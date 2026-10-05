@@ -103,6 +103,11 @@ let cachedTables: Table[] = [];
 /**
  * Create a new table via the backend.
  * The backend reads header text from the grid and enforces uniqueness.
+ *
+ * `styleName` is the style the table is BORN in (`TableStyleLight9`; "" for
+ * no style) -- Format as Table outside a table passes the one the user picked.
+ * Omitted, nothing is sent and the backend's default (TableStyleMedium2)
+ * applies, which is Insert > Table's behaviour.
  */
 export async function createTableAsync(params: {
   sheetIndex: number;
@@ -111,6 +116,7 @@ export async function createTableAsync(params: {
   endRow: number;
   endCol: number;
   hasHeaders: boolean;
+  styleName?: string;
 }): Promise<Table | null> {
   const createParams: CreateTableParams = {
     name: "", // Empty = auto-generate
@@ -119,6 +125,7 @@ export async function createTableAsync(params: {
     endRow: params.endRow,
     endCol: params.endCol,
     hasHeaders: params.hasHeaders,
+    ...(params.styleName !== undefined ? { styleName: params.styleName } : {}),
   };
   const result = await backendCreateTable(createParams);
   if (result.success && result.table) {

@@ -57,6 +57,12 @@ beforeEach(() => {
   ran.length = 0;
   localStorage.clear();
   resetAllKeybindings();
+  // Ctrl+Plus is a BUILT-IN since 2026-10-04 (Excel's Insert Cells,
+  // core.insertCells). These tests are about the key grammar and drive their
+  // own binding on that combination, so the built-in is moved off it -- the
+  // same remap a user can make in Settings -- and the dispatcher hears only
+  // the test's binding.
+  setUserKeybinding("core.insertCells", "Ctrl+Alt+Shift+F12");
   for (const id of COMMANDS) CommandRegistry.register(id, () => void ran.push(id));
   focusGrid();
 });

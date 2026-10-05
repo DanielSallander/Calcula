@@ -7,8 +7,8 @@ use crate::persistence::FileState;
 use crate::{format_cell_value_with_color, AppState};
 use engine::{
     BorderLineStyle, BorderStyle, Cell, CellStyle, CellValue, Color, CurrencyPosition, Fill,
-    GradientDirection, NegativeStyle, NumberFormat, PatternType, TextAlign, TextRotation, ThemeColor,
-    VerticalAlign,
+    FontSize, GradientDirection, NegativeStyle, NumberFormat, PatternType, TextAlign, TextRotation,
+    ThemeColor, VerticalAlign,
 };
 use tauri::State;
 
@@ -160,88 +160,417 @@ pub fn set_cell_style(
     })
 }
 
-/// Apply formatting to a range of cells.
+/// The parameters of one `apply_formatting` call, with every field that can be
+/// REFUSED already parsed.
+///
+/// WHY PARSE FIRST. Three fields can be wrong in a way that must reach the
+/// user: a font size outside Excel's 1..=409, a text rotation the backend does
+/// not know, and (later, per cell) nothing else. Parsing them inside the cell
+/// loop -- where they used to be read -- meant a bad value was discovered with
+/// the document already dirty and half the cells written. Parsing here, before
+/// the gates and before `DocumentEffect::mutates`, makes a bad value a clean
+/// refusal. The number format is parsed here too, once, instead of once per
+/// distinct base style.
+///
+/// ONE APPLIER FOR BOTH COMMANDS. `apply_formatting` and
+/// `apply_formatting_to_sheets` used to carry two hand-copied lists of
+/// "if let Some(x) = params.x { style.x = x }" -- the second one in compressed
+/// one-line form, which is exactly how two copies drift. Both now call
+/// `ParsedFormatting::apply`.
+pub(crate) struct ParsedFormatting<'a> {
+    params: &'a FormattingParams,
+    font_size: Option<FontSize>,
+    text_rotation: Option<TextRotation>,
+    number_format: Option<NumberFormat>,
+}
+
+impl<'a> ParsedFormatting<'a> {
+    pub(crate) fn parse(
+        params: &'a FormattingParams,
+        locale: &engine::LocaleSettings,
+    ) -> Result<Self, String> {
+        let font_size = match params.font_size {
+            None => None,
+            Some(points) => Some(FontSize::from_points(points).ok_or_else(|| {
+                format!(
+                    "Font size must be a number between {} and {} points (got {}).",
+                    FontSize::MIN_POINTS,
+                    FontSize::MAX_POINTS,
+                    points
+                )
+            })?),
+        };
+        let text_rotation = params.text_rotation.as_deref().map(parse_text_rotation).transpose()?;
+        // Locale-aware: the ribbon's Currency / Accounting / Short Date / Long
+        // Date / Time entries are REGIONAL presets, and the invariant parse
+        // would resolve them to US shapes.
+        let number_format = params
+            .number_format
+            .as_deref()
+            .map(|format| parse_number_format_with_locale(format, locale));
+        Ok(ParsedFormatting { params, font_size, text_rotation, number_format })
+    }
+
+    /// Write every field the caller set onto `style`. Fields left `None` are
+    /// untouched, so "bold this range" never resets its font or its format.
+    pub(crate) fn apply(&self, new_style: &mut CellStyle) {
+        let params = self.params;
+        if let Some(bold) = params.bold {
+            new_style.font.bold = bold;
+        }
+        if let Some(italic) = params.italic {
+            new_style.font.italic = italic;
+        }
+        if let Some(underline) = params.underline {
+            new_style.font.underline = underline.into();
+        }
+        if let Some(strikethrough) = params.strikethrough {
+            new_style.font.strikethrough = strikethrough;
+        }
+        if let Some(font_size) = self.font_size {
+            new_style.font.size = font_size;
+        }
+        if let Some(ref font_family) = params.font_family {
+            new_style.font.family = font_family.clone();
+        }
+        if let Some(ref text_color) = params.text_color {
+            if let Some(color) = Color::from_hex(text_color) {
+                new_style.font.color = ThemeColor::Absolute(color);
+            }
+        }
+        if let Some(ref text_color_theme) = params.text_color_theme {
+            if let Some(slot) = engine::ThemeColorSlot::from_key(text_color_theme) {
+                let tint = engine::Tint(params.text_color_tint.unwrap_or(0));
+                new_style.font.color = ThemeColor::Theme { slot, tint };
+            }
+        }
+        if let Some(ref bg_color) = params.background_color {
+            if let Some(color) = Color::from_hex(bg_color) {
+                new_style.fill = Fill::Solid { color: ThemeColor::Absolute(color) };
+            }
+        }
+        if let Some(ref bg_color_theme) = params.bg_color_theme {
+            if let Some(slot) = engine::ThemeColorSlot::from_key(bg_color_theme) {
+                let tint = engine::Tint(params.bg_color_tint.unwrap_or(0));
+                new_style.fill = Fill::Solid { color: ThemeColor::Theme { slot, tint } };
+            }
+        }
+        if let Some(ref align) = params.text_align {
+            new_style.text_align = match align.as_str() {
+                "left" => TextAlign::Left,
+                "center" => TextAlign::Center,
+                "right" => TextAlign::Right,
+                _ => TextAlign::General,
+            };
+        }
+        if let Some(ref valign) = params.vertical_align {
+            new_style.vertical_align = match valign.as_str() {
+                "top" => VerticalAlign::Top,
+                "middle" => VerticalAlign::Middle,
+                "bottom" => VerticalAlign::Bottom,
+                // Excel's default vertical alignment is BOTTOM, so an
+                // unrecognised spelling resolves to the document default
+                // rather than to a third state.
+                _ => VerticalAlign::Bottom,
+            };
+        }
+        if let Some(wrap) = params.wrap_text {
+            new_style.wrap_text = wrap;
+        }
+        if let Some(rotation) = self.text_rotation {
+            new_style.text_rotation = rotation;
+        }
+        if let Some(ref format) = self.number_format {
+            new_style.number_format = format.clone();
+        }
+        if let Some(checkbox) = params.checkbox {
+            new_style.checkbox = checkbox;
+        }
+        if let Some(button) = params.button {
+            new_style.button = button;
+        }
+        if let Some(indent) = params.indent {
+            new_style.indent = indent;
+        }
+        if let Some(shrink_to_fit) = params.shrink_to_fit {
+            new_style.shrink_to_fit = shrink_to_fit;
+        }
+
+        // Borders
+        if let Some(ref border) = params.border_top {
+            new_style.borders.top = parse_border_side(border);
+        }
+        if let Some(ref border) = params.border_right {
+            new_style.borders.right = parse_border_side(border);
+        }
+        if let Some(ref border) = params.border_bottom {
+            new_style.borders.bottom = parse_border_side(border);
+        }
+        if let Some(ref border) = params.border_left {
+            new_style.borders.left = parse_border_side(border);
+        }
+        if let Some(ref border) = params.border_diagonal_down {
+            new_style.borders.diagonal_down = parse_border_side(border);
+        }
+        if let Some(ref border) = params.border_diagonal_up {
+            new_style.borders.diagonal_up = parse_border_side(border);
+        }
+
+        // Fill
+        if let Some(ref fill_param) = params.fill {
+            new_style.fill = parse_fill_param(fill_param);
+        }
+
+        // Protection
+        if let Some(locked) = params.locked {
+            new_style.locked = locked;
+        }
+        if let Some(formula_hidden) = params.formula_hidden {
+            new_style.formula_hidden = formula_hidden;
+        }
+    }
+}
+
+/// Apply formatting to a range of cells -- on the active sheet and, with sheets
+/// GROUPED, on every other sheet in `sheet_indices` too.
+///
+/// ONE COMMAND FOR THE GROUP (review finding, 2026-10-04). The wrapper used to
+/// format the active sheet with this command and then repeat it on the group
+/// with `apply_formatting_to_sheets`: a protected grouped sheet refused only
+/// the SECOND call, after the active sheet was already formatted (and the
+/// refusal went to the console), and a successful group took one Ctrl+Z per
+/// sheet plus one. Now every sheet is gated before any is written and the whole
+/// group is ONE undo step. `sheet_indices` may include the active sheet; an
+/// absent list formats the active sheet only.
 #[tauri::command]
 pub fn apply_formatting(
     state: State<AppState>,
     file_state: State<FileState>,
     params: FormattingParams,
+    sheet_indices: Option<Vec<usize>>,
 ) -> Result<FormattingResult, String> {
-    // Sheet protection, BEFORE any lock below (the gate takes the protection
-    // stores; taking it after `grid`/`style_registry` would fix a lock order
-    // that other gate call sites do not share).
-    //
-    // Formatting a locked cell on a protected sheet is an edit like any other --
-    // Excel refuses it, and `clear_range_with_options` already refuses format
-    // clears here. This gate also becomes load-bearing once `CellStyle.locked`
-    // is the source of truth: without it, `applyFormatting({locked: false})`
-    // would be an ungated way to unlock a protected sheet and then write freely.
-    {
+    apply_formatting_core(&state, &file_state, &params, sheet_indices.as_deref().unwrap_or(&[]))
+}
+
+/// `apply_formatting` without the Tauri wrappers, so the tests drive the real
+/// body. `group` is the grouped sheets (the active sheet is always formatted).
+pub(crate) fn apply_formatting_core(
+    state: &AppState,
+    file_state: &FileState,
+    params: &FormattingParams,
+    group: &[usize],
+) -> Result<FormattingResult, String> {
+    // Refusable VALUES first (see `ParsedFormatting`), then the gates.
+    let parsed = {
+        let locale = state.locale.lock().unwrap();
+        ParsedFormatting::parse(params, &locale)?
+    };
+    format_cells_on_sheets(state, file_state, &parsed, &params.rows, &params.cols, group, true)
+}
+
+// ============================================================================
+// ONE CRITICAL SECTION AND ONE UNDO STEP for every style command
+// ============================================================================
+
+/// THE GUARDS EVERY STYLE COMMAND HOLDS FROM ITS FIRST GATE TO ITS LAST WRITE.
+///
+/// The border presets and the decimal step used to decide under READ guards,
+/// drop them, and write under re-acquired ones; Tauri dispatches on a thread
+/// pool, so an edit landing in between (Bold from a script) was overwritten by
+/// a style computed from the stale base, and the protection gate answered about
+/// cells that could change before the write (review finding, 2026-10-04;
+/// CLAUDE.md: "Never read(), drop the lock, then write()"). Taken with
+/// `lock_pending` in the canonical order -- `grid`, `grids`, then the style
+/// registry -- and turned into write guards with `.authorize(&effect)` only
+/// once every gate has passed and something will change.
+struct StyleLocks<'a> {
+    grid: crate::document_effect::PendingGuard<'a, engine::Grid>,
+    grids: crate::document_effect::PendingGuard<'a, Vec<engine::Grid>>,
+    styles: crate::document_effect::PendingGuard<'a, engine::StyleRegistry>,
+    active_sheet: usize,
+}
+
+impl<'a> StyleLocks<'a> {
+    fn take(state: &'a AppState) -> Self {
+        let grid = state.grid.lock_pending().unwrap();
+        let grids = state.grids.lock_pending().unwrap();
         let active_sheet = *state.active_sheet.read().unwrap();
-        // The allowFormatCells option gates formatting as a KIND of operation;
-        // the per-cell gate below then checks each target cell.
-        crate::protection::check_sheet_action(&state, active_sheet, "formatCells", "format cells")?;
-        crate::protection::check_sheet_protection_cells(
-            &state,
-            active_sheet,
-            params
-                .rows
-                .iter()
-                .flat_map(|r| params.cols.iter().map(move |c| (*r, *c))),
-        )?;
+        let styles = state.style_registry.lock_pending().unwrap();
+        StyleLocks { grid, grids, styles, active_sheet }
     }
 
-    // Every gate above has passed; from here this command commits. Constructed
-    // HERE and not at the top so a refusal cannot leave a spuriously dirty
-    // document -- see DocumentEffect::mutates on ordering.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut grid = state.grid.write(&effect).unwrap();
-    let mut grids = state.grids.write(&effect).unwrap();
-    let active_sheet = *state.active_sheet.read().unwrap();
-    let mut styles = state.style_registry.write(&effect).unwrap();
+    /// The cells of `sheet` as the user sees them: the active sheet's live
+    /// mirror (`state.grid`; `grids[active]` is its second copy), else
+    /// `grids[sheet]`. `None` for a sheet the workbook does not have.
+    fn sheet_grid(&self, sheet: usize) -> Option<&engine::Grid> {
+        if sheet == self.active_sheet {
+            Some(&*self.grid)
+        } else {
+            self.grids.get(sheet)
+        }
+    }
+
+    /// The sheets a command writes, once each: the active sheet first when
+    /// `include_active`, then every listed sheet the workbook has.
+    fn targets(&self, group: &[usize], include_active: bool) -> Vec<usize> {
+        let mut out = Vec::with_capacity(group.len() + 1);
+        if include_active {
+            out.push(self.active_sheet);
+        }
+        for &sheet in group {
+            if sheet != self.active_sheet && sheet < self.grids.len() && !out.contains(&sheet) {
+                out.push(sheet);
+            }
+        }
+        out
+    }
+}
+
+/// What a style command's protection gate is asked about.
+#[derive(Clone, Copy)]
+enum StyleArea<'p> {
+    /// A rectangle: the RANGE form of the gate, which never enumerates it
+    /// (Select All is 17.2 billion positions).
+    Range(CellRect),
+    /// Listed rows x columns: the cell form (the caller bounds the product).
+    Cells { rows: &'p [u32], cols: &'p [u32] },
+}
+
+/// Gate EVERY target sheet -- the formatCells option and the locked cells --
+/// against the HELD guards, before anything is written: one protected sheet
+/// refuses the whole group. `what` names the operation in the refusal.
+fn gate_style_targets(
+    state: &AppState,
+    locks: &StyleLocks<'_>,
+    targets: &[usize],
+    area: StyleArea<'_>,
+    what: &str,
+) -> Result<(), String> {
+    // After the style registry, released before the undo stack is taken: the
+    // order search.rs's held-guard gates use.
+    let sheet_kinds = state.sheet_kinds.read().unwrap();
+    let protection = state.sheet_protection.read().unwrap();
+    for &sheet in targets {
+        let Some(grid) = locks.sheet_grid(sheet) else { continue };
+        crate::protection::check_sheet_action_in(&sheet_kinds, &protection, sheet, "formatCells", what)?;
+        match area {
+            StyleArea::Range(rect) => crate::protection::check_sheet_protection_range_in(
+                &sheet_kinds,
+                &protection,
+                grid,
+                &locks.styles,
+                sheet,
+                rect.start_row,
+                rect.start_col,
+                rect.end_row,
+                rect.end_col,
+            )?,
+            StyleArea::Cells { rows, cols } => crate::protection::check_sheet_protection_cells_in(
+                &sheet_kinds,
+                &protection,
+                grid,
+                &locks.styles,
+                sheet,
+                rows.iter().flat_map(move |r| cols.iter().map(move |c| (*r, *c))),
+            )?,
+        }
+    }
+    Ok(())
+}
+
+/// The body of `apply_formatting` and `apply_formatting_to_sheets`: gate every
+/// target sheet under the held guards, then walk `rows` x `cols` on each of
+/// them inside ONE owned undo transaction (or the step a caller holds open).
+/// Returns the ACTIVE sheet's written cells and the styles they use.
+fn format_cells_on_sheets(
+    state: &AppState,
+    file_state: &FileState,
+    parsed: &ParsedFormatting<'_>,
+    rows: &[u32],
+    cols: &[u32],
+    group: &[usize],
+    include_active: bool,
+) -> Result<FormattingResult, String> {
+    let locks = StyleLocks::take(state);
+    let targets = locks.targets(group, include_active);
+    gate_style_targets(state, &locks, &targets, StyleArea::Cells { rows, cols }, "format cells")?;
+    if targets.is_empty() {
+        // Nothing to format (a group of only the active sheet, or indices past
+        // the workbook): nothing written, and the document stays clean -- this
+        // used to construct the effect regardless.
+        return Ok(FormattingResult { cells: Vec::new(), styles: Vec::new() });
+    }
+
+    // Every gate has passed; from here this command commits. Constructed HERE
+    // so a refusal cannot leave a spuriously dirty document.
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let StyleLocks { grid, grids, styles, active_sheet } = locks;
+    let mut grid = grid.authorize(&effect);
+    let mut grids = grids.authorize(&effect);
+    let mut styles = styles.authorize(&effect);
     let mut undo_stack = state.undo_stack.lock().unwrap();
-    let merged_regions = state.merged_regions.read().unwrap();
-    let locale = state.locale.lock().unwrap();
 
-    let mut updated_cells = Vec::new();
-    let mut updated_styles = Vec::new();
-    let mut used_style_indices = std::collections::HashSet::new();
-
-    // Begin undo transaction for batch formatting -- unless the frontend
-    // already opened one (e.g. a script's withScriptUndoBatch wrapping a
-    // multi-key setRangeFormat decomposition into ONE undo step).
-    let cell_count = params.rows.len() * params.cols.len();
-    let opened_transaction = !undo_stack.has_open_transaction();
-    if opened_transaction {
-        undo_stack.begin_transaction(format!("Format {} cells", cell_count));
+    let label = format!("Format {} cells", rows.len() * cols.len());
+    // Joins a step the caller holds open (a script's undo batch).
+    let txn = undo_stack.begin_owned_transaction(label);
+    let delta = |style: &mut CellStyle| parsed.apply(style);
+    let mut written = Vec::new();
+    for &sheet in &targets {
+        if sheet == active_sheet {
+            written = write_style_delta(
+                &mut grid,
+                grids.get_mut(active_sheet),
+                &mut styles,
+                &mut undo_stack,
+                sheet,
+                rows,
+                cols,
+                &delta,
+            );
+        } else if let Some(sheet_grid) = grids.get_mut(sheet) {
+            write_style_delta(sheet_grid, None, &mut styles, &mut undo_stack, sheet, rows, cols, &delta);
+        }
     }
+    undo_stack.commit_owned(txn);
+    drop(undo_stack);
 
-    // Optimization: cache computed style index per (base style, needs-explicit)
-    // pair. When many cells share the same base style (common case: formatting a
-    // selection), we only compute the new style once per unique base.
-    let mut style_cache: std::collections::HashMap<(usize, bool), usize> =
-        std::collections::HashMap::new();
+    let mut used: Vec<usize> = written.iter().map(|&(_, _, index)| index).collect();
+    used.sort_unstable();
+    used.dedup();
+    Ok(formatting_result(state, &grid, &styles, &written, Some(used)))
+}
 
-    // Iterate over all row/col combinations from the params
-    for row in &params.rows {
-        for col in &params.cols {
-            let row = *row;
-            let col = *col;
-
-            // Record previous state for undo
+/// THE WALK of `apply_formatting`, on ONE sheet: for every (row, col) in
+/// `rows` x `cols`, take the cell's EFFECTIVE style, run `delta` on a copy,
+/// intern the result and point the cell at it, recording the previous cell
+/// against `sheet` in the caller's open transaction. `mirror` is the second
+/// copy of the ACTIVE sheet (`grids[active]` beside `state.grid`), written in
+/// step. The caller holds every guard and has passed every gate. Returns the
+/// cells written with their new style index.
+#[allow(clippy::too_many_arguments)]
+fn write_style_delta(
+    grid: &mut engine::Grid,
+    mut mirror: Option<&mut engine::Grid>,
+    styles: &mut engine::StyleRegistry,
+    undo_stack: &mut engine::UndoStack,
+    sheet: usize,
+    rows: &[u32],
+    cols: &[u32],
+    delta: &dyn Fn(&mut CellStyle),
+) -> Vec<(u32, u32, usize)> {
+    // Optimization: cache the computed style index per (base style,
+    // needs-explicit) pair. A selection's cells mostly share a few bases.
+    let mut style_cache: std::collections::HashMap<(usize, bool), usize> = std::collections::HashMap::new();
+    let mut written = Vec::new();
+    for &row in rows {
+        for &col in cols {
             let previous_cell = grid.get_cell(row, col).cloned();
-
-            // Get or create cell
-            let cell = if let Some(existing) = grid.get_cell(row, col) {
-                existing.clone()
-            } else {
-                Cell {
-                    value: CellValue::Empty,
-                    ast: None,
-                    style_index: 0,
-                    rich_text: None,
-                }
-            };
+            let mut cell = previous_cell.clone().unwrap_or(Cell {
+                value: CellValue::Empty,
+                ast: None,
+                style_index: 0,
+                rich_text: None,
+            });
 
             // Base the delta on the EFFECTIVE style: a style-0 cell under a
             // row/column tier is showing the tier's format (and lock state),
@@ -253,251 +582,104 @@ pub fn apply_formatting(
             // even when it equals the default -- index 0 would mean "inherit"
             // and resolve straight back to the tier.
             let needs_explicit = cell.style_index == 0 && old_style_index != 0;
-
-            // Check style cache: if we've already computed the new style for this base, reuse it
-            if let Some(&cached_new_index) = style_cache.get(&(old_style_index, needs_explicit)) {
-                // Fast path: reuse cached style
-                let mut updated_cell = cell;
-                updated_cell.style_index = cached_new_index;
-                grid.set_cell(row, col, updated_cell.clone());
-                if active_sheet < grids.len() {
-                    grids[active_sheet].set_cell(row, col, updated_cell.clone());
+            let new_style_index = match style_cache.get(&(old_style_index, needs_explicit)) {
+                Some(&cached) => cached,
+                None => {
+                    let mut new_style = styles.get(old_style_index).clone();
+                    delta(&mut new_style);
+                    let index = if needs_explicit {
+                        styles.get_or_create_explicit(new_style)
+                    } else {
+                        styles.get_or_create(new_style)
+                    };
+                    style_cache.insert((old_style_index, needs_explicit), index);
+                    index
                 }
-                undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
-                let new_style = styles.get(cached_new_index);
-                let fmt_result = format_cell_value_with_color(&updated_cell.value, new_style, &locale);
-                let acct_layout = fmt_result.accounting.map(|a| crate::api_types::AccountingLayout {
-                    symbol: a.symbol,
-                    symbol_before: a.symbol_before,
-                    value: a.value,
-                });
-                let merge_info = merged_regions.iter().find(|r| r.start_row == row && r.start_col == col);
-                let (row_span, col_span) = if let Some(region) = merge_info {
-                    (region.end_row - region.start_row + 1, region.end_col - region.start_col + 1)
-                } else {
-                    (1, 1)
-                };
-                updated_cells.push(CellData {
-                    row,
-                    col,
-                    display: fmt_result.text, overflow: fmt_result.overflow,
-                    display_color: fmt_result.color,
-                    formula: updated_cell.formula_string().map(|f| format!("={}", f)),
-                    style_index: cached_new_index,
-                    row_span,
-                    col_span,
-                    sheet_index: None,
-                    rich_text: None,
-                    accounting_layout: acct_layout,
-                });
-                continue;
-            }
-
-            // Slow path: compute new style from base
-            let mut new_style = styles.get(old_style_index).clone();
-
-            // Apply formatting changes
-            if let Some(bold) = params.bold {
-                new_style.font.bold = bold;
-            }
-            if let Some(italic) = params.italic {
-                new_style.font.italic = italic;
-            }
-            if let Some(underline) = params.underline {
-                new_style.font.underline = underline.into();
-            }
-            if let Some(strikethrough) = params.strikethrough {
-                new_style.font.strikethrough = strikethrough;
-            }
-            if let Some(font_size) = params.font_size {
-                new_style.font.size = font_size;
-            }
-            if let Some(ref font_family) = params.font_family {
-                new_style.font.family = font_family.clone();
-            }
-            if let Some(ref text_color) = params.text_color {
-                if let Some(color) = Color::from_hex(text_color) {
-                    new_style.font.color = ThemeColor::Absolute(color);
-                }
-            }
-            if let Some(ref text_color_theme) = params.text_color_theme {
-                if let Some(slot) = engine::ThemeColorSlot::from_key(text_color_theme) {
-                    let tint = engine::Tint(params.text_color_tint.unwrap_or(0));
-                    new_style.font.color = ThemeColor::Theme { slot, tint };
-                }
-            }
-            if let Some(ref bg_color) = params.background_color {
-                if let Some(color) = Color::from_hex(bg_color) {
-                    new_style.fill = Fill::Solid { color: ThemeColor::Absolute(color) };
-                }
-            }
-            if let Some(ref bg_color_theme) = params.bg_color_theme {
-                if let Some(slot) = engine::ThemeColorSlot::from_key(bg_color_theme) {
-                    let tint = engine::Tint(params.bg_color_tint.unwrap_or(0));
-                    new_style.fill = Fill::Solid { color: ThemeColor::Theme { slot, tint } };
-                }
-            }
-            if let Some(ref align) = params.text_align {
-                new_style.text_align = match align.as_str() {
-                    "left" => TextAlign::Left,
-                    "center" => TextAlign::Center,
-                    "right" => TextAlign::Right,
-                    _ => TextAlign::General,
-                };
-            }
-            if let Some(ref valign) = params.vertical_align {
-                new_style.vertical_align = match valign.as_str() {
-                    "top" => VerticalAlign::Top,
-                    "middle" => VerticalAlign::Middle,
-                    "bottom" => VerticalAlign::Bottom,
-                    // Excel's default vertical alignment is BOTTOM, so an
-                    // unrecognised spelling resolves to the document default
-                    // rather than to a third state.
-                    _ => VerticalAlign::Bottom,
-                };
-            }
-            if let Some(wrap) = params.wrap_text {
-                new_style.wrap_text = wrap;
-            }
-            if let Some(ref rotation) = params.text_rotation {
-                new_style.text_rotation = parse_text_rotation(rotation);
-            }
-            if let Some(ref format) = params.number_format {
-                // Locale-aware: the ribbon's Currency / Accounting / Short Date
-                // / Long Date / Time entries are REGIONAL presets, and the
-                // invariant parse would resolve them to US shapes.
-                new_style.number_format = parse_number_format_with_locale(format, &locale);
-            }
-
-            if let Some(checkbox) = params.checkbox {
-                new_style.checkbox = checkbox;
-            }
-            if let Some(button) = params.button {
-                new_style.button = button;
-            }
-            if let Some(indent) = params.indent {
-                new_style.indent = indent;
-            }
-            if let Some(shrink_to_fit) = params.shrink_to_fit {
-                new_style.shrink_to_fit = shrink_to_fit;
-            }
-
-            // Apply border formatting
-            if let Some(ref border) = params.border_top {
-                new_style.borders.top = parse_border_side(border);
-            }
-            if let Some(ref border) = params.border_right {
-                new_style.borders.right = parse_border_side(border);
-            }
-            if let Some(ref border) = params.border_bottom {
-                new_style.borders.bottom = parse_border_side(border);
-            }
-            if let Some(ref border) = params.border_left {
-                new_style.borders.left = parse_border_side(border);
-            }
-            if let Some(ref border) = params.border_diagonal_down {
-                new_style.borders.diagonal_down = parse_border_side(border);
-            }
-            if let Some(ref border) = params.border_diagonal_up {
-                new_style.borders.diagonal_up = parse_border_side(border);
-            }
-
-            // Apply fill
-            if let Some(ref fill_param) = params.fill {
-                new_style.fill = parse_fill_param(fill_param);
-            }
-
-            // Apply protection
-            if let Some(locked) = params.locked {
-                new_style.locked = locked;
-            }
-            if let Some(formula_hidden) = params.formula_hidden {
-                new_style.formula_hidden = formula_hidden;
-            }
-
-            // Get or create style index (explicit under a tier -- see above)
-            let new_style_index = if needs_explicit {
-                styles.get_or_create_explicit(new_style.clone())
-            } else {
-                styles.get_or_create(new_style.clone())
-            };
-            used_style_indices.insert(new_style_index);
-            style_cache.insert((old_style_index, needs_explicit), new_style_index);
-
-            // Update cell
-            let mut updated_cell = cell;
-            updated_cell.style_index = new_style_index;
-            grid.set_cell(row, col, updated_cell.clone());
-
-            if active_sheet < grids.len() {
-                grids[active_sheet].set_cell(row, col, updated_cell.clone());
-            }
-
-            // Record undo
-            undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
-
-            let fmt_result = format_cell_value_with_color(&updated_cell.value, &new_style, &locale);
-            let acct_layout = fmt_result.accounting.map(|a| crate::api_types::AccountingLayout {
-                symbol: a.symbol,
-                symbol_before: a.symbol_before,
-                value: a.value,
-            });
-
-            // Get merge span info
-            let merge_info = merged_regions.iter().find(|r| r.start_row == row && r.start_col == col);
-            let (row_span, col_span) = if let Some(region) = merge_info {
-                (region.end_row - region.start_row + 1, region.end_col - region.start_col + 1)
-            } else {
-                (1, 1)
             };
 
-            updated_cells.push(CellData {
-                row,
-                col,
-                display: fmt_result.text, overflow: fmt_result.overflow,
-                display_color: fmt_result.color,
-                formula: updated_cell.formula_string().map(|f| format!("={}", f)),
-                style_index: new_style_index,
-                row_span,
-                col_span,
-                sheet_index: None,
-                rich_text: None,
-                accounting_layout: acct_layout,
-            });
+            cell.style_index = new_style_index;
+            grid.set_cell(row, col, cell.clone());
+            if let Some(m) = mirror.as_deref_mut() {
+                m.set_cell(row, col, cell);
+            }
+            // THE SHEET THIS CELL IS ON: a grouped sheet's change recorded
+            // against the active sheet made Undo overwrite the ACTIVE sheet
+            // with the grouped sheet's old cell (rust-format, 2026-10-04).
+            undo_stack.record_cell_change(sheet, row, col, previous_cell);
+            written.push((row, col, new_style_index));
         }
     }
+    written
+}
 
-    // Commit undo transaction (only the one this command opened -- an outer
-    // frontend transaction is committed by its owner).
-    if opened_transaction {
-        undo_stack.commit_transaction();
+/// The `FormattingResult` the frontend primes its caches from: a `CellData`
+/// for every written ACTIVE-sheet cell, and the styles -- `Some(indices)` for
+/// just those, `None` for the WHOLE registry (a tier's style is referenced by
+/// no returned cell, and the style cache must still know it to paint the
+/// column). Takes the merges, the locale and the theme after the caller's held
+/// guards, the order every style command has always used.
+fn formatting_result(
+    state: &AppState,
+    grid: &engine::Grid,
+    styles: &engine::StyleRegistry,
+    written: &[(u32, u32, usize)],
+    returned_styles: Option<Vec<usize>>,
+) -> FormattingResult {
+    let merged_regions = state.merged_regions.read().unwrap();
+    let locale = state.locale.lock().unwrap();
+    let merge_at: std::collections::HashMap<(u32, u32), (u32, u32)> = merged_regions
+        .iter()
+        .map(|r| ((r.start_row, r.start_col), (r.end_row - r.start_row + 1, r.end_col - r.start_col + 1)))
+        .collect();
+    let mut cells = Vec::with_capacity(written.len());
+    for &(row, col, style_index) in written {
+        let Some(cell) = grid.get_cell(row, col) else { continue };
+        let fmt_result = format_cell_value_with_color(&cell.value, styles.get(style_index), &locale);
+        let acct_layout = fmt_result.accounting.map(|a| crate::api_types::AccountingLayout {
+            symbol: a.symbol,
+            symbol_before: a.symbol_before,
+            value: a.value,
+        });
+        let (row_span, col_span) = merge_at.get(&(row, col)).copied().unwrap_or((1, 1));
+        cells.push(CellData {
+            row,
+            col,
+            display: fmt_result.text,
+            overflow: fmt_result.overflow,
+            display_color: fmt_result.color,
+            formula: cell.formula_string().map(|f| format!("={}", f)),
+            style_index,
+            row_span,
+            col_span,
+            sheet_index: None,
+            rich_text: None,
+            accounting_layout: acct_layout,
+        });
     }
+    drop(locale);
+    drop(merged_regions);
 
-    // Collect only the styles that were used/created (not the entire registry)
     let theme = state.theme.read().unwrap();
-    for &index in &used_style_indices {
-        if let Some(style) = styles.all_styles().get(index) {
-            updated_styles.push(StyleEntry {
-                index,
-                style: StyleData::from_cell_style(style, &theme),
-            });
-        }
-    }
-
-    // Mark workbook as dirty
-    if !updated_cells.is_empty() {
-        let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
-    }
-
-    Ok(FormattingResult {
-        cells: updated_cells,
-        styles: updated_styles,
-    })
+    let all = styles.all_styles();
+    let styles = match returned_styles {
+        Some(indices) => indices
+            .into_iter()
+            .filter_map(|index| all.get(index).map(|style| StyleEntry { index, style: StyleData::from_cell_style(style, &theme) }))
+            .collect(),
+        None => all
+            .iter()
+            .enumerate()
+            .map(|(index, style)| StyleEntry { index, style: StyleData::from_cell_style(style, &theme) })
+            .collect(),
+    };
+    FormattingResult { cells, styles }
 }
 
 /// Apply formatting to a range of cells on multiple non-active sheets.
 /// Used for sheet grouping: when the user has multiple sheets selected,
 /// formatting applied on the active sheet is replicated to grouped sheets.
+/// The ACTIVE sheet is never this command's (`apply_formatting` with
+/// `sheet_indices` formats a whole group, active sheet included, as one step).
 #[tauri::command]
 pub fn apply_formatting_to_sheets(
     state: State<AppState>,
@@ -505,174 +687,25 @@ pub fn apply_formatting_to_sheets(
     sheet_indices: Vec<usize>,
     params: FormattingParams,
 ) -> Result<(), String> {
-    // Sheet protection on EVERY targeted sheet, before any lock below. Refuses
-    // the whole group format if any one sheet protects those cells, matching
-    // the group-edit policy in update_cell_on_sheets.
-    for &sheet_idx in &sheet_indices {
-        crate::protection::check_sheet_protection_cells(
-            &state,
-            sheet_idx,
-            params
-                .rows
-                .iter()
-                .flat_map(|r| params.cols.iter().map(move |c| (*r, *c))),
-        )?;
-        // Second protection axis, same as apply_formatting on the active sheet.
-        crate::protection::check_sheet_action(&state, sheet_idx, "formatCells", "format cells")?;
-    }
+    apply_formatting_to_sheets_core(&state, &file_state, &sheet_indices, &params)
+}
 
-    // Every gate above has passed; from here this command commits. Constructed
-    // HERE and not at the top so a refusal cannot leave a spuriously dirty
-    // document -- see DocumentEffect::mutates on ordering.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut grids = state.grids.write(&effect).unwrap();
-    let active_sheet = *state.active_sheet.read().unwrap();
-    let mut styles = state.style_registry.write(&effect).unwrap();
-    let mut undo_stack = state.undo_stack.lock().unwrap();
-    // Taken LAST, matching apply_formatting's order (grid(s) -> styles ->
-    // undo -> locale), so the two commands cannot deadlock against each other.
-    let locale = state.locale.lock().unwrap();
-
-    let cell_count = params.rows.len() * params.cols.len();
-
-    for &sheet_idx in &sheet_indices {
-        // Skip the active sheet (already formatted by normal apply_formatting)
-        if sheet_idx == active_sheet || sheet_idx >= grids.len() {
-            continue;
-        }
-
-        let owned_txn = undo_stack.begin_owned_transaction(format!(
-            "Format {} cells on sheet {}",
-            cell_count, sheet_idx
-        ));
-
-        let grid = &mut grids[sheet_idx];
-
-        for row in &params.rows {
-            for col in &params.cols {
-                let row = *row;
-                let col = *col;
-
-                let previous_cell = grid.get_cell(row, col).cloned();
-
-                let cell = if let Some(existing) = grid.get_cell(row, col) {
-                    existing.clone()
-                } else {
-                    Cell {
-                        value: CellValue::Empty,
-                        ast: None,
-                        style_index: 0,
-                        rich_text: None,
-                    }
-                };
-
-                // Base the delta on the EFFECTIVE style, not the cell's own
-                // index: a cell with style_index 0 under a row/column tier is
-                // showing the tier's format (including its lock state), and
-                // basing on index 0 would silently discard the tier -- e.g.
-                // re-locking a cell the tier had unlocked.
-                let effective_index = grid.effective_style_index(row, col);
-                let mut new_style = styles.get(effective_index).clone();
-
-                // Apply all formatting fields (same logic as apply_formatting)
-                if let Some(bold) = params.bold { new_style.font.bold = bold; }
-                if let Some(italic) = params.italic { new_style.font.italic = italic; }
-                if let Some(underline) = params.underline { new_style.font.underline = underline.into(); }
-                if let Some(strikethrough) = params.strikethrough { new_style.font.strikethrough = strikethrough; }
-                if let Some(font_size) = params.font_size { new_style.font.size = font_size; }
-                if let Some(ref font_family) = params.font_family { new_style.font.family = font_family.clone(); }
-                if let Some(ref text_color) = params.text_color {
-                    if let Some(color) = Color::from_hex(text_color) { new_style.font.color = ThemeColor::Absolute(color); }
-                }
-                if let Some(ref text_color_theme) = params.text_color_theme {
-                    if let Some(slot) = engine::ThemeColorSlot::from_key(text_color_theme) {
-                        let tint = engine::Tint(params.text_color_tint.unwrap_or(0));
-                        new_style.font.color = ThemeColor::Theme { slot, tint };
-                    }
-                }
-                if let Some(ref bg_color) = params.background_color {
-                    if let Some(color) = Color::from_hex(bg_color) { new_style.fill = Fill::Solid { color: ThemeColor::Absolute(color) }; }
-                }
-                if let Some(ref bg_color_theme) = params.bg_color_theme {
-                    if let Some(slot) = engine::ThemeColorSlot::from_key(bg_color_theme) {
-                        let tint = engine::Tint(params.bg_color_tint.unwrap_or(0));
-                        new_style.fill = Fill::Solid { color: ThemeColor::Theme { slot, tint } };
-                    }
-                }
-                if let Some(ref align) = params.text_align {
-                    new_style.text_align = match align.as_str() {
-                        "left" => TextAlign::Left,
-                        "center" => TextAlign::Center,
-                        "right" => TextAlign::Right,
-                        _ => TextAlign::General,
-                    };
-                }
-                if let Some(ref valign) = params.vertical_align {
-                    new_style.vertical_align = match valign.as_str() {
-                        "top" => VerticalAlign::Top,
-                        "middle" => VerticalAlign::Middle,
-                        "bottom" => VerticalAlign::Bottom,
-                        // Excel's default vertical alignment is BOTTOM (see the
-                        // sibling arm in apply_formatting).
-                        _ => VerticalAlign::Bottom,
-                    };
-                }
-                if let Some(wrap) = params.wrap_text { new_style.wrap_text = wrap; }
-                if let Some(ref rotation) = params.text_rotation {
-                    new_style.text_rotation = parse_text_rotation(rotation);
-                }
-                if let Some(ref format) = params.number_format {
-                    // Same regional presets as apply_formatting -- a group
-                    // format must not resolve dates differently from a single
-                    // sheet's.
-                    new_style.number_format = parse_number_format_with_locale(format, &locale);
-                }
-                if let Some(checkbox) = params.checkbox { new_style.checkbox = checkbox; }
-                if let Some(button) = params.button { new_style.button = button; }
-                if let Some(indent) = params.indent { new_style.indent = indent; }
-                if let Some(shrink_to_fit) = params.shrink_to_fit { new_style.shrink_to_fit = shrink_to_fit; }
-
-                // Apply border formatting
-                if let Some(ref border) = params.border_top { new_style.borders.top = parse_border_side(border); }
-                if let Some(ref border) = params.border_right { new_style.borders.right = parse_border_side(border); }
-                if let Some(ref border) = params.border_bottom { new_style.borders.bottom = parse_border_side(border); }
-                if let Some(ref border) = params.border_left { new_style.borders.left = parse_border_side(border); }
-                if let Some(ref border) = params.border_diagonal_down { new_style.borders.diagonal_down = parse_border_side(border); }
-                if let Some(ref border) = params.border_diagonal_up { new_style.borders.diagonal_up = parse_border_side(border); }
-
-                // Apply fill
-                if let Some(ref fill_param) = params.fill { new_style.fill = parse_fill_param(fill_param); }
-
-                // Apply protection
-                if let Some(locked) = params.locked { new_style.locked = locked; }
-                if let Some(formula_hidden) = params.formula_hidden { new_style.formula_hidden = formula_hidden; }
-
-                // Under a tier, a result equal to the default must still land
-                // on a NON-ZERO index -- 0 would mean "inherit" and resolve
-                // straight back to the tier the user just formatted away from.
-                let new_style_index = if effective_index != cell.style_index {
-                    styles.get_or_create_explicit(new_style)
-                } else {
-                    styles.get_or_create(new_style)
-                };
-
-                let mut updated_cell = cell;
-                updated_cell.style_index = new_style_index;
-                grid.set_cell(row, col, updated_cell);
-
-                undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
-            }
-        }
-
-        undo_stack.commit_owned(owned_txn);
-    }
-
-    // Mark workbook as dirty
-    if !sheet_indices.is_empty() {
-        let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
-    }
-
-    Ok(())
+/// `apply_formatting_to_sheets` without the Tauri wrappers (tests). Every
+/// listed sheet is gated before any is written, and all of them are ONE undo
+/// step (it was one per sheet).
+pub(crate) fn apply_formatting_to_sheets_core(
+    state: &AppState,
+    file_state: &FileState,
+    sheet_indices: &[usize],
+    params: &FormattingParams,
+) -> Result<(), String> {
+    // Same regional presets and the same refusals as apply_formatting -- a
+    // group format must not resolve dates differently from a single sheet's.
+    let parsed = {
+        let locale = state.locale.lock().unwrap();
+        ParsedFormatting::parse(params, &locale)?
+    };
+    format_cells_on_sheets(state, file_state, &parsed, &params.rows, &params.cols, sheet_indices, false).map(|_| ())
 }
 
 /// Preview a custom number format string against a sample value.
@@ -718,6 +751,23 @@ pub(crate) const RIBBON_NUMBER_FORMAT_PRESETS: [&str; 11] = [
     "fraction_1",
     "scientific",
     "text",
+];
+
+/// The Home tab's Number-group keywords that are NOT dropdown rows: Comma
+/// Style and the six fixed-currency rows of the Accounting split button's menu
+/// (CONTRACT section 3.7), in the menu's order. All seven resolve to the typed
+/// `Accounting` format; only the SYMBOL and its side are fixed -- the negative
+/// pattern is the region's (`LocaleSettings::accounting_negative_style`), as in
+/// Excel, where "$ English (United States)" picked on a Swedish machine writes
+/// the Swedish minus pattern with a `$`.
+pub(crate) const HOME_ACCOUNTING_PRESETS: [&str; 7] = [
+    "comma",
+    "accounting_usd",
+    "accounting_gbp",
+    "accounting_eur_before",
+    "accounting_eur_after",
+    "accounting_cny",
+    "accounting_chf",
 ];
 
 /// One row of the ribbon Number dropdown, resolved for the current locale.
@@ -853,6 +903,17 @@ fn parse_number_format_base(
     locale: &engine::LocaleSettings,
     locale_currency_position: CurrencyPosition,
 ) -> NumberFormat {
+    // Every ACCOUNTING keyword freezes the REGION's negative pattern into the
+    // format, the way Excel writes the region's accounting code (survey defect
+    // B): parentheses in en-US, a leading minus everywhere else.
+    let accounting = |decimal_places: u8, symbol: &str, symbol_position: CurrencyPosition| {
+        NumberFormat::Accounting {
+            decimal_places,
+            symbol: symbol.to_string(),
+            symbol_position,
+            negative_style: locale.accounting_negative_style(),
+        }
+    };
     match format.to_lowercase().as_str() {
         "general" => NumberFormat::General,
         // ---- Excel's Home > Number dropdown, the regional half ----
@@ -862,11 +923,20 @@ fn parse_number_format_base(
             symbol_position: locale_currency_position,
             negative_style: NegativeStyle::Minus,
         },
-        "accounting" => NumberFormat::Accounting {
-            decimal_places: 2,
-            symbol: locale.currency_symbol.trim().to_string(),
-            symbol_position: locale_currency_position,
-        },
+        "accounting" => accounting(2, locale.currency_symbol.trim(), locale_currency_position),
+        // ---- Excel's Home > Number group, outside the dropdown ----
+        // Comma Style is Excel's "Comma" cell style: ACCOUNTING with NO symbol
+        // and 2 decimals (sv-SE `_-* # ##0,00_-;-* # ##0,00_-;_-* "-"??_-;_-@_-`,
+        // measured live). The ribbon used to send `#,##0`, which rounded away
+        // the decimals and showed zero as "0" instead of a dash.
+        "comma" => accounting(2, "", CurrencyPosition::Before),
+        // The Accounting split button's menu rows (CONTRACT section 3.7).
+        // `accounting_usd` is below with the dialog's fixed-currency presets.
+        "accounting_gbp" => accounting(2, "\u{00A3}", CurrencyPosition::Before),
+        "accounting_eur_before" => accounting(2, "\u{20AC}", CurrencyPosition::Before),
+        "accounting_eur_after" => accounting(2, "\u{20AC}", CurrencyPosition::After),
+        "accounting_cny" => accounting(2, "\u{00A5}", CurrencyPosition::Before),
+        "accounting_chf" => accounting(2, "CHF", CurrencyPosition::Before),
         "date_short" => NumberFormat::Date {
             format: locale.date_format.clone(),
         },
@@ -907,26 +977,10 @@ fn parse_number_format_base(
             symbol_position: CurrencyPosition::After,
             negative_style: NegativeStyle::Minus,
         },
-        "accounting_usd" => NumberFormat::Accounting {
-            decimal_places: 2,
-            symbol: "$".to_string(),
-            symbol_position: CurrencyPosition::Before,
-        },
-        "accounting_usd_0" => NumberFormat::Accounting {
-            decimal_places: 0,
-            symbol: "$".to_string(),
-            symbol_position: CurrencyPosition::Before,
-        },
-        "accounting_eur" => NumberFormat::Accounting {
-            decimal_places: 2,
-            symbol: "EUR".to_string(),
-            symbol_position: CurrencyPosition::Before,
-        },
-        "accounting_sek" => NumberFormat::Accounting {
-            decimal_places: 2,
-            symbol: "kr".to_string(),
-            symbol_position: CurrencyPosition::After,
-        },
+        "accounting_usd" => accounting(2, "$", CurrencyPosition::Before),
+        "accounting_usd_0" => accounting(0, "$", CurrencyPosition::Before),
+        "accounting_eur" => accounting(2, "EUR", CurrencyPosition::Before),
+        "accounting_sek" => accounting(2, "kr", CurrencyPosition::After),
         "fraction_1" => NumberFormat::Fraction { denominator: None, max_digits: 1 },
         "fraction_2" => NumberFormat::Fraction { denominator: None, max_digits: 2 },
         "fraction_3" => NumberFormat::Fraction { denominator: None, max_digits: 3 },
@@ -1118,8 +1172,18 @@ pub(crate) fn try_parse_display_name(format: &str) -> Option<NumberFormat> {
         });
     }
     if let Some(rest) = inner("Accounting (") {
+        // The negative clause FIRST, for the same reason as Currency's: it
+        // follows the decimals clause and `parse_money` splits on the last
+        // ", ". An Accounting name carries it since the negative pattern became
+        // part of the format ("..., parenthesised negatives" for en-US).
+        let (rest, negative_style) = split_negative_display_suffix(rest);
         let (symbol, decimal_places, symbol_position) = parse_money(rest)?;
-        return Some(NumberFormat::Accounting { decimal_places, symbol, symbol_position });
+        return Some(NumberFormat::Accounting {
+            decimal_places,
+            symbol,
+            symbol_position,
+            negative_style,
+        });
     }
 
     if let Some(rest) = inner("Percentage (") {
@@ -1210,20 +1274,10 @@ fn try_parse_format_code(format: &str) -> Option<NumberFormat> {
         }
     }
 
-    // Currency formats with [$SYMBOL] prefix: "[$EUR] #,##0.00", "[$SEK] #,##0.00"
-    if trimmed.starts_with("[$") {
-        if let Some(bracket_end) = trimmed.find(']') {
-            let symbol = trimmed[2..bracket_end].trim().to_string();
-            let rest = trimmed[bracket_end + 1..].trim();
-            if let Some((decimals, _has_sep)) = parse_number_pattern(rest) {
-                return Some(NumberFormat::Currency {
-                    decimal_places: decimals,
-                    symbol: format!("{} ", symbol),
-                    symbol_position: CurrencyPosition::Before,
-                    negative_style: NegativeStyle::Minus,
-                });
-            }
-        }
+    // Currency formats with a [$SYMBOL] or [$SYMBOL-LOCALE] prefix:
+    // "[$EUR] #,##0.00", "[$£-809]#,##0.00", "[$€-2] #,##0.00".
+    if let Some(currency) = try_parse_bracket_currency(trimmed) {
+        return Some(currency);
     }
 
     // Plain number formats: "0", "0.00", "#,##0", "#,##0.00", etc.
@@ -1235,6 +1289,39 @@ fn try_parse_format_code(format: &str) -> Option<NumberFormat> {
     }
 
     None
+}
+
+/// A `[$SYMBOL-LOCALE]` currency prefix followed by a plain number pattern.
+///
+/// THE LOCALE TAG IS NOT PART OF THE SYMBOL (survey defect D). Excel's
+/// `[$£-809]#,##0.00` is "the symbol £, locale 0x809"; Excel 365 also writes
+/// the tag as a name (`[$$-en-US]`). The symbol is everything before the FIRST
+/// '-', and the tag after it is dropped -- this used to keep the whole bracket
+/// body, so the cell rendered "£-809 1,234.50" instead of "£1,234.50".
+///
+/// THE SPACE IS THE CODE'S, NOT OURS. Measured live: `[$£-809]#,##0.00` shows
+/// "£1 234,50" (no space) and `[$€-2] #,##0.00` shows "€ 1 234,50" (the code's
+/// own space). This used to add a space after every bracketed symbol.
+///
+/// A bracket with NO symbol (`[$-409]0.00`, a locale tag alone) is not a
+/// currency: `None`, so the caller keeps looking.
+fn try_parse_bracket_currency(trimmed: &str) -> Option<NumberFormat> {
+    let body_start = trimmed.strip_prefix("[$")?;
+    let bracket_end = body_start.find(']')?;
+    let body = &body_start[..bracket_end];
+    let symbol = body.split('-').next().unwrap_or("").trim();
+    if symbol.is_empty() {
+        return None;
+    }
+    let after = &body_start[bracket_end + 1..];
+    let (decimals, _has_sep) = parse_number_pattern(after.trim())?;
+    let gap = after.starts_with(char::is_whitespace);
+    Some(NumberFormat::Currency {
+        decimal_places: decimals,
+        symbol: if gap { format!("{} ", symbol) } else { symbol.to_string() },
+        symbol_position: CurrencyPosition::Before,
+        negative_style: NegativeStyle::Minus,
+    })
 }
 
 /// Parses a number pattern like "0", "0.00", "#,##0", "#,##0.00" and returns
@@ -1288,31 +1375,41 @@ fn is_custom_format_string(s: &str) -> bool {
 ///
 /// The FULL vocabulary the app itself emits round-trips here:
 /// - `StyleData::from_cell_style` (api_types.rs) emits "none" | "rotate90" |
-///   "rotate270" | "custom:N", and the FormatCells dialog + script surface
-///   send those same strings back -- "rotate90"/"rotate270"/"custom:N" used to
-///   fall through to the integer parser, fail, and silently apply None.
+///   "rotate270" | "vertical" | "custom:N", and the FormatCells dialog + script
+///   surface send those same strings back -- "rotate90"/"rotate270"/"custom:N"
+///   used to fall through to the integer parser, fail, and silently apply None.
+/// - "vertical" is STACKED text (Excel's Vertical Text, OOXML 255).
 /// - Bare integer degrees ("45", "-30") and the legacy aliases
 ///   ("0"/"90"/"270"/"-90"/"up"/"down") are accepted too; angles clamp to
 ///   -90..90, and a clamped 0/90/-90 collapses to the named variant so the
 ///   emitted form stays canonical.
-fn parse_text_rotation(rotation: &str) -> TextRotation {
+///
+/// ANYTHING ELSE IS AN ERROR. An unrecognised value used to become `None`,
+/// which is not "ignore the request" but "CLEAR the rotation": sending
+/// "vertical" before this variant existed, or a typo from a script, silently
+/// flattened every selected cell. The caller turns the error into a refusal
+/// before anything is written (`ParsedFormatting::parse`).
+fn parse_text_rotation(rotation: &str) -> Result<TextRotation, String> {
     let lower = rotation.trim().to_lowercase();
     match lower.as_str() {
-        "none" | "0" => TextRotation::None,
-        "rotate90" | "90" | "up" => TextRotation::Rotate90,
-        "rotate270" | "270" | "-90" | "down" => TextRotation::Rotate270,
+        "none" | "0" => Ok(TextRotation::None),
+        "rotate90" | "90" | "up" => Ok(TextRotation::Rotate90),
+        "rotate270" | "270" | "-90" | "down" => Ok(TextRotation::Rotate270),
+        "vertical" => Ok(TextRotation::Vertical),
         _ => {
             let angle_str = lower.strip_prefix("custom:").unwrap_or(&lower).trim();
-            if let Ok(angle) = angle_str.parse::<i16>() {
-                let clamped = angle.clamp(-90, 90);
-                match clamped {
+            match angle_str.parse::<i16>() {
+                Ok(angle) => Ok(match angle.clamp(-90, 90) {
                     0 => TextRotation::None,
                     90 => TextRotation::Rotate90,
                     -90 => TextRotation::Rotate270,
                     other => TextRotation::Custom(other),
-                }
-            } else {
-                TextRotation::None
+                }),
+                Err(_) => Err(format!(
+                    "Unknown text rotation \"{}\": expected none, rotate90, rotate270, \
+                     vertical or custom:N with N between -90 and 90.",
+                    rotation
+                )),
             }
         }
     }
@@ -1519,6 +1616,520 @@ pub fn set_cell_rich_text(
     }))
 }
 
+// ============================================================================
+// Border presets (Home > Font > Borders, Format Cells > Border, scripts)
+// ============================================================================
+
+/// The six range-aware presets `apply_border_preset` understands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BorderPreset {
+    /// Horizontal lines between rows (not on the outer edges).
+    InsideHorizontal,
+    /// Vertical lines between columns (not on the outer edges).
+    InsideVertical,
+    /// Both inside directions.
+    InsideBoth,
+    /// The rectangle's outline only.
+    Outside,
+    /// Every edge of every cell.
+    AllBorders,
+    /// Clear every side, diagonals included.
+    NoBorder,
+}
+
+impl BorderPreset {
+    fn parse(preset: &str) -> Result<Self, String> {
+        match preset {
+            "insideHorizontal" => Ok(BorderPreset::InsideHorizontal),
+            "insideVertical" => Ok(BorderPreset::InsideVertical),
+            "insideBoth" => Ok(BorderPreset::InsideBoth),
+            "outside" => Ok(BorderPreset::Outside),
+            "allBorders" => Ok(BorderPreset::AllBorders),
+            "none" => Ok(BorderPreset::NoBorder),
+            other => Err(format!("Unknown border preset: {}", other)),
+        }
+    }
+}
+
+/// Which of a rectangle's four EDGES a cell lies on. A border preset is a
+/// function of nothing else, which is what lets a whole column's worth of
+/// interior cells share ONE tier style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EdgePosition {
+    top: bool,
+    bottom: bool,
+    left: bool,
+    right: bool,
+}
+
+/// One preset with its line, applied cell by cell.
+#[derive(Debug, Clone)]
+struct BorderPresetDelta {
+    preset: BorderPreset,
+    line: BorderStyle,
+}
+
+impl BorderPresetDelta {
+    fn new(preset: &str, style: &str, color: &str, width: u8) -> Result<Self, String> {
+        let preset = BorderPreset::parse(preset)?;
+        let line_style = match style {
+            "solid" => BorderLineStyle::Solid,
+            "dashed" => BorderLineStyle::Dashed,
+            "dotted" => BorderLineStyle::Dotted,
+            "double" => BorderLineStyle::Double,
+            _ => BorderLineStyle::Solid,
+        };
+        let line = BorderStyle {
+            width,
+            color: ThemeColor::Absolute(Color::from_hex(color).unwrap_or(Color::new(0, 0, 0))),
+            style: line_style,
+        };
+        Ok(BorderPresetDelta { preset, line })
+    }
+
+    fn apply(&self, style: &mut CellStyle, at: EdgePosition) {
+        let line = &self.line;
+        let borders = &mut style.borders;
+        match self.preset {
+            BorderPreset::InsideHorizontal => {
+                if !at.bottom {
+                    borders.bottom = line.clone();
+                }
+                if !at.top {
+                    borders.top = line.clone();
+                }
+            }
+            BorderPreset::InsideVertical => {
+                if !at.right {
+                    borders.right = line.clone();
+                }
+                if !at.left {
+                    borders.left = line.clone();
+                }
+            }
+            BorderPreset::InsideBoth => {
+                if !at.bottom {
+                    borders.bottom = line.clone();
+                }
+                if !at.top {
+                    borders.top = line.clone();
+                }
+                if !at.right {
+                    borders.right = line.clone();
+                }
+                if !at.left {
+                    borders.left = line.clone();
+                }
+            }
+            BorderPreset::Outside => {
+                if at.top {
+                    borders.top = line.clone();
+                }
+                if at.bottom {
+                    borders.bottom = line.clone();
+                }
+                if at.left {
+                    borders.left = line.clone();
+                }
+                if at.right {
+                    borders.right = line.clone();
+                }
+            }
+            BorderPreset::AllBorders => {
+                borders.top = line.clone();
+                borders.bottom = line.clone();
+                borders.left = line.clone();
+                borders.right = line.clone();
+            }
+            BorderPreset::NoBorder => {
+                let none = BorderStyle::default();
+                borders.top = none.clone();
+                borders.bottom = none.clone();
+                borders.left = none.clone();
+                borders.right = none.clone();
+                borders.diagonal_down = none.clone();
+                borders.diagonal_up = none;
+            }
+        }
+    }
+}
+
+/// An inclusive cell rectangle with its corners normalised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CellRect {
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+}
+
+impl CellRect {
+    fn new(start_row: u32, start_col: u32, end_row: u32, end_col: u32) -> Self {
+        CellRect {
+            start_row: start_row.min(end_row),
+            start_col: start_col.min(end_col),
+            end_row: start_row.max(end_row),
+            end_col: start_col.max(end_col),
+        }
+    }
+
+    /// Row and column counts in u64. `(end - start + 1)` as a `u32` PRODUCT
+    /// overflowed on Select All (1,048,576 x 16,384 = 2^34) -- a panic in a
+    /// debug build and a wrapped, meaningless count in release (survey D3).
+    fn rows(&self) -> u64 {
+        u64::from(self.end_row - self.start_row) + 1
+    }
+
+    fn cols(&self) -> u64 {
+        u64::from(self.end_col - self.start_col) + 1
+    }
+
+    fn contains(&self, row: u32, col: u32) -> bool {
+        row >= self.start_row && row <= self.end_row && col >= self.start_col && col <= self.end_col
+    }
+
+    fn position(&self, row: u32, col: u32) -> EdgePosition {
+        EdgePosition {
+            top: row == self.start_row,
+            bottom: row == self.end_row,
+            left: col == self.start_col,
+            right: col == self.end_col,
+        }
+    }
+
+    fn whole_columns(&self) -> bool {
+        self.start_row == 0 && self.end_row >= engine::EXCEL_MAX_ROW_INDEX
+    }
+
+    fn whole_rows(&self) -> bool {
+        self.start_col == 0 && self.end_col >= engine::EXCEL_MAX_COL_INDEX
+    }
+}
+
+/// A rectangle smaller than whole rows or whole columns is styled cell by
+/// cell; above this many cells it is refused rather than materialised (a
+/// Calcula-only bound -- Excel has none). Whole rows, whole columns and Select
+/// All never reach it: they go through the row/column TIERS.
+const DENSE_BORDER_CELL_LIMIT: u64 = 4_000_000;
+
+/// Where a whole-row/whole-column preset crosses the OTHER axis's tiers, each
+/// crossing needs its own cell (the row tier outranks the column tier, so the
+/// new tier would not reach it). Above this many crossings the command is
+/// refused rather than materialising them. The precedent is the 250,000 guard
+/// in `protection.rs`'s tier planner, which instead SKIPS the crossings -- a
+/// silent gap that is tolerable for a lock bit and is not for a visible border.
+const BORDER_TIER_CROSSING_LIMIT: u64 = 2_000_000;
+
+/// Everything a border preset will WRITE, decided before anything is touched,
+/// so a refusal (too many cells, too many crossings) costs nothing.
+#[derive(Debug, Default)]
+struct RangeStylePlan {
+    /// Explicit cell styles: ((row, col), style).
+    cells: Vec<((u32, u32), CellStyle)>,
+    /// New column-tier styles: (col, style).
+    column_tiers: Vec<(u32, CellStyle)>,
+    /// New row-tier styles: (row, style).
+    row_tiers: Vec<(u32, CellStyle)>,
+}
+
+impl RangeStylePlan {
+    fn is_empty(&self) -> bool {
+        self.cells.is_empty() && self.column_tiers.is_empty() && self.row_tiers.is_empty()
+    }
+}
+
+/// Plan a border preset over `rect` on `grid`.
+///
+/// EVERY CELL IS BASED ON ITS EFFECTIVE STYLE (survey D2). This used to start
+/// from the cell's OWN `style_index`, which is 0 -- "inherit" -- for a cell
+/// that only shows a row or column default, so a border on such a cell
+/// replaced the tier's whole format with "default + border": a column's fill
+/// vanished, and a column unlocked through its tier silently re-locked.
+/// `apply_formatting` has based on the effective style for exactly that reason.
+///
+/// WHOLE ROWS AND WHOLE COLUMNS GO THROUGH THE TIERS (survey D3). Select All is
+/// 17.2 billion positions; this used to walk every one of them (and compute
+/// its count as an overflowing `u32` product). Excel stores a whole-column
+/// format as a COLUMN format, and so does Calcula (`Grid::column_styles`):
+///  - the interior cells of a whole-column range differ only in which column
+///    they are in, so ONE tier style per column carries them all;
+///  - the cells that can differ from their column's tier get their own style:
+///    the first and last row (an `outside` top/bottom edge), every stored cell
+///    that already has a style of its own, and every crossing with a ROW tier
+///    (the row tier outranks the column, so the column change would not show);
+///  - a cell is written only when what it would SHOW without one differs from
+///    what the preset asks for, so `allBorders` over a plain column writes one
+///    tier entry and no cells at all.
+/// Whole rows are the same with the axes swapped -- except that the new ROW
+/// tier then outranks every column tier it crosses, so those crossings are
+/// written to keep the column's own format.
+fn plan_border_preset(
+    grid: &engine::Grid,
+    styles: &engine::StyleRegistry,
+    rect: CellRect,
+    delta: &BorderPresetDelta,
+) -> Result<RangeStylePlan, String> {
+    plan_range_style(grid, styles, rect, &|style, position| delta.apply(style, position), &BORDER_WORDING)
+}
+
+/// How a range-style refusal names what it refuses.
+struct PlanWording {
+    /// "Borders" -> "Borders can be applied to at most ...".
+    dense: &'static str,
+    /// "This border" -> "This border would have to be written to ...".
+    crossing: &'static str,
+}
+
+const BORDER_WORDING: PlanWording = PlanWording { dense: "Borders", crossing: "This border" };
+const NUMBER_FORMAT_WORDING: PlanWording =
+    PlanWording { dense: "A number format", crossing: "This number format" };
+
+/// The planner behind the border presets AND Increase/Decrease Decimal: what
+/// `apply` does to every position of `rect` (it is told where the position
+/// sits on the rectangle's edge; a delta that does not care ignores it), with
+/// whole columns and whole rows written through the style TIERS. See
+/// `plan_border_preset` for the tier rules; they do not depend on the delta.
+fn plan_range_style(
+    grid: &engine::Grid,
+    styles: &engine::StyleRegistry,
+    rect: CellRect,
+    apply: &dyn Fn(&mut CellStyle, EdgePosition),
+    wording: &PlanWording,
+) -> Result<RangeStylePlan, String> {
+    let mut plan = RangeStylePlan::default();
+    let desired_at = |row: u32, col: u32| -> (CellStyle, bool) {
+        let before = styles.get(grid.effective_style_index(row, col));
+        let mut desired = before.clone();
+        apply(&mut desired, rect.position(row, col));
+        let changed = desired != *before;
+        (desired, changed)
+    };
+
+    let tier_is_column = rect.whole_columns();
+    if !tier_is_column && !rect.whole_rows() {
+        let count = rect.rows() * rect.cols();
+        if count > DENSE_BORDER_CELL_LIMIT {
+            return Err(dense_limit_refusal(wording, count));
+        }
+        for row in rect.start_row..=rect.end_row {
+            for col in rect.start_col..=rect.end_col {
+                let (desired, changed) = desired_at(row, col);
+                if changed {
+                    plan.cells.push(((row, col), desired));
+                }
+            }
+        }
+        return Ok(plan);
+    }
+
+    // ---- Tier path: whole columns (Select All included) or whole rows ----
+    let mut new_tier: std::collections::HashMap<u32, CellStyle> = std::collections::HashMap::new();
+    if tier_is_column {
+        for col in rect.start_col..=rect.end_col {
+            let current = styles.get(grid.column_styles.get(&col).copied().unwrap_or(0));
+            let mut next = current.clone();
+            let interior = EdgePosition {
+                top: false,
+                bottom: false,
+                left: col == rect.start_col,
+                right: col == rect.end_col,
+            };
+            apply(&mut next, interior);
+            if next != *current {
+                new_tier.insert(col, next.clone());
+                plan.column_tiers.push((col, next));
+            }
+        }
+    } else {
+        for row in rect.start_row..=rect.end_row {
+            let current = styles.get(grid.row_styles.get(&row).copied().unwrap_or(0));
+            let mut next = current.clone();
+            let interior = EdgePosition {
+                top: row == rect.start_row,
+                bottom: row == rect.end_row,
+                left: false,
+                right: false,
+            };
+            apply(&mut next, interior);
+            if next != *current {
+                new_tier.insert(row, next.clone());
+                plan.row_tiers.push((row, next));
+            }
+        }
+    }
+
+    // The positions whose style may differ from the tier after the change.
+    let crossing: Vec<u32> = if tier_is_column {
+        grid.row_styles
+            .iter()
+            .filter(|(r, idx)| **idx != 0 && **r >= rect.start_row && **r <= rect.end_row)
+            .map(|(r, _)| *r)
+            .collect()
+    } else {
+        grid.column_styles
+            .iter()
+            .filter(|(c, idx)| **idx != 0 && **c >= rect.start_col && **c <= rect.end_col)
+            .map(|(c, _)| *c)
+            .collect()
+    };
+    let span = if tier_is_column { rect.cols() } else { rect.rows() };
+    let crossings = crossing.len() as u64 * span;
+    if crossings > BORDER_TIER_CROSSING_LIMIT {
+        return Err(format!(
+            "{} would have to be written to {} separate cells where whole-{} \
+             formats cross; select a smaller range.",
+            wording.crossing,
+            crossings,
+            if tier_is_column { "row" } else { "column" }
+        ));
+    }
+
+    let mut candidates: std::collections::BTreeSet<(u32, u32)> = grid
+        .cells
+        .keys()
+        .copied()
+        .filter(|&(r, c)| rect.contains(r, c))
+        .collect();
+    if tier_is_column {
+        for col in rect.start_col..=rect.end_col {
+            candidates.insert((rect.start_row, col));
+            candidates.insert((rect.end_row, col));
+            for &row in &crossing {
+                candidates.insert((row, col));
+            }
+        }
+    } else {
+        for row in rect.start_row..=rect.end_row {
+            candidates.insert((row, rect.start_col));
+            candidates.insert((row, rect.end_col));
+            for &col in &crossing {
+                candidates.insert((row, col));
+            }
+        }
+    }
+
+    for (row, col) in candidates {
+        let (desired, _) = desired_at(row, col);
+        let own_style = grid.get_cell(row, col).map_or(0, |c| c.style_index);
+        let before = styles.get(grid.effective_style_index(row, col));
+        // What this position SHOWS after the tier entries land, if no cell
+        // style is written for it. A cell's own style outranks every tier; a
+        // row tier outranks a column tier.
+        let after: &CellStyle = if own_style != 0 {
+            before
+        } else if tier_is_column {
+            if grid.row_styles.get(&row).copied().unwrap_or(0) != 0 {
+                before
+            } else {
+                new_tier.get(&col).unwrap_or(before)
+            }
+        } else {
+            new_tier.get(&row).unwrap_or(before)
+        };
+        if desired != *after {
+            plan.cells.push(((row, col), desired));
+        }
+    }
+    Ok(plan)
+}
+
+/// The refusal for a cell-by-cell style write past [`DENSE_BORDER_CELL_LIMIT`].
+fn dense_limit_refusal(wording: &PlanWording, count: u64) -> String {
+    format!(
+        "{} can be applied to at most {} cells at once ({} selected). \
+         Select whole rows or whole columns, or a smaller range.",
+        wording.dense, DENSE_BORDER_CELL_LIMIT, count
+    )
+}
+
+/// What `write_range_style_plan` wrote: the cells (with their new style
+/// index) and the style indices its tier entries now use.
+struct WrittenPlan {
+    cells: Vec<(u32, u32, usize)>,
+    tier_styles: Vec<usize>,
+}
+
+/// Write a `RangeStylePlan` to one sheet: tiers first (with their undo
+/// snapshot), then cells. `mirror` is the second copy of the ACTIVE sheet
+/// (`grids[active]` beside `state.grid`); both must change or the readers that
+/// resolve against the other copy would not see the borders. Returns the
+/// cells written, with their new style index.
+fn write_range_style_plan(
+    grid: &mut engine::Grid,
+    mut mirror: Option<&mut engine::Grid>,
+    styles: &mut engine::StyleRegistry,
+    undo_stack: &mut engine::UndoStack,
+    sheet_index: usize,
+    plan: RangeStylePlan,
+    label: &str,
+) -> WrittenPlan {
+    let mut tier_styles = Vec::new();
+    for (is_column, entries) in [(true, plan.column_tiers), (false, plan.row_tiers)] {
+        if entries.is_empty() {
+            continue;
+        }
+        let previous: Vec<(u32, usize)> = entries
+            .iter()
+            .map(|(idx, _)| {
+                let tiers = if is_column { &grid.column_styles } else { &grid.row_styles };
+                (*idx, tiers.get(idx).copied().unwrap_or(0))
+            })
+            .collect();
+        undo_stack.record_custom_restore(
+            "obj_style_tiers".to_string(),
+            crate::undo_commands::style_tiers_snapshot_bytes(sheet_index, is_column, previous),
+            label,
+        );
+        for (idx, style) in entries {
+            // EXPLICIT: a tier whose style equals the default would otherwise
+            // intern to 0, which `set_column_style` reads as "clear the tier".
+            let style_index = styles.get_or_create_explicit(style);
+            tier_styles.push(style_index);
+            if is_column {
+                grid.set_column_style(idx, style_index);
+                if let Some(m) = mirror.as_deref_mut() {
+                    m.set_column_style(idx, style_index);
+                }
+            } else {
+                grid.set_row_style(idx, style_index);
+                if let Some(m) = mirror.as_deref_mut() {
+                    m.set_row_style(idx, style_index);
+                }
+            }
+        }
+    }
+
+    let mut written = Vec::with_capacity(plan.cells.len());
+    for ((row, col), style) in plan.cells {
+        // Under a tier (after the tier writes above), a style equal to the
+        // default must still be EXPLICIT: index 0 means "inherit".
+        let under_tier = grid.row_styles.get(&row).copied().unwrap_or(0) != 0
+            || grid.column_styles.get(&col).copied().unwrap_or(0) != 0;
+        let style_index = if under_tier {
+            styles.get_or_create_explicit(style)
+        } else {
+            styles.get_or_create(style)
+        };
+        let previous_cell = grid.get_cell(row, col).cloned();
+        let mut cell = previous_cell.clone().unwrap_or(Cell {
+            value: CellValue::Empty,
+            ast: None,
+            style_index: 0,
+            rich_text: None,
+        });
+        cell.style_index = style_index;
+        grid.set_cell(row, col, cell.clone());
+        if let Some(m) = mirror.as_deref_mut() {
+            m.set_cell(row, col, cell);
+        }
+        undo_stack.record_cell_change(sheet_index, row, col, previous_cell);
+        written.push((row, col, style_index));
+    }
+    tier_styles.sort_unstable();
+    tier_styles.dedup();
+    WrittenPlan { cells: written, tier_styles }
+}
+
 /// Apply a border preset to a rectangular range.
 ///
 /// Presets:
@@ -1528,7 +2139,17 @@ pub fn set_cell_rich_text(
 /// - "outside"          - borders on the outer edges only
 /// - "allBorders"       - all inside + outside borders
 /// - "none"             - clear all borders in the range
+///
+/// Whole rows, whole columns and Select All are written through the row/column
+/// tiers (see `plan_border_preset`); everything else cell by cell, each cell
+/// based on its EFFECTIVE style. One undo step, joining a step the caller holds
+/// open (script batches, the Home tab's two-call presets).
+///
+/// `sheet_indices`: with sheets GROUPED, the group (it may include the active
+/// sheet). Every sheet is gated and planned before any is written, and the
+/// whole group is ONE undo step -- see `apply_formatting` for why one command.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn apply_border_preset(
     state: State<AppState>,
     file_state: State<FileState>,
@@ -1540,220 +2161,588 @@ pub fn apply_border_preset(
     style: String,
     color: String,
     width: u8,
+    sheet_indices: Option<Vec<usize>>,
 ) -> Result<FormattingResult, String> {
-    // Sheet protection, before any lock below: per-cell locks AND the
-    // formatCells option flag (borders are formatting), matching apply_formatting.
-    {
-        let active_sheet = *state.active_sheet.read().unwrap();
-        crate::protection::check_sheet_protection_range(
-            &state,
-            active_sheet,
-            start_row.min(end_row),
-            start_col.min(end_col),
-            start_row.max(end_row),
-            start_col.max(end_col),
-        )?;
-        crate::protection::check_sheet_action(&state, active_sheet, "formatCells", "apply borders")?;
-    }
-
-    // Every gate above has passed; from here this command commits. Constructed
-    // HERE and not at the top so a refusal cannot leave a spuriously dirty
-    // document -- see DocumentEffect::mutates on ordering.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut grid = state.grid.write(&effect).unwrap();
-    let mut grids = state.grids.write(&effect).unwrap();
-    let active_sheet = *state.active_sheet.read().unwrap();
-    let mut styles = state.style_registry.write(&effect).unwrap();
-    let mut undo_stack = state.undo_stack.lock().unwrap();
-    let merged_regions = state.merged_regions.read().unwrap();
-    let locale = state.locale.lock().unwrap();
-
-    // Build the border style to apply
-    let line_style = match style.as_str() {
-        "solid" => BorderLineStyle::Solid,
-        "dashed" => BorderLineStyle::Dashed,
-        "dotted" => BorderLineStyle::Dotted,
-        "double" => BorderLineStyle::Double,
-        _ => BorderLineStyle::Solid,
-    };
-    let border_color = ThemeColor::Absolute(
-        Color::from_hex(&color).unwrap_or(Color::new(0, 0, 0)),
-    );
-    let active_border = BorderStyle {
+    apply_border_preset_core(
+        &state,
+        &file_state,
+        CellRect::new(start_row, start_col, end_row, end_col),
+        &preset,
+        &style,
+        &color,
         width,
-        color: border_color,
-        style: line_style,
-    };
-    let no_border = BorderStyle::default();
+        sheet_indices.as_deref().unwrap_or(&[]),
+    )
+}
 
-    let cell_count = ((end_row - start_row + 1) * (end_col - start_col + 1)) as usize;
-    // Join an already-open frontend transaction (script undo batching) instead
-    // of opening a nested one.
-    let opened_transaction = !undo_stack.has_open_transaction();
-    if opened_transaction {
-        undo_stack.begin_transaction(format!("Border preset '{}' on {} cells", preset, cell_count));
+#[allow(clippy::too_many_arguments)]
+fn apply_border_preset_core(
+    state: &AppState,
+    file_state: &FileState,
+    rect: CellRect,
+    preset: &str,
+    style: &str,
+    color: &str,
+    width: u8,
+    group: &[usize],
+) -> Result<FormattingResult, String> {
+    border_preset_on_sheets(state, file_state, rect, preset, style, color, width, group, true)
+}
+
+/// The grouped-sheets half of a border preset (survey D4): repeat the preset
+/// on every listed sheet EXCEPT the active one. Kept for callers that format
+/// the active sheet themselves; the Home tab's wrapper now sends the whole
+/// group to `apply_border_preset` instead.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn apply_border_preset_to_sheets(
+    state: State<AppState>,
+    file_state: State<FileState>,
+    sheet_indices: Vec<usize>,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+    preset: String,
+    style: String,
+    color: String,
+    width: u8,
+) -> Result<(), String> {
+    apply_border_preset_to_sheets_core(
+        &state,
+        &file_state,
+        &sheet_indices,
+        CellRect::new(start_row, start_col, end_row, end_col),
+        &preset,
+        &style,
+        &color,
+        width,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_border_preset_to_sheets_core(
+    state: &AppState,
+    file_state: &FileState,
+    sheet_indices: &[usize],
+    rect: CellRect,
+    preset: &str,
+    style: &str,
+    color: &str,
+    width: u8,
+) -> Result<(), String> {
+    border_preset_on_sheets(state, file_state, rect, preset, style, color, width, sheet_indices, false).map(|_| ())
+}
+
+/// The body of both border commands. Under the HELD guards (`StyleLocks`):
+/// gate every target sheet, plan every one (a refusal -- too many cells, too
+/// many tier crossings -- touches nothing), and only if something changes
+/// construct the effect and write every plan inside ONE owned transaction.
+/// Returns the active sheet's written cells and the whole style registry.
+#[allow(clippy::too_many_arguments)]
+fn border_preset_on_sheets(
+    state: &AppState,
+    file_state: &FileState,
+    rect: CellRect,
+    preset: &str,
+    style: &str,
+    color: &str,
+    width: u8,
+    group: &[usize],
+    include_active: bool,
+) -> Result<FormattingResult, String> {
+    // An unknown preset or style is refused before any guard is taken.
+    let delta = BorderPresetDelta::new(preset, style, color, width)?;
+
+    let locks = StyleLocks::take(state);
+    let targets = locks.targets(group, include_active);
+    gate_style_targets(state, &locks, &targets, StyleArea::Range(rect), "apply borders")?;
+    let mut plans: Vec<(usize, RangeStylePlan)> = Vec::new();
+    for &sheet in &targets {
+        let Some(grid) = locks.sheet_grid(sheet) else { continue };
+        let plan = plan_border_preset(grid, &locks.styles, rect, &delta)?;
+        if !plan.is_empty() {
+            plans.push((sheet, plan));
+        }
+    }
+    if plans.is_empty() {
+        // Nothing would change (`none` on a range without borders): nothing is
+        // written, nothing is recorded, and the document stays clean.
+        return Ok(FormattingResult { cells: Vec::new(), styles: Vec::new() });
     }
 
-    let mut updated_cells = Vec::new();
+    // Every gate has passed and something changes; from here this command
+    // commits. Constructed HERE so a refusal cannot leave a spuriously dirty
+    // document -- see DocumentEffect::mutates on ordering.
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let StyleLocks { grid, grids, styles, active_sheet } = locks;
+    let mut grid = grid.authorize(&effect);
+    let mut grids = grids.authorize(&effect);
+    let mut styles = styles.authorize(&effect);
+    let mut undo_stack = state.undo_stack.lock().unwrap();
 
-    for row in start_row..=end_row {
-        for col in start_col..=end_col {
-            // Record previous state for undo
-            let previous_cell = grid.get_cell(row, col).cloned();
+    let label = format!("Border preset '{}' on {} cells", preset, rect.rows() * rect.cols());
+    // Join an already-open frontend transaction (script undo batching, the Home
+    // tab's two-call presets) instead of opening a nested one.
+    let txn = undo_stack.begin_owned_transaction(label.clone());
+    let mut written = Vec::new();
+    for (sheet, plan) in plans {
+        if sheet == active_sheet {
+            written = write_range_style_plan(
+                &mut grid,
+                grids.get_mut(active_sheet),
+                &mut styles,
+                &mut undo_stack,
+                sheet,
+                plan,
+                &label,
+            )
+            .cells;
+        } else if let Some(sheet_grid) = grids.get_mut(sheet) {
+            write_range_style_plan(sheet_grid, None, &mut styles, &mut undo_stack, sheet, plan, &label);
+        }
+    }
+    undo_stack.commit_owned(txn);
+    drop(undo_stack);
 
-            // Get or create cell
-            let (cell, old_style_index) = if let Some(existing) = grid.get_cell(row, col) {
-                (existing.clone(), existing.style_index)
-            } else {
-                (
-                    Cell {
-                        value: CellValue::Empty,
-                        ast: None,
-                        style_index: 0,
-                        rich_text: None,
-                    },
-                    0,
-                )
+    // The WHOLE registry: a tier's style is referenced by no returned cell, and
+    // the frontend's style cache must still know it to paint the column.
+    Ok(formatting_result(state, &grid, &styles, &written, None))
+}
+
+// ============================================================================
+// Increase / Decrease Decimal (Home > Number)
+// ============================================================================
+
+/// The format Increase/Decrease Decimal turns `format` into, for a cell
+/// holding `value` -- or `None` when Excel leaves the selection UNCHANGED.
+///
+/// Excel's rules, measured live on Excel 16 (sv-SE, 2026-10-04; survey
+/// number.md section 3 and the rust-format probes):
+///  - the ACTIVE cell's format decides, and the result is applied to the WHOLE
+///    selection (F1:F3 with F1 General 1.5 active: all three became `0.00`,
+///    a `0%` cell included);
+///  - the format KEEPS ITS KIND: Number, Currency, Accounting, Percentage and
+///    Scientific gain or lose one decimal (`0%` -> `0.0%`, `0.00E+00` ->
+///    `0.000E+00`, accounting keeps its symbol and layout, currency its symbol
+///    and its negative entry);
+///  - General uses the decimals it SHOWS: 1.5 -> `0.00` / `0`, 1.2345 ->
+///    `0.00000` / `0.000`, 3 -> `0.0` / unchanged;
+///  - a Custom code gets one `0` more or less after the last digit
+///    placeholder of EVERY numeric section (`#,##0.00 "kr"` -> `#,##0.000
+///    "kr"`, `0.00;(0.00);"zero"` -> `0.000;(0.000);"zero"`, `#,##0 " k"` ->
+///    `#,##0.0 " k"`); a section with no digit placeholder is left alone;
+///  - UNCHANGED, for the whole selection: Date, Time, Fraction and Text (`@`)
+///    formats, an empty active cell, a General cell holding text, and a
+///    Decrease with no decimal left to remove (`0`, `0%`). With a DATE active
+///    and a `0.00` cell beside it, neither changed.
+///
+/// One deliberate difference: Excel's General count comes from the column
+/// WIDTH (1234.5678 in a default column shows `1234,568` and becomes 4
+/// decimals); the backend does not lay text out, so it counts the decimals of
+/// General's full rendering (`format_general`, up to 10) and gets 5.
+pub(crate) fn next_decimal_format(
+    format: &NumberFormat,
+    value: Option<&CellValue>,
+    delta: i32,
+) -> Option<NumberFormat> {
+    let step = |places: u8| -> Option<u8> {
+        if delta > 0 {
+            places.checked_add(1)
+        } else {
+            places.checked_sub(1)
+        }
+    };
+    match format {
+        NumberFormat::General => {
+            let Some(CellValue::Number(n)) = value else {
+                return None;
             };
+            let shown = engine::format_number(*n, &NumberFormat::General, &engine::LocaleSettings::invariant());
+            let (mantissa, scientific) = match shown.split_once('E') {
+                Some((m, _)) => (m.to_string(), true),
+                None => (shown.clone(), false),
+            };
+            let decimals = mantissa.split_once('.').map_or(0, |(_, frac)| frac.len());
+            let decimals = u8::try_from(decimals).ok()?;
+            let next = step(decimals)?;
+            Some(if scientific {
+                NumberFormat::Scientific { decimal_places: next }
+            } else {
+                NumberFormat::Number { decimal_places: next, use_thousands_separator: false }
+            })
+        }
+        NumberFormat::Number { decimal_places, use_thousands_separator } => {
+            Some(NumberFormat::Number {
+                decimal_places: step(*decimal_places)?,
+                use_thousands_separator: *use_thousands_separator,
+            })
+        }
+        NumberFormat::Currency { decimal_places, symbol, symbol_position, negative_style } => {
+            Some(NumberFormat::Currency {
+                decimal_places: step(*decimal_places)?,
+                symbol: symbol.clone(),
+                symbol_position: *symbol_position,
+                negative_style: *negative_style,
+            })
+        }
+        NumberFormat::Accounting { decimal_places, symbol, symbol_position, negative_style } => {
+            Some(NumberFormat::Accounting {
+                decimal_places: step(*decimal_places)?,
+                symbol: symbol.clone(),
+                symbol_position: *symbol_position,
+                negative_style: *negative_style,
+            })
+        }
+        NumberFormat::Percentage { decimal_places } => {
+            Some(NumberFormat::Percentage { decimal_places: step(*decimal_places)? })
+        }
+        NumberFormat::Scientific { decimal_places } => {
+            Some(NumberFormat::Scientific { decimal_places: step(*decimal_places)? })
+        }
+        NumberFormat::Fraction { .. } | NumberFormat::Date { .. } | NumberFormat::Time { .. } => None,
+        NumberFormat::Custom { format: code } => {
+            adjust_custom_code_decimals(code, delta).map(|format| NumberFormat::Custom { format })
+        }
+    }
+}
 
-            let mut new_style = styles.get(old_style_index).clone();
-
-            match preset.as_str() {
-                "insideHorizontal" => {
-                    // Bottom border on all rows except the last
-                    if row < end_row {
-                        new_style.borders.bottom = active_border.clone();
-                    }
-                    // Top border on all rows except the first
-                    if row > start_row {
-                        new_style.borders.top = active_border.clone();
-                    }
-                }
-                "insideVertical" => {
-                    // Right border on all cols except the last
-                    if col < end_col {
-                        new_style.borders.right = active_border.clone();
-                    }
-                    // Left border on all cols except the first
-                    if col > start_col {
-                        new_style.borders.left = active_border.clone();
-                    }
-                }
-                "insideBoth" => {
-                    if row < end_row {
-                        new_style.borders.bottom = active_border.clone();
-                    }
-                    if row > start_row {
-                        new_style.borders.top = active_border.clone();
-                    }
-                    if col < end_col {
-                        new_style.borders.right = active_border.clone();
-                    }
-                    if col > start_col {
-                        new_style.borders.left = active_border.clone();
-                    }
-                }
-                "outside" => {
-                    if row == start_row {
-                        new_style.borders.top = active_border.clone();
-                    }
-                    if row == end_row {
-                        new_style.borders.bottom = active_border.clone();
-                    }
-                    if col == start_col {
-                        new_style.borders.left = active_border.clone();
-                    }
-                    if col == end_col {
-                        new_style.borders.right = active_border.clone();
-                    }
-                }
-                "allBorders" => {
-                    new_style.borders.top = active_border.clone();
-                    new_style.borders.bottom = active_border.clone();
-                    new_style.borders.left = active_border.clone();
-                    new_style.borders.right = active_border.clone();
-                }
-                "none" => {
-                    new_style.borders.top = no_border.clone();
-                    new_style.borders.bottom = no_border.clone();
-                    new_style.borders.left = no_border.clone();
-                    new_style.borders.right = no_border.clone();
-                    new_style.borders.diagonal_down = no_border.clone();
-                    new_style.borders.diagonal_up = no_border.clone();
-                }
+/// One `0` more or less after the last digit placeholder of every numeric
+/// section of a custom code; `None` when no section changed, or when the code
+/// is a date/time/text code (Excel leaves those alone).
+///
+/// The code is read with Excel's tokenizer rules: `"..."` and `\x` are
+/// literals, `_x` and `*x` consume the next character, `[...]` is a colour,
+/// condition or locale. Only the MANTISSA counts -- the part before an
+/// `E+`/`E-` exponent -- so `0.00E+00` gains a decimal, not an exponent digit.
+pub(crate) fn adjust_custom_code_decimals(code: &str, delta: i32) -> Option<String> {
+    let sections = split_code_sections(code);
+    let mut changed = false;
+    let mut out: Vec<String> = Vec::with_capacity(sections.len());
+    for (i, section) in sections.iter().enumerate() {
+        let scan = scan_decimal_section(section);
+        if scan.date_or_text {
+            if i == 0 {
+                return None; // a date, time or text code: Excel leaves it
+            }
+            out.push(section.clone());
+            continue;
+        }
+        let Some(last) = scan.last_digit.filter(|_| scan.has_zero_or_hash) else {
+            out.push(section.clone());
+            continue;
+        };
+        let mut chars: Vec<char> = section.chars().collect();
+        if delta > 0 {
+            match scan.decimal_point {
+                Some(point) if point < last => chars.insert(last + 1, '0'),
                 _ => {
-                    return Err(format!("Unknown border preset: {}", preset));
+                    chars.insert(last + 1, '0');
+                    chars.insert(last + 1, '.');
                 }
             }
-
-            let new_style_index = styles.get_or_create(new_style.clone());
-
-            let mut updated_cell = cell;
-            updated_cell.style_index = new_style_index;
-            grid.set_cell(row, col, updated_cell.clone());
-
-            if active_sheet < grids.len() {
-                grids[active_sheet].set_cell(row, col, updated_cell.clone());
+            changed = true;
+        } else {
+            match scan.decimal_point {
+                Some(point) if point < last => {
+                    chars.remove(last);
+                    // No digit placeholder left after the point: the point goes too.
+                    let still_has_decimals = chars[point + 1..]
+                        .iter()
+                        .take_while(|c| matches!(c, '0' | '#' | '?'))
+                        .next()
+                        .is_some();
+                    if !still_has_decimals {
+                        chars.remove(point);
+                    }
+                    changed = true;
+                }
+                _ => {}
             }
+        }
+        out.push(chars.into_iter().collect());
+    }
+    if changed {
+        Some(out.join(";"))
+    } else {
+        None
+    }
+}
 
-            undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
+/// Split a format code on the semicolons outside quotes, escapes and brackets.
+fn split_code_sections(code: &str) -> Vec<String> {
+    let mut sections = vec![String::new()];
+    let mut in_quotes = false;
+    let mut in_bracket = false;
+    let mut escaped = false;
+    for ch in code.chars() {
+        if escaped {
+            escaped = false;
+            sections.last_mut().unwrap().push(ch);
+            continue;
+        }
+        match ch {
+            '\\' if !in_quotes => escaped = true,
+            '"' if !in_bracket => in_quotes = !in_quotes,
+            '[' if !in_quotes => in_bracket = true,
+            ']' if !in_quotes => in_bracket = false,
+            ';' if !in_quotes && !in_bracket => {
+                sections.push(String::new());
+                continue;
+            }
+            _ => {}
+        }
+        sections.last_mut().unwrap().push(ch);
+    }
+    sections
+}
 
-            let fmt_result = format_cell_value_with_color(&updated_cell.value, &new_style, &locale);
-            let acct_layout = fmt_result.accounting.map(|a| crate::api_types::AccountingLayout {
-                symbol: a.symbol,
-                symbol_before: a.symbol_before,
-                value: a.value,
-            });
+/// The digit placeholders of one custom-code section, by CHAR index.
+#[derive(Debug, Default)]
+struct DecimalSectionScan {
+    /// The last `0`/`#`/`?` of the mantissa.
+    last_digit: Option<usize>,
+    /// Whether the mantissa has a `0` or `#`. A section whose only digit
+    /// placeholders are `?` is not edited: Excel left the accounting zero
+    /// section `"-"??` alone when it gave the other sections a decimal (live).
+    has_zero_or_hash: bool,
+    /// The mantissa's decimal point.
+    decimal_point: Option<usize>,
+    /// A date/time token or `@` outside literals.
+    date_or_text: bool,
+}
 
-            let merge_info = merged_regions.iter().find(|r| r.start_row == row && r.start_col == col);
-            let (row_span, col_span) = if let Some(region) = merge_info {
-                (region.end_row - region.start_row + 1, region.end_col - region.start_col + 1)
-            } else {
-                (1, 1)
-            };
+fn scan_decimal_section(section: &str) -> DecimalSectionScan {
+    let chars: Vec<char> = section.chars().collect();
+    let mut scan = DecimalSectionScan::default();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '"' => {
+                i += 1;
+                while i < chars.len() && chars[i] != '"' {
+                    i += 1;
+                }
+            }
+            '\\' | '_' | '*' => i += 1,
+            '[' => {
+                let start = i;
+                while i < chars.len() && chars[i] != ']' {
+                    i += 1;
+                }
+                // Elapsed time: [h], [mm], [ss].
+                let body: String = chars[start + 1..i.min(chars.len())].iter().collect();
+                let lower = body.to_ascii_lowercase();
+                if !lower.is_empty() && lower.chars().all(|c| matches!(c, 'h' | 'm' | 's')) {
+                    scan.date_or_text = true;
+                }
+            }
+            'E' | 'e' if matches!(chars.get(i + 1), Some('+') | Some('-')) => break,
+            '0' | '#' => {
+                scan.last_digit = Some(i);
+                scan.has_zero_or_hash = true;
+            }
+            '?' => scan.last_digit = Some(i),
+            '.' => {
+                if scan.decimal_point.is_none() {
+                    scan.decimal_point = Some(i);
+                }
+            }
+            '@' => scan.date_or_text = true,
+            c if matches!(c.to_ascii_lowercase(), 'y' | 'm' | 'd' | 'h' | 's') => {
+                scan.date_or_text = true
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    scan
+}
 
-            updated_cells.push(CellData {
-                row,
-                col,
-                display: fmt_result.text, overflow: fmt_result.overflow,
-                display_color: fmt_result.color,
-                formula: updated_cell.formula_string().map(|f| format!("={}", f)),
-                style_index: new_style_index,
-                row_span,
-                col_span,
-                sheet_index: None,
-                rich_text: None,
-                accounting_layout: acct_layout,
-            });
+/// Home > Number > Increase Decimal (`delta` = 1) / Decrease Decimal (-1).
+///
+/// The ACTIVE cell -- `(rows[0], cols[0])`; callers put the active cell's row
+/// and column first -- decides the new format (`next_decimal_format`), and the
+/// whole `rows` x `cols` selection receives it, as ONE undo step. When Excel
+/// would change nothing (a date, text, an empty cell, no decimal left), the
+/// command writes nothing, records nothing and leaves the document clean.
+///
+/// WHY THE BACKEND. The ribbon used to do this in TypeScript by regex over the
+/// DISPLAY NAME (`/(\d+)\s*decimal/`) and always wrote a plain `0.0...`, so
+/// Percent, Accounting, Currency, Scientific and Custom formats all turned
+/// into plain numbers, dates turned into serial numbers, and General 1.2345
+/// SHRANK to one decimal on "Increase" (survey number.md section 3). Doing it
+/// on the typed `NumberFormat` keeps the kind, and a second parser of display
+/// names in TypeScript would be the drift class behind BUG-0065.
+///
+/// SELECT ALL (review finding, 2026-10-04). Ctrl+A then Increase Decimal
+/// sends all 1,048,576 rows and 16,384 columns, and this walked every one of
+/// the 17.2 billion positions, materialising a cell and an undo entry for each.
+/// A rectangular selection now goes through `plan_range_style` -- the planner
+/// the border presets use -- so whole columns and whole rows are written as
+/// row/column TIERS plus the cells that differ, and a partial rectangle too
+/// large to style cell by cell is refused before any work. The protection gate
+/// takes the RANGE form, which never enumerates the rectangle. A selection
+/// that is not one rectangle is styled cell by cell under the same bound.
+///
+/// `sheet_indices`: with sheets GROUPED, the group (the active cell's format
+/// decides for every sheet); gated whole and ONE undo step, as
+/// `apply_formatting`.
+#[tauri::command]
+pub fn adjust_number_format_decimals(
+    state: State<AppState>,
+    file_state: State<FileState>,
+    rows: Vec<u32>,
+    cols: Vec<u32>,
+    delta: i32,
+    sheet_indices: Option<Vec<usize>>,
+) -> Result<FormattingResult, String> {
+    adjust_number_format_decimals_core(&state, &file_state, &rows, &cols, delta, sheet_indices.as_deref().unwrap_or(&[]))
+}
+
+/// `rows` and `cols` as ONE rectangle, when they are: each list holds every
+/// index of one contiguous run exactly once, in any order (the Home tab sends
+/// the active cell's row and column first). `None` otherwise.
+fn rect_of_lists(rows: &[u32], cols: &[u32]) -> Option<CellRect> {
+    fn run(list: &[u32]) -> Option<(u32, u32)> {
+        let mut sorted = list.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        let (first, last) = (*sorted.first()?, *sorted.last()?);
+        (sorted.len() == list.len() && (last - first) as usize + 1 == sorted.len()).then_some((first, last))
+    }
+    let (r0, r1) = run(rows)?;
+    let (c0, c1) = run(cols)?;
+    Some(CellRect::new(r0, c0, r1, c1))
+}
+
+/// The cell-by-cell plan for a selection that is not one rectangle: every
+/// listed position (once) whose style `apply` changes. The caller has bounded
+/// the product.
+fn plan_listed_cells(
+    grid: &engine::Grid,
+    styles: &engine::StyleRegistry,
+    rows: &[u32],
+    cols: &[u32],
+    apply: &dyn Fn(&mut CellStyle),
+) -> RangeStylePlan {
+    let mut plan = RangeStylePlan::default();
+    let mut seen: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+    for &row in rows {
+        for &col in cols {
+            if !seen.insert((row, col)) {
+                continue;
+            }
+            let before = styles.get(grid.effective_style_index(row, col));
+            let mut desired = before.clone();
+            apply(&mut desired);
+            if desired != *before {
+                plan.cells.push(((row, col), desired));
+            }
+        }
+    }
+    plan
+}
+
+pub(crate) fn adjust_number_format_decimals_core(
+    state: &AppState,
+    file_state: &FileState,
+    rows: &[u32],
+    cols: &[u32],
+    delta: i32,
+    group: &[usize],
+) -> Result<FormattingResult, String> {
+    if delta != 1 && delta != -1 {
+        return Err(format!("delta must be 1 or -1 (got {})", delta));
+    }
+    let unchanged = || FormattingResult { cells: Vec::new(), styles: Vec::new() };
+    let (Some(&active_row), Some(&active_col)) = (rows.first(), cols.first()) else {
+        return Ok(unchanged());
+    };
+    // The shape decides the route; a scattered list too large to style cell
+    // by cell is refused before any guard is taken.
+    let rect = rect_of_lists(rows, cols);
+    if rect.is_none() {
+        let count = rows.len() as u64 * cols.len() as u64;
+        if count > DENSE_BORDER_CELL_LIMIT {
+            return Err(dense_limit_refusal(&NUMBER_FORMAT_WORDING, count));
         }
     }
 
-    if opened_transaction {
-        undo_stack.commit_transaction();
+    let locks = StyleLocks::take(state);
+    // Decide from the ACTIVE cell, under the guards the write will use.
+    let next = {
+        let style = locks.styles.get(locks.grid.effective_style_index(active_row, active_col));
+        let value = locks.grid.get_cell(active_row, active_col).map(|c| &c.value);
+        next_decimal_format(&style.number_format, value, delta)
+    };
+    let Some(next) = next else {
+        return Ok(unchanged());
+    };
+
+    // The same gates as apply_formatting, and only for a REAL change.
+    let targets = locks.targets(group, true);
+    let area = match rect {
+        Some(r) => StyleArea::Range(r),
+        None => StyleArea::Cells { rows, cols },
+    };
+    gate_style_targets(state, &locks, &targets, area, "format cells")?;
+
+    let set_format = |style: &mut CellStyle| style.number_format = next.clone();
+    let mut plans: Vec<(usize, RangeStylePlan)> = Vec::new();
+    for &sheet in &targets {
+        let Some(grid) = locks.sheet_grid(sheet) else { continue };
+        let plan = match rect {
+            Some(r) => plan_range_style(grid, &locks.styles, r, &|style, _| set_format(style), &NUMBER_FORMAT_WORDING)?,
+            None => plan_listed_cells(grid, &locks.styles, rows, cols, &set_format),
+        };
+        if !plan.is_empty() {
+            plans.push((sheet, plan));
+        }
+    }
+    if plans.is_empty() {
+        // Every position already shows that format: nothing to write.
+        return Ok(unchanged());
     }
 
-    let mut updated_styles = Vec::new();
-    let theme = state.theme.read().unwrap();
-    for (index, style) in styles.all_styles().iter().enumerate() {
-        updated_styles.push(StyleEntry {
-            index,
-            style: StyleData::from_cell_style(style, &theme),
-        });
-    }
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let StyleLocks { grid, grids, styles, active_sheet } = locks;
+    let mut grid = grid.authorize(&effect);
+    let mut grids = grids.authorize(&effect);
+    let mut styles = styles.authorize(&effect);
+    let mut undo_stack = state.undo_stack.lock().unwrap();
 
-    if !updated_cells.is_empty() {
-        let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
+    let label = if delta > 0 { "Increase Decimal" } else { "Decrease Decimal" };
+    let txn = undo_stack.begin_owned_transaction(label);
+    let mut written = Vec::new();
+    let mut used: Vec<usize> = Vec::new();
+    for (sheet, plan) in plans {
+        let outcome = if sheet == active_sheet {
+            write_range_style_plan(&mut grid, grids.get_mut(active_sheet), &mut styles, &mut undo_stack, sheet, plan, label)
+        } else if let Some(sheet_grid) = grids.get_mut(sheet) {
+            write_range_style_plan(sheet_grid, None, &mut styles, &mut undo_stack, sheet, plan, label)
+        } else {
+            continue;
+        };
+        used.extend(outcome.cells.iter().map(|&(_, _, index)| index));
+        used.extend(outcome.tier_styles.iter().copied());
+        if sheet == active_sheet {
+            written = outcome.cells;
+        }
     }
+    undo_stack.commit_owned(txn);
+    drop(undo_stack);
 
-    Ok(FormattingResult {
-        cells: updated_cells,
-        styles: updated_styles,
-    })
+    // Every style returned carries the new format (cells' and tiers' alike, on
+    // every sheet written): the wrapper records `styles[0]` for the macro
+    // recorder, and a Select All writes tiers and no cell at all.
+    used.sort_unstable();
+    used.dedup();
+    Ok(formatting_result(state, &grid, &styles, &written, Some(used)))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_text_rotation;
     use crate::api_types::StyleData;
     use engine::theme::ThemeDefinition;
     use engine::{CellStyle, TextRotation};
@@ -1765,6 +2754,13 @@ mod tests {
         let mut style = CellStyle::default();
         style.text_rotation = rotation;
         StyleData::from_cell_style(&style, &ThemeDefinition::default()).text_rotation
+    }
+
+    /// The tests below assert ACCEPTED values, so they read the Ok side; the
+    /// refusal of an unknown value is pinned on its own by
+    /// `an_unknown_rotation_is_refused_instead_of_clearing_the_rotation`.
+    fn parse_text_rotation(s: &str) -> TextRotation {
+        super::parse_text_rotation(s).unwrap_or_else(|e| panic!("{s:?} was refused: {e}"))
     }
 
     /// THE round-trip: StyleData -> FormattingParams.text_rotation ->
@@ -1784,6 +2780,8 @@ mod tests {
             TextRotation::Custom(-1),
             TextRotation::Custom(-45),
             TextRotation::Custom(-89),
+            // Stacked text, Excel's "Vertical Text" (emitted as "vertical").
+            TextRotation::Vertical,
         ];
         for rotation in vocabulary {
             let emitted = emit(rotation);
@@ -1836,8 +2834,25 @@ mod tests {
         assert_eq!(parse_text_rotation("120"), TextRotation::Rotate90);
         assert_eq!(parse_text_rotation("custom:120"), TextRotation::Rotate90);
         assert_eq!(parse_text_rotation("custom:-500"), TextRotation::Rotate270);
-        // Garbage still degrades to None rather than erroring the whole apply.
-        assert_eq!(parse_text_rotation("sideways"), TextRotation::None);
+    }
+
+    /// "vertical" is stacked text, and the API emits exactly that word.
+    #[test]
+    fn vertical_is_stacked_text_both_ways() {
+        assert_eq!(parse_text_rotation("vertical"), TextRotation::Vertical);
+        assert_eq!(parse_text_rotation("Vertical"), TextRotation::Vertical);
+        assert_eq!(emit(TextRotation::Vertical), "vertical");
+    }
+
+    /// AN UNKNOWN VALUE IS AN ERROR, not `None`. `None` is not "leave it" --
+    /// it CLEARS the rotation -- so a typo, or "vertical" before stacked text
+    /// existed, silently flattened every selected cell.
+    #[test]
+    fn an_unknown_rotation_is_refused_instead_of_clearing_the_rotation() {
+        for garbage in ["sideways", "stacked", "custom:", "custom:abc", "", "45deg"] {
+            let verdict = super::parse_text_rotation(garbage);
+            assert!(verdict.is_err(), "{garbage:?} must be refused, got {verdict:?}");
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1904,16 +2919,58 @@ mod tests {
                 decimal_places: 2,
                 symbol: "$".to_string(),
                 symbol_position: CurrencyPosition::Before,
+                negative_style: NegativeStyle::Parentheses,
             },
             NumberFormat::Accounting {
                 decimal_places: 0,
                 symbol: "$".to_string(),
                 symbol_position: CurrencyPosition::Before,
+                negative_style: NegativeStyle::Minus,
             },
             NumberFormat::Accounting {
                 decimal_places: 2,
                 symbol: "kr".to_string(),
                 symbol_position: CurrencyPosition::After,
+                negative_style: NegativeStyle::Minus,
+            },
+            // The Home tab's Comma Style and Accounting-menu shapes (CONTRACT
+            // 3.7): an EMPTY symbol, the non-ASCII symbols, a multi-letter one,
+            // a suffix one -- each under both regional negative patterns.
+            NumberFormat::Accounting {
+                decimal_places: 2,
+                symbol: String::new(),
+                symbol_position: CurrencyPosition::Before,
+                negative_style: NegativeStyle::Minus,
+            },
+            NumberFormat::Accounting {
+                decimal_places: 2,
+                symbol: String::new(),
+                symbol_position: CurrencyPosition::Before,
+                negative_style: NegativeStyle::Parentheses,
+            },
+            NumberFormat::Accounting {
+                decimal_places: 2,
+                symbol: "\u{00A3}".to_string(),
+                symbol_position: CurrencyPosition::Before,
+                negative_style: NegativeStyle::Minus,
+            },
+            NumberFormat::Accounting {
+                decimal_places: 2,
+                symbol: "\u{20AC}".to_string(),
+                symbol_position: CurrencyPosition::After,
+                negative_style: NegativeStyle::Parentheses,
+            },
+            NumberFormat::Accounting {
+                decimal_places: 3,
+                symbol: "\u{00A5}".to_string(),
+                symbol_position: CurrencyPosition::Before,
+                negative_style: NegativeStyle::Minus,
+            },
+            NumberFormat::Accounting {
+                decimal_places: 2,
+                symbol: "CHF".to_string(),
+                symbol_position: CurrencyPosition::Before,
+                negative_style: NegativeStyle::RedParentheses,
             },
             // SUFFIX CURRENCIES THAT ARE NOT `kr`. The position used to be
             // reconstructed from the symbol text, so every one of these parsed
@@ -1936,6 +2993,7 @@ mod tests {
                 decimal_places: 2,
                 symbol: "K\u{010D}".to_string(),
                 symbol_position: CurrencyPosition::After,
+                negative_style: NegativeStyle::Minus,
             },
             // ...and the same symbols BEFORE the number, so the clause is
             // proved to carry information rather than to be always present.
@@ -2099,6 +3157,8 @@ mod tests {
                 decimal_places: 2,
                 symbol: "kr".to_string(),
                 symbol_position: CurrencyPosition::After,
+                // sv-SE's accounting pattern: a leading minus (live probe).
+                negative_style: NegativeStyle::Minus,
             }
         );
 
@@ -2206,3 +3266,10 @@ mod tests {
         );
     }
 }
+
+/// The Home-tab programme's backend tests (2026-10-04): half-point sizes,
+/// stacked text, the Comma/Accounting presets, Increase/Decrease Decimal and
+/// border presets over tiers, whole axes, Select All and grouped sheets.
+#[cfg(test)]
+#[path = "format_home_tests.rs"]
+mod format_home_tests;

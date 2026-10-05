@@ -7,7 +7,7 @@
 //          the sections/panel migration and nobody noticed for months — the
 //          dialog stayed registered and listening, so nothing failed.
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { ExtensionContext } from "@api/contract";
 
 // --- Mocks: keep the test on the layout, not on the whole @api graph --------
@@ -34,6 +34,13 @@ vi.mock("@api/ui", () => ({
 
 vi.mock("@api/state", () => ({
   useGridState: () => ({ selection: null, editing: null }),
+}));
+
+// A launcher's refusal is shown with alertAsync; the real one would try to
+// open a native dialog.
+const alertAsync = vi.fn();
+vi.mock("@api/dialogs", () => ({
+  alertAsync: (...a: unknown[]) => alertAsync(...a),
 }));
 
 // The two heavy leaves. Neither participates in section IDENTITY, which is
@@ -70,6 +77,7 @@ vi.mock("@api", () => {
 
 import React from "react";
 import { LAUNCHER_ICON_SIZE } from "@api/layout";
+import { CommandRegistry, CoreCommands } from "@api/commands";
 import extension, { buildSections } from "../index";
 import { DEFAULT_LAYOUT, type HomeTabLayout } from "../homeTabConfig";
 
@@ -92,8 +100,9 @@ beforeEach(() => {
 describe("buildSections(DEFAULT_LAYOUT)", () => {
   const sections = () => buildSections(DEFAULT_LAYOUT);
 
-  it("yields today's seven sections, in today's order", () => {
+  it("yields Excel's eight sections, Undo first", () => {
     expect(sections().map((s) => s.id)).toEqual([
+      "home.undo",
       "home.clipboard",
       "home.font",
       "home.alignment",
@@ -103,6 +112,7 @@ describe("buildSections(DEFAULT_LAYOUT)", () => {
       "home.editing",
     ]);
     expect(sections().map((s) => s.label)).toEqual([
+      "Undo",
       "Clipboard",
       "Font",
       "Alignment",
@@ -114,11 +124,11 @@ describe("buildSections(DEFAULT_LAYOUT)", () => {
   });
 
   it("carries the collapse priorities", () => {
-    // useSectionFit sorts ASCENDING and demotes from the front, so this list
-    // is the exact order in which groups become launchers on a narrow band.
-    // Cells is 55 (D6) — it sheds after Styles and before Editing, instead of
-    // clinging on last because of a missing lookup-table row.
-    expect(sections().map((s) => s.collapsePriority)).toEqual([10, 20, 30, 40, 50, 55, 60]);
+    // useSectionFit sorts ASCENDING and demotes from the front, so these
+    // numbers are the exact order in which groups become launchers on a
+    // narrow band: right-to-left like Excel (owner decision 3) -- Styles,
+    // Cells, Editing, Number, Alignment, Font, Clipboard, Undo last.
+    expect(sections().map((s) => s.collapsePriority)).toEqual([80, 70, 60, 50, 40, 10, 20, 30]);
   });
 
   it("keeps every section inline in the ribbon band", () => {
@@ -135,8 +145,12 @@ describe("buildSections(DEFAULT_LAYOUT)", () => {
       expect(key, `${s.id} names a RibbonIcon key`).toBeTruthy();
       expect(size, `${s.id} glyph size`).toBe(LAUNCHER_ICON_SIZE);
     }
+    const byId = Object.fromEntries(sections().map((s) => [s.id, glyphOf(s.icon).key]));
     // Font keeps its letters: the "Aa" drawing, not an abstract picture.
-    expect(glyphOf(sections()[1].icon).key).toBe("Fonts");
+    expect(byId["home.font"]).toBe("Fonts");
+    expect(byId["home.undo"]).toBe("Undo");
+    // Cells collapses to Excel's Insert Cells picture, not Insert Row.
+    expect(byId["home.cells"]).toBe("InsertCells");
   });
 
   it("falls back for a user-created group instead of rendering nothing", () => {
@@ -158,6 +172,87 @@ describe("buildSections(DEFAULT_LAYOUT)", () => {
       groups: [{ id: "my-macros", label: "My Macros", iconId: "font", items: ["undo"] }],
     };
     expect(glyphOf(buildSections(custom)[0].icon).key).toBe("Fonts");
+  });
+});
+
+// ============================================================================
+// Excel's dialog launchers (CONTRACT 3.20)
+// ============================================================================
+
+describe("the Format Cells dialog launchers", () => {
+  const byId = () => Object.fromEntries(buildSections(DEFAULT_LAYOUT).map((s) => [s.id, s]));
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("Font, Alignment and Number each declare one, named, with no Ctrl+1 chip that would open another tab", () => {
+    const sections = byId();
+    const expected: Array<[string, string]> = [
+      ["home.font", "Format Cells: Font"],
+      ["home.alignment", "Format Cells: Alignment"],
+      ["home.number", "Format Cells: Number"],
+    ];
+    for (const [id, label] of expected) {
+      const launcher = sections[id].dialogLauncher;
+      expect(launcher?.label, id).toBe(label);
+      // NO shortcut chip. A chip shows the live binding of `commandId`, and
+      // FORMAT_CELLS's (Ctrl+1) opens the dialog with NO tab, not the Font,
+      // Alignment or Number tab the arrow opens -- the chip would promise a
+      // key that does something else (review finding, 2026-10-04; the same
+      // rule itemTooltip applies to Insert's Ctrl+Plus). No key opens one tab
+      // today: a key binding carries no arguments.
+      expect(launcher?.commandId, id).toBeUndefined();
+      // No testId: the shell's default `dialog-launcher-<sectionId>` applies,
+      // which is the name journeys use (never section-launcher-* or fmt-*).
+      expect(launcher?.testId, id).toBeUndefined();
+    }
+  });
+
+  it("every other group has none (Excel draws no arrow there; Clipboard's pane is deferred)", () => {
+    const sections = byId();
+    for (const id of ["home.undo", "home.clipboard", "home.styles", "home.cells", "home.editing"]) {
+      expect(sections[id].dialogLauncher, id).toBeUndefined();
+    }
+  });
+
+  it("each opens Format Cells on its own tab, through the FORMAT_CELLS command", async () => {
+    // The ONE door to the dialog: it refuses (one toast, no dialog) while
+    // something else owns the selection, so the launcher must not open the
+    // dialog directly.
+    const execute = vi.spyOn(CommandRegistry, "execute").mockResolvedValue(undefined);
+    const sections = byId();
+    sections["home.font"].dialogLauncher!.onLaunch();
+    sections["home.alignment"].dialogLauncher!.onLaunch();
+    sections["home.number"].dialogLauncher!.onLaunch();
+    await Promise.resolve();
+    expect(execute.mock.calls).toEqual([
+      [CoreCommands.FORMAT_CELLS, { tab: "font" }],
+      [CoreCommands.FORMAT_CELLS, { tab: "alignment" }],
+      [CoreCommands.FORMAT_CELLS, { tab: "number" }],
+    ]);
+  });
+
+  it("a refusal from the command reaches the user, not just the console", async () => {
+    vi.spyOn(CommandRegistry, "execute").mockRejectedValue(new Error("The sheet is protected."));
+    byId()["home.font"].dialogLauncher!.onLaunch();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(alertAsync).toHaveBeenCalledWith("The sheet is protected.");
+  });
+
+  it("comes from the LAYOUT: a group of the user's own can carry one, and an unknown id draws none", () => {
+    const custom: HomeTabLayout = {
+      version: 2,
+      groups: [
+        { id: "mine", label: "Mine", items: ["bold"], dialogLauncherId: "formatCells.number" },
+        { id: "stale", label: "Stale", items: ["bold"], dialogLauncherId: "gone" as never },
+        { id: "plain", label: "Plain", items: ["bold"] },
+      ],
+    };
+    const [mine, stale, plain] = buildSections(custom);
+    expect(mine.dialogLauncher?.label).toBe("Format Cells: Number");
+    expect(stale.dialogLauncher).toBeUndefined();
+    expect(plain.dialogLauncher).toBeUndefined();
   });
 });
 

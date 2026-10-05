@@ -477,6 +477,24 @@ describe("MenuItem", () => {
     expect(declared(row, "background")).toBe("transparent");
   });
 
+  it("the label's line box is taller than the 12px font, so a clipped label never cuts descenders", () => {
+    // Found live (2026-10-04, Home > Paste menu): the row sets line-height 1
+    // and the label clips (overflow hidden, for its ellipsis), so a 12px line
+    // box cut the tails off every g/p/y -- "Formatting" read "Formattinq".
+    // The label's own line box must hold the font's descent.
+    render(
+      <Menu ariaLabel="Paste">
+        <MenuItem testId="row" onSelect={() => undefined}>
+          Keep Source Formatting
+        </MenuItem>
+      </Menu>,
+    );
+    const label = byTestId("row").querySelector("[data-menu-label]") as HTMLElement;
+    const cs = getComputedStyle(label);
+    expect(cs.overflow, "the label still clips (it ellipsises)").toBe("hidden");
+    expect(cs.lineHeight).toBe("16px");
+  });
+
   it("a plain item carries no aria-checked; radio/checkbox items always do", () => {
     render(
       <Menu ariaLabel="Trendline">
@@ -832,6 +850,29 @@ describe("SplitMenuButton", () => {
     expect(menu()).toBeNull();
     key(main, "ArrowDown");
     expect(menu()).toBeNull();
+  });
+
+  it("disabled WHILE its menu is open: the menu closes, aria-expanded says so, and re-enabling does not reopen it", () => {
+    // Merge & Center computes `disabled` asynchronously (protection, table
+    // regions, editing), so it can flip while the menu is open. The menu used
+    // to vanish with aria-expanded still "true", and pop back on re-enable.
+    render(<Merge />);
+    click(byTestId("chevron"));
+    expect(menu()).not.toBeNull();
+    expect(byTestId("chevron").getAttribute("aria-expanded")).toBe("true");
+
+    render(<Merge disabled />);
+    expect(menu()).toBeNull();
+    expect(byTestId("chevron").getAttribute("aria-expanded")).toBe("false");
+    expect(byTestId("chevron").hasAttribute("aria-controls")).toBe(false);
+
+    render(<Merge />);
+    expect(menu()).toBeNull();
+    expect(byTestId("chevron").getAttribute("aria-expanded")).toBe("false");
+
+    // Positive control: enabled again, it opens on the next click as usual.
+    click(byTestId("chevron"));
+    expect(menu()).not.toBeNull();
   });
 
   it("a row can show a command's LIVE binding as its shortcut", () => {

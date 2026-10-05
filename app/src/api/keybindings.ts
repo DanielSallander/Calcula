@@ -10,7 +10,8 @@
 //            - Grid (core/hooks/useGridKeyboard.ts): view-state keys that are
 //              meaningless without grid focus — navigation, selection, edit-mode
 //              (F2/Esc/F8), plus grid-only command keys it handles locally
-//              (format toggles, number formats, Ctrl+;, Ctrl+`, F5/F9/F11).
+//              (format toggles, number formats, Ctrl+;, Ctrl+`, F9/F11). F5 is
+//              the registry's Go To binding since 2026-10-04 (Excel's F5).
 //            - Sandboxed SCRIPTS (the `ui.shortcut` capability): a script binds
 //              one Ctrl+Shift+<letter> to a method it exposed. Same registry,
 //              same conflict rules, same visible list — see "Script-owned
@@ -244,7 +245,23 @@ const DEFAULT_KEYBINDINGS: KeyBinding[] = [
   // binding -- see handleGlobalKeyDown. Format Painter's Ctrl+Shift+C is
   // "not-editing" since BUG-0199, so it also works from a ribbon button.)
   { id: "core.insertTable", combo: "Ctrl+T", commandId: "insert.table", label: "Insert Table", category: "Insert", context: "not-editing", source: "built-in" },
-  { id: "core.goToSpecial", combo: "Ctrl+G", commandId: "view.goToSpecial", label: "Go To Special", category: "Navigation", source: "built-in" },
+  // Excel's Go To is F5 and Ctrl+G (Go To Special is reached from its dialog's
+  // Special... button, or Find & Select). Ctrl+G ran Go To Special until the
+  // Home tab gained Excel's Find & Select menu (2026-10-04).
+  { id: "core.goTo", combo: "F5", commandId: "navigate.goTo", label: "Go To", category: "Navigation", context: "not-editing", source: "built-in" },
+  { id: "core.goToCtrlG", combo: "Ctrl+G", commandId: "navigate.goTo", label: "Go To", category: "Navigation", context: "not-editing", source: "built-in" },
+
+  // Excel's Cells and Editing shortcuts (Home tab, 2026-10-04). "Ctrl+Plus" is
+  // the "+" symbol, so it matches Ctrl+Shift+= on a US layout and the numpad
+  // plus alike (matchesEventOnLayout). Like Excel's, they run Insert / Delete
+  // CELLS with no shift: the dialog on a cell range, straight to rows or
+  // columns for whole-row or whole-column selections -- not the split
+  // buttons' main-half rule, which never asks.
+  { id: "core.insertCells", combo: "Ctrl+Plus", commandId: "core.grid.insertCells", label: "Insert Cells", category: "Editing", source: "built-in" },
+  { id: "core.deleteCells", combo: "Ctrl+-", commandId: "core.grid.deleteCells", label: "Delete Cells", category: "Editing", source: "built-in" },
+  { id: "core.insertSheet", combo: "Shift+F11", commandId: "core.sheet.insert", label: "Insert Sheet", category: "Editing", context: "not-editing", source: "built-in" },
+  { id: "ext.autoSum", combo: "Alt+=", commandId: "autosum.insert", label: "AutoSum", category: "Formulas", context: "not-editing", source: "built-in" },
+  { id: "core.insertFunction", combo: "Shift+F3", commandId: "core.formula.insertFunction", label: "Insert Function", category: "Formulas", source: "built-in" },
 
   // Merge (grid-scoped; bridges to gridCommands.mergeCells via CommandRegistry)
   { id: "core.merge", combo: "Ctrl+M", commandId: "core.grid.merge", label: "Merge Cells", category: "Editing", source: "built-in" },
@@ -772,6 +789,16 @@ const GRID_SCOPED_COMMANDS = new Set([
   "core.clipboard.pasteFormulas",
   "core.clipboard.pasteFormatting",
   "core.clipboard.pasteLink",
+  "core.clipboard.pasteFormulasAndNumberFormats",
+  "core.clipboard.pasteNoBorders",
+  "core.clipboard.pasteKeepSourceColumnWidths",
+  "core.clipboard.pasteTranspose",
+  "core.clipboard.pasteValuesAndNumberFormats",
+  "core.clipboard.pasteValuesAndSourceFormatting",
+  // Excel's Insert / Delete Cells (Ctrl+Plus / Ctrl+-): act on the selected
+  // cells, so they stand down outside the grid exactly as paste does.
+  "core.grid.insertCells",
+  "core.grid.deleteCells",
   "core.edit.clearContents",
   "core.edit.fillDown",
   "core.edit.fillRight",
@@ -1803,10 +1830,37 @@ function coreGridHasACell(): boolean {
 }
 
 /**
+ * Whether this keystroke is one of the browser's RELOAD keys that no binding
+ * took: F5, with or without Ctrl / Shift (the hard reloads).
+ *
+ * WebView2 reloads the page on an unprevented F5, which throws away the open
+ * workbook's session -- and nothing in the app turns its browser accelerator
+ * keys off. F5 is the registry's Go To ("not-editing"), and Core's grid handler
+ * leaves it to the registry, so whenever Go To stands down (a cell edit open,
+ * a text field focused, Go To remapped to another key) nothing took the key
+ * and the page reloaded (review finding (a), 2026-10-04). During an edit the
+ * key is SWALLOWED rather than run as Go To: Go To moves Core's selection, and
+ * an edit owns the keyboard. Only the default is prevented -- the key still
+ * propagates, so an editor that listens for it still hears it. (Ctrl+R, the
+ * other reload key, is Fill Right and deliberately left unprevented during an
+ * edit -- keybindings.editContext.test.ts -- so it is not in this set.)
+ */
+function isUnboundBrowserReloadKey(event: KeyboardEvent): boolean {
+  return event.key === "F5" && !event.altKey && !event.metaKey;
+}
+
+/**
  * Handle a global keydown event against all registered keybindings.
  * Returns true if a keybinding was matched and the command was executed.
  */
 export function handleGlobalKeyDown(event: KeyboardEvent): boolean {
+  const handled = dispatchGlobalKeyDown(event);
+  // Whatever stood down, F5 never reaches WebView2's reload (see above).
+  if (!handled && isUnboundBrowserReloadKey(event)) event.preventDefault();
+  return handled;
+}
+
+function dispatchGlobalKeyDown(event: KeyboardEvent): boolean {
   // Skip pure modifier keys
   const modifierKeys = ["Control", "Shift", "Alt", "Meta"];
   if (modifierKeys.includes(event.key)) return false;

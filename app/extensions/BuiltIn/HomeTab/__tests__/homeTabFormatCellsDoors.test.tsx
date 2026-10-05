@@ -1,7 +1,9 @@
 //! FILENAME: app/extensions/BuiltIn/HomeTab/__tests__/homeTabFormatCellsDoors.test.tsx
-// PURPOSE: The Home tab's two "More ..." rows -- Number's "More Number
-//          Formats..." and Fill's "More Fill Options..." -- open Format Cells on
-//          their tab through the FORMAT_CELLS command, the ONE door to the
+// PURPOSE: The Home tab's Format Cells doors -- Number's "More Number
+//          Formats...", Fill's "More Fill Options..." and the Font, Alignment
+//          and Number groups' corner-arrow dialog launchers (Excel's, since
+//          2026-10-04) -- open Format Cells on their tab through the
+//          FORMAT_CELLS command, the ONE door to the
 //          dialog, so they refuse (one toast, no dialog) while a selection owner
 //          holds the selection, exactly like Ctrl+1 and Format > Format Cells.
 // CONTEXT: Review of BUG-0185 (K1). Both rows called
@@ -22,7 +24,9 @@ import { createRoot, type Root } from "react-dom/client";
 
 const h = vi.hoisted(() => ({ openDialog: vi.fn() }));
 
-vi.mock("@api", () => ({
+vi.mock("@api", async () => ({
+  // Fill Color's split draws its face from the real icon set.
+  RibbonIcon: (await import("@api/ribbonIcons")).RibbonIcon,
   useGridState: () => ({ selection: { startRow: 0, startCol: 0, endRow: 0, endCol: 0 } }),
   cellEvents: { emit: vi.fn() },
 }));
@@ -50,18 +54,22 @@ vi.mock("../components/useHomeTabState", () => ({
     currentStyle: { numberFormat: "General", backgroundColor: "#ffffff" },
     currentCellData: null,
     handleItemClick: vi.fn(),
-    handleColorSelect: vi.fn(),
     handleCellStyleApply: vi.fn(),
     handleFontFamilyChange: vi.fn(),
     handleFontSizeChange: vi.fn(),
     handleNumberFormatChange: vi.fn(),
     isActive: () => false,
-    getCurrentColor: () => "#ffffff",
     applyFormat: vi.fn(),
     getItemById: vi.fn(),
   }),
 }));
-vi.mock("../components/homeTabIcons", () => ({ homeTabIcon: () => null }));
+vi.mock("../components/homeTabIcons", () => ({
+  homeTabIcon: () => null,
+  // buildSections draws each section's glyph (the launcher tests read the sections).
+  groupIconFor: () => null,
+  HomeTabCustomizeIcon: () => null,
+  LAUNCHER_ICON_SIZE: 24,
+}));
 vi.mock("../../../_shared/components/CellStylesGallery", () => ({
   CellStylesGallery: () => null,
 }));
@@ -74,6 +82,8 @@ import { initKeybindings } from "@api/keybindings";
 import { MORE_NUMBER_FORMATS_VALUE } from "../components/numberFormatOptions";
 import { HomeTabGroupComponent } from "../components/HomeTabGroupComponent";
 import formatCellsExtension from "../../FormatCellsDialog/index";
+import { buildSections } from "../index";
+import { DEFAULT_LAYOUT } from "../homeTabConfig";
 
 let container: HTMLDivElement;
 let root: Root;
@@ -152,10 +162,10 @@ async function moreNumberFormats(): Promise<void> {
   await click(byTestId(`fmt-numberFormat-option-${MORE_NUMBER_FORMATS_VALUE}`));
 }
 
-/** Fill: open the swatch and pick "More Fill Options...". */
+/** Fill: open the split's palette (its chevron half) and pick "More Fill Options...". */
 async function moreFillOptions(): Promise<void> {
   await render(["backgroundColor"]);
-  await click(byTestId("fmt-backgroundColor"));
+  await click(byTestId("fmt-backgroundColor-options"));
   const more = Array.from(document.querySelectorAll("button")).find(
     (b) => b.textContent === "More Fill Options...",
   );
@@ -163,9 +173,25 @@ async function moreFillOptions(): Promise<void> {
   await click(more);
 }
 
+/** A group's corner arrow (CONTRACT 3.20): the launcher the shell draws for
+ *  the section, run exactly as the shell runs it. */
+function launcher(sectionId: string): () => Promise<void> {
+  return async () => {
+    const section = buildSections(DEFAULT_LAYOUT).find((s) => s.id === sectionId)!;
+    await act(async () => {
+      section.dialogLauncher!.onLaunch();
+      for (let i = 0; i < 4; i++) await Promise.resolve();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+  };
+}
+
 const DOORS: [string, () => Promise<void>, string][] = [
   ["More Number Formats...", moreNumberFormats, "number"],
   ["More Fill Options...", moreFillOptions, "fill"],
+  ["the Font dialog launcher", launcher("home.font"), "font"],
+  ["the Alignment dialog launcher", launcher("home.alignment"), "alignment"],
+  ["the Number dialog launcher", launcher("home.number"), "number"],
 ];
 
 describe("while a selection owner holds the selection", () => {

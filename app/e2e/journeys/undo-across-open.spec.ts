@@ -33,6 +33,7 @@ import * as zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
 import type { Page } from "@playwright/test";
 import { test, expect } from "../fixtures";
+import { homeControl } from "../helpers/homeTab";
 import type { GridHelper } from "../helpers/grid";
 
 /** This spec's own directory. The ESM suite has no `__dirname`. */
@@ -530,10 +531,11 @@ async function typeIntoCell(grid: GridHelper, ref: string, value: string): Promi
  * throwing is what lets the caller assert BOTH.
  */
 async function pressRibbon(page: Page, which: "undo" | "redo"): Promise<"pressed" | "refused"> {
-  const btn = page.locator(`[data-testid="fmt-${which}"]`).first();
-  if ((await btn.count()) === 0) {
-    throw new Error(`the ribbon has no [data-testid="fmt-${which}"] button`);
-  }
+  // Undo and Redo live in Excel's Undo group at the far left since 2026-10-04
+  // (it collapses LAST). homeControl finds the button inline or inside a
+  // collapsed group's flyout, and THROWS -- naming where it looked -- when it
+  // is nowhere: "I could not find it" still never reads as "disabled".
+  const btn = await homeControl(page, `fmt-${which}`);
   if (await btn.isDisabled()) {
     return "refused";
   }

@@ -59,6 +59,102 @@ export const CoreCommands = {
   INSERT_COLUMN: "core.grid.insertColumn",
   DELETE_ROW: "core.grid.deleteRow",
   DELETE_COLUMN: "core.grid.deleteColumn",
+
+  // ---- Excel's Home tab (2026-10-04) --------------------------------------
+  // The ids below are the contract between the Home ribbon and the code that
+  // owns each command (the Seam Rule: the ribbon says WHAT, the owner decides
+  // HOW). Every value here is core.*; the extension-owned ids the ribbon also
+  // runs live in ExtensionCommands below, because CoreCommands is the core.*
+  // namespace (api-contracts and the constants snapshot pin that).
+
+  // Paste variants (PasteSpecial extension). Keep Source Formatting is PASTE.
+  PASTE_FORMULAS_AND_NUMBER_FORMATS: "core.clipboard.pasteFormulasAndNumberFormats",
+  PASTE_NO_BORDERS: "core.clipboard.pasteNoBorders",
+  PASTE_KEEP_SOURCE_COLUMN_WIDTHS: "core.clipboard.pasteKeepSourceColumnWidths",
+  PASTE_TRANSPOSE: "core.clipboard.pasteTranspose",
+  PASTE_VALUES_AND_NUMBER_FORMATS: "core.clipboard.pasteValuesAndNumberFormats",
+  PASTE_VALUES_AND_SOURCE_FORMATTING: "core.clipboard.pasteValuesAndSourceFormatting",
+
+  // Clear menu: Excel's Remove Hyperlinks (the links AND their formatting).
+  REMOVE_HYPERLINKS: "core.edit.removeHyperlinks",
+
+  // Cells group: Insert / Delete. INSERT and DELETE are the split buttons'
+  // main halves (Excel decides rows, columns or cells from the selection);
+  // INSERT_CELLS / DELETE_CELLS take `{ shift }` and open the Insert / Delete
+  // dialog when called without it (InsertDeleteCells extension).
+  INSERT: "core.grid.insert",
+  DELETE: "core.grid.delete",
+  INSERT_CELLS: "core.grid.insertCells",
+  DELETE_CELLS: "core.grid.deleteCells",
+
+  // Cells group: the Format menu. Each acts on the rows / columns the
+  // selection spans, as Excel's do.
+  ROW_HEIGHT: "core.format.rowHeight",
+  COLUMN_WIDTH: "core.format.columnWidth",
+  DEFAULT_WIDTH: "core.format.defaultWidth",
+  AUTOFIT_ROW_HEIGHT: "core.format.autoFitRowHeight",
+  AUTOFIT_COLUMN_WIDTH: "core.format.autoFitColumnWidth",
+  HIDE_ROWS: "core.format.hideRows",
+  HIDE_COLUMNS: "core.format.hideColumns",
+  UNHIDE_ROWS: "core.format.unhideRows",
+  UNHIDE_COLUMNS: "core.format.unhideColumns",
+
+  // Sheets (the shell, which owns the sheet tabs). SHEET_TAB_COLOR takes
+  // `{ color: string | null }` (null = No Color).
+  SHEET_INSERT: "core.sheet.insert",
+  SHEET_DELETE: "core.sheet.delete",
+  SHEET_RENAME: "core.sheet.rename",
+  SHEET_HIDE: "core.sheet.hide",
+  SHEET_UNHIDE: "core.sheet.unhide",
+  SHEET_TAB_COLOR: "core.sheet.setTabColor",
+  SHEET_MOVE_OR_COPY: "core.sheet.moveOrCopy",
+
+  // Editing group: More Functions... opens the fx dialog (the formula bar's
+  // host, which stays mounted while the bar is hidden).
+  INSERT_FUNCTION: "core.formula.insertFunction",
+} as const;
+
+// ============================================================================
+// Well-known EXTENSION command ids (Excel's Home tab, 2026-10-04)
+// ============================================================================
+
+/**
+ * Commands an EXTENSION registers that other features run by id -- the Home
+ * ribbon's menus first of all. They are named here once so that the
+ * registering extension and every caller spell them the same way (a typo in
+ * either is a button that silently does nothing: `execute` takes a string).
+ * They are not CoreCommands because they are not core.*: the namespace says
+ * who owns the handler.
+ */
+export const ExtensionCommands = {
+  // Protection extension.
+  PROTECT_SHEET_TOGGLE: "protection.toggleProtectSheet",
+  LOCK_CELL_TOGGLE: "protection.toggleLockCell",
+
+  // Editing group. AUTOSUM takes `{ fn: "SUM" | "AVERAGE" | "COUNT" | "MAX" |
+  // "MIN" }` (AutoSum extension); FILL_SERIES opens the Series dialog
+  // (FillSeries extension); FLASH_FILL is the FlashFill extension's.
+  AUTOSUM: "autosum.insert",
+  FILL_SERIES: "fill.series",
+  FLASH_FILL: "flashfill.execute",
+
+  // Sort & Filter (Sorting and AutoFilter extensions).
+  SORT_ASCENDING: "sort.ascending",
+  SORT_DESCENDING: "sort.descending",
+  SORT_CUSTOM: "sort.customDialog",
+  FILTER_TOGGLE: "autofilter.toggle",
+  FILTER_CLEAR: "autofilter.clear",
+  FILTER_REAPPLY: "autofilter.reapply",
+
+  // Find & Select (GoToSpecial extension). GO_TO_SPECIAL_SELECT takes
+  // `{ criteria }` and selects the matching cells directly (Excel's
+  // Formulas / Notes / Conditional Formatting / Constants / Data Validation).
+  GO_TO: "navigate.goTo",
+  GO_TO_SPECIAL: "view.goToSpecial",
+  GO_TO_SPECIAL_SELECT: "goToSpecial.select",
+
+  // Styles group: Format as Table takes `{ styleId }` (Table extension).
+  FORMAT_AS_TABLE: "table.formatAsTable",
 } as const;
 
 // ============================================================================
@@ -114,6 +210,13 @@ const GRID_COMMAND_MAP: Record<string, GridCommand> = {
   [CoreCommands.FILL_RIGHT]: "fillRight",
   [CoreCommands.FILL_UP]: "fillUp",
   [CoreCommands.FILL_LEFT]: "fillLeft",
+  // Excel's Home tab (2026-10-04). The AutoFit pair take `{ growOnly?: boolean }`
+  // (the bridge below forwards args) and are NOT script-safe (see
+  // SCRIPT_SAFE_GRID_COMMANDS); Remove Hyperlinks clears each linked cell's
+  // link AND formatting in one undo step.
+  [CoreCommands.AUTOFIT_ROW_HEIGHT]: "autoFitRowHeight",
+  [CoreCommands.AUTOFIT_COLUMN_WIDTH]: "autoFitColumnWidth",
+  [CoreCommands.REMOVE_HYPERLINKS]: "removeHyperlinks",
 };
 
 /**
@@ -125,13 +228,33 @@ const GRID_COMMAND_MAP: Record<string, GridCommand> = {
 const SCRIPT_SAFE_GRID_COMMANDS: ReadonlySet<string> = new Set([
   CoreCommands.CLEAR_CONTENTS,
   CoreCommands.CLEAR_FORMATTING,
+  // Since 2026-10-04 this also clears NOTES (Excel's "Clear Comments and
+  // Notes"); the unlocked API already deletes notes.
   CoreCommands.CLEAR_COMMENTS,
   CoreCommands.CLEAR_HYPERLINKS,
   CoreCommands.CLEAR_ALL,
+  // Clear Formats + Clear Hyperlinks over the linked cells only: no reach
+  // beyond the two commands above.
+  CoreCommands.REMOVE_HYPERLINKS,
+  // Since 2026-10-04 these act on the rows / columns ANY selection spans
+  // (Excel's Insert / Delete Sheet Rows / Columns), not only on whole-row /
+  // whole-column selections -- the same reach a script already had by
+  // selecting whole rows first, and the unlocked API's insertRows/deleteRows.
   CoreCommands.INSERT_ROW,
   CoreCommands.INSERT_COLUMN,
   CoreCommands.DELETE_ROW,
   CoreCommands.DELETE_COLUMN,
+  // NOT AUTOFIT_ROW_HEIGHT / AUTOFIT_COLUMN_WIDTH (review finding (e),
+  // 2026-10-04). A full fit UNHIDES the user-hidden rows / columns inside the
+  // selection, as Excel's does, and un-hiding is the UNLOCKED API's
+  // setRowsHidden reach -- while this set is the ONLY gate of the restricted
+  // script doors (`ext.executeCommand`: restricted tier, no capability, no
+  // consent, no JIT grant; an object script's executeCommand). Listed here, a
+  // sandboxed add-in with no capability could bring back, over Select All, the
+  // rows a user hid to keep working data out of a distributed report. Scripts
+  // size rows and columns through the unlocked API's autoFit / setRowHeight /
+  // setColumnWidth, which are gated as such. Re-admit them only behind a
+  // capability, or with grow-only as the only form a script door can run.
   CoreCommands.MERGE_CELLS,
   CoreCommands.UNMERGE_CELLS,
   // The same reach as MERGE_CELLS plus a horizontal alignment, which the
@@ -312,13 +435,15 @@ class CommandRegistryImpl implements ICommandRegistry {
       }
     }
 
-    // 2. Bridge to gridCommands for grid-specific commands
+    // 2. Bridge to gridCommands for grid-specific commands. `args` travels on
+    // (the AutoFit commands read `{ growOnly }`); it used to be dropped here,
+    // so a grid command could take no options at all.
     const gridCommand = GRID_COMMAND_MAP[commandId];
     if (gridCommand) {
       recordCommand(commandId, "before", args);
       let executed: boolean;
       try {
-        executed = await gridCommands.execute(gridCommand);
+        executed = await gridCommands.execute(gridCommand, args);
       } catch (e) {
         recordCommand(commandId, "failed", args);
         throw e;

@@ -18,6 +18,9 @@ import {
   type SurfaceLayout,
 } from "../context";
 import { Launcher } from "../primitives/Launcher";
+import * as LauncherModule from "../primitives/Launcher";
+import * as Tokens from "../tokens";
+import * as Barrel from "../index";
 import { FLYOUT_DEFAULT_WIDTH, FLYOUT_MAX_WIDTH, FLYOUT_MIN_WIDTH } from "../tokens";
 import { declared, hardcodedColours } from "./colourScan";
 
@@ -269,6 +272,161 @@ describe("Launcher flyout", () => {
     expect(option).not.toBeNull();
     mouseDown(option);
     expect(document.querySelector("[role='dialog'][data-section-flyout]")).not.toBeNull();
+  });
+});
+
+// ============================================================================
+// Opened from the keyboard (Excel moves focus INTO a collapsed group's drop-down)
+// ============================================================================
+
+describe("Launcher flyout keyboard focus", () => {
+  /** A real pointer click: detail 1 (Enter / Space on a native button, and an
+   *  assistive click, are detail 0 -- what `click` above dispatches). */
+  function pointerClick(el: Element): void {
+    act(() => {
+      el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, detail: 1 }));
+      el.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+    });
+  }
+
+  /** A section body with a roving group first: only its CURRENT item is a tab
+   *  stop, the way Segmented / a palette park the rest at tabIndex -1. */
+  function Body(): React.ReactElement {
+    return (
+      <div>
+        <span>Caption text</span>
+        <button data-testid="disabled-one" disabled>
+          Off
+        </button>
+        <button data-testid="roving-parked" tabIndex={-1}>
+          Left
+        </button>
+        <button data-testid="roving-stop" tabIndex={0}>
+          Center
+        </button>
+        <button data-testid="later">Later</button>
+      </div>
+    );
+  }
+
+  const launcherSpec = { label: "Format Cells: Alignment", onLaunch: () => undefined, testId: "dl" };
+
+  it("Enter / Space (a click with detail 0) moves focus to the first TAB STOP of the content", () => {
+    render(<Launcher label="Alignment" testId="launch"><Body /></Launcher>);
+    act(() => button().focus());
+    click(button());
+    expect(flyout()).not.toBeNull();
+    // Not the disabled button, not a roving item parked at -1.
+    expect(document.activeElement).toBe(document.querySelector("[data-testid='roving-stop']"));
+  });
+
+  it("the content comes before the heading's dialog launcher (Excel's launcher is last in its drop-down)", () => {
+    render(
+      <Launcher label="Alignment" testId="launch" dialogLauncher={launcherSpec}>
+        <Body />
+      </Launcher>,
+    );
+    act(() => button().focus());
+    click(button());
+    expect(document.activeElement).toBe(document.querySelector("[data-testid='roving-stop']"));
+  });
+
+  it("with nothing focusable in the content, focus goes to the heading's dialog launcher", () => {
+    render(
+      <Launcher label="Number" testId="launch" dialogLauncher={launcherSpec}>
+        <Probe />
+      </Launcher>,
+    );
+    act(() => button().focus());
+    click(button());
+    expect(document.activeElement).toBe(document.querySelector("[data-testid='dl']"));
+  });
+
+  it("with nothing focusable at all, focus stays on the group button", () => {
+    render(<Launcher label="Actions" testId="launch"><Probe /></Launcher>);
+    act(() => button().focus());
+    click(button());
+    expect(flyout()).not.toBeNull();
+    expect(document.activeElement).toBe(button());
+  });
+
+  it("a POINTER click leaves focus where the pointer put it (on the group button)", () => {
+    render(<Launcher label="Alignment" testId="launch"><Body /></Launcher>);
+    act(() => button().focus());
+    pointerClick(button());
+    expect(flyout()).not.toBeNull();
+    expect(document.activeElement).toBe(button());
+  });
+
+  it("content that takes focus itself on mount keeps it", () => {
+    function Grabs(): React.ReactElement {
+      return (
+        <div>
+          <button data-testid="first">First</button>
+          <input data-testid="grabber" autoFocus />
+        </div>
+      );
+    }
+    render(<Launcher label="Find" testId="launch"><Grabs /></Launcher>);
+    act(() => button().focus());
+    click(button());
+    expect(document.activeElement).toBe(document.querySelector("[data-testid='grabber']"));
+  });
+
+  it("Escape after a keyboard open returns focus to the group button", () => {
+    render(<Launcher label="Alignment" testId="launch"><Body /></Launcher>);
+    act(() => button().focus());
+    click(button());
+    const inside = document.activeElement as HTMLElement;
+    expect(flyout()!.contains(inside)).toBe(true);
+    pressEscape(inside);
+    expect(flyout()).toBeNull();
+    expect(document.activeElement).toBe(button());
+  });
+
+  it("closing from the keyboard (a second Enter) does not try to focus anything inside", () => {
+    render(<Launcher label="Alignment" testId="launch"><Body /></Launcher>);
+    act(() => button().focus());
+    click(button());
+    act(() => button().focus());
+    click(button());
+    expect(flyout()).toBeNull();
+    expect(document.activeElement).toBe(button());
+  });
+});
+
+// ============================================================================
+// The dialog launcher through the barrel
+// ============================================================================
+
+describe("dialog launcher exports", () => {
+  it("the barrel exports the button, the glyph and the geometry", () => {
+    expect(typeof Barrel.DialogLauncherButton).toBe("function");
+    expect(typeof Barrel.DialogLauncherGlyph).toBe("function");
+    expect(Barrel.DIALOG_LAUNCHER_WIDTH).toBe(16);
+    expect(Barrel.DIALOG_LAUNCHER_HEIGHT).toBe(13);
+    expect(Barrel.DIALOG_LAUNCHER_GLYPH_SIZE).toBe(10);
+    expect(Barrel.DIALOG_LAUNCHER_CAPTION_PAD).toBe(Barrel.DIALOG_LAUNCHER_WIDTH + 2);
+    expect(Barrel.DIALOG_LAUNCHER_HIDDEN_INSET).toBe(2);
+  });
+
+  it("the geometry lives in tokens.ts, and Launcher.tsx's names are the SAME values (the shell imports those)", () => {
+    for (const name of [
+      "DIALOG_LAUNCHER_WIDTH",
+      "DIALOG_LAUNCHER_HEIGHT",
+      "DIALOG_LAUNCHER_GLYPH_SIZE",
+      "DIALOG_LAUNCHER_CAPTION_PAD",
+      "DIALOG_LAUNCHER_HIDDEN_INSET",
+    ] as const) {
+      expect(Tokens[name], name).toBeTypeOf("number");
+      expect(LauncherModule[name], name).toBe(Tokens[name]);
+      expect(Barrel[name], name).toBe(Tokens[name]);
+    }
+  });
+
+  it("the barrel's DialogLauncherButton is the one Launcher.tsx draws", () => {
+    expect(Barrel.DialogLauncherButton).toBe(LauncherModule.DialogLauncherButton);
+    expect(Barrel.DialogLauncherGlyph).toBe(LauncherModule.DialogLauncherGlyph);
   });
 });
 

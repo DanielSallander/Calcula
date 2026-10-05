@@ -47,14 +47,12 @@ vi.mock("../components/useHomeTabState", () => ({
     currentStyle: { fontFamily: "Calibri", fontSize: 11, numberFormat: "General" },
     currentCellData: null,
     handleItemClick,
-    handleColorSelect: vi.fn(),
     handleCellStyleApply: vi.fn(),
     handleFontFamilyChange: vi.fn(),
     handleFontSizeChange: vi.fn(),
     handleNumberFormatChange: vi.fn(),
     handleMergeCommand,
     isActive: () => false,
-    getCurrentColor: () => "#000000",
     applyFormat: vi.fn(),
     getItemById: vi.fn(),
   }),
@@ -85,6 +83,8 @@ const SAVED_BEFORE_THE_SPLIT: HomeTabLayout = {
       items: ["mergeCells", "alignLeft", "alignCenter", "alignRight", "rowBreak", "wrapText"],
       iconId: "alignment",
       collapsePriority: 30,
+      // Written by every save since version 2 (the Format Cells corner arrow).
+      dialogLauncherId: "formatCells.alignment",
     },
     {
       id: "user-titles",
@@ -139,7 +139,9 @@ describe("a layout saved before Merge became Excel's split button", () => {
       STORAGE_KEY,
       JSON.stringify({ groups: [{ id: "user-titles", label: "Titles", items: ["mergeCells"], iconId: "merge" }] }),
     );
-    const [group] = loadLayout().groups;
+    // By id: the upgrade also revives the default groups that gained version-2
+    // commands, ahead of a group of the user's own.
+    const group = loadLayout().groups.find((g) => g.id === "user-titles")!;
     expect(group.items).toContain("mergeCells");
     expect(group.iconId).toBe("merge");
   });

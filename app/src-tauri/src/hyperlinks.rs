@@ -9,8 +9,8 @@ use crate::AppState;
 use crate::document_effect::DocumentEffect;
 use crate::persistence::FileState;
 
-/// Record a hyperlink change to the undo stack.
-fn record_hyperlink_undo(state: &AppState, sheet_index: usize, row: u32, col: u32, previous: Option<Hyperlink>, description: &str) {
+/// The "hyperlink" restore payload: what one cell held before the change.
+fn hyperlink_undo_bytes(sheet_index: usize, row: u32, col: u32, previous: Option<Hyperlink>) -> Vec<u8> {
     #[derive(Serialize)]
     struct HyperlinkSnapshot {
         sheet_index: usize,
@@ -18,7 +18,12 @@ fn record_hyperlink_undo(state: &AppState, sheet_index: usize, row: u32, col: u3
         col: u32,
         previous: Option<Hyperlink>,
     }
-    let data = serde_json::to_vec(&HyperlinkSnapshot { sheet_index, row, col, previous }).unwrap_or_default();
+    serde_json::to_vec(&HyperlinkSnapshot { sheet_index, row, col, previous }).unwrap_or_default()
+}
+
+/// Record a hyperlink change to the undo stack.
+fn record_hyperlink_undo(state: &AppState, sheet_index: usize, row: u32, col: u32, previous: Option<Hyperlink>, description: &str) {
+    let data = hyperlink_undo_bytes(sheet_index, row, col, previous);
     let mut undo_stack = state.undo_stack.lock().unwrap();
     undo_stack.record_custom_restore("hyperlink".to_string(), data, description);
 }
@@ -595,38 +600,74 @@ pub fn clear_hyperlinks_in_range(
     end_row: u32,
     end_col: u32,
 ) -> u32 {
+    clear_hyperlinks_in_range_impl(&state, &file_state, start_row, start_col, end_row, end_col)
+}
+
+/// The body of `clear_hyperlinks_in_range`, over plain references.
+///
+/// UNDOABLE, which it was not (only the single-link remove recorded its
+/// "hyperlink" restore, `record_hyperlink_undo` above): every removed link is
+/// recorded now, inside ONE owned transaction -- its own step, or the caller's
+/// when Clear All / Remove Hyperlinks holds one open. A range with no link in
+/// it changes nothing and leaves the document clean.
+pub(crate) fn clear_hyperlinks_in_range_impl(
+    state: &AppState,
+    file_state: &FileState,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> u32 {
     let active_sheet = *state.active_sheet.read().unwrap();
     // NOTE: not option-gated. This returns a bare count with no error channel,
     // so a refusal would be an indistinguishable 0 — a silent no-op is worse
     // than no gate. Clearing hyperlinks still goes through the per-cell write
     // gates; the allowInsertHyperlinks flag is enforced on add/update/remove.
-    // Hyperlinks live in `sheet.hyperlinks` and are written only by the save
-    // path, so changing one changes what a save would write.
-    let effect = DocumentEffect::mutates(&file_state);
-    let mut hyperlinks = state.hyperlinks.write(&effect).unwrap();
-
     let min_row = start_row.min(end_row);
     let max_row = start_row.max(end_row);
     let min_col = start_col.min(end_col);
     let max_col = start_col.max(end_col);
 
-    let sheet_hyperlinks = match hyperlinks.get_mut(&active_sheet) {
-        Some(h) => h,
-        None => return 0,
-    };
-
+    let hyperlinks = state.hyperlinks.lock_pending().unwrap();
     // Collect keys to remove (can't modify while iterating)
-    let keys_to_remove: Vec<(u32, u32)> = sheet_hyperlinks
-        .keys()
-        .filter(|(r, c)| *r >= min_row && *r <= max_row && *c >= min_col && *c <= max_col)
-        .cloned()
-        .collect();
-
-    let count = keys_to_remove.len() as u32;
-    for key in keys_to_remove {
-        sheet_hyperlinks.remove(&key);
+    let keys_to_remove: Vec<(u32, u32)> = hyperlinks
+        .get(&active_sheet)
+        .map(|sheet_hyperlinks| {
+            sheet_hyperlinks
+                .keys()
+                .filter(|(r, c)| *r >= min_row && *r <= max_row && *c >= min_col && *c <= max_col)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    if keys_to_remove.is_empty() {
+        return 0;
     }
+    // Hyperlinks live in `sheet.hyperlinks` and are written only by the save
+    // path, so changing one changes what a save would write.
+    let effect = DocumentEffect::mutates(file_state);
+    let mut hyperlinks = hyperlinks.authorize(&effect);
+    let mut removed: Vec<((u32, u32), Hyperlink)> = Vec::with_capacity(keys_to_remove.len());
+    if let Some(sheet_hyperlinks) = hyperlinks.get_mut(&active_sheet) {
+        for key in keys_to_remove {
+            if let Some(link) = sheet_hyperlinks.remove(&key) {
+                removed.push((key, link));
+            }
+        }
+    }
+    drop(hyperlinks);
 
+    let count = removed.len() as u32;
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    let txn = undo_stack.begin_owned_transaction("Clear hyperlinks");
+    for ((row, col), previous) in removed {
+        undo_stack.record_custom_restore(
+            "hyperlink".to_string(),
+            hyperlink_undo_bytes(active_sheet, row, col, Some(previous)),
+            "Clear hyperlinks",
+        );
+    }
+    undo_stack.commit_owned(txn);
     count
 }
 

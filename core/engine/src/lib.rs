@@ -209,7 +209,7 @@ pub use row_visibility::{
 };
 pub use style::{
     BorderLineStyle, BorderStyle, Borders, CellStyle, Color, CurrencyPosition, Fill,
-    FontStyle, GradientDirection, NegativeStyle, NumberFormat, PatternType, StyleRegistry,
+    FontSize, FontStyle, GradientDirection, NegativeStyle, NumberFormat, PatternType, StyleRegistry,
     TextAlign, TextRotation, UnderlineStyle, VerticalAlign,
 };
 pub use theme::{

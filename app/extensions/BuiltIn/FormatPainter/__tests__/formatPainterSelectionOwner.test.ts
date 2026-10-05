@@ -79,10 +79,15 @@ describe("Format Painter while a selection owner holds the selection", () => {
     expect(toasts.length).toBe(1);
   });
 
-  it("it can still be turned OFF (the same door toggles it)", async () => {
+  // The button's click (FORMAT_PAINTER, persistent=false) turns an armed
+  // painter off -- locked or not. FORMAT_PAINTER_LOCK no longer does: on an
+  // armed painter it UPGRADES it to locked (Home tab = Excel's Home tab,
+  // 2026-10-04: a double-click is click + LOCK, and LOCK switching the painter
+  // off left a double-click with no painter at all).
+  it("it can still be turned OFF (the button's click toggles it)", async () => {
     await activateFormatPainter(true, SOURCE);
     owns = true;
-    await activateFormatPainter(true, SOURCE);
+    await activateFormatPainter(false, SOURCE);
     expect(isFormatPainterActive()).toBe(false);
     expect(toasts).toEqual([]);
   });

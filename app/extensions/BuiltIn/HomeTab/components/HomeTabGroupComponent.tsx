@@ -8,12 +8,25 @@
 // useHomeTabState.
 //
 // THE FILL RULE. A cluster's content box is 61px and is filled one of two ways:
-// one tall row (a hero) or two 28px rows with a 5px gap. So a group with a hero
-// renders the hero(es) and then its other items as a two-row grid beside it —
-// Clipboard is Paste beside "Cut, Copy / Format Painter" — and a group without
-// one packs into two rows (curated by the layout's row breaks where it has
-// them). Nothing here is Clipboard-specific: the arrangement is derived from
-// the layout, so a user's own group with a hero gets the same shape.
+// one tall row (a hero) or two 28px rows with a 5px gap.
+//
+// ORDER IS LAYOUT (Excel's Home tab, 2026-10-04). The items render IN LAYOUT
+// ORDER: each hero is its own full-height control, and each RUN of consecutive
+// non-hero items between heroes is one two-row ControlGrid (split at the run's
+// row breaks where it has them, else halved). So Clipboard is
+// [Paste][Cut Copy / Format Painter] and Editing is
+// [AutoSum Fill / Clear][Sort & Filter][Find & Select] -- Excel's order -- with
+// nothing group-specific here. It used to draw every hero FIRST and pack all
+// the rest into one grid after them, which put Editing's menus on the wrong
+// side of its stack and could never express a hero in the middle of a group.
+//
+// WHICH CONTROL AN ITEM IS. Excel's version-2 commands are components of their
+// own under components/<group>/ (the Paste and Insert/Delete splits, the
+// Borders and Underline splits, the Orientation, Fill, Clear, Sort & Filter
+// and Find & Select menus, ...). Each takes HomeItemProps and is looked up by
+// item id in ITEM_CONTROLS below, whether it sits in a grid or stands as a
+// hero: `hero` decides WHERE an item goes, the id decides WHAT it is. What is
+// left inline here is the plain command button and the three value pickers.
 
 import React, { useEffect, useState } from "react";
 import { css } from "@emotion/css";
@@ -21,6 +34,7 @@ import { CommandRegistry, CoreCommands } from "@api/commands";
 import { getRibbonNumberFormats } from "@api/numberFormats";
 import type { RibbonNumberFormat } from "@api/numberFormats";
 import { onLocaleChanged } from "@api/locale";
+import { alertAsync } from "@api/dialogs";
 import {
   ControlRow,
   ControlGrid,
@@ -29,8 +43,6 @@ import {
   IconButton,
   CommandButton,
   Dropdown,
-  ColorSwatch,
-  Popover,
   useSurfaceLayout,
   CONTROL_HEIGHT_MD,
   GAP_XS,
@@ -40,13 +52,34 @@ import {
 } from "@api/layout";
 import type { RibbonContext } from "@api/extensions";
 import { useUndoAvailability } from "@api/undoState";
-import { ITEMS_BY_ID, type HomeTabItem } from "../homeTabConfig";
-import { CellStylesGallery } from "../../../_shared/components/CellStylesGallery";
+import { ITEMS_BY_ID, isMultiInstanceItem, type HomeTabItem } from "../homeTabConfig";
+import { groupPieces } from "./groupPieces";
 import { FONT_LIST, FONT_SIZES } from "../../../_shared/lib/fontList";
 import { useHomeTabState } from "./useHomeTabState";
 import { homeTabIcon } from "./homeTabIcons";
 import { itemTooltip } from "./itemTooltip";
+import type { HomeItemProps } from "./homeItemProps";
 import { MergeSplitButton } from "./MergeSplitButton";
+import { PasteSplitButton } from "./clipboard/PasteSplitButton";
+import { FormatPainterButton } from "./clipboard/FormatPainterButton";
+import { UnderlineSplitButton } from "./font/UnderlineSplitButton";
+import { BordersSplitButton } from "./font/BordersSplitButton";
+import { ColorSplitButton } from "./font/ColorSplitButton";
+import { OrientationMenuButton } from "./alignment/OrientationMenuButton";
+import { AccountingSplitButton } from "./alignment/AccountingSplitButton";
+import { ConditionalFormattingButton } from "./styles/ConditionalFormattingButton";
+import { FormatAsTableButton } from "./styles/FormatAsTableButton";
+import { CellStylesButton } from "./styles/CellStylesButton";
+import { InsertSplitButton } from "./cells/InsertSplitButton";
+import { DeleteSplitButton } from "./cells/DeleteSplitButton";
+import { FormatMenuButton } from "./cells/FormatMenuButton";
+import {
+  AutoSumSplitButton,
+  FillMenuButton,
+  ClearMenuButton,
+  SortFilterMenuButton,
+  FindSelectMenuButton,
+} from "./editing";
 import {
   CUSTOM_FORMAT_LABEL,
   CUSTOM_FORMAT_VALUE,
@@ -54,6 +87,39 @@ import {
   RIBBON_NUMBER_FORMATS,
   selectedPresetFor,
 } from "./numberFormatOptions";
+
+/**
+ * The item ids that are a control of their own (CONTRACT section 3), each
+ * rendered with HomeItemProps alone. Fill Color and Font Color share one
+ * component; Format Painter and Merge & Center need one more prop each and are
+ * dispatched by hand in renderItem.
+ */
+const ITEM_CONTROLS: Readonly<Record<string, React.ComponentType<HomeItemProps>>> = {
+  // Clipboard
+  paste: PasteSplitButton,
+  // Font
+  underline: UnderlineSplitButton,
+  borders: BordersSplitButton,
+  backgroundColor: ColorSplitButton,
+  textColor: ColorSplitButton,
+  // Alignment / Number
+  orientation: OrientationMenuButton,
+  accountingFormat: AccountingSplitButton,
+  // Styles
+  conditionalFormatting: ConditionalFormattingButton,
+  formatAsTable: FormatAsTableButton,
+  cellStyles: CellStylesButton,
+  // Cells
+  insertCells: InsertSplitButton,
+  deleteCells: DeleteSplitButton,
+  formatMenu: FormatMenuButton,
+  // Editing
+  autoSum: AutoSumSplitButton,
+  fill: FillMenuButton,
+  clear: ClearMenuButton,
+  sortFilter: SortFilterMenuButton,
+  findSelect: FindSelectMenuButton,
+};
 
 /** The value each Number row's sample formats, shown beside the row the way
  *  Excel previews a value per entry. Fixed rather than the active cell's,
@@ -91,27 +157,29 @@ function segmentOf(child: React.ReactElement): string | undefined {
 }
 
 /**
- * Excel's "More Number Formats..." and "More Fill Options..." rows: Format
- * Cells on that tab, through the FORMAT_CELLS command -- the ONE door to the
- * dialog, which refuses (one toast, no dialog) while something else owns the
- * selection. Both rows opened the dialog directly and skipped that check, so
- * with a floating grid's cell selected Format Cells opened over Core's HIDDEN
- * cell (review of BUG-0185).
+ * Excel's "More Number Formats..." row: Format Cells on the Number tab, through
+ * the FORMAT_CELLS command -- the ONE door to the dialog, which refuses (one
+ * toast, no dialog) while something else owns the selection. The row opened
+ * the dialog directly and skipped that check, so with a floating grid's cell
+ * selected Format Cells opened over Core's HIDDEN cell (review of BUG-0185).
+ * (Fill's "More Fill Options..." row now lives in font/ColorSplitButton.)
  */
-function openFormatCellsOn(tab: "number" | "fill"): void {
-  CommandRegistry.execute(CoreCommands.FORMAT_CELLS, { tab }).catch((err) => {
-    console.error("[HomeTab] Format Cells failed to open:", err);
+function openFormatCellsOn(tab: "number"): void {
+  CommandRegistry.execute(CoreCommands.FORMAT_CELLS, { tab }).catch((err: unknown) => {
+    // A refusal that escapes as an error reaches the user, as every other
+    // Home door's does -- not only the console.
+    void alertAsync(err instanceof Error ? err.message : String(err));
   });
 }
 
-/** The typographic glyphs (B, I, U, S, x², x₂, %, ",", ".0", "0.") are square
+/** The typographic glyphs (B, I, S, x², x₂, %, ",", ".0", "0.") are square
  *  28px controls like every IconButton beside them, set in the face that
- *  makes each one read as what it does. */
+ *  makes each one read as what it does. (Underline's "U" is drawn by its
+ *  split, font/UnderlineSplitButton.) */
 const GLYPH_BOX: React.CSSProperties = { width: CONTROL_HEIGHT_MD, padding: 0 };
 const GLYPH_STYLE: Readonly<Record<string, React.CSSProperties>> = {
   bold: { fontWeight: 700, fontSize: 14 },
   italic: { fontStyle: "italic", fontFamily: "Georgia, 'Times New Roman', serif", fontSize: 14 },
-  underline: { textDecoration: "underline", fontSize: 14 },
   strikethrough: { textDecoration: "line-through", fontSize: 14 },
   superscript: { fontSize: 13 },
   subscript: { fontSize: 13 },
@@ -139,13 +207,6 @@ const fontPreview = css`
   white-space: nowrap;
 `;
 
-/** A text glyph standing in for an icon inside a ColorSwatch face. */
-const swatchGlyph = css`
-  font-weight: 700;
-  font-size: 13px;
-  line-height: 1;
-`;
-
 // ============================================================================
 // Group Component
 // ============================================================================
@@ -168,11 +229,6 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
   // store is event-driven (see @api/undoState), so a mutation that never
   // touched the frontend moves these buttons too.
   const undoAvailability = useUndoAvailability();
-  const [cellStylesOpen, setCellStylesOpen] = useState(false);
-  // Popover anchor: the gallery portals to <body> (the band clips overflow).
-  // A callback ref into state, so the anchor is never read from a ref during
-  // render.
-  const [cellStylesAnchor, setCellStylesAnchor] = useState<HTMLDivElement | null>(null);
 
   // Excel's Number dropdown resolved for the CURRENT locale: the backend
   // returns, per entry, the preset keyword to send, the display name get_style
@@ -317,42 +373,11 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
     );
   };
 
-  const renderColor = (item: HomeTabItem) => {
-    const style = state.currentStyle;
-    const isText = item.id === "textColor";
-    return (
-      <ColorSwatch
-        key={item.id}
-        variant="bar"
-        icon={homeTabIcon(item.id, ICON_SIZE_SM) ?? <span className={swatchGlyph}>{item.icon}</span>}
-        color={state.getCurrentColor(item.id)}
-        label={item.tooltip ?? item.label}
-        testId={`fmt-${item.id}`}
-        // Highlights the theme swatch a theme-coloured cell carries.
-        themeSlot={isText ? style?.textColorTheme : style?.bgColorTheme}
-        themeTint={isText ? style?.textColorTint : style?.bgColorTint}
-        onChange={(hex) => void state.handleColorSelect(item.id, hex)}
-        // A theme pick goes down the one colour path this button has ever
-        // had: the resolved hex through handleColorSelect, the same thing the
-        // Format Cells picker does with a theme colour.
-        onThemeColorChange={(_slot, _tint, hex) => void state.handleColorSelect(item.id, hex)}
-        moreAction={
-          item.id === "backgroundColor"
-            ? {
-                label: "More Fill Options...",
-                onSelect: () => openFormatCellsOn("fill"),
-              }
-            : undefined
-        }
-      />
-    );
-  };
-
   /**
-   * One command. `labelled`: beside a hero in the band, a command shows its
-   * label next to its icon (Excel's medium button — "Cut", "Copy", "Format
-   * Painter"), because the stack beside a 61px hero has the room and the
-   * words are what a user scans for there.
+   * One command. `labelled`: beside a hero in the band, a `besideHero`
+   * command shows its label next to its icon (Excel's medium button — "Cut",
+   * "Copy", "Format Painter"), because the stack beside a 61px hero has the
+   * room and the words are what a user scans for there.
    */
   const renderCommand = (item: HomeTabItem, labelled: boolean) => {
     const tip = itemTooltip(item);
@@ -429,19 +454,24 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
     );
   };
 
-  const renderItem = (itemId: string, idx: number, labelled: boolean) => {
-    const item = ITEMS_BY_ID.get(itemId);
-    if (!item) return null;
-
-    if (item.id === "rowBreak") return <ControlGridBreak key={`rowBreak-${idx}`} />;
+  /**
+   * One item, wherever it sits. `labelled`: beside a hero in the band, a
+   * `besideHero` command shows its label next to its icon (Excel's medium
+   * button).
+   *
+   * Every component gets `data-testid="fmt-<id>"` on its ELEMENT as well as
+   * drawing it on its own control: segmentOf reads the element's props (the
+   * React key is rewritten by ControlGrid), and that is how Underline's split
+   * joins the B | I | U pill. None of the components spreads unknown props, so
+   * the attribute never lands twice in the DOM.
+   */
+  const renderItem = (item: HomeTabItem, index: number, labelled: boolean) => {
+    if (isMultiInstanceItem(item)) return <ControlGridBreak key={`${item.id}-${index}`} />;
     if (item.id === "fontName") return renderFontName(item);
     if (item.id === "fontSize") return renderFontSize(item);
     if (item.id === "numberFormat") return renderNumberFormat(item);
-    if (item.type === "color") return renderColor(item);
     // Excel's Merge & Center split button and its Merge menu. Icon-only even
-    // beside a hero: @api/layout has no labelled split, and Excel's own label
-    // shows only when the window is wide. `data-testid` lets segmentOf see
-    // the item (it joins no pill).
+    // beside a hero: Excel's own label shows only when the window is wide.
     if (item.id === "mergeCells") {
       return (
         <MergeSplitButton
@@ -453,46 +483,35 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
         />
       );
     }
+    // Click = FORMAT_PAINTER, double-click = FORMAT_PAINTER_LOCK, pressed
+    // while the painter is on (CONTRACT 3.2). Labelled beside the Paste hero,
+    // as Cut and Copy are.
+    if (item.id === "formatPainter") {
+      return (
+        <FormatPainterButton
+          key={item.id}
+          data-testid={`fmt-${item.id}`}
+          item={item}
+          state={state}
+          band={band}
+          labelled={labelled}
+        />
+      );
+    }
+    const Control = ITEM_CONTROLS[item.id];
+    if (Control) {
+      return <Control key={item.id} data-testid={`fmt-${item.id}`} item={item} state={state} band={band} />;
+    }
+    if (item.hero) return renderHeroCommand(item);
     return renderCommand(item, labelled);
   };
 
-  const renderHero = (id: string) => {
-    const item = ITEMS_BY_ID.get(id);
-    if (!item) return null;
+  /** A hero with no control of its own: a full-height command button. 30px in
+   *  the band's 34px hero slot; outside the band CommandButton is a standard
+   *  28px button whose icon is the standard 20. */
+  const renderHeroCommand = (item: HomeTabItem) => {
     const tip = itemTooltip(item);
-    // 30px in the band's 34px hero slot; outside the band CommandButton is a
-    // standard 28px button whose icon is the standard 20.
     const icon = homeTabIcon(item.id, band ? HERO_ICON_SIZE : ICON_SIZE_SM) ?? item.icon;
-
-    if (item.id === "cellStyles") {
-      return (
-        <div key={item.id} ref={setCellStylesAnchor} style={{ display: "flex" }}>
-          <CommandButton
-            icon={icon}
-            label={item.shortLabel ?? item.label}
-            chevron
-            tooltip={tip.tooltip}
-            shortcut={tip.shortcut}
-            commandId={tip.commandId}
-            data-testid={`fmt-${item.id}`}
-            aria-haspopup="dialog"
-            aria-expanded={cellStylesOpen}
-            onClick={() => setCellStylesOpen(!cellStylesOpen)}
-          />
-          <Popover
-            anchorEl={cellStylesAnchor}
-            open={cellStylesOpen}
-            onClose={() => setCellStylesOpen(false)}
-          >
-            <CellStylesGallery
-              onApplyStyle={state.handleCellStyleApply}
-              onClose={() => setCellStylesOpen(false)}
-            />
-          </Popover>
-        </div>
-      );
-    }
-
     return (
       <CommandButton
         key={item.id}
@@ -507,23 +526,37 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
     );
   };
 
-  // Heroes (Excel-style big Paste / Cell Styles) fill the 61px box on their
-  // own; the rest pack into TWO 28px band rows beside them (a wrapping row in
-  // the sidebar). Rows are chunked first — at the layout's row breaks where
-  // it has them, else halved — and only then are same-segment runs within a
-  // row joined into pills, so a pill never moves a control between rows.
-  const heroIds = itemIds.filter((id) => ITEMS_BY_ID.get(id)?.hero);
-  const regularIds = itemIds.filter((id) => !ITEMS_BY_ID.get(id)?.hero);
-  const labelled = band && heroIds.length > 0;
+  // IN LAYOUT ORDER (see the file header): each hero fills the 61px box on
+  // its own, and each run of the items between heroes packs into TWO 28px
+  // band rows (a wrapping row in the sidebar). Inside a run, rows are chunked
+  // first -- at the run's row breaks where it has them, else halved -- and
+  // only then are same-segment neighbours joined into pills, so a pill never
+  // moves a control between rows.
+  const pieces = groupPieces(itemIds);
+  // Excel's medium (labelled) face is a property of the COMMAND, not of the
+  // group: in the band, beside a hero, only an item the catalog marks
+  // `besideHero` (Cut, Copy, Format Painter) shows its words. Decided
+  // group-wide, the heroes a version-1 layout gained on upgrade labelled every
+  // small command in Editing and Cells (HomeTabItem.besideHero).
+  const besideAHero = band && pieces.some((p) => p.kind === "hero");
+  const labelledFor = (item: HomeTabItem | undefined): boolean => besideAHero && item?.besideHero === true;
 
   return (
     <ControlRow gap={GAP_XS} align="stretch">
-      {heroIds.map(renderHero)}
-      {regularIds.length > 0 && (
-        <ControlGrid bandRows={2} splitAt={2} segmentOf={segmentOf}>
-          {regularIds.map((id, idx) => renderItem(id, idx, labelled))}
-        </ControlGrid>
-      )}
+      {pieces.map((piece) => {
+        if (piece.kind === "hero") {
+          return (
+            <React.Fragment key={`hero-${piece.index}`}>
+              {renderItem(ITEMS_BY_ID.get(piece.id)!, piece.index, labelledFor(ITEMS_BY_ID.get(piece.id)))}
+            </React.Fragment>
+          );
+        }
+        return (
+          <ControlGrid key={`run-${piece.entries[0].index}`} bandRows={2} splitAt={2} segmentOf={segmentOf}>
+            {piece.entries.map((e) => renderItem(ITEMS_BY_ID.get(e.id)!, e.index, labelledFor(ITEMS_BY_ID.get(e.id))))}
+          </ControlGrid>
+        );
+      })}
     </ControlRow>
   );
 }

@@ -7,13 +7,47 @@
  * The backend stores descriptive format names (e.g., "Percentage (0 decimals)")
  * rather than raw format codes. Tests match against these descriptive names.
  *
+ * EXCEL'S NUMBER GROUP (2026-10-04). Comma Style is Excel's: Accounting with no
+ * currency symbol and 2 decimals (the backend's `comma` preset, named
+ * "Accounting (, 2 decimals...)"), no longer `#,##0`. Increase / Decrease
+ * Decimal are the backend's `adjust_number_format_decimals`: the ACTIVE cell's
+ * format plus or minus one decimal, keeping its kind; on General it starts from
+ * the decimals the value SHOWS (3.14 -> 3, 3.14159 -> 5, 1 -> 0), as Excel does.
+ *
  * Uses cells in rows 40+ to avoid collision with Phase 1-2 tests.
  */
+import type { Page } from "@playwright/test";
 import { test, expect } from "../fixtures";
+
+/**
+ * A decimal literal spelled the way the RUNNING app reads typed input.
+ *
+ * The app parses typed numbers with the Windows REGIONAL format (lib.rs), and
+ * this harness runs sv-SE, where the decimal mark is a comma: "0.42" typed
+ * there is TEXT, and a number format never touches text -- the percent button
+ * then "fails" with a display of 0.42 and no product defect anywhere (memory:
+ * e2e formula separator locale, the decimal half). Asking the backend for its
+ * own separator keeps the spec true on an en-US machine too.
+ */
+async function typedDecimal(page: Page, value: string): Promise<string> {
+  const settings = await page
+    .evaluate(() =>
+      (window as unknown as { __TAURI__: { core: { invoke: (c: string, a: object) => Promise<{ decimalSeparator?: string }> } } })
+        .__TAURI__.core.invoke("get_locale_settings", {}),
+    )
+    .catch(() => null);
+  return value.replace(".", settings?.decimalSeparator ?? ".");
+}
+
+/** Comma Style's display name: Accounting, EMPTY symbol, 2 decimals (any negative clause). */
+const COMMA_STYLE_NAME = /^Accounting \(, 2 decimals/;
+
+/** A digit-group separator in any locale the harness may run in (sv-SE uses a no-break space). */
+const SEP = "[\\s,.\\u00a0\\u202f]";
 
 test.describe("Percentage format", () => {
   test("percent button formats a decimal as percentage", async ({ grid }) => {
-    await grid.setCellValue("A40", "0.42");
+    await grid.setCellValue("A40", await typedDecimal(grid.page, "0.42"));
     await grid.clickCell("A40");
     await grid.clickFormatButton("percentFormat");
 
@@ -34,7 +68,7 @@ test.describe("Percentage format", () => {
   });
 
   test("percent format persists after navigating away", async ({ grid }) => {
-    await grid.setCellValue("C40", "0.05");
+    await grid.setCellValue("C40", await typedDecimal(grid.page, "0.05"));
     await grid.clickCell("C40");
     await grid.clickFormatButton("percentFormat");
 
@@ -47,56 +81,57 @@ test.describe("Percentage format", () => {
 });
 
 test.describe("Comma format", () => {
-  test("comma button adds thousands separator", async ({ grid }) => {
+  test("comma button applies Excel's Comma Style: thousands separator and two decimals", async ({ grid }) => {
     await grid.setCellValue("A41", "1234567");
     await grid.clickCell("A41");
     await grid.clickFormatButton("commaFormat");
 
     const fmt = await grid.getCellStyleStringProp("A41", "numberFormat");
-    expect(fmt).toContain("separator");
+    expect(fmt).toMatch(COMMA_STYLE_NAME);
     const display = await grid.getCellDisplayValue("A41");
-    // Should have separators — locale may use comma, dot, or space
-    expect(display).toMatch(/1[\s,.\u00a0]234[\s,.\u00a0]567/);
+    // Separators and the decimal mark follow the locale; the two decimals are Excel's.
+    expect(display).toMatch(new RegExp(`1${SEP}234${SEP}567[.,]00`));
   });
 
-  test("comma format on small number", async ({ grid }) => {
+  test("comma format on small number shows two decimals", async ({ grid }) => {
     await grid.setCellValue("B41", "42");
     await grid.clickCell("B41");
     await grid.clickFormatButton("commaFormat");
 
     const display = await grid.getCellDisplayValue("B41");
-    expect(display).toBe("42");
+    // Accounting pads the value (a trailing space, Excel's `_-`), so trim first.
+    expect(display.trim()).toMatch(/^42[.,]00$/);
   });
 });
 
 test.describe("Increase/decrease decimals", () => {
-  test("increase decimal adds one decimal place", async ({ grid }) => {
-    await grid.setCellValue("A42", "3.14");
+  test("increase decimal adds one decimal place to the decimals the value shows", async ({ grid }) => {
+    await grid.setCellValue("A42", await typedDecimal(grid.page, "3.14"));
     await grid.clickCell("A42");
     await grid.clickFormatButton("increaseDecimal");
 
+    // General shows 3.14 (two decimals), so Excel's Increase gives three.
     const fmt = await grid.getCellStyleStringProp("A42", "numberFormat");
-    expect(fmt).toMatch(/1 decimal/i);
+    expect(fmt).toBe("Number (3 decimals)");
     const display = await grid.getCellDisplayValue("A42");
-    // Should show at least one decimal place
-    expect(display).toMatch(/3[.,]1/);
+    expect(display).toMatch(/^3[.,]140$/);
   });
 
   test("decrease decimal removes one decimal place", async ({ grid }) => {
-    // First set a format with decimals
-    await grid.setCellValue("B42", "3.14159");
+    // General shows 3.14159 (five decimals); Increase makes it six.
+    await grid.setCellValue("B42", await typedDecimal(grid.page, "3.14159"));
     await grid.clickCell("B42");
-    // Apply a format with decimals first
     await grid.clickFormatButton("increaseDecimal");
     await grid.page.waitForTimeout(300);
+    expect(await grid.getCellStyleStringProp("B42", "numberFormat")).toBe("Number (6 decimals)");
 
-    // Now decrease
+    // Now decrease: back to five, the step undone exactly.
     await grid.clickCell("B42");
     await grid.clickFormatButton("decreaseDecimal");
 
+    expect(await grid.getCellStyleStringProp("B42", "numberFormat")).toBe("Number (5 decimals)");
     const display = await grid.getCellDisplayValue("B42");
-    // Should have fewer decimal places than the raw value
-    expect(display.length).toBeLessThan("3.14159".length);
+    expect(display).toMatch(/^3[.,]14159$/);
   });
 
   test("multiple increase decimal clicks add more places", async ({ grid }) => {
@@ -111,6 +146,17 @@ test.describe("Increase/decrease decimals", () => {
     const display = await grid.getCellDisplayValue("C42");
     // Should show "1.000" or "1,000" depending on locale
     expect(display).toMatch(/1[.,]000/);
+  });
+
+  test("increase decimal keeps the format's kind: a percentage stays a percentage", async ({ grid }) => {
+    await grid.setCellValue("D42", await typedDecimal(grid.page, "0.5"));
+    await grid.clickCell("D42");
+    await grid.clickFormatButton("percentFormat");
+    expect(await grid.getCellStyleStringProp("D42", "numberFormat")).toBe("Percentage (0 decimals)");
+
+    await grid.clickFormatButton("increaseDecimal");
+    expect(await grid.getCellStyleStringProp("D42", "numberFormat")).toBe("Percentage (1 decimals)");
+    expect(await grid.getCellDisplayValue("D42")).toMatch(/^50[.,]0\s*%$/);
   });
 });
 
@@ -136,20 +182,20 @@ test.describe("Format applied to formula results", () => {
     await grid.clickFormatButton("commaFormat");
 
     const display = await grid.getCellDisplayValue("D43");
-    expect(display).toMatch(/1[\s,.\u00a0]000[\s,.\u00a0]000/);
+    expect(display).toMatch(new RegExp(`1${SEP}000${SEP}000[.,]00`));
   });
 });
 
 test.describe("Format persistence", () => {
   test("number format survives cell re-edit", async ({ grid }) => {
-    await grid.setCellValue("A44", "0.75");
+    await grid.setCellValue("A44", await typedDecimal(grid.page, "0.75"));
     await grid.clickCell("A44");
     await grid.clickFormatButton("percentFormat");
     const display1 = await grid.getCellDisplayValue("A44");
     expect(display1).toMatch(/75\s*%/);
 
     // Re-edit the cell with a new value
-    await grid.setCellValue("A44", "0.5");
+    await grid.setCellValue("A44", await typedDecimal(grid.page, "0.5"));
 
     // Format should persist
     const fmt = await grid.getCellStyleStringProp("A44", "numberFormat");
@@ -169,8 +215,8 @@ test.describe("Format persistence", () => {
     const fmtA = await grid.getCellStyleStringProp("A45", "numberFormat");
     const fmtB = await grid.getCellStyleStringProp("B45", "numberFormat");
     const fmtC = await grid.getCellStyleStringProp("C45", "numberFormat");
-    expect(fmtA).toContain("separator");
-    expect(fmtB).toContain("separator");
-    expect(fmtC).toContain("separator");
+    expect(fmtA).toMatch(COMMA_STYLE_NAME);
+    expect(fmtB).toMatch(COMMA_STYLE_NAME);
+    expect(fmtC).toMatch(COMMA_STYLE_NAME);
   });
 });

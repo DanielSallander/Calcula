@@ -10,7 +10,7 @@
 import React, { useState, useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import { NameBox } from "./NameBox";
 import { FormulaInput } from "./FormulaInput";
-import { InsertFunctionDialog } from "./InsertFunctionDialog";
+import { openInsertFunction } from "./insertFunctionHost";
 import { useEditing } from "../../api/editing";
 // The SUBPATH: the bar's tests double `api/editing` with a fixed list, and the
 // external-edit store (a floating grid's cell edit) must stay real in them.
@@ -19,11 +19,9 @@ import {
   getExternalEditVersion,
   isExternalEditLive,
   getExternalEditSession,
-  resolveFormulaBarSource,
   endExternalFormulaSession,
 } from "../../api/externalEdit";
 import { useGridContext } from "../../api";
-import { refuseIfSelectionOwned } from "../../api/selectionOwner";
 import { CommandRegistry } from "../../api/commands";
 import { FORMULA_BAR_TOGGLE_EXPANDED_COMMAND } from "../../api/keybindings";
 import {
@@ -67,8 +65,7 @@ function ExpandIcon({ expanded }: { expanded: boolean }): React.ReactElement {
 
 export function FormulaBar(): React.ReactElement {
   const { state } = useGridContext();
-  const { editing, commitEdit, cancelEdit, updateValue, startEditing } = useEditing();
-  const [showFunctionDialog, setShowFunctionDialog] = useState(false);
+  const { editing, commitEdit, cancelEdit } = useEditing();
 
   /**
    * WHY THE LIVE SIZE IS LOCAL AND THE SEED IS IN GRID STATE
@@ -208,33 +205,14 @@ export function FormulaBar(): React.ReactElement {
     await commitEdit();
   }, [editing, commitEdit]);
 
+  // fx opens Insert Function through the ONE opener the Shift+F3 command also
+  // uses (insertFunctionHost.tsx): the dialog is hosted outside the bar so it
+  // works with the bar hidden, and the opening rules -- a floating grid's cell
+  // or session first, a refusal while an object holds the selection, Core's
+  // "=" edit otherwise -- live there, once.
   const handleInsertFunction = useCallback(() => {
-    if (!editing) {
-      // fx on a selected floating-grid cell starts THAT cell's edit, never a
-      // Core edit of the grid cell under it.
-      //
-      // A LIVE session is handed to the BAR before the dialog opens. The
-      // dialog focuses its search box on mount, which blurs the owner's
-      // in-cell view; while that view still owned the edit, its deferred blur
-      // committed the half-typed formula 150 ms later ("=SUM(A1" expects no
-      // reference, so nothing else held it) and the function then chosen had
-      // no edit to land in. Owned by the bar, the in-cell blur ends nothing:
-      // the bar's own doors (Enter, Tab, X, the check mark) end it.
-      const src = resolveFormulaBarSource();
-      if (src.kind === "session") src.session.adoptBarView();
-      else if (src.kind === "cell") src.cell.beginEdit("=");
-      else {
-        // An OBJECT holds the selection (a slicer, a chart, a shape, a
-        // floating grid selected whole): Core's active cell is hidden behind
-        // it, and "=" there -- then the function chosen -- would be written
-        // into that cell (BUG-0270 review). Refused out loud; no dialog with
-        // nothing it may write to.
-        if (refuseIfSelectionOwned("Insert Function")) return;
-        startEditing("=");
-      }
-    }
-    setShowFunctionDialog(true);
-  }, [editing, startEditing]);
+    openInsertFunction();
+  }, []);
 
   // fx must not take the focus off an entry in progress either (the X and
   // check-mark rule): the press itself blurred the floating grid's in-cell
@@ -248,95 +226,6 @@ export function FormulaBar(): React.ReactElement {
   const handleExpandMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
   }, []);
-
-  const handleFunctionSelect = useCallback((functionName: string, template: string) => {
-    const session = editing ? null : getExternalEditSession();
-    if (session) {
-      const current = session.getText();
-      const next = current === "=" || current === "" ? template : current + functionName + "(";
-      session.setText(next, next.length);
-    } else if (editing) {
-      const currentValue = editing.value;
-      if (currentValue === "=" || currentValue === "") {
-        updateValue(template);
-      } else if (currentValue.endsWith("(") || currentValue.endsWith(",") || currentValue.endsWith(";") || currentValue.endsWith("=")) {
-        updateValue(currentValue + functionName + "(");
-      } else {
-        updateValue(currentValue + functionName + "(");
-      }
-    }
-    setShowFunctionDialog(false);
-  }, [editing, updateValue]);
-
-  /**
-   * A function-argument builder produced a COMPLETE formula, so unlike a
-   * template there is nothing left for the user to fill in and the cell is
-   * committed for them — Excel's Function Arguments OK button.
-   *
-   * WHY THIS COMMITS ON A LATER RENDER INSTEAD OF RIGHT HERE.
-   * `commitEdit` commits `editing.value` out of its own closure — it is a
-   * useCallback with `editing` in its deps — and `editing` is React state, so
-   * `updateValue(formula); commitEdit();` in one handler writes the formula
-   * into the editor and then commits a value from an EARLIER render: "=", the
-   * seed the fx button started the session with, or nothing at all when the
-   * handler's own closure is older still. Measured, not assumed: sabotaging
-   * this into the same-tick form commits "<not editing>". So the formula is
-   * parked, and the effect below commits once the dispatch has landed.
-   *
-   * It must also go through `commitEdit` rather than straight to `updateCell`,
-   * which is what the old standalone builder dialog did: only the commit path
-   * runs the commit guards, the R1C1 rewrite and the grouped-sheet replication,
-   * and a cell written around them is a cell that skipped its own validation.
-   */
-  const pendingCommitRef = useRef<string | null>(null);
-
-  const handleFunctionBuilt = useCallback((formula: string) => {
-    setShowFunctionDialog(false);
-    // An external session's text is SYNCHRONOUS (it is not React state), so
-    // the parked-commit dance below -- which exists because Core's commitEdit
-    // commits from a render-old closure -- is not needed: set, then commit
-    // through the owner's own path.
-    const session = editing ? null : getExternalEditSession();
-    if (session) {
-      session.setText(formula, formula.length);
-      void endExternalFormulaSession("commit", null);
-      return;
-    }
-    pendingCommitRef.current = formula;
-    updateValue(formula);
-  }, [editing, updateValue]);
-
-  useEffect(() => {
-    if (pendingCommitRef.current === null) return;
-    // The edit session went away underneath us (Esc, a click elsewhere):
-    // abandon the commit rather than resurrecting it into whatever is
-    // selected now.
-    if (!editing) {
-      pendingCommitRef.current = null;
-      return;
-    }
-    if (editing.value !== pendingCommitRef.current) return;
-    pendingCommitRef.current = null;
-    void commitEdit();
-  }, [editing, commitEdit]);
-
-  const handleDialogClose = useCallback(() => {
-    setShowFunctionDialog(false);
-  }, []);
-
-  // Where a built formula will land. `editing` is authoritative once the fx
-  // button's startEditing has resolved; the selection anchor covers the window
-  // before that, so the builder is never handed (0,0) by accident.
-  //
-  // An external session's anchor is in its OWNER's coordinates (FR-local): a
-  // builder that reads the host sheet at those coordinates reads the wrong
-  // cells (a stated v1 gap), but it is still the cell the formula lands in.
-  const externalAnchor = editing ? null : (extLive ? getExternalEditSession()?.anchor ?? null : null);
-  const builderAnchor = editing
-    ? { row: editing.row, col: editing.col }
-    : externalAnchor
-      ? { row: externalAnchor.row, col: externalAnchor.col }
-      : { row: state.selection?.startRow ?? 0, col: state.selection?.startCol ?? 0 };
 
   const barHeight = expanded
     ? editorHeight + FORMULA_BAR_EXPANDED_CHROME_HEIGHT
@@ -405,15 +294,6 @@ export function FormulaBar(): React.ReactElement {
           aria-hidden="true"
         />
       </S.FormulaBarContainer>
-
-      {showFunctionDialog && (
-        <InsertFunctionDialog
-          onSelect={handleFunctionSelect}
-          onBuilt={handleFunctionBuilt}
-          anchor={builderAnchor}
-          onClose={handleDialogClose}
-        />
-      )}
     </>
   );
 }

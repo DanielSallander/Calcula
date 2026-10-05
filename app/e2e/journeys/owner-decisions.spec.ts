@@ -940,41 +940,91 @@ test.describe.serial("Owner decisions D1-D7 (live)", () => {
   });
 
   // =========================================================================
-  // D6. `cells: collapsePriority` 99 -> 55
+  // D6. `cells: collapsePriority` 99 -> 55 -- and, since 2026-10-04, Excel's
+  //     own collapse order (owner decision 3 of the Excel Home tab)
   // =========================================================================
 
   /**
    * D6: the Cells group's `collapsePriority` was an accidental 99 — the value a
    * missing `GROUP_ORDER` row produced — so Cells demoted LAST on a narrow
-   * ribbon. The owner chose 55: between Styles (50) and Editing (60), which is
+   * ribbon. The owner chose 55 then: between Styles and Editing, which is
    * where Excel sheds it.
+   *
+   * THE EXCEL HOME TAB (2026-10-04) re-made the whole order, by owner decision
+   * 3: groups collapse RIGHT TO LEFT like Excel's -- Styles first (10), then
+   * Cells (20), Editing (30), Number (40), Alignment (50), Font (60), Clipboard
+   * (70), and the new Undo group (80) last. D6's own claim survives in that
+   * order: Cells still goes between Styles and Editing, never last.
    *
    * HOW THIS IS DRIVEN, and why not by resizing the window. The demotion order
    * is decided by ONE pure product function, `computeWidthDemotions`, from the
    * live section list and the live measured widths. This test reads BOTH out of
-   * the running app — the registered sections come from `panelRegistry`, the
-   * widths are the real rendered widths of the ribbon strip's own children —
-   * and then narrows the band, step by step, through that function.
+   * the running app — the registered sections come from the panel registry,
+   * the widths are what the ribbon itself MEASURED for each section (inline
+   * and as a launcher; `peekSectionWidths`, read from the app's own module
+   * instance, the chart-design-ribbon way) — and then narrows the band, step
+   * by step, through that function.
+   *
+   * The strip's rendered children can no longer be the width source: on the
+   * harness's 1280px window Styles, Cells and Editing are ALREADY group
+   * buttons, so their rendered width is the launcher's, not the group's.
    *
    * Actually shrinking the band would have been the other option and is the
-   * wrong one here: `useSectionFit`'s own contract is that "a demoted section
-   * stays demoted for the app session" (its inline content is unmounted, so it
-   * cannot be re-measured), so narrowing the real ribbon would leave demoted
-   * sections behind for every spec that runs after this one.
+   * wrong one here: a demoted section's inline content is unmounted, so
+   * narrowing the real ribbon would leave demoted sections behind for every
+   * spec that runs after this one.
    *
    * TEETH: the ORDER is asserted in full, not just "Cells is not last". An
    * assertion that only said "not last" would pass for 11, 21 or 54 as well.
+   * And the model is tied to the screen: at the LIVE band width it must predict
+   * exactly the groups the ribbon really shows collapsed.
    */
-  test("D6. on a narrowing ribbon the Cells group demotes between Styles and Editing, not last", async ({
+  test("D6. on a narrowing ribbon the Home groups demote right to left (Styles, Cells, Editing, ...), Cells never last", async ({
     appPage: page,
   }) => {
+    // The app's OWN module instances (module-level width caches).
+    await page.evaluate(() => {
+      const w = window as unknown as {
+        __calcImport: (u: string) => Promise<unknown>;
+        __appImport?: (p: string) => Promise<unknown>;
+      };
+      if (w.__appImport) return;
+      w.__appImport = async (modulePath: string) => {
+        const entries = performance
+          .getEntriesByType("resource")
+          .map((e) => e.name)
+          .filter((n) => {
+            try {
+              return new URL(n).pathname === modulePath;
+            } catch {
+              return false;
+            }
+          })
+          .sort();
+        const url = entries.length > 0 ? entries[entries.length - 1] : new URL(modulePath, document.baseURI).href;
+        return w.__calcImport(url);
+      };
+    });
+
     const live = await page.evaluate(async () => {
-      const imp = (window as unknown as { __calcImport: (u: string) => Promise<unknown> })
-        .__calcImport;
-      const reg = (await imp(
-        new URL("/src/shell/registries/panelRegistry.ts", document.baseURI).href,
-      )) as { panelRegistry: { getPanel: (id: string) => { sections?: unknown[] } | undefined } };
-      const panel = reg.panelRegistry.getPanel("home");
+      const w = window as unknown as {
+        __appImport: (p: string) => Promise<unknown>;
+        __CALCULA_PANEL_REGISTRY__?: {
+          getPanel: (id: string) => { sections?: unknown[] } | undefined;
+        };
+      };
+      const r = (await w.__appImport("/src/shell/components/SectionRenderers.tsx")) as {
+        peekSectionWidths: (id: string) => {
+          inline: Record<string, number>;
+          launcher: Record<string, number>;
+          natural: Record<string, number>;
+          bandWidth: number;
+        };
+      };
+      const c = (await w.__appImport("/src/shell/components/SectionChrome.tsx")) as {
+        cellChromeWidth: (first: boolean, last: boolean) => number;
+      };
+      const panel = w.__CALCULA_PANEL_REGISTRY__?.getPanel("home");
       const sections = ((panel?.sections ?? []) as Array<{
         id: string;
         label: string;
@@ -986,20 +1036,32 @@ test.describe.serial("Owner decisions D1-D7 (live)", () => {
         collapsePriority: s.collapsePriority,
         ribbonPresentation: s.ribbonPresentation,
       }));
-
-      // The real rendered widths of the strip's children, in section order.
-      const band = document.querySelector("[data-ribbon-content]");
-      const strip = band?.querySelector("div") ?? null;
-      const widths = strip
-        ? Array.from(strip.children).map((el) => el.getBoundingClientRect().width)
-        : [];
-      return { sections, widths, bandWidth: band?.getBoundingClientRect().width ?? 0 };
+      const peek = r.peekSectionWidths("home");
+      const n = sections.length;
+      const inputs = sections.map((s, i) => {
+        const natural = peek.natural[s.id];
+        const inline = peek.inline[s.id];
+        return {
+          id: s.id,
+          width: Math.max(inline ?? 0, natural !== undefined ? natural + c.cellChromeWidth(i === 0, i === n - 1) : 0),
+          launcherWidth: peek.launcher[s.id],
+          collapsePriority: s.collapsePriority ?? 1000 - i,
+          alreadyLauncher: s.ribbonPresentation === "launcher",
+        };
+      });
+      // What the ribbon really shows collapsed right now.
+      const shownCollapsed = Array.from(
+        document.querySelectorAll('[data-ribbon-content] [data-testid^="section-launcher-home."]'),
+      ).map((el) => (el.getAttribute("data-testid") ?? "").replace(/^section-launcher-/, ""));
+      return { sections, inputs, bandWidth: peek.bandWidth, shownCollapsed };
     });
+    console.log(`[D6] measured Home widths: ${JSON.stringify(live)}`);
 
     expect(
       live.sections.map((s) => s.id),
-      "the Home panel registers its seven groups, in Excel's left-to-right order",
+      "the Home panel registers its eight groups, in Excel's left-to-right order",
     ).toEqual([
+      "home.undo",
       "home.clipboard",
       "home.font",
       "home.alignment",
@@ -1010,23 +1072,20 @@ test.describe.serial("Owner decisions D1-D7 (live)", () => {
     ]);
     expect(
       live.sections.map((s) => s.collapsePriority),
-      "the LIVE registered priorities — Cells is 55, between Styles (50) and Editing (60)",
-    ).toEqual([10, 20, 30, 40, 50, 55, 60]);
+      "the LIVE registered priorities — Styles sheds first, Undo last (owner decision 3)",
+    ).toEqual([80, 70, 60, 50, 40, 10, 20, 30]);
     expect(
-      live.widths.length,
-      "and the ribbon really rendered all seven inline, so the widths below are real",
-    ).toBe(7);
-    for (const w of live.widths) expect(w).toBeGreaterThan(0);
+      live.inputs.filter((x) => !(x.width > 0)).map((x) => x.id),
+      "every group was measured inline at least once, so the widths below are real",
+    ).toEqual([]);
+    expect(live.bandWidth, "the band's width was measured").toBeGreaterThan(0);
 
-    // Drive the PRODUCT's own decision function with the LIVE inputs, narrowing
-    // the band until everything that can demote has.
-    const order = await page.evaluate(
-      async ({ sections, widths }) => {
+    // Drive the PRODUCT's own decision function with the LIVE inputs.
+    const model = await page.evaluate(
+      async ({ inputs, bandWidth }) => {
         const fit = (await (
-          window as unknown as { __calcImport: (u: string) => Promise<unknown> }
-        ).__calcImport(
-          new URL("/src/shell/components/useSectionFit.ts", document.baseURI).href,
-        )) as {
+          window as unknown as { __appImport: (p: string) => Promise<unknown> }
+        ).__appImport("/src/shell/components/useSectionFit.ts")) as {
           computeWidthDemotions: (
             s: Array<{
               id: string;
@@ -1039,16 +1098,7 @@ test.describe.serial("Owner decisions D1-D7 (live)", () => {
             extra?: number,
           ) => Set<string>;
         };
-        const LAUNCHER = 64; // LAUNCHER_BAND_WIDTH — no measured launcher exists yet
-        const inputs = sections.map(
-          (s: { id: string; collapsePriority?: number }, i: number) => ({
-            id: s.id,
-            width: widths[i],
-            collapsePriority: s.collapsePriority ?? 1000 - i,
-            alreadyLauncher: false,
-          }),
-        );
-        const total = widths.reduce((a: number, b: number) => a + b, 0);
+        const total = inputs.reduce((a: number, b: { width: number }) => a + b.width, 0);
         const seen: string[] = [];
         for (let w = Math.ceil(total); w >= 0; w -= 4) {
           const demoted = fit.computeWidthDemotions(inputs, w);
@@ -1057,29 +1107,54 @@ test.describe.serial("Owner decisions D1-D7 (live)", () => {
           }
           if (seen.length === inputs.length) break;
         }
-        return seen;
+        const atLiveWidth = Array.from(fit.computeWidthDemotions(inputs, bandWidth)).sort();
+        return { order: seen, atLiveWidth };
       },
-      { sections: live.sections, widths: live.widths },
+      { inputs: live.inputs, bandWidth: live.bandWidth },
     );
 
-    expect(
-      order,
-      "as the band narrows, groups become launchers in collapsePriority order — " +
-        "and Cells goes SIXTH, before Editing, which is where Excel sheds it",
-    ).toEqual([
-      "home.clipboard",
-      "home.font",
-      "home.alignment",
-      "home.number",
+    // Undo (two stacked icon buttons) can be no wider than its own launcher;
+    // the function never demotes such a section (it would GROW the strip), so
+    // it may be missing from the end of the order. Everything else sheds.
+    const EXCEL_ORDER = [
       "home.styles",
       "home.cells",
       "home.editing",
-    ]);
+      "home.number",
+      "home.alignment",
+      "home.font",
+      "home.clipboard",
+      "home.undo",
+    ];
     expect(
-      order.indexOf("home.cells"),
+      model.order,
+      "as the band narrows, groups become launchers in collapsePriority order — " +
+        "Excel's right-to-left order, Cells SECOND, before Editing",
+    ).toEqual(EXCEL_ORDER.slice(0, model.order.length));
+    expect(model.order.length, "every group but (possibly) Undo demotes").toBeGreaterThanOrEqual(7);
+    expect(
+      model.order.indexOf("home.cells"),
       "TEETH stated as the defect: Cells is NOT the last thing standing (the " +
         "accidental 99 made it exactly that)",
-    ).toBeLessThan(order.indexOf("home.editing"));
+    ).toBeLessThan(model.order.indexOf("home.editing"));
+
+    // The model IS the screen. At the live band width the function's set is a
+    // prefix of Excel's order; the ribbon shows that set collapsed, plus at
+    // most the renderer's DOM-truth "forced" demotions, which only ever take
+    // the NEXT group in the same order. So what is collapsed on screen is a
+    // prefix of Excel's order at least as long as the model's.
+    expect(
+      model.atLiveWidth,
+      `the model's collapsed set at the live ${Math.round(live.bandWidth)}px band is a prefix of Excel's order`,
+    ).toEqual(EXCEL_ORDER.slice(0, model.atLiveWidth.length).sort());
+    expect(
+      [...live.shownCollapsed].sort(),
+      `what the ribbon shows collapsed (${live.shownCollapsed.join(", ") || "nothing"}) is a PREFIX of Excel's order`,
+    ).toEqual(EXCEL_ORDER.slice(0, live.shownCollapsed.length).sort());
+    expect(
+      live.shownCollapsed.length,
+      "and the ribbon collapsed at least what the model says it must",
+    ).toBeGreaterThanOrEqual(model.atLiveWidth.length);
   });
 
   // =========================================================================

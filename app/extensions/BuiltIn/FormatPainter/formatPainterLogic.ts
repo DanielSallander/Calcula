@@ -22,9 +22,15 @@ import {
 import {
   isFormatPainterActive,
   isFormatPainterPersistent,
+  isFormatPainterStarting,
   getSourceStyles,
   getSourceDimensions,
   setFormatPainterActive,
+  setFormatPainterPersistent,
+  beginFormatPainterStart,
+  lockStartingFormatPainter,
+  cancelFormatPainterStart,
+  finishFormatPainterStart,
   clearFormatPainterState,
   addCleanup,
   runAllCleanups,
@@ -173,7 +179,25 @@ function clearCursorOverride(): void {
 // ============================================================================
 
 /**
- * Activate the Format Painter tool.
+ * Activate the Format Painter tool -- the one entry for both commands, so the
+ * Home tab can send FORMAT_PAINTER on a click and FORMAT_PAINTER_LOCK on a
+ * double-click, as Excel's button behaves:
+ *
+ *   painter state    | FORMAT_PAINTER (persistent=false) | FORMAT_PAINTER_LOCK (persistent=true)
+ *   -----------------|-----------------------------------|--------------------------------------
+ *   off              | arm, single-use                   | arm, locked
+ *   starting         | ignored                           | the start arms LOCKED
+ *   armed            | off (a click on the button)       | upgraded to locked, stays on
+ *
+ * LOCK used to switch an armed painter OFF (activation toggled whatever was
+ * running), so a double-click -- click, then LOCK -- ended with no painter.
+ * And a second activation during the start (the source read) started a
+ * SECOND painter: two sets of listeners, every later paint two undo steps.
+ * A double-click's DOM events (click, click, dblclick) come out locked on both
+ * timings: a quick start ignores the second click and the dblclick locks it; a
+ * start that finished before the second click is switched off by it and the
+ * dblclick arms a locked one.
+ *
  * @param persistent - True for persistent mode (stays active after applying once).
  * @param currentSelection - The current grid selection (source).
  */
@@ -181,8 +205,19 @@ export async function activateFormatPainter(
   persistent: boolean,
   currentSelection: Selection | null
 ): Promise<void> {
-  // If already active, toggle off
+  // Still reading the source: a second start is ignored, a LOCK upgrades it.
+  if (isFormatPainterStarting()) {
+    if (persistent) lockStartingFormatPainter();
+    return;
+  }
+
   if (isFormatPainterActive()) {
+    // LOCK on an armed painter upgrades it in place (same source, same
+    // listeners); a plain click on the button turns it off.
+    if (persistent) {
+      setFormatPainterPersistent(true);
+      return;
+    }
     deactivateFormatPainter();
     return;
   }
@@ -203,11 +238,26 @@ export async function activateFormatPainter(
     currentSelection
   );
 
-  // 1. Capture source styles
-  const { styles, width, height } = await captureSourceFormat(currentSelection);
+  // 1. Capture source styles. The read is the STARTING window (one backend
+  //    call per source cell): a second activation in it is ignored, a LOCK
+  //    upgrades it, an Escape cancels it (formatPainterState.ts).
+  beginFormatPainterStart(persistent);
+  let capture: Awaited<ReturnType<typeof captureSourceFormat>>;
+  try {
+    capture = await captureSourceFormat(currentSelection);
+  } catch (err) {
+    finishFormatPainterStart();
+    throw err;
+  }
+  const start = finishFormatPainterStart();
+  if (start.cancelled) {
+    console.log("[FormatPainter] Start cancelled before the painter armed");
+    return;
+  }
+  const { styles, width, height } = capture;
 
   // 2. Update state
-  setFormatPainterActive(true, persistent, currentSelection, styles, width, height);
+  setFormatPainterActive(true, start.persistent, currentSelection, styles, width, height);
 
   // 3. Show marching ants around source
   dispatchGridAction(setClipboard("copy", { ...currentSelection }));
@@ -277,10 +327,15 @@ export async function activateFormatPainter(
 }
 
 /**
- * Deactivate the Format Painter tool.
+ * Deactivate the Format Painter tool. A painter still STARTING (reading its
+ * source) has nothing to tear down yet: its start is cancelled, and it never
+ * arms.
  */
 export function deactivateFormatPainter(): void {
-  if (!isFormatPainterActive()) return;
+  if (!isFormatPainterActive()) {
+    cancelFormatPainterStart();
+    return;
+  }
 
   console.log("[FormatPainter] Deactivating");
 

@@ -98,6 +98,7 @@ void _everyObjectTypeIsListed;
 export type ScriptProvenance = "local" | "distributed";
 
 import type { CapabilityId } from "./scriptHost/allowlist";
+import type { TextRotation } from "./types";
 
 /** Stored script definition for a scriptable object. */
 export interface ObjectScriptDefinition {
@@ -304,7 +305,11 @@ export interface ScriptFormat {
   /** An Excel number-format code, e.g. "#,##0.00", "0.0%", "General". */
   numberFormat?: string;
   wrapText?: boolean;
-  textRotation?: "none" | "rotate90" | "rotate270";
+  /** Text orientation, the backend's and Excel's vocabulary (@api TextRotation):
+   *  "none", "rotate90" (Rotate Text Up), "rotate270" (Rotate Text Down),
+   *  "vertical" (stacked Vertical Text) or `custom:N` for N degrees, -90..90
+   *  (Angle Counterclockwise is "custom:45"). */
+  textRotation?: TextRotation;
   /** Indent steps (0-250). */
   indent?: number;
   shrinkToFit?: boolean;

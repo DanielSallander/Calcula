@@ -24,29 +24,19 @@ import { useSpreadsheet } from "./useSpreadsheet";
 import { gridPointerMouseDown, gridPointerDoubleClick, editBlocksGridFocus } from "./gridPointerEntry";
 import { notifyPointModeViewChanged } from "../../lib/pointModeView";
 import {
-  clearRange,
-  clearRangeWithOptions,
-  clearCommentsInRange,
-  clearHyperlinksInRange,
-  insertRows,
-  insertColumns,
-  deleteRows,
-  deleteColumns,
   getAllColumnWidths,
   getAllRowHeights,
   getDefaultDimensions,
-  beginUndoTransaction,
-  commitUndoTransaction,
-  cancelUndoTransaction,
   setSplitWindow as backendSetSplitWindow,
 } from "../../lib/tauri-api";
-import {
-  ownUndoTransaction,
-  type OwnedUndoTransaction,
-  type UndoTransactionCloses,
-} from "../../lib/undoTransactionOwnership";
 import { cellEvents } from "../../lib/cellEvents";
 import { runMergeGesture, type MergeGestureHost } from "../../lib/merge";
+import { runClearGesture, type ClearGestureKind } from "../../lib/clearGestures";
+import {
+  runRowColumnGesture,
+  type IndexSpan,
+  type RowColumnGestureKind,
+} from "../../lib/sheetRowsColumns";
 import { getCellFromPixel } from "../../lib/gridRenderer";
 import { calculateFreezePaneLayout, calculateVisibleRange } from "../../lib/gridRenderer/layout/viewport";
 import { getColumnWidth, getRowHeight } from "../../lib/gridRenderer/layout/dimensions";
@@ -68,14 +58,7 @@ import type { GridMenuContext } from "../../lib/gridCommands";
 
 // Styles
 import * as S from "./Spreadsheet.styles";
-import { alertAsync } from "../../lib/dialogs";
 import { rowHeaderGutter, colHeaderGutter, effectiveGridConfig, paintedDisplayHeadings } from "../../lib/gridRenderer/layout/headerVisibility";
-
-/** Clear All's closes, read when the close runs (see ownUndoTransaction). */
-const UNDO_CLOSES: UndoTransactionCloses = {
-  commitUndoTransaction: (...ticket) => commitUndoTransaction(...ticket),
-  cancelUndoTransaction: (...ticket) => cancelUndoTransaction(...ticket),
-};
 
 const SCROLLBAR_SIZE = GRID_SCROLLBAR_GUTTER_PX;
 const SPLIT_BAR_SIZE = 4;
@@ -666,278 +649,90 @@ function SpreadsheetContent({
   }, [refreshDimensions, hydrateSheetView, selection, viewport, gridState.virtualBounds, dispatch]);
 
   // -------------------------------------------------------------------------
-  // Clear Contents Handler
+  // Clear Handlers -- Excel's Clear menu (2026-10-04)
   // -------------------------------------------------------------------------
-  const handleClearContents = useCallback(async () => {
-    if (!selection) {
-      return;
-    }
-
-    const minRow = Math.min(selection.startRow, selection.endRow);
-    const maxRow = Math.max(selection.startRow, selection.endRow);
-    const minCol = Math.min(selection.startCol, selection.endCol);
-    const maxCol = Math.max(selection.startCol, selection.endCol);
-
-    try {
-      await clearRange(minRow, minCol, maxRow, maxCol);
-
-      // Emit a single event to trigger refresh
-      cellEvents.emit({
-        row: minRow,
-        col: minCol,
-        oldValue: undefined,
-        newValue: "",
-        formula: null,
-      }, "clear");
-    } catch (error) {
-      console.error("[Spreadsheet] Failed to clear contents:", error);
-    }
-  }, [selection]);
-
-  // -------------------------------------------------------------------------
-  // Clear Formatting Handler
-  // -------------------------------------------------------------------------
-  const handleClearFormatting = useCallback(async () => {
-    if (!selection) return;
-
-    const minRow = Math.min(selection.startRow, selection.endRow);
-    const maxRow = Math.max(selection.startRow, selection.endRow);
-    const minCol = Math.min(selection.startCol, selection.endCol);
-    const maxCol = Math.max(selection.startCol, selection.endCol);
-
-    try {
-      await clearRangeWithOptions(minRow, minCol, maxRow, maxCol, "formats");
-      cellEvents.emit({ row: minRow, col: minCol, oldValue: undefined, newValue: "", formula: null });
-    } catch (error) {
-      console.error("[Spreadsheet] Failed to clear formatting:", error);
-    }
-  }, [selection]);
-
-  // -------------------------------------------------------------------------
-  // Clear Comments Handler
-  // -------------------------------------------------------------------------
-  const handleClearComments = useCallback(async () => {
-    if (!selection) return;
-
-    const minRow = Math.min(selection.startRow, selection.endRow);
-    const maxRow = Math.max(selection.startRow, selection.endRow);
-    const minCol = Math.min(selection.startCol, selection.endCol);
-    const maxCol = Math.max(selection.startCol, selection.endCol);
-
-    try {
-      await clearCommentsInRange(minRow, minCol, maxRow, maxCol);
-      cellEvents.emit({ row: minRow, col: minCol, oldValue: undefined, newValue: "", formula: null });
-    } catch (error) {
-      console.error("[Spreadsheet] Failed to clear comments:", error);
-    }
-  }, [selection]);
-
-  // -------------------------------------------------------------------------
-  // Clear Hyperlinks Handler
-  // -------------------------------------------------------------------------
-  const handleClearHyperlinks = useCallback(async () => {
-    if (!selection) return;
-
-    const minRow = Math.min(selection.startRow, selection.endRow);
-    const maxRow = Math.max(selection.startRow, selection.endRow);
-    const minCol = Math.min(selection.startCol, selection.endCol);
-    const maxCol = Math.max(selection.startCol, selection.endCol);
-
-    try {
-      await clearHyperlinksInRange(minRow, minCol, maxRow, maxCol);
-      cellEvents.emit({ row: minRow, col: minCol, oldValue: undefined, newValue: "", formula: null });
-    } catch (error) {
-      console.error("[Spreadsheet] Failed to clear hyperlinks:", error);
-    }
-  }, [selection]);
-
-  // -------------------------------------------------------------------------
-  // Clear All Handler (formatting + contents + comments + hyperlinks)
-  // -------------------------------------------------------------------------
-  const handleClearAll = useCallback(async () => {
-    if (!selection) return;
-
-    const minRow = Math.min(selection.startRow, selection.endRow);
-    const maxRow = Math.max(selection.startRow, selection.endRow);
-    const minCol = Math.min(selection.startCol, selection.endCol);
-    const maxCol = Math.max(selection.startCol, selection.endCol);
-
-    // Closes ONLY the undo transaction its own begin opened: inside a script's
-    // open batch it joins, and the script closes that step (wave E, Y7).
-    let tx: OwnedUndoTransaction | null = null;
-    try {
-      tx = ownUndoTransaction(await beginUndoTransaction("Clear all"), UNDO_CLOSES);
-      await clearRangeWithOptions(minRow, minCol, maxRow, maxCol, "all");
-      await clearCommentsInRange(minRow, minCol, maxRow, maxCol);
-      await clearHyperlinksInRange(minRow, minCol, maxRow, maxCol);
-      await tx.commit();
-      cellEvents.emit({ row: minRow, col: minCol, oldValue: undefined, newValue: "", formula: null }, "clear");
-    } catch (error) {
-      // clearRangeWithOptions can now be refused by sheet protection, which
-      // skips the commit and leaves the transaction open for later edits to
-      // join. Cancel it, and surface the reason instead of failing silently.
-      await tx?.cancel().catch(() => {});
-      console.error("[Spreadsheet] Failed to clear all:", error);
-      const msg = typeof error === "string" ? error : (error as Error)?.message;
-      if (msg) void alertAsync(msg);
-    }
-  }, [selection]);
-
-  // -------------------------------------------------------------------------
-  // Insert Row Handler
-  // -------------------------------------------------------------------------
-  const handleInsertRow = useCallback(async () => {
-    if (!selection || selection.type !== "rows") {
-      return;
-    }
-
-    const startRow = Math.min(selection.startRow, selection.endRow);
-    const endRow = Math.max(selection.startRow, selection.endRow);
-    const count = endRow - startRow + 1;
-
-    try {
-      await insertRows(startRow, count);
-
-      // (ROWS/COLUMNS_INSERTED/DELETED is emitted by the tauri-api wrapper,
-      // so every caller announces it — not just this one.)
-      // Refresh dimensions from backend (row heights shifted)
-      await refreshDimensions();
-
-      await canvasRef.current?.refreshCells();
-      await canvasRef.current?.animateRowInsertion(startRow, count, 200);
-
-      cellEvents.emit({
-        row: startRow,
-        col: 0,
-        oldValue: undefined,
-        newValue: "",
-        formula: null,
+  // The six commands share ONE gesture runner (core/lib/clearGestures): every
+  // Ctrl+click block, one undo step when a command takes several writes, and
+  // every refusal SHOWN. Clear Contents and Clear Formats used to send a
+  // refusal (a protected sheet) to the console, so the Delete key looked dead;
+  // Clear Comments left notes; Remove Hyperlinks did not exist.
+  //
+  // The host's refresh re-reads the cells and dispatches "grid:refresh" (and
+  // "styles:refresh" when formats changed), as the merge host below does: the
+  // Home ribbon re-reads the active cell's state on those, and after Clear
+  // Formats it kept Bold / Center / the number format lit until the selection
+  // moved (review finding (b), 2026-10-04).
+  const clearHandler = useCallback(
+    (kind: ClearGestureKind) => async () => {
+      await runClearGesture(kind, {
+        selection,
+        refresh: async ({ formats }) => {
+          await canvasRef.current?.refreshCells();
+          canvasRef.current?.redraw();
+          if (formats) window.dispatchEvent(new CustomEvent("styles:refresh"));
+          window.dispatchEvent(new CustomEvent("grid:refresh"));
+        },
       });
+    },
+    [selection, canvasRef],
+  );
 
-      canvasRef.current?.redraw();
-    } catch (error) {
-      console.error("[Spreadsheet] Failed to insert rows:", error);
-      // Delete Row/Column already alerts; a silent insert refusal reads as a
-      // dead button. Surface the backend's reason (protection, usually).
-      const msg = typeof error === "string" ? error : (error as Error)?.message || String(error);
-      void alertAsync(msg);
-    }
-  }, [selection, canvasRef, refreshDimensions, gridState.sheetContext.activeSheetIndex]);
+  const handleClearContents = useMemo(() => clearHandler("clearContents"), [clearHandler]);
+  const handleClearFormatting = useMemo(() => clearHandler("clearFormatting"), [clearHandler]);
+  const handleClearComments = useMemo(() => clearHandler("clearComments"), [clearHandler]);
+  const handleClearHyperlinks = useMemo(() => clearHandler("clearHyperlinks"), [clearHandler]);
+  const handleClearAll = useMemo(() => clearHandler("clearAll"), [clearHandler]);
+  const handleRemoveHyperlinks = useMemo(() => clearHandler("removeHyperlinks"), [clearHandler]);
 
   // -------------------------------------------------------------------------
-  // Insert Column Handler
+  // Insert / Delete Sheet Rows / Columns -- Excel's Cells group (2026-10-04)
   // -------------------------------------------------------------------------
-  const handleInsertColumn = useCallback(async () => {
-    if (!selection || selection.type !== "columns") {
-      return;
-    }
-
-    const startCol = Math.min(selection.startCol, selection.endCol);
-    const endCol = Math.max(selection.startCol, selection.endCol);
-    const count = endCol - startCol + 1;
-
-    try {
-      await insertColumns(startCol, count);
-
-      // (ROWS/COLUMNS_INSERTED/DELETED is emitted by the tauri-api wrapper,
-      // so every caller announces it — not just this one.)
-      // Refresh dimensions from backend (column widths shifted)
-      await refreshDimensions();
-
-      await canvasRef.current?.refreshCells();
-      await canvasRef.current?.animateColumnInsertion(startCol, count, 200);
-
-      cellEvents.emit({
-        row: 0,
-        col: startCol,
-        oldValue: undefined,
-        newValue: "",
-        formula: null,
+  // ONE gesture runner (core/lib/sheetRowsColumns) acts on the rows / columns
+  // ANY selection spans -- these returned early unless whole rows / columns
+  // were selected, so the Home tab's buttons were dead on a cell selection
+  // (and, being script-safe, a script's DELETE_ROW "worked" and did nothing).
+  // The right-click menu offers them only for whole rows / columns, which is
+  // the one-block case below. (ROWS/COLUMNS_INSERTED/DELETED is emitted by the
+  // tauri-api wrappers, so every caller announces it -- not just this one.)
+  const rowColumnHandler = useCallback(
+    (kind: RowColumnGestureKind) => async () => {
+      await runRowColumnGesture(kind, {
+        selection,
+        totalRows: gridState.config.totalRows,
+        totalCols: gridState.config.totalCols,
+        afterChange: async (changed: RowColumnGestureKind, spans: IndexSpan[]) => {
+          // Row heights / column widths shifted with the structure.
+          await refreshDimensions();
+          await canvasRef.current?.refreshCells();
+          // One block animates as the single insert / delete always did;
+          // several just repaint.
+          if (spans.length === 1) {
+            const { start, count } = spans[0];
+            if (changed === "insertRow") await canvasRef.current?.animateRowInsertion(start, count, 200);
+            else if (changed === "insertColumn") await canvasRef.current?.animateColumnInsertion(start, count, 200);
+            else if (changed === "deleteRow") await canvasRef.current?.animateRowDeletion(start, count, 200);
+            else await canvasRef.current?.animateColumnDeletion(start, count, 200);
+          }
+          const first = spans[0];
+          const byRow = changed === "insertRow" || changed === "deleteRow";
+          cellEvents.emit({
+            row: byRow ? first.start : 0,
+            col: byRow ? 0 : first.start,
+            oldValue: undefined,
+            newValue: "",
+            formula: null,
+          });
+          canvasRef.current?.redraw();
+        },
       });
+    },
+    [selection, canvasRef, refreshDimensions, gridState.config.totalRows, gridState.config.totalCols, gridState.sheetContext.activeSheetIndex],
+  );
 
-      canvasRef.current?.redraw();
-    } catch (error) {
-      console.error("[Spreadsheet] Failed to insert columns:", error);
-      const msg = typeof error === "string" ? error : (error as Error)?.message || String(error);
-      void alertAsync(msg);
-    }
-  }, [selection, canvasRef, refreshDimensions, gridState.sheetContext.activeSheetIndex]);
-
-  // -------------------------------------------------------------------------
-  // Delete Row Handler
-  // -------------------------------------------------------------------------
-  const handleDeleteRow = useCallback(async () => {
-    if (!selection || selection.type !== "rows") {
-      return;
-    }
-
-    const startRow = Math.min(selection.startRow, selection.endRow);
-    const endRow = Math.max(selection.startRow, selection.endRow);
-    const count = endRow - startRow + 1;
-
-    try {
-      await deleteRows(startRow, count);
-
-      // (ROWS/COLUMNS_INSERTED/DELETED is emitted by the tauri-api wrapper,
-      // so every caller announces it — not just this one.)
-      // Refresh dimensions from backend (row heights shifted)
-      await refreshDimensions();
-
-      await canvasRef.current?.refreshCells();
-      await canvasRef.current?.animateRowDeletion(startRow, count, 200);
-
-      cellEvents.emit({
-        row: startRow,
-        col: 0,
-        oldValue: undefined,
-        newValue: "",
-        formula: null,
-      });
-
-      canvasRef.current?.redraw();
-    } catch (error) {
-      const msg = typeof error === "string" ? error : (error as Error)?.message || String(error);
-      void alertAsync(msg);
-    }
-  }, [selection, canvasRef, refreshDimensions, gridState.sheetContext.activeSheetIndex]);
-
-  // -------------------------------------------------------------------------
-  // Delete Column Handler
-  // -------------------------------------------------------------------------
-  const handleDeleteColumn = useCallback(async () => {
-    if (!selection || selection.type !== "columns") {
-      return;
-    }
-
-    const startCol = Math.min(selection.startCol, selection.endCol);
-    const endCol = Math.max(selection.startCol, selection.endCol);
-    const count = endCol - startCol + 1;
-
-    try {
-      await deleteColumns(startCol, count);
-
-      // (ROWS/COLUMNS_INSERTED/DELETED is emitted by the tauri-api wrapper,
-      // so every caller announces it — not just this one.)
-      // Refresh dimensions from backend (column widths shifted)
-      await refreshDimensions();
-
-      await canvasRef.current?.refreshCells();
-      await canvasRef.current?.animateColumnDeletion(startCol, count, 200);
-
-      cellEvents.emit({
-        row: 0,
-        col: startCol,
-        oldValue: undefined,
-        newValue: "",
-        formula: null,
-      });
-
-      canvasRef.current?.redraw();
-    } catch (error) {
-      const msg = typeof error === "string" ? error : (error as Error)?.message || String(error);
-      void alertAsync(msg);
-    }
-  }, [selection, canvasRef, refreshDimensions, gridState.sheetContext.activeSheetIndex]);
+  const handleInsertRow = useMemo(() => rowColumnHandler("insertRow"), [rowColumnHandler]);
+  const handleInsertColumn = useMemo(() => rowColumnHandler("insertColumn"), [rowColumnHandler]);
+  const handleDeleteRow = useMemo(() => rowColumnHandler("deleteRow"), [rowColumnHandler]);
+  const handleDeleteColumn = useMemo(() => rowColumnHandler("deleteColumn"), [rowColumnHandler]);
 
   // -------------------------------------------------------------------------
   // Merge Handlers -- Excel's Merge menu (2026-10-02)
@@ -987,6 +782,7 @@ function SpreadsheetContent({
     gridCommands.register("clearComments", handleClearComments);
     gridCommands.register("clearHyperlinks", handleClearHyperlinks);
     gridCommands.register("clearAll", handleClearAll);
+    gridCommands.register("removeHyperlinks", handleRemoveHyperlinks);
     gridCommands.register("insertRow", handleInsertRow);
     gridCommands.register("insertColumn", handleInsertColumn);
     gridCommands.register("deleteRow", handleDeleteRow);
@@ -1005,6 +801,7 @@ function SpreadsheetContent({
       gridCommands.unregister("clearComments");
       gridCommands.unregister("clearHyperlinks");
       gridCommands.unregister("clearAll");
+      gridCommands.unregister("removeHyperlinks");
       gridCommands.unregister("insertRow");
       gridCommands.unregister("insertColumn");
       gridCommands.unregister("deleteRow");
@@ -1023,6 +820,7 @@ function SpreadsheetContent({
     handleClearComments,
     handleClearHyperlinks,
     handleClearAll,
+    handleRemoveHyperlinks,
     handleInsertRow,
     handleInsertColumn,
     handleDeleteRow,

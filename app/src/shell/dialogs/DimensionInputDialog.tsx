@@ -3,8 +3,13 @@
 //          the raw window.prompt. Speaks Excel units (column = characters,
 //          row = points) and converts to the pixel value the engine stores.
 // CONTEXT: Registered with DialogExtensions and opened from the grid context menu
-//          (registries/gridExtensions.ts). Movable via useDialogWindow, per the
-//          app-wide dialog convention.
+//          (registries/gridExtensions.ts) and from Home > Format (Row Height...,
+//          Column Width..., Default Width... -- registries/gridFormatCommands.ts).
+//          Movable via useDialogWindow, per the app-wide dialog convention.
+//
+//          Three modes. `defaultWidth` is Excel's Standard Width dialog: the
+//          STANDARD column width, in the same character units as Column Width
+//          (it is a column width, just not one column's).
 
 import React, { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import type { DialogProps } from "@api/uiTypes";
@@ -14,7 +19,7 @@ import * as S from "./DimensionInputDialog.styles";
 
 export const DIMENSION_INPUT_DIALOG_ID = "core:dimension-input";
 
-export type DimensionMode = "columnWidth" | "rowHeight";
+export type DimensionMode = "columnWidth" | "rowHeight" | "defaultWidth";
 
 export interface DimensionInputData {
   mode: DimensionMode;
@@ -37,16 +42,26 @@ const MDW = 7;
 const COL_PAD = 5;
 const round2 = (n: number): number => Math.round(n * 100) / 100;
 
+/** Column widths -- one column's or the standard one -- are in characters. */
+const inCharacters = (mode: DimensionMode): boolean => mode !== "rowHeight";
+
 function pxToUnits(mode: DimensionMode, px: number): number {
-  return mode === "columnWidth"
+  return inCharacters(mode)
     ? round2((px - COL_PAD) / MDW)
     : round2(px * (72 / 96));
 }
 function unitsToPx(mode: DimensionMode, units: number): number {
-  return mode === "columnWidth"
+  return inCharacters(mode)
     ? units * MDW + COL_PAD
     : units * (96 / 72);
 }
+
+/** The window title and the field's words, per mode (Excel's own). */
+const MODE_TEXT: Record<DimensionMode, { title: string; field: string }> = {
+  columnWidth: { title: "Column Width", field: "Column width" },
+  rowHeight: { title: "Row Height", field: "Row height" },
+  defaultWidth: { title: "Standard Width", field: "Standard column width" },
+};
 
 export function DimensionInputDialog(props: DialogProps): React.ReactElement | null {
   const { onClose, data } = props;
@@ -61,7 +76,7 @@ export function DimensionInputDialog(props: DialogProps): React.ReactElement | n
   // the old `?? 64.29` handed a row-height dialog a column width.
   const currentPx =
     d.currentPx ??
-    (mode === "columnWidth"
+    (inCharacters(mode)
       ? DEFAULT_GRID_CONFIG.defaultCellWidth
       : DEFAULT_GRID_CONFIG.defaultCellHeight);
   const rangeLabel = d.rangeLabel;
@@ -76,8 +91,8 @@ export function DimensionInputDialog(props: DialogProps): React.ReactElement | n
     if (el) { el.focus(); el.select(); }
   }, []);
 
-  const isColumn = mode === "columnWidth";
-  const unitWord = isColumn ? "characters" : "points";
+  const unitWord = inCharacters(mode) ? "characters" : "points";
+  const text = MODE_TEXT[mode] ?? MODE_TEXT.columnWidth;
 
   // Parse tolerantly: accept both '.' and ',' (sv-SE) decimal separators.
   const parsed = useMemo(() => {
@@ -111,12 +126,12 @@ export function DimensionInputDialog(props: DialogProps): React.ReactElement | n
         onMouseDown={(e) => e.stopPropagation()}
       >
         <S.Header onMouseDown={win.onHeaderMouseDown}>
-          <S.Title>{isColumn ? "Column Width" : "Row Height"}</S.Title>
+          <S.Title>{text.title}</S.Title>
           <S.CloseButton onClick={handleCancel} title="Close (Esc)">✕</S.CloseButton>
         </S.Header>
         <S.Body>
           <S.Field>
-            {isColumn ? "Column width" : "Row height"}
+            {text.field}
             {rangeLabel ? ` (${rangeLabel})` : ""} in {unitWord}:
             <S.Input
               ref={inputRef}

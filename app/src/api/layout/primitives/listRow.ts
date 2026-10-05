@@ -89,12 +89,19 @@ export const listIconClass = css`
   width: 20px;
 `;
 
-/** The label: takes the free width and ellipsises. */
+/** The label: takes the free width and ellipsises.
+ *
+ *  Its OWN line box is 16px, not the row's `line-height: 1`. The label clips
+ *  (overflow hidden, for the ellipsis), so a 12px line box cut the descenders
+ *  off every g/p/y -- found live on the Home tab's Paste menu (2026-10-04),
+ *  where "Formatting" read "Formattinq" on every row that said it. The row
+ *  centres the label, so the taller box moves no baseline the eye can see. */
 export const listLabelClass = css`
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  line-height: 16px;
 `;
 
 /** Hint / shortcut / preview, pushed to the row's end. */

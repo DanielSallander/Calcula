@@ -2185,6 +2185,7 @@ fn r_calp_reset(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFi
 fn r_outline(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_outline_restore(s, e, d, inv); }
 fn r_user_hidden(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_user_hidden_restore(s, e, d, inv); }
 fn r_pivot_col_widths(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_pivot_col_widths_restore(s, e, d, inv); }
+fn r_line_sizes(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { crate::commands::dimensions::apply_line_sizes_restore(s, e, d, inv); }
 fn r_sheet_tab_state(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { apply_sheet_tab_state_restore(s, e, d, inv); }
 fn r_canvas_stacking(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, _k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) { crate::sheets::apply_canvas_stacking_restore(s, e, d, inv); }
 
@@ -2231,6 +2232,11 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
     // every grid/style/width lock is dropped, which is exactly the contract the
     // pivot/slicer/ribbon-filter restores already rely on.
     m.insert(PIVOT_COL_WIDTHS_RESTORE_KIND, RestoreSpec { restore: r_pivot_col_widths, domains: MutationDomains::of(Dimensions), defer: true });
+    // A batch Row Height / Column Width (`set_row_heights` / `set_column_widths`):
+    // the previous sizes of the runs it set, run-length encoded. Geometry, so
+    // `Dimensions`; DEFERRED for the pivot column-width reason above --
+    // `apply_changes` holds the width and height mirrors through its inline pass.
+    m.insert(crate::commands::dimensions::LINE_SIZES_RESTORE_KIND, RestoreSpec { restore: r_line_sizes, domains: MutationDomains::of(Dimensions), defer: true });
     // Deferred (defer: true) — acquire other state locks; run after grid locks drop.
     m.insert(PIVOT_DEFINITION_RESTORE_KIND, RestoreSpec { restore: r_pivot_definition, domains: MutationDomains::of(Pivot), defer: true });
     m.insert("pivot_create", RestoreSpec { restore: r_pivot_create, domains: MutationDomains::of(Pivot), defer: true });
@@ -2307,6 +2313,11 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
     // tagged Objects so the frontend fires grid:refresh on undo/redo.
     m.insert("sheet_merge_regions", RestoreSpec { restore: r_sheet_merge_regions, domains: OBJ, defer: true });
     m.insert("sheet_structural_snapshot", RestoreSpec { restore: r_sheet_structural, domains: OBJ, defer: true });
+    // One sheet's dynamic-array SPILL CLAIMS, put back beside the cells a
+    // structural snapshot restores (Insert/Delete Cells). Deferred: the spill
+    // maps are LAST in the lock order, and it must land before the cascade
+    // re-evaluates the restored origins.
+    m.insert(SPILL_CLAIMS_RESTORE_KIND, RestoreSpec { restore: r_spill_claims, domains: OBJ, defer: true });
     // Grid reports: cell-based restore of the report cells + definitions + region.
     // Tagged Objects so the frontend fires grid:refresh on undo/redo.
     m.insert("report_restore", RestoreSpec { restore: r_report_restore, domains: OBJ, defer: true });
@@ -4797,6 +4808,46 @@ pub(crate) struct FloatingRangeObjSnapshot {
     pub(crate) previous: Option<crate::api_types::FloatingRange>,
 }
 
+/// The restore kind that swaps one sheet's spill claims (see the registry).
+pub(crate) const SPILL_CLAIMS_RESTORE_KIND: &str = "spill_claims";
+
+/// Payload of a [`SPILL_CLAIMS_RESTORE_KIND`] restore: the claims to put back.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SpillClaimsSnapshot {
+    sheet_index: usize,
+    claims: crate::spill_restore::SheetSpillClaims,
+}
+
+/// Serialized spill-claims snapshot bytes, recorded inside an already-open
+/// transaction by a structural edit that MOVES cells (Insert/Delete Cells).
+///
+/// WHY IT EXISTS, MEASURED: the structural `RestoreSnapshot` puts the cells
+/// back -- a spill's origin AND its output values -- but not the maps that say
+/// which origin owns those outputs. Undoing an Insert Cells that had moved
+/// `B5 =SEQUENCE(3)` to B7 left both maps empty, so the restored B6:B7 read as
+/// TYPED values in the origin's way and the undo's own recalculation turned B5
+/// into `#SPILL!`.
+pub(crate) fn spill_claims_snapshot_bytes(
+    sheet_index: usize,
+    claims: crate::spill_restore::SheetSpillClaims,
+) -> Vec<u8> {
+    serde_json::to_vec(&SpillClaimsSnapshot { sheet_index, claims }).unwrap_or_default()
+}
+
+fn r_spill_claims(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _tl: &crate::timeline_slicer::TimelineSlicerState, _uf: &UserFilesState, e: &crate::document_effect::DocumentEffect, k: &str, d: &[u8], inv: &mut Transaction, _rp: &mut RestoreReport) {
+    let snap: SpillClaimsSnapshot = match serde_json::from_slice(d) {
+        Ok(snap) => snap,
+        Err(err) => {
+            eprintln!("[undo] bad {} snapshot: {}", k, err);
+            return;
+        }
+    };
+    // The swap hands back the claims it replaced: the inverse, so redo puts
+    // the edit's claims back exactly.
+    let previous = crate::spill_restore::swap_sheet_spill_claims(s, e, snap.sheet_index, &snap.claims);
+    push_obj_inverse(inv, k, &SpillClaimsSnapshot { sheet_index: snap.sheet_index, claims: previous });
+}
+
 fn push_obj_inverse<T: serde::Serialize>(
     inverse_transaction: &mut Transaction,
     kind: &str,
@@ -5966,6 +6017,9 @@ mod restore_registry_tests {
             // holds `column_widths` for the whole inline pass, so an inline
             // handler that writes it deadlocks against its own caller.
             ("pivot_col_widths", true, MutationDomains::of(Dimensions)),
+            // A batch resize: deferred for the same reason (the mirrors are held
+            // through the inline pass), the same `Dimensions` announcement.
+            ("line_sizes", true, MutationDomains::of(Dimensions)),
             ("outline", true, MutationDomains::of(Outline)),
             ("pivot_definition", true, MutationDomains::of(Pivot)),
             ("pivot_create", true, MutationDomains::of(Pivot)),
@@ -5995,6 +6049,9 @@ mod restore_registry_tests {
             ("script_grid_cells", true, OBJ),
             ("sheet_merge_regions", true, OBJ),
             ("sheet_structural_snapshot", true, OBJ),
+            // A sheet's spill claims beside a structural snapshot (Insert/Delete
+            // Cells, insert/delete rows/columns): deferred, spill maps are last.
+            ("spill_claims", true, OBJ),
             ("obj_extension_data", true, OBJ),
             ("obj_cell_types", true, OBJ),
             ("obj_cell_behaviors", true, OBJ),
@@ -6114,6 +6171,13 @@ mod restore_registry_tests {
                 || *kind == "script_grid_cells"
                 || *kind == "sheet_merge_regions"
                 || *kind == "sheet_structural_snapshot"
+                // The spill maps are LAST in the lock order: taken after the grid
+                // locks drop, and before the cascade re-evaluates the origins.
+                || *kind == SPILL_CLAIMS_RESTORE_KIND
+                // A batch resize writes the width/height mirrors, which the inline
+                // pass holds (the pivot_col_widths reason, which the `pivot_`
+                // prefix happens to cover).
+                || *kind == crate::commands::dimensions::LINE_SIZES_RESTORE_KIND
                 || *kind == "report_restore"
                 || *kind == "calp_reset"
                 // The outline is its own per-sheet store, taken after the grid

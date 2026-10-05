@@ -1,6 +1,6 @@
 //! FILENAME: app/extensions/__tests__/dataMenuSelectionOwner.test.ts
 // PURPOSE: The Data- and Insert-menu doors whose TARGET is Core's selection --
-//          Sort A to Z / Z to A / Custom Sort, Remove Duplicates, Text to
+//          Remove Duplicates, Text to
 //          Columns, Subtotals, Consolidate, Data Form, What-If Data Table, Goal
 //          Seek, Data Validation, Advanced Filter, Insert Sparklines -- refuse
 //          with ONE toast and open/sort nothing while a selection owner holds
@@ -60,7 +60,6 @@ vi.mock("@api/lib", async (importOriginal) => ({
   }),
 }));
 
-import { registerSortMenuItems, setCurrentSelection as setSortSelection } from "../Sorting/handlers/dataMenuBuilder";
 import {
   registerRemoveDuplicatesMenuItem,
   setCurrentSelection as setRemoveDuplicatesSelection,
@@ -122,7 +121,6 @@ async function settle(): Promise<void> {
 
 beforeAll(async () => {
   const ctx = recordingContext();
-  registerSortMenuItems(ctx);
   registerRemoveDuplicatesMenuItem(ctx);
   registerTextToColumnsMenuItem(ctx);
   registerSubtotalsMenuItem();
@@ -135,7 +133,6 @@ beforeAll(async () => {
   await SparklinesExtension.activate(recordingContext());
 
   const sel = { startRow: 2, endRow: 6, startCol: 1, endCol: 3, activeRow: 2, activeCol: 1 };
-  setSortSelection(sel);
   setRemoveDuplicatesSelection(sel);
   setTextToColumnsSelection(sel);
   setSubtotalsSelection(sel);
@@ -158,9 +155,12 @@ afterEach(() => {
 
 /** [label, menu item id, the effect its door has when it acts] */
 const DOORS: [string, string, string][] = [
-  ["Data > Sort A to Z", "data:sort:ascending", "detectDataRegion"],
-  ["Data > Sort Z to A", "data:sort:descending", "detectDataRegion"],
-  ["Data > Custom Sort...", "data:sort:custom", "dialogs.show:sort-dialog"],
+  // Sort A to Z / Z to A / Custom Sort are not menu ACTIONS any more: since
+  // 2026-10-04 the Data menu items name the Sorting extension's commands
+  // (sort.ascending / sort.descending / sort.customDialog), which the Home
+  // tab's Sort & Filter menu runs too, and that one door's refusal is pinned
+  // in Sorting/__tests__/sortCommands.test.ts ("refuses on a canvas sheet and
+  // while an object owns the selection").
   ["Data > Remove Duplicates...", "data:removeDuplicates", "dialogs.show:remove-duplicates"],
   ["Data > Text to Columns...", "data:textToColumns", "dialogs.show:text-to-columns"],
   ["Data > Outline > Subtotals...", "data:outline:subtotals", "openDialog:subtotals"],

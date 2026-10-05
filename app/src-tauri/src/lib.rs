@@ -5227,6 +5227,10 @@ pub fn run() {
             commands::set_row_height,
             commands::get_row_height,
             commands::get_all_row_heights,
+            // Batch Row Height / Column Width over a selection span (runs),
+            // one undo step (the Home tab's Format menu).
+            commands::set_row_heights,
+            commands::set_column_widths,
             commands::set_rows_hidden,
             commands::set_cols_hidden,
             commands::get_user_hidden_rows,
@@ -5244,6 +5248,11 @@ pub fn run() {
             commands::apply_formatting,
             commands::apply_formatting_to_sheets,
             commands::apply_border_preset,
+            // Home tab = Excel's Home tab (2026-10-04): the grouped-sheet half
+            // of a border preset, and Increase/Decrease Decimal on the typed
+            // number format.
+            commands::apply_border_preset_to_sheets,
+            commands::adjust_number_format_decimals,
             commands::preview_number_format,
             commands::get_ribbon_number_formats,
             commands::get_style_count,
@@ -5251,6 +5260,12 @@ pub fn run() {
             commands::insert_columns,
             commands::delete_rows,
             commands::delete_columns,
+            // Excel's Insert Cells / Delete Cells (shift right/down/left/up
+            // inside the band the range covers).
+            commands::structure::structure_cells::insert_cells,
+            commands::structure::structure_cells::delete_cells,
+            // Delete Sheet asks first unless EVERY sheet-keyed store is empty.
+            commands::sheet_blank::sheet_is_blank,
             commands::shift_formula_for_fill,
             commands::shift_formulas_batch,
             commands::relocate_cell_references,

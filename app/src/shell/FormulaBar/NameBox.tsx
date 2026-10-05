@@ -46,21 +46,13 @@
 //      renders `displayName` verbatim, so the pane header and the box moved
 //      together with that one function.
 
-import React, { useState, useEffect, useRef, useCallback, useSyncExternalStore } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo, useSyncExternalStore } from "react";
 import {
   useGridContext,
-  setSelection,
-  scrollToCell,
   columnToLetter,
-  getMergeInfo,
   getNamedRangeForSelection,
   getAllNamedRanges,
   createNamedRange,
-  getNamedRange,
-  getSheets,
-  setActiveSheet,
-  setActiveSheetApi,
-  primeSheetSwitch,
   showToast,
   AppEvents,
   emitAppEvent,
@@ -87,32 +79,24 @@ import {
   subscribeExternalEdit,
   getExternalEditVersion,
   getExternalNameBoxAddress,
-  resolveExternalAddress,
   quoteSheetNameForFormula,
 } from "../../api/externalEdit";
 import type { NamedRange } from "../../api";
 // The selection-owner seam (BUG-0270 review): a selected OBJECT holds the
 // selection, and a new name must not be defined over the cell behind it.
 import { selectionRefusalFor } from "../../api/selectionOwner";
-import { resolveNamedRangeCoords } from "../../api/lib";
-import type { NamedRangeCoords } from "../../api/lib";
 import {
   getAllTables,
   getTableAtCell,
-  getTableByName,
   resolveStructuredReference,
 } from "../../api/backend";
-import type { Table } from "../../api/backend";
 // NOT Core's cell-edit flag (`setGlobalIsEditing`): this box is a text field,
 // and the flag means "Core's own cell edit is open". Raised here it had no
 // edit behind it, and an unmount while focused left it up for good (E12).
-import {
-  parseNameBoxAddress,
-  isAddressLike,
-  hasTableBracket,
-  parseStructuredReference,
-} from "./NameBox.address";
-import type { ParsedNameBoxAddress } from "./NameBox.address";
+import { isAddressLike } from "./NameBox.address";
+// Every navigation -- typed, picked from the list -- through the navigator the
+// Go To dialog also runs (NameBox.navigate.ts).
+import { createReferenceNavigator } from "./NameBox.navigate";
 import { NameBoxDropdown } from "./NameBoxDropdown";
 import * as S from "./NameBox.styles";
 
@@ -545,240 +529,20 @@ export function NameBox(): React.ReactElement {
     setInputValue(displayValue);
   }, [displayValue]);
 
-  const navigateToCell = useCallback(
-    async (row: number, col: number) => {
-      try {
-        const mergeInfo = await getMergeInfo(row, col);
-
-        if (mergeInfo) {
-          dispatch(
-            setSelection({
-              startRow: mergeInfo.startRow,
-              startCol: mergeInfo.startCol,
-              endRow: mergeInfo.endRow,
-              endCol: mergeInfo.endCol,
-              type: "cells",
-            })
-          );
-          dispatch(scrollToCell(mergeInfo.startRow, mergeInfo.startCol, false));
-        } else {
-          dispatch(
-            setSelection({
-              startRow: row,
-              startCol: col,
-              endRow: row,
-              endCol: col,
-              type: "cells",
-            })
-          );
-          dispatch(scrollToCell(row, col, false));
-        }
-      } catch (error) {
-        console.error("[NameBox] Failed to get merge info:", error);
-        dispatch(
-          setSelection({
-            startRow: row,
-            startCol: col,
-            endRow: row,
-            endCol: col,
-            type: "cells",
-          })
-        );
-        dispatch(scrollToCell(row, col, false));
-      }
-    },
-    [dispatch]
-  );
-
-  /** Select a block and bring its top-left into view. */
-  const selectRange = useCallback(
-    (range: {
-      startRow: number;
-      startCol: number;
-      endRow: number;
-      endCol: number;
-      type?: "cells" | "rows" | "columns";
-    }) => {
-      dispatch(
-        setSelection({
-          startRow: range.startRow,
-          startCol: range.startCol,
-          endRow: range.endRow,
-          endCol: range.endCol,
-          type: range.type ?? "cells",
-        })
-      );
-      dispatch(scrollToCell(range.startRow, range.startCol, false));
-    },
-    [dispatch]
-  );
-
   /**
-   * Switch the active sheet, the way a sheet-tab click does.
-   *
-   * The sequence is copied from SheetTabs' normal-mode tab click on purpose:
-   * without `primeSheetSwitch` the canvas keeps painting the OLD sheet's cells
-   * under the new sheet's name for a frame (BUG-0052), and without the
-   * SHEET_CHANGED announcement the tab strip goes on highlighting the sheet the
-   * user just left, because that is what SheetTabs reloads itself from.
+   * Every navigation this box makes goes through the ONE navigator Excel's Go
+   * To dialog (F5 / Ctrl+G) also runs -- NameBox.navigate.ts, handed to
+   * extensions through @api/referenceNavigation -- so the box and the dialog
+   * cannot disagree about what a reference, a name or a table means. Rebuilt
+   * when the active sheet changes, as the callbacks it replaced were.
    */
-  const switchToSheet = useCallback(
-    async (index: number) => {
-      window.dispatchEvent(
-        new CustomEvent("sheet:beforeSwitch", {
-          detail: {
-            oldSheetIndex: state.sheetContext.activeSheetIndex,
-            newSheetIndex: index,
-          },
-        })
-      );
-
-      const result = await setActiveSheetApi(index);
-      await primeSheetSwitch(result.activeIndex);
-      // By the index FIELD, never list position: object-backed sheets are
-      // absent from the list while indices stay true (see SheetTabs.sheetAt).
-      const activeSheet = result.sheets.find((s) => s.index === result.activeIndex);
-      const activeName = activeSheet?.name ?? "";
-
-      dispatch(
-        setActiveSheet(
-          result.activeIndex,
-          activeName,
-          activeSheet?.kind === "canvas" ? "canvas" : "grid",
-        ),
-      );
-      window.dispatchEvent(
-        new CustomEvent("sheet:normalSwitch", {
-          detail: { newSheetIndex: result.activeIndex, newSheetName: activeName },
-        })
-      );
-      emitAppEvent(AppEvents.SHEET_CHANGED, {
-        sheetIndex: result.activeIndex,
-        sheetName: activeName,
-      });
-    },
-    [dispatch, state.sheetContext.activeSheetIndex]
-  );
-
-  /**
-   * Go to a parsed address. Returns null on success, or the sentence to show the
-   * user — a Name Box entry that cannot be honoured must SAY so; reverting the
-   * text is indistinguishable from the app having ignored the keypress.
-   */
-  const goToAddress = useCallback(
-    async (address: ParsedNameBoxAddress): Promise<string | null> => {
-      // The sheet is found by NAME and addressed by its TRUE index (the list
-      // omits object-backed sheets, so a list position is not an index), and a
-      // CANVAS is refused before anything moves: selecting on it is a no-op
-      // and scrolling to a cell would scroll the page out of view.
-      const { sheets } = await getSheets();
-      const target = address.sheetName
-        ? sheets.find((s) => s.name.toLowerCase() === address.sheetName!.toLowerCase())
-        : sheets.find((s) => s.index === state.sheetContext.activeSheetIndex);
-      if (address.sheetName && !target) {
-        return `There is no sheet named "${address.sheetName}" in this workbook.`;
-      }
-      if (target?.kind === "canvas") {
-        return `"${target.name}" is a canvas: a canvas sheet holds objects, not cells, so there is no cell to go to.`;
-      }
-      if (target && target.index !== state.sheetContext.activeSheetIndex) {
-        await switchToSheet(target.index);
-      }
-
-      // Merge expansion is a SINGLE-CELL behaviour. Expanding a typed range to
-      // its top-left cell's merged block would silently select something other
-      // than what the user asked for.
-      if (address.isSingleCell) {
-        await navigateToCell(address.startRow, address.startCol);
-      } else {
-        selectRange(address);
-      }
-      return null;
-    },
-    [navigateToCell, selectRange, switchToSheet, state.sheetContext.activeSheetIndex]
-  );
-
-  /**
-   * Go to a defined name. Returns null on success, or the sentence to show.
-   *
-   * Resolution is the BACKEND's (`resolve_named_range_coords`), not a regex over
-   * `refersTo` as it used to be here and in the dropdown. That regex dropped the
-   * sheet prefix, so a workbook-scoped name pointing at Sheet3 selected those
-   * coordinates on whatever sheet was active — a silent wrong answer — and when
-   * it simply did not match it closed the box having done nothing at all.
-   */
-  const goToNamedRange = useCallback(
-    async (nr: NamedRange): Promise<string | null> => {
-      let coords: NamedRangeCoords;
-      try {
-        coords = await resolveNamedRangeCoords(nr.name);
-      } catch {
-        return `"${nr.name}" does not refer to a range that can be selected (${nr.refersTo}).`;
-      }
-
-      {
-        const { sheets } = await getSheets();
-        const target = sheets.find((s) => s.index === coords.sheetIndex);
-        if (!target) {
-          return `"${nr.name}" refers to a sheet that is no longer in this workbook.`;
-        }
-        if (target.kind === "canvas") {
-          return `"${nr.name}" refers to "${target.name}", which is a canvas: a canvas sheet holds objects, not cells, so there is no cell to go to.`;
-        }
-        if (coords.sheetIndex !== state.sheetContext.activeSheetIndex) {
-          await switchToSheet(coords.sheetIndex);
-        }
-      }
-
-      selectRange(coords);
-      return null;
-    },
-    [selectRange, switchToSheet, state.sheetContext.activeSheetIndex]
-  );
-
-  /**
-   * Go to a structured (table) reference. Returns null on success, or the
-   * sentence to show.
-   *
-   * Resolution is the BACKEND's `resolve_structured_reference`, for the same
-   * reason a defined name is: it knows which SHEET the table lives on, and it
-   * owns where a table's data starts and stops. The Name Box hands it the text
-   * and reads back coordinates.
-   */
-  const goToStructuredReference = useCallback(
-    async (reference: string): Promise<string | null> => {
-      let result;
-      try {
-        result = await resolveStructuredReference(reference);
-      } catch (error) {
-        console.error("[NameBox] Failed to resolve a table reference:", error);
-        return `Could not resolve "${reference}": ${String(error)}`;
-      }
-      if (!result.success || !result.resolved) {
-        return (
-          result.error ?? `"${reference}" does not refer to a range that can be selected.`
-        );
-      }
-
-      const coords = result.resolved;
-      {
-        const { sheets } = await getSheets();
-        const target = sheets.find((s) => s.index === coords.sheetIndex);
-        if (!target) {
-          return `"${reference}" refers to a sheet that is no longer in this workbook.`;
-        }
-        if (target.kind === "canvas") {
-          return `"${reference}" refers to "${target.name}", which is a canvas: a canvas sheet holds objects, not cells, so there is no cell to go to.`;
-        }
-        if (coords.sheetIndex !== state.sheetContext.activeSheetIndex) {
-          await switchToSheet(coords.sheetIndex);
-        }
-      }
-
-      selectRange(coords);
-      return null;
-    },
-    [selectRange, switchToSheet, state.sheetContext.activeSheetIndex],
+  const navigator = useMemo(
+    () =>
+      createReferenceNavigator({
+        dispatch,
+        activeSheetIndex: () => state.sheetContext.activeSheetIndex,
+      }),
+    [dispatch, state.sheetContext.activeSheetIndex],
   );
 
   /** Leave edit mode after an entry that was honoured. */
@@ -796,41 +560,6 @@ export function NameBox(): React.ReactElement {
     inputRef.current?.select();
   }, []);
 
-  /**
-   * Branch 0 of EVERY navigation this box makes -- a typed entry and a pick
-   * from the name list alike: ask the extension that owns external addresses
-   * first. "none": nobody claimed the text, the box goes on with its own
-   * branches. "done": the owner selected its cells. "refused": the owner said
-   * why not, and the box has shown it.
-   *
-   * One helper for both doors ON PURPOSE. The owner is also where the box's
-   * refusal during an edit lives: while a floating grid's formula picks a
-   * reference (or is parked on another sheet) the floating-range resolver
-   * claims EVERY entry and refuses it ("Finish the formula ... first"), because
-   * navigating would end that edit through `sheet:beforeSwitch`, which cannot
-   * return to the edit's sheet -- the half-typed formula was stored as text.
-   * The list pick skipped this branch, so picking a defined name on another
-   * sheet did exactly that.
-   */
-  const goToExternalAddress = useCallback(
-    async (text: string): Promise<"none" | "done" | "refused"> => {
-      const external = resolveExternalAddress(text);
-      if (!external) return "none";
-      // On another sheet the box switches there first with its own
-      // `switchToSheet` (a canvas host included).
-      if (external.hostSheetIndex !== state.sheetContext.activeSheetIndex) {
-        await switchToSheet(external.hostSheetIndex);
-      }
-      const problem = await external.go();
-      if (problem) {
-        reportProblem(problem);
-        return "refused";
-      }
-      return "done";
-    },
-    [reportProblem, switchToSheet, state.sheetContext.activeSheetIndex],
-  );
-
   const handleKeyDown = useCallback(
     async (e: React.KeyboardEvent<HTMLInputElement>) => {
       e.stopPropagation();
@@ -843,99 +572,17 @@ export function NameBox(): React.ReactElement {
           return;
         }
 
-        // 0. An EXTERNAL address ("Float1!B2"): a floating grid's cell, claimed
-        //    by the extension that owns it. First, because it has the SHAPE of
-        //    a sheet-qualified address and branch 1 would refuse it with "There
-        //    is no sheet named Float1" -- the text this box itself displays for
-        //    a selected floating-grid cell. (See goToExternalAddress: the
-        //    list pick asks the same question.)
-        const external = await goToExternalAddress(value);
-        if (external === "refused") return;
-        if (external === "done") {
-          finishEditing();
+        // 0-4. An EXTERNAL address (a floating grid's cell, asked first: it
+        //      has the shape of a sheet-qualified address), an ADDRESS or
+        //      range on this sheet or another, a STRUCTURED reference, a DEFINED
+        //      NAME, a TABLE name -- in that order, by the navigator Go To also
+        //      runs (NameBox.navigate.ts, where each branch is explained).
+        const outcome = await navigator.navigate(value);
+        if (outcome.kind === "problem") {
+          reportProblem(outcome.message);
           return;
         }
-
-        // 1. An ADDRESS: cell or range, relative or absolute, this sheet or
-        //    another. `parseNameBoxAddress` returns null both for "not an
-        //    address" and for a malformed one, which is deliberate — a
-        //    malformed address is indistinguishable from a name until the name
-        //    lookup below has also missed.
-        const address = parseNameBoxAddress(value);
-        if (address) {
-          const problem = await goToAddress(address);
-          if (problem) {
-            reportProblem(problem);
-            return;
-          }
-          finishEditing();
-          return;
-        }
-
-        // 2. A STRUCTURED REFERENCE: Sales[Margin], Sales[#All], Sales[#Totals].
-        //    Decided by the BRACKET, before the name branches, because '[' is
-        //    neither an address character nor a name character — every one of
-        //    these spellings used to fall through all three branches and be
-        //    refused with a sentence about cell references, including the exact
-        //    text this box had just displayed.
-        if (hasTableBracket(value)) {
-          if (!parseStructuredReference(value)) {
-            reportProblem(
-              `"${value}" is not a table reference this box can read. ` +
-                "Type a table name (Sales), a column (Sales[Margin]) or a part " +
-                "of it (Sales[#All], Sales[#Headers], Sales[#Totals]).",
-            );
-            return;
-          }
-          const problem = await goToStructuredReference(value);
-          if (problem) {
-            reportProblem(problem);
-            return;
-          }
-          finishEditing();
-          return;
-        }
-
-        // 3. An existing DEFINED NAME.
-        let existing: NamedRange | null = null;
-        try {
-          existing = await getNamedRange(value);
-        } catch (error) {
-          console.error("[NameBox] Failed to look up name:", error);
-        }
-        if (existing) {
-          const problem = await goToNamedRange(existing);
-          if (problem) {
-            reportProblem(problem);
-            return;
-          }
-          finishEditing();
-          return;
-        }
-
-        // 4. A TABLE NAME. Tables and defined names share one namespace — the
-        //    backend refuses a name that would shadow a table — so this cannot
-        //    be reached by anything branch 3 could have answered. A bare table
-        //    name means the table's DATA, which is what Excel selects and what
-        //    the box displays for that block.
-        //
-        //    The lookup is by NAME rather than by trying `[#Data]` and reading
-        //    the error text: a failure here must fall through to the
-        //    create-a-name branch below, and telling "no such table" from "that
-        //    table cannot answer" by string-matching a backend message is the
-        //    kind of test that passes until someone rewords the message.
-        let table: Table | null = null;
-        try {
-          table = await getTableByName(value);
-        } catch (error) {
-          console.error("[NameBox] Failed to look up table:", error);
-        }
-        if (table) {
-          const problem = await goToStructuredReference(`${table.name}[#Data]`);
-          if (problem) {
-            reportProblem(problem);
-            return;
-          }
+        if (outcome.kind === "done") {
           finishEditing();
           return;
         }
@@ -1013,15 +660,11 @@ export function NameBox(): React.ReactElement {
     [
       inputValue,
       displayValue,
-      goToExternalAddress,
-      goToAddress,
-      goToNamedRange,
-      goToStructuredReference,
+      navigator,
       finishEditing,
       reportProblem,
       state.selection,
       state.sheetContext,
-      switchToSheet,
       shownExternal,
     ]
   );
@@ -1098,12 +741,17 @@ export function NameBox(): React.ReactElement {
       // Branch 0 first, exactly as for a typed entry: while a floating grid's
       // formula picks a reference (or is parked), its owner refuses every
       // navigation -- a list pick included.
-      if ((await goToExternalAddress(nr.name)) !== "none") return;
+      const external = await navigator.goToExternalAddress(nr.name);
+      if (external.kind === "refused") {
+        reportProblem(external.message);
+        return;
+      }
+      if (external.kind === "done") return;
       // A table row goes through the table route: `resolve_named_range_coords`
       // knows nothing about tables and would refuse it, which would read as the
       // list offering something it cannot open.
       if (dropdownTableNames.has(nr.name)) {
-        const tableProblem = await goToStructuredReference(`${nr.name}[#Data]`);
+        const tableProblem = await navigator.goToStructuredReference(`${nr.name}[#Data]`);
         if (tableProblem) reportProblem(tableProblem);
         return;
       }
@@ -1111,10 +759,10 @@ export function NameBox(): React.ReactElement {
       // name lives on. The regex this replaced ignored the sheet prefix, so
       // picking a name defined on another sheet selected those coordinates on
       // the sheet you were already looking at.
-      const problem = await goToNamedRange(nr);
+      const problem = await navigator.goToNamedRange(nr);
       if (problem) reportProblem(problem);
     },
-    [dropdownTableNames, goToExternalAddress, goToNamedRange, goToStructuredReference, reportProblem]
+    [dropdownTableNames, navigator, reportProblem]
   );
 
   const handleDropdownClose = useCallback(() => {

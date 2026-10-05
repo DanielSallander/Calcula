@@ -71,7 +71,14 @@ describe("CommandRegistry", () => {
   it("executes via gridCommands bridge when no local handler", async () => {
     vi.mocked(gridCommands.execute).mockResolvedValue(true);
     await registry.execute(CoreCommands.CUT);
-    expect(gridCommands.execute).toHaveBeenCalledWith("cut");
+    // No args from the caller: none forwarded.
+    expect(gridCommands.execute).toHaveBeenCalledWith("cut", undefined);
+  });
+
+  it("forwards args through the gridCommands bridge (AutoFit's { growOnly })", async () => {
+    vi.mocked(gridCommands.execute).mockResolvedValue(true);
+    await registry.execute(CoreCommands.AUTOFIT_ROW_HEIGHT, { growOnly: true });
+    expect(gridCommands.execute).toHaveBeenCalledWith("autoFitRowHeight", { growOnly: true });
   });
 
   it("prefers local handler over gridCommands bridge", async () => {

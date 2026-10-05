@@ -238,21 +238,40 @@ function borderSideWord(side: EmuBorderSide): { style: string; color: string } {
   return { style: side.style, color: side.color };
 }
 
-/** parse_text_rotation (styles.rs). */
+/**
+ * parse_text_rotation (styles.rs), branch for branch:
+ *  - trimmed and lowercased first;
+ *  - the named forms and their aliases, "vertical" (stacked text) included;
+ *  - otherwise an optional "custom:" prefix, then a Rust `i16` parse (an
+ *    optional sign and digits ONLY: "", "45.5" and "abc" fail, and so does a
+ *    value outside -32768..32767), clamped to -90..90, with 0 / 90 / -90
+ *    canonicalised to the named forms;
+ *  - anything else is an Err -- and apply_formatting parses BEFORE its gates,
+ *    so the whole call is refused and nothing is written (the backend used to
+ *    fall through to None here, silently clearing a rotation).
+ * Throws the backend's sentence, as the rejected invoke would.
+ */
 function parseTextRotation(rotation: string): string {
-  switch (rotation) {
+  const lower = rotation.trim().toLowerCase();
+  switch (lower) {
     case "none": case "0": return "none";
     case "rotate90": case "90": case "up": return "rotate90";
     case "rotate270": case "270": case "-90": case "down": return "rotate270";
+    case "vertical": return "vertical";
     default: {
-      const custom = rotation.startsWith("custom:") ? Number(rotation.slice(7)) : NaN;
-      if (Number.isFinite(custom)) {
-        if (custom === 0) return "none";
-        if (custom === 90) return "rotate90";
-        if (custom === -90) return "rotate270";
-        return `custom:${custom}`;
+      const angleText = (lower.startsWith("custom:") ? lower.slice("custom:".length) : lower).trim();
+      const angle = /^[+-]?\d+$/.test(angleText) ? Number(angleText) : NaN;
+      if (!Number.isInteger(angle) || angle < -32768 || angle > 32767) {
+        throw new Error(
+          `Unknown text rotation "${rotation}": expected none, rotate90, rotate270, ` +
+            "vertical or custom:N with N between -90 and 90.",
+        );
       }
-      return "none";
+      const clamped = Math.max(-90, Math.min(90, angle));
+      if (clamped === 0) return "none";
+      if (clamped === 90) return "rotate90";
+      if (clamped === -90) return "rotate270";
+      return `custom:${clamped}`;
     }
   }
 }
@@ -439,6 +458,9 @@ function makeFormatLib() {
     cancelUndoTransaction: vi.fn(async () => undefined),
     applyFormatting: vi.fn(async (rows: number[], cols: number[], format: Record<string, unknown>) => {
       formattingCalls.push([rows, cols, format]);
+      // ParsedFormatting (styles.rs) parses the rotation BEFORE any gate or
+      // write: a bad one refuses the WHOLE call, so no cell changes.
+      if (format.textRotation !== undefined) parseTextRotation(format.textRotation as string);
       for (const row of rows) {
         for (const col of cols) {
           const next = applyFormatToStyle(styles[styleIndexAt(row, col)], format);
@@ -608,6 +630,47 @@ describe("the round-trip contract (setRangeFormat -> getRangeFormat)", () => {
   it("a UI-set custom rotation reads back in the custom:N form", () => {
     const style = emuStyleToStyleData({ ...defaultStyle(), textRotation: "custom:45" });
     expect(styleDataToScriptFormat(style as never).textRotation).toBe("custom:45");
+  });
+
+  // The Home tab's Orientation menu (2026-10-04) writes "vertical" (Excel's
+  // stacked Vertical Text) and "custom:±45"; the backend canonicalises 0 / 90
+  // / -90 to the named forms and clamps a wider angle. Each must read back the
+  // way StyleData emits it -- and the emulator has to say so, or the
+  // round-trip above is a test of a fiction.
+  it("every rotation the backend accepts reads back in its canonical form", async () => {
+    const cases: Array<[written: string, readBack: string]> = [
+      ["vertical", "vertical"],
+      ["custom:45", "custom:45"],
+      ["custom:-45", "custom:-45"],
+      ["custom:0", "none"],
+      ["custom:90", "rotate90"],
+      ["custom:-90", "rotate270"],
+      ["custom:120", "rotate90"],
+      ["ROTATE270", "rotate270"],
+      [" Vertical ", "vertical"],
+    ];
+    for (const [written, readBack] of cases) {
+      const { lib } = makeFormatLib();
+      await applyRangeFormat(asLib(lib), undefined, 0, 0, 0, 0, { textRotation: written } as ScriptRangeFormat);
+      const cell = await readCellFormat(asLib(lib), undefined, 0, 0);
+      expect(cell.textRotation, written).toBe(readBack);
+    }
+  });
+
+  it("an unknown rotation is REFUSED before anything is written (it used to clear the rotation silently)", async () => {
+    for (const bad of ["sideways", "custom:", "custom:45.5", "custom:abc", "custom:40000"]) {
+      const { lib } = makeFormatLib();
+      // An existing rotation, which the old fall-through to "none" destroyed.
+      await applyRangeFormat(asLib(lib), undefined, 0, 0, 0, 0, { textRotation: "rotate90" });
+      await expect(
+        applyRangeFormat(asLib(lib), undefined, 0, 0, 0, 0, { bold: true, textRotation: bad } as ScriptRangeFormat),
+        bad,
+      ).rejects.toThrow(/Unknown text rotation/);
+      const cell = await readCellFormat(asLib(lib), undefined, 0, 0);
+      // Refused WHOLE: neither the rotation nor the bold that came with it.
+      expect(cell.textRotation, bad).toBe("rotate90");
+      expect(cell.bold, bad).toBe(false);
+    }
   });
 
   it("a recognized number-format code reads back as the backend's name", async () => {

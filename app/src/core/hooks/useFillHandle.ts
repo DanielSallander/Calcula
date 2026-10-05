@@ -22,10 +22,11 @@ import { checkRangeGuards } from "../lib/editGuards";
 import { DEFAULT_AUTO_SCROLL_CONFIG } from "./useMouseSelection/constants";
 import { getGridRegions } from "../../api/gridOverlays";
 import {
-  detectPattern,
+  planFillLine,
   processPendingFills,
   replicateMergeRegions,
   type FillDirection,
+  type FillLineCell,
   type PendingFill,
 } from "../lib/fillEngine";
 import { alertAsync } from "../lib/dialogs";
@@ -496,129 +497,46 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
         return styleMap.get(`${row},${col}`) || 0;
       };
 
-      // Build source values arrays and collect pending fills
-      const sourceValues: string[][] = [];
+      // One line per column (vertical fill) or row (horizontal), planned by
+      // the ONE per-line planner (fillEngine.planFillLine) that Fill > Series
+      // > AutoFill also runs -- the formula-filtered pattern, the fill index
+      // and the cycling source live there, not here (review finding (j)).
+      const sourceCell = (row: number, col: number): FillLineCell => ({
+        row,
+        col,
+        value: getSourceValue(row, col),
+        styleIndex: getSourceStyle(row, col),
+      });
       const pendingFills: PendingFill[] = [];
 
       if (fillState.direction === "down" || fillState.direction === "up") {
-        // Get values column by column from the map
+        const down = fillState.direction === "down";
         for (let c = selMinCol; c <= selMaxCol; c++) {
-          const colValues: string[] = [];
-          for (let r = selMinRow; r <= selMaxRow; r++) {
-            colValues.push(getSourceValue(r, c));
-          }
-          sourceValues.push(colValues);
-        }
-
-        const startRow = fillState.direction === "down" ? selMaxRow + 1 : fillState.targetRow;
-        const endRow = fillState.direction === "down" ? fillState.targetRow : selMinRow - 1;
-        const sourceCount = selMaxRow - selMinRow + 1;
-
-        for (let c = selMinCol; c <= selMaxCol; c++) {
-          const colIdx = c - selMinCol;
-          const nonFormulaValues = sourceValues[colIdx].filter(v => !v.startsWith("="));
-          const pattern = detectPattern(nonFormulaValues.length > 0 ? nonFormulaValues : sourceValues[colIdx]);
-
-          if (fillState.direction === "down") {
-            for (let r = startRow; r <= endRow; r++) {
-              const fillIndex = r - selMinRow;
-              const sourceIndex = fillIndex % sourceCount;
-              const sourceValue = sourceValues[colIdx][sourceIndex];
-              const sourceRow = selMinRow + sourceIndex;
-
-              pendingFills.push({
-                row: r,
-                col: c,
-                sourceValue,
-                sourceRow,
-                sourceCol: c,
-                pattern,
-                allSourceValues: sourceValues[colIdx],
-                fillIndex,
-                sourceStyleIndex: getSourceStyle(sourceRow, c),
-              });
-            }
+          const source: FillLineCell[] = [];
+          for (let r = selMinRow; r <= selMaxRow; r++) source.push(sourceCell(r, c));
+          // Targets nearest the source first: below it going down, above it
+          // (bottom-most first) going up.
+          const targets: Array<{ row: number; col: number }> = [];
+          if (down) {
+            for (let r = selMaxRow + 1; r <= fillState.targetRow; r++) targets.push({ row: r, col: c });
           } else {
-            // Fill up - mirror from bottom of selection upward
-            for (let r = endRow; r >= startRow; r--) {
-              const fillIndex = selMaxRow - r;
-              const sourceIndex = fillIndex % sourceCount;
-              const sourceValue = sourceValues[colIdx][sourceCount - 1 - sourceIndex];
-              const sourceRow = selMaxRow - sourceIndex;
-
-              pendingFills.push({
-                row: r,
-                col: c,
-                sourceValue,
-                sourceRow,
-                sourceCol: c,
-                pattern,
-                allSourceValues: sourceValues[colIdx].slice().reverse(),
-                fillIndex,
-                sourceStyleIndex: getSourceStyle(sourceRow, c),
-              });
-            }
+            for (let r = selMinRow - 1; r >= fillState.targetRow; r--) targets.push({ row: r, col: c });
           }
+          pendingFills.push(...planFillLine({ source, targets, backward: !down }));
         }
       } else {
         // Horizontal fill (left/right)
+        const right = fillState.direction === "right";
         for (let r = selMinRow; r <= selMaxRow; r++) {
-          const rowValues: string[] = [];
-          for (let c = selMinCol; c <= selMaxCol; c++) {
-            rowValues.push(getSourceValue(r, c));
-          }
-          sourceValues.push(rowValues);
-        }
-
-        const startCol = fillState.direction === "right" ? selMaxCol + 1 : fillState.targetCol;
-        const endCol = fillState.direction === "right" ? fillState.targetCol : selMinCol - 1;
-        const sourceCount = selMaxCol - selMinCol + 1;
-
-        for (let r = selMinRow; r <= selMaxRow; r++) {
-          const rowIdx = r - selMinRow;
-          const nonFormulaValues = sourceValues[rowIdx].filter(v => !v.startsWith("="));
-          const pattern = detectPattern(nonFormulaValues.length > 0 ? nonFormulaValues : sourceValues[rowIdx]);
-
-          if (fillState.direction === "right") {
-            for (let c = startCol; c <= endCol; c++) {
-              const fillIndex = c - selMinCol;
-              const sourceIndex = fillIndex % sourceCount;
-              const sourceValue = sourceValues[rowIdx][sourceIndex];
-              const sourceCol = selMinCol + sourceIndex;
-
-              pendingFills.push({
-                row: r,
-                col: c,
-                sourceValue,
-                sourceRow: r,
-                sourceCol,
-                pattern,
-                allSourceValues: sourceValues[rowIdx],
-                fillIndex,
-                sourceStyleIndex: getSourceStyle(r, sourceCol),
-              });
-            }
+          const source: FillLineCell[] = [];
+          for (let c = selMinCol; c <= selMaxCol; c++) source.push(sourceCell(r, c));
+          const targets: Array<{ row: number; col: number }> = [];
+          if (right) {
+            for (let c = selMaxCol + 1; c <= fillState.targetCol; c++) targets.push({ row: r, col: c });
           } else {
-            // Fill left - mirror from right of selection leftward
-            for (let c = endCol; c >= startCol; c--) {
-              const fillIndex = selMaxCol - c;
-              const sourceIndex = fillIndex % sourceCount;
-              const sourceValue = sourceValues[rowIdx][sourceCount - 1 - sourceIndex];
-              const sourceCol = selMaxCol - sourceIndex;
-
-              pendingFills.push({
-                row: r,
-                col: c,
-                sourceValue,
-                sourceRow: r,
-                sourceCol,
-                pattern,
-                allSourceValues: sourceValues[rowIdx].slice().reverse(),
-                fillIndex,
-                sourceStyleIndex: getSourceStyle(r, sourceCol),
-              });
-            }
+            for (let c = selMinCol - 1; c >= fillState.targetCol; c--) targets.push({ row: r, col: c });
           }
+          pendingFills.push(...planFillLine({ source, targets, backward: !right }));
         }
       }
 
@@ -814,43 +732,17 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
         return styleMap.get(`${row},${col}`) || 0;
       };
 
-      const sourceValues: string[][] = [];
+      // Down to the edge, one line per column, through the ONE per-line
+      // planner (fillEngine.planFillLine), as the drag does.
       const pendingFills: PendingFill[] = [];
-
-      // Build source values from map
       for (let c = selMinCol; c <= selMaxCol; c++) {
-        const colValues: string[] = [];
+        const source: FillLineCell[] = [];
         for (let r = selMinRow; r <= selMaxRow; r++) {
-          colValues.push(getSourceValue(r, c));
+          source.push({ row: r, col: c, value: getSourceValue(r, c), styleIndex: getSourceStyle(r, c) });
         }
-        sourceValues.push(colValues);
-      }
-
-      const sourceCount = selMaxRow - selMinRow + 1;
-
-      for (let c = selMinCol; c <= selMaxCol; c++) {
-        const colIdx = c - selMinCol;
-        const nonFormulaValues = sourceValues[colIdx].filter(v => !v.startsWith("="));
-        const pattern = detectPattern(nonFormulaValues.length > 0 ? nonFormulaValues : sourceValues[colIdx]);
-
-        for (let r = selMaxRow + 1; r <= edgeRow; r++) {
-          const fillIndex = r - selMinRow;
-          const sourceIndex = fillIndex % sourceCount;
-          const sourceValue = sourceValues[colIdx][sourceIndex];
-          const sourceRow = selMinRow + sourceIndex;
-
-          pendingFills.push({
-            row: r,
-            col: c,
-            sourceValue,
-            sourceRow,
-            sourceCol: c,
-            pattern,
-            allSourceValues: sourceValues[colIdx],
-            fillIndex,
-            sourceStyleIndex: getSourceStyle(sourceRow, c),
-          });
-        }
+        const targets: Array<{ row: number; col: number }> = [];
+        for (let r = selMaxRow + 1; r <= edgeRow; r++) targets.push({ row: r, col: c });
+        pendingFills.push(...planFillLine({ source, targets }));
       }
 
       // OPTIMIZATION: Process all fills using batch formula shifting

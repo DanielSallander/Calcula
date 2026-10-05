@@ -84,6 +84,7 @@ import {
   type PivotView,
 } from "../helpers/pivot-live";
 import { clickPeriod, periodPoint, timelineLanded, timelineRange, timelineRow, type TimelineRow } from "../helpers/timelines";
+import { homeControl } from "../helpers/homeTab";
 
 const TMP = os.tmpdir();
 
@@ -2536,7 +2537,9 @@ test.describe("H. table slicers, script batches, the model field pane", () => {
       // Home > Cell Styles > Good on a plain selection: one step.
       await grid.selectRange("C3", "C4");
       const depth = (await undoState(page)).undoDepth;
-      await page.locator('[data-testid="fmt-cellStyles"]').first().click();
+      // Styles is a collapsed group on the 1280px harness window (Excel sheds it
+      // first); homeControl opens its flyout when it has to.
+      await (await homeControl(page, "fmt-cellStyles")).click();
       const good = page.locator('[data-testid="cell-styles-gallery"]').getByText("Good", { exact: true }).first();
       await good.click();
       await eventually(() => styleOf(2, 2), (s) => s !== 0, "Home > Cell Styles > Good styled nothing");

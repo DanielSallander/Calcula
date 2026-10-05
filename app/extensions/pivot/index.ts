@@ -28,6 +28,7 @@ import type { AutoFitColumnContribution, AutoFitRowContribution } from "@api";
 import { emitAppEvent, onAppEvent } from "@api/events";
 import { drawObjectScriptBadgeIfPresent } from "@api/objectScriptBadge";
 import { pivotMergeGuard, PIVOT_MERGE_GUARDED_COMMANDS } from "./lib/pivotMergeGuard";
+import { registerPivotStructuralGuards } from "./lib/pivotStructuralGuard";
 
 import { PivotEvents } from "../_shared/lib/pivotEvents";
 import type { PivotProgressEvent } from "../_shared/lib/pivotEvents";
@@ -1263,84 +1264,15 @@ function activate(context: ExtensionContext): void {
   // Register structural command guards - block insert/delete that would affect pivot regions
   const pivotStructuralGuardMessage = "We can't make this change for the selected cells because it will affect a PivotTable. Use the field list to change the report. If you are trying to insert or delete cells, move the PivotTable and try again.";
 
-  // Insert row: only block if the insertion point is strictly inside the pivot
-  // (inserting at startRow shifts the whole pivot down — that's safe)
+  // Insert / Delete Sheet Rows / Columns: refused when they would cut into a
+  // PivotTable, for EVERY Ctrl+click block (the commands act on every block
+  // since the Home tab programme; these guards used to read only the main
+  // range). Insert is refused only strictly inside a pivot -- inserting at its
+  // first row / column shifts it whole, which is safe -- and Delete on any
+  // overlap. The rules and why each block may be judged on its own are in
+  // lib/pivotStructuralGuard.ts.
   cleanupFunctions.push(
-    gridCommands.registerGuard(["insertRow"], (selection) => {
-      if (!selection) return true;
-      const regions = getCachedRegions();
-      if (regions.length === 0) return true;
-
-      const minRow = Math.min(selection.startRow, selection.endRow);
-      const maxRow = Math.max(selection.startRow, selection.endRow);
-
-      for (const region of regions) {
-        // Block if any part of the selection is strictly inside the pivot range
-        if (minRow <= region.endRow && maxRow > region.startRow) {
-          return pivotStructuralGuardMessage;
-        }
-      }
-      return true;
-    })
-  );
-
-  // Delete row: block any overlap with the pivot region (deleting any pivot row is destructive)
-  cleanupFunctions.push(
-    gridCommands.registerGuard(["deleteRow"], (selection) => {
-      if (!selection) return true;
-      const regions = getCachedRegions();
-      if (regions.length === 0) return true;
-
-      const minRow = Math.min(selection.startRow, selection.endRow);
-      const maxRow = Math.max(selection.startRow, selection.endRow);
-
-      for (const region of regions) {
-        if (minRow <= region.endRow && maxRow >= region.startRow) {
-          return pivotStructuralGuardMessage;
-        }
-      }
-      return true;
-    })
-  );
-
-  // Insert column: only block if the insertion point is strictly inside the pivot
-  // (inserting at startCol shifts the whole pivot right — that's safe)
-  cleanupFunctions.push(
-    gridCommands.registerGuard(["insertColumn"], (selection) => {
-      if (!selection) return true;
-      const regions = getCachedRegions();
-      if (regions.length === 0) return true;
-
-      const minCol = Math.min(selection.startCol, selection.endCol);
-      const maxCol = Math.max(selection.startCol, selection.endCol);
-
-      for (const region of regions) {
-        // Block if any part of the selection is strictly inside the pivot range
-        if (minCol <= region.endCol && maxCol > region.startCol) {
-          return pivotStructuralGuardMessage;
-        }
-      }
-      return true;
-    })
-  );
-
-  // Delete column: block any overlap with the pivot region (deleting any pivot column is destructive)
-  cleanupFunctions.push(
-    gridCommands.registerGuard(["deleteColumn"], (selection) => {
-      if (!selection) return true;
-      const regions = getCachedRegions();
-      if (regions.length === 0) return true;
-
-      const minCol = Math.min(selection.startCol, selection.endCol);
-      const maxCol = Math.max(selection.startCol, selection.endCol);
-
-      for (const region of regions) {
-        if (minCol <= region.endCol && maxCol >= region.startCol) {
-          return pivotStructuralGuardMessage;
-        }
-      }
-      return true;
-    })
+    registerPivotStructuralGuards(gridCommands, getCachedRegions, pivotStructuralGuardMessage),
   );
 
   // Merging or unmerging cells of a PivotTable: refused for every block of

@@ -2,12 +2,13 @@
 // PURPOSE: Font tab for the Format Cells dialog.
 // CONTEXT: Excel-style font picker with family, style, size, underline, color, and preview.
 
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import styled from "styled-components";
 import { useFormatCellsStore } from "../hooks/useFormatCellsState";
 import { FONT_LIST, FONT_SIZES, THEME_FONTS } from "../../../_shared/lib/fontList";
 import { ColorPicker } from "../components/ColorPicker";
 import { getCachedTheme } from "@api/theme";
+import { parseFontSize } from "../lib/fontValues";
 
 const v = (name: string) => `var(${name})`;
 
@@ -67,7 +68,25 @@ export function FontTab(): React.ReactElement {
   // Size filter
   const [sizeFilter, setSizeFilter] = useState(String(fontSize));
 
+  // BOTH FIELDS FOLLOW THE STORE. They used to copy it once, at mount -- and
+  // the dialog's style load lands AFTER mount, so a dialog opened straight on
+  // this tab (the Home tab's Font dialog launcher does exactly that) showed
+  // "11" and "system-ui" whatever the cell carried. A value the field itself
+  // just wrote is not echoed back, so typing "10." on the way to "10.5" is not
+  // overwritten mid-keystroke.
+  const sizeWrittenByField = useRef<number | null>(null);
+  useEffect(() => {
+    if (sizeWrittenByField.current !== fontSize) setSizeFilter(String(fontSize));
+    sizeWrittenByField.current = null;
+  }, [fontSize]);
+  const familyWrittenByField = useRef<string | null>(null);
+  useEffect(() => {
+    if (familyWrittenByField.current !== fontFamily) setFontFilter(fontFamily);
+    familyWrittenByField.current = null;
+  }, [fontFamily]);
+
   const handleFontSelect = (font: string) => {
+    familyWrittenByField.current = font;
     setFontFamily(font);
     setFontFilter(font);
   };
@@ -82,11 +101,15 @@ export function FontTab(): React.ReactElement {
     setSizeFilter(String(size));
   };
 
+  // HALF POINTS FROM 1 TO 409 (lib/fontValues.ts): a size between half points
+  // is rounded, one outside the range is not taken (the backend would refuse
+  // the WHOLE OK for it). Leaving the field shows the size that is really set.
   const handleSizeInputChange = (val: string) => {
     setSizeFilter(val);
-    const num = parseFloat(val);
-    if (!isNaN(num) && num > 0 && num <= 409) {
-      setFontSize(num);
+    const size = parseFontSize(val);
+    if (size !== null) {
+      sizeWrittenByField.current = size;
+      setFontSize(size);
     }
   };
 
@@ -99,6 +122,8 @@ export function FontTab(): React.ReactElement {
           <FieldLabel>Font:</FieldLabel>
           <FilterInput
             value={fontFilter}
+            aria-label="Font"
+            data-testid="fc-font-name"
             onChange={(e) => {
               setFontFilter(e.target.value);
             }}
@@ -158,7 +183,10 @@ export function FontTab(): React.ReactElement {
           <FieldLabel>Size:</FieldLabel>
           <FilterInput
             value={sizeFilter}
+            aria-label="Size"
+            data-testid="fc-font-size"
             onChange={(e) => handleSizeInputChange(e.target.value)}
+            onBlur={() => setSizeFilter(String(fontSize))}
           />
           <ListBox>
             {FONT_SIZES.map((size) => (

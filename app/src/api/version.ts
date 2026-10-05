@@ -16,7 +16,7 @@
  * whenever @api gains a member, and list it in API_CHANGELOG below
  * (src/api/__tests__/apiVersion.test.ts checks that every listed name exists).
  */
-export const API_VERSION = "1.2.0";
+export const API_VERSION = "1.3.0";
 
 /** One @api addition: a runtime export of `module` (a member of it when the
  *  name is dotted), or a TYPE-only member declared in `declaredIn`. */
@@ -41,9 +41,280 @@ export interface ApiChangelogEntry {
 /**
  * What each minor version added, newest first. 1.1.0 (context.keybindings,
  * context.settings, context.cellEditors, ...) is described in
- * docs/EXTENSION_GUIDE.md, "New in API v1.1.0".
+ * docs/EXTENSION_GUIDE.md, "New in API v1.1.0". 1.3.0 is the Home tab
+ * programme (2026-10-04): Excel's Home tab built through @api, so everything
+ * the ribbon needed and did not have -- the command ids, the kit's submenus /
+ * hero splits / registered menus / colour splits, the dialog launcher, the
+ * state seams -- is now there for any extension.
  */
 export const API_CHANGELOG: readonly ApiChangelogEntry[] = [
+  {
+    version: "1.3.0",
+    added: [
+      // ---- Excel's Home tab (2026-10-04) -------------------------------------
+      // The ids the Home ribbon runs: the extension-owned ones (not core.*), and
+      // the new core.* ones. Run them by id; the owner decides HOW (Seam Rule).
+      { name: "ExtensionCommands", module: "@api" },
+      { name: "ExtensionCommands.PROTECT_SHEET_TOGGLE", module: "@api" },
+      { name: "ExtensionCommands.LOCK_CELL_TOGGLE", module: "@api" },
+      { name: "ExtensionCommands.AUTOSUM", module: "@api" },
+      { name: "ExtensionCommands.FILL_SERIES", module: "@api" },
+      { name: "ExtensionCommands.FLASH_FILL", module: "@api" },
+      { name: "ExtensionCommands.SORT_ASCENDING", module: "@api" },
+      { name: "ExtensionCommands.SORT_DESCENDING", module: "@api" },
+      { name: "ExtensionCommands.SORT_CUSTOM", module: "@api" },
+      { name: "ExtensionCommands.FILTER_TOGGLE", module: "@api" },
+      { name: "ExtensionCommands.FILTER_CLEAR", module: "@api" },
+      { name: "ExtensionCommands.FILTER_REAPPLY", module: "@api" },
+      { name: "ExtensionCommands.GO_TO", module: "@api" },
+      { name: "ExtensionCommands.GO_TO_SPECIAL", module: "@api" },
+      { name: "ExtensionCommands.GO_TO_SPECIAL_SELECT", module: "@api" },
+      { name: "ExtensionCommands.FORMAT_AS_TABLE", module: "@api" },
+      { name: "CoreCommands.PASTE_FORMULAS_AND_NUMBER_FORMATS", module: "@api" },
+      { name: "CoreCommands.PASTE_NO_BORDERS", module: "@api" },
+      { name: "CoreCommands.PASTE_KEEP_SOURCE_COLUMN_WIDTHS", module: "@api" },
+      { name: "CoreCommands.PASTE_TRANSPOSE", module: "@api" },
+      { name: "CoreCommands.PASTE_VALUES_AND_NUMBER_FORMATS", module: "@api" },
+      { name: "CoreCommands.PASTE_VALUES_AND_SOURCE_FORMATTING", module: "@api" },
+      { name: "CoreCommands.REMOVE_HYPERLINKS", module: "@api" },
+      { name: "CoreCommands.INSERT", module: "@api" },
+      { name: "CoreCommands.DELETE", module: "@api" },
+      { name: "CoreCommands.INSERT_CELLS", module: "@api" },
+      { name: "CoreCommands.DELETE_CELLS", module: "@api" },
+      { name: "CoreCommands.ROW_HEIGHT", module: "@api" },
+      { name: "CoreCommands.COLUMN_WIDTH", module: "@api" },
+      { name: "CoreCommands.DEFAULT_WIDTH", module: "@api" },
+      { name: "CoreCommands.AUTOFIT_ROW_HEIGHT", module: "@api" },
+      { name: "CoreCommands.AUTOFIT_COLUMN_WIDTH", module: "@api" },
+      { name: "CoreCommands.HIDE_ROWS", module: "@api" },
+      { name: "CoreCommands.HIDE_COLUMNS", module: "@api" },
+      { name: "CoreCommands.UNHIDE_ROWS", module: "@api" },
+      { name: "CoreCommands.UNHIDE_COLUMNS", module: "@api" },
+      { name: "CoreCommands.SHEET_INSERT", module: "@api" },
+      { name: "CoreCommands.SHEET_DELETE", module: "@api" },
+      { name: "CoreCommands.SHEET_RENAME", module: "@api" },
+      { name: "CoreCommands.SHEET_HIDE", module: "@api" },
+      { name: "CoreCommands.SHEET_UNHIDE", module: "@api" },
+      { name: "CoreCommands.SHEET_TAB_COLOR", module: "@api" },
+      { name: "CoreCommands.SHEET_MOVE_OR_COPY", module: "@api" },
+      { name: "CoreCommands.INSERT_FUNCTION", module: "@api" },
+      // Format Painter's state, for a button drawn pressed / locked (written by
+      // the FormatPainter extension only).
+      { name: "getFormatPainterState", module: "@api/formatPainterState" },
+      { name: "subscribeToFormatPainterState", module: "@api/formatPainterState" },
+      { name: "useFormatPainterState", module: "@api/formatPainterState" },
+      { name: "publishFormatPainterState", module: "@api/formatPainterState" },
+      {
+        name: "FormatPainterState",
+        declaredIn: "src/api/formatPainterState.ts",
+        pattern: "export interface FormatPainterState \\{",
+      },
+      // Whether the copied cells are still what the system clipboard holds (the
+      // rule plain Paste uses, for the paste variants).
+      { name: "internalClipboardIsCurrent", module: "@api/cellClipboard" },
+      { name: "internalClipboardMatchesSystemText", module: "@api/cellClipboard" },
+      // ...and where a copy came from (Paste Link names the source sheet).
+      {
+        name: "ClipboardData.sourceSheetIndex",
+        declaredIn: "src/core/hooks/useClipboard.ts",
+        pattern: "sourceSheetIndex: number;",
+      },
+      {
+        name: "ClipboardData.sourceSheetName",
+        declaredIn: "src/core/hooks/useClipboard.ts",
+        pattern: "sourceSheetName: string;",
+      },
+      // The fill handle's own engine (pattern detection + pending fills), so a
+      // Series dialog's AutoFill is not a second implementation.
+      { name: "detectPattern", module: "@api/fillPatterns" },
+      { name: "generateFillValue", module: "@api/fillPatterns" },
+      { name: "processPendingFills", module: "@api/fillPatterns" },
+      // Navigate by reference exactly as the Name Box does (the Go To dialog).
+      { name: "registerReferenceNavigator", module: "@api/referenceNavigation" },
+      { name: "hasReferenceNavigator", module: "@api/referenceNavigation" },
+      { name: "navigateToReference", module: "@api/referenceNavigation" },
+      // The AutoFilter's state, for a Filter row drawn checked and Clear /
+      // Reapply drawn enabled -- and Excel's Reapply.
+      { name: "onChange", module: "@api/autoFilterService" },
+      { name: "getAutoFilterStatus", module: "@api/autoFilterService" },
+      { name: "publishAutoFilterStatus", module: "@api/autoFilterService" },
+      {
+        name: "AutoFilterStatus",
+        declaredIn: "src/api/autoFilterService.ts",
+        pattern: "export interface AutoFilterStatus \\{",
+      },
+      {
+        name: "AutoFilterController.reapply",
+        declaredIn: "src/api/autoFilterService.ts",
+        pattern: "reapply\\(\\): Promise<AutoFilterSnapshot>;",
+      },
+      // The command ids a worksheet Copy / Paste door runs with a control selected.
+      { name: "WORKSHEET_CONTROL_COPY_COMMAND", module: "@api/objectClipboard" },
+      { name: "WORKSHEET_CONTROL_PASTE_COMMAND", module: "@api/objectClipboard" },
+      // The layout kit: submenus, Excel's large and labelled splits, two-line
+      // hero labels, menus hosted from the menu-bar registry, colour splits and
+      // the palette body.
+      { name: "MenuSub", module: "@api/layout" },
+      { name: "MENU_ICON_BLANK", module: "@api/layout" },
+      { name: "useMenuClose", module: "@api/layout" },
+      { name: "RegisteredMenuButton", module: "@api/layout" },
+      { name: "useRegisteredMenuItem", module: "@api/layout" },
+      { name: "ColorPalette", module: "@api/layout" },
+      { name: "SUBMENU_HOVER_DELAY_MS", module: "@api/layout" },
+      { name: "HERO_LABEL_LINE_HEIGHT", module: "@api/layout" },
+      { name: "HERO_PAD_Y", module: "@api/layout" },
+      { name: "HERO_LABEL_GAP", module: "@api/layout" },
+      { name: "HERO_TWO_LINE_GAP", module: "@api/layout" },
+      { name: "HERO_TWO_LINE_PAD_Y", module: "@api/layout" },
+      { name: "HERO_SPLIT_TOP_HEIGHT", module: "@api/layout" },
+      { name: "HERO_SPLIT_TOP_HEIGHT_TWO_LINE", module: "@api/layout" },
+      {
+        name: "SplitFace",
+        declaredIn: "src/api/layout/primitives/Button.tsx",
+        pattern: 'export type SplitFace = "icon" \\| "labelled" \\| "hero";',
+      },
+      {
+        name: "SplitMenuButtonProps.face",
+        declaredIn: "src/api/layout/primitives/Menu.tsx",
+        pattern: "face\\?: SplitFace;",
+      },
+      {
+        name: "SplitMenuButtonProps.labelLines",
+        declaredIn: "src/api/layout/primitives/Menu.tsx",
+        pattern: "labelLines\\?: 1 \\| 2;",
+      },
+      {
+        name: "CommandButtonProps.labelLines",
+        declaredIn: "src/api/layout/primitives/Button.tsx",
+        pattern: "labelLines\\?: 1 \\| 2;",
+      },
+      {
+        name: "MenuSubProps",
+        declaredIn: "src/api/layout/primitives/Menu.tsx",
+        pattern: "export interface MenuSubProps \\{",
+      },
+      {
+        name: "RegisteredMenuButtonProps",
+        declaredIn: "src/api/layout/primitives/MenuTree.tsx",
+        pattern: "export interface RegisteredMenuButtonProps \\{",
+      },
+      {
+        name: "ColorSwatchProps.split",
+        declaredIn: "src/api/layout/primitives/Color.tsx",
+        pattern: "split\\?: boolean;",
+      },
+      {
+        name: "ColorSwatchProps.onApply",
+        declaredIn: "src/api/layout/primitives/Color.tsx",
+        pattern: "onApply\\?: \\(\\) => void;",
+      },
+      {
+        name: "ColorSwatchProps.chevronTestId",
+        declaredIn: "src/api/layout/primitives/Color.tsx",
+        pattern: "chevronTestId\\?: string;",
+      },
+      {
+        name: "ColorSwatchProps.chevronLabel",
+        declaredIn: "src/api/layout/primitives/Color.tsx",
+        pattern: "chevronLabel\\?: string;",
+      },
+      {
+        name: "ColorPopoverProps.automaticPlacement",
+        declaredIn: "src/api/layout/primitives/Color.tsx",
+        pattern: 'automaticPlacement\\?: "first" \\| "afterColors";',
+      },
+      {
+        name: "ColorPopoverProps.returnFocusTo",
+        declaredIn: "src/api/layout/primitives/Color.tsx",
+        pattern: "returnFocusTo\\?: HTMLElement \\| null;",
+      },
+      // Excel's dialog launcher: the corner arrow under a ribbon group.
+      {
+        name: "PanelSection.dialogLauncher",
+        declaredIn: "src/api/uiTypes.ts",
+        pattern: "dialogLauncher\\?: PanelSectionDialogLauncher;",
+      },
+      {
+        name: "PanelSectionDialogLauncher",
+        declaredIn: "src/api/uiTypes.ts",
+        pattern: "export interface PanelSectionDialogLauncher \\{",
+      },
+      // Backend wrappers: Increase / Decrease Decimal, border presets on grouped
+      // sheets, Excel's Insert / Delete Cells.
+      { name: "adjustNumberFormatDecimals", module: "@api" },
+      { name: "applyBorderPresetToSheets", module: "@api" },
+      { name: "insertCellsRange", module: "@api" },
+      { name: "deleteCellsRange", module: "@api" },
+      // Delete Sheet asks the backend whether EVERY sheet-keyed store is empty.
+      { name: "isSheetBlank", module: "@api" },
+      {
+        name: "CellShiftResult",
+        declaredIn: "src/core/types/types.ts",
+        pattern: "export interface CellShiftResult \\{",
+      },
+      {
+        name: "CellShiftOptions",
+        declaredIn: "src/core/lib/tauri-api.ts",
+        pattern: "export interface CellShiftOptions \\{",
+      },
+      {
+        name: "InsertCellsShift",
+        declaredIn: "src/core/types/types.ts",
+        pattern: 'export type InsertCellsShift = "right" \\| "down";',
+      },
+      {
+        name: "DeleteCellsShift",
+        declaredIn: "src/core/types/types.ts",
+        pattern: 'export type DeleteCellsShift = "left" \\| "up";',
+      },
+      // Style types now exported through @api.
+      {
+        name: "TextRotation",
+        declaredIn: "src/core/types/types.ts",
+        pattern: "export type TextRotation =",
+      },
+      {
+        name: "AccountingLayout",
+        declaredIn: "src/core/types/types.ts",
+        pattern: "export interface AccountingLayout \\{",
+      },
+    ],
+    changed: [
+      "clipboardDoorCommand answers Controls' Copy / Paste (WORKSHEET_CONTROL_COPY_COMMAND / WORKSHEET_CONTROL_PASTE_COMMAND) " +
+        "on a WORKSHEET with a floating control among the selected objects (Paste only while the object clipboard holds " +
+        "something), the way Controls' own Ctrl+C / Ctrl+V do; a worksheet chart or slicer still gets the cell command",
+      "CoreCommands.FORMAT_PAINTER_LOCK (double-click) arms the painter locked, or UPGRADES an armed one to locked -- it no " +
+        "longer turns the painter off (FORMAT_PAINTER, the click, does); a lock while the painter is still reading its source " +
+        "makes it arm locked",
+      "CoreCommands.INSERT_ROW / INSERT_COLUMN / DELETE_ROW / DELETE_COLUMN act on the rows (columns) EVERY block of ANY " +
+        "selection spans -- one cell, a range, several Ctrl+click blocks -- like Excel's Insert / Delete Sheet Rows / Columns; " +
+        "they acted only on whole-row (column) selections and silently did nothing otherwise. Blocks that share a row " +
+        "(column) are refused (\"Cannot use that command on overlapping selections.\"); several blocks are ONE undo step. " +
+        "A gridCommands guard on them receives the whole selection, additionalRanges included, and must judge every block",
+      "CoreCommands.CLEAR_COMMENTS clears notes too (Excel's Clear Comments and Notes), and CLEAR_ALL clears notes; every " +
+        "clear (CLEAR_CONTENTS, CLEAR_FORMATTING, CLEAR_COMMENTS, CLEAR_HYPERLINKS, CLEAR_ALL) acts on EVERY Ctrl+click block, " +
+        "not only the main range, and a range clear of comments, notes or hyperlinks records undo",
+      "F5 and Ctrl+G run ExtensionCommands.GO_TO (Excel's Go To dialog). F5 used to focus the Name Box (the grid handled it) " +
+        "and Ctrl+G ran Go To Special, which now has no shortcut (its dialog's Special... button and Find & Select reach " +
+        "it). New built-in bindings: Ctrl+Plus / Ctrl+- run INSERT_CELLS / DELETE_CELLS (the Insert / Delete dialog, or " +
+        "rows / columns straight away for whole-row / whole-column selections), Shift+F11 SHEET_INSERT, Alt+= " +
+        "ExtensionCommands.AUTOSUM, Shift+F3 INSERT_FUNCTION",
+      "CommandRegistry.execute forwards its args to a grid command (gridCommands.execute(name, args)), e.g. " +
+        "AUTOFIT_ROW_HEIGHT { growOnly: true }; grid command handlers receive them",
+      "applyFormatting: textRotation also takes \"vertical\" (stacked text) and REFUSES an unknown value (it used to clear " +
+        "the rotation silently); fontSize takes half points (twips, in fact) from 1 to 409, so StyleData.fontSize may be " +
+        "fractional. The script gate and the script ScriptFormat types accept the same rotations",
+      "applyBorderPreset replicates to grouped sheets (as applyFormatting does) and returns only the cells it wrote; whole " +
+        "rows / columns go through row / column tiers, so dispatch a grid refresh after one",
+      "AccountingLayout's strings carry the sign and the padding: a minus-style negative's minus rides in `symbol` " +
+        "(symbol before) or leads `value` (symbol after, drawn at the left edge); zero is \"-\" plus a digit-width space per " +
+        "decimal",
+      "ColorPopover speaks Excel's words (\"Theme Colors\", \"Standard Colors\", \"More Colors...\"; default accessible name " +
+        "\"Colors\"), and Escape in its hex field CANCELS (it used to apply the half-typed colour)",
+      "clearConditionalFormatsInRange cuts the selection out of every rule (Excel's Clear Rules from Selected Cells) and " +
+        "returns the number of rules CHANGED, cut or removed; it removed nothing for a partial selection",
+    ],
+  },
   {
     version: "1.2.0",
     added: [

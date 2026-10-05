@@ -4334,6 +4334,14 @@ pub(crate) fn clear_range_with_options_off_sheet(
     let max_col = params.start_col.max(params.end_col);
     let apply_to = params.apply_to;
 
+    // The hyperlink store is read and cleared on the ACTIVE sheet (the
+    // hyperlinks module has no sheet-addressed clear), so these two are refused
+    // here rather than half-done. Nothing sends them: the script validator and
+    // the command line accept only all / contents / formats.
+    if matches!(apply_to, ClearApplyTo::Hyperlinks | ClearApplyTo::RemoveHyperlinks) {
+        return Err("Clear Hyperlinks and Remove Hyperlinks work on the active sheet only.".to_string());
+    }
+
     // Sheet protection applies to FORMAT clears too (see the active twin).
     crate::protection::check_sheet_protection_range(
         state, target, min_row, min_col, max_row, max_col,
@@ -4449,16 +4457,8 @@ pub(crate) fn clear_range_with_options_off_sheet(
                         grid.set_cell(row, col, new_cell);
                     }
                 }
-                ClearApplyTo::Hyperlinks | ClearApplyTo::RemoveHyperlinks => {
-                    if let Some(ref cell) = previous_cell {
-                        if apply_to == ClearApplyTo::RemoveHyperlinks {
-                            let mut new_cell = cell.clone();
-                            new_cell.style_index = 0;
-                            previous_cells.push((row, col, previous_cell.clone()));
-                            grid.set_cell(row, col, new_cell);
-                        }
-                    }
-                }
+                // Refused at the top of this function (active sheet only).
+                ClearApplyTo::Hyperlinks | ClearApplyTo::RemoveHyperlinks => {}
             }
         }
 
@@ -4511,13 +4511,131 @@ pub(crate) fn clear_range_with_options_off_sheet(
     })
 }
 
+/// `applyTo` "hyperlinks" and "removeHyperlinks" on the ACTIVE sheet, Excel's
+/// two hyperlink clears (measured live, core-grid lane, 2026-10-04):
+///
+/// - Clear Hyperlinks removes every link in the range and KEEPS every format.
+/// - Remove Hyperlinks, on each cell that HOLDS a link, removes the link AND
+///   the cell's own format (bold, fill, number format, alignment, borders: back
+///   to Normal -- here, style index 0, which inherits the row/column tier as
+///   Clear Formats does). A cell without a link keeps its format; values stay.
+///
+/// ONE undo step either way (the hyperlink range clear records its removals
+/// inside the transaction this opens). A range holding no link changes
+/// nothing, records nothing and leaves the document clean -- Excel greys both
+/// items then. The Home tab's Remove Hyperlinks runs the same two halves from
+/// TypeScript (`core/lib/clearGestures`, which reads the linked cells first);
+/// this is the command's own answer for any caller that asks for it by name.
+fn clear_hyperlinks_apply_to(
+    state: &AppState,
+    file_state: &FileState,
+    active_sheet: usize,
+    params: &ClearRangeParams,
+) -> Result<ClearRangeResult, String> {
+    let min_row = params.start_row.min(params.end_row);
+    let max_row = params.start_row.max(params.end_row);
+    let min_col = params.start_col.min(params.end_col);
+    let max_col = params.start_col.max(params.end_col);
+    let remove_formats = params.apply_to == ClearApplyTo::RemoveHyperlinks;
+
+    let mut linked: Vec<(u32, u32)> = state
+        .hyperlinks
+        .read()
+        .map_err(|e| e.to_string())?
+        .get(&active_sheet)
+        .map(|links| {
+            links
+                .keys()
+                .filter(|(r, c)| *r >= min_row && *r <= max_row && *c >= min_col && *c <= max_col)
+                .copied()
+                .collect()
+        })
+        .unwrap_or_default();
+    if linked.is_empty() {
+        return Ok(ClearRangeResult { count: 0, updated_cells: Vec::new() });
+    }
+    linked.sort_unstable();
+
+    if !remove_formats {
+        let count = crate::hyperlinks::clear_hyperlinks_in_range_impl(state, file_state, min_row, min_col, max_row, max_col);
+        return Ok(ClearRangeResult { count, updated_cells: Vec::new() });
+    }
+
+    // Remove Hyperlinks: the formats of the linked cells, then the links, as
+    // ONE step. The begin is OWNED: inside a script's batch it joins and the
+    // commit below closes nothing that is not its own.
+    let owned = {
+        let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
+        undo_stack.begin_owned_transaction("Remove Hyperlinks".to_string())
+    };
+    let mut updated_cells: Vec<CellData> = Vec::new();
+    {
+        let grid = state.grid.lock_pending().map_err(|e| e.to_string())?;
+        let restyle: Vec<(u32, u32, engine::Cell)> = linked
+            .iter()
+            .filter_map(|&(r, c)| grid.get_cell(r, c).filter(|cell| cell.style_index != 0).map(|cell| (r, c, cell.clone())))
+            .collect();
+        if !restyle.is_empty() {
+            // Every gate passed (sheet protection, before this function) and
+            // something changes: committed.
+            let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+            let mut grid = grid.authorize(&effect);
+            let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
+            let style_registry = state.style_registry.read().map_err(|e| e.to_string())?;
+            let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
+            let merged_regions = state.merged_regions.read().map_err(|e| e.to_string())?;
+            let locale = state.locale.lock().map_err(|e| e.to_string())?;
+            for (row, col, cell) in restyle {
+                undo_stack.record_cell_change(active_sheet, row, col, Some(cell.clone()));
+                // Index 0 = INHERIT; see the note in the Formats branch below.
+                let mut new_cell = cell.clone();
+                new_cell.style_index = 0;
+                grid.set_cell(row, col, new_cell.clone());
+                if active_sheet < grids.len() {
+                    grids[active_sheet].set_cell(row, col, new_cell);
+                }
+                let default_style = style_registry.get(grid.effective_style_index(row, col));
+                let (display, overflow) = crate::format_cell_value_and_class(&cell.value, default_style, &locale);
+                let (row_span, col_span) = merged_regions
+                    .iter()
+                    .find(|m| m.start_row == row && m.start_col == col)
+                    .map(|m| (m.end_row - m.start_row + 1, m.end_col - m.start_col + 1))
+                    .unwrap_or((1, 1));
+                updated_cells.push(CellData {
+                    row,
+                    col,
+                    display,
+                    overflow,
+                    display_color: None,
+                    formula: formula_display(&cell, &locale),
+                    style_index: 0,
+                    row_span,
+                    col_span,
+                    sheet_index: None,
+                    rich_text: None,
+                    accounting_layout: None,
+                });
+            }
+        }
+    }
+    // The links themselves (records its own removals into the open step and
+    // marks the document modified).
+    crate::hyperlinks::clear_hyperlinks_in_range_impl(state, file_state, min_row, min_col, max_row, max_col);
+    {
+        let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
+        undo_stack.commit_owned(owned);
+    }
+    Ok(ClearRangeResult { count: linked.len() as u32, updated_cells })
+}
+
 /// Clear a range of cells with options for what to clear.
 /// Supports Excel-compatible ClearApplyTo options:
 /// - All: Clear both content and formatting (default)
 /// - Contents: Clear values only, keep formatting
 /// - Formats: Clear formatting only, keep values
-/// - Hyperlinks: Clear hyperlinks only (placeholder)
-/// - RemoveHyperlinks: Remove hyperlinks and formatting, keep content
+/// - Hyperlinks: Clear the links, keep formatting (`clear_hyperlinks_apply_to`)
+/// - RemoveHyperlinks: Remove the links AND the linked cells' formatting, keep
+///   content (`clear_hyperlinks_apply_to`)
 /// - ResetContents: Reset to default state
 #[tauri::command]
 pub fn clear_range_with_options(
@@ -4566,6 +4684,17 @@ pub fn clear_range_with_options(
         params.start_row.max(params.end_row),
         params.start_col.max(params.end_col),
     )?;
+
+    // Clear Hyperlinks / Remove Hyperlinks touch links and (Remove) the linked
+    // cells' formats -- no content, nothing a formula reads -- so they skip the
+    // content gates below, exactly as a Formats clear does, and run on their
+    // own path. (They were a PLACEHOLDER here until 2026-10-04: "hyperlinks"
+    // changed nothing yet dirtied the document and opened an undo step, and
+    // "removeHyperlinks" reset the style of EVERY cell in the range and removed
+    // no link.)
+    if matches!(params.apply_to, ClearApplyTo::Hyperlinks | ClearApplyTo::RemoveHyperlinks) {
+        return clear_hyperlinks_apply_to(&state, &file_state, active_sheet, &params);
+    }
 
     // Check if any cell in the range is a spill host (not the origin) — block content-clearing operations
     if !matches!(params.apply_to, ClearApplyTo::Formats) {
@@ -4886,57 +5015,8 @@ pub fn clear_range_with_options(
                     });
                 }
             }
-            ClearApplyTo::Hyperlinks | ClearApplyTo::RemoveHyperlinks => {
-                // Placeholder - hyperlinks not yet implemented
-                // For now, treat RemoveHyperlinks as clear formats
-                if let Some(ref cell) = previous_cell {
-                    if apply_to == ClearApplyTo::RemoveHyperlinks {
-                        undo_stack.record_cell_change(active_sheet, row, col, previous_cell.clone());
-
-                        // Index 0 = INHERIT; see the note in the Formats branch.
-                        let mut new_cell = cell.clone();
-                        new_cell.style_index = 0;
-
-                        grid.set_cell(row, col, new_cell.clone());
-                        if active_sheet < grids.len() {
-                            grids[active_sheet].set_cell(row, col, new_cell);
-                        }
-
-                        // The cell's own style is cleared, but a row/column
-                        // style still applies to it.
-                        let default_style = style_registry.get(grid.effective_style_index(row, col));
-                        let (display, overflow) = crate::format_cell_value_and_class(&cell.value, default_style, &locale);
-
-                        // Get merge span info
-                        let merge_info = merged_regions
-                            .iter()
-                            .find(|r| r.start_row == row && r.start_col == col);
-                        let (row_span, col_span) = if let Some(region) = merge_info {
-                            (
-                                region.end_row - region.start_row + 1,
-                                region.end_col - region.start_col + 1,
-                            )
-                        } else {
-                            (1, 1)
-                        };
-
-                        updated_cells.push(CellData {
-                            row,
-                            col,
-                            display,
-                            overflow,
-                            display_color: None,
-                            formula: formula_display(&cell, &locale),
-                            style_index: 0,
-                            row_span,
-                            col_span,
-                            sheet_index: None,
-                            rich_text: None,
-                            accounting_layout: None,
-                        });
-                    }
-                }
-            }
+            // Dispatched to `clear_hyperlinks_apply_to` before this loop.
+            ClearApplyTo::Hyperlinks | ClearApplyTo::RemoveHyperlinks => {}
         }
     }
 
@@ -9043,3 +9123,11 @@ mod pivot_structural_delete_tests;
 #[cfg(test)]
 #[path = "icon_sort_tests.rs"]
 mod icon_sort_tests;
+
+/// Clear Hyperlinks / Remove Hyperlinks through `clear_range_with_options`
+/// (`applyTo` "hyperlinks" / "removeHyperlinks"): they were a placeholder that
+/// removed no link (and, for Remove, reset EVERY cell's style). A CHILD module
+/// of `data` so it can reach `clear_hyperlinks_apply_to`.
+#[cfg(test)]
+#[path = "clear_hyperlinks_tests.rs"]
+mod clear_hyperlinks_tests;

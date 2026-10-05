@@ -105,6 +105,7 @@ import {
   type AppWindow,
   type FrInfo,
 } from "../helpers/edit-harness";
+import { clickHomeMenuRow, closeHomeFlyouts } from "../helpers/homeTab";
 
 /** The one sentence a floating grid's claim answers every refused door with. */
 const FR_REFUSAL = /is not available for a floating range's cells yet\. Nothing was changed\./;
@@ -256,10 +257,13 @@ test.describe("selection owner: a floating grid's cell on a worksheet", () => {
 
       const doors: Array<{ name: string; act: () => Promise<void> }> = [
         { name: "Home > Bold", act: () => page.locator('[data-testid="fmt-bold"]').click() },
+        // Font Color is Excel's split since 2026-10-04: the face APPLIES the
+        // colour on its bar, the chevron opens the palette. Both are doors.
+        { name: "Home > Font Color (face)", act: () => page.locator('[data-testid="fmt-textColor"]').click() },
         {
-          name: "Home > Font Color",
+          name: "Home > Font Color (palette)",
           act: async () => {
-            await page.locator('[data-testid="fmt-textColor"]').click();
+            await page.locator('[data-testid="fmt-textColor-options"]').click();
             await page.locator('[data-testid="fmt-textColor-popover"] button[data-colour-swatch]').nth(5).click();
           },
         },
@@ -289,8 +293,9 @@ test.describe("selection owner: a floating grid's cell on a worksheet", () => {
         {
           name: "Home > Fill > More Fill Options...",
           act: async () => {
-            await page.locator('[data-testid="fmt-backgroundColor"]').click();
-            await page.locator("button", { hasText: /^More Fill Options\.\.\.$/ }).click();
+            // The chevron opens the palette; the face would APPLY the bar's colour.
+            await page.locator('[data-testid="fmt-backgroundColor-options"]').click();
+            await page.locator('[data-testid="fmt-backgroundColor-more"]').click();
           },
         },
         {
@@ -345,8 +350,8 @@ test.describe("selection owner: a floating grid's cell on a worksheet", () => {
       expect((onNumber.find((x) => x.id === "format-cells")!.data as { tab?: string } | null)?.tab).toBe("number");
       await closeDialogsAndOverlays(page);
 
-      await page.locator('[data-testid="fmt-backgroundColor"]').click();
-      await page.locator("button", { hasText: /^More Fill Options\.\.\.$/ }).click();
+      await page.locator('[data-testid="fmt-backgroundColor-options"]').click();
+      await page.locator('[data-testid="fmt-backgroundColor-more"]').click();
       const onFill = await eventually(() => openDialogs(page), (d) => d.some((x) => x.id === "format-cells"), "More Fill Options... did not open Format Cells");
       expect((onFill.find((x) => x.id === "format-cells")!.data as { tab?: string } | null)?.tab).toBe("fill");
       await closeDialogsAndOverlays(page);
@@ -1446,7 +1451,9 @@ test.describe("sv-SE and AltGr keys (W17, E13, X16, D5, R5)", () => {
       await writeCells(page, [[0, 0, "keep"], [1, 0, "paint"]]);
       await grid.clickCell("A2");
       const depth = (await undoState(page)).undoDepth;
-      await page.locator('[data-testid="fmt-textColor"]').click();
+      // The palette (and its hex field) opens from Font Color's chevron; the
+      // face applies the bar's colour (Excel's split, 2026-10-04).
+      await page.locator('[data-testid="fmt-textColor-options"]').click();
       const hex = page.locator('[data-testid="fmt-textColor-popover-hex"]');
       await hex.fill("#FF0000");
       await hex.press("Enter");
@@ -1457,7 +1464,7 @@ test.describe("sv-SE and AltGr keys (W17, E13, X16, D5, R5)", () => {
       const fr = await createFr(page, FR_POS.x, FR_POS.y, "HexFR");
       await claimWithFrCell(page, grid, fr);
       const mark = await toastMark(page);
-      await page.locator('[data-testid="fmt-textColor"]').click();
+      await page.locator('[data-testid="fmt-textColor-options"]').click();
       await hex.fill("#00AA00");
       await hex.press("Enter");
       await expectOneRefusal(page, mark, "Font Color hex + Enter");
@@ -2344,7 +2351,10 @@ test.describe("undo: script batches, the paste step, refusals; Space on a checkb
             name: "Home > Clear All on J1",
             act: async () => {
               await grid.clickCell("J1");
-              await page.locator('[data-testid="fmt-clearAll"]').click();
+              // Excel's Editing > Clear > Clear All (the row is fmt-clear-all; fmt-clearAll is the standalone button).
+              // Editing may be a collapsed group: homeMenuRow opens its flyout.
+              await clickHomeMenuRow(page, "fmt-clear", "fmt-clear-all");
+              await closeHomeFlyouts(page);
             },
             landed: async () => (await cellsOn(page, [[0, 0, 9]]))[0] === "",
             reverted: async () => (await cellsOn(page, [[0, 0, 9]]))[0] === "j",

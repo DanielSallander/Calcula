@@ -18,6 +18,7 @@ import FormulaAutocompleteExtension from "./BuiltIn/FormulaAutocomplete";
 import ColumnValueAutocompleteExtension from "./BuiltIn/ColumnValueAutocomplete";
 import FormatPainterExtension from "./BuiltIn/FormatPainter";
 import PasteSpecialExtension from "./BuiltIn/PasteSpecial";
+import InsertDeleteCellsExtension from "./BuiltIn/InsertDeleteCells";
 import StatusBarAggregationExtension from "./BuiltIn/StatusBarAggregation";
 import ComputedPropertiesExtension from "./BuiltIn/ComputedProperties";
 import CellBookmarksExtension from "./BuiltIn/CellBookmarks";
@@ -40,6 +41,8 @@ import TextToColumnsExtension from "./TextToColumns";
 import GoalSeekExtension from "./GoalSeek";
 import GoToSpecialExtension from "./GoToSpecial";
 import FlashFillExtension from "./FlashFill";
+import AutoSumExtension from "./AutoSum";
+import FillSeriesExtension from "./FillSeries";
 import CustomFillListsExtension from "./CustomFillLists";
 import AdvancedFilterExtension from "./AdvancedFilter";
 import ReportsExtension from "./Reports";
@@ -129,6 +132,7 @@ export const builtInExtensions: ExtensionModule[] = [
   FormatPainterExtension,
   // Paste Special (depends on Edit menu being registered)
   PasteSpecialExtension,
+  InsertDeleteCellsExtension,
   // Formula Autocomplete (Intellisense)
   FormulaAutocompleteExtension,
   // Column Value Autocomplete (Excel-style same-column suggestions)
@@ -159,6 +163,8 @@ export const builtInExtensions: ExtensionModule[] = [
   GoToSpecialExtension,
   SelectVisibleCellsExtension,
   FlashFillExtension,
+  AutoSumExtension,
+  FillSeriesExtension,
   CustomFillListsExtension,
   AdvancedFilterExtension,
   ReportsExtension,

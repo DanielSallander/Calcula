@@ -5,6 +5,7 @@ use crate::api_types::{DefaultDimensions, DimensionData};
 use crate::document_effect::{CleanReason, DocumentEffect, Persisted};
 use crate::persistence::FileState;
 use crate::AppState;
+use std::collections::HashMap;
 use tauri::State;
 
 /// Set a column width.
@@ -116,10 +117,24 @@ pub fn get_default_dimensions(state: State<AppState>) -> DefaultDimensions {
 }
 
 /// Set the default row height.
+///
+/// GATED like `set_row_height` (the sheet's "Format rows" protection option):
+/// the default height resizes every row without a height of its own, so a
+/// protected sheet that refuses one row's resize must refuse this too.
 #[tauri::command]
-pub fn set_default_row_height(state: State<AppState>, file_state: State<FileState>, height: f64) -> DefaultDimensions {
+pub fn set_default_row_height(state: State<AppState>, file_state: State<FileState>, height: f64) -> Result<DefaultDimensions, String> {
+    set_default_row_height_inner(&state, &file_state, height)
+}
+
+/// State-only body of `set_default_row_height` (unit-testable without a State).
+pub(crate) fn set_default_row_height_inner(state: &AppState, file_state: &FileState, height: f64) -> Result<DefaultDimensions, String> {
+    {
+        let active_sheet = *state.active_sheet.read().unwrap();
+        crate::protection::check_sheet_action(state, active_sheet, "formatRows", "change the standard row height")?;
+    }
     let clamped = if height < 1.0 { 1.0 } else { height };
-    let effect = DocumentEffect::mutates(&file_state);
+    // After the gate: a refusal must not leave a spuriously dirty document.
+    let effect = DocumentEffect::mutates(file_state);
     let mut h = state.default_row_height.write(&effect).unwrap();
     let previous = *h;
     *h = clamped;
@@ -132,17 +147,33 @@ pub fn set_default_row_height(state: State<AppState>, file_state: State<FileStat
     drop(undo_stack);
 
     let col_w = *state.default_column_width.read().unwrap();
-    DefaultDimensions {
+    Ok(DefaultDimensions {
         default_row_height: clamped,
         default_column_width: col_w,
-    }
+    })
 }
 
-/// Set the default column width.
+/// Set the default column width (Excel's Format > Default Width...).
+///
+/// GATED like `set_column_width` (the sheet's "Format columns" protection
+/// option). It was not: on a sheet protected without that option a single
+/// column could not be resized, yet Default Width resized every column without
+/// a width of its own (shell-sheets lane report, "Not fixed" 1). The Home tab
+/// also asks first, to refuse before its dialog opens; this is the authority.
 #[tauri::command]
-pub fn set_default_column_width(state: State<AppState>, file_state: State<FileState>, width: f64) -> DefaultDimensions {
+pub fn set_default_column_width(state: State<AppState>, file_state: State<FileState>, width: f64) -> Result<DefaultDimensions, String> {
+    set_default_column_width_inner(&state, &file_state, width)
+}
+
+/// State-only body of `set_default_column_width` (unit-testable without a State).
+pub(crate) fn set_default_column_width_inner(state: &AppState, file_state: &FileState, width: f64) -> Result<DefaultDimensions, String> {
+    {
+        let active_sheet = *state.active_sheet.read().unwrap();
+        crate::protection::check_sheet_action(state, active_sheet, "formatColumns", "change the standard column width")?;
+    }
     let clamped = if width < 1.0 { 1.0 } else { width };
-    let effect = DocumentEffect::mutates(&file_state);
+    // After the gate: a refusal must not leave a spuriously dirty document.
+    let effect = DocumentEffect::mutates(file_state);
     let mut w = state.default_column_width.write(&effect).unwrap();
     let previous = *w;
     *w = clamped;
@@ -155,10 +186,259 @@ pub fn set_default_column_width(state: State<AppState>, file_state: State<FileSt
     drop(undo_stack);
 
     let row_h = *state.default_row_height.read().unwrap();
-    DefaultDimensions {
+    Ok(DefaultDimensions {
         default_row_height: row_h,
         default_column_width: clamped,
+    })
+}
+
+// ============================================================================
+// Batch resize: Row Height / Column Width over a whole selection span
+// ============================================================================
+//
+// WHY A BATCH. Excel's Row Height... and Column Width... set every row (column)
+// the selection spans, and "Select All, then Row Height" is how a user gives a
+// whole sheet one height. `set_row_height` is one line per call and one undo
+// entry per call; the Home tab looped it, which is 1,048,576 IPC round trips
+// for Select All -- the reason it refused anything over 16,384 lines.
+//
+// THE SHAPE. The lines arrive as inclusive RUNS (`[[0, 1048575]]` for Select
+// All, not a million indices), and the change is ONE undo entry of a compact
+// kind: the previous sizes of those runs, run-length encoded (`segments`), so
+// undoing Select All + Row Height stores a handful of segments, not a million
+// `SetRowHeight` changes (a `CellChange` is hundreds of bytes: the enum is as
+// big as its `GridSnapshot` variant). The work here is linear in the lines
+// changed. A size equal to the current one changes nothing, records nothing
+// and leaves the document clean.
+//
+// WHAT IS STILL PER LINE. The sheet stores one explicit size per line, and
+// that map is what every structural undo snapshot, every dimension refresh and
+// the grid's scroll arithmetic carry. Giving 1,048,576 rows an explicit height
+// is therefore expensive AFTER this command, not in it; Excel's own answer --
+// a per-sheet default row height -- needs a persisted per-sheet field this
+// lane does not own (see the rust-followup report). The Home tab's own span
+// rule decides what it sends.
+
+/// The undo restore kind of a batch resize.
+pub(crate) const LINE_SIZES_RESTORE_KIND: &str = "line_sizes";
+
+/// One sheet's line sizes over some runs, before a batch resize (or, as the
+/// inverse, after it).
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
+pub(crate) struct LineSizesSnapshot {
+    pub sheet_index: usize,
+    /// Rows (`true`) or columns (`false`).
+    pub rows: bool,
+    /// `(first, last, size)`: every line `first..=last` had `size`; `None` = no
+    /// size of its own (the default). Ascending, non-overlapping, and covering
+    /// exactly the runs the resize touched.
+    pub segments: Vec<(u32, u32, Option<f64>)>,
+}
+
+/// Sort and merge `runs` (overlapping and adjacent runs join) after checking
+/// each lies on the sheet. Either end may come first.
+pub(crate) fn normalize_line_runs(runs: &[(u32, u32)], last_line: u32) -> Result<Vec<(u32, u32)>, String> {
+    let mut sorted: Vec<(u32, u32)> = Vec::with_capacity(runs.len());
+    for &(a, b) in runs {
+        let (lo, hi) = (a.min(b), a.max(b));
+        if hi > last_line {
+            return Err(format!("Line {} is past the end of the sheet (the last is {}).", hi + 1, last_line + 1));
+        }
+        sorted.push((lo, hi));
     }
+    sorted.sort_unstable();
+    let mut merged: Vec<(u32, u32)> = Vec::with_capacity(sorted.len());
+    for (lo, hi) in sorted {
+        match merged.last_mut() {
+            Some(last) if lo as u64 <= last.1 as u64 + 1 => last.1 = last.1.max(hi),
+            _ => merged.push((lo, hi)),
+        }
+    }
+    Ok(merged)
+}
+
+/// The explicit sizes inside one run, ascending -- by walking whichever is
+/// smaller, the run or the map.
+fn explicit_sizes_in(sizes: &HashMap<u32, f64>, lo: u32, hi: u32) -> Vec<(u32, f64)> {
+    let span = hi as u64 - lo as u64 + 1;
+    let mut found: Vec<(u32, f64)> = if (sizes.len() as u64) < span {
+        sizes.iter().filter(|(&k, _)| k >= lo && k <= hi).map(|(&k, &v)| (k, v)).collect()
+    } else {
+        (lo..=hi).filter_map(|k| sizes.get(&k).map(|&v| (k, v))).collect()
+    };
+    found.sort_unstable_by_key(|&(k, _)| k);
+    found
+}
+
+/// The sizes of `runs`, run-length encoded (see `LineSizesSnapshot::segments`).
+pub(crate) fn line_size_segments(sizes: &HashMap<u32, f64>, runs: &[(u32, u32)]) -> Vec<(u32, u32, Option<f64>)> {
+    let mut out: Vec<(u32, u32, Option<f64>)> = Vec::new();
+    let push = |first: u32, last: u32, size: Option<f64>, out: &mut Vec<(u32, u32, Option<f64>)>| {
+        if let Some(prev) = out.last_mut() {
+            if prev.2 == size && prev.1 as u64 + 1 == first as u64 {
+                prev.1 = last;
+                return;
+            }
+        }
+        out.push((first, last, size));
+    };
+    for &(lo, hi) in runs {
+        let mut next = lo as u64;
+        for (line, size) in explicit_sizes_in(sizes, lo, hi) {
+            if (line as u64) > next {
+                push(next as u32, line - 1, None, &mut out);
+            }
+            push(line, line, Some(size), &mut out);
+            next = line as u64 + 1;
+        }
+        if next <= hi as u64 {
+            push(next as u32, hi, None, &mut out);
+        }
+    }
+    out
+}
+
+/// Write `segments` into `sizes`: a `None` segment removes its lines' own
+/// sizes, a `Some` one gives every line that size.
+pub(crate) fn apply_line_size_segments(sizes: &mut HashMap<u32, f64>, segments: &[(u32, u32, Option<f64>)]) {
+    for &(first, last, size) in segments {
+        match size {
+            Some(px) => {
+                sizes.reserve((last as u64 - first as u64 + 1).min(1 << 21) as usize);
+                for line in first..=last {
+                    sizes.insert(line, px);
+                }
+            }
+            None => {
+                let span = last as u64 - first as u64 + 1;
+                if (sizes.len() as u64) < span {
+                    sizes.retain(|&k, _| k < first || k > last);
+                } else {
+                    for line in first..=last {
+                        sizes.remove(&line);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Set every line of `runs` (rows when `rows`, else columns) on the ACTIVE
+/// sheet to `size` px -- `size <= 0` removes their own sizes, as
+/// `set_row_height` does -- in ONE undo step. Returns how many lines changed.
+///
+/// Gated by the sheet's "Format rows" / "Format columns" protection option,
+/// exactly as the one-line commands are. A refusal, or a resize that changes
+/// nothing, leaves the document clean.
+pub(crate) fn set_line_sizes_inner(
+    state: &AppState,
+    file_state: &FileState,
+    rows: bool,
+    runs: &[(u32, u32)],
+    size: f64,
+) -> Result<u64, String> {
+    if !size.is_finite() {
+        return Err(format!("{} must be a number of pixels.", if rows { "A row height" } else { "A column width" }));
+    }
+    let last_line = if rows { engine::EXCEL_MAX_ROW_INDEX } else { engine::EXCEL_MAX_COL_INDEX };
+    let runs = normalize_line_runs(runs, last_line)?;
+    let active_sheet = *state.active_sheet.read().unwrap();
+    crate::protection::check_sheet_action(
+        state,
+        active_sheet,
+        if rows { "formatRows" } else { "formatColumns" },
+        if rows { "resize rows" } else { "resize columns" },
+    )?;
+    let target = if size > 0.0 { Some(size) } else { None };
+
+    let store = if rows { &state.row_heights } else { &state.column_widths };
+    let sizes = store.lock_pending().unwrap();
+    let previous = line_size_segments(&sizes, &runs);
+    let changed: u64 = previous
+        .iter()
+        .filter(|&&(_, _, was)| was != target)
+        .map(|&(first, last, _)| last as u64 - first as u64 + 1)
+        .sum();
+    if changed == 0 {
+        return Ok(0);
+    }
+    // Past every gate, and something changes: committed.
+    let effect = DocumentEffect::mutates(file_state);
+    let mut sizes = sizes.authorize(&effect);
+    let next: Vec<(u32, u32, Option<f64>)> = runs.iter().map(|&(lo, hi)| (lo, hi, target)).collect();
+    apply_line_size_segments(&mut sizes, &next);
+    drop(sizes);
+
+    let label = if rows { "Row Height" } else { "Column Width" };
+    let snapshot = LineSizesSnapshot { sheet_index: active_sheet, rows, segments: previous };
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    let owned = undo_stack.begin_owned_transaction(label.to_string());
+    undo_stack.record_custom_restore(
+        LINE_SIZES_RESTORE_KIND.to_string(),
+        serde_json::to_vec(&snapshot).unwrap_or_default(),
+        label,
+    );
+    undo_stack.commit_owned(owned);
+    Ok(changed)
+}
+
+/// Excel's Row Height... over every row of `rows` (inclusive runs, e.g.
+/// `[[0, 1048575]]` for Select All), ONE undo step. See the section comment.
+#[tauri::command]
+pub fn set_row_heights(state: State<AppState>, file_state: State<FileState>, rows: Vec<(u32, u32)>, height: f64) -> Result<(), String> {
+    set_line_sizes_inner(&state, &file_state, true, &rows, height).map(|_| ())
+}
+
+/// Excel's Column Width... over every column of `cols` (inclusive runs), ONE
+/// undo step.
+#[tauri::command]
+pub fn set_column_widths(state: State<AppState>, file_state: State<FileState>, cols: Vec<(u32, u32)>, width: f64) -> Result<(), String> {
+    set_line_sizes_inner(&state, &file_state, false, &cols, width).map(|_| ())
+}
+
+/// Undo / redo of a batch resize: put the recorded sizes back on the sheet
+/// they were recorded on (the active mirror, or that sheet's per-sheet store
+/// when the user has since switched), recording the CURRENT sizes of the same
+/// lines as the symmetric inverse.
+///
+/// DEFERRED in the restore registry: `apply_changes` holds the width and
+/// height mirrors through its inline pass, and std's locks are not reentrant
+/// (the pivot column-width restore paid for that once).
+pub(crate) fn apply_line_sizes_restore(
+    state: &AppState,
+    effect: &DocumentEffect,
+    data: &[u8],
+    inverse_transaction: &mut engine::Transaction,
+) {
+    let snap: LineSizesSnapshot = match serde_json::from_slice(data) {
+        Ok(s) => s,
+        Err(e) => {
+            crate::log_error!("UNDO", "bad line-size snapshot: {}", e);
+            return;
+        }
+    };
+    let runs: Vec<(u32, u32)> = snap.segments.iter().map(|&(a, b, _)| (a, b)).collect();
+    let active = state.active_sheet.read().map(|a| *a).unwrap_or(0);
+    let swap = |sizes: &mut HashMap<u32, f64>| -> Vec<(u32, u32, Option<f64>)> {
+        let current = line_size_segments(sizes, &runs);
+        apply_line_size_segments(sizes, &snap.segments);
+        current
+    };
+    let inverse = if snap.sheet_index == active {
+        let store = if snap.rows { &state.row_heights } else { &state.column_widths };
+        let Ok(mut sizes) = store.write(effect) else { return };
+        swap(&mut *sizes)
+    } else {
+        let store = if snap.rows { &state.all_row_heights } else { &state.all_column_widths };
+        let Ok(mut all) = store.write(effect) else { return };
+        let Some(sizes) = all.get_mut(snap.sheet_index) else { return };
+        swap(sizes)
+    };
+    let inverse_snap = LineSizesSnapshot { sheet_index: snap.sheet_index, rows: snap.rows, segments: inverse };
+    inverse_transaction.add_change(engine::CellChange::CustomRestore {
+        kind: LINE_SIZES_RESTORE_KIND.to_string(),
+        data: serde_json::to_vec(&inverse_snap).unwrap_or_default(),
+    });
 }
 // ============================================================================
 // User-hidden rows / columns
@@ -653,3 +933,9 @@ pub(crate) fn hidden_cols_info_inner(
         effective: ascending(crate::commands::nav::collect_hidden_cols_for_sheet(state, target)),
     })
 }
+
+/// The batch resize commands and the standard-size protection gate, over a
+/// real `AppState` (a CHILD so it can reach the state-only bodies).
+#[cfg(test)]
+#[path = "dimensions_batch_tests.rs"]
+mod dimensions_batch_tests;

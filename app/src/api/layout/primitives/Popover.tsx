@@ -29,12 +29,32 @@
 //          window. It only does so when focus was inside the popover, on the
 //          anchor, or nowhere; Escape pressed while the user is typing in an
 //          unrelated field closes the popover but leaves that field focused.
+//
+//          ESCAPE NESTS (the NESTING rule of Menu.tsx, for every popover, not
+//          only menus). A popover is often opened from inside another overlay
+//          -- a collapsed group's Launcher flyout, a card -- whose dismissal
+//          also listens on `document`. Escape must close the INNERMOST open
+//          overlay only, as Excel's does. Two halves:
+//          - Escape with focus INSIDE the popover is handled at the popover's
+//            own root (close, focus back, preventDefault, stopPropagation), so
+//            it never reaches `document` and no outer overlay hears it. Every
+//            caller gets this without asking -- a gallery card, a palette, the
+//            Home tab's Cell Styles popover -- because the rule is the kit's,
+//            not the caller's. An Escape the content already handled
+//            (defaultPrevented: a Menu or Dropdown inside, which also stop it)
+//            is left alone there, and so is one while an overlay opened from
+//            inside this popover is still open (the next half closes that).
+//          - Escape with focus OUTSIDE it (on the trigger, after a pointer
+//            open) reaches `document`, where every open overlay listens. Each
+//            one then defers to an overlay portalled AFTER it -- that one was
+//            opened from inside it (laterFlyoutIsOpen) -- so only the last one
+//            closes, and the next Escape takes the one below.
 
-import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import ReactDOM from "react-dom";
 import { css, keyframes } from "@emotion/css";
 import { LT } from "../theme";
-import { FONT_FAMILY } from "../tokens";
+import { FONT_FAMILY, POPOVER_CARD_BORDER, POPOVER_CARD_PADDING } from "../tokens";
 
 /** Where the popover sits relative to its anchor. The two `top-*` placements
  *  open UPWARD -- for an anchor at the bottom of the window (the status bar),
@@ -55,6 +75,13 @@ export interface PopoverProps {
   placement?: PopoverPlacement;
   /** Gap between anchor and popover in px. Default 2. */
   offset?: number;
+  /** Shift along the anchor's edge (the cross axis), in px. Default 0. For
+   *  "right-start" it moves the popover DOWN from the anchor's top (negative
+   *  lifts it: a MenuSub flyout passes SUBMENU_ALIGN_OFFSET so its first row
+   *  lines up with the row that opened it); for the bottom-* and top-*
+   *  placements it moves it RIGHT. The result is still clamped into the
+   *  viewport. */
+  alignOffset?: number;
   /** Small caption at the top of the popover (11px/600, secondary). Also the
    *  popover's accessible name when `ariaLabel` is not given. */
   heading?: string;
@@ -101,6 +128,10 @@ export type PopoverPosition =
  * opened -- over its own anchor and, from a status-bar anchor, off the bottom
  * of the window, taking its last rows (its commands) with it. Anchored by the
  * bottom it grows upward, and anything taller than the room scrolls.
+ *
+ * `alignOffset` shifts the popover along the anchor's edge -- down for
+ * "right-start", right for the others -- before the viewport clamp. 0 (the
+ * default) computes exactly what this function did before it existed.
  */
 export function computePopoverPosition(
   anchor: Pick<DOMRect, "left" | "top" | "right" | "bottom">,
@@ -110,19 +141,20 @@ export function computePopoverPosition(
   offset: number,
   viewportWidth: number,
   viewportHeight: number,
+  alignOffset = 0,
 ): PopoverPosition {
   const clampLeft = (x: number) =>
     Math.max(VIEWPORT_MARGIN, Math.min(x, viewportWidth - width - VIEWPORT_MARGIN));
 
   if (placement === "bottom-end") {
-    return { left: clampLeft(anchor.right - width), top: anchor.bottom + offset };
+    return { left: clampLeft(anchor.right - width + alignOffset), top: anchor.bottom + offset };
   }
 
   if (placement === "top-start" || placement === "top-end") {
     void height; // the bottom edge does not depend on the content's height
     const left = placement === "top-end" ? anchor.right - width : anchor.left;
     return {
-      left: clampLeft(left),
+      left: clampLeft(left + alignOffset),
       bottom: viewportHeight - (anchor.top - offset),
       maxHeight: Math.max(0, anchor.top - offset - VIEWPORT_MARGIN),
     };
@@ -136,11 +168,14 @@ export function computePopoverPosition(
     }
     return {
       left: Math.max(VIEWPORT_MARGIN, left),
-      top: Math.max(VIEWPORT_MARGIN, Math.min(anchor.top, viewportHeight - height - VIEWPORT_MARGIN)),
+      top: Math.max(
+        VIEWPORT_MARGIN,
+        Math.min(anchor.top + alignOffset, viewportHeight - height - VIEWPORT_MARGIN),
+      ),
     };
   }
 
-  return { left: clampLeft(anchor.left), top: anchor.bottom + offset };
+  return { left: clampLeft(anchor.left + alignOffset), top: anchor.bottom + offset };
 }
 
 const FOCUSABLE =
@@ -159,6 +194,23 @@ function focusIsOurs(popover: HTMLElement | null, anchor: HTMLElement): boolean 
   if (!active || active === document.body) return true;
   if (popover && popover.contains(active)) return true;
   return anchor.contains(active);
+}
+
+/**
+ * Kit-internal (Launcher uses it too): whether a `[data-section-flyout]` other
+ * than `own` (and not inside it) sits AFTER `own` in the document. Every kit
+ * overlay is a body portal appended when it opens, so a later one was opened
+ * from inside this one (or while it was open) -- the INNERMOST overlay, which
+ * owns a document-level Escape. The same "later portal = nested" reading
+ * Popover's outside-press rule already uses.
+ */
+export function laterFlyoutIsOpen(own: HTMLElement | null): boolean {
+  if (!own) return false;
+  for (const other of Array.from(document.querySelectorAll("[data-section-flyout]"))) {
+    if (other === own || own.contains(other)) continue;
+    if (own.compareDocumentPosition(other) & Node.DOCUMENT_POSITION_FOLLOWING) return true;
+  }
+  return false;
 }
 
 // ============================================================================
@@ -188,11 +240,15 @@ const cardEnterUp = keyframes`
   }
 `;
 
+/** The padding and border are tokens (../tokens.ts) because a MenuSub flyout
+ *  is PLACED by them: SUBMENU_ALIGN_OFFSET lifts it by border + padding so its
+ *  first row lines up with its parent row. The rendered text is the same
+ *  "8px" / "1px", so the class is unchanged. */
 const cardChrome = css`
   box-sizing: border-box;
-  padding: 8px;
+  padding: ${POPOVER_CARD_PADDING}px;
   background: ${LT.surface};
-  border: 1px solid ${LT.clusterBorder};
+  border: ${POPOVER_CARD_BORDER}px solid ${LT.clusterBorder};
   border-radius: ${LT.radiusPopover};
   box-shadow: ${LT.shadowPopover};
   color: ${LT.text};
@@ -232,6 +288,7 @@ export function Popover({
   card = false,
   placement = "bottom-start",
   offset = 2,
+  alignOffset = 0,
   heading,
   returnFocus = true,
   width,
@@ -260,23 +317,49 @@ export function Popover({
         offset,
         window.innerWidth,
         window.innerHeight,
+        alignOffset,
       ),
     );
-  }, [open, anchorEl, placement, offset]);
+  }, [open, anchorEl, placement, offset, alignOffset]);
+
+  /** Close and, when focus was ours, hand it back to the anchor. Decided
+   *  BEFORE closing: once the parent re-renders, the popover (and whatever
+   *  inside it held focus) is gone. */
+  const closeFromEscape = useCallback(() => {
+    const restore =
+      returnFocus && anchorEl !== null && focusIsOurs(popRef.current, anchorEl)
+        ? firstFocusable(anchorEl)
+        : null;
+    onClose();
+    restore?.focus();
+  }, [anchorEl, onClose, returnFocus]);
+
+  /** Escape from INSIDE the popover (see ESCAPE NESTS in the header): handled
+   *  here and stopped, so no overlay around this one also closes. Only a key
+   *  whose target is DOM-inside this popover: React bubbles keys from nested
+   *  portals through the component tree, and a nested overlay's key is its
+   *  own (it stops a handled one itself). */
+  const handleRootKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== "Escape" || e.defaultPrevented) return;
+    if (!popRef.current || !popRef.current.contains(e.target as Node)) return;
+    // Focus is in here but an overlay opened from in here is still open (a
+    // palette its trigger opened by the pointer): that one is the innermost.
+    // Leave the key to the document rule, where it closes that overlay.
+    if (laterFlyoutIsOpen(popRef.current)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    closeFromEscape();
+  };
 
   // Close on Escape and on mousedown outside both the popover and the anchor.
   useEffect(() => {
     if (!open) return;
     const handleKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      // Decide BEFORE closing: once the parent re-renders, the popover (and
-      // whatever inside it held focus) is gone.
-      const restore =
-        returnFocus && anchorEl !== null && focusIsOurs(popRef.current, anchorEl)
-          ? firstFocusable(anchorEl)
-          : null;
-      onClose();
-      restore?.focus();
+      // A popover opened from inside this one is the innermost: the key is
+      // its (ESCAPE NESTS). This one closes on the next Escape.
+      if (laterFlyoutIsOpen(popRef.current)) return;
+      closeFromEscape();
     };
     const handleMouseDown = (e: MouseEvent) => {
       const target = e.target as HTMLElement | null;
@@ -304,7 +387,7 @@ export function Popover({
       document.removeEventListener("keydown", handleKey);
       document.removeEventListener("mousedown", handleMouseDown);
     };
-  }, [open, anchorEl, onClose, returnFocus]);
+  }, [open, anchorEl, onClose, closeFromEscape]);
 
   if (!open) return null;
 
@@ -347,6 +430,7 @@ export function Popover({
       data-opens={opensUp ? "up" : undefined}
       role={role}
       aria-label={ariaLabel ?? heading}
+      onKeyDown={handleRootKeyDown}
     >
       {heading && <div className={headingStyle}>{heading}</div>}
       {children}

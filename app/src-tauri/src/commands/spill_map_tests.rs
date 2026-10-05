@@ -1295,11 +1295,12 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         // by the detector rather than by a sentence. An exemption that has to
         // be argued is the shape this register keeps finding defects behind.
         // -- Style only: an origin's FORMULA is untouched, so its spill lives -
-        ("commands/styles.rs", "apply_formatting", "style_index only — no formula is removed, so no range is orphaned"),
-        ("commands/styles.rs", "apply_formatting_to_sheets", "style_index only"),
+        // apply_formatting writes through write_style_delta; the border presets
+        // and adjust_number_format_decimals through write_range_style_plan.
+        ("commands/styles.rs", "write_style_delta", "style_index only — no formula is removed, so no range is orphaned"),
         ("commands/styles.rs", "set_cell_style", "style_index only"),
         ("commands/styles.rs", "set_cell_rich_text", "rich-text runs only"),
-        ("commands/styles.rs", "apply_border_preset", "style_index only"),
+        ("commands/styles.rs", "write_range_style_plan", "style_index and row/column style tiers only"),
         ("protection.rs", "set_cell_protection", "lock/hidden flags only"),
         ("named_styles_cmd.rs", "apply_named_style_impl", "style_index only"),
         ("computed_properties.rs", "apply_fill_color", "style_index only"),
@@ -1322,6 +1323,12 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("commands/structure.rs", "off_sheet_structural_edit", "shift_flat_cell_stores, re-anchored to the target sheet"),
         ("commands/coord_shift.rs", "shift_per_sheet_cell_map", "generic coordinate-map shift; the spill pair is moved by shift_flat_cell_stores, which uses shift_flat_cell_map"),
         ("commands/structure.rs", "shift_per_sheet_cell_stores", "helper of the four structural edits; the spill pair is not a per-sheet store"),
+        // Insert/Delete Cells (`structure_cells.rs`).
+        ("commands/structure_cells.rs", "shift_cell_maps_in_band", "moves the comment/note/hyperlink maps; writes no cell"),
+        ("commands/structure_cells.rs", "shift_cross_sheet_formulas_in_band", "re-points references inside surviving formulas"),
+        ("commands/structure_cells.rs", "inherit_neighbour_styles", "writes only EMPTY, style-only cells into lines an insertion just emptied (after every spill was moved or torn down); removes no origin"),
+        ("commands/data.rs", "clear_hyperlinks_apply_to", "style_index only on existing cells (value and formula kept), so no spill origin is removed or overwritten"),
+        ("commands/structure_cells.rs", "shift_spills_in_band", "IS Insert/Delete Cells' spill-map maintenance: a spill that moves whole is re-keyed in BOTH maps; a cut one loses both entries and its output cells together, and shift_cells_impl re-seeds its origin into the shared cascade"),
         // -- Transient / self-evaluating: writes it also un-writes ------------
         ("data_tables.rs", "data_table_one_var", "what-if table: substitutes into a borrowed probe cell and restores it"),
         ("data_tables.rs", "data_table_two_var", "what-if table: as above"),

@@ -62,12 +62,16 @@ const GROUP_ORDER: Record<string, number> = {
 
 // Import gridCommands for use in registerCoreGridContextMenu
 import { gridCommands } from "../../core/lib/gridCommands";
-import { setColumnWidth, setRowHeight, getColumnWidth, getRowHeight, getDefaultDimensions } from "../../core/lib/tauri-api";
 import { applyRowsHidden, applyColsHidden, indexRange } from "../../core/lib/hiddenRowsCols";
 import { dispatchGridAction } from "@api/gridDispatch";
 import { DialogExtensions } from "@api/ui";
-import { columnToLetter } from "../../core/types";
-import { DimensionInputDialog, DIMENSION_INPUT_DIALOG_ID, type DimensionInputData } from "../dialogs/DimensionInputDialog";
+import { DimensionInputDialog, DIMENSION_INPUT_DIALOG_ID } from "../dialogs/DimensionInputDialog";
+import {
+  registerGridFormatCommands,
+  openColumnWidthDialog,
+  openRowHeightDialog,
+  lineRangeLabel,
+} from "./gridFormatCommands";
 
 // ============================================================================
 // Grid Extension Registry
@@ -220,12 +224,21 @@ export const gridExtensions = new GridExtensionRegistry();
 
 /** Register the default/core context menu items */
 export function registerCoreGridContextMenu(): void {
-  // Register the shared Column Width / Row Height dialog (opened below).
+  // Register the shared Column Width / Row Height / Standard Width dialog
+  // (opened below and by the Home tab's Format menu).
   DialogExtensions.registerDialog({
     id: DIMENSION_INPUT_DIALOG_ID,
     component: DimensionInputDialog,
     priority: 300,
   });
+
+  // Excel's Home > Format > Cell Size and Visibility commands (Row Height...,
+  // Column Width..., Default Width..., Hide & Unhide Rows / Columns). They act
+  // on the SPAN of any selection, where the right-click items below are
+  // offered for whole rows / columns only; both share one dialog opener and
+  // one writer (gridFormatCommands.ts), so a resize is one undo step from
+  // either door.
+  registerGridFormatCommands();
 
   // -------------------------------------------------------------------------
   // Clipboard Group
@@ -382,35 +395,15 @@ export function registerCoreGridContextMenu(): void {
     onClick: async (ctx) => {
       if (!ctx.selection || ctx.selection.type !== "columns") return;
 
-      const startCol = Math.min(ctx.selection.startCol, ctx.selection.endCol);
-      const endCol = Math.max(ctx.selection.startCol, ctx.selection.endCol);
-
-      // Seed the dialog with the first selected column's current width.
-      const defaults = await getDefaultDimensions();
-      const currentPx = await getColumnWidth(startCol) ?? defaults.defaultColumnWidth;
-      const rangeLabel = startCol === endCol
-        ? columnToLetter(startCol)
-        : `${columnToLetter(startCol)}:${columnToLetter(endCol)}`;
-
-      const dialogData: DimensionInputData = {
-        mode: "columnWidth",
-        currentPx,
-        rangeLabel,
-        onResult: async (newPx) => {
-          try {
-            for (let col = startCol; col <= endCol; col++) {
-              await setColumnWidth(col, newPx);
-            }
-          } catch (err) {
-            // A backend refusal (sheet protection) was an unhandled promise
-            // rejection and a silent no-op — the dialog just closed.
-            void alertAsync(err instanceof Error ? err.message : String(err));
-          }
-          window.dispatchEvent(new CustomEvent("dimensions:refresh"));
-          window.dispatchEvent(new CustomEvent("grid:refresh"));
-        },
-      };
-      DialogExtensions.openDialog(DIMENSION_INPUT_DIALOG_ID, dialogData as unknown as Record<string, unknown>);
+      // Seeded with the first selected column's width. The writer behind it
+      // resizes the whole run in ONE undo step: this loop used to call
+      // setColumnWidth bare, one undo entry per column (five columns, five
+      // Ctrl+Z), and surfaces a backend refusal (sheet protection) instead of
+      // closing silently.
+      await openColumnWidthDialog(
+        indexRange(ctx.selection.startCol, ctx.selection.endCol),
+        lineRangeLabel("columns", ctx.selection.startCol, ctx.selection.endCol),
+      );
     },
   });
 
@@ -426,33 +419,12 @@ export function registerCoreGridContextMenu(): void {
     onClick: async (ctx) => {
       if (!ctx.selection || ctx.selection.type !== "rows") return;
 
-      const startRow = Math.min(ctx.selection.startRow, ctx.selection.endRow);
-      const endRow = Math.max(ctx.selection.startRow, ctx.selection.endRow);
-
-      // Seed the dialog with the first selected row's current height.
-      const defaults = await getDefaultDimensions();
-      const currentPx = await getRowHeight(startRow) ?? defaults.defaultRowHeight;
-      const rangeLabel = startRow === endRow
-        ? String(startRow + 1)
-        : `${startRow + 1}:${endRow + 1}`;
-
-      const dialogData: DimensionInputData = {
-        mode: "rowHeight",
-        currentPx,
-        rangeLabel,
-        onResult: async (newPx) => {
-          try {
-            for (let row = startRow; row <= endRow; row++) {
-              await setRowHeight(row, newPx);
-            }
-          } catch (err) {
-            void alertAsync(err instanceof Error ? err.message : String(err));
-          }
-          window.dispatchEvent(new CustomEvent("dimensions:refresh"));
-          window.dispatchEvent(new CustomEvent("grid:refresh"));
-        },
-      };
-      DialogExtensions.openDialog(DIMENSION_INPUT_DIALOG_ID, dialogData as unknown as Record<string, unknown>);
+      // Seeded with the first selected row's height; ONE undo step (see
+      // Column Width above).
+      await openRowHeightDialog(
+        indexRange(ctx.selection.startRow, ctx.selection.endRow),
+        lineRangeLabel("rows", ctx.selection.startRow, ctx.selection.endRow),
+      );
     },
   });
 

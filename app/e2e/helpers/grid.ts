@@ -23,6 +23,7 @@
  * rather than a TypeError.
  */
 import { type Page, type Locator, expect } from "@playwright/test";
+import { closeHomeFlyouts, homeControl, isInHomeFlyout } from "./homeTab";
 
 // ---- Last-resort fallbacks (used ONLY when __CALCULA_GRID_STATE__ is absent) ----
 // These mirror DEFAULT_GRID_CONFIG in core/types/types.ts, which in turn
@@ -576,14 +577,47 @@ export class GridHelper {
   }
 
   /**
+   * Toggle strikethrough on the selection with Excel's Ctrl+5.
+   *
+   * Strikethrough is not on Excel's Home tab (it lives in the Font dialog and
+   * on Ctrl+5), and since 2026-10-04 it is not on Calcula's default Home tab
+   * either. Dispatched on the grid container like `dispatchKeyOnGrid`, but with
+   * the PHYSICAL digit code: the grid reads Ctrl+digit by `event.code`
+   * (`ctrlDigit`, "Digit shortcuts are PHYSICAL keys").
+   */
+  async toggleStrikethroughByKey() {
+    await this.spreadsheet.focus();
+    await this.page.waitForTimeout(100);
+    await this.spreadsheet.evaluate((el) => {
+      el.dispatchEvent(new KeyboardEvent("keydown", {
+        key: "5",
+        code: "Digit5",
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }));
+    });
+    await this.page.waitForTimeout(600);
+  }
+
+  /**
    * Check if a formatting toggle button is active in the ribbon.
-   * Button IDs: "bold", "italic", "underline", "strikethrough",
-   *             "superscript", "subscript", "alignLeft", "alignCenter",
-   *             "alignRight", "wrapText"
+   * Button IDs: "bold", "italic", "underline", "alignLeft", "alignCenter",
+   *             "alignRight", "wrapText", ... -- any Home item in the CURRENT
+   *             layout. "strikethrough", "superscript" and "subscript" left the
+   *             default layout with the Excel Home tab (2026-10-04; Customize
+   *             Home Tab can put them back), so asking for them on a default
+   *             ribbon fails naming where it looked.
    */
   async isFormatActive(formatId: string): Promise<boolean> {
-    const btn = this.page.locator(`[data-testid="fmt-${formatId}"]`);
+    // Through homeControl: on the 1280px harness window Styles, Cells and
+    // Editing are collapsed group buttons, and their controls exist only in
+    // the group's flyout (helpers/homeTab.ts).
+    const btn = await homeControl(this.page, `fmt-${formatId}`);
     const attr = await btn.getAttribute("data-active", { timeout: 3000 });
+    // A flyout opened just to read the state is closed again, so it cannot
+    // sit over the grid cells the spec clicks next.
+    if (await isInHomeFlyout(btn)) await closeHomeFlyouts(this.page);
     return attr === "true";
   }
 
@@ -771,10 +805,19 @@ export class GridHelper {
    * Does NOT move focus back to the grid — call clickCell() if needed.
    */
   async clickFormatButton(formatId: string) {
-    const btn = this.page.locator(`[data-testid="fmt-${formatId}"]`);
+    // Wherever the ribbon has put it: inline, or inside a collapsed group's
+    // flyout (helpers/homeTab.ts). A narrow window collapses Styles, Cells and
+    // Editing first, exactly as Excel does.
+    const btn = await homeControl(this.page, `fmt-${formatId}`);
+    const inFlyout = await isInHomeFlyout(btn);
+    const opensPopup = (await btn.getAttribute("aria-haspopup")) !== null;
     await btn.click();
     // Wait for the Tauri applyFormatting round-trip and React state update
     await this.page.waitForTimeout(600);
+    // A plain command clicked inside a collapsed group's flyout leaves the
+    // flyout open; close it so it cannot cover the cells clicked next. A
+    // control that opened a menu keeps it: the menu lives with the flyout.
+    if (inFlyout && !opensPopup) await closeHomeFlyouts(this.page);
   }
 
   // -------------------------------------------------------------------

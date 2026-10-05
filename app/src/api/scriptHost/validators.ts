@@ -882,7 +882,29 @@ const UNDERLINE_STYLES = new Set([
 ]);
 const TEXT_ALIGNS = new Set(["left", "center", "right", "general"]);
 const VERTICAL_ALIGNS = new Set(["top", "middle", "bottom"]);
-const TEXT_ROTATIONS = new Set(["none", "rotate90", "rotate270"]);
+/**
+ * The named text rotations (mirrors parse_text_rotation in
+ * app/src-tauri/src/commands/styles.rs). "vertical" is STACKED text, Excel's
+ * Vertical Text. Angles travel as `custom:N` (see isTextRotation).
+ */
+const TEXT_ROTATIONS = new Set(["none", "rotate90", "rotate270", "vertical"]);
+const TEXT_ROTATION_HELP =
+  'one of: none, rotate90, rotate270, vertical, or "custom:N" with a whole N from -90 to 90';
+
+/**
+ * A text rotation the backend accepts: a named one, or `custom:N` with an
+ * integer N in -90..90 (Home > Orientation's Angle Counterclockwise is
+ * "custom:45", Angle Clockwise "custom:-45"). The gate used to accept only the
+ * three named rotations, so a RECORDED orientation macro was refused on replay.
+ */
+function isTextRotation(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  if (TEXT_ROTATIONS.has(value)) return true;
+  const match = /^custom:(-?\d{1,3})$/.exec(value);
+  if (!match) return false;
+  const angle = Number(match[1]);
+  return angle >= -90 && angle <= 90;
+}
 /** Border line styles the backend's parse_border_side understands. */
 const BORDER_STYLES = new Set(["none", "thin", "medium", "thick", "dashed", "dotted", "double"]);
 
@@ -1115,8 +1137,8 @@ export function checkFormatObject(
         }
         break;
       case "textRotation":
-        if (!TEXT_ROTATIONS.has(value as string)) {
-          return `textRotation must be one of: ${[...TEXT_ROTATIONS].join(", ")}`;
+        if (!isTextRotation(value)) {
+          return `textRotation must be ${TEXT_ROTATION_HELP}`;
         }
         break;
       case "fontSize":

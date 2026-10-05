@@ -9,7 +9,7 @@ import { CoreCommands } from "@api/commands";
 import { ExtensionRegistry, IconFormatPainter, IconLock } from "@api";
 import { registerMenuItem, unregisterMenuItem } from "@api/ui";
 import { activateFormatPainter, deactivateFormatPainter } from "./formatPainterLogic";
-import { isFormatPainterActive } from "./formatPainterState";
+import { isFormatPainterActive, isFormatPainterStarting } from "./formatPainterState";
 
 // ============================================================================
 // Extension State
@@ -39,12 +39,16 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(unsubSelection);
 
-  // Register Format Painter command (single-use mode)
+  // Register Format Painter command (single-use mode). On an armed painter it
+  // switches it off (a click on Excel's pressed button); while one is still
+  // starting it is ignored (formatPainterLogic.ts has the whole table).
   context.commands.register(CoreCommands.FORMAT_PAINTER, async () => {
     await activateFormatPainter(false, currentSelection);
   });
 
-  // Register Format Painter Lock command (persistent mode)
+  // Register Format Painter Lock command (persistent mode) -- the Home tab's
+  // double-click and the Edit menu's "Format Painter Lock". On an armed (or
+  // starting) painter it UPGRADES it to locked; it never switches it off.
   context.commands.register(CoreCommands.FORMAT_PAINTER_LOCK, async () => {
     await activateFormatPainter(true, currentSelection);
   });
@@ -60,8 +64,10 @@ function activate(context: ExtensionContext): void {
   // painter twice, and a user's remap in Settings left Ctrl+Shift+C working
   // (BUG-0199). Only Escape is the painter's own key.
   const handleKeyDown = (e: KeyboardEvent) => {
-    // ESC: Deactivate Format Painter (if active)
-    if (e.key === "Escape" && isFormatPainterActive()) {
+    // ESC: Deactivate Format Painter (if active) -- or cancel one still
+    // reading its source cells, which would otherwise arm a moment AFTER the
+    // user pressed Escape.
+    if (e.key === "Escape" && (isFormatPainterActive() || isFormatPainterStarting())) {
       e.preventDefault();
       e.stopPropagation();
       deactivateFormatPainter();
@@ -111,8 +117,10 @@ function deactivate(): void {
 
   console.log("[FormatPainterExtension] Deactivating...");
 
-  // Deactivate painter if active
-  if (isFormatPainterActive()) {
+  // Deactivate painter if active (or cancel one still starting: it must not
+  // arm listeners after its extension has gone). The published state
+  // (@api/formatPainterState) goes back to OFF with it.
+  if (isFormatPainterActive() || isFormatPainterStarting()) {
     deactivateFormatPainter();
   }
 

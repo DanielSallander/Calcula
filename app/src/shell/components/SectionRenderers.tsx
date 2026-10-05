@@ -16,7 +16,7 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { css } from "@emotion/css";
+import { css, cx } from "@emotion/css";
 import type { PanelSection, PanelSectionProps } from "../../api/uiTypes";
 import {
   SurfaceLayoutProvider,
@@ -27,8 +27,9 @@ import {
   FONT_FAMILY,
   HEADER_FONT_SIZE,
 } from "../../api/layout";
+import { DialogLauncherButton } from "../../api/layout/primitives/Launcher";
 import { SectionCell, type SectionCellForm } from "./SectionCell";
-import { cellChromeWidth } from "./SectionChrome";
+import { cellChromeWidth, dialogLauncherTestId } from "./SectionChrome";
 import { computeWidthDemotions, type WidthDemotionInput } from "./useSectionFit";
 
 /**
@@ -386,6 +387,23 @@ const sidebarStyles = {
     text-overflow: ellipsis;
     white-space: nowrap;
   `,
+  /** Only for a section with a dialog launcher: the header button and the
+   *  launcher side by side. The header is itself a <button> (it toggles the
+   *  section), and a button cannot contain a button, so the launcher is its
+   *  SIBLING and the row takes over the header's outer margin. */
+  headerRow: css`
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin: 2px 6px;
+  `,
+  /** The header inside a headerRow: the row owns the margin and the width. */
+  headerInRow: css`
+    flex: 1 1 auto;
+    width: auto;
+    min-width: 0;
+    margin: 0;
+  `,
   content: css`
     padding: 6px 14px 12px;
     min-width: 0;
@@ -465,35 +483,60 @@ export function SectionSidebarRenderer({
             section.icon !== null &&
             section.icon !== false &&
             section.icon !== "";
+          const dialogLauncher = section.dialogLauncher;
+          const header = (
+            <button
+              type="button"
+              className={
+                dialogLauncher
+                  ? cx(sidebarStyles.header, sidebarStyles.headerInRow)
+                  : sidebarStyles.header
+              }
+              aria-expanded={!isCollapsed}
+              onClick={() => toggleSection(section.id)}
+            >
+              <span
+                className={sidebarStyles.chevron}
+                style={{ transform: isCollapsed ? "rotate(-90deg)" : "rotate(0deg)" }}
+                aria-hidden
+              >
+                <DropdownChevron size={SIDEBAR_CHEVRON_SIZE} />
+              </span>
+              {hasIcon && (
+                <span className={sidebarStyles.icon} aria-hidden>
+                  {section.icon}
+                </span>
+              )}
+              <span className={sidebarStyles.label}>{section.label}</span>
+            </button>
+          );
           return (
             <div
               key={section.id}
               data-sidebar-section={section.id}
               style={isSingleSection ? { height: "100%" } : undefined}
             >
-              {/* Section header — hidden for single-section panels */}
-              {!isSingleSection && (
-                <button
-                  type="button"
-                  className={sidebarStyles.header}
-                  aria-expanded={!isCollapsed}
-                  onClick={() => toggleSection(section.id)}
-                >
-                  <span
-                    className={sidebarStyles.chevron}
-                    style={{ transform: isCollapsed ? "rotate(-90deg)" : "rotate(0deg)" }}
-                    aria-hidden
-                  >
-                    <DropdownChevron size={SIDEBAR_CHEVRON_SIZE} />
-                  </span>
-                  {hasIcon && (
-                    <span className={sidebarStyles.icon} aria-hidden>
-                      {section.icon}
-                    </span>
-                  )}
-                  <span className={sidebarStyles.label}>{section.label}</span>
-                </button>
-              )}
+              {/* Section header — hidden for single-section panels (which
+                  therefore have nowhere to show a dialog launcher). A section
+                  WITHOUT a dialog launcher keeps the bare header button as the
+                  section div's first child, exactly as before. The launcher
+                  stays reachable while the section is collapsed: the dialog
+                  is the whole group and more, so it needs no expanded body. */}
+              {!isSingleSection &&
+                (dialogLauncher ? (
+                  <div className={sidebarStyles.headerRow}>
+                    {header}
+                    <DialogLauncherButton
+                      size="header"
+                      label={dialogLauncher.label}
+                      onClick={dialogLauncher.onLaunch}
+                      commandId={dialogLauncher.commandId}
+                      testId={dialogLauncherTestId(section.id, dialogLauncher)}
+                    />
+                  </div>
+                ) : (
+                  header
+                ))}
               {/* Section content */}
               {(isSingleSection || !isCollapsed) && (
                 <div

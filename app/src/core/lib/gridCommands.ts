@@ -11,6 +11,10 @@ import { refuseIfSelectionOwned } from "./selectionOwner";
 /** Names a word split would get wrong ("Merge Center" is Excel's "Merge & Center"). */
 const GRID_COMMAND_LABELS: Partial<Record<GridCommand, string>> = {
   mergeCenter: "Merge & Center",
+  // Excel spells AutoFit as one word, and its Clear menu item clears notes too.
+  autoFitRowHeight: "AutoFit Row Height",
+  autoFitColumnWidth: "AutoFit Column Width",
+  clearComments: "Clear Comments and Notes",
 };
 
 /** "clearContents" -> "Clear Contents": what a refusal calls a grid command. */
@@ -45,8 +49,13 @@ export interface GridMenuContext {
 // Command Registry
 // ============================================================================
 
-/** Command handler function type */
-type CommandHandler = () => void | Promise<void>;
+/**
+ * Command handler function type. `args` is whatever the caller passed to
+ * `gridCommands.execute` / `CommandRegistry.execute` (undefined from every
+ * door that passes none: menus, keys, the right-click menu); a handler that
+ * takes options reads them defensively, since a script can pass anything.
+ */
+type CommandHandler = (args?: unknown) => void | Promise<void>;
 
 /**
  * Guard function type. Called before a command executes.
@@ -84,6 +93,11 @@ export const GRID_COMMANDS = [
   "fillRight",
   "fillUp",
   "fillLeft",
+  // Excel's Home tab (2026-10-04): the Format menu's AutoFit commands (they
+  // take `{ growOnly?: boolean }`) and the Clear menu's Remove Hyperlinks.
+  "autoFitRowHeight",
+  "autoFitColumnWidth",
+  "removeHyperlinks",
 ] as const;
 
 /** Available command names */
@@ -148,9 +162,11 @@ class GridCommandRegistry {
    * Guards are checked first - if any guard returns a string, the command
    * is blocked and the message is shown as an alert.
    * @param command The command to execute
+   * @param args Optional arguments, handed to the handler unchanged (e.g.
+   *   `{ growOnly: true }` for the AutoFit commands)
    * @returns true if the command was executed, false otherwise
    */
-  async execute(command: GridCommand): Promise<boolean> {
+  async execute(command: GridCommand, args?: unknown): Promise<boolean> {
     // Every grid command acts on Core's SELECTION. While something else owns
     // the selection (a floating grid's selected cell, with Core's selection
     // HIDDEN under it -- BUG-0185), none of them may run: refused here, once,
@@ -173,7 +189,7 @@ class GridCommandRegistry {
 
     const handler = this.handlers.get(command);
     if (handler) {
-      await handler();
+      await handler(args);
       return true;
     }
     console.warn(

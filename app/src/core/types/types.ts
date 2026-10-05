@@ -327,7 +327,8 @@ export interface RichTextRun {
   underline?: UnderlineStyle;
   /** Override: strikethrough */
   strikethrough?: boolean;
-  /** Override: font size in points */
+  /** Override: font size in points. Half points (10.5) and Excel's 1..409 are
+   *  legal (Rust `FontSize`, twip resolution). */
   fontSize?: number;
   /** Override: font family name */
   fontFamily?: string;
@@ -339,13 +340,26 @@ export interface RichTextRun {
   subscript?: boolean;
 }
 
-/** Accounting layout for split rendering (symbol left, value right). */
+/**
+ * Accounting layout for split rendering. Mirrors Rust `AccountingLayout`
+ * (api_types.rs), whose doc is the contract. Excel's accounting code is three
+ * runs: [left-edge run][fill][right-edge run].
+ *  - `symbolBefore`: `symbol` is the LEFT-edge run -- for a minus-style
+ *    negative it carries the minus in front ("-$", "-£", and a bare "-" for
+ *    Comma Style's empty symbol) -- and `value` the right-edge run.
+ *  - symbol after: the right-edge run is `value` then `symbol`; a minus-style
+ *    negative's `value` starts with "-" FOLLOWED BY A DIGIT, and Excel pins
+ *    that one character to the LEFT edge (sv-SE `-* # ##0,00 kr_-`).
+ *  - zero is "-" + one U+2007 (digit-width space) per decimal + " ".
+ *  - positives and minus-style negatives end with a trailing " " pad (Excel's
+ *    `_)` / `_-`); a parenthesised negative ends with ")".
+ */
 export interface AccountingLayout {
-  /** Currency symbol text (e.g., "$", "EUR") */
+  /** Currency symbol text (e.g., "$", "EUR"); "-$" for a minus-style negative */
   symbol: string;
   /** Whether the symbol appears before the value */
   symbolBefore: boolean;
-  /** Formatted number part (e.g., "1,234.00", "(1,234.00)", "-") */
+  /** Formatted number part (e.g., "1,234.00 ", "(1,234.00)", "-1,234.00 ") */
   value: string;
 }
 
@@ -495,6 +509,7 @@ export interface StyleData {
   italic: boolean;
   underline: UnderlineStyle;
   strikethrough: boolean;
+  /** Points: half points (10.5) are real sizes, and the range is Excel's 1..409. */
   fontSize: number;
   fontFamily: string;
   textColor: string;
@@ -503,6 +518,9 @@ export interface StyleData {
   verticalAlign: string;
   numberFormat: string;
   wrapText: boolean;
+  /** One of the `TextRotation` values the backend emits ("none", "rotate90",
+   *  "rotate270", "vertical", "custom:N"). Kept `string` so a reader's
+   *  comparisons stay legal; send values typed as `TextRotation`. */
   textRotation: string;
   borderTop: BorderSideData;
   borderRight: BorderSideData;
@@ -707,6 +725,25 @@ export const DEFAULT_STYLE: StyleData = {
 };
 
 /**
+ * Text orientation, as `applyFormatting({ textRotation })` takes it and the
+ * backend reports it (Rust `parse_text_rotation` / `StyleData.text_rotation`):
+ *  - "none": horizontal;
+ *  - "rotate90" / "rotate270": Excel's Rotate Text Up / Rotate Text Down;
+ *  - "vertical": STACKED text, Excel's Vertical Text (OOXML 255);
+ *  - `custom:N`: N degrees counter-clockwise, -90..90 (Angle Counterclockwise
+ *    is "custom:45", Angle Clockwise "custom:-45"). 0 / 90 / -90 come back as
+ *    "none" / "rotate90" / "rotate270".
+ * Anything else is REFUSED by the backend (it used to silently clear the
+ * rotation).
+ */
+export type TextRotation =
+  | "none"
+  | "rotate90"
+  | "rotate270"
+  | "vertical"
+  | `custom:${number}`;
+
+/**
  * Border side parameter for formatting.
  */
 export interface BorderSideParam {
@@ -722,6 +759,8 @@ export interface FormattingOptions {
   italic?: boolean;
   underline?: UnderlineStyle;
   strikethrough?: boolean;
+  /** Points. Half points (10.5) up to Excel's 409; outside 1..409 the backend
+   *  refuses the whole call. */
   fontSize?: number;
   fontFamily?: string;
   textColor?: string;
@@ -730,7 +769,7 @@ export interface FormattingOptions {
   verticalAlign?: "top" | "middle" | "bottom";
   numberFormat?: string;
   wrapText?: boolean;
-  textRotation?: "none" | "rotate90" | "rotate270";
+  textRotation?: TextRotation;
   borderTop?: BorderSideParam;
   borderRight?: BorderSideParam;
   borderBottom?: BorderSideParam;
@@ -2522,3 +2561,36 @@ export interface ComputedPropertyResult {
   dimensionChanges: DimensionData[];
   needsStyleRefresh: boolean;
 }
+// ============================================================================
+// Structure: Insert / Delete Cells and batch line sizes (Rust api_types.rs)
+// ============================================================================
+
+/**
+ * An inclusive run of row or column indices, `[first, last]` (either order):
+ * the shape `set_row_heights` / `set_column_widths` take (Rust `(u32, u32)`),
+ * so Select All is one run rather than a million indices.
+ */
+export type LineRun = readonly [number, number];
+
+/**
+ * What `insert_cells` / `delete_cells` did (Rust `api_types::CellShiftResult`,
+ * field for field).
+ *
+ * A refusal REJECTS, like every structural command. `applied: false` is the
+ * other way to stop without a change: Excel ASKS before it unmerges a merged
+ * region the shift cuts, so the backend returns the question in `confirm` and
+ * the caller asks, then calls again with `{ unmergeCutMerges: true }` on OK.
+ */
+export interface CellShiftResult {
+  /** True when the cells moved. False only when the command stopped to ask. */
+  applied: boolean;
+  /** Excel's question ("This operation will cause some merged cells to unmerge..."). */
+  confirm: string | null;
+  /** The range spanned every column (row): entire rows (columns) were inserted / deleted. */
+  wholeLines: boolean;
+}
+
+/** Excel's Insert dialog shifts: `insert_cells`'s `shift` argument. */
+export type InsertCellsShift = "right" | "down";
+/** Excel's Delete dialog shifts: `delete_cells`'s `shift` argument. */
+export type DeleteCellsShift = "left" | "up";

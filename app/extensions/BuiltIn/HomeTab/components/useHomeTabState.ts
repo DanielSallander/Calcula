@@ -2,9 +2,30 @@
 // PURPOSE: Shared hook that provides formatting state and actions for Home tab groups.
 // CONTEXT: Each layout group renders as its own panel section; this hook lets every
 // section component share the same selection/style state and formatting actions.
+//
+// "THE CELL" IS THE ACTIVE CELL. Every read and write here that is about one
+// cell -- the style the ribbon shows, superscript/subscript's rich text, the
+// cell Increase/Decrease Decimal reads its format from -- uses activeCellOf
+// (@api/activeCell, the one rule Core, Format Cells and the mini toolbar read
+// too): activeRow/activeCol, else endRow/endCol, which is where the grid draws
+// the active-cell border. It used to read startRow/startCol, the ANCHOR, so
+// after a drag the ribbon described the cell the drag began on.
+//
+// EVERY BLOCK. A WRITE covers every block of the selection (@api/selectionBlocks:
+// the main range first, then each Ctrl+click / Go To Special range), several
+// blocks as ONE undo step. It used to write the main range only, so after Go
+// To Special > Constants, Bold formatted the first match and nothing else,
+// while Borders and Clear on the same selection covered every block (review
+// finding, 2026-10-04).
+//
+// EXCEL, MEASURED. Increase/Decrease Font Size walk Excel's ladder (not the
+// Size list), Increase Indent is Excel's (General/Center become Left, angled
+// text goes horizontal, cap 250), Comma Style is the backend's `comma` preset,
+// and Increase/Decrease Decimal are the backend's own step. Each rule's
+// measurement is cited where it is applied.
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useGridState, cellEvents } from "@api";
+import { useGridState } from "@api";
 import { getGridStateSnapshot } from "@api/grid";
 import { CommandRegistry, CoreCommands } from "@api/commands";
 import {
@@ -12,19 +33,27 @@ import {
   getStyle,
   applyFormatting,
   setCellRichText,
+  beginUndoTransaction,
+  commitUndoTransaction,
+  cancelUndoTransaction,
 } from "@api/lib";
-import type { RichTextRun, CellData } from "@api/types";
+import type { RichTextRun, CellData, FormattingResult } from "@api/types";
 import type { StyleData } from "@api/types";
+import { activeCellOf } from "@api/activeCell";
+import { selectionBlocks } from "@api/selectionBlocks";
+import { announceFormattingResult } from "@api/announceFormatting";
+import { ownUndoTransaction } from "@api/undoTicket";
 import {
   ITEMS_BY_ID,
   type HomeTabItem,
 } from "../homeTabConfig";
 import type { CellStyleDefinition } from "../../../_shared/components/CellStylesGallery";
-import { FONT_SIZES } from "../../../_shared/lib/fontList";
 import { alertAsync } from "@api/dialogs";
 import { refuseIfSelectionOwned } from "@api/selectionOwner";
 import { clipboardDoorCommand } from "@api/objectClipboard";
 import type { MergeMenuCommand } from "./homeTabIcons";
+import { FONT_SIZE_LADDER, fontSizeStep } from "../../../_shared/lib/fontList";
+import { COMMA_STYLE_PRESET, rowsColsOf, stepNumberFormatDecimals } from "./alignment/numberGroupCommands";
 
 /** The CoreCommand behind each row of the Merge & Center menu. */
 export const MERGE_MENU_COMMAND_IDS: Readonly<Record<MergeMenuCommand, string>> = {
@@ -33,6 +62,42 @@ export const MERGE_MENU_COMMAND_IDS: Readonly<Record<MergeMenuCommand, string>> 
   mergeCells: CoreCommands.MERGE_CELLS,
   unmergeCells: CoreCommands.UNMERGE_CELLS,
 };
+
+/**
+ * Excel's Increase / Decrease Font Size ladder and its step live in ONE place,
+ * @api/fontSizeLadder (re-exported by _shared/lib/fontList, imported above),
+ * which the mini format toolbar's Grow / Shrink use too: its own copy had
+ * already drifted (no 26, wrote past both ends). Re-exported here for this
+ * file's existing readers.
+ */
+export { FONT_SIZE_LADDER, fontSizeStep };
+
+/** Excel's largest indent (measured: 250 sets, 251 is refused; probe9). */
+export const MAX_INDENT = 250;
+
+/**
+ * What Excel's Increase Indent writes, given the active cell's style; null
+ * when it changes nothing (already at MAX_INDENT). Measured live (alignment
+ * survey, probes 6-8):
+ *  - General and Center become LEFT; Right stays right, Left stays left;
+ *  - ANGLED text (any rotation but stacked) goes back to horizontal, and the
+ *    alignment is left as it was -- the indent rule and an angle cannot both
+ *    hold (Excel greys the angle rows while indent > 0);
+ *  - STACKED text keeps its orientation and becomes Left like any other.
+ */
+export function increaseIndentFormatting(style: StyleData | null): Record<string, unknown> | null {
+  const indent = style?.indent ?? 0;
+  if (indent >= MAX_INDENT) return null;
+  const formatting: Record<string, unknown> = { indent: indent + 1 };
+  const rotation = style?.textRotation ?? "none";
+  if (rotation !== "none" && rotation !== "vertical") {
+    formatting.textRotation = "none";
+    return formatting;
+  }
+  const align = style?.textAlign ?? "general";
+  if (align === "general" || align === "center") formatting.textAlign = "left";
+  return formatting;
+}
 
 export function useHomeTabState() {
   const gridState = useGridState();
@@ -105,14 +170,14 @@ export function useHomeTabState() {
    * document -- so both are fixed here rather than at the call sites.
    */
   useEffect(() => {
-    const sel = gridState.selection;
-    if (!sel) {
+    const active = activeCellOf(gridState.selection);
+    if (!active) {
       setCurrentCellData(null);
       setCurrentStyle(null);
       return;
     }
     let cancelled = false;
-    getCell(sel.startRow, sel.startCol).then((cell) => {
+    getCell(active.row, active.col).then((cell) => {
       if (cancelled) return;
       if (!cell) {
         // The cell holds nothing: the ribbon must not keep the last cell that
@@ -137,62 +202,112 @@ export function useHomeTabState() {
     return () => { cancelled = true; };
   }, [gridState.selection, documentRevision]);
 
-  // Get the rows/cols arrays for current selection
-  const getSelectionRange = useCallback(() => {
+  /** Every block of the current selection, the main one first, each as the
+   *  rows and columns applyFormatting takes (see "EVERY BLOCK" above). */
+  const getSelectionBlocks = useCallback(() => {
     const snapshot = getGridStateSnapshot();
     const sel = snapshot?.selection ?? lastSelectionRef.current;
-    if (!sel) return null;
-    const startRow = Math.min(sel.startRow, sel.endRow);
-    const endRow = Math.max(sel.startRow, sel.endRow);
-    const startCol = Math.min(sel.startCol, sel.endCol);
-    const endCol = Math.max(sel.startCol, sel.endCol);
-    const rows: number[] = [];
-    const cols: number[] = [];
-    for (let r = startRow; r <= endRow; r++) rows.push(r);
-    for (let c = startCol; c <= endCol; c++) cols.push(c);
-    return { rows, cols };
+    return selectionBlocks(sel).map(rowsColsOf);
   }, []);
 
-  // Apply formatting and refresh. THE Home tab's formatting door: every
-  // button, picker, colour and the cell-style gallery come through here, so
-  // this is where a selection owner (a floating grid's selected cell, with
-  // Core's selection HIDDEN under it -- BUG-0185) refuses them, once.
+  /**
+   * Re-read the ACTIVE cell's style straight after a write, so the ribbon
+   * shows what was just applied without waiting for the coalesced
+   * `grid:refresh` re-read. Never throws: a failed re-read must not turn a
+   * write that LANDED into a reported failure.
+   */
+  const rereadActiveStyle = useCallback(async () => {
+    try {
+      const active = activeCellOf(getGridStateSnapshot()?.selection ?? lastSelectionRef.current);
+      if (!active) return;
+      const cell = await getCell(active.row, active.col);
+      if (cell) setCurrentStyle(await getStyle(cell.styleIndex));
+    } catch {
+      // The coalesced document re-read (above) will catch up.
+    }
+  }, []);
+
+  /**
+   * Apply formatting and refresh. THE Home tab's formatting door: every
+   * button, picker, colour and the cell-style gallery come through here, so
+   * this is where a selection owner (a floating grid's selected cell, with
+   * Core's selection HIDDEN under it -- BUG-0185) refuses them, once.
+   *
+   * EVERY BLOCK of the selection, one applyFormatting call each, inside ONE
+   * owned undo transaction when there are several (so one Ctrl+Z restores
+   * every area). A block refused part-way stops the gesture: what landed is
+   * COMMITTED -- a cancel would drop the undo record and keep the writes --
+   * and an empty step is cancelled.
+   *
+   * ANSWERS WHETHER IT WROTE: true when a write landed (in at least one
+   * block); false when a selection owner refused it, there is no selection, or
+   * the backend refused it before anything landed. The Orientation menu reads
+   * that answer to skip the AutoFit after a refused rotation.
+   *
+   * A BACKEND REFUSAL REACHES THE USER HERE. It used to be logged to the
+   * console only, so on a protected sheet Bold, Underline, the colours, the
+   * pickers and every other formatting button did nothing at all, silently
+   * (number.md, home-font, home-alignment-number). It is shown HERE and never
+   * re-thrown: callers that also catch (handleItemClick, the group lanes'
+   * runners) would otherwise show it twice.
+   */
   const applyFormat = useCallback(
-    async (formatting: Record<string, unknown>, action = "Formatting") => {
-      if (refuseIfSelectionOwned(action)) return;
-      const range = getSelectionRange();
-      if (!range) return;
+    async (formatting: Record<string, unknown>, action = "Formatting"): Promise<boolean> => {
+      if (refuseIfSelectionOwned(action)) return false;
+      const blocks = getSelectionBlocks();
+      if (blocks.length === 0) return false;
+      // One block: the backend's own step is the one undo step. A begin that
+      // fails still lets the write apply (as several steps); a begin that
+      // JOINS a script's batch closes nothing -- the holder closes it.
+      const tx =
+        blocks.length > 1
+          ? ownUndoTransaction(await beginUndoTransaction(action).catch(() => null), {
+              commitUndoTransaction,
+              cancelUndoTransaction,
+            })
+          : null;
+      const landed: FormattingResult[] = [];
       try {
-        const result = await applyFormatting(
-          range.rows,
-          range.cols,
-          formatting as Parameters<typeof applyFormatting>[2]
-        );
-        for (const cell of result.cells) {
-          cellEvents.emit({
-            row: cell.row,
-            col: cell.col,
-            oldValue: undefined,
-            newValue: cell.display,
-            formula: cell.formula,
-          });
+        for (const block of blocks) {
+          landed.push(
+            await applyFormatting(block.rows, block.cols, formatting as Parameters<typeof applyFormatting>[2]),
+          );
         }
-        window.dispatchEvent(new CustomEvent("styles:refresh"));
-        window.dispatchEvent(new CustomEvent("grid:refresh"));
-        const freshSnapshot = getGridStateSnapshot();
-        const sel = freshSnapshot?.selection ?? lastSelectionRef.current;
-        if (sel) {
-          const cell = await getCell(sel.startRow, sel.startCol);
-          if (cell) {
-            const style = await getStyle(cell.styleIndex);
-            setCurrentStyle(style);
-          }
-        }
+        await tx?.commit();
       } catch (err) {
         console.error("[HomeTab] Failed to apply formatting:", err);
+        void alertAsync(err instanceof Error ? err.message : String(err));
+        const close = landed.length > 0 ? tx?.commit() : tx?.cancel();
+        await close?.catch((closeErr: unknown) =>
+          console.error("[HomeTab] Formatting: closing the undo step failed:", closeErr),
+        );
+      }
+      if (landed.length === 0) return false;
+      announceFormattingResult(landed);
+      await rereadActiveStyle();
+      return true;
+    },
+    [getSelectionBlocks, rereadActiveStyle]
+  );
+
+  /**
+   * Excel's Increase (+1) / Decrease (-1) Decimal: the backend's own step
+   * (`adjustNumberFormatDecimals`), which keeps the format's KIND and reads the
+   * ACTIVE cell from the first row and column it is sent -- so the active
+   * cell goes first (numberGroupCommands.activeCellFirst). The same refusal
+   * (selection owner, one toast) and announcement as applyFormat; a backend
+   * refusal reaches the user through alertAsync there. This replaced a step
+   * computed HERE from the cell's display name, which rebuilt a plain "0.00"
+   * and so turned a Currency, Accounting, Percentage or Scientific cell into a
+   * plain number.
+   */
+  const stepDecimals = useCallback(
+    async (delta: 1 | -1, action: string) => {
+      if (await stepNumberFormatDecimals(delta, action, lastSelectionRef.current)) {
+        await rereadActiveStyle();
       }
     },
-    [getSelectionRange]
+    [rereadActiveStyle]
   );
 
   // Handle item click
@@ -211,43 +326,40 @@ export function useHomeTabState() {
         case "formatPainter": await CommandRegistry.execute(CoreCommands.FORMAT_PAINTER); break;
         case "bold": await applyFormat({ bold: !(currentStyle?.bold ?? false) }, action); break;
         case "italic": await applyFormat({ italic: !(currentStyle?.italic ?? false) }, action); break;
-        case "underline": await applyFormat({ underline: (currentStyle?.underline ?? "none") !== "none" ? "none" : "single" }, action); break;
+        // (Underline is its own split, font/UnderlineSplitButton, with Excel's
+        // measured single/double toggle; it never reaches this door.)
         case "strikethrough": await applyFormat({ strikethrough: !(currentStyle?.strikethrough ?? false) }, action); break;
         case "superscript":
         case "subscript": {
           // Its own write path (rich text, not applyFormat), so its own ask.
           if (refuseIfSelectionOwned(action)) break;
-          const sel = gridState.selection ?? lastSelectionRef.current;
-          if (!sel) break;
+          const active = activeCellOf(gridState.selection ?? lastSelectionRef.current);
+          if (!active) break;
           const isSuperscript = item.id === "superscript";
-          const cellData = await getCell(sel.startRow, sel.startCol);
+          const cellData = await getCell(active.row, active.col);
           const cellText = cellData?.display ?? "";
           if (!cellText) break;
           const runs = cellData?.richText;
           const isCurrentlyActive = runs?.length === 1 &&
             (isSuperscript ? runs[0].superscript : runs[0].subscript);
           if (isCurrentlyActive) {
-            await setCellRichText(sel.startRow, sel.startCol, null);
+            await setCellRichText(active.row, active.col, null);
           } else {
             const run: RichTextRun = { text: cellText, superscript: isSuperscript, subscript: !isSuperscript };
-            await setCellRichText(sel.startRow, sel.startCol, [run]);
+            await setCellRichText(active.row, active.col, [run]);
           }
-          const updated = await getCell(sel.startRow, sel.startCol);
+          const updated = await getCell(active.row, active.col);
           if (updated) setCurrentCellData(updated);
           break;
         }
         case "formatCells": await CommandRegistry.execute(CoreCommands.FORMAT_CELLS); break;
-        case "increaseFontSize": {
-          const size = currentStyle?.fontSize ?? 11;
-          const next = FONT_SIZES.find((s) => s > size) ?? FONT_SIZES[FONT_SIZES.length - 1];
-          await applyFormat({ fontSize: next }, action);
-          break;
-        }
+        // Excel's ladder (FONT_SIZE_LADDER). Past either end Excel changes
+        // nothing, so nothing is written: a same-size write would still dirty
+        // the document and add an undo step that undoes nothing.
+        case "increaseFontSize":
         case "decreaseFontSize": {
-          const size = currentStyle?.fontSize ?? 11;
-          const smaller = FONT_SIZES.filter((s) => s < size);
-          const next = smaller.length > 0 ? smaller[smaller.length - 1] : FONT_SIZES[0];
-          await applyFormat({ fontSize: next }, action);
+          const next = fontSizeStep(currentStyle?.fontSize ?? 11, item.id === "increaseFontSize" ? 1 : -1);
+          if (next !== null) await applyFormat({ fontSize: next }, action);
           break;
         }
         // Vertical alignment is exclusive; clicking the active state returns
@@ -259,35 +371,32 @@ export function useHomeTabState() {
         case "alignCenter": await applyFormat({ textAlign: currentStyle?.textAlign === "center" ? "general" : "center" }, action); break;
         case "alignRight": await applyFormat({ textAlign: currentStyle?.textAlign === "right" ? "general" : "right" }, action); break;
         case "wrapText": await applyFormat({ wrapText: !(currentStyle?.wrapText ?? false) }, action); break;
-        case "increaseIndent": await applyFormat({ indent: Math.min(15, (currentStyle?.indent ?? 0) + 1) }, action); break;
-        case "decreaseIndent": await applyFormat({ indent: Math.max(0, (currentStyle?.indent ?? 0) - 1) }, action); break;
+        // Excel's Increase Indent (increaseIndentFormatting): General/Center
+        // become Left, angled text goes horizontal, the cap is 250 (it was 15).
+        case "increaseIndent": {
+          const formatting = increaseIndentFormatting(currentStyle);
+          if (formatting) await applyFormat(formatting, action);
+          break;
+        }
+        // At 0 Excel's Decrease Indent is enabled and changes nothing; so does
+        // this (no same-value write, no empty undo step).
+        case "decreaseIndent": {
+          const indent = currentStyle?.indent ?? 0;
+          if (indent > 0) await applyFormat({ indent: indent - 1 }, action);
+          break;
+        }
         // The Merge & Center split button's icon half: Excel's toggle (merges
         // and centres, or unmerges while the selection holds a merge).
         case "mergeCells": await CommandRegistry.execute(CoreCommands.MERGE_CENTER); break;
         case "percentFormat": await applyFormat({ numberFormat: "0%" }, action); break;
-        case "commaFormat": await applyFormat({ numberFormat: "#,##0" }, action); break;
-        case "increaseDecimal": {
-          const fmt = currentStyle?.numberFormat ?? "General";
-          const decMatch = fmt.match(/(\d+)\s*decimal/i);
-          const currentDecimals = decMatch ? parseInt(decMatch[1], 10) : 0;
-          const hasSep = fmt.includes("separator");
-          const newDecimals = currentDecimals + 1;
-          const decPart = newDecimals > 0 ? "." + "0".repeat(newDecimals) : "";
-          await applyFormat({ numberFormat: hasSep ? `#,##0${decPart}` : `0${decPart}` }, action);
-          break;
-        }
-        case "decreaseDecimal": {
-          const fmt = currentStyle?.numberFormat ?? "General";
-          const decMatch = fmt.match(/(\d+)\s*decimal/i);
-          const currentDecimals = decMatch ? parseInt(decMatch[1], 10) : 0;
-          if (currentDecimals > 0) {
-            const hasSep = fmt.includes("separator");
-            const newDecimals = currentDecimals - 1;
-            const decPart = newDecimals > 0 ? "." + "0".repeat(newDecimals) : "";
-            await applyFormat({ numberFormat: hasSep ? `#,##0${decPart}` : `0${decPart}` }, action);
-          }
-          break;
-        }
+        // Excel's Comma Style: Accounting with no symbol and two decimals, the
+        // backend's `comma` preset (it wrote "#,##0", a plain number format).
+        case "commaFormat": await applyFormat({ numberFormat: COMMA_STYLE_PRESET }, action); break;
+        case "increaseDecimal": await stepDecimals(1, action); break;
+        case "decreaseDecimal": await stepDecimals(-1, action); break;
+        // The Accounting split's face (alignment/AccountingSplitButton) writes
+        // this itself; kept for a path that renders the item as a plain button.
+        case "accountingFormat": await applyFormat({ numberFormat: "accounting" }, action); break;
         case "undo": await CommandRegistry.execute(CoreCommands.UNDO); break;
         case "redo": await CommandRegistry.execute(CoreCommands.REDO); break;
         case "find": await CommandRegistry.execute(CoreCommands.FIND); break;
@@ -305,7 +414,7 @@ export function useHomeTabState() {
         void alertAsync(err instanceof Error ? err.message : String(err));
       }
     },
-    [applyFormat, currentStyle, gridState.selection]
+    [applyFormat, stepDecimals, currentStyle, gridState.selection]
   );
 
   /**
@@ -322,17 +431,8 @@ export function useHomeTabState() {
     }
   }, []);
 
-  // Handle color selection
-  const handleColorSelect = useCallback(
-    async (itemId: string, color: string) => {
-      if (itemId === "textColor") {
-        await applyFormat({ textColor: color }, "Font Color");
-      } else if (itemId === "backgroundColor") {
-        await applyFormat({ backgroundColor: color }, "Fill Color");
-      }
-    },
-    [applyFormat]
-  );
+  // (Fill Color / Font Color write through applyFormat from their own split,
+  // font/ColorSplitButton, which keeps a theme pick a theme slot.)
 
   // Ribbon font pickers (Font group row 1)
   const handleFontFamilyChange = useCallback(
@@ -374,7 +474,6 @@ export function useHomeTabState() {
       switch (itemId) {
         case "bold": return currentStyle.bold;
         case "italic": return currentStyle.italic;
-        case "underline": return currentStyle.underline !== "none";
         case "strikethrough": return currentStyle.strikethrough;
         case "wrapText": return currentStyle.wrapText;
         case "alignLeft": return currentStyle.textAlign === "left";
@@ -397,33 +496,20 @@ export function useHomeTabState() {
     [currentStyle, currentCellData]
   );
 
-  // Get current color for color items, or null while no style is known (no
-  // selection yet, or the first read still in flight). Null is what the
-  // ColorSwatch draws as "no colour" — an empty outline — which is the truth
-  // in that moment; the old black/white fallbacks were a guess the ribbon
-  // presented as the cell's colour. Falls back per-field so a partial style
-  // object can never surface undefined to color consumers.
-  const getCurrentColor = useCallback(
-    (itemId: string): string | null => {
-      if (itemId === "textColor") return currentStyle?.textColor ?? null;
-      if (itemId === "backgroundColor") return currentStyle?.backgroundColor ?? null;
-      return null;
-    },
-    [currentStyle]
-  );
+  // (The colour bars no longer show the active cell's colour: Excel's bar is
+  // the LAST colour applied from that button, which its face re-applies --
+  // font/colorChoice.ts keeps it per session.)
 
   return {
     currentStyle,
     currentCellData,
     handleItemClick,
-    handleColorSelect,
     handleCellStyleApply,
     handleFontFamilyChange,
     handleFontSizeChange,
     handleNumberFormatChange,
     handleMergeCommand,
     isActive,
-    getCurrentColor,
     applyFormat,
     getItemById: (id: string) => ITEMS_BY_ID.get(id),
   };

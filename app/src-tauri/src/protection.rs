@@ -809,6 +809,34 @@ pub(crate) fn check_sheet_action(
         crate::sheets::ensure_not_canvas_in_state(state, sheet_index, what)?;
     }
     let protection_storage = state.sheet_protection.read().unwrap();
+    action_refusal(&protection_storage, sheet_index, action, what)
+}
+
+/// Pure form of [`check_sheet_action`], over borrowed state, for a command
+/// that already holds its guards and must gate inside the same critical
+/// section it writes in (the style commands' `StyleLocks`). Same canvas rule,
+/// same option lookup, same sentence.
+pub(crate) fn check_sheet_action_in(
+    sheet_kinds: &[::persistence::SheetKind],
+    protection_storage: &ProtectionStorage,
+    sheet_index: usize,
+    action: &str,
+    what: &str,
+) -> Result<(), String> {
+    if !CANVAS_OBJECT_SCOPE_ACTIONS.contains(&action) {
+        crate::sheets::ensure_not_canvas(sheet_kinds, sheet_index, what)?;
+    }
+    action_refusal(protection_storage, sheet_index, action, what)
+}
+
+/// The option half of both action gates: `Err` with the sentence when the
+/// sheet is protected and its options disallow `action`.
+fn action_refusal(
+    protection_storage: &ProtectionStorage,
+    sheet_index: usize,
+    action: &str,
+    what: &str,
+) -> Result<(), String> {
     let Some(protection) = protection_storage.get(&sheet_index) else {
         return Ok(());
     };

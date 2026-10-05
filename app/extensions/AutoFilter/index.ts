@@ -28,6 +28,7 @@ import {
 } from "./lib/filterStore";
 import { registerAutoFilterController } from "@api/autoFilterService";
 import { registerDataMenu } from "./handlers/dataMenuBuilder";
+import { registerAutoFilterCommands } from "./lib/filterCommands";
 import { FilterEvents } from "./lib/filterEvents";
 import FilterDropdownOverlay from "./components/FilterDropdownOverlay";
 import type { FilterDropdownData } from "./types";
@@ -173,6 +174,10 @@ function activate(context: ExtensionContext): void {
   // 5. The Toggle AutoFilter command the registry's Ctrl+Shift+L runs.
   context.commands.register(AUTOFILTER_TOGGLE_COMMAND, () => toggleFilter());
   cleanupFns.push(() => context.commands.unregister(AUTOFILTER_TOGGLE_COMMAND));
+
+  // 5b. Clear (every column's criteria) and Reapply: the ids the Home tab's
+  //     Sort & Filter menu and the Data menu both run (lib/filterCommands.ts).
+  cleanupFns.push(registerAutoFilterCommands(context.commands));
 
   // 6. Cursor change on chevron hover is handled by getCellCursor in the overlay registration
 

@@ -73,8 +73,9 @@ pub struct RichTextRunData {
     pub underline: Option<UnderlineStyle>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strikethrough: Option<bool>,
+    /// Points, twip resolution (10.5 is a legal run size, as it is for a cell).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub font_size: Option<u8>,
+    pub font_size: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_family: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -86,15 +87,24 @@ pub struct RichTextRunData {
 }
 
 /// Accounting layout data for split rendering in cells.
-/// Symbol is drawn left-aligned, value is drawn right-aligned.
+///
+/// Mirrors `engine::number_format::AccountingParts`, whose doc is the contract:
+/// Excel's accounting code is [left-edge run][fill][right-edge run].
+///  - `symbol_before`: `symbol` is the left-edge run (it carries a leading
+///    "-" for a minus-style negative: "-$", "-£", and a bare "-" for Comma
+///    Style), `value` the right-edge run.
+///  - symbol after: the right-edge run is `value` then `symbol`; a
+///    minus-style negative's `value` starts with "-" FOLLOWED BY A DIGIT, and
+///    Excel pins that character to the LEFT edge (`-* # ##0,00 kr_-`).
+///  - zero is "-" + one U+2007 (digit-width space) per decimal + " ".
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountingLayout {
-    /// Currency symbol text (e.g., "$", "EUR")
+    /// Currency symbol text (e.g., "$", "EUR"); "-$" for a minus-style negative
     pub symbol: String,
     /// Whether the symbol appears before the value
     pub symbol_before: bool,
-    /// Formatted number part (e.g., "1,234.00", "(1,234.00)", "-")
+    /// Formatted number part (e.g., "1,234.00 ", "(1,234.00)", "-1,234.00 ")
     pub value: String,
 }
 
@@ -325,7 +335,9 @@ pub struct StyleData {
     pub italic: bool,
     pub underline: UnderlineStyle,
     pub strikethrough: bool,
-    pub font_size: u8,
+    /// Points, twip resolution: 10.5 is a real size (Excel's list has it), and
+    /// the range is Excel's 1..=409. It was `u8`, so neither fitted.
+    pub font_size: f64,
     pub font_family: String,
     pub text_color: String,
     pub background_color: String,
@@ -605,7 +617,10 @@ pub struct FormattingParams {
     pub italic: Option<bool>,
     pub underline: Option<UnderlineStyle>,
     pub strikethrough: Option<bool>,
-    pub font_size: Option<u8>,
+    /// Points. Half points (10.5) and anything up to Excel's 409 are legal; a
+    /// size outside 1..=409 REFUSES the whole command (it used to be `u8`, so
+    /// 10.5 failed to deserialise and the refusal only reached the console).
+    pub font_size: Option<f64>,
     pub font_family: Option<String>,
     pub text_color: Option<String>,
     pub background_color: Option<String>,
@@ -613,6 +628,9 @@ pub struct FormattingParams {
     pub vertical_align: Option<String>,
     pub number_format: Option<String>,
     pub wrap_text: Option<bool>,
+    /// "none" | "rotate90" | "rotate270" | "vertical" | "custom:N" (N in
+    /// -90..=90). An unknown value REFUSES the command -- it used to become
+    /// "none" and silently clear the rotation (see `parse_text_rotation`).
     pub text_rotation: Option<String>,
     pub border_top: Option<BorderSideParam>,
     pub border_right: Option<BorderSideParam>,
@@ -709,6 +727,28 @@ pub struct MergedRegion {
     pub start_col: u32,
     pub end_row: u32,
     pub end_col: u32,
+}
+
+/// What `insert_cells` / `delete_cells` did (Excel's Insert Cells / Delete
+/// Cells; `commands/structure_cells.rs`).
+///
+/// A REFUSAL is an `Err`, like every structural command. This result has a
+/// second way to stop without changing anything: Excel ASKS before it unmerges
+/// a merged region the shift cuts ("This operation will cause some merged cells
+/// to unmerge..."). The backend cannot show that question, so it returns
+/// `applied: false` with the sentence in `confirm`; the caller asks and, on OK,
+/// calls again with `unmergeCutMerges: true`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CellShiftResult {
+    /// True when the cells moved. False only when the command stopped to ask.
+    pub applied: bool,
+    /// The question to ask before calling again with `unmergeCutMerges: true`.
+    pub confirm: Option<String>,
+    /// True when the range spanned every column (row) and Excel's rule turned
+    /// the command into an ENTIRE-row (column) insert or delete -- the caller
+    /// announces rows/columns changed instead of a cell shift.
+    pub whole_lines: bool,
 }
 
 /// What the ribbon's merge gestures ask of `merge_cells` beyond a plain
@@ -975,7 +1015,7 @@ pub fn rich_text_runs_to_data(runs: &[RichTextRun]) -> Vec<RichTextRunData> {
             italic: run.italic,
             underline: run.underline.map(|u| u.into()),
             strikethrough: run.strikethrough,
-            font_size: run.font_size,
+            font_size: run.font_size.map(|s| s.points()),
             font_family: run.font_family.clone(),
             color: run.color.map(|c| c.to_css()),
             superscript: run.superscript,
@@ -993,7 +1033,10 @@ pub fn data_to_rich_text_runs(data: &[RichTextRunData]) -> Vec<RichTextRun> {
             italic: d.italic,
             underline: d.underline.map(|u| u.into()),
             strikethrough: d.strikethrough,
-            font_size: d.font_size,
+            // Clamped to Excel's 1..=409 rather than refused: runs come from
+            // the in-cell editor's own measurements, and one stray run must
+            // not cost the user the whole rich-text edit.
+            font_size: d.font_size.map(engine::FontSize::from_points_clamped),
             font_family: d.font_family.clone(),
             color: d.color.as_ref().and_then(|c| engine::Color::from_hex(c)),
             superscript: d.superscript,
@@ -1055,7 +1098,7 @@ impl StyleData {
             italic: style.font.italic,
             underline: UnderlineStyle::from(style.font.underline),
             strikethrough: style.font.strikethrough,
-            font_size: style.font.size,
+            font_size: style.font.size.points(),
             font_family,
             text_color,
             background_color,
@@ -1077,6 +1120,7 @@ impl StyleData {
                 TextRotation::Rotate90 => "rotate90".to_string(),
                 TextRotation::Rotate270 => "rotate270".to_string(),
                 TextRotation::Custom(angle) => format!("custom:{}", angle),
+                TextRotation::Vertical => "vertical".to_string(),
             },
             border_top: border_side_to_data(&style.borders.top, theme),
             border_right: border_side_to_data(&style.borders.right, theme),
@@ -1297,12 +1341,18 @@ pub(crate) fn format_number_format_name(format: &NumberFormat) -> String {
             symbol,
             decimal_places,
             symbol_position,
+            negative_style,
         } => {
+            // The negative clause uses Currency's words ("parenthesised
+            // negatives"), and is EMPTY for the leading minus -- the pattern of
+            // every region but en-US -- so an sv-SE accounting cell keeps the
+            // short name and an en-US one names its brackets.
             format!(
-                "Accounting ({}, {} decimals{})",
+                "Accounting ({}, {} decimals{}{})",
                 symbol,
                 decimal_places,
-                symbol_position_suffix(*symbol_position)
+                symbol_position_suffix(*symbol_position),
+                negative_style.display_suffix()
             )
         }
         NumberFormat::Fraction {

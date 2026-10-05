@@ -51,6 +51,14 @@
  * layout key is cleared and the page reloaded in test 8's `finally` so the
  * ribbon goes back to the default the visual goldens encode.
  *
+ * THE EXCEL HOME TAB (2026-10-04). The default became Excel 365's eight groups
+ * (Undo first), and at the harness's 1280px width Styles, Cells and Editing are
+ * COLLAPSED group buttons -- their controls are not in the band at all. Test 8
+ * used to add its row break to Cells (then a grid of four icon buttons); Cells
+ * is now three full-height heroes and collapsed besides, so the row break goes
+ * into the Number group, which is inline at 1280 and lays out two rows
+ * (Number Format | Accounting % , .0 .00).
+ *
  * LOCALE. sv-SE. No formula is typed anywhere here, so the ';' separator never
  * comes up.
  */
@@ -82,9 +90,9 @@ const SAVED_DOC = path.join(os.tmpdir(), "calcula-shapes-hometab.cala");
 /** localStorage key the Home-tab layout persists under (homeTabConfig.ts). */
 const HOME_LAYOUT_KEY = "calcula.homeTab.layout";
 
-/** The ribbon's Home sections, in the order the owner's constraint pins. */
+/** The ribbon's Home sections, in Excel 365's order (Undo first, owner decision 2). */
 const DEFAULT_SECTION_LABELS = [
-  "Clipboard", "Font", "Alignment", "Number", "Styles", "Cells", "Editing",
+  "Undo", "Clipboard", "Font", "Alignment", "Number", "Styles", "Cells", "Editing",
 ];
 
 // ---------------------------------------------------------------------------
@@ -1311,9 +1319,10 @@ test.describe("Shapes from a script + the Home-tab Customize entry point", () =>
     test.setTimeout(300_000);
 
     try {
-      // Baseline: Cells is ["insertRow","insertColumn",rowBreak,"deleteRow",
-      // "deleteColumn"] — two rendered rows.
-      expect(await sectionRows(page, "Cells"), "Cells starts as two rendered rows").toBe(2);
+      // Baseline: Number is ["numberFormat", rowBreak, "accountingFormat",
+      // "percentFormat", "commaFormat", "increaseDecimal", "decreaseDecimal"]
+      // — two rendered rows (the Accounting split's two halves share a row).
+      expect(await sectionRows(page, "Number"), "Number starts as two rendered rows").toBe(2);
 
       // ---- add a row break ------------------------------------------------
       let dialog = await openCustomizeDialog(page, grid);
@@ -1335,24 +1344,28 @@ test.describe("Shapes from a script + the Home-tab Customize entry point", () =>
           "assertion above is not just 'nothing is ever disabled')",
       ).toBeDisabled();
 
-      await dialog.locator("[data-hometab-add-to]").selectOption("cells");
+      await dialog.locator("[data-hometab-add-to]").selectOption("number");
       await rowBreakBtn.click();
       await page.waitForTimeout(300);
 
-      const cellsGroup = dialog.locator("[data-hometab-group='cells']");
-      const breaks = cellsGroup.locator("[data-hometab-chip='rowBreak']");
-      await expect(breaks, "Cells now holds two row breaks").toHaveCount(2);
+      const numberGroup = dialog.locator("[data-hometab-group='number']");
+      const breaks = numberGroup.locator("[data-hometab-chip='rowBreak']");
+      await expect(breaks, "Number now holds two row breaks").toHaveCount(2);
 
       // The new break appended at the END, where a trailing separator renders
-      // nothing. Move it one place left so it lands BETWEEN deleteRow and
-      // deleteColumn and actually splits a row.
+      // nothing. Move it two places left so it lands BETWEEN commaFormat and
+      // the Decimals pill (increaseDecimal, decreaseDecimal) and actually splits
+      // a row without cutting the pill in half.
       await breaks.last().locator("[data-hometab-chip-left]").click();
       await page.waitForTimeout(200);
-      const chipOrder = await cellsGroup
+      await breaks.last().locator("[data-hometab-chip-left]").click();
+      await page.waitForTimeout(200);
+      const chipOrder = await numberGroup
         .locator("[data-hometab-chip]")
         .evaluateAll((nodes) => nodes.map((n) => n.getAttribute("data-hometab-chip")));
-      expect(chipOrder, "the new break sits between deleteRow and deleteColumn").toEqual([
-        "insertRow", "insertColumn", "rowBreak", "deleteRow", "rowBreak", "deleteColumn",
+      expect(chipOrder, "the new break sits between commaFormat and increaseDecimal").toEqual([
+        "numberFormat", "rowBreak", "accountingFormat", "percentFormat", "commaFormat",
+        "rowBreak", "increaseDecimal", "decreaseDecimal",
       ]);
 
       await dialog.locator("[data-hometab-save]").click();
@@ -1374,7 +1387,7 @@ test.describe("Shapes from a script + the Home-tab Customize entry point", () =>
       ).toEqual(DEFAULT_SECTION_LABELS);
 
       expect(
-        await sectionRows(page, "Cells"),
+        await sectionRows(page, "Number"),
         "the RIBBON lays the group out in three rows now",
       ).toBe(3);
       expect(
@@ -1390,7 +1403,7 @@ test.describe("Shapes from a script + the Home-tab Customize entry point", () =>
       });
       await page.waitForTimeout(1_500);
       expect(
-        await sectionRows(page, "Cells"),
+        await sectionRows(page, "Number"),
         "the saved layout is what the ribbon builds at startup",
       ).toBe(3);
 
@@ -1399,9 +1412,9 @@ test.describe("Shapes from a script + the Home-tab Customize entry point", () =>
       await dialog.locator("[data-hometab-reset]").click();
       await page.waitForTimeout(300);
       // The reset is STAGED: the dialog now shows the default (one row break in
-      // Cells) while nothing has been written.
+      // Number) while nothing has been written.
       await expect(
-        dialog.locator("[data-hometab-group='cells'] [data-hometab-chip='rowBreak']"),
+        dialog.locator("[data-hometab-group='number'] [data-hometab-chip='rowBreak']"),
         "Reset staged the default layout in the dialog",
       ).toHaveCount(1);
 
@@ -1410,7 +1423,7 @@ test.describe("Shapes from a script + the Home-tab Customize entry point", () =>
       await page.waitForTimeout(600);
 
       expect(
-        await sectionRows(page, "Cells"),
+        await sectionRows(page, "Number"),
         "Cancel cancelled: the ribbon still shows the customised layout",
       ).toBe(3);
 
@@ -1421,7 +1434,7 @@ test.describe("Shapes from a script + the Home-tab Customize entry point", () =>
       });
       await page.waitForTimeout(1_500);
       expect(
-        await sectionRows(page, "Cells"),
+        await sectionRows(page, "Number"),
         "and it is STILL the customised layout after a reload — `resetLayout` " +
           "used to removeItem() on the spot, so Reset+Cancel wiped storage and " +
           "the reset appeared at the next launch",
@@ -1435,7 +1448,7 @@ test.describe("Shapes from a script + the Home-tab Customize entry point", () =>
     } finally {
       // Put the ribbon back to the default the visual goldens encode.
       await restoreDefaultHomeLayout(page).catch(() => {});
-      const back = await sectionRows(page, "Cells").catch(() => -1);
+      const back = await sectionRows(page, "Number").catch(() => -1);
       expect(back, "the default layout is restored for the rest of the suite").toBe(2);
     }
   });

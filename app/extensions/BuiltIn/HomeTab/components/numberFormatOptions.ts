@@ -54,6 +54,12 @@ export const RIBBON_NUMBER_FORMATS: RibbonNumberFormatOption[] = [
   { preset: "text", label: "Text" },
 ];
 
+/** The dropdown's Accounting entry (RIBBON_NUMBER_FORMATS). */
+const ACCOUNTING_PRESET = "accounting";
+
+/** How the backend's display name of EVERY Accounting format begins. */
+const ACCOUNTING_NAME_PREFIX = "Accounting (";
+
 /**
  * Which dropdown row a cell's CURRENT format sits on.
  *
@@ -67,6 +73,16 @@ export const RIBBON_NUMBER_FORMATS: RibbonNumberFormatOption[] = [
  * ("0.00", "@"), which never matched: applying Number and re-reading the cell
  * put the box on a greyed-out, unselectable "Number (2 decimals)" row. The
  * dropdown could not report its own result.
+ *
+ * ACCOUNTING IS A KIND, NOT ONE NAME. Excel's box reads "Accounting" for every
+ * Accounting format -- any symbol, either side, either negative pattern, any
+ * number of decimals, and Comma Style's symbol-less one. Since 2026-10-04 the
+ * ribbon writes seven of them (the Accounting split's locale face and six
+ * currency rows, and Comma Style), while the dropdown's Accounting entry is
+ * only the LOCALE's, so an exact name match put all the others on "Custom".
+ * The backend names every Accounting format "Accounting (<symbol>, <n>
+ * decimals[, symbol after][, <negative clause>])" (`format_number_format_name`
+ * in api_types.rs), so the prefix is the kind.
  */
 export function selectedPresetFor(
   format: string,
@@ -75,6 +91,7 @@ export function selectedPresetFor(
   if (!format) return "general";
   const match = resolved.find((entry) => entry.displayName === format);
   if (match) return match.preset;
+  if (format.startsWith(ACCOUNTING_NAME_PREFIX)) return ACCOUNTING_PRESET;
   // Before the first backend response lands, only the default is decidable --
   // and "General" is the one the box shows on a brand-new workbook.
   if (resolved.length === 0 && format === "General") return "general";

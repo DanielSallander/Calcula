@@ -22,8 +22,10 @@ import {
   showDialog,
   DialogExtensions,
 } from "@api/ui";
-import type { PanelSection, PanelSectionProps } from "@api/uiTypes";
+import type { PanelSection, PanelSectionDialogLauncher, PanelSectionProps } from "@api/uiTypes";
 import { useGridState } from "@api/state";
+import { CommandRegistry, CoreCommands } from "@api/commands";
+import { alertAsync } from "@api/dialogs";
 import { HomeTabGroupComponent } from "./components/HomeTabGroupComponent";
 import { HomeTabCustomizeDialog } from "./components/HomeTabCustomizeDialog";
 import {
@@ -31,7 +33,7 @@ import {
   HomeTabCustomizeIcon,
   LAUNCHER_ICON_SIZE,
 } from "./components/homeTabIcons";
-import { loadLayout, type HomeTabLayout } from "./homeTabConfig";
+import { loadLayout, type HomeDialogLauncherId, type HomeTabLayout } from "./homeTabConfig";
 
 // ============================================================================
 // Constants
@@ -78,21 +80,78 @@ function makeSectionComponent(itemIds: string[]): React.ComponentType<PanelSecti
 }
 
 /**
+ * Excel's three Format Cells corner arrows (CONTRACT 3.20), by the id a layout
+ * group stores in `dialogLauncherId`. The label is Excel's own tooltip
+ * heading; the tab is the one the arrow opens.
+ */
+const FORMAT_CELLS_LAUNCHERS: ReadonlyMap<string, { label: string; tab: string }> = new Map<
+  HomeDialogLauncherId,
+  { label: string; tab: string }
+>([
+  ["formatCells.font", { label: "Format Cells: Font", tab: "font" }],
+  ["formatCells.alignment", { label: "Format Cells: Alignment", tab: "alignment" }],
+  ["formatCells.number", { label: "Format Cells: Number", tab: "number" }],
+]);
+
+/**
+ * The PanelSection launcher for a layout group's `dialogLauncherId`, or
+ * undefined when it names none -- or names one this build does not know (a
+ * stale id draws nothing rather than an arrow that opens nothing).
+ *
+ * It runs FORMAT_CELLS, the ONE door to the dialog: that command refuses (one
+ * toast, no dialog) while something else owns the selection, which a direct
+ * `openDialog` would skip (review of BUG-0185). No `testId`: the shell's
+ * default, `dialog-launcher-home.font` etc., is the name journeys use.
+ *
+ * NO `commandId`, so the tooltip shows no shortcut chip. A chip is the live
+ * binding of that command, and FORMAT_CELLS's (Ctrl+1) opens the dialog on
+ * no particular tab -- not the Font, Alignment or Number tab this arrow opens
+ * -- so it promised a key that does something else (review finding,
+ * 2026-10-04; itemTooltip refuses Insert's Ctrl+Plus for the same reason). A
+ * key binding carries no arguments, so no key runs exactly
+ * `FORMAT_CELLS { tab }` today; give the launcher a chip when one does.
+ */
+function dialogLauncherFor(id: string | undefined): PanelSectionDialogLauncher | undefined {
+  const known = id === undefined ? undefined : FORMAT_CELLS_LAUNCHERS.get(id);
+  if (!known) return undefined;
+  const { label, tab } = known;
+  return {
+    label,
+    onLaunch: () => {
+      CommandRegistry.execute(CoreCommands.FORMAT_CELLS, { tab }).catch((err: unknown) => {
+        // A refusal that escapes as an error (not the owner's toast) must
+        // reach the user, as every other Home door's does.
+        void alertAsync(err instanceof Error ? err.message : String(err));
+      });
+    },
+  };
+}
+
+/**
  * Builds the panel sections from a layout.
  *
- * Icon and collapse order come from the LAYOUT (`iconId`, `collapsePriority`),
- * not from side tables here. Two parallel lookup tables keyed by group id used
- * to live in this file and had already drifted from DEFAULT_LAYOUT once.
+ * Icon, collapse order and dialog launcher come from the LAYOUT (`iconId`,
+ * `collapsePriority`, `dialogLauncherId`), not from side tables here. Two
+ * parallel lookup tables keyed by group id used to live in this file and had
+ * already drifted from DEFAULT_LAYOUT once.
  */
 export function buildSections(layout: HomeTabLayout): PanelSection[] {
-  return layout.groups.map((group) => ({
-    id: `${HOME_TAB_ID}.${group.id}`,
-    label: group.label,
-    icon: groupIconFor(group, LAUNCHER_ICON_SIZE),
-    component: makeSectionComponent(group.items),
-    ribbonPresentation: "inline" as const,
-    collapsePriority: group.collapsePriority ?? DEFAULT_COLLAPSE_PRIORITY,
-  }));
+  return layout.groups.map((group) => {
+    const section: PanelSection = {
+      id: `${HOME_TAB_ID}.${group.id}`,
+      label: group.label,
+      icon: groupIconFor(group, LAUNCHER_ICON_SIZE),
+      component: makeSectionComponent(group.items),
+      ribbonPresentation: "inline" as const,
+      collapsePriority: group.collapsePriority ?? DEFAULT_COLLAPSE_PRIORITY,
+    };
+    // Only set when there is one: a section without a launcher must render
+    // exactly the DOM it did before launchers existed (shell-launcher's
+    // goldens guard).
+    const dialogLauncher = dialogLauncherFor(group.dialogLauncherId);
+    if (dialogLauncher) section.dialogLauncher = dialogLauncher;
+    return section;
+  });
 }
 
 /** Registers (or re-registers) the Home panel from the current layout. */

@@ -63,6 +63,22 @@
 //
 //          Colours: none. This file must never carry a colour literal; the
 //          layout tests scan what the primitives render.
+//
+//          SOFT DISABLED (2026-10-04). A control greyed out FOR A REASON is
+//          aria-disabled, not natively disabled: a native `disabled` button
+//          takes no focus and shows no tooltip (React drops its mouse events),
+//          so "isn't available on a protected sheet" could never be read. The
+//          split halves (SplitMenuButton, ColorSwatch `split`) and
+//          RegisteredMenuButton's trigger are drawn that way, and Button's
+//          `:disabled` rule never reaches them. `softDisabled` is the class
+//          that gives them the look instead. It was written twice -- Menu.tsx
+//          for SplitMenuButton, and a copy in Color.tsx "identical to
+//          Menu.tsx's, which is not exported" -- and a second copy is a second
+//          look waiting to drift, so it lives here, once, beside the idiom it
+//          applies (pinned by a source guard in disabled.test.tsx).
+
+import { css } from "@emotion/css";
+import { LT } from "../theme";
 
 /** How far a disabled control fades (the whole control: chrome, label, icon). */
 export const DISABLED_OPACITY = 0.4;
@@ -94,5 +110,29 @@ export const DISABLED_LOOK = `
   & svg:not([data-colour-data]),
   & img:not([data-colour-data]) {
     filter: grayscale(1);
+  }
+`;
+
+/**
+ * The disabled idiom for a control that is `aria-disabled="true"` rather than
+ * natively disabled (see SOFT DISABLED above): DISABLED_LOOK, plus no hover or
+ * press tint -- the doubled class out-ranks the button recipe's
+ * `:hover:not(:disabled)`, which an aria-disabled button still matches. A
+ * PRESSED control keeps its pressed fill (Excel shows Merge & Center pressed
+ * but disabled on a protected sheet), which DISABLED_LOOK leaves alone because
+ * it greys only the icons; a control that is never a toggle (a colour half)
+ * simply never matches that line. Kit-internal: joined onto the control's
+ * classes while it is disabled, never cx-merged (see Button.tsx's header).
+ */
+export const softDisabled = css`
+  &&[aria-disabled="true"] {
+    ${DISABLED_LOOK}
+  }
+  &&[aria-disabled="true"]:hover,
+  &&[aria-disabled="true"]:active {
+    background: ${LT.buttonBg};
+  }
+  &&[aria-disabled="true"][aria-pressed="true"] {
+    background: ${LT.pressed};
   }
 `;

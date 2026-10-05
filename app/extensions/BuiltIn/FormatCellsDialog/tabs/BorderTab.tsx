@@ -1,7 +1,14 @@
 //! FILENAME: app/extensions/BuiltIn/FormatCellsDialog/tabs/BorderTab.tsx
-// PURPOSE: Border tab for the Format Cells dialog (UI only).
-// CONTEXT: Border rendering is not yet supported in the Canvas renderer.
-// This tab provides the UI but apply is a no-op for now.
+// PURPOSE: Border tab for the Format Cells dialog.
+// CONTEXT: Excel's model. On a RANGE the Top / Bottom / Left / Right buttons are
+//          the range's OUTER edges and two more buttons are the lines inside it;
+//          the presets are None, Outline and Inside (Inside is offered only
+//          when there is an inside). This tab only edits the store -- what OK
+//          writes is decided by lib/formatCellsWrites.ts: Outline becomes ONE
+//          `applyBorderPreset(..., "outside")`, None clears the range first.
+//          It used to set all four sides of every cell for Outline, which on a
+//          range is All Borders (survey D5). (The old header called OK a
+//          no-op; borders have rendered and applied for a long time.)
 
 import React, { useState } from "react";
 import styled from "styled-components";
@@ -26,42 +33,55 @@ export function BorderTab(): React.ReactElement {
     borderRight,
     borderBottom,
     borderLeft,
+    borderInsideHorizontal,
+    borderInsideVertical,
     borderDiagonalDown,
     borderDiagonalUp,
+    rangeShape,
     setBorderTop,
     setBorderRight,
     setBorderBottom,
     setBorderLeft,
+    setBorderInsideHorizontal,
+    setBorderInsideVertical,
     setBorderDiagonalDown,
     setBorderDiagonalUp,
+    setBorderClearAll,
   } = useFormatCellsStore();
 
   const [lineStyle, setLineStyle] = useState<BorderSide["style"]>("thin");
   const [lineColor, setLineColor] = useState("#000000");
+  const hasInside = rangeShape.multiRow || rangeShape.multiCol;
 
-  const applyPreset = (preset: "none" | "outline" | "all") => {
-    const border: BorderSide =
-      preset === "none"
-        ? { style: "none", color: lineColor }
-        : { style: lineStyle === "none" ? "thin" : lineStyle, color: lineColor };
+  const applyPreset = (preset: "none" | "outline" | "inside") => {
+    const border: BorderSide = { style: lineStyle === "none" ? "thin" : lineStyle, color: lineColor };
 
     if (preset === "none") {
-      setBorderTop({ style: "none", color: "#000000" });
-      setBorderRight({ style: "none", color: "#000000" });
-      setBorderBottom({ style: "none", color: "#000000" });
-      setBorderLeft({ style: "none", color: "#000000" });
-      setBorderDiagonalDown({ style: "none", color: "#000000" });
-      setBorderDiagonalUp({ style: "none", color: "#000000" });
-    } else {
+      // Every line of the range goes, the inside ones and the diagonals too;
+      // OK clears the range FIRST and then writes whatever is drawn after this.
+      const none: BorderSide = { style: "none", color: "#000000" };
+      setBorderTop(none);
+      setBorderRight(none);
+      setBorderBottom(none);
+      setBorderLeft(none);
+      setBorderInsideHorizontal(none);
+      setBorderInsideVertical(none);
+      setBorderDiagonalDown(none);
+      setBorderDiagonalUp(none);
+      setBorderClearAll(true);
+    } else if (preset === "outline") {
       setBorderTop(border);
       setBorderRight(border);
       setBorderBottom(border);
       setBorderLeft(border);
+    } else {
+      if (rangeShape.multiRow) setBorderInsideHorizontal(border);
+      if (rangeShape.multiCol) setBorderInsideVertical(border);
     }
   };
 
   const toggleBorder = (
-    side: "top" | "right" | "bottom" | "left" | "diagonalDown" | "diagonalUp",
+    side: "top" | "right" | "bottom" | "left" | "insideHorizontal" | "insideVertical" | "diagonalDown" | "diagonalUp",
     current: BorderSide,
     setter: (v: BorderSide) => void
   ) => {
@@ -126,11 +146,30 @@ export function BorderTab(): React.ReactElement {
           {/* Presets */}
           <SectionTitle>Presets</SectionTitle>
           <PresetRow>
-            <PresetButton onClick={() => applyPreset("none")} title="No borders">
+            <PresetButton
+              type="button"
+              onClick={() => applyPreset("none")}
+              title="No borders"
+              data-testid="fc-border-preset-none"
+            >
               None
             </PresetButton>
-            <PresetButton onClick={() => applyPreset("outline")} title="Outline borders">
+            <PresetButton
+              type="button"
+              onClick={() => applyPreset("outline")}
+              title="Outline: the border around the selection"
+              data-testid="fc-border-preset-outline"
+            >
               Outline
+            </PresetButton>
+            <PresetButton
+              type="button"
+              onClick={() => applyPreset("inside")}
+              disabled={!hasInside}
+              title="Inside: the lines between the selected cells"
+              data-testid="fc-border-preset-inside"
+            >
+              Inside
             </PresetButton>
           </PresetRow>
 
@@ -138,40 +177,80 @@ export function BorderTab(): React.ReactElement {
           <SectionTitle>Border</SectionTitle>
           <BorderButtonRow>
             <BorderToggle
+              type="button"
               $active={borderTop.style !== "none"}
+              aria-pressed={borderTop.style !== "none"}
               onClick={() => toggleBorder("top", borderTop, setBorderTop)}
+              data-testid="fc-border-top"
             >
               Top
             </BorderToggle>
             <BorderToggle
+              type="button"
+              $active={borderInsideHorizontal.style !== "none"}
+              aria-pressed={borderInsideHorizontal.style !== "none"}
+              disabled={!rangeShape.multiRow}
+              onClick={() => toggleBorder("insideHorizontal", borderInsideHorizontal, setBorderInsideHorizontal)}
+              title="Inside horizontal (between the selected rows)"
+              data-testid="fc-border-insideHorizontal"
+            >
+              Inside H
+            </BorderToggle>
+            <BorderToggle
+              type="button"
               $active={borderBottom.style !== "none"}
+              aria-pressed={borderBottom.style !== "none"}
               onClick={() => toggleBorder("bottom", borderBottom, setBorderBottom)}
+              data-testid="fc-border-bottom"
             >
               Bottom
             </BorderToggle>
             <BorderToggle
+              type="button"
               $active={borderLeft.style !== "none"}
+              aria-pressed={borderLeft.style !== "none"}
               onClick={() => toggleBorder("left", borderLeft, setBorderLeft)}
+              data-testid="fc-border-left"
             >
               Left
             </BorderToggle>
             <BorderToggle
+              type="button"
+              $active={borderInsideVertical.style !== "none"}
+              aria-pressed={borderInsideVertical.style !== "none"}
+              disabled={!rangeShape.multiCol}
+              onClick={() => toggleBorder("insideVertical", borderInsideVertical, setBorderInsideVertical)}
+              title="Inside vertical (between the selected columns)"
+              data-testid="fc-border-insideVertical"
+            >
+              Inside V
+            </BorderToggle>
+            <BorderToggle
+              type="button"
               $active={borderRight.style !== "none"}
+              aria-pressed={borderRight.style !== "none"}
               onClick={() => toggleBorder("right", borderRight, setBorderRight)}
+              data-testid="fc-border-right"
             >
               Right
             </BorderToggle>
             <BorderToggle
+              type="button"
               $active={borderDiagonalDown.style !== "none"}
+              aria-pressed={borderDiagonalDown.style !== "none"}
               onClick={() => toggleBorder("diagonalDown", borderDiagonalDown, setBorderDiagonalDown)}
               title="Diagonal down (top-left to bottom-right)"
+              data-testid="fc-border-diagonalDown"
             >
               Diag \
             </BorderToggle>
             <BorderToggle
+              type="button"
               $active={borderDiagonalUp.style !== "none"}
+              aria-pressed={borderDiagonalUp.style !== "none"}
               onClick={() => toggleBorder("diagonalUp", borderDiagonalUp, setBorderDiagonalUp)}
               title="Diagonal up (bottom-left to top-right)"
+              data-testid="fc-border-diagonalUp"
             >
               Diag /
             </BorderToggle>
@@ -227,6 +306,30 @@ export function BorderTab(): React.ReactElement {
                     />
                   )}
                 </svg>
+              )}
+              {/* The inside lines, drawn through the middle of the sample as
+                  the boundaries between its rows / columns. */}
+              {borderInsideHorizontal.style !== "none" && (
+                <div
+                  style={{
+                    position: "absolute", left: 0, right: 0, top: "50%",
+                    borderTopWidth: getBorderStyle(borderInsideHorizontal).borderWidth,
+                    borderTopStyle: getBorderStyle(borderInsideHorizontal).borderStyle as React.CSSProperties["borderTopStyle"],
+                    borderTopColor: borderInsideHorizontal.color,
+                    pointerEvents: "none",
+                  }}
+                />
+              )}
+              {borderInsideVertical.style !== "none" && (
+                <div
+                  style={{
+                    position: "absolute", top: 0, bottom: 0, left: "50%",
+                    borderLeftWidth: getBorderStyle(borderInsideVertical).borderWidth,
+                    borderLeftStyle: getBorderStyle(borderInsideVertical).borderStyle as React.CSSProperties["borderLeftStyle"],
+                    borderLeftColor: borderInsideVertical.color,
+                    pointerEvents: "none",
+                  }}
+                />
               )}
               Text
             </PreviewCell>
@@ -314,9 +417,14 @@ const PresetButton = styled.button`
   color: ${v("--text-primary")};
   cursor: pointer;
 
-  &:hover {
+  &:hover:not(:disabled) {
     border-color: ${v("--accent-primary")};
     background: ${v("--panel-bg")};
+  }
+
+  &:disabled {
+    opacity: 0.4;
+    cursor: default;
   }
 `;
 
@@ -335,8 +443,13 @@ const BorderToggle = styled.button<{ $active: boolean }>`
   color: ${(p) => (p.$active ? "#ffffff" : v("--text-primary"))};
   cursor: pointer;
 
-  &:hover {
+  &:hover:not(:disabled) {
     opacity: 0.85;
+  }
+
+  &:disabled {
+    opacity: 0.4;
+    cursor: default;
   }
 `;
 

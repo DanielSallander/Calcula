@@ -12,17 +12,23 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
-const { getCellMock, getStyleMock, applyMock } = vi.hoisted(() => ({
+const { getCellMock, getStyleMock, applyMock, adjustMock } = vi.hoisted(() => ({
   getCellMock: vi.fn(),
   getStyleMock: vi.fn(),
   applyMock: vi.fn(),
+  adjustMock: vi.fn(),
 }));
 
 vi.mock("../../../../api/lib", () => ({
   getCell: getCellMock,
   getStyle: getStyleMock,
   applyFormatting: applyMock,
+  // Increase / Decrease Decimal write through the backend's decimal step.
+  adjustNumberFormatDecimals: adjustMock,
 }));
+
+/** Every write the toolbar can make, through either door. */
+const writes = (): number => applyMock.mock.calls.length + adjustMock.mock.calls.length;
 vi.mock("../../../../api", () => ({ cellEvents: { emit: vi.fn() } }));
 vi.mock("../../../../api/theme", () => ({ getThemeColorPalette: vi.fn(async () => []) }));
 
@@ -87,6 +93,8 @@ beforeEach(() => {
     strikethrough: false, textColor: "#000000", backgroundColor: "#ffffff", textAlign: "general",
   });
   applyMock.mockResolvedValue({ cells: [] });
+  adjustMock.mockReset();
+  adjustMock.mockResolvedValue({ cells: [], styles: [] });
   toasts.length = 0;
   registerToastSink((t) => toasts.push(t));
   container = document.createElement("div");
@@ -124,7 +132,7 @@ describe("mini format toolbar while a selection owner holds the selection", () =
       release = registerSelectionOwner({ id: "test-owner", label: "the test object's cells", ownsSelection: () => true });
       await render();
       await run();
-      expect(applyMock, `${label} formatted Core's hidden selection`).not.toHaveBeenCalled();
+      expect(writes(), `${label} formatted Core's hidden selection`).toBe(0);
       expect(toasts.length).toBe(1);
     });
   }
@@ -142,7 +150,7 @@ describe("positive controls: nothing owns the selection", () => {
     it(`${label}: formats Core's selection, no refusal`, async () => {
       await render();
       await run();
-      expect(applyMock).toHaveBeenCalledTimes(1);
+      expect(writes()).toBe(1);
       expect(toasts).toEqual([]);
     });
   }

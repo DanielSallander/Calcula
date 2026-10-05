@@ -1230,6 +1230,19 @@ pub fn clear_conditional_formats_in_range(
 
 /// Command body over plain references, so the undo contract is unit-testable
 /// without a Tauri `State`.
+///
+/// EXCEL'S CLEAR RULES FROM SELECTED CELLS CUTS THE SELECTION OUT OF EVERY RULE.
+/// This used to remove a rule only when EVERY one of its ranges lay inside the
+/// selection, so with a rule on A1:A10 and A1:A5 selected nothing happened at
+/// all and nothing said so. Now each range loses the selected cells (what is
+/// left is re-described as at most four rectangles: above, below, left and
+/// right of the cut), and a rule left with no cell is removed. Calcula's
+/// expression rules evaluate the same formula for every cell, so re-describing
+/// a rule's ranges cannot change what the rule means.
+///
+/// Returns the number of rules that changed (cut or removed). The
+/// `DocumentEffect` is constructed only once something is known to change: a
+/// selection that touches no rule leaves the document clean.
 pub(crate) fn clear_conditional_formats_in_range_impl(
     state: &AppState,
     file_state: &FileState,
@@ -1240,43 +1253,101 @@ pub(crate) fn clear_conditional_formats_in_range_impl(
     sheet_index: Option<usize>,
 ) -> Result<u32, String> {
     let target_sheet = resolve_cf_sheet(state, sheet_index)?;
-    let effect = DocumentEffect::mutates(file_state);
-    let mut cf_storage = state.conditional_formats.write(&effect).unwrap();
-
-    let min_row = start_row.min(end_row);
-    let max_row = start_row.max(end_row);
-    let min_col = start_col.min(end_col);
-    let max_col = start_col.max(end_col);
-
-    let rules = match cf_storage.get_mut(&target_sheet) {
-        Some(r) => r,
-        None => return Ok(0),
+    let cut = ConditionalFormatRange {
+        start_row: start_row.min(end_row),
+        start_col: start_col.min(end_col),
+        end_row: start_row.max(end_row),
+        end_col: start_col.max(end_col),
     };
 
+    let cf_storage = state.conditional_formats.lock_pending().unwrap();
+    let Some(rules) = cf_storage.get(&target_sheet) else {
+        return Ok(0);
+    };
     let previous = rules.clone();
-    let initial_len = rules.len();
-
-    rules.retain(|rule| {
-        !rule.ranges.iter().all(|r| {
-            r.start_row >= min_row
-                && r.end_row <= max_row
-                && r.start_col >= min_col
-                && r.end_col <= max_col
-        })
-    });
-
-    let removed = (initial_len - rules.len()) as u32;
-    drop(cf_storage);
-    if removed > 0 {
-        crate::undo_commands::record_conditional_formats_undo(
-            state,
-            target_sheet,
-            previous,
-            "Clear conditional formats",
-        );
+    let mut next: Vec<ConditionalFormatDefinition> = Vec::with_capacity(rules.len());
+    let mut changed: u32 = 0;
+    for rule in rules {
+        if !rule.ranges.iter().any(|r| ranges_intersect(r, &cut)) {
+            next.push(rule.clone());
+            continue;
+        }
+        changed += 1;
+        let ranges: Vec<ConditionalFormatRange> =
+            rule.ranges.iter().flat_map(|r| subtract_range(r, &cut)).collect();
+        if !ranges.is_empty() {
+            let mut kept = rule.clone();
+            kept.ranges = ranges;
+            next.push(kept);
+        }
+    }
+    if changed == 0 {
+        return Ok(0);
     }
 
-    Ok(removed)
+    // Something changes: the document is dirty from here.
+    let effect = DocumentEffect::mutates(file_state);
+    let mut cf_storage = cf_storage.authorize(&effect);
+    cf_storage.insert(target_sheet, next);
+    drop(cf_storage);
+    crate::undo_commands::record_conditional_formats_undo(
+        state,
+        target_sheet,
+        previous,
+        "Clear conditional formats",
+    );
+
+    Ok(changed)
+}
+
+/// Do two rectangles share a cell?
+fn ranges_intersect(a: &ConditionalFormatRange, b: &ConditionalFormatRange) -> bool {
+    a.start_row <= b.end_row && b.start_row <= a.end_row && a.start_col <= b.end_col && b.start_col <= a.end_col
+}
+
+/// `range` minus `cut`, as at most four rectangles: the full-width bands above
+/// and below the cut, then the parts left and right of it within the cut's
+/// rows. Empty when the cut covers the whole range.
+fn subtract_range(range: &ConditionalFormatRange, cut: &ConditionalFormatRange) -> Vec<ConditionalFormatRange> {
+    if !ranges_intersect(range, cut) {
+        return vec![range.clone()];
+    }
+    let mut out = Vec::with_capacity(4);
+    if range.start_row < cut.start_row {
+        out.push(ConditionalFormatRange {
+            start_row: range.start_row,
+            end_row: cut.start_row - 1,
+            start_col: range.start_col,
+            end_col: range.end_col,
+        });
+    }
+    if range.end_row > cut.end_row {
+        out.push(ConditionalFormatRange {
+            start_row: cut.end_row + 1,
+            end_row: range.end_row,
+            start_col: range.start_col,
+            end_col: range.end_col,
+        });
+    }
+    let mid_start = range.start_row.max(cut.start_row);
+    let mid_end = range.end_row.min(cut.end_row);
+    if range.start_col < cut.start_col {
+        out.push(ConditionalFormatRange {
+            start_row: mid_start,
+            end_row: mid_end,
+            start_col: range.start_col,
+            end_col: cut.start_col - 1,
+        });
+    }
+    if range.end_col > cut.end_col {
+        out.push(ConditionalFormatRange {
+            start_row: mid_start,
+            end_row: mid_end,
+            start_col: cut.end_col + 1,
+            end_col: range.end_col,
+        });
+    }
+    out
 }
 
 // ============================================================================
@@ -2121,6 +2192,118 @@ mod tests {
     #[test]
     fn test_icon_set_type_default() {
         assert_eq!(IconSetType::default(), IconSetType::ThreeTrafficLights1);
+    }
+
+    // ------------------------------------------------------------------
+    // Clear Rules from Selected Cells (Excel cuts the selection out)
+    // ------------------------------------------------------------------
+
+    fn range(sr: u32, sc: u32, er: u32, ec: u32) -> ConditionalFormatRange {
+        ConditionalFormatRange { start_row: sr, start_col: sc, end_row: er, end_col: ec }
+    }
+
+    fn cells(ranges: &[ConditionalFormatRange]) -> std::collections::HashSet<(u32, u32)> {
+        let mut out = std::collections::HashSet::new();
+        for r in ranges {
+            for row in r.start_row..=r.end_row {
+                for col in r.start_col..=r.end_col {
+                    out.insert((row, col));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn subtracting_a_cut_leaves_exactly_the_cells_outside_it() {
+        // A hole in the middle: eight cells, four pieces.
+        let left = subtract_range(&range(0, 0, 2, 2), &range(1, 1, 1, 1));
+        assert_eq!(left.len(), 4);
+        let mut expected = cells(&[range(0, 0, 2, 2)]);
+        expected.remove(&(1, 1));
+        assert_eq!(cells(&left), expected);
+        // The cut covers the range: nothing left.
+        assert!(subtract_range(&range(2, 2, 3, 3), &range(0, 0, 9, 9)).is_empty());
+        // A disjoint cut leaves the range as it was.
+        assert_eq!(cells(&subtract_range(&range(0, 0, 9, 0), &range(0, 2, 9, 2))), cells(&[range(0, 0, 9, 0)]));
+    }
+
+    struct Book {
+        state: AppState,
+        file: FileState,
+    }
+
+    fn book_with_rule(ranges: Vec<ConditionalFormatRange>) -> Book {
+        let book = Book { state: crate::create_app_state(), file: FileState::default() };
+        let added = add_conditional_format_impl(
+            &book.state,
+            &book.file,
+            AddCFParams {
+                rule: ConditionalFormatRule::CellValue(CellValueRule {
+                    operator: CellValueOperator::GreaterThan,
+                    value1: "5".to_string(),
+                    value2: None,
+                }),
+                format: ConditionalFormat { background_color: Some("#FFC7CE".to_string()), ..Default::default() },
+                ranges,
+                stop_if_true: false,
+            },
+        );
+        assert!(added.success, "{:?}", added.error);
+        crate::document_effect::mark_saved(&book.file);
+        book
+    }
+
+    fn rule_ranges(book: &Book) -> Vec<ConditionalFormatRange> {
+        book.state.conditional_formats.read().unwrap().get(&0).map(|rules| rules.iter().flat_map(|r| r.ranges.clone()).collect()).unwrap_or_default()
+    }
+
+    /// Survey note C, reproduced: rule A1:A10, A1:A5 selected. It used to
+    /// remove nothing (the rule's range is not wholly inside the selection) and
+    /// say nothing; Excel leaves the rule on A6:A10.
+    #[test]
+    fn clear_rules_from_selected_cells_cuts_the_selection_out_of_every_rule() {
+        let book = book_with_rule(vec![range(0, 0, 9, 0)]);
+        let changed = clear_conditional_formats_in_range_impl(&book.state, &book.file, 0, 0, 4, 0, None).unwrap();
+        assert_eq!(changed, 1);
+        assert_eq!(cells(&rule_ranges(&book)), cells(&[range(5, 0, 9, 0)]), "A6:A10 keeps the rule");
+        assert!(book.file.is_dirty());
+
+        // ONE undo step restores the rule's whole range.
+        let transaction = book.state.undo_stack.lock().unwrap().pop_undo().expect("the clear recorded an undo step");
+        crate::undo_commands::apply_changes(
+            &book.state,
+            &book.file,
+            &crate::persistence::UserFilesState::default(),
+            &crate::pivot::types::PivotState::new(),
+            &crate::slicer::SlicerState::new(),
+            &crate::ribbon_filter::RibbonFilterState::new(),
+            &crate::pane_control::PaneControlState::new(),
+            &crate::timeline_slicer::TimelineSlicerState::new(),
+            transaction,
+            true,
+        );
+        assert_eq!(cells(&rule_ranges(&book)), cells(&[range(0, 0, 9, 0)]));
+    }
+
+    #[test]
+    fn a_rule_whose_every_cell_is_selected_is_removed() {
+        let book = book_with_rule(vec![range(2, 2, 3, 3), range(8, 8, 8, 8)]);
+        assert_eq!(clear_conditional_formats_in_range_impl(&book.state, &book.file, 0, 0, 9, 9, None).unwrap(), 1);
+        assert!(book.state.conditional_formats.read().unwrap().get(&0).unwrap().is_empty());
+    }
+
+    /// The `DocumentEffect` is built only inside the branch that changes
+    /// something: a clear that touches no rule leaves the document clean and
+    /// records nothing.
+    #[test]
+    fn a_clear_that_touches_no_rule_leaves_the_document_clean() {
+        let book = book_with_rule(vec![range(0, 0, 9, 0)]);
+        let depth = book.state.undo_stack.lock().unwrap().undo_depth();
+        assert_eq!(clear_conditional_formats_in_range_impl(&book.state, &book.file, 0, 2, 4, 2, None).unwrap(), 0);
+        assert!(!book.file.is_dirty(), "nothing changed, so the document must stay clean");
+        assert_eq!(book.state.undo_stack.lock().unwrap().undo_depth(), depth);
+        assert_eq!(cells(&rule_ranges(&book)), cells(&[range(0, 0, 9, 0)]));
     }
 }
 

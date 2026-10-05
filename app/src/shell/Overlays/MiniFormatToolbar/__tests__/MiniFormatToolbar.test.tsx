@@ -20,10 +20,14 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
-const { getCellMock, getStyleMock, applyMock, emitMock, paletteMock } = vi.hoisted(() => ({
+const { getCellMock, getStyleMock, applyMock, adjustMock, emitMock, paletteMock, beginMock, commitMock, cancelMock } = vi.hoisted(() => ({
+  beginMock: vi.fn(),
+  commitMock: vi.fn(),
+  cancelMock: vi.fn(),
   getCellMock: vi.fn(),
   getStyleMock: vi.fn(),
   applyMock: vi.fn(),
+  adjustMock: vi.fn(),
   emitMock: vi.fn(),
   paletteMock: vi.fn(),
 }));
@@ -32,9 +36,15 @@ vi.mock("../../../../api/lib", () => ({
   getCell: getCellMock,
   getStyle: getStyleMock,
   applyFormatting: applyMock,
+  adjustNumberFormatDecimals: adjustMock,
+  beginUndoTransaction: beginMock,
+  commitUndoTransaction: commitMock,
+  cancelUndoTransaction: cancelMock,
 }));
 
 vi.mock("../../../../api", () => ({ cellEvents: { emit: emitMock } }));
+// The ONE announcement (@api/announceFormatting) emits through @api's own door.
+vi.mock("../../../../api/cellEvents", () => ({ cellEvents: { emit: emitMock } }));
 
 // The quick palette never asks for the document theme; mocked so a regression
 // that turns the theme grid on fails loudly instead of reaching for Tauri.
@@ -129,6 +139,12 @@ beforeEach(() => {
   getStyleMock.mockReset();
   applyMock.mockReset();
   emitMock.mockReset();
+  beginMock.mockReset();
+  beginMock.mockResolvedValue(null);
+  commitMock.mockReset();
+  commitMock.mockResolvedValue(undefined);
+  cancelMock.mockReset();
+  cancelMock.mockResolvedValue(undefined);
   paletteMock.mockReset();
   paletteMock.mockResolvedValue([]);
   getCellMock.mockResolvedValue({ row: 1, col: 2, styleIndex: 7, display: "" });
@@ -144,6 +160,8 @@ beforeEach(() => {
     textAlign: "center",
   });
   applyMock.mockResolvedValue({ cells: [{ row: 1, col: 2, display: "x", formula: null }] });
+  adjustMock.mockReset();
+  adjustMock.mockResolvedValue({ cells: [{ row: 1, col: 2, display: "1.50", formula: null }], styles: [] });
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -293,12 +311,26 @@ describe("MiniFormatToolbar — formatting", () => {
     expect(byTestId("mini-format-align-right").getAttribute("aria-pressed")).toBe("true");
     await click(byTestId("mini-format-percent"));
     expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { numberFormat: "0%" });
+    // Comma Style is Excel's: Accounting with no symbol and 2 decimals -- the
+    // backend's `comma` preset, the same one the Home tab sends. It used to be
+    // `#,##0.00`, a third Comma Style of the app's own.
     await click(byTestId("mini-format-comma"));
-    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { numberFormat: "#,##0.00" });
+    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { numberFormat: "comma" });
+  });
+
+  it("Increase / Decrease Decimal go through the backend's decimal step, the ACTIVE cell first", async () => {
+    // They used to write `#,##0.000` and `#,##0` whatever the cell carried, so
+    // a percentage became a plain number and a date a serial (number.md 3).
+    // The active cell (the selection's END) leads both lists: it decides.
+    await render(menuContext({ selection: { startRow: 1, startCol: 2, endRow: 3, endCol: 4, type: "cells" } as never }));
     await click(byTestId("mini-format-decimal-increase"));
-    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { numberFormat: "#,##0.000" });
+    expect(adjustMock).toHaveBeenLastCalledWith([3, 1, 2], [4, 2, 3], 1);
     await click(byTestId("mini-format-decimal-decrease"));
-    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { numberFormat: "#,##0" });
+    expect(adjustMock).toHaveBeenLastCalledWith([3, 1, 2], [4, 2, 3], -1);
+    // Never through applyFormatting with a format of the toolbar's own.
+    expect(applyMock).not.toHaveBeenCalled();
+    // The grid hears about it like any other format change.
+    expect(emitMock).toHaveBeenCalledWith(expect.objectContaining({ row: 1, col: 2, newValue: "1.50" }));
   });
 
   it("keeps presses on the toolbar away from the context menu's outside-click listener", async () => {
@@ -611,4 +643,86 @@ describe("MiniFormatToolbar — no hardcoded chrome colours", () => {
       expect(findHardcodedColours(flyout)).toEqual([]);
     });
   }
+});
+
+// ============================================================================
+// Shared rules (review findings (g), (h), (i), 2026-10-04)
+// ============================================================================
+
+describe("MiniFormatToolbar — the shared selection and font rules", () => {
+  it("loads the ACTIVE cell's style (the selection's end), not the top-left cell", async () => {
+    // menuContext(): a drag from (1,2) to (2,3) -- (2,3) is active.
+    await render();
+    expect(getCellMock.mock.calls[0], "the pill described the top-left cell").toEqual([2, 3]);
+  });
+
+  it("a drag UP-LEFT is on its end too: active (1,2), anchor (4,5)", async () => {
+    await render(menuContext({ selection: { startRow: 4, startCol: 5, endRow: 1, endCol: 2, type: "cells" } as never }));
+    expect(getCellMock.mock.calls[0]).toEqual([1, 2]);
+  });
+
+  async function renderAtSize(fontSize: number): Promise<void> {
+    getStyleMock.mockResolvedValue({
+      fontFamily: "Calibri", fontSize, bold: false, italic: false, underline: "none",
+      strikethrough: false, textColor: "#000000", backgroundColor: "#ffffff", textAlign: "general",
+    });
+    await render();
+  }
+
+  it("Grow at 24pt gives Excel's 26 (the toolbar's own ladder had no 26)", async () => {
+    await renderAtSize(24);
+    await click(byTestId("mini-format-grow"));
+    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { fontSize: 26 });
+  });
+
+  it("Grow at 72pt writes NOTHING (it wrote 74 and an undo step)", async () => {
+    await renderAtSize(72);
+    await click(byTestId("mini-format-grow"));
+    expect(applyMock).not.toHaveBeenCalled();
+  });
+
+  it("Shrink at 8pt writes NOTHING (it wrote 6)", async () => {
+    await renderAtSize(8);
+    await click(byTestId("mini-format-shrink"));
+    expect(applyMock).not.toHaveBeenCalled();
+  });
+
+  it("a size between rungs moves to the next rung: Grow at 10.5 gives 11", async () => {
+    await renderAtSize(10.5);
+    await click(byTestId("mini-format-grow"));
+    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { fontSize: 11 });
+  });
+
+  it("formats EVERY block of a Ctrl+click selection, the main one first, as ONE undo step", async () => {
+    beginMock.mockResolvedValue(77);
+    await render(
+      menuContext({
+        selection: {
+          startRow: 1, startCol: 2, endRow: 2, endCol: 3, type: "cells",
+          additionalRanges: [{ startRow: 6, startCol: 0, endRow: 5, endCol: 0 }],
+        } as never,
+      }),
+    );
+    await click(byTestId("mini-format-italic"));
+    expect(applyMock.mock.calls).toEqual([
+      [[1, 2], [2, 3], { italic: true }],
+      [[5, 6], [0], { italic: true }],
+    ]);
+    expect(beginMock).toHaveBeenCalledTimes(1);
+    expect(commitMock).toHaveBeenCalledWith(77);
+  });
+
+  it("announces through the ONE announcement: every cell, styles:refresh and grid:refresh once", async () => {
+    const styles = vi.fn();
+    const grid = vi.fn();
+    window.addEventListener("styles:refresh", styles);
+    window.addEventListener("grid:refresh", grid);
+    await render();
+    await click(byTestId("mini-format-bold"));
+    expect(emitMock).toHaveBeenCalledWith(expect.objectContaining({ row: 1, col: 2, newValue: "x" }));
+    expect(styles).toHaveBeenCalledTimes(1);
+    expect(grid).toHaveBeenCalledTimes(1);
+    window.removeEventListener("styles:refresh", styles);
+    window.removeEventListener("grid:refresh", grid);
+  });
 });

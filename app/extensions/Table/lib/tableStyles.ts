@@ -279,6 +279,29 @@ export function tableStyleNumber(id: string): number {
 export const TABLE_STYLES: TableStyleDef[] = generateTableStyles();
 export const TABLE_STYLES_BY_ID = new Map(TABLE_STYLES.map((s) => [s.id, s]));
 
+// ============================================================================
+// Excel's set -- what the galleries OFFER
+// ============================================================================
+
+/**
+ * How many styles of each family Excel offers. Read from live Excel 16 on
+ * 2026-10-04 (UI Automation over Home > Format as Table): "Table Style Light
+ * 1".."21", "Medium 1".."28", "Dark 1".."11", then New Table Style... and New
+ * PivotTable Style.... The catalogue above generates more (Light 22-28, Dark
+ * 12-21); those stay in TABLE_STYLES because a workbook may already store
+ * one (`TableStyleLight25`) and that table must keep its paint -- they are
+ * just no longer OFFERED.
+ */
+const EXCEL_FAMILY_SIZE: Record<TableStyleCategory, number> = { light: 21, medium: 28, dark: 11 };
+
+/** Whether Excel's galleries offer this style. */
+export function isExcelGalleryStyle(def: TableStyleDef): boolean {
+  return tableStyleNumber(def.id) <= EXCEL_FAMILY_SIZE[def.category];
+}
+
+/** Excel's 60, in gallery order: Light 1-21, Medium 1-28, Dark 1-11. */
+export const EXCEL_TABLE_STYLES: TableStyleDef[] = TABLE_STYLES.filter(isExcelGalleryStyle);
+
 /** Default style (Excel's TableStyleMedium2 equivalent) — what a new table gets. */
 export const DEFAULT_TABLE_STYLE_ID = "table-medium-2";
 
@@ -347,6 +370,20 @@ export function tableStyleIdForName(name: string | null | undefined): string | n
   if (!match) return null;
   const id = `table-${match[1].toLowerCase()}-${parseInt(match[2], 10)}`;
   return TABLE_STYLES_BY_ID.has(id) ? id : null;
+}
+
+/**
+ * A style a CALLER named -- a gallery id (`table-medium-2`) or the name a
+ * table stores and scripts speak (`TableStyleMedium2`) -- as a gallery id, or
+ * null when the catalogue has no such style. "None" is not a style a table can
+ * be FORMATTED as, so it resolves to null here.
+ */
+export function resolveTableStyleId(idOrName: unknown): string | null {
+  if (typeof idOrName !== "string") return null;
+  const trimmed = idOrName.trim();
+  if (TABLE_STYLES_BY_ID.has(trimmed)) return trimmed;
+  const fromName = tableStyleIdForName(trimmed);
+  return fromName && fromName !== TABLE_STYLE_NONE_ID ? fromName : null;
 }
 
 // ============================================================================

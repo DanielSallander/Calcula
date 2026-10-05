@@ -205,7 +205,9 @@ test.describe("Format consistency under operations", () => {
   });
 
   test("number format persists through copy-paste", async ({ grid }) => {
-    await grid.setCellValueDirect("A785", "0.5");
+    // A formula, not the literal "0.5": the harness runs sv-SE, where a typed
+    // "0.5" is TEXT (the decimal mark is a comma) and no number format applies.
+    await grid.setCellValueDirect("A785", "=1/2");
     await grid.clickCell("A785");
     await grid.clickFormatButton("percentFormat");
 

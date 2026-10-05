@@ -36,8 +36,10 @@ export type { LayoutThemeKey } from "./theme";
 /** Test helper: hardcoded colour literals in a rendered subtree. */
 export { findHardcodedColours } from "./testing";
 
-export { Launcher } from "./primitives/Launcher";
-export type { LauncherProps } from "./primitives/Launcher";
+export { Launcher, DialogLauncherButton, DialogLauncherGlyph } from "./primitives/Launcher";
+export type { LauncherProps, DialogLauncherButtonProps } from "./primitives/Launcher";
+// The DIALOG_LAUNCHER_* geometry arrives with `export * from "./tokens"` above:
+// it is band geometry (the shell lays a caption out by it), so it lives there.
 
 export {
   Group,
@@ -98,14 +100,31 @@ export type {
 export { SegmentedTabs } from "./primitives/SegmentedTabs";
 export type { SegmentedTabsProps, SegmentedTab } from "./primitives/SegmentedTabs";
 
-export { MenuButton, Menu, MenuItem, MenuSeparator, MenuHeading, SplitMenuButton } from "./primitives/Menu";
+export {
+  MenuButton,
+  Menu,
+  MenuItem,
+  MenuSub,
+  MENU_ICON_BLANK,
+  MenuSeparator,
+  MenuHeading,
+  SplitMenuButton,
+  useMenuClose,
+} from "./primitives/Menu";
 export type {
   MenuButtonProps,
   MenuProps,
   MenuItemProps,
   MenuItemRole,
+  MenuSubProps,
   SplitMenuButtonProps,
 } from "./primitives/Menu";
+export type { SplitFace } from "./primitives/Button";
+
+/** The registered-menu seam: host another extension's menu-bar subtree
+ *  (getMenus() from @api/ui) under a ribbon control, live. */
+export { RegisteredMenuButton, useRegisteredMenuItem } from "./primitives/MenuTree";
+export type { RegisteredMenuButtonProps } from "./primitives/MenuTree";
 
 export { Dropdown } from "./primitives/Dropdown";
 export type { DropdownProps, DropdownOption } from "./primitives/Dropdown";
@@ -136,10 +155,14 @@ export {
   normalizeHex,
   sameColor,
 } from "./colors";
-export { ColorSwatch, ColorPopover } from "./primitives/Color";
+/** ColorPalette is the palette BODY on its own (ColorPopover renders it in an
+ *  anchored card): the content of a MenuSub flyout, Excel's "Tab Color >". */
+export { ColorSwatch, ColorPopover, ColorPalette } from "./primitives/Color";
 export type {
   ColorSwatchProps,
   ColorPopoverProps,
+  ColorPaletteProps,
+  ColorPaletteContentProps,
   ColorPopoverAction,
   ColorSwatchVariant,
   ColorSwatchSize,

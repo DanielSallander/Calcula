@@ -329,6 +329,10 @@ describe("grid command bridge — every bridged command is classified for script
     CUT: "clipboard contents are ambient-world data a sandboxed script must not read or replace",
     COPY: "same: reading the clipboard is reach outside the workbook",
     PASTE: "same: pasting injects ambient-world data the script never had",
+    AUTOFIT_ROW_HEIGHT:
+      "a full fit UNHIDES the user-hidden rows in the selection -- the unlocked API's setRowsHidden " +
+      "reach, behind a door (ext.executeCommand) that is restricted tier with no capability",
+    AUTOFIT_COLUMN_WIDTH: "same, for user-hidden columns",
   };
 
   it("every bridged grid command is either script-safe or explicitly denied", () => {

@@ -1,88 +1,56 @@
 //! FILENAME: app/extensions/ConditionalFormatting/components/DataBarGallery.tsx
-// PURPOSE: Visual gallery of data bar presets for the Conditional Formatting menu.
-// CONTEXT: Shows gradient and solid fill data bar swatches, similar to Excel.
+// PURPOSE: Conditional Formatting > Data Bars: Excel's six colours as Gradient
+//          Fill and as Solid Fill bars, then More Rules....
+// CONTEXT: Hosted by the menu bar AND by the Home tab's Conditional Formatting
+//          hero, so it paints its own @api/layout surface (galleryChrome.ts
+//          says why -- the old tiles were the menu bar's #252526, which on the
+//          ribbon's light card read as dark holes). Excel's layout: two groups,
+//          three per row. Each preview is three bars of different lengths on a
+//          cell-white ground, the way Excel draws it; its colours are DATA.
+//
+//          The gradient bars keep a tooltip beginning "Gradient": the
+//          fixall-edit journey picks one by `button[title^="Gradient"]`.
 
 import React from "react";
-import styled from "styled-components";
-import { PRESET_DATA_BAR_COLORS } from "../types";
+import { css } from "@emotion/css";
+import { PRESET_DATA_BARS } from "../types";
+import {
+  galleryRoot,
+  groupHeading,
+  optionGrid,
+  optionButton,
+  footerRule,
+  moreRulesRow,
+  handleGalleryKeyDown,
+  OPTION_ATTR,
+  COLUMNS_ATTR,
+  MORE_RULES_ATTR,
+} from "./galleryChrome";
 
-const v = (name: string) => `var(${name})`;
+const COLUMNS = 3;
+/** Bar lengths in the preview, longest first (percent of the cell). */
+const BAR_LENGTHS = [90, 60, 35];
 
-// ============================================================================
-// Styles
-// ============================================================================
-
-const GalleryContainer = styled.div`
-  padding: 6px 8px;
-  width: 200px;
-`;
-
-const SectionHeader = styled.div`
-  font-size: 11px;
-  font-weight: 600;
-  color: ${v("--menu-shortcut-text")};
-  padding: 4px 2px 4px;
-
-  &:first-child {
-    padding-top: 0;
-  }
-`;
-
-const SwatchGrid = styled.div`
-  display: grid;
-  grid-template-columns: repeat(6, 1fr);
-  gap: 4px;
-  margin-bottom: 4px;
-`;
-
-const SwatchButton = styled.button`
+const preview = css`
   display: flex;
-  align-items: flex-end;
-  width: 28px;
-  height: 28px;
-  border: 1px solid ${v("--menu-border")};
-  border-radius: 2px;
-  cursor: pointer;
-  padding: 2px;
-  background: ${v("--menu-dropdown-bg")};
-
-  &:hover {
-    border-color: ${v("--menu-text")};
-    box-shadow: 0 0 0 1px ${v("--menu-text")};
-  }
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  box-sizing: border-box;
+  width: 30px;
+  height: 30px;
+  padding: 3px 2px;
 `;
 
-const BarPreview = styled.div<{ $color: string; $gradient: boolean }>`
-  width: 100%;
-  height: 60%;
-  border-radius: 1px;
-  background: ${({ $color, $gradient }) =>
-    $gradient
-      ? `linear-gradient(to right, ${$color}, ${$color}00)`
-      : $color};
-`;
-
-const MoreRulesButton = styled.button`
+const bar = css`
   display: block;
-  width: 100%;
-  margin-top: 4px;
-  padding: 5px 8px;
-  background: transparent;
-  border: none;
-  color: ${v("--menu-text")};
-  font-size: 12px;
-  text-align: left;
-  cursor: pointer;
-  border-radius: 3px;
-
-  &:hover {
-    background-color: ${v("--menu-item-hover-bg")};
-  }
+  height: 5px;
+  border-radius: 1px;
 `;
 
-// ============================================================================
-// Component
-// ============================================================================
+function barFill(color: string, gradient: boolean): string {
+  return gradient ? `linear-gradient(to right, ${color}, ${color}22)` : color;
+}
 
 export interface DataBarGalleryProps {
   onSelect: (color: string, gradientFill: boolean) => void;
@@ -90,42 +58,69 @@ export interface DataBarGalleryProps {
   onClose: () => void;
 }
 
+const GROUPS: Array<{ label: string; gradient: boolean; slug: string }> = [
+  { label: "Gradient Fill", gradient: true, slug: "gradient" },
+  { label: "Solid Fill", gradient: false, slug: "solid" },
+];
+
 export function DataBarGallery({
   onSelect,
   onMoreRules,
   onClose,
 }: DataBarGalleryProps): React.ReactElement {
   return (
-    <GalleryContainer>
-      <SectionHeader>Gradient Fill</SectionHeader>
-      <SwatchGrid>
-        {PRESET_DATA_BAR_COLORS.map((color, idx) => (
-          <SwatchButton
-            key={`grad-${idx}`}
-            title={`Gradient ${color}`}
-            onClick={() => { onSelect(color, true); onClose(); }}
+    <div className={galleryRoot} data-testid="cf-gallery-dataBars" onKeyDown={handleGalleryKeyDown}>
+      {GROUPS.map((group) => (
+        <div key={group.slug} role="group" aria-label={group.label}>
+          <div className={groupHeading} aria-hidden>
+            {group.label}
+          </div>
+          <div
+            className={optionGrid}
+            style={{ gridTemplateColumns: `repeat(${COLUMNS}, auto)` }}
+            {...{ [COLUMNS_ATTR]: COLUMNS }}
           >
-            <BarPreview $color={color} $gradient={true} />
-          </SwatchButton>
-        ))}
-      </SwatchGrid>
-      <SectionHeader>Solid Fill</SectionHeader>
-      <SwatchGrid>
-        {PRESET_DATA_BAR_COLORS.map((color, idx) => (
-          <SwatchButton
-            key={`solid-${idx}`}
-            title={`Solid ${color}`}
-            onClick={() => { onSelect(color, false); onClose(); }}
-          >
-            <BarPreview $color={color} $gradient={false} />
-          </SwatchButton>
-        ))}
-      </SwatchGrid>
-      <MoreRulesButton
-        onClick={() => { onMoreRules(); onClose(); }}
+            {PRESET_DATA_BARS.map((preset, idx) => (
+              <button
+                key={`${group.slug}-${preset.color}`}
+                type="button"
+                className={optionButton}
+                title={`${group.label}: ${preset.name}`}
+                aria-label={preset.name}
+                data-testid={`cf-dataBar-${group.slug}-${idx}`}
+                {...{ [OPTION_ATTR]: "" }}
+                onClick={() => {
+                  onSelect(preset.color, group.gradient);
+                  onClose();
+                }}
+              >
+                <span className={preview} data-colour-data="">
+                  {BAR_LENGTHS.map((length) => (
+                    <span
+                      key={length}
+                      className={bar}
+                      style={{ width: `${length}%`, background: barFill(preset.color, group.gradient) }}
+                    />
+                  ))}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+      <div className={footerRule} role="separator" />
+      <button
+        type="button"
+        className={moreRulesRow}
+        data-testid="cf-dataBars-moreRules"
+        {...{ [MORE_RULES_ATTR]: "" }}
+        onClick={() => {
+          onMoreRules();
+          onClose();
+        }}
       >
         More Rules...
-      </MoreRulesButton>
-    </GalleryContainer>
+      </button>
+    </div>
   );
 }

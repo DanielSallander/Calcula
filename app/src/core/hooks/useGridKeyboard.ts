@@ -933,17 +933,14 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         return;
       }
 
-      // Handle F5 - Focus Name Box (Go To)
-      if (key === "F5" && !modKey && !altKey && !shiftKey) {
-        event.preventDefault();
-        event.stopPropagation();
-        eventLog.keyboard('Grid', 'handleKeyDown', 'F5', []);
-        if (onCommand) {
-          onCommand('navigate.focusNameBox');
-        }
-        fnLog.exit('handleKeyDown', 'focus name box');
-        return;
-      }
+      // F5 is NOT handled here (2026-10-04). It is a keybinding-registry
+      // shortcut for `navigate.goTo` -- Excel's Go To dialog, beside Ctrl+G --
+      // so a remap applies to it and the Keyboard Shortcuts list shows it. The
+      // grid used to send F5 to the Name Box itself; with both in place one
+      // press could open Go To AND focus the Name Box, depending on which
+      // listener saw it first. The Name Box stays reachable by clicking it,
+      // and any code can still focus it with @api's AppEvents.NAMEBOX_FOCUS,
+      // which the Name Box listens for.
 
       // Handle F9 - Calculate Now (recalculate the WORKBOOK, as Excel's F9 does)
       if (key === "F9" && !modKey && !altKey && !shiftKey) {

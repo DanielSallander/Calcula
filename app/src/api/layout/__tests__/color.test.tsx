@@ -372,9 +372,12 @@ describe("ColorPopover — content", () => {
     expect(pop.getAttribute("aria-label")).toBe("Font colour");
     expect(container.querySelector("button")!.getAttribute("aria-expanded")).toBe("true");
     expect(paletteMock).toHaveBeenCalledTimes(1);
-    expect(pop.textContent).toContain("Theme colours");
-    expect(pop.textContent).toContain("Standard colours");
-    expect(pop.textContent).toContain("More colours...");
+    // Excel's words, Excel's spelling: the palette is the one users already
+    // know from Excel's Font Color / Fill Color drop-downs.
+    expect(pop.textContent).toContain("Theme Colors");
+    expect(pop.textContent).toContain("Standard Colors");
+    expect(pop.textContent).toContain("More Colors...");
+    expect(pop.textContent).not.toMatch(/colours/i);
     // 10 base + 10 tints + 10 standard.
     expect(swatches()).toHaveLength(30);
     expect(swatchNamed("Dark red")).toBeDefined();
@@ -413,7 +416,7 @@ describe("ColorPopover — content", () => {
     await settle();
     expect(paletteMock).not.toHaveBeenCalled();
     expect(swatches()).toHaveLength(20);
-    expect(flyout()!.textContent).not.toContain("Theme colours");
+    expect(flyout()!.textContent).not.toContain("Theme Colors");
     expect(flyout()!.textContent).toContain("Colours");
   });
 
@@ -424,7 +427,7 @@ describe("ColorPopover — content", () => {
     await click(container.querySelector("button")!);
     await settle();
     expect(swatches()).toHaveLength(10);
-    expect(flyout()!.textContent).not.toContain("Theme colours");
+    expect(flyout()!.textContent).not.toContain("Theme Colors");
     expect(warn).toHaveBeenCalled();
   });
 
@@ -470,6 +473,21 @@ describe("ColorPopover — picking", () => {
     expect(onChange).toHaveBeenCalledWith("#ff0000");
     expect(flyout()).toBeNull();
     expect(container.querySelector("button")!.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("a blur that is NOT an Escape still commits the draft (the field's documented contract)", async () => {
+    // Positive control for the Escape test below: the discard is specific to
+    // Escape, not a blur commit that stopped working.
+    const onChange = vi.fn();
+    render(<ColorSwatch color="#ff0000" onChange={onChange} label="Font colour" />);
+    await click(container.querySelector("button")!);
+    await settle();
+    const hex = flyout()!.querySelector<HTMLInputElement>('input[aria-label="Hex colour"]')!;
+    act(() => hex.focus());
+    setInputValue(hex, "12ab34");
+    act(() => hex.blur());
+    expect(onChange.mock.calls).toEqual([["#12ab34"]]);
+    expect(flyout()).not.toBeNull();
   });
 
   it("a theme swatch calls onThemeColorChange(slot, tint, hex) and NOT onChange", async () => {
@@ -521,13 +539,13 @@ describe("ColorPopover — picking", () => {
     expect(flyout()!.textContent).not.toContain("Automatic");
   });
 
-  it("More colours...: an inline <input type=color> that reports live and keeps the popover open", async () => {
+  it("More Colors...: an inline <input type=color> that reports live and keeps the popover open", async () => {
     const onChange = vi.fn();
     render(<ColorSwatch color="#ff0000" onChange={onChange} label="Font colour" />);
     await click(container.querySelector("button")!);
     await settle();
     const custom = flyout()!.querySelector<HTMLInputElement>('input[type="color"]')!;
-    expect(custom.getAttribute("aria-label")).toBe("More colours...");
+    expect(custom.getAttribute("aria-label")).toBe("More Colors...");
     expect(custom.value).toBe("#ff0000");
     setInputValue(custom, "#336699");
     expect(onChange).toHaveBeenCalledWith("#336699");
@@ -573,6 +591,28 @@ describe("ColorPopover — picking", () => {
     expect(flyout()).toBeNull();
     expect(document.activeElement, "precondition: the close moved focus off the field").not.toBe(hex);
     expect(onChange.mock.calls).toEqual([["#12ab34"]]);
+  });
+
+  // Found 2026-10-04 (kit-color lane, a probe while adding the split): Escape
+  // in a FOCUSED hex field APPLIED the typed draft. Escape closes the popover,
+  // the close hands focus back to the trigger, that blurs the field, and the
+  // blur commits -- so the key that means "cancel" everywhere else in the kit
+  // wrote a colour to the selection (one undo step the user never asked for).
+  it("Escape in a FOCUSED hex field discards the typed draft (applies nothing) and closes", async () => {
+    const onChange = vi.fn();
+    render(<ColorSwatch color="#ff0000" onChange={onChange} label="Font colour" />);
+    const btn = container.querySelector("button")!;
+    await click(btn);
+    await settle();
+    const hex = flyout()!.querySelector<HTMLInputElement>('input[aria-label="Hex colour"]')!;
+    act(() => hex.focus());
+    expect(document.activeElement, "precondition: the field has focus, so closing blurs it").toBe(hex);
+    setInputValue(hex, "12ab34");
+    key(hex, "Escape");
+    await settle();
+    expect(flyout()).toBeNull();
+    expect(document.activeElement, "precondition: the close moved focus off the field").toBe(btn);
+    expect(onChange).not.toHaveBeenCalled();
   });
 
   it("the hex field refuses an invalid colour (aria-invalid, no onChange, stays open)", async () => {
@@ -709,7 +749,7 @@ describe("ColorPopover — standalone", () => {
     const onClose = vi.fn();
     render(<ColorPopover anchorEl={anchor} open onClose={onClose} value="#ff0000" onChange={() => {}} />);
     await settle();
-    expect(flyout()!.getAttribute("aria-label")).toBe("Colours");
+    expect(flyout()!.getAttribute("aria-label")).toBe("Colors");
     expect(swatches()).toHaveLength(30);
     render(<ColorPopover anchorEl={anchor} open={false} onClose={onClose} value="#ff0000" onChange={() => {}} />);
     expect(flyout()).toBeNull();

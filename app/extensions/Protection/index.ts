@@ -18,6 +18,7 @@ import { UnprotectWorkbookDialog } from "./components/UnprotectWorkbookDialog";
 import { CellProtectionDialog } from "./components/CellProtectionDialog";
 import { registerReviewMenu, refreshMenu } from "./handlers/reviewMenuBuilder";
 import { registerSheetTabProtection } from "./handlers/sheetTabGuard";
+import { registerProtectionCommands } from "./handlers/protectionCommands";
 import {
   refreshProtectionState,
   resetProtectionState,
@@ -131,6 +132,10 @@ function activate(context: ExtensionContext): void {
   // 4. Register sheet tab context menu modifications for workbook protection
   //    (the replaced core items are put back on deactivate)
   cleanupFns.push(registerSheetTabProtection());
+
+  // 4b. Commands: protection.toggleProtectSheet and protection.toggleLockCell,
+  //     the doors Home > Format > Protection runs (taken back on deactivate).
+  cleanupFns.push(registerProtectionCommands(context));
 
   // 5. Subscribe to events
 

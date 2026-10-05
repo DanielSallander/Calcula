@@ -12,8 +12,8 @@ use crate::persistence::FileState;
 use chrono::Utc;
 use uuid::Uuid;
 
-/// Record a note change to the undo stack.
-fn record_note_undo(state: &AppState, sheet_index: usize, row: u32, col: u32, previous: Option<Note>, description: &str) {
+/// The "note" restore payload: what one cell held before the change.
+fn note_undo_bytes(sheet_index: usize, row: u32, col: u32, previous: Option<Note>) -> Vec<u8> {
     #[derive(Serialize)]
     struct NoteSnapshot {
         sheet_index: usize,
@@ -21,7 +21,12 @@ fn record_note_undo(state: &AppState, sheet_index: usize, row: u32, col: u32, pr
         col: u32,
         previous: Option<Note>,
     }
-    let data = serde_json::to_vec(&NoteSnapshot { sheet_index, row, col, previous }).unwrap_or_default();
+    serde_json::to_vec(&NoteSnapshot { sheet_index, row, col, previous }).unwrap_or_default()
+}
+
+/// Record a note change to the undo stack.
+fn record_note_undo(state: &AppState, sheet_index: usize, row: u32, col: u32, previous: Option<Note>, description: &str) {
+    let data = note_undo_bytes(sheet_index, row, col, previous);
     let mut undo_stack = state.undo_stack.lock().unwrap();
     undo_stack.record_custom_restore("note".to_string(), data, description);
 }
@@ -785,7 +790,7 @@ pub fn clear_all_notes(
         .unwrap_or(0)
 }
 
-/// Clear notes in a range (used when deleting rows/columns or clearing a range).
+/// Clear notes in a range (Clear Comments and Notes, Clear All).
 #[tauri::command]
 pub fn clear_notes_in_range(
     state: State<AppState>,
@@ -795,31 +800,65 @@ pub fn clear_notes_in_range(
     end_row: u32,
     end_col: u32,
 ) -> usize {
+    clear_notes_in_range_impl(&state, &file_state, start_row, start_col, end_row, end_col)
+}
+
+/// The body of `clear_notes_in_range`, over plain references.
+///
+/// UNDOABLE, which it was not (only the single-note delete recorded its
+/// "note" restore): every removed note is recorded now, inside ONE owned
+/// transaction -- its own step, or the caller's when Clear All holds one open.
+/// A range with no note in it changes nothing and leaves the document clean.
+pub(crate) fn clear_notes_in_range_impl(
+    state: &AppState,
+    file_state: &FileState,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> usize {
     let active_sheet = *state.active_sheet.read().unwrap();
+    let (min_row, max_row) = (start_row.min(end_row), start_row.max(end_row));
+    let (min_col, max_col) = (start_col.min(end_col), start_col.max(end_col));
+    let notes = state.notes.lock_pending().unwrap();
+    let keys_to_remove: Vec<(u32, u32)> = notes
+        .get(&active_sheet)
+        .map(|sheet_notes| {
+            sheet_notes
+                .keys()
+                .filter(|(r, c)| *r >= min_row && *r <= max_row && *c >= min_col && *c <= max_col)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    if keys_to_remove.is_empty() {
+        return 0;
+    }
     // Notes live in `sheet.notes` and are written only by the save path, so
     // changing one changes what a save would write. See `document_effect`.
-    let effect = DocumentEffect::mutates(&file_state);
-    let mut notes = state.notes.write(&effect).unwrap();
-
-    let sheet_notes = match notes.get_mut(&active_sheet) {
-        Some(sn) => sn,
-        None => return 0,
-    };
-
-    let keys_to_remove: Vec<(u32, u32)> = sheet_notes
-        .keys()
-        .filter(|(r, c)| {
-            *r >= start_row && *r <= end_row &&
-            *c >= start_col && *c <= end_col
-        })
-        .cloned()
-        .collect();
-
-    let count = keys_to_remove.len();
-    for key in keys_to_remove {
-        sheet_notes.remove(&key);
+    let effect = DocumentEffect::mutates(file_state);
+    let mut notes = notes.authorize(&effect);
+    let mut removed: Vec<((u32, u32), Note)> = Vec::with_capacity(keys_to_remove.len());
+    if let Some(sheet_notes) = notes.get_mut(&active_sheet) {
+        for key in keys_to_remove {
+            if let Some(note) = sheet_notes.remove(&key) {
+                removed.push((key, note));
+            }
+        }
     }
+    drop(notes);
 
+    let count = removed.len();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    let txn = undo_stack.begin_owned_transaction("Clear notes");
+    for ((row, col), previous) in removed {
+        undo_stack.record_custom_restore(
+            "note".to_string(),
+            note_undo_bytes(active_sheet, row, col, Some(previous)),
+            "Clear notes",
+        );
+    }
+    undo_stack.commit_owned(txn);
     count
 }
 

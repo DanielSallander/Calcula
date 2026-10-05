@@ -8,7 +8,11 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import React from "react";
-import { DISABLED_LOOK, DISABLED_OPACITY } from "../primitives/disabled";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+import { DISABLED_LOOK, DISABLED_OPACITY, softDisabled } from "../primitives/disabled";
+import { RegisteredMenuButton } from "../primitives/MenuTree";
 import { Button, IconButton, CommandButton } from "../primitives/Button";
 import { Chip } from "../primitives/Chip";
 import { ColorSwatch } from "../primitives/Color";
@@ -141,6 +145,85 @@ describe("SplitMenuButton (aria-disabled, never native)", () => {
     const main = q<HTMLButtonElement>(m.container, "[data-testid='main']");
     expect(filterOf(main)).not.toBe(GREY);
     expect(declared(main, "background")).toContain("--button-pressed-bg");
+  });
+});
+
+describe("ONE soft-disabled rule for every aria-disabled control (primitives/disabled.ts)", () => {
+  // A control greyed out FOR A REASON stays aria-disabled (focusable, its
+  // tooltip still shows), so Button's `:disabled` rule never reaches it. The
+  // rule that gives it the disabled look instead used to exist twice --
+  // Menu.tsx for SplitMenuButton, and a copy in Color.tsx for the split colour
+  // button -- and a second copy is a second look waiting to drift.
+
+  it("SplitMenuButton's halves, the split colour button's halves and a disabled registered trigger share it", () => {
+    m.render(
+      <>
+        <SplitMenuButton
+          icon={<Icon />}
+          label="Borders"
+          disabled
+          data-testid="borders"
+          chevronTestId="borders-chevron"
+          onClick={() => undefined}
+        >
+          <MenuItem onSelect={() => undefined}>Bottom Border</MenuItem>
+        </SplitMenuButton>
+        <ColorSwatch
+          split
+          variant="bar"
+          icon={<Icon />}
+          color="#ffff00"
+          onApply={() => undefined}
+          onChange={() => undefined}
+          label="Fill Color"
+          testId="fill"
+          chevronTestId="fill-chevron"
+          disabled
+        />
+        <RegisteredMenuButton
+          menuId="no-such-menu"
+          itemId="nothing"
+          trigger={<Button data-testid="registered">Conditional Formatting</Button>}
+        />
+      </>,
+    );
+    const classOf = (id: string): string[] =>
+      (q(m.container, `[data-testid='${id}']`).getAttribute("class") ?? "").split(/\s+/);
+    for (const id of ["borders", "borders-chevron", "fill", "fill-chevron", "registered"]) {
+      expect(q(m.container, `[data-testid='${id}']`).getAttribute("aria-disabled"), id).toBe("true");
+      expect(classOf(id), id).toContain(softDisabled);
+    }
+  });
+
+  it("it is the disabled look plus no hover or press tint, and a pressed half keeps its fill", () => {
+    m.render(
+      <SplitMenuButton
+        icon={<Icon />}
+        label="Merge & Center"
+        pressed
+        disabled
+        data-testid="merge"
+        onClick={() => undefined}
+      >
+        <MenuItem onSelect={() => undefined}>Merge Cells</MenuItem>
+      </SplitMenuButton>,
+    );
+    const merge = q<HTMLButtonElement>(m.container, "[data-testid='merge']");
+    expect(getComputedStyle(merge).opacity).toBe(FADED);
+    expect(declared(merge, "background")).toContain("--button-pressed-bg");
+  });
+
+  it("no primitive but disabled.ts declares an aria-disabled look of its own", () => {
+    // A source guard: the rule was already copied once, into Color.tsx, for
+    // the reason a copy is always made ("identical to Menu.tsx's, which is not
+    // exported"). A primitive that needs the look imports softDisabled from
+    // disabled.ts; it does not re-declare it.
+    const dir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../primitives");
+    const offenders = fs
+      .readdirSync(dir)
+      .filter((f) => /\.(ts|tsx)$/.test(f) && f !== "disabled.ts")
+      .filter((f) => /&&\[aria-disabled="true"\]/.test(fs.readFileSync(path.join(dir, f), "utf8")));
+    expect(offenders).toEqual([]);
   });
 });
 

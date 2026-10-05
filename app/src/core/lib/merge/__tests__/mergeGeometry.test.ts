@@ -33,11 +33,17 @@ describe("selectionBlocks", () => {
     expect(selectionBlocks(sel(4, 3, 1, 0))).toEqual([{ startRow: 1, startCol: 0, endRow: 4, endCol: 3 }]);
   });
 
-  it("lists the Ctrl+click ranges first and the main range LAST", () => {
-    const blocks = selectionBlocks(sel(10, 0, 10, 2, [{ startRow: 0, startCol: 0, endRow: 0, endCol: 2 }]));
+  it("lists the MAIN range (the active cell's block) FIRST, then the Ctrl+click ranges in order", () => {
+    const blocks = selectionBlocks(
+      sel(10, 0, 10, 2, [
+        { startRow: 0, startCol: 0, endRow: 0, endCol: 2 },
+        { startRow: 5, startCol: 4, endRow: 3, endCol: 4 },
+      ]),
+    );
     expect(blocks).toEqual([
-      { startRow: 0, startCol: 0, endRow: 0, endCol: 2 },
       { startRow: 10, startCol: 0, endRow: 10, endCol: 2 },
+      { startRow: 0, startCol: 0, endRow: 0, endCol: 2 },
+      { startRow: 3, startCol: 4, endRow: 5, endCol: 4 },
     ]);
   });
 

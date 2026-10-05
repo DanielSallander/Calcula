@@ -4,15 +4,10 @@
 import React, { useState, useCallback } from "react";
 import { useDialogWindow } from "@api/dialogWindow";
 import type { DialogProps } from "@api/uiTypes";
-import {
-  goToSpecial,
-  useGridDispatch,
-  setSelection,
-  useGridState,
-  restoreFocusToGrid,
-} from "@api";
+import { restoreFocusToGrid } from "@api";
 import type { GoToSpecialCriteria } from "@api";
 import { CRITERIA_OPTIONS } from "../criteriaOptions";
+import { selectSpecialCells, NO_CELLS_FOUND } from "../lib/selectSpecialCells";
 
 const styles = {
   backdrop: {
@@ -117,67 +112,26 @@ export function GoToSpecialDialog({ isOpen, onClose }: DialogProps): React.React
   const [selectedCriteria, setSelectedCriteria] = useState<GoToSpecialCriteria>("blanks");
   const [statusMessage, setStatusMessage] = useState<string>("");
   const [isSearching, setIsSearching] = useState(false);
-  const dispatch = useGridDispatch();
-  const gridState = useGridState();
-
+  // The search and the selection are the SAME code the Find & Select quick
+  // items run (goToSpecial.select, lib/selectSpecialCells.ts): exactly the
+  // matching cells, never the rectangle around them. This handler used to
+  // select the BOUNDING BOX as Core's main range (and the cells themselves
+  // only as extra ranges, and only up to 1000 of them), so "Constants, then
+  // Delete" cleared every formula inside the box.
   const handleOk = useCallback(async () => {
     setIsSearching(true);
     setStatusMessage("Searching...");
 
     try {
-      // Use current selection as search range if it's a multi-cell selection
-      const sel = gridState.selection;
-      let searchRange: { startRow: number; startCol: number; endRow: number; endCol: number } | undefined;
-      if (sel && (sel.startRow !== sel.endRow || sel.startCol !== sel.endCol)) {
-        searchRange = {
-          startRow: Math.min(sel.startRow, sel.endRow),
-          startCol: Math.min(sel.startCol, sel.endCol),
-          endRow: Math.max(sel.startRow, sel.endRow),
-          endCol: Math.max(sel.startCol, sel.endCol),
-        };
-      }
-
-      const result = await goToSpecial(selectedCriteria, searchRange);
-
-      if (result.cells.length === 0) {
-        setStatusMessage("No cells found matching the criteria.");
-        setIsSearching(false);
+      const outcome = await selectSpecialCells(selectedCriteria, { announce: false });
+      if (outcome.kind === "none") {
+        setStatusMessage(NO_CELLS_FOUND);
         return;
       }
-
-      // Select all found cells using multi-selection
-      // For simplicity, select the bounding range of all found cells
-      let minRow = result.cells[0].row;
-      let maxRow = result.cells[0].row;
-      let minCol = result.cells[0].col;
-      let maxCol = result.cells[0].col;
-
-      for (const cell of result.cells) {
-        minRow = Math.min(minRow, cell.row);
-        maxRow = Math.max(maxRow, cell.row);
-        minCol = Math.min(minCol, cell.col);
-        maxCol = Math.max(maxCol, cell.col);
+      if (outcome.kind === "refused") {
+        setStatusMessage(outcome.message);
+        return;
       }
-
-      // If only one type of cells, we can select the first one and create
-      // additional ranges for the rest. For now, select bounding range.
-      dispatch(setSelection({
-        startRow: minRow,
-        startCol: minCol,
-        endRow: maxRow,
-        endCol: maxCol,
-        type: "cells",
-        additionalRanges: result.cells.length <= 1000
-          ? result.cells.map(c => ({
-              startRow: c.row,
-              startCol: c.col,
-              endRow: c.row,
-              endCol: c.col,
-            }))
-          : undefined,
-      }));
-
-      setStatusMessage(`Found ${result.cells.length} cell(s).`);
       onClose();
       restoreFocusToGrid();
     } catch (error) {
@@ -185,7 +139,7 @@ export function GoToSpecialDialog({ isOpen, onClose }: DialogProps): React.React
     } finally {
       setIsSearching(false);
     }
-  }, [selectedCriteria, dispatch, gridState.selection, onClose]);
+  }, [selectedCriteria, onClose]);
 
   if (!isOpen) return null;
 

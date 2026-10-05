@@ -2,6 +2,9 @@
 // PURPOSE: Insert Table dialog component.
 // CONTEXT: Simplified dialog for creating a table from a data range.
 //          Follows the same pattern and styling as CreatePivotDialog.
+//          Opened by Insert > Table... (no data) and by Home > Format as Table
+//          outside a table, with `{ styleName }` -- the style the new table is
+//          born in. The dialog used to accept `data` and never read it.
 
 import React, { useState, useEffect, useCallback } from "react";
 import {
@@ -103,6 +106,12 @@ export function CreateTableDialog({
   data,
 }: DialogProps): React.ReactElement | null {
   const gridState = useGridState();
+
+  // The style the new table is born in. Home > Format as Table (outside a
+  // table) opens this dialog with the picked style's NAME; Insert > Table
+  // passes nothing, and then nothing is sent and the backend's default applies.
+  // The dialog mounts once per opening, so reading `data` here is enough.
+  const styleName = typeof data?.styleName === "string" ? data.styleName : undefined;
 
   // Movable + resizable dialog window (shared @api hook)
   const win = useDialogWindow({ minWidth: 320, minHeight: 260 });
@@ -213,6 +222,7 @@ export function CreateTableDialog({
         endRow: parsed.endRow,
         endCol: parsed.endCol,
         hasHeaders,
+        ...(styleName !== undefined ? { styleName } : {}),
       });
 
       if (!table) {

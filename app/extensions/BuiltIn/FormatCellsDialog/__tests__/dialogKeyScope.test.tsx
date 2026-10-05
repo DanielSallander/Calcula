@@ -33,6 +33,10 @@ vi.mock("@api/lib", () => ({
   getCell: (...a: unknown[]) => h.getCell(...a),
   getStyle: vi.fn(),
   applyFormatting: (...a: unknown[]) => h.applyFormatting(...a),
+  applyBorderPreset: vi.fn(),
+  beginUndoTransaction: vi.fn(async () => 1),
+  commitUndoTransaction: vi.fn(async () => undefined),
+  cancelUndoTransaction: vi.fn(async () => undefined),
 }));
 vi.mock("@api/backend", () => ({
   setCellProtection: (...a: unknown[]) => h.setCellProtection(...a),
@@ -139,6 +143,8 @@ describe("Format Cells dialog — Escape / Enter belong to the dialog's own DOM"
   it("Enter inside the dialog applies it (positive control)", async () => {
     const onClose = vi.fn();
     await renderDialog(onClose);
+    // OK writes only what CHANGED (survey D5), so the control changes something.
+    act(() => useFormatCellsStore.getState().setBold(true));
     await press(byTestId("in-dialog"), "Enter");
     expect(h.applyFormatting).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalledTimes(1);
@@ -154,6 +160,9 @@ describe("Format Cells dialog — Escape / Enter belong to the dialog's own DOM"
   it("Enter in a portalled child does NOT press OK", async () => {
     const onClose = vi.fn();
     await renderDialog(onClose);
+    // A change is pending, so a wrongly pressed OK WOULD write (OK writes only
+    // what changed -- without this the applyFormatting check below is blind).
+    act(() => useFormatCellsStore.getState().setBold(true));
     await press(byTestId("portalled"), "Enter");
     expect(h.applyFormatting).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();

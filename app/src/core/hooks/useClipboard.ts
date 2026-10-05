@@ -72,6 +72,19 @@ export interface ClipboardData {
   sourceRows: number[];
   /** Whether this was a cut operation (cells should be cleared on paste) */
   isCut: boolean;
+  /**
+   * The sheet the cells were copied FROM: its index and its name as they were
+   * at the copy.
+   *
+   * Paste Link needs it: a link pasted on ANOTHER sheet must name the source
+   * sheet (`=Sheet1!$A$1`, Excel), and without it the link was written as
+   * `=$A$1` and pointed at the same addresses on the destination sheet
+   * (clipboard survey defect 1). The NAME is kept as well as the index because
+   * that is what a formula spells; a sheet renamed after the copy is a link to
+   * the old name, which Excel avoids only by cancelling copy mode.
+   */
+  sourceSheetIndex: number;
+  sourceSheetName: string;
   /** Plain text representation for system clipboard */
   text: string;
   /** Map of "row,col" (relative) to JSON text for collection cells (List/Dict) */
@@ -136,6 +149,64 @@ let internalClipboard: ClipboardData | null = null;
  */
 export function getInternalClipboard(): ClipboardData | null {
   return internalClipboard;
+}
+
+// ============================================================================
+// Is the internal clipboard still what the clipboard holds?
+// ============================================================================
+//
+// The internal clipboard is Calcula's own record of the last Copy / Cut -- the
+// cells WITH their formulas, styles, comments and validations. The SYSTEM
+// clipboard is shared with every other program. When the user copies in
+// Notepad after copying cells, the system clipboard holds the newer text and
+// the internal record is stale: pasting it would paste cells the user no longer
+// has on the clipboard.
+//
+// Plain Paste always asked (it compares the system text with the text the copy
+// wrote there, and pastes the system text when they differ). The Paste Special
+// variants never did: after a copy in Notepad, Paste Values pasted the OLD
+// Calcula cells (clipboard survey defect 3). ONE rule, exported, so every paste
+// door asks the same question the same way -- a second spelling would drift
+// on the first change (Windows line endings were the first one).
+
+/**
+ * THE freshness rule: the internal clipboard is CURRENT when the system
+ * clipboard holds the very text the copy wrote there (line endings
+ * normalised -- Windows hands `\r\n` back), or holds nothing readable at all.
+ * Different text means another program copied after Calcula did.
+ */
+export function internalClipboardMatchesSystemText(
+  clipboard: Pick<ClipboardData, "text">,
+  systemText: string | null | undefined,
+): boolean {
+  const normalized = systemText?.replace(/\r\n/g, "\n") ?? null;
+  return !normalized || normalized === clipboard.text;
+}
+
+/**
+ * Read the system clipboard's text, or null when it cannot be read (no Tauri
+ * runtime, a clipboard another process holds open). A failed read is "nothing
+ * newer", never a refusal: plain Paste has always fallen back to the internal
+ * clipboard then.
+ */
+async function readSystemClipboardText(): Promise<string | null> {
+  try {
+    return await tauriReadText();
+  } catch (err) {
+    console.warn("[Clipboard] Could not read from system clipboard:", err);
+    return null;
+  }
+}
+
+/**
+ * Whether `clipboard` (the internal clipboard a paste is about to use) is
+ * still what the clipboard holds -- {@link internalClipboardMatchesSystemText}
+ * against a fresh read of the system clipboard. The Paste Special variants
+ * ask this before they paste (@api/cellClipboard); plain Paste applies the
+ * same rule to the text it reads anyway.
+ */
+export async function internalClipboardIsCurrent(clipboard: Pick<ClipboardData, "text">): Promise<boolean> {
+  return internalClipboardMatchesSystemText(clipboard, await readSystemClipboardText());
 }
 
 /**
@@ -389,6 +460,8 @@ export function useClipboard(): UseClipboardReturn {
         cells,
         sourceRows,
         isCut: false,
+        sourceSheetIndex: sheetContext.activeSheetIndex,
+        sourceSheetName: sheetContext.activeSheetName,
         text,
         collectionTexts: collectionTexts.size > 0 ? collectionTexts : undefined,
         comments: comments.size > 0 ? comments : undefined,
@@ -407,7 +480,7 @@ export function useClipboard(): UseClipboardReturn {
     } catch (error) {
       console.error("[Clipboard] Copy failed:", error);
     }
-  }, [selection, getCellRange, cellsToText, dispatch, sheetContext.activeSheetIndex]);
+  }, [selection, getCellRange, cellsToText, dispatch, sheetContext.activeSheetIndex, sheetContext.activeSheetName]);
 
   /**
    * Cut selected cells to clipboard.
@@ -448,6 +521,8 @@ export function useClipboard(): UseClipboardReturn {
         cells,
         sourceRows,
         isCut: true,
+        sourceSheetIndex: sheetContext.activeSheetIndex,
+        sourceSheetName: sheetContext.activeSheetName,
         text,
         collectionTexts: collectionTexts.size > 0 ? collectionTexts : undefined,
         comments: comments.size > 0 ? comments : undefined,
@@ -466,7 +541,7 @@ export function useClipboard(): UseClipboardReturn {
     } catch (error) {
       console.error("[Clipboard] Cut failed:", error);
     }
-  }, [selection, getCellRange, cellsToText, dispatch, sheetContext.activeSheetIndex]);
+  }, [selection, getCellRange, cellsToText, dispatch, sheetContext.activeSheetIndex, sheetContext.activeSheetName]);
 
   /**
    * Paste clipboard contents to current selection.
@@ -480,12 +555,7 @@ export function useClipboard(): UseClipboardReturn {
     console.log("[Clipboard] Pasting to selection:", selection);
 
     // Try to read from system clipboard first (via Tauri plugin)
-    let textToPaste: string | null = null;
-    try {
-      textToPaste = await tauriReadText();
-    } catch (err) {
-      console.warn("[Clipboard] Could not read from system clipboard:", err);
-    }
+    const textToPaste = await readSystemClipboardText();
 
     // Determine what to paste
     let cellsToPaste: (CellData | null)[][] | null = null;
@@ -494,13 +564,9 @@ export function useClipboard(): UseClipboardReturn {
     // Track if we're using internal clipboard (for deciding whether to clear after paste)
     let usingInternalClipboard = false;
 
-    // Normalize line endings for comparison (Windows clipboard uses \r\n)
-    const normalizedSystemText = textToPaste?.replace(/\r\n/g, "\n") ?? null;
-
-    if (
-      internalClipboard &&
-      (!normalizedSystemText || normalizedSystemText === internalClipboard.text)
-    ) {
+    // THE freshness rule (shared with every Paste Special variant): the
+    // internal clipboard answers unless another program put newer text there.
+    if (internalClipboard && internalClipboardMatchesSystemText(internalClipboard, textToPaste)) {
       // Use internal clipboard (preserves formulas, formatting, etc.)
       cellsToPaste = internalClipboard.cells;
       pasteHeight = cellsToPaste.length;

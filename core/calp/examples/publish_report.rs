@@ -74,7 +74,7 @@ fn make_alt_row_style() -> CellStyle {
 fn make_title_style() -> CellStyle {
     let mut s = CellStyle::new();
     s.font.bold = true;
-    s.font.size = 16;
+    s.font.size = engine::style::FontSize::from_whole_points(16);
     s.font.color = tc(47, 85, 151);
     s
 }

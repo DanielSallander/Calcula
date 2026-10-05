@@ -1,15 +1,16 @@
 //! FILENAME: app/extensions/Sorting/index.ts
 // PURPOSE: Sorting extension entry point.
-// CONTEXT: Registers the Sort dialog and Data menu items.
-//          Uses ExtensionModule lifecycle (Path A).
+// CONTEXT: Registers the Sort dialog, Excel's Sort Warning, the sort commands
+//          (sort.ascending / sort.descending / sort.customDialog -- the Home
+//          tab's Sort & Filter menu and the Data menu run the same ids) and the
+//          Data menu items. Uses ExtensionModule lifecycle (Path A).
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
-import { ExtensionRegistry } from "@api";
 import { SortDialog } from "./components/SortDialog";
-import {
-  registerSortMenuItems,
-  setCurrentSelection,
-} from "./handlers/dataMenuBuilder";
+import { SortWarningDialog } from "./components/SortWarningDialog";
+import { registerSortMenuItems } from "./handlers/dataMenuBuilder";
+import { registerSortCommands, SORT_DIALOG_ID } from "./lib/sortCommands";
+import { SORT_WARNING_DIALOG_ID } from "./lib/sortWarning";
 
 // ============================================================================
 // Cleanup tracking
@@ -24,33 +25,27 @@ const cleanupFns: (() => void)[] = [];
 function activate(context: ExtensionContext): void {
   console.log("[Sorting] Activating...");
 
-  // 1. Register dialog
+  // 1. Register dialogs
   context.ui.dialogs.register({
-    id: "sort-dialog",
+    id: SORT_DIALOG_ID,
     component: SortDialog,
     priority: 100,
   });
-  cleanupFns.push(() => context.ui.dialogs.unregister("sort-dialog"));
+  cleanupFns.push(() => context.ui.dialogs.unregister(SORT_DIALOG_ID));
 
-  // 2. Register menu items in Data menu
-  cleanupFns.push(registerSortMenuItems(context));
-
-  // 3. Track current selection (for quick sort and dialog context)
-  const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {
-    setCurrentSelection(
-      sel
-        ? {
-            startRow: sel.startRow,
-            endRow: sel.endRow,
-            startCol: sel.startCol,
-            endCol: sel.endCol,
-            activeRow: sel.endRow,
-            activeCol: sel.endCol,
-          }
-        : null,
-    );
+  // Above the Sort dialog: Custom Sort asks it BEFORE that dialog opens.
+  context.ui.dialogs.register({
+    id: SORT_WARNING_DIALOG_ID,
+    component: SortWarningDialog,
+    priority: 110,
   });
-  cleanupFns.push(unsubSelection);
+  cleanupFns.push(() => context.ui.dialogs.unregister(SORT_WARNING_DIALOG_ID));
+
+  // 2. The commands every door runs
+  cleanupFns.push(registerSortCommands(context.commands));
+
+  // 3. Register menu items in Data menu
+  cleanupFns.push(registerSortMenuItems(context));
 
   console.log("[Sorting] Activated successfully.");
 }

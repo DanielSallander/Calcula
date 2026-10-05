@@ -25,7 +25,15 @@ pub fn format_number(value: f64, format: &NumberFormat, locale: &LocaleSettings)
             decimal_places,
             symbol,
             symbol_position,
-        } => format_accounting_display(value, *decimal_places, symbol, *symbol_position, locale),
+            negative_style,
+        } => format_accounting_display(
+            value,
+            *decimal_places,
+            symbol,
+            *symbol_position,
+            *negative_style,
+            locale,
+        ),
         NumberFormat::Fraction {
             denominator,
             max_digits,
@@ -195,44 +203,113 @@ fn format_currency(
 }
 
 /// Parts of an accounting-formatted value for split rendering.
-/// The symbol is drawn left-aligned and the value right-aligned in the cell.
+///
+/// Excel's accounting code is three runs: text pinned to the cell's LEFT edge,
+/// a fill (`*` + space), and text pinned to the RIGHT edge. These parts carry
+/// that split in the shape the renderer already draws:
+///
+/// - `symbol_before`: `symbol` is the LEFT-edge run and `value` the right-edge
+///   run. A minus-style NEGATIVE puts its minus at the FRONT of `symbol`
+///   (`"-$"`, `"-£"`, and a bare `"-"` for Comma Style's empty symbol),
+///   because Excel's code `-£* #,##0.00_-` puts it before the fill.
+/// - symbol AFTER: the right-edge run is `value` followed by `symbol`. A
+///   minus-style negative's `value` BEGINS with `-` immediately followed by a
+///   digit; Excel pins that one character to the LEFT edge
+///   (`-* # ##0,00 kr_-`, measured live: -42 shows `"-         42,00 "`), so a
+///   renderer that lays the right-edge run out against the symbol splits it
+///   off and draws it at the left edge. (A zero's dash is followed by U+2007,
+///   never by a digit, so the two cannot be confused.)
 #[derive(Debug, Clone)]
 pub struct AccountingParts {
-    /// Currency symbol text (e.g., "$", "EUR")
+    /// Currency symbol text (e.g., "$", "EUR"), with a leading "-" for a
+    /// minus-style negative when the symbol sits before the number.
     pub symbol: String,
     /// Whether the symbol appears before the value
     pub symbol_before: bool,
-    /// Formatted number part (e.g., "1,234.00", "(1,234.00)", "-")
+    /// Formatted number part (e.g., "1,234.00 ", "(1,234.00)", "-1 234,00 ",
+    /// and "-" + one U+2007 per decimal + " " for zero)
     pub value: String,
 }
 
+/// Excel's `?` digit placeholder prints "a space as wide as a digit", and the
+/// accounting zero section is `"-"??`: a dash and one such space per decimal
+/// the writer emits (`xlsx_writer::convert_number_format`). U+2007 FIGURE
+/// SPACE is Unicode's digit-width space, so the dash lands where Excel puts it
+/// instead of hugging the right edge.
+const DIGIT_WIDTH_SPACE: char = '\u{2007}';
+
 /// Format a number in accounting style, returning the split parts for rendering.
+///
+/// THREE SECTIONS, EXCEL'S. Positive: the number plus a trailing pad (`_)` /
+/// `_-`, the width of the negative's closing character). ZERO: Excel's
+/// `"-"??` -- a dash and one digit-width space per decimal place, then the same
+/// trailing pad; it used to be a bare `"-"`, which sat against the right edge,
+/// past the digits it should line up with (survey defect C). NEGATIVE:
+/// `negative_style` -- the region's pattern frozen into the format when it was
+/// applied (see `NumberFormat::Accounting::negative_style`); it used to be
+/// parentheses unconditionally, which is en-US only (survey defect B).
+///
+/// A NEGATIVE THAT ROUNDS TO ZERO IS STILL SIGNED HERE, unlike in
+/// `format_currency`. Measured live (sv-SE, 2026-10-04): a ONE-section code
+/// (`# ##0,00 kr`) shows -0.001 as `0,00 kr`, but a MULTI-section code -- and
+/// every accounting code is one -- applies its negative section to every value
+/// below zero, so Comma Style shows -0.001 as `"-   0,00 "` and `0,00;(0,00)`
+/// shows `(0,00)`. Only an exact zero takes the zero section.
 pub fn format_accounting_parts(
     value: f64,
     decimal_places: u8,
     symbol: &str,
     position: CurrencyPosition,
+    negative_style: NegativeStyle,
     locale: &LocaleSettings,
 ) -> AccountingParts {
-    let value_text = if value == 0.0 {
-        // Dash for zero values
-        "-".to_string()
-    } else {
-        let formatted = add_thousands_separator(
-            &format!("{:.prec$}", value.abs(), prec = decimal_places as usize),
-            locale,
-        );
-        if value < 0.0 {
-            format!("({})", formatted)
-        } else {
-            format!("{} ", formatted) // trailing space to align with closing paren
-        }
-    };
+    let symbol_before = matches!(position, CurrencyPosition::Before);
+    let parts = |symbol: String, value: String| AccountingParts { symbol, symbol_before, value };
 
-    AccountingParts {
-        symbol: symbol.to_string(),
-        symbol_before: matches!(position, CurrencyPosition::Before),
-        value: value_text,
+    if value == 0.0 {
+        let pad: String = std::iter::repeat(DIGIT_WIDTH_SPACE)
+            .take(decimal_places as usize)
+            .collect();
+        return parts(symbol.to_string(), format!("-{} ", pad));
+    }
+
+    let digits = add_thousands_separator(
+        &format!("{:.prec$}", value.abs(), prec = decimal_places as usize),
+        locale,
+    );
+    if value > 0.0 {
+        // Trailing pad: Excel's `_)` / `_-` reserves the width of the negative
+        // section's closing character so the digits line up down a column.
+        return parts(symbol.to_string(), format!("{} ", digits));
+    }
+
+    match negative_style {
+        NegativeStyle::Parentheses | NegativeStyle::RedParentheses => {
+            parts(symbol.to_string(), format!("({})", digits))
+        }
+        NegativeStyle::Minus => {
+            if symbol_before {
+                parts(format!("-{}", symbol), format!("{} ", digits))
+            } else {
+                parts(symbol.to_string(), format!("-{} ", digits))
+            }
+        }
+        // Excel's red entries carry no sign; colour is the only marker (set
+        // on the colour channel by `format_number_with_color`).
+        NegativeStyle::Red => parts(symbol.to_string(), format!("{} ", digits)),
+    }
+}
+
+/// The one-string spelling of `AccountingParts`, for every consumer that has
+/// no split layout (copy, export, autofit, the fallback renderer path). An
+/// EMPTY symbol (Comma Style) contributes nothing rather than a stray space.
+fn accounting_parts_text(parts: &AccountingParts) -> String {
+    if parts.symbol.is_empty() {
+        parts.value.clone()
+    } else if parts.symbol_before {
+        format!("{} {}", parts.symbol, parts.value)
+    } else {
+        format!("{} {}", parts.value, parts.symbol)
     }
 }
 
@@ -242,14 +319,17 @@ fn format_accounting_display(
     decimal_places: u8,
     symbol: &str,
     position: CurrencyPosition,
+    negative_style: NegativeStyle,
     locale: &LocaleSettings,
 ) -> String {
-    let parts = format_accounting_parts(value, decimal_places, symbol, position, locale);
-    if parts.symbol_before {
-        format!("{} {}", parts.symbol, parts.value)
-    } else {
-        format!("{} {}", parts.value, parts.symbol)
-    }
+    accounting_parts_text(&format_accounting_parts(
+        value,
+        decimal_places,
+        symbol,
+        position,
+        negative_style,
+        locale,
+    ))
 }
 
 // ============================================================================
@@ -481,16 +561,29 @@ pub fn format_number_with_color(value: f64, format: &NumberFormat, locale: &Loca
             decimal_places,
             symbol,
             symbol_position,
+            negative_style,
         } => {
-            let parts = format_accounting_parts(value, *decimal_places, symbol, *symbol_position, locale);
-            let text = if parts.symbol_before {
-                format!("{} {}", parts.symbol, parts.value)
+            let parts = format_accounting_parts(
+                value,
+                *decimal_places,
+                symbol,
+                *symbol_position,
+                *negative_style,
+                locale,
+            );
+            let text = accounting_parts_text(&parts);
+            // An imported `[Red]` accounting code keeps its colour. Every value
+            // below zero takes the negative section (see
+            // `format_accounting_parts`), so there is no rounds-to-zero
+            // exception here, unlike the one-section Currency arm below.
+            let color = if negative_style.is_red() && value < 0.0 {
+                Some(custom_format::FormatColor::Red)
             } else {
-                format!("{} {}", parts.value, parts.symbol)
+                None
             };
             FormatResult {
                 text,
-                color: None,
+                color,
                 accounting: Some(parts),
             }
         }
@@ -937,15 +1030,107 @@ mod tests {
         assert!(format_number_with_color(-1234.56, &odd, &l).color.is_some());
     }
 
-    /// ACCOUNTING KEEPS ITS PARENTHESES. Excel's accounting code
-    /// `_($* #,##0.00_);_($* (#,##0.00);...` carries a parenthesised negative
-    /// section and offers no choice, so the currency change must not leak here.
+    /// ACCOUNTING NEGATIVES FOLLOW THE PATTERN THE FORMAT WAS APPLIED WITH
+    /// (survey defect B). en-US's code `_($* #,##0.00_);_($* (#,##0.00);...`
+    /// brackets them; sv-SE's `_-* # ##0,00 kr_-;-* # ##0,00 kr_-;...` puts a
+    /// minus at the LEFT edge -- measured live, Comma Style on -42 shows
+    /// `"-         42,00 "`. The formatter used to bracket every negative.
     #[test]
-    fn accounting_negatives_stay_parenthesised() {
+    fn accounting_negatives_follow_the_frozen_regional_pattern() {
         let l = us();
-        let parts = format_accounting_parts(-1234.56, 2, "$", CurrencyPosition::Before, &l);
-        assert_eq!(parts.value, "(1,234.56)");
-        assert_eq!(format_accounting_parts(0.0, 2, "$", CurrencyPosition::Before, &l).value, "-");
+        let paren = NegativeStyle::Parentheses;
+        let minus = NegativeStyle::Minus;
+        let before = CurrencyPosition::Before;
+        let after = CurrencyPosition::After;
+
+        // en-US: parentheses, symbol untouched, no trailing pad.
+        let p = format_accounting_parts(-1234.56, 2, "$", before, paren, &l);
+        assert_eq!((p.symbol.as_str(), p.value.as_str()), ("$", "(1,234.56)"));
+
+        // Minus, symbol BEFORE: the minus rides at the front of the left-edge
+        // run, ahead of the symbol (`-£* #,##0.00_-`).
+        let p = format_accounting_parts(-1234.56, 2, "\u{00A3}", before, minus, &l);
+        assert_eq!((p.symbol.as_str(), p.value.as_str()), ("-\u{00A3}", "1,234.56 "));
+
+        // Comma Style (empty symbol, before): the left-edge run is the minus.
+        let p = format_accounting_parts(-42.0, 2, "", before, minus, &se());
+        assert_eq!((p.symbol.as_str(), p.value.as_str()), ("-", "42,00 "));
+
+        // Minus, symbol AFTER (sv-SE kr): the minus leads the value and is
+        // followed by a digit -- the marker a split renderer pins left.
+        let p = format_accounting_parts(-1234.5, 2, "kr", after, minus, &se());
+        assert_eq!(p.symbol, "kr");
+        assert_eq!(p.value, "-1\u{00A0}234,50 ");
+        assert!(p.value[1..].starts_with(|c: char| c.is_ascii_digit()));
+
+        // Positives are identical under both patterns.
+        for style in [paren, minus] {
+            let p = format_accounting_parts(1234.56, 2, "$", before, style, &l);
+            assert_eq!((p.symbol.as_str(), p.value.as_str()), ("$", "1,234.56 "));
+        }
+
+        // The single-string spelling: no stray space for an empty symbol.
+        let comma = NumberFormat::Accounting {
+            decimal_places: 2,
+            symbol: String::new(),
+            symbol_position: before,
+            negative_style: minus,
+        };
+        assert_eq!(format_number(1234.5, &comma, &se()), "1\u{00A0}234,50 ");
+        assert_eq!(format_number(-42.0, &comma, &se()), "- 42,00 ");
+    }
+
+    /// Excel's zero section is `"-"??`: a dash, a digit-width space per
+    /// decimal, then the trailing pad (survey defect C). It used to be a bare
+    /// "-", which hugged the right edge instead of lining up with the digits.
+    #[test]
+    fn accounting_zero_is_a_dash_padded_like_excels_question_marks() {
+        let l = us();
+        let fig = '\u{2007}';
+        let zero = |dp| format_accounting_parts(0.0, dp, "$", CurrencyPosition::Before, NegativeStyle::Minus, &l);
+        assert_eq!(zero(2).value, format!("-{fig}{fig} "));
+        assert_eq!(zero(0).value, "- ", "0 decimals: Excel's `\"-\"` has no `?`");
+        assert_eq!(zero(3).value, format!("-{fig}{fig}{fig} "));
+        // The pad is never a digit, so a split renderer cannot mistake a zero
+        // for a minus-style negative.
+        assert!(!zero(2).value[1..].starts_with(|c: char| c.is_ascii_digit()));
+    }
+
+    /// Every accounting code has a negative SECTION, and Excel applies it to
+    /// every value below zero -- -0.001 under Comma Style shows `"-   0,00 "`
+    /// and under `0,00;(0,00)` shows `(0,00)` (measured live). Only an exact
+    /// zero is the dash.
+    #[test]
+    fn an_accounting_negative_that_rounds_to_zero_keeps_its_sign() {
+        let l = us();
+        let p = format_accounting_parts(-0.001, 2, "", CurrencyPosition::Before, NegativeStyle::Minus, &l);
+        assert_eq!((p.symbol.as_str(), p.value.as_str()), ("-", "0.00 "));
+        let p = format_accounting_parts(-0.001, 2, "$", CurrencyPosition::Before, NegativeStyle::Parentheses, &l);
+        assert_eq!(p.value, "(0.00)");
+        let p = format_accounting_parts(0.001, 2, "$", CurrencyPosition::Before, NegativeStyle::Parentheses, &l);
+        assert_eq!(p.value, "0.00 ");
+    }
+
+    /// An imported `[Red]` accounting code keeps its colour; the structured
+    /// presets never produce one.
+    #[test]
+    fn red_accounting_negatives_ride_the_colour_channel() {
+        let l = us();
+        let red = NumberFormat::Accounting {
+            decimal_places: 2,
+            symbol: "$".to_string(),
+            symbol_position: CurrencyPosition::Before,
+            negative_style: NegativeStyle::RedParentheses,
+        };
+        assert!(format_number_with_color(-5.0, &red, &l).color.is_some());
+        assert!(format_number_with_color(5.0, &red, &l).color.is_none());
+        let plain = NumberFormat::Accounting {
+            decimal_places: 2,
+            symbol: "$".to_string(),
+            symbol_position: CurrencyPosition::Before,
+            negative_style: NegativeStyle::Parentheses,
+        };
+        assert!(format_number_with_color(-5.0, &plain, &l).color.is_none());
     }
 
     #[test]

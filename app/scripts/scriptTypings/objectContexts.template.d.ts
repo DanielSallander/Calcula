@@ -1596,7 +1596,12 @@ declare interface ScriptFormat {
   /** An Excel number-format code, e.g. "#,##0.00", "0.0%", "General". */
   numberFormat?: string;
   wrapText?: boolean;
-  textRotation?: "none" | "rotate90" | "rotate270";
+  /** Text orientation, Excel's Home > Orientation vocabulary: "none",
+   *  "rotate90" (Rotate Text Up), "rotate270" (Rotate Text Down), "vertical"
+   *  (stacked Vertical Text) or `custom:N` for N degrees counter-clockwise, a
+   *  whole number from -90 to 90 (Angle Counterclockwise is "custom:45", Angle
+   *  Clockwise "custom:-45"). Anything else is refused before any write. */
+  textRotation?: "none" | "rotate90" | "rotate270" | "vertical" | `custom:${number}`;
   /** Indent steps (0-250). */
   indent?: number;
   shrinkToFit?: boolean;
@@ -1632,8 +1637,9 @@ declare interface ScriptFormat {
  * populated, in the same vocabulary the write accepts. Colors come back in
  * canonical lowercase "#rrggbb"; border sides come back as the same words you
  * write (thin/medium/thick/dashed/dotted/double, "none" when absent);
- * `textRotation` may additionally be `"custom:N"` (N in degrees) for a
- * rotation set through the UI. `numberFormat` is the backend's name for the
+ * `textRotation` comes back in the words you write ("none", "rotate90",
+ * "rotate270", "vertical", or `"custom:N"` for any other angle, however it was
+ * set). `numberFormat` is the backend's name for the
  * format — "General" round-trips exactly; a format code you wrote (say
  * "0.00%") reads back as its recognized name ("Percentage (2 decimals)").
  */

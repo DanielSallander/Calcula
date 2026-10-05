@@ -23,9 +23,16 @@ import type {
   MergedRegion,
   MergeResult,
   MergeOptions,
+  LineRun,
+  CellShiftResult,
+  InsertCellsShift,
+  DeleteCellsShift,
 } from "../types";
 import { isSheetGroupingActive, getSelectedSheetIndices } from "../state/sheetGrouping";
 import { AppEvents, emitAppEvent } from "./events";
+// STRUCTURAL_UNDO lives only in the @api event table (Core's own table has no
+// entry for it); the cell-shift wrappers below announce through it.
+import { AppEvents as ApiAppEvents } from "../../api/events";
 
 /**
  * Announce a row/column insert or delete.
@@ -635,6 +642,32 @@ export async function clearHyperlinksInRange(
   return cleared;
 }
 
+/**
+ * A cell that holds a hyperlink, as Rust `get_hyperlinks_in_range` reports it
+ * (`HyperlinkIndicator`). Core reads only the position; the full shape, with
+ * the link kind typed, is `@api`'s `HyperlinkIndicator`.
+ */
+export interface LinkedCell {
+  row: number;
+  col: number;
+  linkType: string;
+  tooltip?: string;
+}
+
+/**
+ * The cells of a range (on the active sheet) that hold a hyperlink -- Core's
+ * own door to the Hyperlinks store's indicator query, so Core's gestures
+ * (Remove Hyperlinks) never reach the IPC bridge with a raw `invoke`.
+ */
+export async function getHyperlinksInRange(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number
+): Promise<LinkedCell[]> {
+  return invoke<LinkedCell[]>("get_hyperlinks_in_range", { startRow, startCol, endRow, endCol });
+}
+
 export async function getGridBounds(): Promise<[number, number]> {
   return invoke<[number, number]>("get_grid_bounds");
 }
@@ -649,6 +682,20 @@ export async function getCellCount(): Promise<number> {
  */
 export async function getUsedRange(sheetIndex?: number): Promise<UsedRangeResult> {
   return invoke<UsedRangeResult>("get_used_range", { sheetIndex });
+}
+
+/**
+ * True when the sheet at `sheetIndex` holds NOTHING a delete would lose --
+ * asked of EVERY sheet-keyed store in the backend (`sheet_is_blank`): cells
+ * and formats, sizes and hidden lines, merges, notes, comments, hyperlinks,
+ * data validation, conditional formats, filters, tables, sheet-scoped names,
+ * protection, a print area, and the objects placed on it. The used range sees
+ * only cells, which let a sheet holding only a note or a validation rule be
+ * deleted without a question (review finding, 2026-10-04). Rejects for an
+ * index past the workbook.
+ */
+export async function isSheetBlank(sheetIndex: number): Promise<boolean> {
+  return invoke<boolean>("sheet_is_blank", { sheetIndex });
 }
 
 /**
@@ -885,6 +932,59 @@ export async function getAllRowHeights(): Promise<DimensionData[]> {
   return invoke<DimensionData[]>("get_all_row_heights");
 }
 
+// `LineRun` (an inclusive `[first, last]` run) mirrors Rust's `(u32, u32)`
+// run and lives with the other API types in core/types/types.ts.
+export type { LineRun } from "../types";
+
+/** Sort and merge runs (overlapping and adjacent ones join), first <= last. */
+function mergeLineRuns(runs: readonly LineRun[]): Array<[number, number]> {
+  const sorted = runs
+    .map(([a, b]): [number, number] => [Math.min(a, b), Math.max(a, b)])
+    .sort((x, y) => x[0] - y[0]);
+  const merged: Array<[number, number]> = [];
+  for (const run of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && run[0] <= last[1] + 1) last[1] = Math.max(last[1], run[1]);
+    else merged.push([run[0], run[1]]);
+  }
+  return merged;
+}
+
+/**
+ * Excel's Row Height... over every row of `runs` in ONE call and ONE undo step
+ * (Rust `set_row_heights`): `[[0, 1048575]]` is Select All, not a million
+ * indices. `height <= 0` removes the rows' own heights (the default), as
+ * {@link setRowHeight} does. Gated by the sheet's "Format rows" protection
+ * option -- a refusal rejects with the backend's sentence and changes nothing.
+ *
+ * The macro recorder sees the same per-row `rowHeight` events the one-row
+ * wrapper reports (a recorded macro replays `setRowHeight` per row); the
+ * events are built only while a recorder is listening.
+ */
+export async function setRowHeights(runs: readonly LineRun[], height: number): Promise<void> {
+  const merged = mergeLineRuns(runs);
+  await invoke<void>("set_row_heights", { rows: merged, height });
+  if (isGridRecorderActive()) {
+    for (const [first, last] of merged) {
+      for (let row = first; row <= last; row++) recordGridEvent({ kind: "rowHeight", row, height });
+    }
+  }
+}
+
+/**
+ * Excel's Column Width... over every column of `runs`, ONE call and ONE undo
+ * step (Rust `set_column_widths`). See {@link setRowHeights}.
+ */
+export async function setColumnWidths(runs: readonly LineRun[], width: number): Promise<void> {
+  const merged = mergeLineRuns(runs);
+  await invoke<void>("set_column_widths", { cols: merged, width });
+  if (isGridRecorderActive()) {
+    for (const [first, last] of merged) {
+      for (let col = first; col <= last; col++) recordGridEvent({ kind: "columnWidth", col, width });
+    }
+  }
+}
+
 /**
  * Hide or unhide ROWS on the active sheet. Returns the resulting user-hidden
  * row set, ascending.
@@ -949,10 +1049,14 @@ export async function getDefaultDimensions(): Promise<DefaultDimensions> {
   return invoke<DefaultDimensions>("get_default_dimensions");
 }
 
+/** Rejects (with the backend's sentence) on a sheet protected against row
+ *  formatting -- the same gate as {@link setRowHeight}. */
 export async function setDefaultRowHeight(height: number): Promise<DefaultDimensions> {
   return invoke<DefaultDimensions>("set_default_row_height", { height });
 }
 
+/** Rejects (with the backend's sentence) on a sheet protected against column
+ *  formatting -- the same gate as {@link setColumnWidth}. */
 export async function setDefaultColumnWidth(width: number): Promise<DefaultDimensions> {
   return invoke<DefaultDimensions>("set_default_column_width", { width });
 }
@@ -1045,6 +1149,21 @@ export function announceStyleEntries(result: FormattingResult): void {
   }
 }
 
+/**
+ * The group a formatting command must also write, as its `sheetIndices`
+ * argument -- or nothing, when no sheets are grouped.
+ *
+ * ONE COMMAND PER GESTURE (review finding, 2026-10-04). The wrappers used to
+ * format the active sheet and then repeat the change on the group with a second
+ * command; a protected grouped sheet refused only that second call, after the
+ * active sheet was already formatted (and the refusal went to the console), and
+ * a successful group took one Ctrl+Z per sheet plus one. The backend now gates
+ * every sheet of the group before writing any and records ONE undo step.
+ */
+function groupArgs(): { sheetIndices?: number[] } {
+  return isSheetGroupingActive() ? { sheetIndices: getSelectedSheetIndices() } : {};
+}
+
 export async function applyFormatting(
   rows: number[],
   cols: number[],
@@ -1089,6 +1208,7 @@ export async function applyFormatting(
       locked: formatting.locked,
       formulaHidden: formatting.formulaHidden,
     },
+    ...groupArgs(),
   });
   console.log(
     "[tauri-api] applyFormatting result:",
@@ -1099,22 +1219,7 @@ export async function applyFormatting(
   );
   announceStyleEntries(result);
   recordGridEvent({ kind: "formatting", rows, cols, formatting });
-
-  // Sheet grouping: replicate formatting to all grouped (non-active) sheets
-  if (isSheetGroupingActive()) {
-    try {
-      await applyFormattingToSheets(
-        getSelectedSheetIndices(),
-        rows,
-        cols,
-        formatting
-      );
-      console.log("[tauri-api] Replicated formatting to grouped sheets");
-    } catch (err) {
-      console.error("[tauri-api] Failed to replicate formatting to grouped sheets:", err);
-    }
-  }
-
+  // Grouped sheets were formatted by the SAME command (`groupArgs`).
   return result;
 }
 
@@ -1132,6 +1237,15 @@ export async function getStyleCount(): Promise<number> {
  * @param style - Border line style: "solid", "dashed", "dotted", "double"
  * @param color - CSS hex color (e.g. "#000000")
  * @param width - Border width 0-3
+ *
+ * Whole rows, whole columns and Select All are written through the backend's
+ * row/column defaults, so `result.cells` holds only the cells that needed a
+ * style of their own: refresh the grid afterwards rather than patching from
+ * `result.cells` alone. An unchanged range returns empty arrays.
+ *
+ * SHEET GROUPING (survey D4): like `applyFormatting`, the preset reaches every
+ * grouped sheet -- through the SAME command (`groupArgs`), gated whole and one
+ * undo step. A refusal anywhere in the group rejects and changes nothing.
  */
 export async function applyBorderPreset(
   startRow: number,
@@ -1152,6 +1266,7 @@ export async function applyBorderPreset(
     style,
     color,
     width,
+    ...groupArgs(),
   });
   recordGridEvent({
     kind: "borderPreset",
@@ -1165,6 +1280,84 @@ export async function applyBorderPreset(
     width,
   });
   announceStyleEntries(result);
+  return result;
+}
+
+/**
+ * Repeat a border preset on every listed sheet except the active one. One undo
+ * step for all of them; refused whole if any listed sheet protects the range.
+ * `applyBorderPreset` no longer needs it (it sends the group to its own
+ * command); kept for callers that format the active sheet themselves.
+ */
+export async function applyBorderPresetToSheets(
+  sheetIndices: number[],
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  preset: string,
+  style: string,
+  color: string,
+  width: number
+): Promise<void> {
+  return invoke<void>("apply_border_preset_to_sheets", {
+    sheetIndices,
+    startRow,
+    startCol,
+    endRow,
+    endCol,
+    preset,
+    style,
+    color,
+    width,
+  });
+}
+
+/**
+ * Excel's Home > Number > Increase Decimal (`delta` = 1) / Decrease Decimal
+ * (`delta` = -1), decided by the backend on the TYPED number format.
+ *
+ * The ACTIVE cell decides: pass its row FIRST in `rows` and its column FIRST
+ * in `cols` (the backend reads `rows[0]`, `cols[0]`). Its format gains or
+ * loses one decimal KEEPING ITS KIND -- Number, Currency, Accounting, Percent,
+ * Scientific; General uses the decimals it shows; a Custom code edits every
+ * numeric section -- and the whole `rows` x `cols` selection receives the
+ * result as ONE undo step. Where Excel changes nothing (a date, time, fraction
+ * or text format, an empty or text active cell, no decimal left to remove)
+ * nothing is written and the result's arrays are empty.
+ *
+ * Like `applyFormatting` this announces the new styles, records the change
+ * for the macro recorder (as the resulting number format, which replays
+ * through `applyFormatting`), and reaches grouped sheets through the SAME
+ * command (`groupArgs`).
+ *
+ * A whole column, a whole row or Select All is written as row/column TIERS
+ * (review finding, 2026-10-04: Select All used to walk 17.2 billion cells), so
+ * `result.cells` may be empty while `result.styles` carries the new format:
+ * refresh the grid rather than patching from `result.cells` alone.
+ */
+export async function adjustNumberFormatDecimals(
+  rows: number[],
+  cols: number[],
+  delta: 1 | -1
+): Promise<FormattingResult> {
+  const result = await invoke<FormattingResult>("adjust_number_format_decimals", {
+    rows,
+    cols,
+    delta,
+    ...groupArgs(),
+  });
+  announceStyleEntries(result);
+
+  // Every returned style carries the SAME number format (the active cell's,
+  // adjusted) -- the written cells' and the tiers' alike; its display name is a
+  // value applyFormatting parses back to the identical typed format (pinned in
+  // Rust by every_display_name_the_serializer_emits_round_trips), so it is what
+  // a recorded macro replays. Empty styles: Excel changed nothing.
+  const numberFormat = result.styles[0]?.style.numberFormat;
+  if (numberFormat !== undefined) {
+    recordGridEvent({ kind: "formatting", rows, cols, formatting: { numberFormat } });
+  }
   return result;
 }
 
@@ -1823,6 +2016,149 @@ export async function deleteColumns(col: number, count: number, sheetIndex?: num
   emitStructuralEvent(AppEvents.COLUMNS_DELETED, { startCol: col, count });
   announceStructuralDeleteCascade();
   recordGridEvent({ kind: "deleteColumns", startCol: col, count });
+  return result;
+}
+
+// ============================================================================
+// Insert Cells / Delete Cells (Excel's "Shift cells right / down / left / up")
+// ============================================================================
+
+/** The last row / column index of a sheet (0-based): Excel's 1,048,576 x XFD. */
+const SHEET_LAST_ROW_INDEX = 1_048_575;
+const SHEET_LAST_COL_INDEX = 16_383;
+
+// `CellShiftResult` (Rust `api_types::CellShiftResult`) and the two shift
+// unions mirror the Rust command's types and live in core/types/types.ts.
+export type { CellShiftResult, InsertCellsShift, DeleteCellsShift } from "../types";
+
+/** Options for the cell-shift wrappers. */
+export interface CellShiftOptions {
+  /** The user answered OK to `confirm`: unmerge the merges the shift cuts and go on. */
+  unmergeCutMerges?: boolean;
+}
+
+/**
+ * Which whole-line command a range that spans every column (row) is: Excel
+ * inserts / deletes ENTIRE rows (columns) for such a range whatever shift was
+ * asked for (measured live). Those go through the row / column wrappers so
+ * they announce and record exactly as the row / column commands do.
+ */
+function wholeLineSpan(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+): { axis: "rows" | "columns"; start: number; count: number } | null {
+  const r0 = Math.min(startRow, endRow);
+  const r1 = Math.max(startRow, endRow);
+  const c0 = Math.min(startCol, endCol);
+  const c1 = Math.max(startCol, endCol);
+  if (c0 === 0 && c1 >= SHEET_LAST_COL_INDEX) return { axis: "rows", start: r0, count: r1 - r0 + 1 };
+  if (r0 === 0 && r1 >= SHEET_LAST_ROW_INDEX) return { axis: "columns", start: c0, count: c1 - c0 + 1 };
+  return null;
+}
+
+/**
+ * A cell shift moved part of the sheet's cells and every store anchored to
+ * them (notes, comments, hyperlinks, controls, validations, conditional
+ * formats, tables, names). It carries no whole-row/column coordinates, so the
+ * ROWS_INSERTED family cannot describe it: the extensions that cache those
+ * stores re-read them on STRUCTURAL_UNDO -- the "a structural change with no
+ * coordinates happened" announcement an undone insert also makes -- and on the
+ * MUTATION_REFRESH domains below. Emitted here, at the IPC wrapper, so every
+ * route announces (the convention events.ts records).
+ */
+function announceCellShift(description: string): void {
+  emitAppEvent(ApiAppEvents.STRUCTURAL_UNDO, { description });
+  emitAppEvent(AppEvents.MUTATION_REFRESH, {
+    domains: [
+      "styles",
+      "objects",
+      "namedRanges",
+      "hyperlinks",
+      "validations",
+      "annotations",
+      "controls",
+      "conditionalFormats",
+    ],
+    source: "commit",
+  });
+}
+
+/**
+ * A whole-line route (a range spanning every column / row) moved the
+ * backend's row heights or column widths -- and an inserted line now TAKES
+ * its neighbour's size (Excel's "Format Same As Above"). The callers of this
+ * route re-read only the cells, so the grid is told here to re-read its
+ * dimensions too (Core's own `dimensions:refresh`, which Spreadsheet answers
+ * by fetching the sizes, the defaults and the hidden sets); without it the
+ * old sizes stayed painted on the old lines.
+ */
+function refreshDimensionsAfterLineEdit(): void {
+  if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("dimensions:refresh"));
+}
+
+/**
+ * Excel's Insert Cells on the ACTIVE sheet: shift the range's cells right or
+ * down inside the band of rows (columns) it covers. References into the moved
+ * block follow it on every sheet; see `commands/structure_cells.rs` for the
+ * measured rules. ONE undo step.
+ */
+export async function insertCellsRange(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  shift: InsertCellsShift,
+  options: CellShiftOptions = {},
+): Promise<CellShiftResult> {
+  const whole = wholeLineSpan(startRow, startCol, endRow, endCol);
+  if (whole) {
+    if (whole.axis === "rows") await insertRows(whole.start, whole.count);
+    else await insertColumns(whole.start, whole.count);
+    refreshDimensionsAfterLineEdit();
+    return { applied: true, confirm: null, wholeLines: true };
+  }
+  const result = await invoke<CellShiftResult>("insert_cells", {
+    startRow,
+    startCol,
+    endRow,
+    endCol,
+    shift,
+    unmergeCutMerges: options.unmergeCutMerges ?? false,
+  });
+  if (result.applied) announceCellShift("Insert Cells");
+  return result;
+}
+
+/**
+ * Excel's Delete Cells on the ACTIVE sheet: remove the range's cells and shift
+ * the rest of the band left or up. See `insertCellsRange`.
+ */
+export async function deleteCellsRange(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  shift: DeleteCellsShift,
+  options: CellShiftOptions = {},
+): Promise<CellShiftResult> {
+  const whole = wholeLineSpan(startRow, startCol, endRow, endCol);
+  if (whole) {
+    if (whole.axis === "rows") await deleteRows(whole.start, whole.count);
+    else await deleteColumns(whole.start, whole.count);
+    refreshDimensionsAfterLineEdit();
+    return { applied: true, confirm: null, wholeLines: true };
+  }
+  const result = await invoke<CellShiftResult>("delete_cells", {
+    startRow,
+    startCol,
+    endRow,
+    endCol,
+    shift,
+    unmergeCutMerges: options.unmergeCutMerges ?? false,
+  });
+  if (result.applied) announceCellShift("Delete Cells");
   return result;
 }
 

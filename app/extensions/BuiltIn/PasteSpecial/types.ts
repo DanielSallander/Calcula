@@ -18,6 +18,9 @@
  * - "columnWidths": Column width dimensions only (ignores cell contents)
  * - "formulasAndNumberFormats": Formula text + number format only
  * - "valuesAndNumberFormats": Flattened values + number format only
+ * - "valuesAndSourceFormatting": Flattened values + the source cell's WHOLE
+ *   style (Excel's Home > Paste > "Values & Source Formatting" row; the
+ *   Paste Special dialog has no radio for it, as Excel's has none)
  */
 export type PasteAttribute =
   | "all"
@@ -29,7 +32,8 @@ export type PasteAttribute =
   | "allExceptBorders"
   | "columnWidths"
   | "formulasAndNumberFormats"
-  | "valuesAndNumberFormats";
+  | "valuesAndNumberFormats"
+  | "valuesAndSourceFormatting";
 
 // ============================================================================
 // Mathematical Operation (The "Operation" Group)

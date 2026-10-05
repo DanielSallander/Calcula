@@ -456,7 +456,9 @@ mod tests {
                         italic: Some(true),
                         underline: Some(engine::UnderlineStyle::Single),
                         strikethrough: None,
-                        font_size: Some(14),
+                        // A HALF-POINT run: the .cala round trip must keep
+                        // the .5 (the run size used to be a u8).
+                        font_size: Some(engine::style::FontSize::from_points(10.5).unwrap()),
                         font_family: Some("Arial".to_string()),
                         color: Some(Color::new(255, 0, 0)),
                         superscript: false,
@@ -487,7 +489,7 @@ mod tests {
         let rt = restored[&(0, 0)].rich_text.as_ref().unwrap();
         assert_eq!(rt.len(), 2);
         assert_eq!(rt[0].bold, Some(true));
-        assert_eq!(rt[0].font_size, Some(14));
+        assert_eq!(rt[0].font_size.map(|s| s.points()), Some(10.5));
         assert_eq!(rt[0].color, Some(Color::new(255, 0, 0)));
         assert!(rt[1].subscript);
         assert_eq!(rt[1].strikethrough, Some(true));

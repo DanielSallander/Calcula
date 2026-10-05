@@ -9,6 +9,7 @@ import type {
   AutoFilterColumnCriteria,
   AutoFilterUniqueValues,
 } from "@api/autoFilterService";
+import { publishAutoFilterStatus } from "@api/autoFilterService";
 import type { FilterState } from "../types";
 
 /** Minimal selection type for filter operations. */
@@ -115,6 +116,23 @@ function syncOverlayRegion(): void {
       endCol: info.endCol,
     }]);
   }
+  publishStatus();
+}
+
+/**
+ * Tell @api/autoFilterService what the cached filter now says, so a surface
+ * that shows it (the Home tab's Sort & Filter menu, the Data menu) follows
+ * without polling. Called from syncOverlayRegion because EVERY path that
+ * changes the cache ends there -- a click, a script, a sheet switch, a
+ * structural edit -- so no path can update the buttons and forget the ribbon.
+ * The seam drops a status equal to the last one.
+ */
+function publishStatus(): void {
+  const hasFilter = state.isActive && state.autoFilterInfo !== null;
+  publishAutoFilterStatus({
+    hasFilter,
+    isDataFiltered: hasFilter && state.autoFilterInfo?.isDataFiltered === true,
+  });
 }
 
 // ============================================================================
@@ -333,6 +351,10 @@ export async function sortByColumn(absoluteCol: number, ascending: boolean): Pro
   if (!state.autoFilterInfo) return;
   const info = state.autoFilterInfo;
   let tx: OwnedUndoTransaction | null = null;
+  // Whether the sort WROTE: from then on the step is committed, never
+  // cancelled, whatever fails after it (a cancel drops the undo record of a
+  // write that stays).
+  let landed = false;
   try {
     tx = ownUndoTransaction(await beginUndoTransaction("Sort by column"), UNDO_CLOSES);
     const result = await sortRangeByColumn<{ success: boolean; error?: string }>(
@@ -344,21 +366,26 @@ export async function sortByColumn(absoluteCol: number, ascending: boolean): Pro
       ascending,
       true, // hasHeaders
     );
-    await tx.commit();
+    landed = result.success;
     if (result.success) {
       // Use "grid:refresh" (not "app:grid-refresh") to re-fetch cell data from backend
       window.dispatchEvent(new CustomEvent("grid:refresh"));
-      // Reapply filter since row order changed
+      // Reapply filter since row order changed -- INSIDE the sort's step. The
+      // reapply records its own "Filter" entry; committed before it, the sort
+      // took two Ctrl+Z, and the first put the old hidden-row INDEX set back
+      // over the sorted rows (the wrong rows hidden). 2026-10-05, the same
+      // defect the Home tab's Sort A to Z had (Sorting/lib/quickSort.ts).
       await reapplyFilter();
-    } else if (result.error) {
-      void alertAsync(result.error);
     }
+    await tx.commit();
+    if (!result.success && result.error) void alertAsync(result.error);
   } catch (err) {
     // sort_range now rejects when the range is protected, so this is a routine
-    // outcome rather than an internal error. Cancel the transaction (the commit
-    // above is skipped on throw, leaving it open for later edits to join) and
-    // tell the user why the click did nothing.
-    await tx?.cancel().catch(() => {});
+    // outcome rather than an internal error. Cancel the transaction when
+    // nothing landed (the commit above is skipped on throw, leaving it open for
+    // later edits to join); after a landed sort, commit it. Tell the user why.
+    if (landed) await tx?.commit().catch(() => {});
+    else await tx?.cancel().catch(() => {});
     console.error("[AutoFilter] Sort failed:", err);
     const msg = typeof err === "string" ? err : (err as Error)?.message;
     if (msg) void alertAsync(msg);
@@ -377,6 +404,7 @@ export async function sortByColor(
   if (!state.autoFilterInfo) return;
   const info = state.autoFilterInfo;
   let tx: OwnedUndoTransaction | null = null;
+  let landed = false;
   try {
     tx = ownUndoTransaction(await beginUndoTransaction("Sort by color"), UNDO_CLOSES);
     const result = await sortRange<{ success: boolean; error?: string }>(
@@ -392,16 +420,19 @@ export async function sortByColor(
       }],
       { hasHeaders: true },
     );
-    await tx.commit();
+    landed = result.success;
     if (result.success) {
       window.dispatchEvent(new CustomEvent("grid:refresh"));
+      // Inside the sort's step, as sortByColumn explains.
       await reapplyFilter();
-    } else if (result.error) {
-      void alertAsync(result.error);
     }
+    await tx.commit();
+    if (!result.success && result.error) void alertAsync(result.error);
   } catch (err) {
-    // Same as sortByColumn: a protected range now rejects here.
-    await tx?.cancel().catch(() => {});
+    // Same as sortByColumn: a protected range now rejects here; a landed sort
+    // keeps its step.
+    if (landed) await tx?.commit().catch(() => {});
+    else await tx?.cancel().catch(() => {});
     console.error("[AutoFilter] Sort by color failed:", err);
     const msg = typeof err === "string" ? err : (err as Error)?.message;
     if (msg) void alertAsync(msg);
@@ -618,6 +649,14 @@ export async function removeFilter(): Promise<void> {
   emitAppEvent(FilterEvents.FILTER_TOGGLED, { active: false });
 }
 
+/** Re-run the filter over the current data (Excel's Reapply). Rejects on a
+ *  refusal -- no filter on the sheet, a protected sheet -- like every other
+ *  controller operation, where the Data menu's reapplyFilter() above shrugs. */
+export async function reapplyFilterCriteria(): Promise<AutoFilterSnapshot> {
+  const result = await reapplyAutoFilter();
+  return adoptResult(result, "Reapplying the filter");
+}
+
 /** Distinct values in one column, for building a values filter. */
 export async function listColumnValues(
   relativeColIndex: number,
@@ -659,7 +698,13 @@ export function createAutoFilterController(): AutoFilterController {
           ),
     clear: (columnIndex: number | null) => clearFilterCriteria(columnIndex),
     remove: () => removeFilter(),
+    reapply: () => reapplyFilterCriteria(),
   };
+}
+
+/** Whether the active sheet has a filter, by the cache every door keeps fresh. */
+export function hasActiveFilter(): boolean {
+  return state.isActive && state.autoFilterInfo !== null;
 }
 
 // ============================================================================
@@ -684,4 +729,5 @@ export function resetState(): void {
     openDropdownCol: null,
   };
   currentSelection = null;
+  publishStatus();
 }

@@ -1,6 +1,7 @@
 //! FILENAME: app/src/api/layout/primitives/Button.tsx
 // PURPOSE: The button atoms of the Calcula Clusters control grammar — Button,
-//          ToggleButton, IconButton, CommandButton (the hero) and the
+//          ToggleButton, IconButton, CommandButton (the hero), the labelled and
+//          hero split faces SplitMenuButton draws (SplitButton), and the
 //          DropdownChevron glyph they share.
 // CONTEXT: Gives extensions the standard control look without hand-rolled CSS
 //          (and without importing shell internals). Every other @api/layout
@@ -41,7 +42,15 @@ import {
   CONTROL_HEIGHT_MD,
   CONTROL_HEIGHT_SM,
   FONT_FAMILY,
+  HERO_ICON_SIZE,
   HERO_ICON_SLOT,
+  HERO_LABEL_GAP,
+  HERO_LABEL_LINE_HEIGHT,
+  HERO_PAD_Y,
+  HERO_SPLIT_TOP_HEIGHT,
+  HERO_SPLIT_TOP_HEIGHT_TWO_LINE,
+  HERO_TWO_LINE_GAP,
+  HERO_TWO_LINE_PAD_Y,
   ICON_SIZE_SM,
   LABEL_FONT_SIZE,
   LAUNCHER_MIN_WIDTH,
@@ -529,16 +538,24 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
 /** A hero is the same footprint as a Launcher, so a cluster demoting to a
  *  launcher does not shift its neighbours sideways. */
 const HERO_MIN_WIDTH = LAUNCHER_MIN_WIDTH;
-/** Longest label a hero shows before ellipsis. */
+/** Longest label a hero shows before ellipsis (per line, in the two-line form). */
 const HERO_LABEL_MAX_WIDTH = 92;
 
 const hero = css`
   flex-direction: column;
   justify-content: center;
-  gap: 2px;
+  gap: ${HERO_LABEL_GAP}px;
   height: ${TALL_CONTROL_HEIGHT}px;
   min-width: ${HERO_MIN_WIDTH}px;
-  padding: 6px 10px;
+  padding: ${HERO_PAD_Y}px 10px;
+`;
+
+/** The two-line hero (tokens.ts "TWO-LINE"): the 34px slot gives way to the
+ *  30px icon it holds, so two 13px label lines fit: 2 + 30 + 1 + 26 + 2. Later
+ *  in the stylesheet than `hero`, so its two declarations win. */
+const heroTwoLine = css`
+  gap: ${HERO_TWO_LINE_GAP}px;
+  padding: ${HERO_TWO_LINE_PAD_Y}px 10px;
 `;
 
 const heroSlot = css`
@@ -549,6 +566,16 @@ const heroSlot = css`
   flex: none;
   width: ${HERO_ICON_SLOT}px;
   height: ${HERO_ICON_SLOT}px;
+`;
+
+const heroSlotTwoLine = css`
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: ${HERO_ICON_SIZE}px;
+  height: ${HERO_ICON_SIZE}px;
 `;
 
 const heroBadge = css`
@@ -564,7 +591,29 @@ const heroLabel = css`
   max-width: ${HERO_LABEL_MAX_WIDTH}px;
   font-size: ${LABEL_FONT_SIZE}px;
   font-weight: 500;
-  line-height: 13px;
+  line-height: ${HERO_LABEL_LINE_HEIGHT}px;
+`;
+
+/** The two-line label block: two lines of the one-line recipe, stacked. */
+const heroLines = css`
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  font-size: ${LABEL_FONT_SIZE}px;
+  font-weight: 500;
+`;
+
+/** One line of a two-line label. Its height is fixed, so an EMPTY second line
+ *  (a one-word label with no chevron) still holds its 13px and the icon stays
+ *  where every other two-line hero's icon is. */
+const heroLine = css`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  max-width: ${HERO_LABEL_MAX_WIDTH}px;
+  height: ${HERO_LABEL_LINE_HEIGHT}px;
+  line-height: ${HERO_LABEL_LINE_HEIGHT}px;
 `;
 
 /** Ellipsis needs its own box: a flex container cannot truncate the
@@ -589,6 +638,93 @@ const panelIconFit = css`
   }
 `;
 
+/** The same fit for a 24px ("sm") row, whose icons are 16. */
+const compactIconFit = css`
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+
+  & > svg {
+    width: 16px;
+    height: 16px;
+  }
+`;
+
+/**
+ * Where Excel breaks a LARGE button's label over its two lines: at the word
+ * boundary that balances the two, counting the chevron (about two characters
+ * wide) on the second line, where it sits after the last word. A tie goes to
+ * the shorter second line. One word stays on line 1 and the chevron takes line
+ * 2 on its own -- Excel's "Paste / v".
+ *
+ *   "Conditional Formatting" -> "Conditional" / "Formatting v"
+ *   "Format as Table"        -> "Format as"   / "Table v"
+ *   "Sort & Filter"          -> "Sort &"      / "Filter v"
+ *
+ * Character counts, not measured pixels: deterministic, testable in jsdom,
+ * and they reproduce every break on Excel's Home tab.
+ */
+export function splitHeroLabel(label: string, chevron: boolean): [string, string] {
+  const words = label.trim().split(/\s+/).filter(Boolean);
+  if (words.length < 2) return [words[0] ?? "", ""];
+  const chevronChars = chevron ? 2 : 0;
+  let best = 1;
+  let bestCost = Number.POSITIVE_INFINITY;
+  for (let at = 1; at < words.length; at++) {
+    const first = words.slice(0, at).join(" ").length;
+    const second = words.slice(at).join(" ").length + chevronChars;
+    const cost = Math.max(first, second);
+    if (cost <= bestCost) {
+      best = at;
+      bestCost = cost;
+    }
+  }
+  return [words.slice(0, best).join(" "), words.slice(best).join(" ")];
+}
+
+/**
+ * A hero's label in the band: one line (label + chevron), or Excel's two lines
+ * with the chevron after the LAST word. The two-line form keeps the space
+ * between the lines INSIDE the first line's text (it collapses at the line's
+ * end, so nothing moves), so the button's text -- its accessible name, and
+ * what an E2E text match reads -- is still the whole label, never
+ * "ConditionalFormatting". `marked` tags a one-line label with
+ * data-hero-line too (the split faces do; the plain hero's one-line DOM is
+ * pinned as it was).
+ */
+function HeroLabel({
+  label,
+  chevron,
+  lines,
+  marked = false,
+}: {
+  label: string;
+  chevron: boolean;
+  lines: 1 | 2;
+  marked?: boolean;
+}): React.ReactElement {
+  if (lines === 1) {
+    return (
+      <span className={heroLabel} data-hero-line={marked ? "" : undefined}>
+        <span className={heroLabelText}>{label}</span>
+        {chevron && <Chevron size={9} />}
+      </span>
+    );
+  }
+  const [first, second] = splitHeroLabel(label, chevron);
+  return (
+    <span className={heroLines}>
+      <span className={heroLine} data-hero-line="">
+        <span className={heroLabelText}>{second ? `${first} ` : first}</span>
+      </span>
+      <span className={heroLine} data-hero-line="">
+        {second && <span className={heroLabelText}>{second}</span>}
+        {chevron && <Chevron size={9} />}
+      </span>
+    </span>
+  );
+}
+
 export interface CommandButtonProps
   extends Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "children"> {
   /** Icon shown above the label in the band (pass HERO_ICON_SIZE), inline
@@ -609,6 +745,13 @@ export interface CommandButtonProps
   shortcut?: string;
   /** Resolve the tooltip chip from the live keybinding registry. */
   commandId?: string;
+  /** In the band: 1 (default) = the label on one line under the 34px slot;
+   *  2 = Excel's large-button label over two lines ("Conditional /
+   *  Formatting v"), broken by splitHeroLabel, with the chevron after the last
+   *  word, under the 30px icon (tokens.ts "TWO-LINE"). Heroes side by side in
+   *  one group should agree on it: a two-line hero's icon sits 6px higher than
+   *  a one-line hero's. Ignored outside the band. */
+  labelLines?: 1 | 2;
 }
 
 /**
@@ -621,7 +764,7 @@ export interface CommandButtonProps
  */
 export const CommandButton = forwardRef<HTMLButtonElement, CommandButtonProps>(
   function CommandButton(
-    { icon, label, chevron, active, badge, tooltip, shortcut, commandId, className, ...rest },
+    { icon, label, chevron, active, badge, tooltip, shortcut, commandId, labelLines = 1, className, ...rest },
     ref,
   ) {
     const layout = useSurfaceLayout();
@@ -630,10 +773,16 @@ export const CommandButton = forwardRef<HTMLButtonElement, CommandButtonProps>(
     const hasBadge = badge !== undefined && badge !== null && badge !== "";
 
     if (layout.container === "band") {
+      const twoLine = labelLines === 2;
       return (
         <Tooltip content={tip} shortcut={shortcut} commandId={commandId}>
-          <button ref={ref} className={classNames(control, hero, className)} {...rest} aria-pressed={ariaPressed}>
-            <span className={heroSlot} aria-hidden>
+          <button
+            ref={ref}
+            className={classNames(control, hero, twoLine && heroTwoLine, className)}
+            {...rest}
+            aria-pressed={ariaPressed}
+          >
+            <span className={twoLine ? heroSlotTwoLine : heroSlot} aria-hidden>
               {icon}
               {hasBadge && (
                 <Badge className={heroBadge} aria-hidden>
@@ -641,10 +790,7 @@ export const CommandButton = forwardRef<HTMLButtonElement, CommandButtonProps>(
                 </Badge>
               )}
             </span>
-            <span className={heroLabel}>
-              <span className={heroLabelText}>{label}</span>
-              {chevron && <Chevron size={9} />}
-            </span>
+            <HeroLabel label={label} chevron={!!chevron} lines={twoLine ? 2 : 1} />
           </button>
         </Tooltip>
       );
@@ -668,3 +814,246 @@ export const CommandButton = forwardRef<HTMLButtonElement, CommandButtonProps>(
     );
   },
 );
+
+// ============================================================================
+// SplitButton — the "labelled" and "hero" faces of a split (Excel's medium
+// and large split buttons). SplitMenuButton (Menu.tsx) draws them; the "icon"
+// face is IconButton's `split`.
+// ============================================================================
+//
+// Both faces keep the icon face's DOM contract, so everything SplitMenuButton
+// does with a split works unchanged on them: `span.split` wrapping
+// `button.split-main` (the command; takes the HTML props, the ref and
+// data-testid) and `button.split-chevron` (opens the menu; takes chevronProps,
+// so chevronTestId and the aria-haspopup/expanded attributes land on it), and
+// the menu anchors on the wrapper -- under the WHOLE control.
+//
+// LABELLED: [icon label][v] in one 28px (24 "sm") row -- "Merge & Center v",
+//   "AutoSum v". The 16px chevron half is the icon face's.
+// HERO: one 61px column in the band -- the picture on top runs the command, the
+//   label + chevron below opens the menu, one hairline between (an inset
+//   shadow on the menu part, like the icon face's vertical one, so the parts'
+//   heights stay exact and a focus ring replaces it). Each part is its own
+//   button with the shared recipe, so each takes its own hover tint, as
+//   Excel's two parts do. The geometry is tokens.ts "SPLIT": the hairline
+//   sits in the middle of the plain hero's icon-to-label gap, so the picture
+//   and the label land on the same pixels as a CommandButton beside it.
+//   Outside the band there is no 61px box: the hero falls back to LABELLED.
+
+const heroSplitWrap = css`
+  flex-direction: column;
+  min-width: ${HERO_MIN_WIDTH}px;
+`;
+
+/** Both parts of a hero split: content stacked and centred horizontally. */
+const heroSplitPart = css`
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 0;
+`;
+
+const heroSplitMain = css`
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+`;
+
+const heroSplitMainOneLine = css`
+  height: ${HERO_SPLIT_TOP_HEIGHT}px;
+  padding: ${HERO_PAD_Y}px 10px ${HERO_SPLIT_TOP_HEIGHT - HERO_PAD_Y - HERO_ICON_SLOT}px;
+`;
+
+const heroSplitMainTwoLine = css`
+  height: ${HERO_SPLIT_TOP_HEIGHT_TWO_LINE}px;
+  padding: ${HERO_TWO_LINE_PAD_Y}px 10px 0px;
+`;
+
+/** The menu part: the hairline along its top edge, square top corners. */
+const heroSplitMenu = css`
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  box-shadow: inset 0 1px 0 ${LT.controlDivider};
+`;
+
+const heroSplitMenuOneLine = css`
+  height: ${TALL_CONTROL_HEIGHT - HERO_SPLIT_TOP_HEIGHT}px;
+  padding: ${HERO_LABEL_GAP / 2}px 10px ${HERO_PAD_Y}px;
+`;
+
+const heroSplitMenuTwoLine = css`
+  height: ${TALL_CONTROL_HEIGHT - HERO_SPLIT_TOP_HEIGHT_TWO_LINE}px;
+  padding: ${HERO_TWO_LINE_GAP}px 10px ${HERO_TWO_LINE_PAD_Y}px;
+`;
+
+/** The faces SplitMenuButton offers. */
+export type SplitFace = "icon" | "labelled" | "hero";
+
+export interface SplitButtonProps extends Omit<IconButtonProps, "split" | "chevron"> {
+  /** "labelled" (Excel's medium split) or "hero" (its large split; labelled
+   *  outside the band). The "icon" face is IconButton `split`. */
+  face: Exclude<SplitFace, "icon">;
+  /** Hero only: the label over one line (default) or Excel's two. */
+  labelLines?: 1 | 2;
+}
+
+/**
+ * A split button with a VISIBLE label. Props follow IconButton's split form:
+ * HTML props, the ref and data-testid go to the main half; `chevronProps`,
+ * `chevronLabel` and `onChevronClick` to the menu half. The label is visible,
+ * so the main half gets a tooltip only when it teaches something (`tooltip`,
+ * `shortcut`, `commandId`); the menu half is described by its own name
+ * (`chevronLabel`, default "`label` options"), as the icon face's is.
+ */
+export const SplitButton = forwardRef<HTMLButtonElement, SplitButtonProps>(function SplitButton(
+  {
+    face,
+    labelLines = 1,
+    icon,
+    label,
+    pressed,
+    size = "md",
+    onChevronClick,
+    chevronLabel,
+    chevronProps,
+    tooltip,
+    shortcut,
+    commandId,
+    tooltipPlacement,
+    tooltipZIndex,
+    variant = "flat",
+    tone = "neutral",
+    grow,
+    disabled,
+    className,
+    style,
+    ...rest
+  },
+  ref,
+) {
+  const layout = useSurfaceLayout();
+  const asHero = face === "hero" && layout.container === "band";
+  const halfLabel = chevronLabel ?? `${label} options`;
+  const mainTip = visibleNameTooltip(tooltip, shortcut, commandId, label);
+  const halfTip = tooltip === false ? null : halfLabel;
+  const ariaPressed = pressed ?? rest["aria-pressed"];
+  const variantClass = variant === "outlined" && outlined;
+  const toneClass = tone === "danger" && danger;
+
+  if (asHero) {
+    const twoLine = labelLines === 2;
+    return (
+      <span className={classNames("split", splitWrap, heroSplitWrap)} style={grow ? { flex: 1 } : undefined}>
+        <Tooltip
+          content={mainTip}
+          shortcut={shortcut}
+          commandId={commandId}
+          placement={tooltipPlacement}
+          zIndex={tooltipZIndex}
+        >
+          <button
+            ref={ref}
+            className={classNames(
+              "split-main",
+              control,
+              variantClass,
+              toneClass,
+              heroSplitPart,
+              heroSplitMain,
+              twoLine ? heroSplitMainTwoLine : heroSplitMainOneLine,
+              className,
+            )}
+            style={style}
+            disabled={disabled}
+            {...rest}
+            aria-label={label}
+            aria-pressed={ariaPressed}
+          >
+            <span className={twoLine ? heroSlotTwoLine : heroSlot} aria-hidden>
+              {icon}
+            </span>
+          </button>
+        </Tooltip>
+        <Tooltip content={halfTip} placement={tooltipPlacement} zIndex={tooltipZIndex}>
+          <button
+            {...chevronProps}
+            className={classNames(
+              "split-chevron",
+              control,
+              variantClass,
+              toneClass,
+              heroSplitPart,
+              heroSplitMenu,
+              twoLine ? heroSplitMenuTwoLine : heroSplitMenuOneLine,
+              chevronProps?.className,
+            )}
+            aria-label={halfLabel}
+            disabled={disabled || !onChevronClick}
+            onClick={onChevronClick}
+          >
+            <HeroLabel label={label} chevron lines={twoLine ? 2 : 1} marked />
+          </button>
+        </Tooltip>
+      </span>
+    );
+  }
+
+  // LABELLED (and a hero outside the band).
+  const compact = size === "sm";
+  const height = compact ? CONTROL_HEIGHT_SM : CONTROL_HEIGHT_MD;
+  return (
+    <span className={classNames("split", splitWrap)} style={grow ? { flex: 1 } : undefined}>
+      <Tooltip
+        content={mainTip}
+        shortcut={shortcut}
+        commandId={commandId}
+        placement={tooltipPlacement}
+        zIndex={tooltipZIndex}
+      >
+        <button
+          ref={ref}
+          className={classNames("split-main", control, variantClass, toneClass, splitMain, className)}
+          style={{
+            height,
+            minWidth: height,
+            padding: compact ? "0 4px" : "0 6px",
+            ...(grow ? { flex: 1 } : {}),
+            ...style,
+          }}
+          disabled={disabled}
+          {...rest}
+          aria-label={label}
+          aria-pressed={ariaPressed}
+        >
+          <span className={compact ? compactIconFit : panelIconFit} aria-hidden>
+            {icon}
+          </span>
+          <span>{label}</span>
+        </button>
+      </Tooltip>
+      <Tooltip content={halfTip} placement={tooltipPlacement} zIndex={tooltipZIndex}>
+        <button
+          {...chevronProps}
+          className={classNames(
+            "split-chevron",
+            control,
+            variantClass,
+            toneClass,
+            splitChevron,
+            chevronProps?.className,
+          )}
+          style={{
+            width: SPLIT_CHEVRON_WIDTH,
+            minWidth: SPLIT_CHEVRON_WIDTH,
+            height,
+            padding: 0,
+            ...chevronProps?.style,
+          }}
+          aria-label={halfLabel}
+          disabled={disabled || !onChevronClick}
+          onClick={onChevronClick}
+        >
+          <Chevron size={compact ? 7 : 9} />
+        </button>
+      </Tooltip>
+    </span>
+  );
+});

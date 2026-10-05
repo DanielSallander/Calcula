@@ -38,6 +38,17 @@ import {
   collectAutoFitRowContributions,
 } from "../../../../api/autoFitContributors";
 import { buildCellFont, pointsToPixels } from "../fonts";
+// Rotated / stacked text and the indent are measured with the SAME geometry the
+// painter places them with (see the header of textOrientation.ts for why that
+// is not a style preference).
+import {
+  parseTextOrientation,
+  rotatedTextExtent,
+  stackedTextExtent,
+  ORIENTATION_LINE_HEIGHT_FACTOR,
+  type TextOrientation,
+} from "./textOrientation";
+import { effectiveIndentPx } from "./cellIndent";
 
 /** Horizontal padding inside cells (matches cells.ts paddingX) */
 const PADDING_X = 3;
@@ -45,8 +56,30 @@ const PADDING_X = 3;
 const PADDING_Y = 2;
 /** Extra margin to prevent content from touching the border */
 const FIT_MARGIN = 2;
-/** Line height multiplier for wrapped text (matches cells.ts) */
-const LINE_HEIGHT_FACTOR = 1.2;
+/** Line height multiplier for wrapped text (matches cells.ts, and is the line
+ *  pitch of rotated and stacked text too) */
+const LINE_HEIGHT_FACTOR = ORIENTATION_LINE_HEIGHT_FACTOR;
+
+/**
+ * The axis-aligned room a ROTATED or STACKED value needs, at the font already
+ * set on `ctx`. `fontSizePoints` gives the line pitch: a stacked character's
+ * height and a rotated line's thickness.
+ *
+ * One function for both AutoFit directions, so a column and a row measure the
+ * same block -- and that block is exactly what the painter lays out.
+ */
+function orientedTextExtent(
+  ctx: CanvasRenderingContext2D,
+  orientation: Exclude<TextOrientation, { kind: "horizontal" }>,
+  text: string,
+  fontSizePoints: number,
+): { width: number; height: number } {
+  const lineHeight = pointsToPixels(fontSizePoints) * LINE_HEIGHT_FACTOR;
+  if (orientation.kind === "stacked") {
+    return stackedTextExtent(text, (t) => ctx.measureText(t).width, lineHeight);
+  }
+  return rotatedTextExtent(ctx.measureText(text).width, lineHeight, orientation.degrees);
+}
 
 /**
  * Lazy singleton offscreen canvas for text measurement.
@@ -250,8 +283,20 @@ export function measureOptimalColumnWidth(
     }
 
     hasContent = true;
+    const orientation = parseTextOrientation(style?.textRotation);
     let textWidth: number;
-    if (cell.richText && cell.richText.length > 0) {
+    if (orientation.kind !== "horizontal") {
+      // ROTATED OR STACKED: the column needs the block's WIDTH -- one line for
+      // Rotate Text Up/Down, the widest character for stacked text -- not the
+      // length of the text, which now runs down the cell. Measured as the
+      // painter lays it out (one font for the whole value, as drawn).
+      const fontString = buildFontString(style, theme.cellFontFamily, theme.cellFontSize);
+      if (fontString !== lastFont) {
+        ctx.font = fontString;
+        lastFont = fontString;
+      }
+      textWidth = orientedTextExtent(ctx, orientation, cell.display, style?.fontSize || theme.cellFontSize).width;
+    } else if (cell.richText && cell.richText.length > 0) {
       // Rich text: each run renders with its own font
       textWidth = measureRichTextWidth(ctx, cell.richText, style, theme.cellFontFamily, theme.cellFontSize);
       lastFont = "";
@@ -264,8 +309,11 @@ export function measureOptimalColumnWidth(
       textWidth = measureWidestLine(ctx, cell.display);
     }
 
-    // The renderer shifts text right by the style indent (8px per level)
-    const indentWidth = (style?.indent ?? 0) * 8;
+    // The indent the painter actually draws (layout/cellIndent.ts): one step
+    // per level for Left, Right and General, NONE for Center -- Excel has no
+    // centred indent. Rotated and stacked text is placed without one.
+    const indentWidth =
+      orientation.kind === "horizontal" ? effectiveIndentPx(style?.textAlign, style?.indent) : 0;
     const chrome = extraCellWidth.get(cell.row) ?? 0;
     const cellWidth = textWidth + indentWidth + PADDING_X * 2 + FIT_MARGIN + chrome;
 
@@ -366,6 +414,31 @@ export function measureOptimalRowHeight(
     }
 
     let lineCount = 1;
+    const orientation = parseTextOrientation(style?.textRotation);
+
+    // ROTATED OR STACKED TEXT. Excel grows the row for it (measured: "Sample
+    // text" in a 14.3pt row went to 49.2pt at 45 degrees, 55.5pt at 90, 157.5pt
+    // stacked), and this measurement had no rotation term at all -- it handed
+    // back the one-line height and rotated text stayed cut in a 20px row. The
+    // block is the one the painter lays out, plus the painter's top and bottom
+    // inset; a value shorter than a line still gets a whole line.
+    if (orientation.kind !== "horizontal" && cell.display) {
+      const fontString = buildFontString(style, theme.cellFontFamily, theme.cellFontSize);
+      if (fontString !== lastFont) {
+        ctx.font = fontString;
+        lastFont = fontString;
+      }
+      const extent = orientedTextExtent(ctx, orientation, cell.display, style?.fontSize || theme.cellFontSize);
+      const oneLine =
+        fontSize <= theme.cellFontSize
+          ? defaultRowHeight
+          : pointsToPixels(fontSize) * LINE_HEIGHT_FACTOR + PADDING_Y * 2;
+      const orientedHeight = Math.max(extent.height + PADDING_Y * 2, oneLine);
+      hasContent = true;
+      hasCellContent = true;
+      if (orientedHeight > maxHeight) maxHeight = orientedHeight;
+      continue;
+    }
 
     // If wrap text is enabled, calculate how many lines this cell needs
     // (only cells with text can wrap)
@@ -376,7 +449,9 @@ export function measureOptimalRowHeight(
         lastFont = fontString;
       }
       const colWidth = columnWidths.get(cell.col) ?? defaultColWidth;
-      const availableWidth = colWidth - PADDING_X * 2 - (style?.indent ?? 0) * 8;
+      // The width the PAINTER wraps at: the indent it really draws, which is
+      // none for a centred value (layout/cellIndent.ts).
+      const availableWidth = colWidth - PADDING_X * 2 - effectiveIndentPx(style?.textAlign, style?.indent);
       // No `availableWidth > 0` guard: `wrapText` falls back to hard-break
       // splitting alone when there is no usable width, which is one line for
       // ordinary text -- the same answer the guard used to hard-code -- and the

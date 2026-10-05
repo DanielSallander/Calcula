@@ -289,7 +289,11 @@ export interface ScriptFormat {
   /** An Excel number-format code, e.g. "#,##0.00" or "General". */
   numberFormat?: string;
   wrapText?: boolean;
-  textRotation?: "none" | "rotate90" | "rotate270";
+  /** "none", "rotate90" (Rotate Text Up), "rotate270" (Rotate Text Down),
+   *  "vertical" (stacked Vertical Text) or `custom:N` for N degrees, -90..90
+   *  (Angle Counterclockwise is "custom:45"). The union is @api's TextRotation,
+   *  spelled out because this module stays dependency-free. */
+  textRotation?: "none" | "rotate90" | "rotate270" | "vertical" | `custom:${number}`;
   /** Indent steps (0-250). */
   indent?: number;
   shrinkToFit?: boolean;

@@ -14,6 +14,7 @@ import { CreateTableDialog } from "./components/CreateTableDialog";
 import { RemoveDuplicatesDialog } from "./components/RemoveDuplicatesDialog";
 import { TABLE_DESIGN_SECTIONS } from "./components/TableDesignTab";
 import { TableJsonPane, TABLE_JSON_PANE_ID } from "./components/TableJsonPane";
+import { TABLE_DIALOG_ID } from "./lib/dialogIds";
 
 // ============================================================================
 // Extension Manifest
@@ -86,7 +87,9 @@ export const TableJsonPaneDefinition: TaskPaneViewDefinition = {
 // Dialog Registration
 // ============================================================================
 
-export const TABLE_DIALOG_ID = "table:createDialog";
+// Defined in lib/dialogIds.ts (a module with no imports) so the Format as
+// Table handler can open the dialog without pulling in every component here.
+export { TABLE_DIALOG_ID };
 
 export const TableDialogDefinition: DialogDefinition = {
   id: TABLE_DIALOG_ID,

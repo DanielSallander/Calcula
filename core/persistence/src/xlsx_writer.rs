@@ -918,7 +918,8 @@ fn convert_style_to_format(style: &CellStyle) -> Format {
         format = format.set_font_strikethrough();
     }
 
-    format = format.set_font_size(style.font.size as f64);
+    // Points as a double -- `<sz val="10.5"/>` -- the unit OOXML stores.
+    format = format.set_font_size(style.font.size.points());
     format = format.set_font_name(&style.font.family);
 
     // Colors
@@ -947,17 +948,27 @@ fn convert_style_to_format(style: &CellStyle) -> Format {
         VerticalAlign::Bottom => FormatAlign::Bottom,
     });
 
-    // Text rotation
+    // Text rotation.
+    //
+    // rust_xlsxwriter's `set_rotation` takes an ANGLE in -90..=90 and ONE magic
+    // value, 270, which it writes as OOXML 255 -- STACKED text. `Rotate270`
+    // ("Rotate Text Down", 90 degrees clockwise) used to be passed as 270, so
+    // every rotated-down cell exported as Excel's Vertical Text and came back
+    // from a re-import as Rotate Text UP. Clockwise is a NEGATIVE angle here.
     match style.text_rotation {
         TextRotation::None => {}
         TextRotation::Rotate90 => {
             format = format.set_rotation(90);
         }
         TextRotation::Rotate270 => {
-            format = format.set_rotation(270);
+            format = format.set_rotation(-90);
         }
         TextRotation::Custom(angle) => {
-            format = format.set_rotation(angle as i16);
+            format = format.set_rotation(angle.clamp(-90, 90));
+        }
+        TextRotation::Vertical => {
+            // The crate's spelling of OOXML 255.
+            format = format.set_rotation(270);
         }
     }
 
@@ -1133,30 +1144,8 @@ fn convert_number_format(format: &NumberFormat) -> String {
                 }
             }
         }
-        NumberFormat::Accounting { decimal_places, symbol, symbol_position } => {
-            let decimal_part = if *decimal_places > 0 {
-                format!(".{}", "0".repeat(*decimal_places as usize))
-            } else {
-                String::new()
-            };
-            let num_fmt = format!("#,##0{}", decimal_part);
-            let dash = if *decimal_places > 0 {
-                format!("\"-\"{}",  "?".repeat(*decimal_places as usize))
-            } else {
-                "\"-\"".to_string()
-            };
-            match symbol_position {
-                engine::style::CurrencyPosition::Before => {
-                    format!(
-                        "_(\"{symbol}\"* {num_fmt}_);_(\"{symbol}\"* ({num_fmt});_(\"{symbol}\"* {dash}_);_(@_)"
-                    )
-                }
-                engine::style::CurrencyPosition::After => {
-                    format!(
-                        "_(* {num_fmt}\" {symbol}\"_);_(* ({num_fmt})\" {symbol}\";_(* {dash}\" {symbol}\"_);_(@_)"
-                    )
-                }
-            }
+        NumberFormat::Accounting { decimal_places, symbol, symbol_position, negative_style } => {
+            accounting_format_code(*decimal_places, symbol, *symbol_position, *negative_style)
         }
         NumberFormat::Fraction { denominator, max_digits } => {
             let num_placeholders = "?".repeat(*max_digits as usize);
@@ -1187,6 +1176,59 @@ fn convert_number_format(format: &NumberFormat) -> String {
         NumberFormat::Date { format: fmt } => fmt.clone(),
         NumberFormat::Time { format: fmt } => fmt.clone(),
         NumberFormat::Custom { format: fmt } => fmt.clone(),
+    }
+}
+
+/// The Excel code for a typed Accounting format, in the shape Excel itself
+/// writes for that region's pattern.
+///
+/// - PARENTHESES (en-US): `_("$"* #,##0.00_);_("$"* (#,##0.00);_("$"* "-"??_);_(@_)`
+///   -- the `_(`/`_)` pads reserve the width of the brackets.
+/// - MINUS (everywhere else): `_-"£"* #,##0.00_-;-"£"* #,##0.00_-;_-"£"* "-"??_-;_-@_-`
+///   -- the minus sits BEFORE the fill, at the cell's left edge, which is what
+///   Excel's sv-SE Accounting button writes (live probe 2026-10-04). This
+///   writer used to emit the parenthesised code for every accounting cell, so
+///   a Swedish ledger changed its negatives on the way to Excel.
+///
+/// An EMPTY symbol (Comma Style) writes NO quoted literal at all -- `""` is
+/// legal but is not what Excel writes, and Excel's own Comma code is
+/// `_-* #,##0.00_-;-* #,##0.00_-;...`. A suffix symbol is written with its
+/// separating space inside the quotes (`" kr"`). The two `[Red]` entries put
+/// the colour at the head of the negative section. Read back by
+/// `xlsx_style_reader::parse_accounting_code`; the pair is pinned by
+/// `every_accounting_shape_round_trips_through_the_reader`.
+fn accounting_format_code(
+    decimal_places: u8,
+    symbol: &str,
+    symbol_position: engine::style::CurrencyPosition,
+    negative_style: engine::style::NegativeStyle,
+) -> String {
+    use engine::style::{CurrencyPosition, NegativeStyle};
+    let decimal_part = if decimal_places > 0 {
+        format!(".{}", "0".repeat(decimal_places as usize))
+    } else {
+        String::new()
+    };
+    let num = format!("#,##0{}", decimal_part);
+    // Excel's zero section: a dash and one `?` (a digit-width space) per
+    // decimal -- the same padding the renderer draws (`format_accounting_parts`).
+    let dash = format!("\"-\"{}", "?".repeat(decimal_places as usize));
+    let (prefix, suffix) = match (symbol.is_empty(), symbol_position) {
+        (true, _) => (String::new(), String::new()),
+        (false, CurrencyPosition::Before) => (format!("\"{}\"", symbol), String::new()),
+        (false, CurrencyPosition::After) => (String::new(), format!("\" {}\"", symbol)),
+    };
+    let red = if negative_style.is_red() { "[Red]" } else { "" };
+    if negative_style.uses_parentheses() {
+        format!(
+            "_({prefix}* {num}{suffix}_);{red}_({prefix}* ({num}){suffix};_({prefix}* {dash}{suffix}_);_(@_)"
+        )
+    } else {
+        // `Red` carries no sign (Excel's red entry); `Minus` leads with one.
+        let sign = if negative_style == NegativeStyle::Red { "_-" } else { "-" };
+        format!(
+            "_-{prefix}* {num}{suffix}_-;{red}{sign}{prefix}* {num}{suffix}_-;_-{prefix}* {dash}{suffix}_-;_-@_-"
+        )
     }
 }
 
@@ -2200,6 +2242,144 @@ mod tests {
                 code
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Home tab = Excel's Home tab (rust-format lane, 2026-10-04)
+    // ------------------------------------------------------------------
+
+    /// The codes Excel writes, region by region: en-US brackets negatives
+    /// behind `_(` pads; every minus region puts the minus BEFORE the fill.
+    /// The sv-SE Comma code is byte-for-byte the one Excel's Comma Style
+    /// wrote in the live probe (in its invariant spelling).
+    #[test]
+    fn accounting_exports_the_regional_code_excel_writes() {
+        use engine::style::{CurrencyPosition, NegativeStyle};
+        let acct = |sym: &str, pos, neg| NumberFormat::Accounting {
+            decimal_places: 2,
+            symbol: sym.to_string(),
+            symbol_position: pos,
+            negative_style: neg,
+        };
+        assert_eq!(
+            convert_number_format(&acct("", CurrencyPosition::Before, NegativeStyle::Minus)),
+            "_-* #,##0.00_-;-* #,##0.00_-;_-* \"-\"??_-;_-@_-"
+        );
+        assert_eq!(
+            convert_number_format(&acct("kr", CurrencyPosition::After, NegativeStyle::Minus)),
+            "_-* #,##0.00\" kr\"_-;-* #,##0.00\" kr\"_-;_-* \"-\"??\" kr\"_-;_-@_-"
+        );
+        assert_eq!(
+            convert_number_format(&acct("$", CurrencyPosition::Before, NegativeStyle::Parentheses)),
+            "_(\"$\"* #,##0.00_);_(\"$\"* (#,##0.00);_(\"$\"* \"-\"??_);_(@_)"
+        );
+        assert_eq!(
+            convert_number_format(&acct("\u{00A3}", CurrencyPosition::Before, NegativeStyle::Minus)),
+            "_-\"\u{00A3}\"* #,##0.00_-;-\"\u{00A3}\"* #,##0.00_-;_-\"\u{00A3}\"* \"-\"??_-;_-@_-"
+        );
+    }
+
+    /// Every accounting shape the writer can emit reads back as the format it
+    /// came from: symbol (empty, prefix, suffix, multi-letter, non-ASCII),
+    /// side, decimals, and all four negative entries.
+    #[test]
+    fn every_accounting_shape_round_trips_through_the_reader() {
+        use engine::style::{CurrencyPosition, NegativeStyle};
+        for symbol in ["", "$", "\u{00A3}", "\u{20AC}", "\u{00A5}", "CHF", "kr"] {
+            for position in [CurrencyPosition::Before, CurrencyPosition::After] {
+                if symbol.is_empty() && position == CurrencyPosition::After {
+                    continue; // no symbol has no side; it reads back as Before
+                }
+                for negative_style in [
+                    NegativeStyle::Minus,
+                    NegativeStyle::Parentheses,
+                    NegativeStyle::Red,
+                    NegativeStyle::RedParentheses,
+                ] {
+                    for decimal_places in [0u8, 2, 3] {
+                        let original = NumberFormat::Accounting {
+                            decimal_places,
+                            symbol: symbol.to_string(),
+                            symbol_position: position,
+                            negative_style,
+                        };
+                        let code = convert_number_format(&original);
+                        assert_eq!(
+                            crate::xlsx_style_reader::parse_format_code_for_test(&code),
+                            original,
+                            "did not survive the code {code}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Rotation, stacked text and a half-point size survive save + load. This
+    /// is where "Rotate Text Down" used to become Excel's Vertical Text (the
+    /// crate's magic 270 is OOXML 255) and come back as Rotate Text UP, and
+    /// where 10.5 pt was written and read back as 10.
+    #[test]
+    fn rotations_stacked_text_and_half_point_sizes_survive_the_xlsx_roundtrip() {
+        use engine::style::{FontSize, TextRotation};
+        let rotations = [
+            TextRotation::Rotate90,
+            TextRotation::Rotate270,
+            TextRotation::Vertical,
+            TextRotation::Custom(45),
+            TextRotation::Custom(-45),
+        ];
+        let mut workbook = Workbook::new();
+        workbook.sheets.clear();
+        let mut sheet = Sheet::new("Orient".to_string());
+        sheet.styles = vec![CellStyle::new()];
+        for (i, rotation) in rotations.iter().enumerate() {
+            sheet.styles.push(CellStyle::new().with_text_rotation(*rotation));
+            sheet.cells.insert(
+                (i as u32, 0),
+                SavedCell {
+                    value: SavedCellValue::Text("ab".to_string()),
+                    formula: None,
+                    style_index: i + 1,
+                    rich_text: None,
+                    spill: None,
+                },
+            );
+        }
+        let mut half = CellStyle::new();
+        half.font.size = FontSize::from_points(10.5).unwrap();
+        let mut big = CellStyle::new();
+        big.font.size = FontSize::from_whole_points(409);
+        for (offset, style) in [half, big].into_iter().enumerate() {
+            sheet.styles.push(style);
+            let row = (rotations.len() + offset) as u32;
+            let style_index = sheet.styles.len() - 1;
+            sheet.cells.insert(
+                (row, 0),
+                SavedCell {
+                    value: SavedCellValue::Text("size".to_string()),
+                    formula: None,
+                    style_index,
+                    rich_text: None,
+                    spill: None,
+                },
+            );
+        }
+        workbook.sheets.push(sheet);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orient.xlsx");
+        save_xlsx(&workbook, &path).unwrap();
+        let loaded = crate::xlsx_reader::load_xlsx(&path).unwrap();
+        let s = &loaded.sheets[0];
+        for (i, rotation) in rotations.iter().enumerate() {
+            let style = &s.styles[s.cells[&(i as u32, 0)].style_index];
+            assert_eq!(style.text_rotation, *rotation, "row {i}");
+        }
+        let half_back = &s.styles[s.cells[&(rotations.len() as u32, 0)].style_index];
+        assert_eq!(half_back.font.size.points(), 10.5);
+        let big_back = &s.styles[s.cells[&(rotations.len() as u32 + 1, 0)].style_index];
+        assert_eq!(big_back.font.size.points(), 409.0);
     }
 
     // =======================================================================

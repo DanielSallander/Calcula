@@ -1,76 +1,49 @@
 //! FILENAME: app/extensions/ConditionalFormatting/components/ColorScaleGallery.tsx
-// PURPOSE: Visual gallery of color scale presets for the Conditional Formatting menu.
-// CONTEXT: Replaces text labels with gradient swatches, similar to Excel.
+// PURPOSE: Conditional Formatting > Color Scales: Excel's twelve presets as
+//          swatches, then More Rules....
+// CONTEXT: Hosted twice -- the menu bar's Format > Conditional Formatting
+//          flyout and the Home tab's Conditional Formatting hero (the kit's
+//          RegisteredMenuButton draws this item's customContent in a MenuSub
+//          card) -- so it paints its own @api/layout surface (galleryChrome.ts
+//          says why). Excel's layout: four per row, three rows.
+//
+//          Each swatch shows the scale the way Excel's picture does: the
+//          HIGHEST value's colour on top, the lowest at the bottom, which is
+//          also the order of the words in its name ("Green - Yellow - Red").
+//          The preview colours are DATA, inside `data-colour-data`.
 
 import React from "react";
-import styled from "styled-components";
+import { css } from "@emotion/css";
 import type { PresetColorScale } from "../types";
-import { PRESET_COLOR_SCALES } from "../types";
+import { PRESET_COLOR_SCALES, colorScaleName } from "../types";
+import {
+  galleryRoot,
+  optionGrid,
+  optionButton,
+  footerRule,
+  moreRulesRow,
+  handleGalleryKeyDown,
+  OPTION_ATTR,
+  COLUMNS_ATTR,
+  MORE_RULES_ATTR,
+} from "./galleryChrome";
 
-const v = (name: string) => `var(${name})`;
+const COLUMNS = 4;
 
-// ============================================================================
-// Styles
-// ============================================================================
-
-const GalleryContainer = styled.div`
-  padding: 6px 8px;
-  width: 200px;
-`;
-
-const SwatchGrid = styled.div`
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 4px;
-`;
-
-const SwatchButton = styled.button`
+const swatch = css`
   display: block;
-  width: 44px;
-  height: 28px;
-  border: 1px solid ${v("--menu-border")};
+  width: 30px;
+  height: 30px;
   border-radius: 2px;
-  cursor: pointer;
-  padding: 0;
-
-  &:hover {
-    border-color: ${v("--menu-text")};
-    box-shadow: 0 0 0 1px ${v("--menu-text")};
-  }
 `;
 
-const MoreRulesButton = styled.button`
-  display: block;
-  width: 100%;
-  margin-top: 6px;
-  padding: 5px 8px;
-  background: transparent;
-  border: none;
-  color: ${v("--menu-text")};
-  font-size: 12px;
-  text-align: left;
-  cursor: pointer;
-  border-radius: 3px;
-
-  &:hover {
-    background-color: ${v("--menu-item-hover-bg")};
-  }
-`;
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
+/** Top (highest value) to bottom (lowest), as the name reads. */
 function buildGradient(preset: PresetColorScale): string {
-  if (preset.midColor) {
-    return `linear-gradient(to right, ${preset.minColor}, ${preset.midColor}, ${preset.maxColor})`;
-  }
-  return `linear-gradient(to right, ${preset.minColor}, ${preset.maxColor})`;
+  const stops = preset.midColor
+    ? [preset.maxColor, preset.midColor, preset.minColor]
+    : [preset.maxColor, preset.minColor];
+  return `linear-gradient(to bottom, ${stops.join(", ")})`;
 }
-
-// ============================================================================
-// Component
-// ============================================================================
 
 export interface ColorScaleGalleryProps {
   onSelect: (preset: PresetColorScale) => void;
@@ -84,28 +57,48 @@ export function ColorScaleGallery({
   onClose,
 }: ColorScaleGalleryProps): React.ReactElement {
   return (
-    <GalleryContainer>
-      <SwatchGrid>
-        {PRESET_COLOR_SCALES.map((preset, idx) => (
-          <SwatchButton
-            key={idx}
-            title={preset.label}
-            style={{ background: buildGradient(preset) }}
-            onClick={() => {
-              onSelect(preset);
-              onClose();
-            }}
-          />
-        ))}
-      </SwatchGrid>
-      <MoreRulesButton
+    <div className={galleryRoot} data-testid="cf-gallery-colorScales" onKeyDown={handleGalleryKeyDown}>
+      <div
+        role="group"
+        aria-label="Color Scales"
+        className={optionGrid}
+        style={{ gridTemplateColumns: `repeat(${COLUMNS}, auto)` }}
+        {...{ [COLUMNS_ATTR]: COLUMNS }}
+      >
+        {PRESET_COLOR_SCALES.map((preset, idx) => {
+          const name = colorScaleName(preset);
+          return (
+            <button
+              key={preset.label}
+              type="button"
+              className={optionButton}
+              title={name}
+              aria-label={name}
+              data-testid={`cf-colorScale-${idx}`}
+              {...{ [OPTION_ATTR]: "" }}
+              onClick={() => {
+                onSelect(preset);
+                onClose();
+              }}
+            >
+              <span className={swatch} data-colour-data="" style={{ background: buildGradient(preset) }} />
+            </button>
+          );
+        })}
+      </div>
+      <div className={footerRule} role="separator" />
+      <button
+        type="button"
+        className={moreRulesRow}
+        data-testid="cf-colorScales-moreRules"
+        {...{ [MORE_RULES_ATTR]: "" }}
         onClick={() => {
           onMoreRules();
           onClose();
         }}
       >
         More Rules...
-      </MoreRulesButton>
-    </GalleryContainer>
+      </button>
+    </div>
   );
 }

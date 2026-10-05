@@ -166,6 +166,51 @@ export const OBJECT_COPY_COMMAND = "canvasSheet.copySelection";
 /** The canvas's Paste of the object clipboard (see OBJECT_COPY_COMMAND). */
 export const OBJECT_PASTE_COMMAND = "canvasSheet.pasteObjects";
 
+// ----------------------------------------------------------------------------
+// The WORKSHEET's own door: Controls' Copy / Paste of selected controls
+// ----------------------------------------------------------------------------
+//
+// On a worksheet each family keeps its OWN clipboard door (the canvas comment
+// above), and today exactly one family has one: Controls. With a shape, a
+// button or a picture selected, Ctrl+C runs Controls' copy of the selected
+// controls and Ctrl+V -- while the object clipboard holds something -- its
+// paste (Controls lib/controlKeys.ts: guarded bindings that beat the grid's
+// built-ins). The DOORS used to answer the cell commands there, and the cell
+// commands are refused while an object is selected ("Copy is not available
+// while an object is selected"), so the Home tab's Copy did nothing the key
+// did (Home tab = Excel's Home tab, 2026-10-04; clipboard survey section 4).
+// A chart, slicer or timeline on a worksheet has no Copy of its own (Charts
+// lib/chartMenuSelection.ts: there "a chart's Ctrl+C is still the grid's"),
+// so for them the door keeps the cell command, and its refusal, as the key
+// does.
+//
+// SPELLED HERE, LIKE THE CANVAS'S IDS ABOVE. Seams point one way: this module
+// cannot import Controls. The ids below are the ones Controls registers its
+// two commands under, and the region type is the one it publishes floating
+// controls under; until Controls imports these constants (as CanvasSheet
+// imports OBJECT_COPY_COMMAND), objectClipboardWorksheetDoor.test.ts reads
+// Controls' source and pins the two spellings together.
+
+/** Controls' Copy of the selected controls on a worksheet (its Ctrl+C there). */
+export const WORKSHEET_CONTROL_COPY_COMMAND = "ext.controls.copySelection";
+/** Controls' Paste of the object clipboard on a worksheet (its Ctrl+V there). */
+export const WORKSHEET_CONTROL_PASTE_COMMAND = "ext.controls.pasteSelection";
+/** The region type Controls publishes its floating controls (shapes, buttons, pictures) under. */
+const FLOATING_CONTROL_REGION_TYPE = "floating-control";
+
+/**
+ * Whether the worksheet's own object door answers the clipboard right now: a
+ * WORKSHEET (a canvas has its own door, above), a floating control among the
+ * selected objects, and no INNER selection claiming the clipboard keys --
+ * the same line Controls' Ctrl+C guard draws (`worksheetKey`), less the
+ * keyboard-only parts (a click door has no focus or DOM text selection to
+ * yield to).
+ */
+function worksheetControlHasClipboardKeys(): boolean {
+  if (canvasOwnsObjectClipboard() || objectOwnsKey("Clipboard")) return false;
+  return getSelectedObjectRegions().some((r) => r.type === FLOATING_CONTROL_REGION_TYPE);
+}
+
 /**
  * Whether the OBJECT clipboard -- not the cell clipboard -- holds the
  * clipboard keys and doors right now: the sheet on screen is a canvas
@@ -179,15 +224,29 @@ export function objectClipboardHasClipboardKeys(): boolean {
 
 /**
  * The command a Copy / Paste DOOR (a menu item, a ribbon button) runs right
- * now: the canvas's object-clipboard command while the object clipboard holds
- * the clipboard keys and that command is registered; the grid's cell clipboard
- * command (CoreCommands.COPY / PASTE) otherwise. The canvas's COMMAND is run,
- * not this module's copy / paste functions, because the command also holds the
- * canvas's own refusal (a paste on a SUBSCRIBED canvas, the publisher's page).
+ * now -- the command the KEY (Ctrl+C / Ctrl+V) runs in the same place:
+ *   - on a CANVAS, the canvas's object-clipboard command, while the object
+ *     clipboard holds the clipboard keys and that command is registered;
+ *   - on a WORKSHEET with a floating control selected, Controls' own Copy of
+ *     the selected controls -- and its Paste while the object clipboard holds
+ *     something (an empty one falls through to the cell paste, as Ctrl+V
+ *     does) -- while Controls' command is registered;
+ *   - the grid's cell clipboard command (CoreCommands.COPY / PASTE) otherwise.
+ * The family's COMMAND is run, not this module's copy / paste functions,
+ * because the command also holds the family's own refusal (a paste on a
+ * SUBSCRIBED canvas, the publisher's page) and its own way of copying.
  */
 export function clipboardDoorCommand(action: "copy" | "paste"): string {
   const objectCommand = action === "copy" ? OBJECT_COPY_COMMAND : OBJECT_PASTE_COMMAND;
   if (objectClipboardHasClipboardKeys() && CommandRegistry.has(objectCommand)) return objectCommand;
+  if (worksheetControlHasClipboardKeys()) {
+    if (action === "copy" && CommandRegistry.has(WORKSHEET_CONTROL_COPY_COMMAND)) {
+      return WORKSHEET_CONTROL_COPY_COMMAND;
+    }
+    if (action === "paste" && hasObjectClipboard() && CommandRegistry.has(WORKSHEET_CONTROL_PASTE_COMMAND)) {
+      return WORKSHEET_CONTROL_PASTE_COMMAND;
+    }
+  }
   return action === "copy" ? CoreCommands.COPY : CoreCommands.PASTE;
 }
 

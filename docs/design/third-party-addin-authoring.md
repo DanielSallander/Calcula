@@ -907,17 +907,21 @@ renamed or removed, so a token that resolves today resolves in every later build
 example add-in's `"Percent"` (`docs/examples/addin-tax-tools/tax-tools.js`) is one of the 34 keys
 frozen since before this redesign.
 
-### 8.3 The token vocabulary (180 keys, 2026-10-02)
+### 8.3 The token vocabulary (243 keys, 2026-10-04)
 
 Authoritative list and drawing rules: `docs/design/ICONS.md` §4. By family:
 
 | Family | Tokens |
 |---|---|
 | **Clipboard and history** | Cut, Copy, Paste, FormatPainter, Undo, Redo |
-| **Font and fill** | FontSizeUp, FontSizeDown, FontColor, FillColor, Superscript, Subscript, FormatCells, CellStyles |
-| **Alignment** | AlignTop, AlignMiddle, AlignBottom, AlignLeft, AlignCenter, AlignRight, WrapText, IndentIncrease, IndentDecrease, MergeCells, MergeCenter, MergeAcross, UnmergeCells |
-| **Number** | Percent, Comma, NumberFormat, DecimalIncrease, DecimalDecrease |
-| **Cells and editing** | InsertRow, InsertColumn, DeleteRow, DeleteColumn, Find, Replace, ClearContents, ClearFormatting, ClearAll |
+| **Paste options** | PasteFormulas, PasteFormulasNumberFormats, PasteKeepSourceFormatting, PasteNoBorders, PasteColumnWidths, PasteTranspose, PasteValues, PasteValuesNumberFormats, PasteValuesSourceFormatting, PasteFormatting, PasteLink, PasteSpecial |
+| **Font and fill** | FontSizeUp, FontSizeDown, FontColor, FillColor, Superscript, Subscript, Underline, DoubleUnderline, FormatCells |
+| **Borders** | BorderBottom, BorderTop, BorderLeft, BorderRight, BorderNone, BorderAll, BorderOutside, BorderThickOutside, BorderDoubleBottom, BorderThickBottom, BorderTopBottom, BorderTopThickBottom, BorderTopDoubleBottom, LineColor |
+| **Alignment** | AlignTop, AlignMiddle, AlignBottom, AlignLeft, AlignCenter, AlignRight, WrapText, IndentIncrease, IndentDecrease, MergeCells, MergeCenter, MergeAcross, UnmergeCells, TextOrientation, AngleCounterclockwise, AngleClockwise, VerticalText, RotateTextUp, RotateTextDown |
+| **Number** | Percent, Comma, NumberFormat, DecimalIncrease, DecimalDecrease, Accounting |
+| **Styles** | CellStyles, ConditionalFormatting, FormatAsTable |
+| **Cells** | InsertCells, DeleteCells, FormatMenu, InsertRow, InsertColumn, DeleteRow, DeleteColumn, InsertSheet, DeleteSheet, RenameSheet, ProtectSheet, RowHeight, ColumnWidth |
+| **Editing** | AutoSum, FillDown, FillRight, FillUp, FillLeft, Clear, ClearContents, ClearFormatting, ClearAll, RemoveHyperlinks, SortFilter, SortAscending, SortDescending, Find, Replace, GoTo |
 | **Chart types** | ChartColumn, ChartBar, ChartLine, ChartArea, ChartPie, ChartDonut, ChartScatter, ChartWaterfall, ChartCombo, ChartRadar, ChartBubble, ChartHistogram, ChartFunnel, ChartTreemap, ChartStock, ChartBoxPlot, ChartSunburst, ChartPareto |
 | **Chart furniture and marks** | ChartTitle, Gridlines, Legend, AxisLabels, DataLabels, Grouped, Stacked, Stacked100, SecondaryAxis, Trendline, MarkOptions, LineStraight, LineSmooth, LineStep, Markers, Palette, Series, Filter, SwitchRowCol |
 | **Chart actions** | EditChart, SaveImage, FormatPoint, Code |
@@ -931,11 +935,22 @@ Authoritative list and drawing rules: `docs/design/ICONS.md` §4. By family:
 | **Status** | Info, Warn, Error, Success |
 | **Structure** | Group, More, MoreHorizontal, Close, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Sidebar, Ribbon, Panel, Layout, Resize |
 | **Things** | Settings, Text, Pointer, Keyboard, Image, Lock, Eye, Calendar, Clock, Script, Model, Controls, Database, Folder, AddIn |
-| **Arrange** | BringForward, SendBackward, BringToFront, SendToBack, AlignObjects, DistributeHorizontal, DistributeVertical |
+| **Arrange** | BringForward, SendBackward, BringToFront, SendToBack, AlignObjects, DistributeHorizontal, DistributeVertical, ObjectAlignLeft, ObjectAlignCenter, ObjectAlignRight, ObjectAlignTop, ObjectAlignMiddle, ObjectAlignBottom |
 
 Tokens are case-sensitive PascalCase: `"Refresh"` resolves, `"refresh"` falls back to the generic
 glyph. Pick the icon for what the button DOES (a verb) or the object it acts on, and prefer a verb
 for a command: two add-ins that both show `Table` for different actions read as one.
+
+**Redrawn 2026-10-04** (the key resolves as before; the picture changed): AlignTop, AlignMiddle and
+AlignBottom are now Excel's TEXT alignment (a three-line block pushed up, centred or down). An add-in
+that used them to mean "align these objects" should switch to ObjectAlignTop / ObjectAlignMiddle /
+ObjectAlignBottom, which carry the previous pictures; ObjectAlignLeft / ObjectAlignCenter /
+ObjectAlignRight complete the set for horizontal object alignment (AlignLeft / AlignCenter /
+AlignRight stay the TEXT paragraph pictures). WrapText, FillColor, InsertRow, InsertColumn,
+DeleteRow and DeleteColumn were redrawn in Excel's metaphor with the same meaning, and the same
+day's icon review redrew RemoveHyperlinks (now Excel's whole chain with a red X in the corner,
+not a broken chain), the 45-degree Orientation pictures, DeleteCells, GoTo and several Paste
+options, all with the same meaning.
 
 ### 8.4 A trusted (built-in) extension, for comparison
 

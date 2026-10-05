@@ -20,15 +20,27 @@
 //          loses its style) and routes to `onStyleClear`. The old footer's
 //          "New Table Style..." was a permanently disabled placeholder and is
 //          not carried over.
+//
+//          EXCEL'S SET (2026-10-04). The gallery offers what Excel offers --
+//          Light 1-21, Medium 1-28, Dark 1-11, read from live Excel -- not the
+//          catalogue's 77. A table that already wears one of the extra styles
+//          (a workbook saved while all 77 were offered) still finds it here,
+//          selected, at the end of its family (galleryItemsFor). The Home
+//          tab's Format as Table gallery (FormatAsTableGallery.tsx) offers the
+//          same 60 without "None".
 
-import React from "react";
+import React, { useMemo } from "react";
 import { StyleGallery, type StyleGalleryItem } from "@api/layout";
 import {
   TABLE_STYLES,
+  TABLE_STYLES_BY_ID,
+  EXCEL_TABLE_STYLES,
   TABLE_STYLE_CATEGORY_LABELS,
   TABLE_STYLE_NONE_ID,
   TABLE_STYLE_NONE_THUMB,
+  isExcelGalleryStyle,
   tableStyleDisplayName,
+  type TableStyleDef,
   type TableStyleThumbColors,
 } from "../lib/tableStyles";
 
@@ -159,25 +171,54 @@ export function TableStyleThumbnail({
 // Gallery items
 // ============================================================================
 
-/** "None" first (Excel's first Light tile), then Light, Medium, Dark. */
-const TABLE_STYLE_GALLERY_ITEMS: readonly StyleGalleryItem[] = [
-  {
-    id: TABLE_STYLE_NONE_ID,
-    name: "None",
-    group: TABLE_STYLE_CATEGORY_LABELS.light,
-    renderThumb: ({ w, h }) => (
-      <TableStyleThumbnail thumb={TABLE_STYLE_NONE_THUMB} width={w} height={h} />
-    ),
-  },
-  ...TABLE_STYLES.map(
-    (def): StyleGalleryItem => ({
-      id: def.id,
-      name: tableStyleDisplayName(def),
-      group: TABLE_STYLE_CATEGORY_LABELS[def.category],
-      renderThumb: ({ w, h }) => <TableStyleThumbnail thumb={def.thumb} width={w} height={h} />,
-    }),
+/** One catalogue style as a gallery item. */
+function styleItem(def: TableStyleDef): StyleGalleryItem {
+  return {
+    id: def.id,
+    name: tableStyleDisplayName(def),
+    group: TABLE_STYLE_CATEGORY_LABELS[def.category],
+    renderThumb: ({ w, h }) => <TableStyleThumbnail thumb={def.thumb} width={w} height={h} />,
+  };
+}
+
+const NONE_ITEM: StyleGalleryItem = {
+  id: TABLE_STYLE_NONE_ID,
+  name: "None",
+  group: TABLE_STYLE_CATEGORY_LABELS.light,
+  renderThumb: ({ w, h }) => (
+    <TableStyleThumbnail thumb={TABLE_STYLE_NONE_THUMB} width={w} height={h} />
   ),
-];
+};
+
+/**
+ * Excel's set as gallery items -- Light 1-21, Medium 1-28, Dark 1-11 -- the
+ * styles both galleries OFFER (Format as Table on the Home tab, Table Styles
+ * on Table Design). The catalogue's extra styles are kept for tables that
+ * already wear one, never offered to a table that does not.
+ */
+export const EXCEL_TABLE_STYLE_ITEMS: readonly StyleGalleryItem[] = EXCEL_TABLE_STYLES.map(styleItem);
+
+/** "None" first (Excel's first Light tile), then Light, Medium, Dark. */
+const TABLE_STYLE_GALLERY_ITEMS: readonly StyleGalleryItem[] = [NONE_ITEM, ...EXCEL_TABLE_STYLE_ITEMS];
+
+/**
+ * Table Design's items for a table wearing `selectedStyleId`: Excel's set,
+ * plus -- when the table wears a catalogue style OUTSIDE it (a workbook saved
+ * while all 77 were offered: "TableStyleLight25") -- that style at the end of
+ * its own family, so the user still sees, selected, what the table wears.
+ */
+function galleryItemsFor(selectedStyleId: string | null): readonly StyleGalleryItem[] {
+  const worn = selectedStyleId ? TABLE_STYLES_BY_ID.get(selectedStyleId) : undefined;
+  if (!worn || isExcelGalleryStyle(worn)) return TABLE_STYLE_GALLERY_ITEMS;
+  const group = TABLE_STYLE_CATEGORY_LABELS[worn.category];
+  let lastOfFamily = -1;
+  TABLE_STYLE_GALLERY_ITEMS.forEach((item, i) => {
+    if (item.group === group) lastOfFamily = i;
+  });
+  const items = [...TABLE_STYLE_GALLERY_ITEMS];
+  items.splice(lastOfFamily + 1, 0, styleItem(worn));
+  return items;
+}
 
 /** The band strip starts from Excel's familiar row, Medium 1-7. None and the
  *  Light family lead the full grid (as in Excel), but a strip that took the
@@ -209,9 +250,10 @@ export function TableStylesGallery({
   onStyleSelect,
   onStyleClear,
 }: TableStylesGalleryProps): React.ReactElement {
+  const items = useMemo(() => galleryItemsFor(selectedStyleId), [selectedStyleId]);
   return (
     <StyleGallery
-      items={TABLE_STYLE_GALLERY_ITEMS}
+      items={items}
       value={selectedStyleId}
       onChange={(id) => {
         if (id === TABLE_STYLE_NONE_ID) onStyleClear();

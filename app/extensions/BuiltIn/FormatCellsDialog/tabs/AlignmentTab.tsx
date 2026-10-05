@@ -1,9 +1,21 @@
 //! FILENAME: app/extensions/BuiltIn/FormatCellsDialog/tabs/AlignmentTab.tsx
 // PURPOSE: Alignment tab for the Format Cells dialog.
+// CONTEXT: Orientation is Excel's: an angle in DEGREES from -90 to 90 (five
+//          one-click angles plus a Degrees field) and the stacked "Text" box --
+//          Excel's Vertical Text. It used to be a select of 0 / 90 / -90, so a
+//          cell at 45 degrees (the Home tab's Angle Counterclockwise) opened
+//          showing nothing it could select, and stacked text could not be set
+//          here at all. The Indent goes to Excel's 250 (it was capped at 15).
 
-import React from "react";
+import React, { useEffect, useRef, useState } from "react";
 import styled from "styled-components";
 import { useFormatCellsStore } from "../hooks/useFormatCellsState";
+import {
+  MAX_INDENT,
+  clampIndent,
+  orientationOf,
+  textRotationForDegrees,
+} from "../lib/alignmentValues";
 
 const v = (name: string) => `var(${name})`;
 
@@ -20,11 +32,42 @@ const V_ALIGN_OPTIONS = [
   { value: "bottom", label: "Bottom" },
 ];
 
-const ROTATION_OPTIONS = [
-  { value: "none", label: "0 degrees" },
-  { value: "rotate90", label: "90 degrees" },
-  { value: "rotate270", label: "-90 degrees" },
-];
+/** The one-click angles, top to bottom as on Excel's orientation dial. */
+const ANGLE_PRESETS = [90, 45, 0, -45, -90] as const;
+
+/**
+ * A number field's TEXT, kept in step with the store value it edits. A value
+ * that arrives from outside (the dialog's style load lands after mount) is
+ * shown; a value this field itself just wrote is not echoed back, so typing
+ * "-" or "4" on the way to "-45" is not overwritten mid-keystroke.
+ */
+function useNumberText(value: number): {
+  text: string;
+  setText: (t: string) => void;
+  wrote: (v: number) => void;
+} {
+  const [text, setText] = useState(String(value));
+  const written = useRef<number | null>(null);
+  useEffect(() => {
+    if (written.current !== value) setText(String(value));
+    written.current = null;
+  }, [value]);
+  return {
+    text,
+    setText,
+    wrote: (n: number) => {
+      written.current = n;
+    },
+  };
+}
+
+/** A typed number, or null while the field holds something that is not one yet. */
+function typedNumber(raw: string): number | null {
+  const t = raw.trim();
+  if (t === "" || t === "-" || t === "+") return null;
+  const n = Number(t);
+  return Number.isFinite(n) ? n : null;
+}
 
 export function AlignmentTab(): React.ReactElement {
   const {
@@ -41,6 +84,24 @@ export function AlignmentTab(): React.ReactElement {
     setTextRotation,
     setIndent,
   } = useFormatCellsStore();
+
+  const orientation = orientationOf(textRotation);
+  const degreesText = useNumberText(orientation.degrees);
+  const indentText = useNumberText(indent);
+
+  /**
+   * Set the indent the way Excel does: an indent on a General or a Center cell
+   * makes it LEFT (measured: IndentLevel on either reads back as xlLeft; Right
+   * stays Right). Excel has no centred indent, and the grid draws an indented
+   * General value as Left -- so the dialog says what the cell will show.
+   */
+  const changeIndent = (level: number): void => {
+    const next = clampIndent(level);
+    if (next > 0 && (textAlign === "general" || textAlign === "center" || textAlign === "")) {
+      setTextAlign("left");
+    }
+    setIndent(next);
+  };
 
   return (
     <Container>
@@ -83,20 +144,44 @@ export function AlignmentTab(): React.ReactElement {
         <SectionTitle>Indent</SectionTitle>
         <FieldRow>
           <FieldGroup>
-            <FieldLabel>Indent level:</FieldLabel>
+            <FieldLabel htmlFor="fc-indent">Indent level:</FieldLabel>
             <IndentRow>
               <IndentButton
-                onClick={() => setIndent(Math.max(0, indent - 1))}
+                type="button"
+                onClick={() => changeIndent(indent - 1)}
                 disabled={indent <= 0}
                 title="Decrease indent"
+                data-testid="fc-indent-decrease"
               >
                 -
               </IndentButton>
-              <IndentValue>{indent}</IndentValue>
+              <NumberInput
+                id="fc-indent"
+                type="number"
+                min={0}
+                max={MAX_INDENT}
+                step={1}
+                value={indentText.text}
+                onChange={(e) => {
+                  indentText.setText(e.target.value);
+                  const n = typedNumber(e.target.value);
+                  if (n === null) return;
+                  // Excel's range is 0..250; a typed value past it is held at
+                  // the limit rather than silently ignored.
+                  const next = clampIndent(n);
+                  indentText.wrote(next);
+                  changeIndent(next);
+                }}
+                onBlur={() => indentText.setText(String(indent))}
+                aria-label="Indent level"
+                data-testid="fc-indent"
+              />
               <IndentButton
-                onClick={() => setIndent(Math.min(15, indent + 1))}
-                disabled={indent >= 15}
+                type="button"
+                onClick={() => changeIndent(indent + 1)}
+                disabled={indent >= MAX_INDENT}
                 title="Increase indent"
+                data-testid="fc-indent-increase"
               >
                 +
               </IndentButton>
@@ -131,18 +216,63 @@ export function AlignmentTab(): React.ReactElement {
       {/* Orientation section */}
       <Section>
         <SectionTitle>Orientation</SectionTitle>
-        <FieldGroup>
-          <FieldLabel>Text rotation:</FieldLabel>
-          <Select
-            value={textRotation}
-            onChange={(e) => setTextRotation(e.target.value)}
+        <OrientationRow>
+          {/* Excel's left box: the stacked "Text" (Vertical Text). */}
+          <StackedToggle
+            type="button"
+            aria-pressed={orientation.stacked}
+            $active={orientation.stacked}
+            onClick={() => setTextRotation("vertical")}
+            title="Vertical text (one character per line)"
+            data-testid="fc-orientation-stacked"
           >
-            {ROTATION_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value}>
-                {opt.label}
-              </option>
+            {"Text".split("").map((ch, i) => (
+              <span key={i}>{ch}</span>
             ))}
-          </Select>
+          </StackedToggle>
+          {/* Excel's dial, as its five one-click angles. */}
+          <AngleColumn role="group" aria-label="Angle">
+            {ANGLE_PRESETS.map((deg) => {
+              const active = !orientation.stacked && orientation.degrees === deg;
+              return (
+                <AngleButton
+                  key={deg}
+                  type="button"
+                  aria-pressed={active}
+                  $active={active}
+                  onClick={() => setTextRotation(textRotationForDegrees(deg))}
+                  data-testid={`fc-orientation-${deg}`}
+                >
+                  <AngleSample style={{ transform: `rotate(${-deg}deg)` }}>Text</AngleSample>
+                  <AngleLabel>{`${deg}°`}</AngleLabel>
+                </AngleButton>
+              );
+            })}
+          </AngleColumn>
+        </OrientationRow>
+        <FieldGroup>
+          <FieldLabel htmlFor="fc-orientation-degrees">Degrees:</FieldLabel>
+          <NumberInput
+            id="fc-orientation-degrees"
+            type="number"
+            min={-90}
+            max={90}
+            step={1}
+            value={degreesText.text}
+            onChange={(e) => {
+              degreesText.setText(e.target.value);
+              const n = typedNumber(e.target.value);
+              if (n === null) return;
+              // Excel's range is -90..90. Typing an angle leaves stacked text,
+              // as choosing a point on Excel's dial does.
+              const clamped = Math.max(-90, Math.min(90, Math.round(n)));
+              degreesText.wrote(clamped);
+              setTextRotation(textRotationForDegrees(clamped));
+            }}
+            onBlur={() => degreesText.setText(String(orientation.degrees))}
+            aria-label="Degrees"
+            data-testid="fc-orientation-degrees"
+          />
         </FieldGroup>
 
         {/* Visual preview of alignment */}
@@ -151,11 +281,20 @@ export function AlignmentTab(): React.ReactElement {
             style={{
               textAlign: textAlign === "general" ? "left" : (textAlign as React.CSSProperties["textAlign"]),
               verticalAlign: verticalAlign as React.CSSProperties["verticalAlign"],
-              paddingLeft: indent > 0 ? `${indent * 8}px` : undefined,
+              // Excel has no centred indent (the grid ignores it there too).
+              paddingLeft: indent > 0 && textAlign !== "center" ? `${Math.min(indent, 20) * 8}px` : undefined,
               fontSize: shrinkToFit ? "10px" : undefined,
             }}
           >
-            Sample Text
+            <span
+              style={
+                orientation.stacked
+                  ? { writingMode: "vertical-rl", textOrientation: "upright" }
+                  : { display: "inline-block", transform: `rotate(${-orientation.degrees}deg)` }
+              }
+            >
+              Sample Text
+            </span>
           </PreviewText>
         </PreviewBox>
       </Section>
@@ -264,11 +403,73 @@ const IndentButton = styled.button<{ disabled?: boolean }>`
   }
 `;
 
-const IndentValue = styled.span`
-  min-width: 28px;
-  text-align: center;
+const NumberInput = styled.input`
+  width: 64px;
+  padding: 5px 8px;
   font-size: 13px;
+  background: ${v("--grid-bg")};
+  border: 1px solid ${v("--border-default")};
+  border-radius: 4px;
   color: ${v("--text-primary")};
+  outline: none;
+
+  &:focus {
+    border-color: ${v("--accent-primary")};
+  }
+`;
+
+const OrientationRow = styled.div`
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+`;
+
+/** Excel's stacked "Text" box: the word written one letter per line. */
+const StackedToggle = styled.button<{ $active: boolean }>`
+  width: 32px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  font-size: 12px;
+  line-height: 1.1;
+  background: ${(p) => (p.$active ? v("--accent-primary") : v("--grid-bg"))};
+  color: ${(p) => (p.$active ? "#ffffff" : v("--text-primary"))};
+  border: 1px solid ${v("--border-default")};
+  border-radius: 4px;
+  cursor: pointer;
+`;
+
+const AngleColumn = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+`;
+
+const AngleButton = styled.button<{ $active: boolean }>`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 8px;
+  font-size: 12px;
+  background: ${(p) => (p.$active ? v("--accent-primary") : v("--grid-bg"))};
+  color: ${(p) => (p.$active ? "#ffffff" : v("--text-primary"))};
+  border: 1px solid ${v("--border-default")};
+  border-radius: 4px;
+  cursor: pointer;
+  overflow: hidden;
+`;
+
+const AngleSample = styled.span`
+  display: inline-block;
+`;
+
+const AngleLabel = styled.span`
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
 `;
 
 const PreviewBox = styled.div`
@@ -280,6 +481,7 @@ const PreviewBox = styled.div`
   background: ${v("--grid-bg")};
   display: flex;
   padding: 4px;
+  overflow: hidden;
 `;
 
 const PreviewText = styled.div`

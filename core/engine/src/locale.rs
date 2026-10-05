@@ -368,6 +368,30 @@ impl LocaleSettings {
         }
     }
 
+    /// How this region's ACCOUNTING pattern spells a negative: parentheses or
+    /// a leading minus. Read when an Accounting format is APPLIED and frozen
+    /// into it (`NumberFormat::Accounting::negative_style`), the way Excel
+    /// writes the region's pattern into the format code.
+    ///
+    /// THE EVIDENCE. sv-SE, measured live on Excel 16 on 2026-10-04: the
+    /// Accounting button writes `_-* # ##0,00 kr_-;-* # ##0,00 kr_-;...` and
+    /// Comma Style `_-* # ##0,00_-;-* # ##0,00_-;...`; -42 shows
+    /// `"-         42,00 "` -- a minus at the LEFT edge, before the fill. en-US
+    /// cannot be measured on a Swedish machine; its pattern is OOXML built-in
+    /// numFmt 44, `_("$"* #,##0.00_);_("$"* \(#,##0.00\);...`, which is also
+    /// the en-US "Currency" cell style the Accounting button applies there.
+    /// Every other locale this table knows writes Excel's minus pattern
+    /// (`_-£* #,##0.00_-;-£* #,##0.00_-` in en-GB), so en-US is the one
+    /// parenthesised region -- matched on the Windows locale NAME, because
+    /// `LOCALE_INEGCURR` describes plain CURRENCY and Excel's accounting
+    /// pattern does not follow it.
+    pub fn accounting_negative_style(&self) -> crate::style::NegativeStyle {
+        if self.locale_id.eq_ignore_ascii_case("en-US") {
+            crate::style::NegativeStyle::Parentheses
+        } else {
+            crate::style::NegativeStyle::Minus
+        }
+    }
 }
 
 /// Localized month and weekday names for the `mmm`/`mmmm`/`mmmmm`/`ddd`/`dddd`
@@ -661,5 +685,31 @@ mod tests {
             assert_eq!(cal.month_full(13), "???");
             assert_eq!(cal.day_full(7), "???");
         }
+    }
+
+    /// en-US is the one region whose accounting pattern brackets negatives;
+    /// sv-SE (measured live) and every other table entry use a leading minus.
+    #[test]
+    fn only_en_us_accounting_brackets_its_negatives() {
+        use crate::style::NegativeStyle;
+        assert_eq!(
+            LocaleSettings::invariant().accounting_negative_style(),
+            NegativeStyle::Parentheses
+        );
+        for (id, _) in LocaleSettings::supported_locales() {
+            let expected = if id == "en-US" {
+                NegativeStyle::Parentheses
+            } else {
+                NegativeStyle::Minus
+            };
+            assert_eq!(
+                LocaleSettings::from_locale_id(&id).accounting_negative_style(),
+                expected,
+                "{id}"
+            );
+        }
+        // The Windows locale NAME decides, whatever its case.
+        let lower = LocaleSettings { locale_id: "en-us".to_string(), ..LocaleSettings::invariant() };
+        assert_eq!(lower.accounting_negative_style(), NegativeStyle::Parentheses);
     }
 }

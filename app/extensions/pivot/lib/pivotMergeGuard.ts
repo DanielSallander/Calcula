@@ -32,8 +32,8 @@ function overlaps(a: Rect, b: Rect): boolean {
 
 /**
  * `true` when no block of the selection touches a pivot region on this sheet,
- * else `refusal`. EVERY block is checked (the existing structural guards read
- * only the main range; a Ctrl+click selection merges each block).
+ * else `refusal`. EVERY block is checked: a Ctrl+click selection merges each
+ * block (the row/column guards beside it, pivotStructuralGuard.ts, do the same).
  */
 export function pivotMergeGuard(
   selection: Selection | null,

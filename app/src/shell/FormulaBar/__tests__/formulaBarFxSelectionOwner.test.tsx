@@ -52,6 +52,9 @@ vi.mock("../InsertFunctionDialog", () => ({
 }));
 
 import { FormulaBar } from "../FormulaBar";
+// The dialog is hosted OUTSIDE the bar (insertFunctionHost.tsx), mounted by the
+// shell frame; rendered here beside the bar, as the frame does.
+import { InsertFunctionHost, resetInsertFunctionForTests } from "../insertFunctionHost";
 import { registerSelectionOwner } from "../../../api/selectionOwner";
 import { registerToastSink, type ToastPayload } from "../../../api/notifications";
 
@@ -96,8 +99,11 @@ beforeEach(async () => {
     ownsSelection: () => owned,
     refusal: SENTENCE,
   });
+  resetInsertFunctionForTests();
   await act(async () => {
-    root.render(React.createElement(FormulaBar));
+    root.render(
+      React.createElement(React.Fragment, null, React.createElement(FormulaBar), React.createElement(InsertFunctionHost)),
+    );
   });
   await flush();
 });

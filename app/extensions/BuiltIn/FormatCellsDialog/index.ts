@@ -17,11 +17,25 @@ let isActivated = false;
 /** Undoes this activation's command registration (see deactivate). */
 let unregisterCommand: (() => void) | null = null;
 
-/** The tab a FORMAT_CELLS caller asked for (`{ tab: "number" }`), or null. */
-function requestedTab(args: unknown): string | null {
+/** A non-empty string argument of a FORMAT_CELLS caller, or null. */
+function stringArg(args: unknown, key: "tab" | "category"): string | null {
   if (typeof args !== "object" || args === null) return null;
-  const tab = (args as { tab?: unknown }).tab;
-  return typeof tab === "string" && tab !== "" ? tab : null;
+  const value = (args as Record<string, unknown>)[key];
+  return typeof value === "string" && value !== "" ? value : null;
+}
+
+/**
+ * What a FORMAT_CELLS caller asked the dialog to open on: `{ tab }` (the
+ * ribbon's dialog launchers, "More Number Formats...", "More Borders...") and
+ * `{ category }` -- a Number-tab category, which is how the Accounting split
+ * button's "More Accounting Formats..." opens on Accounting as Excel's does. A
+ * category alone implies the Number tab, the only tab with categories.
+ */
+function requestedView(args: unknown): { tab: string; category?: string } | null {
+  const tab = stringArg(args, "tab");
+  const category = stringArg(args, "category");
+  if (category !== null) return { tab: tab ?? "number", category };
+  return tab !== null ? { tab } : null;
 }
 
 // ============================================================================
@@ -49,12 +63,13 @@ function activate(context: ExtensionContext): void {
   // through here, and the dialog formats Core's selection -- so while something
   // else owns the selection (BUG-0185) it does not open at all. The two "More"
   // rows opened the dialog directly, past this check, until the review of
-  // BUG-0185; they now pass `{ tab }`, which opens it on that tab.
+  // BUG-0185; they now pass `{ tab }`, which opens it on that tab, and
+  // optionally `{ category }` for the Number tab's category list.
   context.commands.register(CoreCommands.FORMAT_CELLS, (args?: unknown) => {
     if (refuseIfSelectionOwned("Format Cells")) return;
-    const tab = requestedTab(args);
-    if (tab === null) DialogExtensions.openDialog("format-cells");
-    else DialogExtensions.openDialog("format-cells", { tab });
+    const view = requestedView(args);
+    if (view === null) DialogExtensions.openDialog("format-cells");
+    else DialogExtensions.openDialog("format-cells", view);
   });
   // Deactivate takes it away: a deactivated extension must not keep answering
   // the registry's Ctrl+1 (D3 class).

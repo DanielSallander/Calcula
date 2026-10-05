@@ -14,6 +14,8 @@ import {
   firstFocusable,
   type PopoverProps,
 } from "../primitives/Popover";
+import { POPOVER_CARD_BORDER, POPOVER_CARD_PADDING } from "../tokens";
+import { declared } from "./colourScan";
 
 /**
  * findHardcodedColours with its one known false positive neutralised. The
@@ -336,6 +338,65 @@ describe("Popover — placement", () => {
   it("right-start clamps its top into the viewport", () => {
     const low = { left: 100, top: 700, right: 200, bottom: 728 };
     expect(computePopoverPosition(low, 240, 300, "right-start", 2, 1200, 800).top).toBe(800 - 300 - 4);
+  });
+
+  it("alignOffset shifts right-start along the anchor's edge (down; negative lifts), flipped or not", () => {
+    // MenuSub passes -(border + padding) so a flyout's first row lines up
+    // with the row that opened it, as Excel's do.
+    expect(computePopoverPosition(anchor, 240, 300, "right-start", 4, 1200, 800, -9)).toEqual({
+      left: 204,
+      top: 41,
+    });
+    const nearEdge = { left: 1000, top: 50, right: 1100, bottom: 78 };
+    expect(computePopoverPosition(nearEdge, 240, 300, "right-start", 4, 1200, 800, -9)).toEqual({
+      left: 1000 - 4 - 240,
+      top: 41,
+    });
+    // Still clamped into the viewport at both ends.
+    const top = { left: 100, top: 6, right: 200, bottom: 34 };
+    expect(computePopoverPosition(top, 240, 300, "right-start", 4, 1200, 800, -9).top).toBe(4);
+    const low = { left: 100, top: 700, right: 200, bottom: 728 };
+    expect(computePopoverPosition(low, 240, 300, "right-start", 4, 1200, 800, -9).top).toBe(800 - 300 - 4);
+  });
+
+  it("alignOffset is the HORIZONTAL shift for the bottom-* and top-* placements (the cross axis)", () => {
+    expect(computePopoverPosition(anchor, 240, 300, "bottom-start", 2, 1200, 800, 10)).toEqual({ left: 110, top: 80 });
+    expect(
+      computePopoverPosition({ ...anchor, left: 600, right: 700 }, 240, 300, "bottom-end", 2, 1200, 800, -10).left,
+    ).toBe(450);
+    const statusBar = { left: 180, top: 776, right: 220, bottom: 800 };
+    expect(computePopoverPosition(statusBar, 240, 300, "top-start", 2, 1200, 800, 6).left).toBe(186);
+    // Clamped like any other left.
+    expect(computePopoverPosition(anchor, 240, 300, "bottom-start", 2, 1200, 800, -200).left).toBe(4);
+  });
+
+  it("alignOffset defaults to 0: every placement computes exactly what it did before", () => {
+    for (const placement of ["bottom-start", "bottom-end", "right-start", "top-start", "top-end"] as const) {
+      expect(computePopoverPosition(anchor, 240, 300, placement, 2, 1200, 800)).toEqual(
+        computePopoverPosition(anchor, 240, 300, placement, 2, 1200, 800, 0),
+      );
+    }
+  });
+
+  it("a rendered right-start card with alignOffset sits that far above its anchor's top", () => {
+    const row = document.createElement("div");
+    row.getBoundingClientRect = () => ({ left: 100, top: 300, right: 340, bottom: 330 }) as DOMRect;
+    document.body.appendChild(row);
+    render(
+      <Popover anchorEl={row} open onClose={() => undefined} card placement="right-start" offset={4} alignOffset={-9}>
+        <div>flyout</div>
+      </Popover>,
+    );
+    expect(flyout()!.style.top).toBe("291px");
+    expect(flyout()!.style.left).toBe("344px");
+  });
+
+  it("the card chrome's padding and border are the tokens a flyout aligns by", () => {
+    render(<Harness card />);
+    // jsdom drops a border shorthand written with var(), so the declared rule
+    // text is read instead (colourScan.declared).
+    expect(getComputedStyle(flyout()!).padding).toBe(`${POPOVER_CARD_PADDING}px`);
+    expect(declared(flyout()!, "border")).toMatch(new RegExp(`^${POPOVER_CARD_BORDER}px solid `));
   });
 
   it("offset is honoured", () => {

@@ -18,7 +18,7 @@ import {
   resetState,
 } from "./lib/cfStore";
 import { conditionalFormattingInterceptor } from "./lib/cfInterceptor";
-import { setMenuSelection, registerCFMenuItems } from "./handlers/homeMenuBuilder";
+import { setMenuSelection, registerCFMenuItems, refreshClearScopes } from "./handlers/homeMenuBuilder";
 import { QUICK_CF_DIALOG_ID, RULES_MANAGER_DIALOG_ID, NEW_RULE_DIALOG_ID } from "./handlers/homeMenuBuilder";
 import { renderDataBars } from "./rendering/dataBarRenderer";
 import { renderIconSets } from "./rendering/iconSetRenderer";
@@ -32,6 +32,10 @@ import { NewRuleDialog } from "./components/NewRuleDialog";
 
 let isActivated = false;
 const cleanupFns: (() => void)[] = [];
+
+/** How long the selection must rest before "This Table / This PivotTable"
+ *  are re-derived (two backend lookups per derivation). */
+const CLEAR_SCOPE_REFRESH_MS = 120;
 
 // ============================================================================
 // Helpers
@@ -120,6 +124,24 @@ function activate(context: ExtensionContext): void {
 
   // 6. Subscribe to events
 
+  // "Clear Rules from This Table / This PivotTable" are enabled only while the
+  // ACTIVE cell is in one (Excel). Their state is a function of the active
+  // cell, the sheet, the tables and the pivots, so each of those prompts a
+  // re-derivation -- coalesced, because a held arrow key moves the selection
+  // thirty times a second and each derivation asks the backend twice.
+  let scopeTimer: ReturnType<typeof setTimeout> | null = null;
+  const scheduleScopeRefresh = () => {
+    if (scopeTimer !== null) clearTimeout(scopeTimer);
+    scopeTimer = setTimeout(() => {
+      scopeTimer = null;
+      void refreshClearScopes();
+    }, CLEAR_SCOPE_REFRESH_MS);
+  };
+  cleanupFns.push(() => {
+    if (scopeTimer !== null) clearTimeout(scopeTimer);
+    scopeTimer = null;
+  });
+
   // Selection changed: update cached selection for menu actions
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {
     if (!sel) return;
@@ -129,8 +151,16 @@ function activate(context: ExtensionContext): void {
       endRow: sel.endRow ?? sel.activeRow,
       endCol: sel.endCol ?? sel.activeCol,
     });
+    scheduleScopeRefresh();
   });
   cleanupFns.push(unsubSelection);
+
+  for (const evt of [AppEvents.TABLE_CREATED, AppEvents.TABLE_DEFINITIONS_UPDATED]) {
+    cleanupFns.push(context.events.on(evt, scheduleScopeRefresh));
+  }
+  // Pivots announce themselves on a window event (no AppEvent exists for it).
+  window.addEventListener("pivot:refresh", scheduleScopeRefresh);
+  cleanupFns.push(() => window.removeEventListener("pivot:refresh", scheduleScopeRefresh));
 
   // Sheet changed: reset state and reload with actual viewport
   const unsubSheet = context.events.on(AppEvents.SHEET_CHANGED, () => {
@@ -139,6 +169,7 @@ function activate(context: ExtensionContext): void {
     refreshRules().then(() => {
       evaluateViewport(vp.startRow, vp.startCol, vp.endRow, vp.endCol);
     });
+    scheduleScopeRefresh();
   });
   cleanupFns.push(unsubSheet);
 
@@ -174,6 +205,8 @@ function activate(context: ExtensionContext): void {
       const vp = getCurrentViewportBounds();
       evaluateViewport(vp.startRow, vp.startCol, vp.endRow, vp.endCol);
     });
+    // A structural edit moves tables and pivots too.
+    scheduleScopeRefresh();
   };
   for (const evt of [
     AppEvents.ROWS_INSERTED,

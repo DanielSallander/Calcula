@@ -45,9 +45,17 @@ test.describe("Format + Sort + Filter pipeline", () => {
     });
     await grid.page.waitForTimeout(300);
 
-    // Verify sort: 90, 75, 45, 30
-    expect(await grid.getCellDisplayValue("B801")).toBe("90");
-    expect(await grid.getCellDisplayValue("B802")).toBe("75");
+    // Verify sort: 90, 75, 45, 30. Comma Style is Excel's since 2026-10-04
+    // (Accounting, no symbol, 2 decimals), so the cells SHOW "90,00 " and
+    // the like; the sorted VALUES are what this step is about.
+    const shown = async (ref: string) =>
+      // JS \s covers the no-break, narrow no-break and figure spaces the
+      // accounting layout pads with.
+      parseFloat((await grid.getCellDisplayValue(ref)).replace(/\s/g, "").replace(",", "."));
+    expect(await shown("B801")).toBe(90);
+    expect(await shown("B802")).toBe(75);
+    expect(await shown("B803")).toBe(45);
+    expect(await shown("B804")).toBe(30);
 
     // 5. Apply auto filter
     await grid.page.evaluate(async () => {
@@ -58,13 +66,16 @@ test.describe("Format + Sort + Filter pipeline", () => {
     });
     await grid.page.waitForTimeout(300);
 
-    // 6. Filter to scores > 50 (show Charlie=90 and Bob=75)
-    await grid.page.evaluate(async () => {
+    // 6. Filter to scores > 50 (show Charlie=90 and Bob=75). A values filter
+    // matches the text a cell SHOWS (Excel's AutoFilter list), so the values are
+    // read back from the formatted cells rather than spelled "90" / "75".
+    const keep = [await grid.getCellDisplayValue("B801"), await grid.getCellDisplayValue("B802")];
+    await grid.page.evaluate(async (values) => {
       const tauri = (window as any).__TAURI__;
       await tauri.core.invoke("set_column_filter_values", {
-        columnIndex: 1, values: ["90", "75"], includeBlanks: false,
+        columnIndex: 1, values, includeBlanks: false,
       });
-    });
+    }, keep);
     await grid.page.waitForTimeout(300);
 
     const hidden = await grid.page.evaluate(async () => {
@@ -72,6 +83,10 @@ test.describe("Format + Sort + Filter pipeline", () => {
       return tauri.core.invoke("get_hidden_rows");
     });
     expect(hidden.length).toBeGreaterThan(0);
+    // Exactly the two low scores are hidden (0-based rows 802/803), never the kept ones.
+    expect(hidden).toEqual(expect.arrayContaining([802, 803]));
+    expect(hidden).not.toContain(800);
+    expect(hidden).not.toContain(801);
 
     // 7. Clear filter and remove auto filter
     await grid.page.evaluate(async () => {
@@ -84,7 +99,7 @@ test.describe("Format + Sort + Filter pipeline", () => {
     // 8. Verify formatting survived the sort + filter round-trip
     expect(await grid.getCellStyleProp("A800", "bold")).toBe(true);
     const fmt = await grid.getCellStyleStringProp("B801", "numberFormat");
-    expect(fmt).toContain("separator");
+    expect(fmt).toMatch(/^Accounting \(, 2 decimals/);
   });
 });
 
@@ -157,11 +172,14 @@ test.describe("Copy-paste with formulas and formatting combined", () => {
   test("copy block with formulas, formatting, and number format", async ({ grid }) => {
     // Source block: A820-B822 with formula in B, bold in A, percent format in B
     await grid.setCellValueDirect("A820", "Revenue");
-    await grid.setCellValueDirect("B820", "0.15");
+    // Whole numbers and a /100 in the formula: the harness runs sv-SE, where a
+    // typed "0.15" is TEXT (the decimal mark is a comma) and B820-B821 would be
+    // #VALUE!. The margin is still 0.07, so the percent button still shows 7 %.
+    await grid.setCellValueDirect("B820", "15");
     await grid.setCellValueDirect("A821", "Cost");
-    await grid.setCellValueDirect("B821", "0.08");
+    await grid.setCellValueDirect("B821", "8");
     await grid.setCellValueDirect("A822", "Margin");
-    await grid.setCellValueDirect("B822", "=B820-B821");
+    await grid.setCellValueDirect("B822", "=(B820-B821)/100");
 
     // Bold labels
     for (const ref of ["A820", "A821", "A822"]) {
@@ -176,7 +194,7 @@ test.describe("Copy-paste with formulas and formatting combined", () => {
     // Verify source
     expect(await grid.getCellStyleProp("A820", "bold")).toBe(true);
     const display = await grid.getCellDisplayValue("B822");
-    expect(display).toMatch(/7\s*%/); // 0.15 - 0.08 = 0.07 = 7%
+    expect(display).toMatch(/7\s*%/); // (15 - 8) / 100 = 0.07 = 7%
 
     // Copy and paste the block
     await grid.selectRange("A820", "B822");

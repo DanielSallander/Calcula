@@ -1026,6 +1026,7 @@ fn test_create_protected_region() {
         start_col: 10,
         end_row: 20,
         end_col: 15,
+        reserved_only: false,
     };
     assert_eq!(region.id, "pivot-1");
     assert_eq!(region.region_type, "pivot");
@@ -1045,6 +1046,7 @@ fn test_protected_region_boundaries() {
             start_col: 5,
             end_row: 10,
             end_col: 10,
+            reserved_only: false,
         });
     }
 
@@ -1067,10 +1069,12 @@ fn test_protected_regions_different_sheets() {
         regions.push(ProtectedRegion {
             id: "pivot-1".into(), region_type: "pivot".into(), owner_id: pid(1),
             sheet_index: 0, start_row: 0, start_col: 0, end_row: 10, end_col: 5,
+            reserved_only: false,
         });
         regions.push(ProtectedRegion {
             id: "pivot-2".into(), region_type: "pivot".into(), owner_id: pid(2),
             sheet_index: 1, start_row: 0, start_col: 0, end_row: 10, end_col: 5,
+            reserved_only: false,
         });
     }
 

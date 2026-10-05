@@ -23,14 +23,22 @@ export function normaliseBlock(r: SelectionRange): Block {
 }
 
 /**
- * Every block of the selection: the main range plus each Ctrl+click range,
+ * Every block of the selection: the MAIN range FIRST -- the block that holds
+ * the active cell -- then each other range (Ctrl+click, Go To Special),
  * normalised. A block that repeats an earlier one EXACTLY (the same cell
  * Ctrl+clicked twice) is dropped, so a duplicate click does not read as two
  * overlapping blocks and silently cancel the command.
+ *
+ * THE ONE RULE (review finding (h), 2026-10-04): extensions reach it as
+ * `@api/selectionBlocks`; there were three copies (this one, the Home tab's
+ * editing rules and its Borders runner) and one of them did not de-duplicate.
+ * Main first, because a command that reads the active cell's state (the
+ * decimals step, a toggle) takes it from the first block. It listed the main
+ * range LAST until then; nothing but the merge announcement read the order.
  */
 export function selectionBlocks(sel: Selection | null | undefined): Block[] {
   if (!sel) return [];
-  const all = [...(sel.additionalRanges ?? []), sel].map(normaliseBlock);
+  const all = [sel, ...(sel.additionalRanges ?? [])].map(normaliseBlock);
   const out: Block[] = [];
   for (const b of all) {
     if (!out.some((o) => sameBlock(o, b))) out.push(b);

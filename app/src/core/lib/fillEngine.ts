@@ -433,6 +433,74 @@ export interface PendingFill {
   sourceStyleIndex: number;
 }
 
+/** One source cell of a fill line: where it is, what it holds, its style. */
+export interface FillLineCell {
+  row: number;
+  col: number;
+  /** The cell's formula when it has one, else its display text ("" for empty). */
+  value: string;
+  styleIndex: number;
+}
+
+/** One line (a column for a vertical fill, a row for a horizontal one) to fill. */
+export interface FillLine {
+  /** The source cells, in READING order (top to bottom, left to right). */
+  source: FillLineCell[];
+  /** The cells to fill, in FILL order: nearest the source first. */
+  targets: Array<{ row: number; col: number }>;
+  /**
+   * Filling UP or LEFT: the source is read from its far end (the cell next to
+   * the first target first) and its values are handed to the engine reversed.
+   */
+  backward?: boolean;
+}
+
+/**
+ * The pattern a fill line follows: the engine's inference over the line's
+ * NON-formula values (all of them when every one is a formula). A formula is
+ * shifted, not extrapolated, so it must not decide the series the literals
+ * around it follow.
+ */
+export function fillPatternFor(values: string[]): PatternResult {
+  const nonFormulaValues = values.filter((v) => !v.startsWith("="));
+  return detectPattern(nonFormulaValues.length > 0 ? nonFormulaValues : values);
+}
+
+/**
+ * THE per-line AutoFill plan -- "like dragging the fill handle" -- for every
+ * door that fills that way: the drag (useFillHandle.completeFill), the
+ * double-click fill to the edge, and Fill > Series > AutoFill (through
+ * @api/fillPatterns). Review finding (j), 2026-10-04: the loop was copied into
+ * the Series runner without the formula filter, so ["Item 1", "=B1"] filled
+ * as a copy from Series and as a text increment from the drag.
+ *
+ * Target i takes fill index `source.length + i` and the source cell at that
+ * index modulo the source length (cycling); the pattern is read once per line
+ * (`fillPatternFor`) in reading order. Hand the result to processPendingFills.
+ */
+export function planFillLine(line: FillLine): PendingFill[] {
+  const count = line.source.length;
+  if (count === 0 || line.targets.length === 0) return [];
+  const pattern = fillPatternFor(line.source.map((c) => c.value));
+  const ordered = line.backward ? line.source.slice().reverse() : line.source;
+  const allSourceValues = ordered.map((c) => c.value);
+  return line.targets.map((target, i) => {
+    const fillIndex = count + i;
+    const from = ordered[fillIndex % count];
+    return {
+      row: target.row,
+      col: target.col,
+      sourceValue: from.value,
+      sourceRow: from.row,
+      sourceCol: from.col,
+      pattern,
+      allSourceValues,
+      fillIndex,
+      sourceStyleIndex: from.styleIndex,
+    };
+  });
+}
+
 /**
  * Compute the fill value for a non-formula cell synchronously.
  */

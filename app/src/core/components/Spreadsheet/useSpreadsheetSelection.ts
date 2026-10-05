@@ -32,7 +32,6 @@ import {
   beginUndoTransaction,
   commitUndoTransaction,
   cancelUndoTransaction,
-  fillRange,
   calculateNow,
   calculateSheet,
   recalcControlDependents,
@@ -86,6 +85,14 @@ import { emitAppEvent, AppEvents, type MutationDomain } from "../../../api/event
 import { showToast } from "../../../api/notifications";
 import type { GridCanvasHandle } from "../Grid";
 import { alertAsync } from "../../lib/dialogs";
+import { runFillCommand, type FillDirection } from "../../lib/fillCommands";
+import { activeCellOf } from "../../lib/activeCell";
+import { selectionBlocks } from "../../lib/merge/mergeGeometry";
+import {
+  runAutoFitColumnWidth,
+  runAutoFitRowHeight,
+  type AutoFitCommandHost,
+} from "../../lib/autoFitCommands";
 
 /**
  * The closes the resize / auto-fit / hide gestures make, bound to the begin's
@@ -1535,54 +1542,70 @@ export function useSpreadsheetSelection({
   // -------------------------------------------------------------------------
 
   /**
-   * Helper: Get rows and cols arrays from the current selection.
-   */
-  const getSelectionRowsCols = useCallback((): { rows: number[]; cols: number[] } | null => {
-    if (!selection) return null;
-    const minRow = Math.min(selection.startRow, selection.endRow);
-    const maxRow = Math.max(selection.startRow, selection.endRow);
-    const minCol = Math.min(selection.startCol, selection.endCol);
-    const maxCol = Math.max(selection.startCol, selection.endCol);
-
-    const rows: number[] = [];
-    const cols: number[] = [];
-    for (let r = minRow; r <= maxRow; r++) rows.push(r);
-    for (let c = minCol; c <= maxCol; c++) cols.push(c);
-    return { rows, cols };
-  }, [selection]);
-
-  /**
-   * Helper: Apply formatting to the current selection and refresh canvas.
+   * Helper: Apply formatting to EVERY block of the current selection and
+   * refresh the canvas.
+   *
+   * Every block (`selectionBlocks`: the main range first, then each Ctrl+click
+   * / Go To Special range): this formatted the MAIN range only, so after Go To
+   * Special > Constants (one area per run of matches) Ctrl+B bolded the first
+   * area and left the rest -- where it had bolded the bounding box before Go To
+   * Special learned to select exact areas (review, 2026-10-04). Several blocks
+   * are ONE undo step (an owned transaction, as the clear gestures do); a
+   * refusal on a later block commits what landed, so one Ctrl+Z restores it,
+   * and every refusal is SHOWN (it was logged only). Then "grid:refresh", so
+   * the ribbon's pressed Bold re-reads after the keyboard changed it.
    */
   const applyFormattingToSelection = useCallback(async (formatting: FormattingOptions) => {
-    const rc = getSelectionRowsCols();
-    if (!rc) return;
+    const blocks = selectionBlocks(selection);
+    if (blocks.length === 0) return;
 
+    let tx: OwnedUndoTransaction | null = null;
+    let landed = 0;
     try {
-      await applyFormatting(rc.rows, rc.cols, formatting);
-
-      // Refresh canvas to show updated styles
-      const canvas = canvasRef.current;
-      if (canvas) {
-        await canvas.refreshCells();
-        canvas.redraw();
+      if (blocks.length > 1) {
+        tx = ownUndoTransaction(await beginUndoTransaction("Format Cells"), UNDO_CLOSES);
       }
+      for (const b of blocks) {
+        const rows: number[] = [];
+        const cols: number[] = [];
+        for (let r = b.startRow; r <= b.endRow; r++) rows.push(r);
+        for (let c = b.startCol; c <= b.endCol; c++) cols.push(c);
+        await applyFormatting(rows, cols, formatting);
+        landed++;
+      }
+      await tx?.commit();
     } catch (error) {
       console.error("[useSpreadsheetSelection] applyFormatting failed:", error);
+      if (landed > 0) await tx?.commit().catch(() => {});
+      else await tx?.cancel().catch(() => {});
+      await alertAsync(error instanceof Error ? error.message : String(error));
+      if (landed === 0) return;
     }
-  }, [getSelectionRowsCols, canvasRef]);
+
+    // Refresh canvas to show updated styles
+    const canvas = canvasRef.current;
+    if (canvas) {
+      await canvas.refreshCells();
+      canvas.redraw();
+    }
+    window.dispatchEvent(new CustomEvent("grid:refresh"));
+  }, [selection, canvasRef]);
 
   /**
    * Helper: Toggle a boolean formatting property (bold, italic, underline, strikethrough).
-   * Reads the active cell's current style to determine the toggle direction.
-   * If the active cell has the property ON, turns it OFF for the entire selection (and vice versa).
+   * Reads the ACTIVE cell's current style to determine the toggle direction
+   * (`activeCellOf`: the cell the grid draws as active -- never the anchor,
+   * which Go To Special puts at the far corner; the Home ribbon reads the same
+   * cell, so the shortcut and the button agree). If the active cell has the
+   * property ON, turns it OFF for the entire selection (and vice versa).
    */
   const toggleFormatProperty = useCallback(async (property: "bold" | "italic" | "underline" | "strikethrough") => {
-    if (!selection) return;
+    const active = activeCellOf(selection);
+    if (!active) return;
 
     try {
       // Read the active cell's style to determine current state
-      const activeCell = await getCell(selection.startRow, selection.startCol);
+      const activeCell = await getCell(active.row, active.col);
       const styleIndex = activeCell?.styleIndex ?? 0;
       const style = await getStyle(styleIndex);
 
@@ -1604,124 +1627,28 @@ export function useSpreadsheetSelection({
   }, [selection, applyFormattingToSelection]);
 
   /**
-   * Handle Ctrl+D - Fill Down.
-   * Copies the contents and format of the topmost cell in the selection to cells below.
+   * Fill Down (Ctrl+D) / Fill Right (Ctrl+R) / Fill Up / Fill Left -- Excel's
+   * Fill menu (2026-10-04). The rules live in core/lib/fillCommands: several
+   * rows copy the top row down (and so on); ONE row or column copies from its
+   * neighbour above / left / below / right, as Excel does (each fill silently
+   * did nothing on one row); the sheet's edge does nothing; a refusal (a
+   * protected sheet) is SHOWN, where it used to be logged only.
    */
-  const handleFillDown = useCallback(async () => {
-    if (!selection) return;
+  const fillHandler = useCallback(
+    (direction: FillDirection) => async () => {
+      await runFillCommand(direction, {
+        selection,
+        totalRows: config.totalRows,
+        totalCols: config.totalCols,
+      });
+    },
+    [selection, config.totalRows, config.totalCols]
+  );
 
-    const minRow = Math.min(selection.startRow, selection.endRow);
-    const maxRow = Math.max(selection.startRow, selection.endRow);
-    const minCol = Math.min(selection.startCol, selection.endCol);
-    const maxCol = Math.max(selection.startCol, selection.endCol);
-
-    // Need at least 2 rows selected
-    if (maxRow <= minRow) return;
-
-    try {
-      // Single IPC call: source = first row, target = rows below
-      const updatedCells = await fillRange(
-        minRow, minCol, minRow, maxCol,       // source: first row
-        minRow + 1, minCol, maxRow, maxCol,   // target: rows below
-      );
-
-      if (updatedCells.length > 0) {
-        cellEvents.emitBatch(updatedCells.map(cellToChange), "fill");
-      }
-    } catch (error) {
-      console.error("[useSpreadsheetSelection] Fill Down failed:", error);
-    }
-  }, [selection]);
-
-  /**
-   * Handle Ctrl+R - Fill Right.
-   * Copies the contents and format of the leftmost cell in the selection to cells to the right.
-   */
-  const handleFillRight = useCallback(async () => {
-    if (!selection) return;
-
-    const minRow = Math.min(selection.startRow, selection.endRow);
-    const maxRow = Math.max(selection.startRow, selection.endRow);
-    const minCol = Math.min(selection.startCol, selection.endCol);
-    const maxCol = Math.max(selection.startCol, selection.endCol);
-
-    // Need at least 2 columns selected
-    if (maxCol <= minCol) return;
-
-    try {
-      // Single IPC call: source = first column, target = columns to the right
-      const updatedCells = await fillRange(
-        minRow, minCol, maxRow, minCol,       // source: first column
-        minRow, minCol + 1, maxRow, maxCol,   // target: columns to the right
-      );
-
-      if (updatedCells.length > 0) {
-        cellEvents.emitBatch(updatedCells.map(cellToChange), "fill");
-      }
-    } catch (error) {
-      console.error("[useSpreadsheetSelection] Fill Right failed:", error);
-    }
-  }, [selection]);
-
-  /**
-   * Handle Fill Up.
-   * Copies the contents and format of the bottommost cell in the selection to cells above.
-   */
-  const handleFillUp = useCallback(async () => {
-    if (!selection) return;
-
-    const minRow = Math.min(selection.startRow, selection.endRow);
-    const maxRow = Math.max(selection.startRow, selection.endRow);
-    const minCol = Math.min(selection.startCol, selection.endCol);
-    const maxCol = Math.max(selection.startCol, selection.endCol);
-
-    // Need at least 2 rows selected
-    if (maxRow <= minRow) return;
-
-    try {
-      // Single IPC call: source = last row, target = rows above
-      const updatedCells = await fillRange(
-        maxRow, minCol, maxRow, maxCol,       // source: last row
-        minRow, minCol, maxRow - 1, maxCol,   // target: rows above
-      );
-
-      if (updatedCells.length > 0) {
-        cellEvents.emitBatch(updatedCells.map(cellToChange), "fill");
-      }
-    } catch (error) {
-      console.error("[useSpreadsheetSelection] Fill Up failed:", error);
-    }
-  }, [selection]);
-
-  /**
-   * Handle Fill Left.
-   * Copies the contents and format of the rightmost cell in the selection to cells to the left.
-   */
-  const handleFillLeft = useCallback(async () => {
-    if (!selection) return;
-
-    const minRow = Math.min(selection.startRow, selection.endRow);
-    const maxRow = Math.max(selection.startRow, selection.endRow);
-    const minCol = Math.min(selection.startCol, selection.endCol);
-    const maxCol = Math.max(selection.startCol, selection.endCol);
-
-    // Need at least 2 columns selected
-    if (maxCol <= minCol) return;
-
-    try {
-      // Single IPC call: source = last column, target = columns to the left
-      const updatedCells = await fillRange(
-        minRow, maxCol, maxRow, maxCol,       // source: last column
-        minRow, minCol, maxRow, maxCol - 1,   // target: columns to the left
-      );
-
-      if (updatedCells.length > 0) {
-        cellEvents.emitBatch(updatedCells.map(cellToChange), "fill");
-      }
-    } catch (error) {
-      console.error("[useSpreadsheetSelection] Fill Left failed:", error);
-    }
-  }, [selection]);
+  const handleFillDown = useMemo(() => fillHandler("down"), [fillHandler]);
+  const handleFillRight = useMemo(() => fillHandler("right"), [fillHandler]);
+  const handleFillUp = useMemo(() => fillHandler("up"), [fillHandler]);
+  const handleFillLeft = useMemo(() => fillHandler("left"), [fillHandler]);
 
   // Register fill commands as grid commands (for menu execution via CommandRegistry)
   useEffect(() => {
@@ -1737,6 +1664,38 @@ export function useSpreadsheetSelection({
       gridCommands.unregister("fillLeft");
     };
   }, [handleFillDown, handleFillRight, handleFillUp, handleFillLeft]);
+
+  // AutoFit Column Width / AutoFit Row Height as COMMANDS -- Excel's Format
+  // menu (2026-10-04), and the Orientation menu's `{ growOnly: true }` after
+  // rotating text (the bridge forwards args). Not the header double-click
+  // above: these follow Excel's RIBBON rules (core/lib/autoFitCommands) --
+  // on a cell range a column is fitted to the SELECTED cells only, a row is
+  // always fitted whole, hidden rows / columns in the selection are unhidden,
+  // and the whole fit is one undo step.
+  const autoFitHost = useCallback(
+    (): AutoFitCommandHost => ({
+      selection,
+      config,
+      dimensions,
+      dispatch,
+      onColumnResized: (col, width) =>
+        emitAppEvent(AppEvents.COLUMN_RESIZED, { sheetIndex: sheetContext.activeSheetIndex, col, width }),
+      onRowResized: (row, height) =>
+        emitAppEvent(AppEvents.ROW_RESIZED, { sheetIndex: sheetContext.activeSheetIndex, row, height }),
+      redraw: () => canvasRef.current?.redraw(),
+    }),
+    [selection, config, dimensions, dispatch, sheetContext.activeSheetIndex, canvasRef]
+  );
+
+  useEffect(() => {
+    gridCommands.register("autoFitColumnWidth", (args) => runAutoFitColumnWidth(autoFitHost(), args));
+    gridCommands.register("autoFitRowHeight", (args) => runAutoFitRowHeight(autoFitHost(), args));
+
+    return () => {
+      gridCommands.unregister("autoFitColumnWidth");
+      gridCommands.unregister("autoFitRowHeight");
+    };
+  }, [autoFitHost]);
 
   // Register undo/redo with CommandRegistry so keybindings and menu items work.
   // The keybindings system (capture phase) routes Ctrl+Z/Y to CommandRegistry,
@@ -1755,7 +1714,9 @@ export function useSpreadsheetSelection({
    * Handle inserting current date into the active cell.
    */
   const handleInsertDate = useCallback(async () => {
-    if (!selection) return;
+    // Into the ACTIVE cell, as Excel's Ctrl+; does (it wrote into the anchor).
+    const active = activeCellOf(selection);
+    if (!active) return;
 
     const now = new Date();
     const month = now.getMonth() + 1;
@@ -1764,11 +1725,11 @@ export function useSpreadsheetSelection({
     const dateStr = `${month}/${day}/${year}`;
 
     try {
-      await updateCell(selection.startRow, selection.startCol, dateStr);
+      await updateCell(active.row, active.col, dateStr);
 
       cellEvents.emit({
-        row: selection.startRow,
-        col: selection.startCol,
+        row: active.row,
+        col: active.col,
         oldValue: undefined,
         newValue: dateStr,
         formula: null,
@@ -1782,7 +1743,9 @@ export function useSpreadsheetSelection({
    * Handle inserting current time into the active cell.
    */
   const handleInsertTime = useCallback(async () => {
-    if (!selection) return;
+    // Into the ACTIVE cell, as Excel's Ctrl+: does (it wrote into the anchor).
+    const active = activeCellOf(selection);
+    if (!active) return;
 
     const now = new Date();
     let hours = now.getHours();
@@ -1792,11 +1755,11 @@ export function useSpreadsheetSelection({
     const timeStr = `${hours}:${minutes.toString().padStart(2, "0")} ${ampm}`;
 
     try {
-      await updateCell(selection.startRow, selection.startCol, timeStr);
+      await updateCell(active.row, active.col, timeStr);
 
       cellEvents.emit({
-        row: selection.startRow,
-        col: selection.startCol,
+        row: active.row,
+        col: active.col,
         oldValue: undefined,
         newValue: timeStr,
         formula: null,
@@ -1892,10 +1855,8 @@ export function useSpreadsheetSelection({
         break;
       }
 
-      // Navigate: Focus Name Box (F5)
-      case 'navigate.focusNameBox':
-        emitAppEvent(AppEvents.NAMEBOX_FOCUS);
-        break;
+      // (F5 no longer focuses the Name Box from here: it is the keybinding
+      // registry's Go To shortcut since 2026-10-04 -- see useGridKeyboard.)
 
       // Calculate Now (F9) — the WORKBOOK — and Calculate Sheet (Shift+F9) —
       // the active sheet. EXCEL PARITY: those are Excel's two manual

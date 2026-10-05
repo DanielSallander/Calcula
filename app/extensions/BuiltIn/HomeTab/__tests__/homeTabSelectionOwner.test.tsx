@@ -34,14 +34,22 @@ vi.mock("@api/dialogs", () => ({ alertAsync: vi.fn() }));
 
 const applyFormatting = vi.fn(async (..._a: unknown[]) => ({ cells: [] }));
 const setCellRichText = vi.fn(async (..._a: unknown[]) => undefined);
+// Increase/Decrease Decimal are the backend's own step (rust-format), a write
+// door of their own, so the owner must stop them as well.
+const adjustNumberFormatDecimals = vi.fn(async (..._a: unknown[]) => ({ cells: [], styles: [] }));
 vi.mock("@api/lib", () => ({
   getCell: vi.fn(async () => ({ row: 0, col: 0, styleIndex: 0, display: "x2" })),
   getStyle: vi.fn(async () => ({ bold: false, fontSize: 11 })),
   applyFormatting: (...a: unknown[]) => applyFormatting(...a),
   setCellRichText: (...a: unknown[]) => setCellRichText(...a),
+  adjustNumberFormatDecimals: (...a: unknown[]) => adjustNumberFormatDecimals(...a),
 }));
 vi.mock("../homeTabConfig", () => ({ ITEMS_BY_ID: new Map() }));
-vi.mock("../../../_shared/lib/fontList", () => ({ FONT_SIZES: [8, 11, 14] }));
+// The REAL font-size ladder (Increase/Decrease Font Size step through it).
+vi.mock("../../../_shared/lib/fontList", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../_shared/lib/fontList")>()),
+  FONT_SIZES: [8, 11, 14],
+}));
 
 import { useHomeTabState } from "../components/useHomeTabState";
 import { registerSelectionOwner } from "@api/selectionOwner";
@@ -76,6 +84,7 @@ async function flush(): Promise<void> {
 beforeEach(async () => {
   applyFormatting.mockClear();
   setCellRichText.mockClear();
+  adjustNumberFormatDecimals.mockClear();
   execute.mockClear();
   toasts.length = 0;
   registerToastSink((t) => toasts.push(t));
@@ -107,10 +116,13 @@ const DOORS: [string, () => Promise<unknown>][] = [
   ["Wrap text", () => latest!.handleItemClick({ id: "wrapText" } as never)],
   ["Percent format", () => latest!.handleItemClick({ id: "percentFormat" } as never)],
   ["Increase decimal", () => latest!.handleItemClick({ id: "increaseDecimal" } as never)],
+  ["Decrease decimal", () => latest!.handleItemClick({ id: "decreaseDecimal" } as never)],
+  ["Comma Style", () => latest!.handleItemClick({ id: "commaFormat" } as never)],
   ["Superscript", () => latest!.handleItemClick({ id: "superscript" } as never)],
   ["Subscript", () => latest!.handleItemClick({ id: "subscript" } as never)],
-  ["Font colour", () => latest!.handleColorSelect("textColor", "#ff0000")],
-  ["Fill colour", () => latest!.handleColorSelect("backgroundColor", "#00ff00")],
+  // Fill Color / Font Color write through the door itself (font/colorChoice.ts).
+  ["Font colour", () => latest!.applyFormat({ textColor: "#ff0000" }, "Font Color")],
+  ["Fill colour", () => latest!.applyFormat({ backgroundColor: "#00ff00" }, "Fill Color")],
   ["Font family picker", () => latest!.handleFontFamilyChange("Arial")],
   ["Font size picker", () => latest!.handleFontSizeChange(14)],
   ["Number format dropdown", () => latest!.handleNumberFormatChange("0.00")],
@@ -126,6 +138,7 @@ describe("Home tab formatting doors while a selection owner holds the selection"
       });
       expect(applyFormatting, `${label} formatted Core's hidden selection`).not.toHaveBeenCalled();
       expect(setCellRichText, `${label} wrote rich text into Core's hidden cell`).not.toHaveBeenCalled();
+      expect(adjustNumberFormatDecimals, `${label} stepped the decimals of Core's hidden cells`).not.toHaveBeenCalled();
       expect(toasts.length, `${label} refused ${toasts.length} times`).toBe(1);
       expect(toasts[0].message).toContain("the test object's cells");
     });
@@ -138,7 +151,11 @@ describe("positive controls: nothing owns the selection", () => {
       await act(async () => {
         await run();
       });
-      expect(applyFormatting.mock.calls.length + setCellRichText.mock.calls.length).toBe(1);
+      expect(
+        applyFormatting.mock.calls.length +
+          setCellRichText.mock.calls.length +
+          adjustNumberFormatDecimals.mock.calls.length,
+      ).toBe(1);
       expect(toasts).toEqual([]);
     });
   }

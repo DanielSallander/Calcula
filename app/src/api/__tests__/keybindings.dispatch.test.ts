@@ -239,7 +239,9 @@ describe("menu-bar shortcut ↔ registry consistency", () => {
     "core.file.save",
     "core.file.saveAs",
     "insert.table",
-    "view.goToSpecial",
+    // Ctrl+G was Go To Special until 2026-10-04; it is Excel's Go To now
+    // (navigate.goTo, with F5), and Go To Special is reached from that dialog.
+    "navigate.goTo",
     "core.grid.merge",
   ];
   it("every former MenuBar-only shortcut now has a registry binding", () => {

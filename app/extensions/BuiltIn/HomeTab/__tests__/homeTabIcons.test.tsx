@@ -16,6 +16,7 @@ vi.mock("@api", async () => {
 });
 
 import { LAUNCHER_ICON_SIZE } from "@api/layout";
+import { RibbonIcon } from "@api/ribbonIcons";
 import { ALL_ITEMS, ITEMS_BY_ID, DEFAULT_LAYOUT } from "../homeTabConfig";
 import {
   homeTabIcon,
@@ -70,6 +71,33 @@ describe("item icons", () => {
     }
   });
 
+  it("each version-2 command shows its ribbon face in the Customize palette (CONTRACT section 7)", () => {
+    // The palette and a collapsed group draw homeTabIcon(id); the controls
+    // themselves draw the same key first, so the two can never disagree.
+    const FACES: Record<string, keyof typeof RibbonIcon> = {
+      borders: "BorderBottom",
+      orientation: "TextOrientation",
+      accountingFormat: "Accounting",
+      conditionalFormatting: "ConditionalFormatting",
+      formatAsTable: "FormatAsTable",
+      insertCells: "InsertCells",
+      deleteCells: "DeleteCells",
+      formatMenu: "FormatMenu",
+      autoSum: "AutoSum",
+      fill: "FillDown",
+      clear: "Clear",
+      sortFilter: "SortFilter",
+      findSelect: "Find",
+      // Excel's Clear All row draws the eraser; ClearAll (the stacked-cell X)
+      // is no row's picture (icons-fix defect 2).
+      clearAll: "Clear",
+    };
+    for (const [id, key] of Object.entries(FACES)) {
+      const Face = RibbonIcon[key] as React.ComponentType<{ size?: number }>;
+      expect(markup(homeTabIcon(id, 20)), id).toBe(markup(<Face size={20} />));
+    }
+  });
+
   it("Align Left and Align Right are no longer the same glyph", () => {
     const left = ITEMS_BY_ID.get("alignLeft")!;
     const right = ITEMS_BY_ID.get("alignRight")!;
@@ -113,6 +141,11 @@ describe("group launcher glyphs", () => {
       expect(groupIcon(id), id).not.toBeNull();
     }
     expect(GROUP_ICON_IDS).toContain(GROUP_ICON_FALLBACK_ID);
+  });
+
+  it("the Undo group draws Undo, and Cells draws Excel's Insert Cells picture", () => {
+    expect(markup(groupIconFor({ id: "undo" }))).toBe(markup(<RibbonIcon.Undo size={24} />));
+    expect(markup(groupIconFor({ id: "cells" }))).toBe(markup(<RibbonIcon.InsertCells size={24} />));
   });
 
   it("an unknown id falls back instead of rendering nothing", () => {

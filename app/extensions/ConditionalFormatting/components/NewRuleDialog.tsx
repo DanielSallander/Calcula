@@ -1,13 +1,24 @@
 //! FILENAME: app/extensions/ConditionalFormatting/components/NewRuleDialog.tsx
 // PURPOSE: Comprehensive "New Formatting Rule" dialog modeled after Excel's dialog.
-// CONTEXT: Opened from Format > Conditional Formatting > New Rule...
+// CONTEXT: Opened from Conditional Formatting > New Rule... and from every
+//          "More Rules..." row (the Format menu and the Home tab show the same
+//          tree). Each door names the page it opens on (NewRuleDialogData in
+//          ../types.ts), as Excel's do: the item and Highlight Cells Rules >
+//          More Rules... on "Format only cells that contain", Top/Bottom Rules >
+//          More Rules... on the ranked-values page, and each gallery's More
+//          Rules... on "Format all cells based on their values" with the
+//          gallery's own format style. It used to open on "Format only cells
+//          that contain" whichever door was used.
+//
+//          The colour-scale / data-bar / icon-set rules come from the SAME
+//          builders the galleries use (../lib/presetRules.ts), so a preset
+//          written here and the same preset picked from a gallery are the same
+//          rule. A refusal keeps the dialog open with the reason in an alert
+//          line (it used to escape as an unhandled promise rejection).
 
 import React, { useState, useCallback } from "react";
-import type { DialogProps } from "@api";
-import {
-  addConditionalFormat,
-  restoreFocusToGrid,
-} from "@api";
+import type { DialogProps, TimePeriod } from "@api";
+import { restoreFocusToGrid } from "@api";
 import type {
   ConditionalFormatRule,
   ConditionalFormat,
@@ -18,8 +29,19 @@ import type {
   AverageRuleType,
   IconSetType,
 } from "@api";
-import { invalidateAndRefresh } from "../lib/cfStore";
-import { PRESET_STYLES, PRESET_COLOR_SCALES, PRESET_DATA_BAR_COLORS } from "../types";
+import { tryAddRule } from "../lib/ruleWrites";
+import { colorScaleRule, dataBarRule, iconSetRule } from "../lib/presetRules";
+import {
+  PRESET_STYLES,
+  PRESET_COLOR_SCALES,
+  PRESET_DATA_BARS,
+  PRESET_DATA_BAR_COLORS,
+  DATE_OCCURRING_PERIODS,
+  ICON_SET_CATEGORIES,
+  colorScaleName,
+  type NewRuleCategory,
+  type NewRuleFormatStyle,
+} from "../types";
 
 // ============================================================================
 // Styles
@@ -147,17 +169,25 @@ const primaryButtonStyle: React.CSSProperties = {
   borderColor: "#0060b0",
 };
 
+const errorStyle: React.CSSProperties = {
+  fontSize: 12,
+  color: "#a4262c",
+  backgroundColor: "#fde7e9",
+  border: "1px solid #f1bbbc",
+  borderRadius: 3,
+  padding: "6px 8px",
+};
+
 // ============================================================================
 // Category definitions
 // ============================================================================
 
-type RuleCategory =
-  | "formatByValues"
-  | "formatContaining"
-  | "topBottom"
-  | "aboveBelow"
-  | "uniqueDuplicate"
-  | "formula";
+type RuleCategory = NewRuleCategory;
+
+/** Where New Rule opens when the door names no page: Excel's default. */
+const DEFAULT_CATEGORY: RuleCategory = "formatContaining";
+
+const FORMAT_STYLES: readonly NewRuleFormatStyle[] = ["colorScale", "dataBar", "iconSet"];
 
 const RULE_CATEGORIES: { id: RuleCategory; label: string }[] = [
   { id: "formatByValues", label: "Format all cells based on their values" },
@@ -206,49 +236,55 @@ const AVERAGE_TYPES: { value: AverageRuleType; label: string }[] = [
   { value: "threeStdDevBelow", label: "3 Std Dev Below" },
 ];
 
-const ICON_SET_OPTIONS: { value: IconSetType; label: string }[] = [
-  { value: "threeTrafficLights1", label: "3 Traffic Lights" },
-  { value: "threeArrows", label: "3 Arrows" },
-  { value: "threeFlags", label: "3 Flags" },
-  { value: "threeStars", label: "3 Stars" },
-  { value: "threeTriangles", label: "3 Triangles" },
-  { value: "threeSigns", label: "3 Signs" },
-  { value: "threeSymbols", label: "3 Symbols" },
-  { value: "fourArrows", label: "4 Arrows" },
-  { value: "fourTrafficLights", label: "4 Traffic Lights" },
-  { value: "fourRating", label: "4 Ratings" },
-  { value: "fiveArrows", label: "5 Arrows" },
-  { value: "fiveRating", label: "5 Ratings" },
-  { value: "fiveQuarters", label: "5 Quarters" },
-  { value: "fiveBoxes", label: "5 Boxes" },
-];
+/** Every icon set, by Excel's name, in the gallery's order (one list, ../types.ts). */
+const ICON_SET_OPTIONS: { value: IconSetType; label: string }[] = ICON_SET_CATEGORIES.flatMap((category) =>
+  category.sets.map((set) => ({ value: set.id, label: set.label })),
+);
 
 // ============================================================================
 // Component
 // ============================================================================
 
+/** The page a door asked for, or Excel's default for anything else. */
+function initialCategoryOf(data: Record<string, unknown> | undefined): RuleCategory {
+  const asked = data?.initialCategory;
+  return RULE_CATEGORIES.some((c) => c.id === asked) ? (asked as RuleCategory) : DEFAULT_CATEGORY;
+}
+
+/** The format style a gallery's More Rules... asked for, else Color Scale. */
+function initialFormatStyleOf(data: Record<string, unknown> | undefined): NewRuleFormatStyle {
+  const asked = data?.initialFormatStyle;
+  return FORMAT_STYLES.includes(asked as NewRuleFormatStyle) ? (asked as NewRuleFormatStyle) : "colorScale";
+}
+
 export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) => {
   const selection = data?.selection as ConditionalFormatRange | null;
 
-  // Category selection
-  const [selectedCategory, setSelectedCategory] = useState<RuleCategory>("formatContaining");
+  // Category selection: the page the door asked for (the dialog mounts per
+  // opening, so the data is read once, here).
+  const [selectedCategory, setSelectedCategory] = useState<RuleCategory>(() => initialCategoryOf(data));
 
   // Format preset
   const [formatIndex, setFormatIndex] = useState(0);
 
   // --- formatByValues state ---
-  const [formatByValuesType, setFormatByValuesType] = useState<"colorScale" | "dataBar" | "iconSet">("colorScale");
+  const [formatByValuesType, setFormatByValuesType] = useState<NewRuleFormatStyle>(() => initialFormatStyleOf(data));
   const [colorScalePresetIndex, setColorScalePresetIndex] = useState(0);
   const [dataBarColorIndex, setDataBarColorIndex] = useState(0);
   const [iconSetType, setIconSetType] = useState<IconSetType>("threeTrafficLights1");
 
   // --- formatContaining state ---
-  const [containingType, setContainingType] = useState<"cellValue" | "text" | "blanks" | "noBlanks" | "errors" | "noErrors">("cellValue");
+  const [containingType, setContainingType] = useState<"cellValue" | "text" | "dates" | "blanks" | "noBlanks" | "errors" | "noErrors">("cellValue");
   const [cellValueOperator, setCellValueOperator] = useState<CellValueOperator>("greaterThan");
   const [cellValue1, setCellValue1] = useState("");
   const [cellValue2, setCellValue2] = useState("");
   const [textRuleType, setTextRuleType] = useState<TextRuleType>("contains");
   const [textValue, setTextValue] = useState("");
+  const [datePeriod, setDatePeriod] = useState<TimePeriod>(DATE_OCCURRING_PERIODS[0].value);
+
+  // A refusal stays on screen; OK is inert while a write is in flight.
+  const [refusal, setRefusal] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   // --- topBottom state ---
   const [topBottomType, setTopBottomType] = useState<TopBottomType>("topItems");
@@ -277,44 +313,16 @@ export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
 
     switch (selectedCategory) {
       case "formatByValues":
+        // The galleries' own builders: one preset, one rule, whichever door.
         if (formatByValuesType === "colorScale") {
-          const preset = PRESET_COLOR_SCALES[colorScalePresetIndex];
-          rule = {
-            type: "colorScale",
-            minPoint: { valueType: "autoMin", color: preset.minColor },
-            ...(preset.midColor
-              ? { midPoint: { valueType: "percent", value: 50, color: preset.midColor } }
-              : {}),
-            maxPoint: { valueType: "autoMax", color: preset.maxColor },
-          } as ConditionalFormatRule;
+          rule = colorScaleRule(PRESET_COLOR_SCALES[colorScalePresetIndex]);
         } else if (formatByValuesType === "dataBar") {
-          rule = {
-            type: "dataBar",
-            minValueType: "autoMin",
-            maxValueType: "autoMax",
-            fillColor: PRESET_DATA_BAR_COLORS[dataBarColorIndex],
-            axisPosition: "automatic",
-            direction: "context",
-            showValue: true,
-            gradientFill: true,
-          } as ConditionalFormatRule;
+          rule = dataBarRule(PRESET_DATA_BAR_COLORS[dataBarColorIndex], true);
         } else {
-          // Determine threshold count based on icon set type
-          const thresholdCount = iconSetType.startsWith("five") ? 4
-            : iconSetType.startsWith("four") ? 3
-            : 2;
-          const thresholds = [];
-          for (let i = 0; i < thresholdCount; i++) {
-            const pct = Math.round(((i + 1) / (thresholdCount + 1)) * 100);
-            thresholds.push({ valueType: "percent" as const, value: pct, operator: "greaterThanOrEqual" as const });
-          }
-          rule = {
-            type: "iconSet",
-            iconSet: iconSetType,
-            thresholds,
-            reverseIcons: false,
-            showIconOnly: false,
-          } as ConditionalFormatRule;
+          const iconCount = iconSetType.startsWith("five") ? 5
+            : iconSetType.startsWith("four") ? 4
+            : 3;
+          rule = iconSetRule(iconSetType, iconCount);
         }
         break;
 
@@ -325,6 +333,8 @@ export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
           rule = { type: "cellValue", operator: cellValueOperator, value1: cellValue1, value2: cellValue2 || undefined };
         } else if (containingType === "text") {
           rule = { type: "containsText", ruleType: textRuleType, text: textValue };
+        } else if (containingType === "dates") {
+          rule = { type: "timePeriod", period: datePeriod };
         } else if (containingType === "blanks") {
           rule = { type: "blankCells" };
         } else if (containingType === "noBlanks") {
@@ -370,20 +380,27 @@ export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
         return;
     }
 
-    await addConditionalFormat({
+    if (busy) return;
+    setBusy(true);
+    setRefusal(null);
+    const refused = await tryAddRule({
       rule,
       format,
       ranges: [selection],
       stopIfTrue: false,
     });
-
-    await invalidateAndRefresh();
+    setBusy(false);
+    if (refused !== null) {
+      // Stay open: the user can correct the rule and press OK again.
+      setRefusal(refused);
+      return;
+    }
     onClose();
     restoreFocusToGrid();
   }, [
-    selectedCategory, selection, onClose, formatIndex,
+    selectedCategory, selection, onClose, formatIndex, busy,
     formatByValuesType, colorScalePresetIndex, dataBarColorIndex, iconSetType,
-    containingType, cellValueOperator, cellValue1, cellValue2, textRuleType, textValue,
+    containingType, cellValueOperator, cellValue1, cellValue2, textRuleType, textValue, datePeriod,
     topBottomType, topBottomRank, averageType, dupUniqueType, formulaExpression,
   ]);
 
@@ -411,10 +428,13 @@ export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
 
         {/* Rule type selector */}
         <p style={sectionLabelStyle}>Select a Rule Type:</p>
-        <div style={categoryListStyle}>
+        <div style={categoryListStyle} role="listbox" aria-label="Select a Rule Type">
           {RULE_CATEGORIES.map((cat) => (
             <div
               key={cat.id}
+              role="option"
+              aria-selected={selectedCategory === cat.id}
+              data-rule-category={cat.id}
               style={selectedCategory === cat.id ? selectedCategoryStyle : categoryItemStyle}
               onClick={() => setSelectedCategory(cat.id)}
             >
@@ -435,7 +455,7 @@ export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
                 <select
                   style={selectStyle}
                   value={formatByValuesType}
-                  onChange={(e) => setFormatByValuesType(e.target.value as "colorScale" | "dataBar" | "iconSet")}
+                  onChange={(e) => setFormatByValuesType(e.target.value as NewRuleFormatStyle)}
                 >
                   <option value="colorScale">Color Scale</option>
                   <option value="dataBar">Data Bar</option>
@@ -452,7 +472,7 @@ export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
                     onChange={(e) => setColorScalePresetIndex(Number(e.target.value))}
                   >
                     {PRESET_COLOR_SCALES.map((p, i) => (
-                      <option key={i} value={i}>{p.label}</option>
+                      <option key={i} value={i}>{colorScaleName(p)}</option>
                     ))}
                   </select>
                 </div>
@@ -466,8 +486,8 @@ export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
                     value={dataBarColorIndex}
                     onChange={(e) => setDataBarColorIndex(Number(e.target.value))}
                   >
-                    {PRESET_DATA_BAR_COLORS.map((c, i) => (
-                      <option key={i} value={i}>{c}</option>
+                    {PRESET_DATA_BARS.map((bar, i) => (
+                      <option key={i} value={i}>{bar.name}</option>
                     ))}
                   </select>
                   <div style={{
@@ -507,6 +527,7 @@ export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
                 >
                   <option value="cellValue">Cell Value</option>
                   <option value="text">Specific Text</option>
+                  <option value="dates">Dates Occurring</option>
                   <option value="blanks">Blanks</option>
                   <option value="noBlanks">No Blanks</option>
                   <option value="errors">Errors</option>
@@ -567,6 +588,20 @@ export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
                     onChange={(e) => setTextValue(e.target.value)}
                     placeholder="Text"
                   />
+                </div>
+              )}
+
+              {containingType === "dates" && (
+                <div style={rowStyle}>
+                  <select
+                    style={{ ...selectStyle, flex: 1 }}
+                    value={datePeriod}
+                    onChange={(e) => setDatePeriod(e.target.value as TimePeriod)}
+                  >
+                    {DATE_OCCURRING_PERIODS.map((p) => (
+                      <option key={p.value} value={p.value}>{p.label}</option>
+                    ))}
+                  </select>
                 </div>
               )}
             </>
@@ -705,9 +740,15 @@ export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
           }} />
         )}
 
+        {refusal !== null && (
+          <div role="alert" style={errorStyle}>
+            The rule was not added: {refusal}
+          </div>
+        )}
+
         <div style={buttonRowStyle}>
           <button style={buttonStyle} onClick={handleCancel}>Cancel</button>
-          <button style={primaryButtonStyle} onClick={handleOk}>OK</button>
+          <button style={primaryButtonStyle} onClick={handleOk} disabled={busy}>OK</button>
         </div>
       </div>
     </div>

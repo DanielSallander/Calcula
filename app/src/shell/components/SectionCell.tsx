@@ -9,14 +9,18 @@
 //          (launcher or inline, chrome included) so the renderer's width math
 //          works from actual pixels, not approximations.
 
-import React, { useCallback, useEffect, useRef } from "react";
-import type { PanelSection, PanelSectionProps } from "../../api/uiTypes";
+import React, { useCallback, useEffect, useMemo, useRef } from "react";
+import type {
+  PanelSection,
+  PanelSectionDialogLauncher,
+  PanelSectionProps,
+} from "../../api/uiTypes";
 import {
   Launcher,
   SurfaceLayoutProvider,
   bandLayout,
 } from "../../api/layout";
-import { SectionChrome } from "./SectionChrome";
+import { SectionChrome, dialogLauncherTestId } from "./SectionChrome";
 import { useSectionFit } from "./useSectionFit";
 
 /** Which form a reported cell width was measured in. */
@@ -125,9 +129,29 @@ export function SectionCell({
 
   const Section = section.component as React.ComponentType<PanelSectionProps>;
 
+  // The section's dialog launcher with its test id resolved, so the caption
+  // cell and the flyout heading spell it the same way.
+  const declaredDialogLauncher = section.dialogLauncher;
+  const dialogLauncher = useMemo<PanelSectionDialogLauncher | undefined>(
+    () =>
+      declaredDialogLauncher
+        ? {
+            ...declaredDialogLauncher,
+            testId: dialogLauncherTestId(section.id, declaredDialogLauncher),
+          }
+        : undefined,
+    [declaredDialogLauncher, section.id],
+  );
+
   // Both forms render the SAME SectionChrome (same element at the same
   // position), so React keeps the measured cell element across the swap and
   // the caption — the section label — stays its last element child either way.
+  //
+  // The dialog launcher goes to ONE place per form: the caption cell when
+  // inline, the Launcher's flyout heading when collapsed. Excel's collapsed
+  // group shows its launcher inside the drop-down, not under the button, and
+  // keeping it out of the collapsed cell keeps that cell's measured width (and
+  // so the width collapse) exactly what it was.
   if (isLauncher) {
     return (
       <SectionChrome
@@ -142,6 +166,7 @@ export function SectionCell({
           icon={launcherIcon ?? section.icon}
           flyoutWidth={section.flyoutWidth}
           testId={`section-launcher-${section.id}`}
+          dialogLauncher={dialogLauncher}
         >
           <Section placement="sidebar" />
         </Launcher>
@@ -156,6 +181,7 @@ export function SectionCell({
       isLast={isLast}
       captionMode={section.captionMode}
       measureRef={measureRef}
+      dialogLauncher={dialogLauncher}
     >
       {/* Clip box: bounds the visible content to the card's content box while
           the sizer inside reveals the natural content size to the

@@ -34,7 +34,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { test, expect } from "../fixtures";
 import type { GridHelper } from "../helpers/grid";
 
@@ -136,18 +136,26 @@ async function moveSheetLeftViaUI(page: Page, index: number): Promise<void> {
   await page.waitForTimeout(1_200);
 }
 
+/** Leave out anything inside the ribbon band or a ribbon flyout/popover. */
+function notRibbon(locator: Locator): Locator {
+  return locator.and(locator.page().locator(":not([data-ribbon-content] *):not([data-section-flyout] *)"));
+}
+
 /** Delete a sheet through the real tab context menu and its confirmation. */
 async function deleteSheetViaUI(page: Page, index: number): Promise<void> {
   const tab = page.locator(`button[data-sheet-tab="${index}"]`);
   await tab.click({ button: "right" });
   await page.waitForTimeout(600);
-  await page.getByRole("button", { name: "Delete", exact: true }).first().click();
+  // NOT the ribbon's: Excel's Home > Cells carries a "Delete" split since
+  // 2026-10-04 (inline on a wide window, in its group's flyout on a narrow
+  // one), and it comes first in the DOM. The tab menu's row is the one meant.
+  await notRibbon(page.getByRole("button", { name: "Delete", exact: true })).first().click();
   await page.waitForTimeout(700);
   await expect(
     page.locator("text=Are you sure you want to delete"),
     "the sheet-delete confirmation must appear",
   ).toBeVisible();
-  await page.getByRole("button", { name: "Delete", exact: true }).last().click();
+  await notRibbon(page.getByRole("button", { name: "Delete", exact: true })).last().click();
   await page.waitForTimeout(1_800);
 }
 

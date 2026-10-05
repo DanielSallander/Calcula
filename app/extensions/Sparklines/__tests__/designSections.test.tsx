@@ -508,7 +508,7 @@ describe("SparklineColorPicker", () => {
     const swatches = Array.from(popover.querySelectorAll<HTMLElement>("[data-colour-swatch]"));
     expect(swatches).toHaveLength(SPARKLINE_PICKER_COLORS.length);
     expect(swatches).toHaveLength(60);
-    expect(popover.textContent).not.toContain("Theme colours");
+    expect(popover.textContent).not.toContain("Theme Colors");
     expect(popover.textContent).toContain("Colours");
     expect(paletteMock).not.toHaveBeenCalled();
     // The popover chrome follows the skin too; only the swatches are data.

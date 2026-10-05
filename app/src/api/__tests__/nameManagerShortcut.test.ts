@@ -87,7 +87,10 @@ describe("Name Manager shortcut", () => {
 
   it("does not fire on Shift+F3 or Alt+F3 either", async () => {
     const spy = spyCommand(NAME_MANAGER_COMMAND);
-    expect(handleGlobalKeyDown(keydown({ key: "F3", shiftKey: true }))).toBe(false);
+    // Shift+F3 IS handled since 2026-10-04 -- it is Excel's Insert Function
+    // (core.formula.insertFunction) -- so only the spy can say Name Manager
+    // did not run.
+    handleGlobalKeyDown(keydown({ key: "F3", shiftKey: true }));
     expect(handleGlobalKeyDown(keydown({ key: "F3", altKey: true }))).toBe(false);
     await Promise.resolve();
     expect(spy).not.toHaveBeenCalled();

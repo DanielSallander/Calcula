@@ -62,6 +62,11 @@ import {
 } from "../../api/externalEdit";
 import { resolveTabClick } from "./resolveTabClick";
 import { sheetRangePrefix } from "./sheetRangePrefix";
+import { registerSheetTabsController } from "./sheetCommands";
+import { promptForSheetName } from "./renameSheetPrompt";
+import { sheetDeleteNeedsConfirmation } from "./sheetDeletePolicy";
+import { insertSheetBefore, moveOrCopySheet } from "./sheetTabFlows";
+import { insertionReorderDetail, removalReorderDetail } from "./sheetPlacement";
 import type {
   SheetInfo,
   SheetsResult,
@@ -71,7 +76,7 @@ import type {
   SheetSurface,
 } from "../../api";
 import * as S from './SheetTabs.styles';
-import { alertAsync, promptAsync } from "@api/dialogs";
+import { alertAsync } from "@api/dialogs";
 
 export interface SheetTabsProps {
   onSheetChange?: (sheetIndex: number, sheetName: string) => void;
@@ -115,6 +120,16 @@ const surfacesOf = (sheets: SheetInfo[]): Record<number, SheetSurface> => {
   const out: Record<number, SheetSurface> = {};
   for (const s of sheets) out[s.index] = surfaceOf(s);
   return out;
+};
+
+/**
+ * Tell Core's per-sheet view cache (selection + scroll, keyed by TRUE index;
+ * Spreadsheet.tsx `handleSheetReorder`) that sheets were renumbered. A move is
+ * a rotate; an insertion or a removal is told the same way through
+ * sheetPlacement.ts's `insertionReorderDetail` / `removalReorderDetail`.
+ */
+const announceReorder = (detail: { fromIndex: number; toIndex: number }): void => {
+  window.dispatchEvent(new CustomEvent("sheet:reorder", { detail }));
 };
 
 export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement {
@@ -251,12 +266,16 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
   // Helper: apply a SheetsResult and trigger sheet switch events.
   // backendHandledSwitch=true means the backend already swapped grids/state for the new active
   // index, so we must NOT call setActiveSheetApi again (which would do a redundant swap).
+  // forceSwitch=true runs the switch steps even when the active INDEX did not
+  // change: Insert Sheet (before the active sheet) and Move or Copy's copy can
+  // leave a DIFFERENT sheet at the same index, and comparing numbers would
+  // then keep painting the old sheet's cells under the new sheet's tab.
   const applySheetsResult = useCallback(async (
     result: SheetsResult,
-    { switchSheet = true, backendHandledSwitch = false } = {}
+    { switchSheet = true, backendHandledSwitch = false, forceSwitch = false } = {}
   ) => {
     setSheets(result.sheets);
-    if (switchSheet && result.activeIndex !== activeIndex) {
+    if (switchSheet && (forceSwitch || result.activeIndex !== activeIndex)) {
       if (backendHandledSwitch) {
         // Backend already swapped - just sync frontend state.
         // BUG-0052: prime the canvas with the new sheet's viewport BEFORE any
@@ -302,8 +321,78 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     }
   }, [activeIndex, dispatch, onSheetChange]);
 
-  // Listen for custom events from context menu actions
+  // The strip's operations, reached two ways: the `sheet:request*` window
+  // events the tab context menu (and Protection's guarded copies of its items)
+  // dispatch, and the controller the core.sheet.* commands call
+  // (sheetCommands.ts). ONE body per operation, so the two doors cannot
+  // drift. Every handler is read through a ref, so this effect registers once.
   useEffect(() => {
+    const moveSheetTo = async (fromIndex: number, toIndex: number) => {
+      try {
+        window.dispatchEvent(new CustomEvent("sheet:reorder", {
+          detail: { fromIndex, toIndex },
+        }));
+        const result = await moveSheet(fromIndex, toIndex);
+        await applySheetsResultRef.current(result, { backendHandledSwitch: true });
+      } catch (err) {
+        console.error("[SheetTabs] moveSheet error:", err);
+        void alertAsync("Failed to move sheet: " + String(err));
+      }
+    };
+
+    const copySheetAt = async (index: number) => {
+      try {
+        window.dispatchEvent(new CustomEvent("sheet:beforeSwitch", {
+          detail: { oldSheetIndex: -1, newSheetIndex: -1 },
+        }));
+        const result = await copySheet(index);
+        // The copy lands right after its source, renumbering every sheet past
+        // it: untold, each of them restored its NEIGHBOUR's selection and
+        // scroll on its next visit.
+        announceReorder(insertionReorderDetail(result.activeIndex));
+        await applySheetsResultRef.current(result, { backendHandledSwitch: true, forceSwitch: true });
+      } catch (err) {
+        console.error("[SheetTabs] copySheet error:", err);
+        void alertAsync("Failed to copy sheet: " + String(err));
+      }
+    };
+
+    const hideSheetAt = async (index: number) => {
+      try {
+        const result = await hideSheet(index);
+        await applySheetsResultRef.current(result, { backendHandledSwitch: true });
+      } catch (err) {
+        console.error("[SheetTabs] hideSheet error:", err);
+        void alertAsync("Failed to hide sheet: " + String(err));
+      }
+    };
+
+    const openUnhideDialog = async () => {
+      try {
+        const current = await getSheets();
+        const hiddenSheets = current.sheets.filter(s => s.visibility === "hidden");
+        if (hiddenSheets.length === 0) {
+          void alertAsync("No hidden sheets to unhide.");
+          return;
+        }
+        // Open the unhide dialog
+        setUnhideDialog({ hiddenSheets, selectedIndex: hiddenSheets[0].index });
+      } catch (err) {
+        console.error("[SheetTabs] unhideSheet error:", err);
+        void alertAsync("Failed to unhide sheet: " + String(err));
+      }
+    };
+
+    const setTabColorAt = async (index: number, color: string) => {
+      try {
+        const result = await setTabColor(index, color);
+        setSheets(result.sheets);
+      } catch (err) {
+        console.error("[SheetTabs] setTabColor error:", err);
+        void alertAsync("Failed to set tab color: " + String(err));
+      }
+    };
+
     const handleRename = async (e: Event) => {
       const { index, newName } = (e as CustomEvent).detail;
       await handleRenameSheetRef.current(index, newName);
@@ -321,69 +410,43 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
 
     const handleMove = async (e: Event) => {
       const { fromIndex, toIndex } = (e as CustomEvent).detail;
-      try {
-        window.dispatchEvent(new CustomEvent("sheet:reorder", {
-          detail: { fromIndex, toIndex },
-        }));
-        const result = await moveSheet(fromIndex, toIndex);
-        await applySheetsResultRef.current(result, { backendHandledSwitch: true });
-      } catch (err) {
-        console.error("[SheetTabs] moveSheet error:", err);
-        void alertAsync("Failed to move sheet: " + String(err));
-      }
+      await moveSheetTo(fromIndex, toIndex);
     };
 
     const handleCopy = async (e: Event) => {
       const { index } = (e as CustomEvent).detail;
-      try {
-        window.dispatchEvent(new CustomEvent("sheet:beforeSwitch", {
-          detail: { oldSheetIndex: -1, newSheetIndex: -1 },
-        }));
-        const result = await copySheet(index);
-        await applySheetsResultRef.current(result, { backendHandledSwitch: true });
-      } catch (err) {
-        console.error("[SheetTabs] copySheet error:", err);
-        void alertAsync("Failed to copy sheet: " + String(err));
-      }
+      await copySheetAt(index);
     };
 
     const handleHide = async (e: Event) => {
       const { index } = (e as CustomEvent).detail;
-      try {
-        const result = await hideSheet(index);
-        await applySheetsResultRef.current(result, { backendHandledSwitch: true });
-      } catch (err) {
-        console.error("[SheetTabs] hideSheet error:", err);
-        void alertAsync("Failed to hide sheet: " + String(err));
-      }
+      await hideSheetAt(index);
     };
 
     const handleUnhide = async () => {
-      try {
-        const current = await getSheets();
-        const hiddenSheets = current.sheets.filter(s => s.visibility === "hidden");
-        if (hiddenSheets.length === 0) {
-          void alertAsync("No hidden sheets to unhide.");
-          return;
-        }
-        // Open the unhide dialog
-        setUnhideDialog({ hiddenSheets, selectedIndex: hiddenSheets[0].index });
-      } catch (err) {
-        console.error("[SheetTabs] unhideSheet error:", err);
-        void alertAsync("Failed to unhide sheet: " + String(err));
-      }
+      await openUnhideDialog();
     };
 
     const handleTabColor = async (e: Event) => {
       const { index, color } = (e as CustomEvent).detail;
-      try {
-        const result = await setTabColor(index, color);
-        setSheets(result.sheets);
-      } catch (err) {
-        console.error("[SheetTabs] setTabColor error:", err);
-        void alertAsync("Failed to set tab color: " + String(err));
-      }
+      await setTabColorAt(index, color);
     };
+
+    // The core.sheet.* commands' door (sheetCommands.ts). Seated for as long
+    // as the strip is mounted; every method is a handler of the strip's own,
+    // so a command runs the same switch steps a click does.
+    const releaseController = registerSheetTabsController({
+      snapshot: () => controllerStateRef.current,
+      insertSheetBefore: (beforeIndex) => handleInsertSheetBeforeRef.current(beforeIndex),
+      // Excel's rule for the command door: a blank sheet goes without asking.
+      deleteSheet: (index) => handleDeleteSheetRef.current(index, { confirm: "whenNotBlank" }),
+      renameSheet: (index, newName) => handleRenameSheetRef.current(index, newName),
+      hideSheet: hideSheetAt,
+      openUnhideDialog,
+      setTabColor: setTabColorAt,
+      moveOrCopySheet: (sourceIndex, beforeIndex, copy) =>
+        handleMoveOrCopySheetRef.current(sourceIndex, beforeIndex, copy),
+    });
 
     window.addEventListener("sheet:requestRename", handleRename);
     window.addEventListener("sheet:requestDelete", handleDelete);
@@ -403,6 +466,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       window.removeEventListener("sheet:requestHide", handleHide);
       window.removeEventListener("sheet:requestUnhide", handleUnhide);
       window.removeEventListener("sheet:requestTabColor", handleTabColor);
+      releaseController();
     };
   }, []);
 
@@ -729,16 +793,75 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     }
   }, [onSheetChange, structuralLocked]);
 
-  const handleDeleteSheet = useCallback(
-    (index: number) => {
-      if (sheets.length <= 1) return;
-      if (structuralLocked) return;
+  /**
+   * Excel's Insert Sheet (Shift+F11, Home > Insert > Insert Sheet): a new
+   * worksheet immediately BEFORE `beforeIndex`, made active. The "+" button
+   * keeps its append (handleAddSheet above); the backend can only append, so
+   * this is an add followed by one move (sheetTabFlows.ts), applied through
+   * the same commit-before-switch steps. FORCED: the new sheet takes the
+   * anchor's index, so the active INDEX can come back unchanged while the
+   * active SHEET is a different one.
+   */
+  const handleInsertSheetBefore = useCallback(async (beforeIndex: number) => {
+    if (structuralLocked) return;
+    const anchor = sheetAt(sheets, beforeIndex);
+    try {
+      window.dispatchEvent(new CustomEvent("sheet:beforeSwitch", {
+        detail: { oldSheetIndex: activeIndex, newSheetIndex: -1 },
+      }));
+      const { result, error } = await insertSheetBefore(
+        { addSheet: () => addSheet(), copySheet, moveSheet },
+        announceReorder,
+        anchor,
+      );
+      await applySheetsResultRef.current(result, { backendHandledSwitch: true, forceSwitch: true });
+      if (error !== undefined) {
+        // The sheet exists (and is shown); only its position failed.
+        console.error("[SheetTabs] insert-before move error:", error);
+        void alertAsync(`The new sheet was added at the end: it could not be moved before "${anchor?.name ?? ""}". ` + String(error));
+      }
+    } catch (err) {
+      console.error("[SheetTabs] insertSheetBefore error:", err);
+      void alertAsync("Failed to insert sheet: " + String(err));
+    }
+  }, [sheets, activeIndex, structuralLocked]);
 
-      // Show confirmation dialog instead of using confirm()
-      const sheetName = sheets.find(s => s.index === index)?.name || `Sheet ${index}`;
-      setDeleteConfirm({ index, name: sheetName });
+  /**
+   * Excel's Move or Copy: the sheet at `sourceIndex` -- or a copy of it --
+   * immediately before `beforeIndex`, or at the end (null). A copy is made
+   * active (Excel), so its switch is forced (see handleInsertSheetBefore); a
+   * move keeps the active sheet, and the backend's index follows it.
+   */
+  const handleMoveOrCopySheet = useCallback(
+    async (sourceIndex: number, beforeIndex: number | null, copy: boolean) => {
+      if (structuralLocked) return;
+      try {
+        if (copy) {
+          window.dispatchEvent(new CustomEvent("sheet:beforeSwitch", {
+            detail: { oldSheetIndex: activeIndex, newSheetIndex: -1 },
+          }));
+        }
+        const { result, error } = await moveOrCopySheet(
+          { addSheet: () => addSheet(), copySheet, moveSheet },
+          announceReorder,
+          sheets,
+          sourceIndex,
+          beforeIndex,
+          copy,
+        );
+        if (result) {
+          await applySheetsResultRef.current(result, { backendHandledSwitch: true, forceSwitch: copy });
+        }
+        if (error !== undefined) {
+          console.error("[SheetTabs] move-or-copy move error:", error);
+          void alertAsync("The copy was made, but it could not be moved: " + String(error));
+        }
+      } catch (err) {
+        console.error("[SheetTabs] moveOrCopySheet error:", err);
+        void alertAsync((copy ? "Failed to copy sheet: " : "Failed to move sheet: ") + String(err));
+      }
     },
-    [sheets, structuralLocked]
+    [sheets, activeIndex, structuralLocked]
   );
 
   const executeDeleteSheet = useCallback(
@@ -753,6 +876,11 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         }));
 
         const result = await deleteSheet(index);
+        // Every sheet past the deleted one moved down an index. Untold, Core's
+        // per-sheet view cache restored the DELETED sheet's selection and
+        // scroll onto the neighbour that inherited its index, and each later
+        // sheet its neighbour's.
+        announceReorder(removalReorderDetail(index));
         // BUG-0052: prime-before-commit; deleting the active sheet lands the
         // user on a NEIGHBOUR whose cells must arrive with its tab.
         await primeSheetSwitch(result.activeIndex);
@@ -784,6 +912,41 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     [onSheetChange, activeIndex, dispatch]
   );
 
+  /**
+   * Delete, from either door: the tab menu's `sheet:requestDelete` and
+   * core.sheet.delete (Home > Delete > Delete Sheet).
+   *
+   * `confirm: "whenNotBlank"` is Excel's rule -- ask first only when the sheet
+   * holds something, delete a blank one at once; every doubt asks
+   * (sheetDeletePolicy.ts: a delete ends the undo history, so a wrong "blank"
+   * is unrecoverable). The COMMAND uses it. The tab menu still always asks
+   * (`"always"`, the default): three journeys drive its confirmation on sheets
+   * that may be blank (fixall-lifecycle X19, orphaned-sheet-state,
+   * report-store), so moving that door is an owner's call, not this change's.
+   */
+  const handleDeleteSheet = useCallback(
+    async (index: number, options: { confirm?: "always" | "whenNotBlank" } = {}) => {
+      if (sheets.length <= 1) return;
+      if (structuralLocked) return;
+
+      const sheet = sheetAt(sheets, index);
+      const sheetName = sheet?.name || `Sheet ${index}`;
+      const ask =
+        options.confirm !== "whenNotBlank" ||
+        (await sheetDeleteNeedsConfirmation(
+          { index, kind: sheet?.kind === "canvas" ? "canvas" : "worksheet" },
+          index === activeIndex,
+        ));
+      if (ask) {
+        // Show confirmation dialog instead of using confirm()
+        setDeleteConfirm({ index, name: sheetName });
+      } else {
+        await executeDeleteSheet(index);
+      }
+    },
+    [sheets, structuralLocked, activeIndex, executeDeleteSheet]
+  );
+
   const handleRenameSheet = useCallback(
     async (index: number, newName: string) => {
       // Don't allow renaming sheets while in formula mode
@@ -810,8 +973,17 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
   handleRenameSheetRef.current = handleRenameSheet;
   const handleAddSheetRef = useRef(handleAddSheet);
   handleAddSheetRef.current = handleAddSheet;
+  const handleInsertSheetBeforeRef = useRef(handleInsertSheetBefore);
+  handleInsertSheetBeforeRef.current = handleInsertSheetBefore;
+  const handleMoveOrCopySheetRef = useRef(handleMoveOrCopySheet);
+  handleMoveOrCopySheetRef.current = handleMoveOrCopySheet;
   const applySheetsResultRef = useRef(applySheetsResult);
   applySheetsResultRef.current = applySheetsResult;
+  // What the core.sheet.* commands' refusals read SYNCHRONOUSLY (the command-
+  // refusal registry cannot await): the list, the active sheet and the
+  // structural lock as of this render.
+  const controllerStateRef = useRef({ sheets, activeIndex, locked: structuralLocked });
+  controllerStateRef.current = { sheets, activeIndex, locked: structuralLocked };
 
   const sheetByIndex = useCallback(
     (index: number): SheetInfo | undefined => sheetAt(sheets, index),
@@ -841,17 +1013,12 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         return;
       }
       const currentName = sheetByIndex(index)?.name || "";
-      // window.prompt is the one dialog global Tauri does NOT replace, so
-      // whether it appears at all is up to the WebView2 embedder's script-dialog
-      // policy — and a suppressed prompt returns null, which is
-      // indistinguishable from the user cancelling. promptAsync renders the
-      // modal itself, so double-click-to-rename behaves the same in every window.
-      const newName = await promptAsync("Enter new sheet name:", {
-        title: "Rename sheet",
-        defaultValue: currentName,
-      });
-      if (newName && newName.trim() !== "" && newName !== currentName) {
-        handleRenameSheet(index, newName.trim());
+      // THE rename prompt (renameSheetPrompt.ts), shared with the tab menu's
+      // Rename and core.sheet.rename; it explains why it is promptAsync and
+      // never window.prompt.
+      const newName = await promptForSheetName(currentName);
+      if (newName !== null) {
+        await handleRenameSheet(index, newName);
       }
     },
     [sheetByIndex, handleRenameSheet, structuralLocked]
@@ -901,11 +1068,16 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     [contextMenu, contextFor]
   );
 
-  // Unhide dialog confirm
-  const handleUnhideConfirm = useCallback(async () => {
-    if (!unhideDialog || unhideDialog.selectedIndex === null) return;
+  // Unhide dialog confirm. `index` is the row a DOUBLE-CLICK chose: the
+  // double-click handler used to set the selection and call this in the same
+  // tick, and this read `unhideDialog.selectedIndex` from its render closure --
+  // the PREVIOUS selection -- so double-clicking the second hidden sheet
+  // unhid the first. OK passes nothing and reads the selection.
+  const handleUnhideConfirm = useCallback(async (index?: number) => {
+    const target = typeof index === "number" ? index : unhideDialog?.selectedIndex ?? null;
+    if (!unhideDialog || target === null) return;
     try {
-      const result = await unhideSheet(unhideDialog.selectedIndex);
+      const result = await unhideSheet(target);
       setSheets(result.sheets);
       setActiveIndex(result.activeIndex);
     } catch (err) {
@@ -1408,10 +1580,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
                     prev ? { ...prev, selectedIndex: sheet.index } : null
                   )}
                   onDoubleClick={() => {
-                    setUnhideDialog(prev =>
-                      prev ? { ...prev, selectedIndex: sheet.index } : null
-                    );
-                    handleUnhideConfirm();
+                    void handleUnhideConfirm(sheet.index);
                   }}
                 >
                   {sheet.name}
@@ -1423,7 +1592,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
                 Cancel
               </S.DialogButton>
               <S.DialogButtonPrimary
-                onClick={handleUnhideConfirm}
+                onClick={() => void handleUnhideConfirm()}
                 disabled={unhideDialog.selectedIndex === null}
               >
                 OK

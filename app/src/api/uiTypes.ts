@@ -335,6 +335,43 @@ export type SectionRibbonPresentation = "auto" | "inline" | "launcher";
 export type SectionCaptionMode = "default" | "always";
 
 /**
+ * A section's DIALOG LAUNCHER: Excel's small corner-arrow button at the
+ * bottom-right of a ribbon group, which opens the dialog that holds everything
+ * the group shows and more (Home's Font, Alignment and Number groups open
+ * Format Cells on their own tab).
+ *
+ * The section only DECLARES it; the Shell draws it, so the door is the same on
+ * every surface the section can land on and no section hand-rolls it:
+ * - the ribbon: at the bottom-right of the group's caption row (with the
+ *   caption kept centred), or in the card's free bottom strip while the user
+ *   hides group labels — it is never inside the caption, so hiding labels
+ *   never hides the door;
+ * - a group collapsed to a launcher button: on its flyout's heading row, the
+ *   way Excel's collapsed group shows the launcher in its drop-down;
+ * - the sidebar: beside the section's header (a single-section panel has no
+ *   header, so there is no launcher there).
+ *
+ * The glyph is kit chrome (`DialogLauncherGlyph`), not a RibbonIcon key.
+ *
+ * Not to be confused with the LAUNCHER (`Launcher` in @api/layout), which is
+ * the button a whole group collapses to when the band is too narrow.
+ */
+export interface PanelSectionDialogLauncher {
+  /** The dialog's name: the button's accessible name and its tooltip
+   *  ("Format Cells: Font"). */
+  label: string;
+  /** Opens the dialog. Runs on click, Enter and Space. */
+  onLaunch: () => void;
+  /** The command the launcher is equivalent to, used ONLY to show its live
+   *  shortcut chip in the tooltip ("Ctrl+1"). The Shell never executes it;
+   *  `onLaunch` is what runs. */
+  commandId?: string;
+  /** data-testid of the button. Default `dialog-launcher-<sectionId>` (for
+   *  example `dialog-launcher-home.font`). */
+  testId?: string;
+}
+
+/**
  * A named section within a panel.
  * Sections are the universal building block: the Shell renders them
  * horizontally in the ribbon or vertically (collapsible) in the sidebar.
@@ -362,6 +399,11 @@ export interface PanelSection {
   collapsePriority?: number;
   /** Launcher flyout width in px (clamped to 240-480, default 320). */
   flyoutWidth?: number;
+  /** Excel's group dialog launcher (the corner arrow under the group), drawn
+   *  by the Shell. Omitted: the section renders exactly as it would without
+   *  the feature — no element, no padding, no width change. See
+   *  PanelSectionDialogLauncher. */
+  dialogLauncher?: PanelSectionDialogLauncher;
 }
 
 /**

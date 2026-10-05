@@ -99,8 +99,10 @@ test.describe("Sales dashboard workflow", () => {
     await grid.selectRange("C471", "E480");
     await grid.clickFormatButton("commaFormat");
 
+    // Excel's Comma Style: Accounting with no symbol and two decimals
+    // (2026-10-04; it used to write a bare `#,##0`).
     const fmt = await grid.getCellStyleStringProp("C471", "numberFormat");
-    expect(fmt).toContain("separator");
+    expect(fmt).toMatch(/^Accounting \(, 2 decimals/);
   });
 
   test("step 4: add data validation for region input", async ({ gridPersistent: grid }) => {

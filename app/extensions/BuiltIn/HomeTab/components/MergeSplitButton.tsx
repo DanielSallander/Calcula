@@ -25,6 +25,7 @@ import { isSheetProtected, readSelectionMergeState } from "@api/lib";
 import { getGridRegions, onRegionChange, type GridRegion } from "@api/gridOverlays";
 import { SplitMenuButton, MenuItem, ICON_SIZE_SM } from "@api/layout";
 import type { Selection } from "@api/types";
+import { selectionBlocks } from "@api/selectionBlocks";
 import type { HomeTabItem } from "../homeTabConfig";
 import { homeTabIcon, mergeMenuIcon, type MergeMenuCommand } from "./homeTabIcons";
 import { itemTooltip } from "./itemTooltip";
@@ -74,7 +75,8 @@ export function selectionTouchesTable(selection: Selection | null, regions: Grid
   if (!selection) return false;
   const tables = regions.filter((r) => r.type === "table");
   if (tables.length === 0) return false;
-  const blocks = [selection, ...(selection.additionalRanges ?? [])];
+  // Every block (@api/selectionBlocks, the one split every Home door uses).
+  const blocks = selectionBlocks(selection);
   return blocks.some((b) => tables.some((t) => overlaps(b, t)));
 }
 

@@ -34,8 +34,12 @@ import {
   resolveEdgeBorders,
   strokeEdgeBorders,
   resolveEffectiveStyle,
+  drawOrientedText,
+  paintAccountingValue,
   type DeferredCellDecoration,
 } from "./rendering/cells";
+import { parseTextOrientation } from "./layout/textOrientation";
+import { alignmentWithIndent, effectiveIndentPx, indentedTextBox } from "./layout/cellIndent";
 import { buildMergeSlaveIndex } from "./rendering/mergeIndex";
 import { drawSelection, drawFillPreview, drawClipboardSelection, drawSelectionDragPreview } from "./rendering/selection";
 import { drawSpillBorders } from "./rendering/spillBorder";
@@ -358,6 +362,9 @@ function drawCellTextZone(
   const totalRows = config.totalRows || 1000;
   const totalCols = config.totalCols || 100;
   const paddingX = 3;
+  // The main painter's vertical text inset (drawCellText's paddingY), used by
+  // rotated and stacked text, which is anchored to the top or bottom edge.
+  const PANE_PADDING_Y = 2;
 
   // Cell types render as their own content (suppressed in Show Formulas mode,
   // where the raw value/formula must stay visible). Unlike the main draw path,
@@ -616,8 +623,51 @@ function drawCellTextZone(
       ctx.textBaseline = "middle";
       const fontSizePx = pointsToPixels(fontSize);
 
-      const textX = cellLeft + paddingX;
+      // ROTATED AND STACKED TEXT IN A PANE. A frozen header row is exactly where
+      // rotated column titles live, and this painter used to draw every value
+      // horizontally whatever its orientation. It now paints through the SAME
+      // helper as the main painter (drawOrientedText), so a value looks the
+      // same on either side of a freeze line.
+      const orientation = parseTextOrientation(cellStyle?.textRotation);
+      if (orientation.kind !== "horizontal") {
+        drawOrientedText(
+          ctx,
+          orientation,
+          cellDisplayText,
+          {
+            left: baseX + paddingX,
+            top: baseY + PANE_PADDING_Y,
+            right: baseX + actualWidth - paddingX,
+            bottom: baseY + actualHeight - PANE_PADDING_Y,
+          },
+          cellStyle?.textAlign ?? "general",
+          cellStyle?.verticalAlign || "bottom",
+          fontSizePx,
+        );
+        ctx.restore();
+        baseX += colWidth;
+        continue;
+      }
+
       const textY = Math.round(baseY + actualHeight / 2);
+
+      // ACCOUNTING IN A PANE: the runs, not the one-string fallback, through the
+      // main painter's own helper -- a frozen column of amounts used to lose
+      // its alignment (and symbol-after amounts their symbol column).
+      if (cell.accountingLayout && !(state.showFormulas && cell.formula)) {
+        paintAccountingValue(
+          ctx,
+          cell.accountingLayout,
+          cellLeft + paddingX,
+          cellRight - paddingX,
+          textY,
+          cellStyle?.numberFormat ?? "",
+          cell.overflow,
+        );
+        ctx.restore();
+        baseX += colWidth;
+        continue;
+      }
 
       let textAlign: "left" | "right" | "center" = "left";
       if (state.showFormulas && cell.formula) {
@@ -631,20 +681,32 @@ function drawCellTextZone(
         if (numericPattern.test(cellDisplayText.trim())) {
           textAlign = "right";
         }
+        // An indented General value is drawn Left, as in the main painter.
+        textAlign = alignmentWithIndent(cellStyle?.textAlign, textAlign, cellStyle?.indent);
       }
+
+      // THE INDENT IN A PANE (layout/cellIndent.ts, shared with drawCellText):
+      // from the left for Left, from the right edge for Right, none for Center.
+      // This painter used to ignore the indent altogether.
+      const textBox = indentedTextBox(
+        textAlign,
+        cellLeft + paddingX,
+        cellRight - paddingX,
+        effectiveIndentPx(cellStyle?.textAlign, cellStyle?.indent),
+      );
 
       ctx.textAlign = "left";
-      let drawX = textX;
       const textMetrics = ctx.measureText(cellDisplayText);
-      const textWidth = Math.min(textMetrics.width, availableWidth);
+      const textWidth = Math.min(textMetrics.width, Math.max(0, textBox.width));
 
+      let drawX = textBox.x;
       if (textAlign === "right") {
-        drawX = cellLeft + (cellRight - cellLeft) - paddingX - textWidth;
+        drawX = textBox.x + textBox.width - textWidth;
       } else if (textAlign === "center") {
-        drawX = cellLeft + ((cellRight - cellLeft) - textWidth) / 2;
+        drawX = textBox.x + (textBox.width - textWidth) / 2;
       }
 
-      ctx.fillText(cellDisplayText, drawX, textY, availableWidth);
+      ctx.fillText(cellDisplayText, drawX, textY, Math.max(0, textBox.width));
       
       if (cellStyle?.underline && cellStyle.underline !== "none") {
         ctx.beginPath();

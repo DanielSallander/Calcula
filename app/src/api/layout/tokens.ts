@@ -88,6 +88,47 @@ export const LAUNCHER_ICON_SIZE = ICON_SIZE_MD;
 /** Width of a tile (height is TALL_CONTROL_HEIGHT in the band). */
 export const TILE_WIDTH = 44;
 
+// ---- The hero's vertical geometry ----------------------------------------
+//
+// A hero (CommandButton in the band) fills the 61px content box with its icon
+// over its label, and since 2026-10-04 it comes in two label shapes, plus the
+// split form of each (SplitMenuButton face "hero", Excel's LARGE split: Paste,
+// Insert, Delete). Every one of them is derived here, so a test can add the
+// pieces up and prove they still make 61:
+//
+//   ONE-LINE (the default, unchanged since the Clusters redesign)
+//     pad 6 + slot 34 + gap 2 + line 13 + pad 6                     = 61
+//   TWO-LINE (Excel's "Conditional / Formatting v")
+//     pad 2 + icon 30 + gap 1 + line 13 + line 13 + pad 2           = 61
+//     The 34px slot is the one thing that has to give: 34 + 26 is 60 and
+//     leaves one pixel for four paddings. The ICON stays 30 (the slot shrinks
+//     to the icon it holds), because a smaller picture on the heroes that
+//     carry the longest names would read as the less important commands.
+//   SPLIT, one-line: the hairline sits in the middle of the 2px gap, so the
+//     icon and the label land on the SAME pixels as a plain hero beside it
+//     (Cells: Insert and Delete splits beside the Format hero):
+//     top part   pad 6 + slot 34 + 1                                 = 41
+//     menu part  1 + line 13 + pad 6                                 = 20
+//   SPLIT, two-line: the same rule over the two-line hero:
+//     top part   pad 2 + icon 30                                     = 32
+//     menu part  gap 1 + 2 x line 13 + pad 2                         = 29
+
+/** One hero label line (11px text). */
+export const HERO_LABEL_LINE_HEIGHT = 13;
+/** Top and bottom padding of a ONE-LINE hero. */
+export const HERO_PAD_Y = 6;
+/** Gap between a one-line hero's icon slot and its label. */
+export const HERO_LABEL_GAP = 2;
+/** Gap between a two-line hero's icon and its first label line. */
+export const HERO_TWO_LINE_GAP = 1;
+/** Top and bottom padding of a TWO-LINE hero: whatever the 61 leaves. */
+export const HERO_TWO_LINE_PAD_Y =
+  (TALL_CONTROL_HEIGHT - HERO_ICON_SIZE - HERO_TWO_LINE_GAP - 2 * HERO_LABEL_LINE_HEIGHT) / 2; // 2
+/** Height of a one-line hero split's icon (top) part. */
+export const HERO_SPLIT_TOP_HEIGHT = HERO_PAD_Y + HERO_ICON_SLOT + HERO_LABEL_GAP / 2; // 41
+/** Height of a two-line hero split's icon (top) part. */
+export const HERO_SPLIT_TOP_HEIGHT_TWO_LINE = HERO_TWO_LINE_PAD_Y + HERO_ICON_SIZE; // 32
+
 export const FONT_FAMILY =
   "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif";
 export const FONT_MONO = "'Cascadia Code', Consolas, ui-monospace, monospace";
@@ -100,6 +141,60 @@ export const HEADER_FONT_SIZE = 12;
 export const MENU_ROW_HEIGHT = 30;
 /** Hover delay before a tooltip appears. */
 export const TOOLTIP_DELAY_MS = 400;
+/** Hover delay before a submenu (MenuSub) opens -- and before hovering a
+ *  DIFFERENT row closes an open one, so a pointer cutting diagonally across a
+ *  sibling row on its way into the flyout does not lose it (Windows' menu
+ *  timing; Excel's flyouts follow it). */
+export const SUBMENU_HOVER_DELAY_MS = 200;
+
+// ---- The card overlay (Popover `card`) -----------------------------------
+//
+// Every Clusters overlay -- a menu, a dropdown list, a colour palette, a
+// MenuSub flyout -- is the same card: a 1px border and 8px of padding on all
+// four sides (the fill rule, applied to overlays). They are constants rather
+// than literals in Popover.tsx because a FLYOUT has to be placed by them: a
+// MenuSub flyout opened at its row's top would put its first row
+// border + padding = 9px BELOW the row that opened it. Excel lines the two up,
+// so the flyout is lifted by exactly that much (SUBMENU_ALIGN_OFFSET), and the
+// day the card's padding changes, the lift changes with it.
+
+/** Padding of the card overlay, all four sides. */
+export const POPOVER_CARD_PADDING = 8;
+/** Border width of the card overlay. */
+export const POPOVER_CARD_BORDER = 1;
+/** How far a MenuSub flyout is moved along its row's edge (Popover
+ *  `alignOffset` at "right-start"): up by the card's border + padding, so the
+ *  flyout's first row sits level with the row that opened it, as in Excel. */
+export const SUBMENU_ALIGN_OFFSET = -(POPOVER_CARD_BORDER + POPOVER_CARD_PADDING); // -9
+
+// ---- The dialog launcher (Excel's corner arrow under a group) ------------
+//
+// Drawn by the shell in a group's caption row (SectionChrome), so its size is
+// band geometry the shell lays the caption out by -- which is why it lives
+// here with the rest of the geometry rather than in Launcher.tsx, the file that
+// draws it (Launcher.tsx re-exports these names unchanged).
+
+/** Hit box of the caption-row dialog launcher. 16 wide like a split button's
+ *  chevron half; 13 tall, the caption's own line box (GROUP_LABEL_BLOCK_HEIGHT
+ *  15 = 2px margin + 13px line), so in the caption row the glyph sits on the
+ *  caption's text line and the button never reaches up into the card. */
+export const DIALOG_LAUNCHER_WIDTH = 16;
+export const DIALOG_LAUNCHER_HEIGHT = 13;
+/** The corner-arrow glyph: about Excel's own (~10px at 100% zoom). */
+export const DIALOG_LAUNCHER_GLYPH_SIZE = 10;
+/** Symmetric horizontal padding the caption takes while a dialog launcher is
+ *  present: the launcher's width plus a 2px gap, on BOTH sides, so the
+ *  caption text stays centred under the card and never runs under the arrow.
+ *  Only applied when a launcher is declared — a group without one keeps
+ *  today's caption exactly (the visual goldens depend on that). */
+export const DIALOG_LAUNCHER_CAPTION_PAD = DIALOG_LAUNCHER_WIDTH + 2;
+/** With group labels hidden the caption collapses to zero height and the card
+ *  grows to the band's full 92px, so the launcher (anchored to the cell's
+ *  bottom-right) lands on the card's rounded corner. Insetting it by this much
+ *  keeps the glyph inside the card's painted corner (radius 12) and still
+ *  clear of the 61px content box: the card's free bottom strip is
+ *  8 padding + (76 - 61) / 2 = 15.5px, and 2 + 13 = 15 fits under it. */
+export const DIALOG_LAUNCHER_HIDDEN_INSET = 2;
 
 /** Clamp a requested flyout width into the sanctioned range. */
 export function clampFlyoutWidth(width: number | undefined): number {

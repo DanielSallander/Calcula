@@ -13,6 +13,10 @@
 //   node scripts/icon-accent-contact.mjs --write      rewrite the allowlist (refuses any growth)
 //   node scripts/icon-accent-contact.mjs --bodies f.json   measure [{name, body}] instead of the TSX
 //
+// Importing this file measures nothing: the browser only starts when node was asked to RUN it.
+// `planAllowlist` -- the comparison, and what --write stores -- is exported so
+// src/api/__tests__/iconAccentContactAllowlist.test.ts can pin it without a browser.
+//
 // Method: each icon is drawn at 240px (10 px per grid unit) twice, as an SVG image on a canvas:
 //   pass A: ACCENT + DANGER black, SOFT + STRONG white   -> the accent pixels that stay VISIBLE
 //   pass G: SOFT + STRONG black, ACCENT + DANGER white   -> the ground pixels that stay visible
@@ -54,81 +58,118 @@ globalThis.__iconBodies = Object.entries(RibbonIcon).map(([name, C]) => ({ name,
   return globalThis.__iconBodies;
 }
 
-const icons = opt("--bodies") ? JSON.parse(fs.readFileSync(opt("--bodies"), "utf8")) : await bodiesFromSource();
-
-const { chromium } = require("playwright");
-const browser = await chromium.launch({ args: ["--disable-gpu", "--force-color-profile=srgb"] });
-const page = await browser.newPage();
-const result = await page.evaluate(async ({ icons, GAP_UNITS }) => {
-  const S = 240, U = S / 24, R = GAP_UNITS * U;
-  const offsets = [];
-  for (let dy = -Math.ceil(R); dy <= Math.ceil(R); dy++) for (let dx = -Math.ceil(R); dx <= Math.ceil(R); dx++) if (dx * dx + dy * dy < R * R) offsets.push([dx, dy]);
-  const paint = (body, map) => body
-    .replaceAll("var(--icon-fill-soft)", map.soft).replaceAll("currentColor", map.strong)
-    .replaceAll("var(--icon-accent)", map.accent).replaceAll("var(--icon-danger)", map.danger);
-  const raster = async (body) => {
-    const img = new Image();
-    img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${S}" height="${S}" viewBox="0 0 24 24" fill="none">${body}</svg>`);
-    await img.decode();
-    const c = new OffscreenCanvas(S, S), g = c.getContext("2d");
-    g.fillStyle = "#fff"; g.fillRect(0, 0, S, S); g.drawImage(img, 0, 0, S, S);
-    const d = g.getImageData(0, 0, S, S).data, m = new Uint8Array(S * S);
-    for (let i = 0; i < S * S; i++) m[i] = d[i * 4] < 128 ? 1 : 0;
-    return m;
-  };
-  const out = [];
-  for (const { name, body } of icons) {
-    if (!/var\(--icon-(accent|danger)\)/.test(body)) { out.push({ name, contact: 0, accent: false }); continue; }
-    const A = await raster(paint(body, { soft: "#fff", strong: "#fff", accent: "#000", danger: "#000" }));
-    const G = await raster(paint(body, { soft: "#000", strong: "#000", accent: "#fff", danger: "#fff" }));
-    let n = 0, minD2 = Infinity;
-    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
-      const i = y * S + x;
-      if (!A[i]) continue;
-      const edge = x === 0 || y === 0 || x === S - 1 || y === S - 1 || !A[i - 1] || !A[i + 1] || !A[i - S] || !A[i + S];
-      if (!edge) continue;
-      let hit = false;
-      for (const [dx, dy] of offsets) {
-        const X = x + dx, Y = y + dy;
-        if (X < 0 || Y < 0 || X >= S || Y >= S) continue;
-        if (G[Y * S + X]) { hit = true; const d2 = dx * dx + dy * dy; if (d2 < minD2) minD2 = d2; }
-      }
-      if (hit) n++;
-    }
-    out.push({ name, accent: true, contact: Math.round(n / U * 10) / 10, minGap: minD2 === Infinity ? null : Math.round(Math.sqrt(minD2) / U * 100) / 100 });
+/**
+ * Compare one measurement with the allowlist, and say what `--write` stores.
+ *
+ * `allow` is the file's `icons` map ({ name: units }); `result` is the measurement
+ * ([{ name, contact }], contact 0 = none). Returns:
+ *   measured  every icon in contact now, { name: units }
+ *   added     "name units" for an icon in contact that the list does not name
+ *   over      "name was -> now" for an entry that grew by more than `tolerance`
+ *   shrink    "name was -> now" for an entry that went down by more than 1
+ *   next      the `icons` map --write stores, sorted by name
+ */
+export function planAllowlist(allow, result, { tolerance = TOLERANCE, acceptGrowth = false } = {}) {
+  const measured = Object.fromEntries(result.filter((r) => r.contact > 0).map((r) => [r.name, r.contact]));
+  const over = [], shrink = [], added = [];
+  for (const r of result) {
+    const was = allow[r.name];
+    if (r.contact > 0 && was === undefined) added.push(`${r.name} ${r.contact}`);
+    else if (was !== undefined && r.contact > was + tolerance) over.push(`${r.name} ${was} -> ${r.contact}`);
+    else if (was !== undefined && r.contact < was - 1) shrink.push(`${r.name} ${was} -> ${r.contact}`);
   }
-  return out;
-}, { icons, GAP_UNITS });
-await browser.close();
-
-const measured = Object.fromEntries(result.filter((r) => r.contact > 0).map((r) => [r.name, r.contact]));
-const allow = fs.existsSync(ALLOWLIST) ? JSON.parse(fs.readFileSync(ALLOWLIST, "utf8")).icons ?? {} : {};
-const over = [], shrink = [], added = [];
-for (const r of result) {
-  const was = allow[r.name];
-  if (r.contact > 0 && was === undefined) added.push(`${r.name} ${r.contact}`);
-  else if (was !== undefined && r.contact > was + TOLERANCE) over.push(`${r.name} ${was} -> ${r.contact}`);
-  else if (was !== undefined && r.contact < was - 1) shrink.push(`${r.name} ${was} -> ${r.contact}`);
+  // What --write stores. An entry already on the list keeps min(pin, measured): a measurement up to
+  // `tolerance` above its pin passes the check as edge-pixel noise, and storing it would RAISE the
+  // pin -- each write spending the noise margin, the next write raising it again, a shrink-only
+  // list ratcheting up one tolerance at a time (on 2026-10-04 one write would have raised
+  // Gridlines, Loop, Pivot, Undo and Redo by 0.2-0.8). Only growth the user explicitly accepted
+  // (--accept-growth: an `over` or `added` icon) is stored as measured. An icon no longer in
+  // contact leaves the list.
+  const grew = new Set([...over, ...added].map((line) => line.split(" ")[0]));
+  const next = {};
+  for (const [name, contact] of Object.entries(measured).sort((a, b) => a[0].localeCompare(b[0]))) {
+    const was = allow[name];
+    next[name] = was === undefined || (acceptGrowth && grew.has(name)) ? contact : Math.min(was, contact);
+  }
+  return { measured, over, shrink, added, next };
 }
-console.log(`[icon-contact] ${result.length} icons, ${result.filter((r) => r.accent).length} with ACCENT/DANGER, ${Object.keys(measured).length} in contact with SOFT/STRONG (total ${Object.values(measured).reduce((a, b) => a + b, 0).toFixed(1)} units of outline)`);
-if (flag("--report")) for (const [n, v] of Object.entries(measured).sort((a, b) => b[1] - a[1])) console.log(`  ${n.padEnd(16)} ${v}`);
-if (flag("--write")) {
-  if ((over.length || added.length) && !flag("--accept-growth")) {
-    console.log("[FAIL] refusing to write: the allowlist may only shrink.\n  grew: " + [...over, ...added].join(", "));
+
+async function main() {
+  const icons = opt("--bodies") ? JSON.parse(fs.readFileSync(opt("--bodies"), "utf8")) : await bodiesFromSource();
+
+  const { chromium } = require("playwright");
+  const browser = await chromium.launch({ args: ["--disable-gpu", "--force-color-profile=srgb"] });
+  const page = await browser.newPage();
+  const result = await page.evaluate(async ({ icons, GAP_UNITS }) => {
+    const S = 240, U = S / 24, R = GAP_UNITS * U;
+    const offsets = [];
+    for (let dy = -Math.ceil(R); dy <= Math.ceil(R); dy++) for (let dx = -Math.ceil(R); dx <= Math.ceil(R); dx++) if (dx * dx + dy * dy < R * R) offsets.push([dx, dy]);
+    const paint = (body, map) => body
+      .replaceAll("var(--icon-fill-soft)", map.soft).replaceAll("currentColor", map.strong)
+      .replaceAll("var(--icon-accent)", map.accent).replaceAll("var(--icon-danger)", map.danger);
+    const raster = async (body) => {
+      const img = new Image();
+      img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${S}" height="${S}" viewBox="0 0 24 24" fill="none">${body}</svg>`);
+      await img.decode();
+      const c = new OffscreenCanvas(S, S), g = c.getContext("2d");
+      g.fillStyle = "#fff"; g.fillRect(0, 0, S, S); g.drawImage(img, 0, 0, S, S);
+      const d = g.getImageData(0, 0, S, S).data, m = new Uint8Array(S * S);
+      for (let i = 0; i < S * S; i++) m[i] = d[i * 4] < 128 ? 1 : 0;
+      return m;
+    };
+    const out = [];
+    for (const { name, body } of icons) {
+      if (!/var\(--icon-(accent|danger)\)/.test(body)) { out.push({ name, contact: 0, accent: false }); continue; }
+      const A = await raster(paint(body, { soft: "#fff", strong: "#fff", accent: "#000", danger: "#000" }));
+      const G = await raster(paint(body, { soft: "#000", strong: "#000", accent: "#fff", danger: "#fff" }));
+      let n = 0, minD2 = Infinity;
+      for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+        const i = y * S + x;
+        if (!A[i]) continue;
+        const edge = x === 0 || y === 0 || x === S - 1 || y === S - 1 || !A[i - 1] || !A[i + 1] || !A[i - S] || !A[i + S];
+        if (!edge) continue;
+        let hit = false;
+        for (const [dx, dy] of offsets) {
+          const X = x + dx, Y = y + dy;
+          if (X < 0 || Y < 0 || X >= S || Y >= S) continue;
+          if (G[Y * S + X]) { hit = true; const d2 = dx * dx + dy * dy; if (d2 < minD2) minD2 = d2; }
+        }
+        if (hit) n++;
+      }
+      out.push({ name, accent: true, contact: Math.round(n / U * 10) / 10, minGap: minD2 === Infinity ? null : Math.round(Math.sqrt(minD2) / U * 100) / 100 });
+    }
+    return out;
+  }, { icons, GAP_UNITS });
+  await browser.close();
+
+  const allow = fs.existsSync(ALLOWLIST) ? JSON.parse(fs.readFileSync(ALLOWLIST, "utf8")).icons ?? {} : {};
+  const { measured, over, shrink, added, next } = planAllowlist(allow, result, { acceptGrowth: flag("--accept-growth") });
+  console.log(`[icon-contact] ${result.length} icons, ${result.filter((r) => r.accent).length} with ACCENT/DANGER, ${Object.keys(measured).length} in contact with SOFT/STRONG (total ${Object.values(measured).reduce((a, b) => a + b, 0).toFixed(1)} units of outline)`);
+  if (flag("--report")) for (const [n, v] of Object.entries(measured).sort((a, b) => b[1] - a[1])) console.log(`  ${n.padEnd(16)} ${v}`);
+  if (flag("--write")) {
+    if ((over.length || added.length) && !flag("--accept-growth")) {
+      console.log("[FAIL] refusing to write: the allowlist may only shrink.\n  grew: " + [...over, ...added].join(", "));
+      process.exit(1);
+    }
+    fs.writeFileSync(ALLOWLIST, JSON.stringify({
+      rule: "ACCENT/DANGER keeps >= 1.2 units of background from SOFT/STRONG. Units = length of accent outline within 1.2 of grey. Entries may only shrink; see docs/design/ICONS.md.",
+      icons: next,
+    }, null, 1) + "\n");
+    console.log(`[OK] wrote ${ALLOWLIST} (${Object.keys(next).length} entries)`);
+    process.exit(0);
+  }
+  if (shrink.length) console.log("[info] improved, lower the allowlist with --write: " + shrink.join(", "));
+  if (over.length || added.length) {
+    console.log("[FAIL] green (or red) now touches grey where it did not:");
+    for (const x of [...added.map((a) => "new  " + a), ...over.map((o) => "grew " + o)]) console.log("  " + x);
+    console.log("  Keep 1.2 units of background between ACCENT/DANGER and SOFT/STRONG (docs/design/ICONS.md 2.2).");
     process.exit(1);
   }
-  fs.writeFileSync(ALLOWLIST, JSON.stringify({
-    rule: "ACCENT/DANGER keeps >= 1.2 units of background from SOFT/STRONG. Units = length of accent outline within 1.2 of grey. Entries may only shrink; see docs/design/ICONS.md.",
-    icons: Object.fromEntries(Object.entries(measured).sort((a, b) => a[0].localeCompare(b[0]))),
-  }, null, 1) + "\n");
-  console.log(`[OK] wrote ${ALLOWLIST} (${Object.keys(measured).length} entries)`);
-  process.exit(0);
+  console.log("[OK] no icon gained contact between its accent and the greys");
 }
-if (shrink.length) console.log("[info] improved, lower the allowlist with --write: " + shrink.join(", "));
-if (over.length || added.length) {
-  console.log("[FAIL] green (or red) now touches grey where it did not:");
-  for (const x of [...added.map((a) => "new  " + a), ...over.map((o) => "grew " + o)]) console.log("  " + x);
-  console.log("  Keep 1.2 units of background between ACCENT/DANGER and SOFT/STRONG (docs/design/ICONS.md 2.2).");
-  process.exit(1);
+
+// Only when node RUNS this file (npm run check:icon-contact): an import -- the test -- measures
+// nothing and launches no browser.
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await main();
 }
-console.log("[OK] no icon gained contact between its accent and the greys");

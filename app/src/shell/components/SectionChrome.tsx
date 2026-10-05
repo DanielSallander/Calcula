@@ -17,6 +17,13 @@
 //            |                           --radius-cluster, --ribbon-cluster-bg,
 //            |                           a hairline on hover drawn as an inset
 //            |                           shadow so it never moves layout.
+//            +- button[data-dialog-launcher]   ONLY when the section declares
+//            |                           a dialog launcher (Excel's corner
+//            |                           arrow, PanelSection.dialogLauncher):
+//            |                           absolutely positioned at the cell's
+//            |                           bottom-right, so it adds no width
+//            |                           and no height. BEFORE the caption,
+//            |                           never after it and never inside it.
 //            +- div                      the caption. ALWAYS the last element
 //                                        child: shapes-hometab and the width
 //                                        probe tests read a cell's label as
@@ -31,10 +38,32 @@
 //          unchanged) but collapses to zero height, and the card carries the
 //          label as its `title`. A section whose caption is load-bearing
 //          declares `captionMode: "always"` and keeps it visible.
+//
+//          The DIALOG LAUNCHER (a section's `dialogLauncher`) and the goldens:
+//          everything it needs — the button, the cell's positioning context,
+//          the caption's symmetric padding — is applied ONLY when one is
+//          declared. A section without one renders the DOM and the rules it
+//          always did, so no existing ribbon moves by a pixel. With one:
+//          - labels shown: the button sits in the caption row at the right
+//            (its 13px height is the caption's line box), and the caption
+//            pads both sides by DIALOG_LAUNCHER_CAPTION_PAD so its text stays
+//            centred and never runs under the arrow. The padding can widen a
+//            group only when caption + 36px is wider than the group's content,
+//            which no Home group is; the cell probe measures the real width
+//            either way, so the collapse math stays right.
+//          - labels hidden: the caption is 0 tall, so a button INSIDE it would
+//            vanish; this one is the caption's sibling and simply lands in the
+//            card's free bottom strip, inset by DIALOG_LAUNCHER_HIDDEN_INSET to
+//            stay inside the card's rounded corner. Still on screen, still in
+//            the Tab order.
+//          The collapsed (launcher) form does NOT get one here: SectionCell
+//          hands it to the Launcher's flyout heading instead, which is where
+//          Excel's collapsed group shows it, and the collapsed cell keeps its
+//          exact measured width.
 
 import React, { useSyncExternalStore } from "react";
 import { css, cx } from "@emotion/css";
-import type { SectionCaptionMode } from "../../api/uiTypes";
+import type { PanelSectionDialogLauncher, SectionCaptionMode } from "../../api/uiTypes";
 import {
   LT,
   CLUSTER_GAP,
@@ -42,6 +71,11 @@ import {
   FONT_FAMILY,
   GROUP_LABEL_FONT_SIZE,
 } from "../../api/layout";
+import {
+  DialogLauncherButton,
+  DIALOG_LAUNCHER_CAPTION_PAD,
+  DIALOG_LAUNCHER_HIDDEN_INSET,
+} from "../../api/layout/primitives/Launcher";
 import { subscribeToAppearance } from "../../api/appearance";
 
 /**
@@ -55,6 +89,23 @@ import { subscribeToAppearance } from "../../api/appearance";
 export function cellChromeWidth(isFirst: boolean, isLast: boolean): number {
   void isFirst;
   return 2 * CLUSTER_PAD + (isLast ? 0 : CLUSTER_GAP);
+}
+
+/**
+ * The data-testid of a section's dialog launcher: the section's own `testId`
+ * when it declares one, else `dialog-launcher-<sectionId>`
+ * (`dialog-launcher-home.font`). One spelling for the ribbon cell, the
+ * collapsed group's flyout heading and the sidebar header — only one of them
+ * is mounted for a section at a time, since a panel lives on one surface and a
+ * group is either inline or collapsed. Deliberately NOT `section-launcher-*`
+ * (the width probes read that prefix as "this group is collapsed") and NOT
+ * `fmt-*` (shapes-hometab counts a group's rows from its `fmt-` buttons).
+ */
+export function dialogLauncherTestId(
+  sectionId: string,
+  launcher: PanelSectionDialogLauncher,
+): string {
+  return launcher.testId ?? `dialog-launcher-${sectionId}`;
 }
 
 // ============================================================================
@@ -125,6 +176,30 @@ const captionHiddenClass = css`
   overflow: hidden;
 `;
 
+/** Only with a dialog launcher: the cell becomes the launcher's containing
+ *  block. Never applied otherwise — a positioning context changes the paint
+ *  order of everything inside the cell, and a section without a launcher must
+ *  render exactly as before. */
+const cellWithDialogLauncherClass = css`
+  position: relative;
+`;
+
+/** Only with a dialog launcher: room for the arrow on the right, the same on
+ *  the left so the text stays centred. Kept in hide mode as well, so toggling
+ *  the label preference never changes a group's width. */
+const captionWithDialogLauncherClass = css`
+  padding-left: ${DIALOG_LAUNCHER_CAPTION_PAD}px;
+  padding-right: ${DIALOG_LAUNCHER_CAPTION_PAD}px;
+`;
+
+/** The launcher's anchor: the cell's bottom edge. `right` is set inline from
+ *  the cell's padding-right (the gap to the next cluster), because the
+ *  containing block is the padding box and the arrow must sit over the CARD's
+ *  right edge, not out in the gap. */
+const dialogLauncherAnchorClass = css`
+  position: absolute;
+`;
+
 // ============================================================================
 // Component
 // ============================================================================
@@ -141,6 +216,12 @@ export interface SectionChromeProps {
   /** Ref to the cell's root element — the ribbon renderer's real rendered-width
    *  probe attaches here (measures the actual cell, launcher or inline). */
   measureRef?: (el: HTMLDivElement | null) => void;
+  /** Excel's group dialog launcher, drawn at the bottom-right of the cell.
+   *  Its `testId` is used AS GIVEN: SectionCell resolves the
+   *  `dialog-launcher-<sectionId>` default (dialogLauncherTestId) first.
+   *  Omitted: no launcher, and the cell is exactly what it was before the
+   *  feature existed. */
+  dialogLauncher?: PanelSectionDialogLauncher;
   children: React.ReactNode;
 }
 
@@ -150,18 +231,21 @@ export function SectionChrome({
   isLast,
   captionMode = "default",
   measureRef,
+  dialogLauncher,
   children,
 }: SectionChromeProps): React.ReactElement {
   const labelsHidden = useRibbonLabelsHidden();
   const captionHidden = labelsHidden && captionMode !== "always";
+  const gap = isLast ? 0 : CLUSTER_GAP;
+  const inset = captionHidden ? DIALOG_LAUNCHER_HIDDEN_INSET : 0;
 
   return (
     <div
       ref={measureRef}
       data-section-cell=""
       data-section-first={isFirst ? "" : undefined}
-      className={cellClass}
-      style={{ paddingRight: isLast ? 0 : CLUSTER_GAP }}
+      className={dialogLauncher ? cx(cellClass, cellWithDialogLauncherClass) : cellClass}
+      style={{ paddingRight: gap }}
     >
       <div
         role="group"
@@ -171,8 +255,22 @@ export function SectionChrome({
       >
         {children}
       </div>
+      {dialogLauncher && (
+        <DialogLauncherButton
+          label={dialogLauncher.label}
+          onClick={dialogLauncher.onLaunch}
+          commandId={dialogLauncher.commandId}
+          testId={dialogLauncher.testId}
+          className={dialogLauncherAnchorClass}
+          style={{ bottom: inset, right: gap + inset }}
+        />
+      )}
       <div
-        className={cx(captionClass, captionHidden && captionHiddenClass)}
+        className={cx(
+          captionClass,
+          dialogLauncher && captionWithDialogLauncherClass,
+          captionHidden && captionHiddenClass,
+        )}
         data-section-caption=""
       >
         {label}

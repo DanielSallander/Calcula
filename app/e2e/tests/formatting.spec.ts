@@ -153,24 +153,34 @@ test.describe("Formatting on formulas", () => {
   });
 });
 
+// Strikethrough left the default Home tab on 2026-10-04: Excel's Home tab has
+// no Strikethrough button (it is in the Font dialog and on Ctrl+5), and
+// Calcula's now matches. The toggle is driven by Excel's own key; the button
+// is still in the Customize Home Tab catalog for anyone who wants it back.
 test.describe("Strikethrough formatting", () => {
-  test("strikethrough via ribbon button", async ({ grid }) => {
+  test("strikethrough via Ctrl+5", async ({ grid }) => {
     await grid.setCellValue("A35", "StrikeTest");
     await grid.clickCell("A35");
-    await grid.clickFormatButton("strikethrough");
+    await grid.toggleStrikethroughByKey();
 
     expect(await grid.getCellStyleProp("A35", "strikethrough")).toBe(true);
   });
 
-  test("strikethrough toggle off via ribbon", async ({ grid }) => {
+  test("strikethrough toggle off via Ctrl+5", async ({ grid }) => {
     await grid.setCellValue("B35", "UnStrike");
     await grid.clickCell("B35");
 
-    await grid.clickFormatButton("strikethrough");
+    await grid.toggleStrikethroughByKey();
     expect(await grid.getCellStyleProp("B35", "strikethrough")).toBe(true);
 
-    await grid.clickFormatButton("strikethrough");
+    await grid.toggleStrikethroughByKey();
     expect(await grid.getCellStyleProp("B35", "strikethrough")).toBe(false);
+  });
+
+  test("the default Home tab carries no Strikethrough button (Excel's layout)", async ({ appPage }) => {
+    await expect(appPage.locator('[data-ribbon-content] [data-testid="fmt-strikethrough"]')).toHaveCount(0);
+    // Positive control on the same query: Bold, its old pill neighbour, is there.
+    await expect(appPage.locator('[data-ribbon-content] [data-testid="fmt-bold"]')).toHaveCount(1);
   });
 });
 
@@ -182,7 +192,6 @@ test.describe("Formatting state readback", () => {
     if (await grid.isFormatActive("bold")) await grid.clickFormatButton("bold");
     if (await grid.isFormatActive("italic")) await grid.clickFormatButton("italic");
     if (await grid.isFormatActive("underline")) await grid.clickFormatButton("underline");
-    if (await grid.isFormatActive("strikethrough")) await grid.clickFormatButton("strikethrough");
 
     await grid.setCellValue("K30", "Plain");
     await grid.clickCell("K30");
@@ -191,7 +200,8 @@ test.describe("Formatting state readback", () => {
     expect(await grid.isFormatActive("bold")).toBe(false);
     expect(await grid.isFormatActive("italic")).toBe(false);
     expect(await grid.isFormatActive("underline")).toBe(false);
-    expect(await grid.isFormatActive("strikethrough")).toBe(false);
+    // Strikethrough has no Home button any more; read the cell itself.
+    expect(await grid.getCellStyleProp("K30", "strikethrough")).toBe(false);
   });
 });
 

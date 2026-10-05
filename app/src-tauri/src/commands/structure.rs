@@ -14,6 +14,13 @@ use regex::Regex;
 use std::collections::HashMap;
 use tauri::State;
 
+// Excel's Insert Cells / Delete Cells: a row (column) edit confined to the band
+// of columns (rows) the range covers. A CHILD module, so it reuses this file's
+// private reference rewriters and store shifters instead of copying them.
+// Registered in `generate_handler!` by its full path.
+#[path = "structure_cells.rs"]
+pub(crate) mod structure_cells;
+
 // Pre-compiled regexes for formula reference shifting (avoids ~2.6ms per Regex::new call)
 // Group 1 in each of these is a captured LEADING DELIMITER (re-emitted by the
 // rewrite closures), and the column part is capped at 3 letters — Excel's last
@@ -65,6 +72,14 @@ static CELL_REF_OR_RANGE_RE: Lazy<Regex> = Lazy::new(|| {
 fn capture_grid_snapshot(state: &AppState) -> GridSnapshot {
     let sheet = *state.active_sheet.read().unwrap();
     let grid = state.grid.read().unwrap();
+    capture_grid_snapshot_of(state, sheet, &grid)
+}
+
+/// [`capture_grid_snapshot`] for a caller that ALREADY HOLDS the active grid.
+/// Insert/Delete Cells takes the grid first, so its gates, its plan and its
+/// write share one critical section (CLAUDE.md's TOCTOU rule); this reads the
+/// sizes and the merges after the grid, in the canonical order.
+pub(crate) fn capture_grid_snapshot_of(state: &AppState, sheet: usize, grid: &engine::Grid) -> GridSnapshot {
     let row_heights = state.row_heights.read().unwrap();
     let column_widths = state.column_widths.read().unwrap();
     let merged_regions = state.merged_regions.read().unwrap();
@@ -88,6 +103,43 @@ fn capture_grid_snapshot(state: &AppState) -> GridSnapshot {
         row_styles: grid.row_styles.iter().map(|(k, v)| (*k, *v)).collect(),
         column_styles: grid.column_styles.iter().map(|(k, v)| (*k, *v)).collect(),
     }
+}
+
+/// Record the sheet's dynamic-array SPILL CLAIMS into the caller's open undo
+/// transaction, beside the `GridSnapshot` every structural edit records.
+///
+/// The snapshot puts a spill's cells back -- the origin and its output values --
+/// but not the maps that say which origin owns those outputs. Measured: undo an
+/// Insert Rows above `B5 =SEQUENCE(3)` and both maps came back EMPTY, so the
+/// restored B6:B7 read as TYPED values in the origin's way and the undo's own
+/// recalculation turned B5 into `#SPILL!`.
+///
+/// ALWAYS RECORDS, even when the sheet holds no claim. The restore REPLACES the
+/// sheet's claims wholesale, so "no claims" is a state Undo must be able to put
+/// back: an edit can CREATE a claim (a delete makes room for a blocked
+/// `#SPILL!` origin, which then spills), and skipping the record left that
+/// claim in place after Undo -- where the origin's next evaluation released it
+/// by erasing the cells under it, the user's restored blocker included (review
+/// finding, 2026-10-04). An empty record costs a few bytes. Never fails: it
+/// runs between a transaction's begin and its commit, where an early return
+/// would strand the open step.
+pub(crate) fn record_spill_claims_for_undo(
+    state: &AppState,
+    undo_stack: &mut engine::UndoStack,
+    sheet_index: usize,
+) {
+    let Ok(spill_ranges) = state.spill_ranges.read() else { return };
+    let claims: crate::spill_restore::SheetSpillClaims = spill_ranges
+        .iter()
+        .filter(|((s, _, _), _)| *s == sheet_index)
+        .map(|((_, r, c), cells)| (*r, *c, cells.clone()))
+        .collect();
+    drop(spill_ranges);
+    undo_stack.record_custom_restore(
+        crate::undo_commands::SPILL_CLAIMS_RESTORE_KIND.to_string(),
+        crate::undo_commands::spill_claims_snapshot_bytes(sheet_index, claims),
+        "Restore spills",
+    );
 }
 
 /// ============================================================================
@@ -637,11 +689,18 @@ fn shift_flat_cell_stores(
 /// Move every per-sheet RANGE-keyed store through a structural edit.
 ///
 /// Conditional formats and data validations remember RECTANGLES rather than
-/// single cells, so they need [`coord_shift::shift_range`] rather than
-/// `shift_cell` — but the failure was the same: insert a row above a formatted
-/// range and the highlight stayed on the old rows, now colouring different data.
+/// single cells -- but the failure was the same as for cells: insert a row
+/// above a formatted range and the highlight stayed on the old rows, now
+/// colouring different data.
 ///
-/// A rule/validation whose every range was deleted is dropped entirely.
+/// They go through the SAME rule as Insert/Delete Cells
+/// (`structure_cells::shift_cf_and_validation_ranges` over
+/// `BandEdit::whole_lines`): a range shrinks over a deletion, keeps reaching
+/// the sheet's last line, and -- Excel's "Format Same As Above / Left",
+/// measured live -- a range that ends on the line just before an insertion
+/// grows over the inserted lines (a CF on A4:D4 with three rows inserted at
+/// row 5 covers A4:D7). A rule/validation whose every range was deleted is
+/// dropped entirely.
 ///
 /// The caller must already hold the undo-stack lock inside `begin_transaction`.
 fn shift_per_sheet_range_stores(
@@ -651,73 +710,14 @@ fn shift_per_sheet_range_stores(
     sheet_index: usize,
     edit: calp::writeback::StructuralEdit,
 ) {
-    use crate::commands::coord_shift::{shift_range, CellRange};
-
-    // --- Conditional formats: each rule owns a LIST of ranges. ---
-    if let Ok(mut store) = state.conditional_formats.write(effect) {
-        if let Some(rules) = store.get_mut(&sheet_index) {
-            if !rules.is_empty() {
-                let previous = rules.clone();
-                let mut changed = false;
-
-                rules.retain_mut(|rule| {
-                    let before_len = rule.ranges.len();
-                    rule.ranges.retain_mut(|r| {
-                        let shifted = shift_range(
-                            CellRange {
-                                start_row: r.start_row,
-                                end_row: r.end_row,
-                                start_col: r.start_col,
-                                end_col: r.end_col,
-                            },
-                            edit,
-                        );
-                        match shifted {
-                            Some(n) => {
-                                if (n.start_row, n.end_row, n.start_col, n.end_col)
-                                    != (r.start_row, r.end_row, r.start_col, r.end_col)
-                                {
-                                    changed = true;
-                                    r.start_row = n.start_row;
-                                    r.end_row = n.end_row;
-                                    r.start_col = n.start_col;
-                                    r.end_col = n.end_col;
-                                }
-                                true
-                            }
-                            None => {
-                                changed = true;
-                                false
-                            }
-                        }
-                    });
-                    if rule.ranges.len() != before_len {
-                        changed = true;
-                    }
-                    // A rule with no ranges left applies to nothing.
-                    if rule.ranges.is_empty() {
-                        // Mark changed even when the rule ARRIVED range-less:
-                        // the retain below still drops it, and without this the
-                        // undo entry is skipped and the rule is unrecoverable.
-                        changed = true;
-                        return false;
-                    }
-                    true
-                });
-
-                if changed {
-                    undo_stack.record_custom_restore(
-                        "obj_conditional_formats".to_string(),
-                        crate::undo_commands::conditional_formats_snapshot_bytes(
-                            sheet_index,
-                            previous,
-                        ),
-                        "Shift conditional formats",
-                    );
-                }
-            }
-        }
-    }
+    // --- Conditional formats and data validations (one rule, both paths). ---
+    structure_cells::shift_cf_and_validation_ranges(
+        state,
+        effect,
+        undo_stack,
+        sheet_index,
+        &structure_cells::BandEdit::whole_lines(edit),
+    );
 
     // --- Allow-edit ranges: the exceptions carved out of sheet protection. ---
     //
@@ -744,54 +744,6 @@ fn shift_per_sheet_range_stores(
                             previous_ranges,
                         ),
                         "Shift allow-edit ranges",
-                    );
-                }
-            }
-        }
-    }
-
-    // --- Data validations: one range each. ---
-    if let Ok(mut store) = state.data_validations.write(effect) {
-        if let Some(ranges) = store.get_mut(&sheet_index) {
-            if !ranges.is_empty() {
-                let previous = ranges.clone();
-                let mut changed = false;
-
-                ranges.retain_mut(|v| {
-                    let shifted = shift_range(
-                        CellRange {
-                            start_row: v.start_row,
-                            end_row: v.end_row,
-                            start_col: v.start_col,
-                            end_col: v.end_col,
-                        },
-                        edit,
-                    );
-                    match shifted {
-                        Some(n) => {
-                            if (n.start_row, n.end_row, n.start_col, n.end_col)
-                                != (v.start_row, v.end_row, v.start_col, v.end_col)
-                            {
-                                changed = true;
-                                v.start_row = n.start_row;
-                                v.end_row = n.end_row;
-                                v.start_col = n.start_col;
-                                v.end_col = n.end_col;
-                            }
-                            true
-                        }
-                        None => {
-                            changed = true;
-                            false
-                        }
-                    }
-                });
-
-                if changed {
-                    undo_stack.record_custom_restore(
-                        "obj_validation".to_string(),
-                        crate::undo_commands::validation_snapshot_bytes(sheet_index, previous),
-                        "Shift data validations",
                     );
                 }
             }
@@ -1697,6 +1649,15 @@ pub(crate) fn insert_rows_impl(
     let snapshot = capture_grid_snapshot(&state);
 
     let grid = state.grid.lock_pending().map_err(|e| e.to_string())?;
+    // THE ROOM RULE every insert path shares (`ensure_insert_fits`): nothing
+    // to insert, more rows than fit, or a non-empty cell pushed past the last
+    // row is refused here, under the held grid, before anything moves. Select
+    // All + Insert reaches this command with 1,048,576 rows and used to move
+    // every cell of the sheet off its end (review finding, 2026-10-04).
+    structure_cells::ensure_insert_fits(
+        &grid,
+        &structure_cells::BandEdit::whole_lines(calp::writeback::StructuralEdit::RowInsert { at: row, count }),
+    )?;
     let grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
     // `sheet_names` BEFORE `style_registry`. The recalculation pass takes them
     // in that order and runs on a BACKGROUND thread, so the reverse closes a
@@ -1723,6 +1684,8 @@ pub(crate) fn insert_rows_impl(
     // Record snapshot for undo
     let owned_txn = undo_stack.begin_owned_transaction(format!("Insert {} row(s)", count));
     undo_stack.record_snapshot(snapshot);
+    // ...and the spill claims the snapshot does not carry (see the helper).
+    record_spill_claims_for_undo(&state, &mut undo_stack, active_sheet);
     // Past every refusal gate above (sheet-protection options + the writeback
     // shift guard) and inside the open transaction: the edit is committed, and
     // the cell-keyed / range-keyed stores below move with it. `mutates` sets
@@ -1923,7 +1886,21 @@ pub(crate) fn insert_rows_impl(
             row_heights.insert(r, height);
         }
     }
-    
+
+    // Excel's "Format Same As Above": the inserted rows take the format, the
+    // whole-row format and the height of the row above them (measured; see
+    // `inherit_line_format`). After the move, so the inserted rows are empty;
+    // before the grids sync below, which carries the cells to the other half
+    // of the pair -- the tier is set on both halves here.
+    {
+        let edit = calp::writeback::StructuralEdit::RowInsert { at: row, count };
+        inherit_line_format(&mut grid, edit);
+        inherit_line_size(&mut row_heights, edit);
+        if let Some(g) = grids.get_mut(active_sheet) {
+            inherit_line_tier(g, edit);
+        }
+    }
+
     // === UPDATE DEPENDENCY MAPS ===
     
     // Update dependents map: shift keys and values
@@ -2158,6 +2135,13 @@ pub(crate) fn insert_columns_impl(
     let snapshot = capture_grid_snapshot(&state);
 
     let grid = state.grid.lock_pending().map_err(|e| e.to_string())?;
+    // THE ROOM RULE every insert path shares (`ensure_insert_fits`): nothing
+    // to insert, more columns than fit, or a non-empty cell pushed past the
+    // last column is refused here, under the held grid, before anything moves.
+    structure_cells::ensure_insert_fits(
+        &grid,
+        &structure_cells::BandEdit::whole_lines(calp::writeback::StructuralEdit::ColInsert { at: col, count }),
+    )?;
     let grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
     // `sheet_names` BEFORE `style_registry`. The recalculation pass takes them
     // in that order and runs on a BACKGROUND thread, so the reverse closes a
@@ -2184,6 +2168,8 @@ pub(crate) fn insert_columns_impl(
     // Record snapshot for undo
     let owned_txn = undo_stack.begin_owned_transaction(format!("Insert {} column(s)", count));
     undo_stack.record_snapshot(snapshot);
+    // ...and the spill claims the snapshot does not carry (see the helper).
+    record_spill_claims_for_undo(&state, &mut undo_stack, active_sheet);
     // Past every refusal gate above (sheet-protection options + the writeback
     // shift guard) and inside the open transaction: the edit is committed, and
     // the cell-keyed / range-keyed stores below move with it. `mutates` sets
@@ -2378,7 +2364,19 @@ pub(crate) fn insert_columns_impl(
             column_widths.insert(c, width);
         }
     }
-    
+
+    // Excel's "Format Same As Left": the inserted columns take the format, the
+    // whole-column format and the width of the column to their left (see the
+    // row twin and `inherit_line_format`).
+    {
+        let edit = calp::writeback::StructuralEdit::ColInsert { at: col, count };
+        inherit_line_format(&mut grid, edit);
+        inherit_line_size(&mut column_widths, edit);
+        if let Some(g) = grids.get_mut(active_sheet) {
+            inherit_line_tier(g, edit);
+        }
+    }
+
     // === UPDATE DEPENDENCY MAPS ===
     
     // Update dependents map: shift keys and values
@@ -2523,6 +2521,88 @@ pub(crate) fn insert_columns_impl(
 }
 
 // ============================================================================
+// INSERTED LINES TAKE THEIR NEIGHBOUR'S FORMAT (Excel's "Format Same As Above")
+// ============================================================================
+//
+// MEASURED LIVE (Excel 16 build 20326, rust-followup probe 1, 2026-10-04; a
+// fresh hidden instance, `Rows("5:7").Insert` / `Columns("D:D").Insert`):
+//   * every inserted row takes the format of the row ABOVE it (an inserted
+//     column, the column to its LEFT): each cell's fill, font and number
+//     format, the whole-row (whole-column) format, and the row's HEIGHT (the
+//     column's WIDTH) -- three rows inserted under a red, bold, 0.000, 30 pt
+//     row 4 are three red, bold, 0.000, 30 pt rows;
+//   * a conditional format and a data validation on the neighbour grow over
+//     the inserted lines (CF A4:D4 -> A4:D7, DV A4 -> A4:A7) -- that half is
+//     `structure_cells::shift_cf_and_validation_ranges`;
+//   * HIDDEN is not inherited (a hidden row 4 still gave its 30 pt height, and
+//     the new row was visible), and neither is a MERGE (A4:B4 merged left A5
+//     unmerged);
+//   * an insertion at row 1 / column A has no neighbour and takes NOTHING
+//     (Excel did not use the row below).
+// The CELL half is `structure_cells::inherit_neighbour_styles` -- the helper
+// Insert Cells uses -- so the two paths cannot disagree about what a neighbour
+// gives. Undo needs nothing of its own here: the cells, the tiers and the
+// sizes all ride the `GridSnapshot` every whole-line insert records first.
+
+/// The inserted lines' style TIER: the neighbour line's whole-row (whole-column)
+/// format, when it has one. `grid` is either half of the active pair or an
+/// off-sheet grid; the caller applies it to every copy it keeps.
+fn inherit_line_tier(grid: &mut engine::Grid, edit: calp::writeback::StructuralEdit) {
+    use calp::writeback::StructuralEdit as SE;
+    let (at, count, rows) = match edit {
+        SE::RowInsert { at, count } => (at, count, true),
+        SE::ColInsert { at, count } => (at, count, false),
+        SE::RowDelete { .. } | SE::ColDelete { .. } => return,
+    };
+    if at == 0 || count == 0 {
+        return;
+    }
+    let max = if rows { engine::EXCEL_MAX_ROW_INDEX } else { engine::EXCEL_MAX_COL_INDEX };
+    let last = (at as u64 + count as u64 - 1).min(max as u64) as u32;
+    let tiers = if rows { &mut grid.row_styles } else { &mut grid.column_styles };
+    if let Some(style) = tiers.get(&(at - 1)).copied() {
+        for line in at..=last {
+            tiers.insert(line, style);
+        }
+    }
+}
+
+/// The inserted lines' CELLS (each takes its neighbour's style, empty) and
+/// TIER. See the section comment.
+fn inherit_line_format(grid: &mut engine::Grid, edit: calp::writeback::StructuralEdit) {
+    if !matches!(
+        edit,
+        calp::writeback::StructuralEdit::RowInsert { .. } | calp::writeback::StructuralEdit::ColInsert { .. }
+    ) {
+        return;
+    }
+    structure_cells::inherit_neighbour_styles(grid, &structure_cells::BandEdit::whole_lines(edit));
+    inherit_line_tier(grid, edit);
+}
+
+/// The inserted lines' SIZE: the neighbour's custom height (width), when it
+/// has one. `sizes` must already be shifted by the edit. A neighbour at the
+/// default size gives nothing, so the inserted lines are default too (measured:
+/// a default row 4 above a 40 pt row 5 gave a default-height new row 5).
+fn inherit_line_size(sizes: &mut HashMap<u32, f64>, edit: calp::writeback::StructuralEdit) {
+    use calp::writeback::StructuralEdit as SE;
+    let (at, count, max) = match edit {
+        SE::RowInsert { at, count } => (at, count, engine::EXCEL_MAX_ROW_INDEX),
+        SE::ColInsert { at, count } => (at, count, engine::EXCEL_MAX_COL_INDEX),
+        SE::RowDelete { .. } | SE::ColDelete { .. } => return,
+    };
+    if at == 0 || count == 0 {
+        return;
+    }
+    let last = (at as u64 + count as u64 - 1).min(max as u64) as u32;
+    if let Some(size) = sizes.get(&(at - 1)).copied() {
+        for line in at..=last {
+            sizes.insert(line, size);
+        }
+    }
+}
+
+// ============================================================================
 // FORMULA REFERENCE SHIFTING (respects $ absolute markers)
 // ============================================================================
 
@@ -2541,38 +2621,42 @@ pub fn shift_formula_row_references(formula: &str, from_row: u32, delta: i32) ->
     // copy marker, not a pin to a physical row), so a large negative delta
     // could push `$A$3` above row 1. `None` means the caller writes `#REF!`.
     let shift = |row_num: u32| -> Option<u32> { structural_row(row_num, from_row, delta) };
+    // A RANGE is one interval, decided once (`structural_row_span`): it shrinks
+    // over a partial delete and keeps reaching the sheet's last row, exactly as
+    // Excel's does.
+    let span = |a: u32, b: u32| -> Option<(u32, u32)> { structural_row_span(a, b, from_row, delta) };
     rewrite_outside_strings(formula, |segment| {
         // Handle cell references and cell RANGES (A5, $A$5, A5:A9). The range is
         // matched whole so both ends are decided together — see
         // `CELL_REF_OR_RANGE_RE` for the half-`#REF!` range this prevents.
         let result = replace_all_guarded(&CELL_REF_OR_RANGE_RE, segment, |caps| {
             let lead = &caps[1];
-            let end1 = shift(caps[5].parse().unwrap_or(0))
-                .map(|r| format!("{}{}{}{}", &caps[2], &caps[3], &caps[4], r));
-            let has_second = caps.get(9).is_some();
-            let end2 = if has_second {
-                shift(caps[9].parse().unwrap_or(0))
-                    .map(|r| format!("{}{}{}{}", &caps[6], &caps[7], &caps[8], r))
-            } else {
-                None
-            };
-            emit_ref_or_range(lead, end1, has_second, end2)
+            let row1: u32 = caps[5].parse().unwrap_or(0);
+            if caps.get(9).is_none() {
+                let end1 = shift(row1).map(|r| format!("{}{}{}{}", &caps[2], &caps[3], &caps[4], r));
+                return emit_ref_or_range(lead, end1, false, None);
+            }
+            let row2: u32 = caps[9].parse().unwrap_or(0);
+            match span(row1, row2) {
+                Some((a, b)) => format!(
+                    "{}{}{}{}{}:{}{}{}{}",
+                    lead, &caps[2], &caps[3], &caps[4], a, &caps[6], &caps[7], &caps[8], b
+                ),
+                None => format!("{}{}", lead, REF_ERROR),
+            }
         });
 
-        // Handle row-only references (e.g., 5:5, $2:$10, 2:$10)
+        // Handle row-only references (e.g., 5:5, $2:$10, 2:$10): the same
+        // interval rule (`=SUM(3:7)` with rows 3:4 deleted is `=SUM(3:5)`).
         replace_all_guarded(&ROW_RANGE_RE, &result, |caps| {
             let lead = &caps[1];
             let start_abs = &caps[2];
             let start_row: u32 = caps[3].parse().unwrap_or(0);
             let end_abs = &caps[4];
             let end_row: u32 = caps[5].parse().unwrap_or(0);
-            // A range with EITHER end off the sheet is `#REF!` whole: Excel does
-            // not keep half a range.
-            match (shift(start_row), shift(end_row)) {
-                (Some(a), Some(b)) => {
-                    format!("{}{}{}:{}{}", lead, start_abs, a, end_abs, b)
-                }
-                _ => format!("{}{}", lead, REF_ERROR),
+            match span(start_row, end_row) {
+                Some((a, b)) => format!("{}{}{}:{}{}", lead, start_abs, a, end_abs, b),
+                None => format!("{}{}", lead, REF_ERROR),
             }
         })
     })
@@ -2587,37 +2671,38 @@ pub fn shift_formula_col_references(formula: &str, from_col: u32, delta: i32) ->
     let shift = |letters: &str| -> Option<String> {
         structural_col(shift_col_to_index(letters), from_col, delta).map(shift_index_to_col)
     };
+    // A RANGE is one interval, decided once -- see the row twin.
+    let span = |a: &str, b: &str| -> Option<(String, String)> {
+        structural_span(shift_col_to_index(a), shift_col_to_index(b), from_col, delta, false)
+            .map(|(x, y)| (shift_index_to_col(x), shift_index_to_col(y)))
+    };
     rewrite_outside_strings(formula, |segment| {
         // Cell references and cell RANGES (C5, $C$5, C5:F5) — matched whole, so
-        // a range with one end deleted collapses instead of emitting
-        // `#REF!:E5`, which does not parse. See `CELL_REF_OR_RANGE_RE`.
+        // both ends are decided together. See `CELL_REF_OR_RANGE_RE`.
         let result = replace_all_guarded(&CELL_REF_OR_RANGE_RE, segment, |caps| {
             let lead = &caps[1];
-            let end1 =
-                shift(&caps[3]).map(|c| format!("{}{}{}{}", &caps[2], c, &caps[4], &caps[5]));
-            let has_second = caps.get(9).is_some();
-            let end2 = if has_second {
-                shift(&caps[7]).map(|c| format!("{}{}{}{}", &caps[6], c, &caps[8], &caps[9]))
-            } else {
-                None
-            };
-            emit_ref_or_range(lead, end1, has_second, end2)
+            if caps.get(9).is_none() {
+                let end1 = shift(&caps[3]).map(|c| format!("{}{}{}{}", &caps[2], c, &caps[4], &caps[5]));
+                return emit_ref_or_range(lead, end1, false, None);
+            }
+            match span(&caps[3], &caps[7]) {
+                Some((a, b)) => format!(
+                    "{}{}{}{}{}:{}{}{}{}",
+                    lead, &caps[2], a, &caps[4], &caps[5], &caps[6], b, &caps[8], &caps[9]
+                ),
+                None => format!("{}{}", lead, REF_ERROR),
+            }
         });
 
-        // Handle column-only references (e.g., B:B, $A:$C, A:$C)
+        // Handle column-only references (e.g., B:B, $A:$C, A:$C): the same
+        // interval rule (`=SUM(C:F)` with A:D deleted is `=SUM(A:B)`).
         replace_all_guarded(&COL_RANGE_RE, &result, |caps| {
             let lead = &caps[1];
             let start_abs = &caps[2];
-            let start_col = &caps[3];
             let end_abs = &caps[4];
-            let end_col = &caps[5];
-            // Either end off the sheet makes the whole range `#REF!`, as on the
-            // row axis above.
-            match (shift(start_col), shift(end_col)) {
-                (Some(a), Some(b)) => {
-                    format!("{}{}{}:{}{}", lead, start_abs, a, end_abs, b)
-                }
-                _ => format!("{}{}", lead, REF_ERROR),
+            match span(&caps[3], &caps[5]) {
+                Some((a, b)) => format!("{}{}{}:{}{}", lead, start_abs, a, end_abs, b),
+                None => format!("{}{}", lead, REF_ERROR),
             }
         })
     })
@@ -3154,37 +3239,73 @@ fn shifted_col(col_index: u32, delta: i32) -> Option<u32> {
 /// reference bug can take: no error, a plausible number, and a different one
 /// than the user asked for.
 ///
-/// The band test needs no count parameter: for a delete (`delta < 0`) a
-/// reference below the edit point that would land AT OR ABOVE it was inside the
-/// rows that were removed.
+/// ONE RULE. The answer comes from `BandEdit::whole_lines` -- the band rule
+/// Insert/Delete Cells uses, with a band that spans every column -- so a
+/// single reference cannot be moved one way by a whole-row edit and another
+/// way by a cell shift.
 fn structural_row(row_num: u32, from_row: u32, delta: i32) -> Option<u32> {
-    if row_num <= from_row {
+    if row_num == 0 {
+        // Not a reference the parser could have produced; leave it alone.
         return Some(row_num);
     }
-    let shifted = (row_num as i64) + delta as i64;
-    if delta < 0 && shifted <= from_row as i64 {
-        return None;
-    }
-    if shifted < 1 || shifted > engine::EXCEL_MAX_ROW_INDEX as i64 + 1 {
-        return None;
-    }
-    Some(shifted as u32)
+    line_edit(from_row, delta, true).shift_reference_point(row_num - 1).map(|r| r + 1)
 }
 
 /// The column twin of [`structural_row`]. `col_index` and `from_col` are both
-/// 0-based, so the "above the edit" test is `<` rather than `<=`.
+/// 0-based.
 fn structural_col(col_index: u32, from_col: u32, delta: i32) -> Option<u32> {
-    if col_index < from_col {
-        return Some(col_index);
+    line_edit(from_col, delta, false).shift_reference_point(col_index)
+}
+
+/// The whole-line edit a `(from, delta)` pair names: `delta > 0` inserts that
+/// many lines at `from` (0-based), `delta < 0` deletes them.
+fn line_edit(from: u32, delta: i32, rows: bool) -> structure_cells::BandEdit {
+    use calp::writeback::StructuralEdit as SE;
+    let count = delta.unsigned_abs();
+    let edit = match (rows, delta >= 0) {
+        (true, true) => SE::RowInsert { at: from, count },
+        (true, false) => SE::RowDelete { at: from, count },
+        (false, true) => SE::ColInsert { at: from, count },
+        (false, false) => SE::ColDelete { at: from, count },
+    };
+    structure_cells::BandEdit::whole_lines(edit)
+}
+
+/// Where the two WRITTEN ends of a range go through a whole-line edit, along
+/// the edit's axis (0-based in, 0-based out), or `None` when every line the
+/// range covered was deleted (or it was pushed off the sheet): `#REF!`.
+///
+/// EXCEL'S RULE, measured live (rust-followup probe 1, 2026-10-04) and the same
+/// one Insert/Delete Cells applies inside its band:
+///   * a range SHRINKS over the lines a delete removes from it --
+///     `=SUM(A5:A9)` with row 5 deleted is `=SUM(A5:A8)`, rows 4:6 deleted is
+///     `=SUM(A4:A6)`, rows 9:12 deleted is `=SUM(A5:A8)` -- and only a range
+///     deleted WHOLE is `#REF!` (rows 5:9, or 3:12);
+///   * it GROWS over an insertion strictly inside it (`A5:A9`, insert at row 9:
+///     `A5:A10`) and MOVES when the insertion is at or above its start;
+///   * a range that reaches the sheet's last line keeps reaching it
+///     (`=SUM(B10:B1048576)` with 2 rows inserted at row 2 is
+///     `=SUM(B12:B1048576)`; `=ROWS(1:1048576)` never changes), and one pushed
+///     past the edge is cut at it (`B1048560:B1048575` + 10 rows is
+///     `B1048570:B1048576`) or, when its start leaves too, is `#REF!`.
+///
+/// This replaced deciding each END on its own, which turned the first two
+/// cases into `#REF!` -- a formula that errors where Excel keeps summing.
+///
+/// An INVERTED range (`A9:A5`) keeps its spelling: the end written first gets
+/// the new position of whichever end it was.
+fn structural_span(first: u32, second: u32, from: u32, delta: i32, rows: bool) -> Option<(u32, u32)> {
+    let (lo, hi) = (first.min(second), first.max(second));
+    let (nlo, nhi) = line_edit(from, delta, rows).shift_reference_interval(lo, hi)?;
+    Some(if first <= second { (nlo, nhi) } else { (nhi, nlo) })
+}
+
+/// [`structural_span`] over 1-based row NUMBERS, as the A1 text spells them.
+fn structural_row_span(first: u32, second: u32, from_row: u32, delta: i32) -> Option<(u32, u32)> {
+    if first == 0 || second == 0 {
+        return Some((first, second));
     }
-    let shifted = (col_index as i64) + delta as i64;
-    if delta < 0 && shifted < from_col as i64 {
-        return None;
-    }
-    if shifted < 0 || shifted > engine::EXCEL_MAX_COL_INDEX as i64 {
-        return None;
-    }
-    Some(shifted as u32)
+    structural_span(first - 1, second - 1, from_row, delta, true).map(|(a, b)| (a + 1, b + 1))
 }
 
 /// Shift column references for fill operation (all non-absolute refs shift).
@@ -3529,6 +3650,8 @@ pub(crate) fn delete_rows_impl(
     // Record snapshot for undo
     let owned_txn = undo_stack.begin_owned_transaction(format!("Delete {} row(s)", count));
     undo_stack.record_snapshot(snapshot);
+    // ...and the spill claims the snapshot does not carry (see the helper).
+    record_spill_claims_for_undo(&state, &mut undo_stack, active_sheet);
     // BUG-0054: restores for the pivots this delete removes outright, INSIDE
     // this transaction so one Ctrl+Z restores rows + pivot + slicers together.
     // Cascade restores first: entries replay in reverse, so the pivot is
@@ -4065,6 +4188,8 @@ pub(crate) fn delete_columns_impl(
     // Record snapshot for undo
     let owned_txn = undo_stack.begin_owned_transaction(format!("Delete {} column(s)", count));
     undo_stack.record_snapshot(snapshot);
+    // ...and the spill claims the snapshot does not carry (see the helper).
+    record_spill_claims_for_undo(&state, &mut undo_stack, active_sheet);
     // BUG-0054: restores for the pivots this delete removes outright — see the
     // row twin for ordering (cascade first; reverse replay recreates the pivot
     // before its slicers).
@@ -5604,19 +5729,26 @@ mod structural_formula_shift_tests {
     /// emitted `=SUM(#REF!:A8)` — and that DOES NOT PARSE. An unparseable
     /// formula is stored anyway, so the cell keeps a stale value, carries no
     /// dependency edges and can never recalculate: exactly the failure
-    /// `REF_ERROR`'s own comment says writing `#REF!` exists to avoid. Excel
-    /// collapses the whole range.
+    /// `REF_ERROR`'s own comment says writing `#REF!` exists to avoid. A COPY
+    /// that pushes one end of a range off the sheet collapses the whole range.
+    ///
+    /// This test used to pin the same collapse for a STRUCTURAL delete of one
+    /// end (`=SUM(A5:A9)`, delete row 5 -> `=SUM(#REF!)`). That was the wrong
+    /// claim: Excel SHRINKS such a range (`=SUM(A5:A8)`, measured live,
+    /// rust-followup probe 1) and only a range deleted WHOLE becomes `#REF!`.
+    /// The structural cases now live in `a_partly_deleted_range_shrinks_...`
+    /// below; the two that remain here are deleted whole.
     #[test]
     fn a_range_with_one_end_off_the_sheet_collapses_whole_and_still_parses() {
         for out in [
-            shift_formula_row_references("=SUM(A5:A9)", 4, -1),
-            shift_formula_col_references("=SUM(C5:F5)", 2, -1),
             shift_formula_internal("=SUM(A1:A5)", -3, 0),
             shift_formula_internal("=SUM(A1:C1)", 0, -1),
             // One end absolute, the other pushed off: still one `#REF!`.
             shift_formula_internal("=SUM(A1:$A$5)", -3, 0),
-            // BOTH ends gone is one `#REF!`, not two.
+            // BOTH ends gone is one `#REF!`, not two -- rows 5..14 deleted take
+            // every row of A5:A9.
             shift_formula_row_references("=SUM(A5:A9)", 4, -10),
+            shift_formula_col_references("=SUM(C5:F5)", 2, -4),
         ] {
             assert_eq!(out, "=SUM(#REF!)", "half a #REF! range survived");
             assert!(parser::parse(&out).is_ok(), "`{}` does not parse back", out);
@@ -5628,6 +5760,21 @@ mod structural_formula_shift_tests {
         assert_eq!(shift_formula_row_references("=SUM(A1:A3)", 4, 1), "=SUM(A1:A3)");
         assert_eq!(shift_formula_internal("=SUM(A5:A9)", 1, 0), "=SUM(A6:A10)");
         assert_eq!(shift_formula_col_references("=SUM(C5:F5)", 2, 1), "=SUM(D5:G5)");
+    }
+
+    /// Excel's rule for a STRUCTURAL delete of part of a range, measured live
+    /// (rust-followup probe 1, 2026-10-04): the range shrinks over the deleted
+    /// lines, and stays parseable.
+    #[test]
+    fn a_partly_deleted_range_shrinks_like_excels_and_still_parses() {
+        for (out, excel) in [
+            (shift_formula_row_references("=SUM(A5:A9)", 4, -1), "=SUM(A5:A8)"),
+            (shift_formula_col_references("=SUM(C5:F5)", 2, -1), "=SUM(C5:E5)"),
+            (shift_formula_row_references("=SUM($A$5:$A$9)", 4, -1), "=SUM($A$5:$A$8)"),
+        ] {
+            assert_eq!(out, excel);
+            assert!(parser::parse(&out).is_ok(), "`{}` does not parse back", out);
+        }
     }
 
     // ================================================================
@@ -5686,11 +5833,17 @@ mod structural_formula_shift_tests {
         assert_eq!(shift_formula_col_references("=B5", 2, -1), "=B5");
     }
 
+    /// Only a range deleted WHOLE is `#REF!` -- and then the whole range, never
+    /// half of it. (This test was named "either end deleted is #REF! whole",
+    /// which is not Excel's rule: `=SUM(3:7)` with rows 3:4 deleted is
+    /// `=SUM(3:5)`, measured; the cases it asserts were always whole deletes.)
     #[test]
-    fn a_range_with_either_end_deleted_is_ref_whole() {
-        // Excel does not keep half a range.
+    fn a_range_deleted_whole_is_ref_whole() {
         assert_eq!(shift_formula_row_references("=SUM(5:5)", 4, -1), "=SUM(#REF!)");
         assert_eq!(shift_formula_col_references("=SUM(C:C)", 2, -1), "=SUM(#REF!)");
+        // Controls: a row-only / column-only range that keeps a line shrinks.
+        assert_eq!(shift_formula_row_references("=SUM(3:7)", 2, -2), "=SUM(3:5)");
+        assert_eq!(shift_formula_col_references("=SUM(C:F)", 0, -4), "=SUM(A:B)");
     }
 
     #[test]
@@ -5707,7 +5860,8 @@ mod structural_formula_shift_tests {
             shift_formula_col_references("=SUM(C:C)", 2, -1),
             // The RANGE forms, added when the half-`#REF!` range was fixed:
             // `#REF!:A8` was the one spelling this census would have caught.
-            shift_formula_row_references("=SUM(A5:A9)", 4, -1),
+            // (A5:A9 with rows 5..9 deleted: gone whole, so `#REF!`.)
+            shift_formula_row_references("=SUM(A5:A9)", 4, -5),
             shift_formula_internal("=SUM(A1:A5)", -3, 0),
             shift_formula_internal("=SUM(1:3)", -1, 0),
             shift_formula_internal("=SUM(A:C)", 0, -1),
@@ -6462,21 +6616,24 @@ pub(crate) fn shift_formula_rows_sheet_aware(
             let col_letters = &caps[5];
             let row_abs = &caps[6];
             let row_num: u32 = caps[7].parse().unwrap_or(0);
-            let new_row = if applies { shift_row(row_num) } else { Some(row_num) };
-            // A range is matched WHOLE here (one match governs both endpoints),
-            // so both ends are resolved before anything is emitted: if either
-            // lost its row the reference is `#REF!` entire, not half a range.
-            let second = if let (Some(ca2), Some(cl2), Some(ra2), Some(rn2)) =
+            // A range is matched WHOLE here (one match governs both endpoints)
+            // and decided as ONE interval (`structural_row_span`): it shrinks
+            // over a partial delete, keeps reaching the sheet's last row, and is
+            // `#REF!` entire -- never half a range -- only when every row of it
+            // was deleted.
+            let (new_row, second) = if let (Some(ca2), Some(cl2), Some(ra2), Some(rn2)) =
                 (caps.get(8), caps.get(9), caps.get(10), caps.get(11))
             {
                 let row2: u32 = rn2.as_str().parse().unwrap_or(0);
-                let new_row2 = if applies { shift_row(row2) } else { Some(row2) };
-                Some((ca2.as_str(), cl2.as_str(), ra2.as_str(), new_row2))
+                let pair = if applies { structural_row_span(row_num, row2, from_row, delta) } else { Some((row_num, row2)) };
+                match pair {
+                    Some((a, b)) => (Some(a), Some((ca2.as_str(), cl2.as_str(), ra2.as_str(), Some(b)))),
+                    None => (None, None),
+                }
             } else {
-                None
+                (if applies { shift_row(row_num) } else { Some(row_num) }, None)
             };
-            let second_lost = matches!(second, Some((_, _, _, None)));
-            let Some(new_row) = new_row.filter(|_| !second_lost) else {
+            let Some(new_row) = new_row else {
                 return format!("{}{}", lead, REF_ERROR);
             };
             let mut out = format!(
@@ -6507,13 +6664,11 @@ pub(crate) fn shift_formula_rows_sheet_aware(
             let r1: u32 = caps[5].parse().unwrap_or(0);
             let abs2 = &caps[6];
             let r2: u32 = caps[7].parse().unwrap_or(0);
-            let (n1, n2) = if applies {
-                (shift_row(r1), shift_row(r2))
-            } else {
-                (Some(r1), Some(r2))
-            };
-            match (n1, n2) {
-                (Some(a), Some(b)) => format!(
+            // One interval, as for cell ranges (`=SUM(3:7)` with rows 3:4
+            // deleted is `=SUM(3:5)`, measured).
+            let pair = if applies { structural_row_span(r1, r2, from_row, delta) } else { Some((r1, r2)) };
+            match pair {
+                Some((a, b)) => format!(
                     "{}{}{}{}:{}{}",
                     lead,
                     qualifier_prefix(&quoted, &bare),
@@ -6539,6 +6694,11 @@ pub(crate) fn shift_formula_cols_sheet_aware(
     let shift_col = |letters: &str| -> Option<String> {
         structural_col(shift_col_to_index(letters), from_col, delta).map(shift_index_to_col)
     };
+    // One interval per range -- see `structural_span` and the row twin.
+    let span = |a: &str, b: &str| -> Option<(String, String)> {
+        structural_span(shift_col_to_index(a), shift_col_to_index(b), from_col, delta, false)
+            .map(|(x, y)| (shift_index_to_col(x), shift_index_to_col(y)))
+    };
     rewrite_outside_strings(formula, |segment| {
         // Pass 1: cell refs and cell ranges.
         let pass1 = replace_all_guarded(&QUALIFIED_REF_RE, segment, |caps| {
@@ -6554,26 +6714,23 @@ pub(crate) fn shift_formula_cols_sheet_aware(
             let col_letters = &caps[5];
             let row_abs = &caps[6];
             let row_num = &caps[7];
-            let new_col = if applies {
-                shift_col(col_letters)
-            } else {
-                Some(col_letters.to_string())
-            };
-            // Both ends resolved before anything is emitted -- see the row twin.
-            let second = if let (Some(ca2), Some(cl2), Some(ra2), Some(rn2)) =
+            // Both ends decided together, as ONE interval -- see the row twin.
+            let (new_col, second) = if let (Some(ca2), Some(cl2), Some(ra2), Some(rn2)) =
                 (caps.get(8), caps.get(9), caps.get(10), caps.get(11))
             {
-                let new_col2 = if applies {
-                    shift_col(cl2.as_str())
+                let pair = if applies {
+                    span(col_letters, cl2.as_str())
                 } else {
-                    Some(cl2.as_str().to_string())
+                    Some((col_letters.to_string(), cl2.as_str().to_string()))
                 };
-                Some((ca2.as_str(), new_col2, ra2.as_str(), rn2.as_str()))
+                match pair {
+                    Some((a, b)) => (Some(a), Some((ca2.as_str(), Some(b), ra2.as_str(), rn2.as_str()))),
+                    None => (None, None),
+                }
             } else {
-                None
+                (if applies { shift_col(col_letters) } else { Some(col_letters.to_string()) }, None)
             };
-            let second_lost = matches!(second, Some((_, None, _, _)));
-            let Some(new_col) = new_col.filter(|_| !second_lost) else {
+            let Some(new_col) = new_col else {
                 return format!("{}{}", lead, REF_ERROR);
             };
             let mut out = format!(
@@ -6604,13 +6761,10 @@ pub(crate) fn shift_formula_cols_sheet_aware(
             let c1 = &caps[5];
             let abs2 = &caps[6];
             let c2 = &caps[7];
-            let (n1, n2) = if applies {
-                (shift_col(c1), shift_col(c2))
-            } else {
-                (Some(c1.to_string()), Some(c2.to_string()))
-            };
-            match (n1, n2) {
-                (Some(a), Some(b)) => format!(
+            // One interval (`=SUM(C:F)` with A:D deleted is `=SUM(A:B)`).
+            let pair = if applies { span(c1, c2) } else { Some((c1.to_string(), c2.to_string())) };
+            match pair {
+                Some((a, b)) => format!(
                     "{}{}{}{}:{}{}",
                     lead,
                     qualifier_prefix(&quoted, &bare),
@@ -7258,6 +7412,16 @@ pub(crate) fn off_sheet_structural_edit(
         _ => {}
     }
 
+    // THE ROOM RULE every insert path shares (`ensure_insert_fits`), on the
+    // TARGET sheet's cells. Before the snapshot and before the effect, like
+    // every gate above.
+    if matches!(edit, SE::RowInsert { .. } | SE::ColInsert { .. }) {
+        let grids = state.grids.read().map_err(|e| e.to_string())?;
+        if let Some(grid) = grids.get(target) {
+            structure_cells::ensure_insert_fits(grid, &structure_cells::BandEdit::whole_lines(edit))?;
+        }
+    }
+
     // Capture the per-sheet snapshot BEFORE any mutation (takes its own locks).
     let snapshot = crate::undo_commands::capture_sheet_structural_snapshot(state, target)?;
 
@@ -7514,6 +7678,9 @@ pub(crate) fn off_sheet_structural_edit(
                 }
             }
         }
+        // Inserted lines take their neighbour's format (cells + tier), as on
+        // the active sheet. A no-op for a delete.
+        inherit_line_format(grid, edit);
         grid.recalculate_bounds();
     }
 
@@ -7528,6 +7695,7 @@ pub(crate) fn off_sheet_structural_edit(
                 for (r, h) in old {
                     heights.insert(if r >= at { r + count } else { r }, h);
                 }
+                inherit_line_size(heights, edit);
             }
         }
         SE::RowDelete { at, count } => {
@@ -7551,6 +7719,7 @@ pub(crate) fn off_sheet_structural_edit(
                 for (c, w) in old {
                     widths.insert(if c >= at { c + count } else { c }, w);
                 }
+                inherit_line_size(widths, edit);
             }
         }
         SE::ColDelete { at, count } => {

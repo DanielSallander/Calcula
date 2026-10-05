@@ -222,4 +222,47 @@ mod tests {
         assert_eq!(restored.len(), 2); // default + bold
         assert_eq!(restored[1], bold_style);
     }
+
+    /// The three style shapes the Home-tab programme added survive .cala
+    /// (`styles/registry.json` is a plain serde dump of the engine style):
+    /// a half-point and a 409 pt font, stacked text, and an Accounting format
+    /// carrying the leading-minus pattern. And a workbook with none of them
+    /// writes the SAME bytes it always did -- a whole size is still an
+    /// integer -- which is why none of them is linked to the format version
+    /// (an older reader refuses a fraction or an unknown variant loudly; it
+    /// cannot misread one -- see `FontSize`'s serializer).
+    #[test]
+    fn half_points_stacked_text_and_minus_accounting_survive_the_registry() {
+        use engine::style::{
+            CurrencyPosition, FontSize, NegativeStyle, NumberFormat, StyleRegistry, TextRotation,
+        };
+        let mut registry = StyleRegistry::new();
+        let mut half = CellStyle::new();
+        half.font.size = FontSize::from_points(10.5).unwrap();
+        let mut top = CellStyle::new();
+        top.font.size = FontSize::from_whole_points(409);
+        let stacked = CellStyle::new().with_text_rotation(TextRotation::Vertical);
+        let comma = CellStyle::new().with_number_format(NumberFormat::Accounting {
+            decimal_places: 2,
+            symbol: String::new(),
+            symbol_position: CurrencyPosition::Before,
+            negative_style: NegativeStyle::Minus,
+        });
+        let indices: Vec<usize> = [half, top, stacked, comma]
+            .into_iter()
+            .map(|s| registry.get_or_create(s))
+            .collect();
+
+        let json = serialize_style_registry(registry.all_styles()).unwrap();
+        assert!(json.contains("\"size\": 10.5"), "{json}");
+        assert!(json.contains("\"size\": 409"), "{json}");
+        let restored = deserialize_style_registry(&json).unwrap();
+        for i in indices {
+            assert_eq!(restored[i], registry.all_styles()[i], "style {i}");
+        }
+
+        // An ordinary registry is unchanged on disk: `"size": 11`, no fraction.
+        let plain = serialize_style_registry(StyleRegistry::new().all_styles()).unwrap();
+        assert!(plain.contains("\"size\": 11,"), "{plain}");
+    }
 }

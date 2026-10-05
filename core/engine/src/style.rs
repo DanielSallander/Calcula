@@ -41,6 +41,17 @@ pub enum TextRotation {
     Rotate90,    // 90 degrees counter-clockwise
     Rotate270,   // 270 degrees (90 degrees clockwise)
     Custom(i16), // Custom angle: -90 to +90 degrees
+    /// STACKED text: the characters keep their upright orientation and are
+    /// laid out one under the other. Excel's Home > Orientation > "Vertical
+    /// Text" (`xlVertical`, -4166 through COM), OOXML `textRotation="255"`.
+    ///
+    /// NOT AN ANGLE, which is why it is its own variant rather than a magic
+    /// `Custom` value: every angle rotates the glyphs, this one never does. It
+    /// did not exist before, and the cost of its absence was concrete -- the
+    /// `.xlsx` reader mapped 255 to `Rotate90`, so a stacked header came back
+    /// as text rotated a quarter turn, and the API's parser turned the word
+    /// "vertical" into `None`, silently CLEARING a rotation the user asked for.
+    Vertical,
 }
 
 /// Number format types for displaying numeric values.
@@ -66,6 +77,27 @@ pub enum NumberFormat {
         decimal_places: u8,
         symbol: String,
         symbol_position: CurrencyPosition,
+        /// How a NEGATIVE is spelled: a leading minus pinned to the cell's
+        /// left edge (`Minus`, Excel's accounting code in every locale Calcula
+        /// knows except en-US: sv-SE `-* # ##0,00 kr_-`, measured live) or
+        /// parentheses (`Parentheses`, en-US `_($* (#,##0.00)`). Excel offers
+        /// no choice in the dialog -- the convention is the REGION's, read
+        /// when the format is applied and then frozen into the code, which is
+        /// why it is stored here per format rather than decided at render
+        /// time from whoever happens to be viewing: a US workbook opened in
+        /// Stockholm keeps its parentheses in Excel, and so must it here.
+        ///
+        /// Only `Minus` and `Parentheses` are produced by the presets; the two
+        /// red entries render as they do for Currency (an imported
+        /// `[Red]` accounting code), so nothing a file carries is dropped.
+        ///
+        /// ABSENT (a document written before the field existed) reads as
+        /// `Parentheses`, because that is what every such document RENDERED:
+        /// the formatter wrapped every accounting negative in parentheses
+        /// unconditionally. Defaulting to `Minus` would silently restyle every
+        /// old en-US ledger on its first open.
+        #[serde(default = "accounting_negative_style_before_the_field_existed")]
+        negative_style: NegativeStyle,
     },
     Fraction {
         /// Fixed denominator (e.g., Some(4) for quarters). None = best-fit.
@@ -125,10 +157,15 @@ pub enum CurrencyPosition {
 /// omission: the negative section supplies the whole rendering, and its section
 /// carries no minus.
 ///
-/// ACCOUNTING IS NOT THIS. `NumberFormat::Accounting` keeps its parentheses
-/// unconditionally and correctly: Excel's accounting code
-/// `_($* #,##0.00_);_($* (#,##0.00);...` has a parenthesised negative section
-/// built in, and offers no choice.
+/// ACCOUNTING USES THE SAME ENUM, BUT NOT THE SAME CHOICE. Excel's Accounting
+/// category offers no "Negative numbers:" list: its code is the REGION's
+/// accounting pattern, which is parenthesised in en-US
+/// (`_($* #,##0.00_);_($* (#,##0.00);...`) and a leading minus nearly
+/// everywhere else (sv-SE `_-* # ##0,00 kr_-;-* # ##0,00 kr_-;...`, measured
+/// live 2026-10-04). It used to be "parentheses, unconditionally", which was
+/// right for one region; `NumberFormat::Accounting::negative_style` now
+/// records which pattern the format was applied with
+/// (`LocaleSettings::accounting_negative_style`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum NegativeStyle {
     /// `-$1,234.50` in the cell's own colour. Excel's first entry and the
@@ -177,6 +214,14 @@ impl NegativeStyle {
             _ => None,
         }
     }
+}
+
+/// The `negative_style` an Accounting format carries when its serialized form
+/// predates the field. See `NumberFormat::Accounting::negative_style`: every
+/// such document rendered its negatives in parentheses, so that is what the
+/// absent field means.
+fn accounting_negative_style_before_the_field_existed() -> NegativeStyle {
+    NegativeStyle::Parentheses
 }
 
 /// RGB color representation.
@@ -391,11 +436,169 @@ impl From<UnderlineStyle> for bool {
     }
 }
 
+/// A font size in POINTS, stored as a whole number of TWIPS (1/20 point).
+///
+/// WHY NOT `u8`. The size used to be `u8` whole points, which is wrong twice:
+/// Excel's range is 1 to 409 points (a `u8` stops at 255), and Excel's own
+/// size list has 10.5 in it -- the Home tab's Decrease Font Size from the
+/// default 11 sends 10.5, the backend refused to deserialise it, the refusal
+/// was only logged, and the button was stuck at 11 (survey defect D1).
+///
+/// WHY TWIPS AND NOT HALF POINTS. Excel's UI offers half points, but Excel's
+/// MODEL is finer: through COM `Font.Size = 10.3` reads back 10.3, and 10.25
+/// reads back 10.25 (measured live 2026-10-04), and the BIFF font record
+/// stores its height in twips. An `.xlsx` carrying `<sz val="10.25"/>` is
+/// therefore a legitimate file, and rounding it to a half point on import
+/// would change it on the way through. Twips are Excel's own unit, they hold
+/// every size Excel can store exactly, 409 pt is 8,180 of them (a `u16`), and
+/// an integer keeps `FontStyle` -- and so `CellStyle` -- `Eq + Hash`, which
+/// the style registry's interning depends on. An `f32`/`f64` field would not.
+///
+/// SERIALISED AS A PLAIN NUMBER OF POINTS: a whole size is written exactly as
+/// the old `u8` was (`11`), so an ordinary workbook's bytes do not change at
+/// all; only a fractional size writes a fraction (`10.5`). See
+/// `FontSize::serialize` for what an older reader does with that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FontSize(u16);
+
+impl FontSize {
+    /// Excel's smallest font size, in points.
+    pub const MIN_POINTS: f64 = 1.0;
+    /// Excel's largest font size in its UI and in Calcula, in points. (COM
+    /// accepts 409.5; the UI and every Calcula entry point stop at 409.)
+    pub const MAX_POINTS: f64 = 409.0;
+    const TWIPS_PER_POINT: u16 = 20;
+    const MIN_TWIPS: u16 = 20;
+    const MAX_TWIPS: u16 = 8_180;
+
+    /// The document default, Excel's Calibri 11.
+    pub const DEFAULT: FontSize = FontSize(220);
+
+    /// A whole-point size known at compile time (the built-in cell styles'
+    /// 18 / 15 / 13 headings). Out-of-range literals are clamped so this can
+    /// stay a `const fn` without a panic path.
+    pub const fn from_whole_points(points: u16) -> Self {
+        let twips = points.saturating_mul(Self::TWIPS_PER_POINT);
+        if twips < Self::MIN_TWIPS {
+            FontSize(Self::MIN_TWIPS)
+        } else if twips > Self::MAX_TWIPS {
+            FontSize(Self::MAX_TWIPS)
+        } else {
+            FontSize(twips)
+        }
+    }
+
+    /// A size the USER asked for. `None` when it is not a finite number of
+    /// points in Excel's 1..=409 range -- a caller that has to answer the user
+    /// (`apply_formatting`) turns that into a refusal rather than guessing.
+    /// Rounded to the nearest twip, which is Excel's own resolution.
+    pub fn from_points(points: f64) -> Option<Self> {
+        if !points.is_finite() {
+            return None;
+        }
+        let twips = (points * f64::from(Self::TWIPS_PER_POINT)).round();
+        if twips < f64::from(Self::MIN_TWIPS) || twips > f64::from(Self::MAX_TWIPS) {
+            return None;
+        }
+        Some(FontSize(twips as u16))
+    }
+
+    /// A size READ FROM A FILE, which must load rather than refuse: clamped to
+    /// 1..=409, and a non-finite value is the default. An importer that
+    /// refused the whole workbook over one odd `<sz>` would be worse than a
+    /// size pinned to Excel's own limit.
+    pub fn from_points_clamped(points: f64) -> Self {
+        if !points.is_finite() {
+            return Self::DEFAULT;
+        }
+        let clamped = points.clamp(Self::MIN_POINTS, Self::MAX_POINTS);
+        FontSize((clamped * f64::from(Self::TWIPS_PER_POINT)).round() as u16)
+    }
+
+    /// The size in points (10.5 for a ten-and-a-half point font).
+    pub fn points(self) -> f64 {
+        f64::from(self.0) / f64::from(Self::TWIPS_PER_POINT)
+    }
+
+    /// The size in twips (1/20 point), Excel's storage unit.
+    pub fn twips(self) -> u16 {
+        self.0
+    }
+
+    /// Whether the size is a whole number of points.
+    pub fn is_whole(self) -> bool {
+        self.0 % Self::TWIPS_PER_POINT == 0
+    }
+}
+
+impl Default for FontSize {
+    fn default() -> Self {
+        FontSize::DEFAULT
+    }
+}
+
+impl std::fmt::Display for FontSize {
+    /// `11` for a whole size, `10.5` for a fractional one -- the spelling a
+    /// CSS `font-size:{}pt` or an `.xlsx` `<sz val>` wants.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_whole() {
+            write!(f, "{}", self.0 / Self::TWIPS_PER_POINT)
+        } else {
+            write!(f, "{}", self.points())
+        }
+    }
+}
+
+impl Serialize for FontSize {
+    /// A whole size is written as an INTEGER, byte-identical to the old `u8`
+    /// field, so a document with no fractional size is unchanged and an older
+    /// build still opens it. A fractional size is written as a fraction; an
+    /// older build's `u8` field then fails to deserialise it and the load is
+    /// REFUSED with an error (`zip_io::read_optional_json` propagates it) --
+    /// it cannot truncate 10.5 to 10 or wrap 300 to 44. That is a refusal, not
+    /// a lie, which is why fractional sizes carry no `.cala` format-version
+    /// link (CLAUDE.md, ".cala Format Versioning"); pinned by
+    /// `an_older_u8_reader_refuses_a_fractional_size_instead_of_truncating_it`.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.is_whole() {
+            serializer.serialize_u16(self.0 / Self::TWIPS_PER_POINT)
+        } else {
+            serializer.serialize_f64(self.points())
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for FontSize {
+    /// Any JSON number of points. Out-of-range values are CLAMPED rather than
+    /// refused (`from_points_clamped`): a saved document is not a user asking
+    /// for something, and one stray size must not stop the workbook opening.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct PointsVisitor;
+        impl<'de> serde::de::Visitor<'de> for PointsVisitor {
+            type Value = FontSize;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a font size in points")
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<FontSize, E> {
+                Ok(FontSize::from_points_clamped(v as f64))
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<FontSize, E> {
+                Ok(FontSize::from_points_clamped(v as f64))
+            }
+            fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<FontSize, E> {
+                Ok(FontSize::from_points_clamped(v))
+            }
+        }
+        deserializer.deserialize_any(PointsVisitor)
+    }
+}
+
 /// Font style configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FontStyle {
     pub family: String,
-    pub size: u8,         // Font size in points
+    /// Font size in points (twip resolution, 1..=409). See `FontSize`.
+    pub size: FontSize,
     pub bold: bool,
     pub italic: bool,
     pub underline: UnderlineStyle,
@@ -407,7 +610,7 @@ impl Default for FontStyle {
     fn default() -> Self {
         FontStyle {
             family: "Body".to_string(),
-            size: 11,
+            size: FontSize::DEFAULT,
             bold: false,
             italic: false,
             underline: UnderlineStyle::None,
@@ -984,6 +1187,134 @@ mod tests {
         let idx2 = registry.get_or_create(style2);
 
         assert_eq!(idx1, idx2, "Same indent level should deduplicate");
+    }
+
+    // ------------------------------------------------------------------
+    // FontSize: half points and Excel's 409 (survey defect D1, 2026-10-04)
+    // ------------------------------------------------------------------
+
+    /// The size the Home tab's Decrease Font Size sends from the default 11 is
+    /// 10.5, and the old `u8` field could not hold it; the top of Excel's
+    /// range (409) did not fit either.
+    #[test]
+    fn font_size_holds_half_points_and_excels_whole_range() {
+        assert_eq!(FontSize::from_points(10.5).map(FontSize::points), Some(10.5));
+        assert_eq!(FontSize::from_points(409.0).map(FontSize::points), Some(409.0));
+        assert_eq!(FontSize::from_points(1.0).map(FontSize::points), Some(1.0));
+        // Excel's model is finer than its UI: COM reads back 10.3 and 10.25
+        // exactly (measured live), and twips hold both.
+        assert_eq!(FontSize::from_points(10.3).map(FontSize::points), Some(10.3));
+        assert_eq!(FontSize::from_points(10.25).map(FontSize::points), Some(10.25));
+        // Outside Excel's range, and non-numbers, are refused -- not clamped --
+        // when a USER asks for them.
+        for bad in [0.5, 0.0, -3.0, 409.5, 410.0, 1000.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(FontSize::from_points(bad), None, "{bad} must be refused");
+        }
+        // A FILE is clamped instead: one stray size must not refuse a workbook.
+        assert_eq!(FontSize::from_points_clamped(0.0).points(), 1.0);
+        assert_eq!(FontSize::from_points_clamped(500.0).points(), 409.0);
+        assert_eq!(FontSize::from_points_clamped(f64::NAN), FontSize::DEFAULT);
+        assert_eq!(FontSize::default().points(), 11.0);
+        assert_eq!(FontStyle::default().size.points(), 11.0);
+    }
+
+    /// A half-point style is a DIFFERENT style from its whole neighbours --
+    /// the registry interns on `Eq + Hash`, which is the reason the size is
+    /// an integer number of twips rather than an `f64`.
+    #[test]
+    fn half_point_sizes_intern_as_distinct_styles() {
+        let mut registry = StyleRegistry::new();
+        let mut a = CellStyle::new();
+        a.font.size = FontSize::from_points(10.5).unwrap();
+        let mut b = CellStyle::new();
+        b.font.size = FontSize::from_whole_points(10);
+        let ia = registry.get_or_create(a.clone());
+        let ib = registry.get_or_create(b);
+        assert_ne!(ia, ib);
+        assert_ne!(ia, 0, "10.5 is not the default 11");
+        assert_eq!(registry.get_or_create(a), ia, "and it dedupes with itself");
+    }
+
+    /// A WHOLE size serialises exactly as the old `u8` did, so an ordinary
+    /// workbook's `styles/registry.json` is byte-identical and older builds
+    /// keep opening it; only a fractional size writes a fraction.
+    #[test]
+    fn font_size_serialises_whole_sizes_as_integers_and_halves_as_fractions() {
+        assert_eq!(serde_json::to_string(&FontSize::from_whole_points(11)).unwrap(), "11");
+        assert_eq!(serde_json::to_string(&FontSize::from_whole_points(409)).unwrap(), "409");
+        assert_eq!(serde_json::to_string(&FontSize::from_points(10.5).unwrap()).unwrap(), "10.5");
+        assert_eq!(serde_json::to_string(&FontSize::from_points(10.25).unwrap()).unwrap(), "10.25");
+        for text in ["11", "10.5", "409", "10.25", "1"] {
+            let size: FontSize = serde_json::from_str(text).unwrap();
+            assert_eq!(serde_json::to_string(&size).unwrap(), text, "{text} must round-trip");
+        }
+        // The default style's bytes still say `"size":11`.
+        let json = serde_json::to_string(&CellStyle::new()).unwrap();
+        assert!(json.contains("\"size\":11,"), "{json}");
+        assert_eq!(format!("{}", FontSize::from_points(10.5).unwrap()), "10.5");
+        assert_eq!(format!("{}", FontSize::from_whole_points(18)), "18");
+    }
+
+    /// THE `.cala` VERSIONING DECISION, pinned. A fractional size reaches an
+    /// older build as a JSON fraction in a field that build reads as `u8`.
+    /// That must be a REFUSAL (serde errors, the load fails) -- never a
+    /// truncation to 10 or a wrap of 300 to 44, which would be the "lie" case
+    /// CLAUDE.md reserves format-version links for. This test stands in for
+    /// the older reader with the exact field type it had.
+    #[test]
+    fn an_older_u8_reader_refuses_a_fractional_size_instead_of_truncating_it() {
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OlderFontStyle {
+            size: u8,
+        }
+        let mut style = CellStyle::new();
+        style.font.size = FontSize::from_points(10.5).unwrap();
+        let json = serde_json::to_string(&style.font).unwrap();
+        assert!(serde_json::from_str::<OlderFontStyle>(&json).is_err(), "{json}");
+        style.font.size = FontSize::from_whole_points(300);
+        let json = serde_json::to_string(&style.font).unwrap();
+        assert!(serde_json::from_str::<OlderFontStyle>(&json).is_err(), "{json}");
+        // ...and the ordinary case stays readable by it.
+        style.font.size = FontSize::from_whole_points(14);
+        let json = serde_json::to_string(&style.font).unwrap();
+        assert_eq!(serde_json::from_str::<OlderFontStyle>(&json).unwrap().size, 14);
+    }
+
+    /// Stacked text is a real, distinct, persistable rotation.
+    #[test]
+    fn vertical_text_rotation_round_trips_through_serde() {
+        let style = CellStyle::new().with_text_rotation(TextRotation::Vertical);
+        let json = serde_json::to_string(&style).unwrap();
+        assert!(json.contains("\"text_rotation\":\"Vertical\""), "{json}");
+        let back: CellStyle = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.text_rotation, TextRotation::Vertical);
+        assert_ne!(TextRotation::Vertical, TextRotation::Rotate90);
+    }
+
+    /// An Accounting format saved before `negative_style` existed reads back
+    /// as PARENTHESES, which is what it rendered; a saved `Minus` survives.
+    #[test]
+    fn accounting_without_a_negative_style_reads_as_the_parentheses_it_rendered() {
+        let old = r#"{"Accounting":{"decimal_places":2,"symbol":"$","symbol_position":"Before"}}"#;
+        let nf: NumberFormat = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            nf,
+            NumberFormat::Accounting {
+                decimal_places: 2,
+                symbol: "$".to_string(),
+                symbol_position: CurrencyPosition::Before,
+                negative_style: NegativeStyle::Parentheses,
+            }
+        );
+        let minus = NumberFormat::Accounting {
+            decimal_places: 2,
+            symbol: "kr".to_string(),
+            symbol_position: CurrencyPosition::After,
+            negative_style: NegativeStyle::Minus,
+        };
+        let json = serde_json::to_string(&minus).unwrap();
+        assert_eq!(serde_json::from_str::<NumberFormat>(&json).unwrap(), minus);
     }
 
     #[test]

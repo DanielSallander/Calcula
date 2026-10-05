@@ -1,13 +1,53 @@
 //! FILENAME: app/extensions/ConditionalFormatting/handlers/homeMenuBuilder.ts
-// PURPOSE: Registers Conditional Formatting menu items in the Format menu.
-// CONTEXT: Adds "Conditional Formatting" submenu with quick-apply actions and management options.
+// PURPOSE: Registers the Conditional Formatting tree in the Format menu -- the
+//          ONE tree the menu bar and the Home tab's Conditional Formatting hero
+//          both show.
+// CONTEXT: The Home tab may not import this extension (the Facade and Seam
+//          rules), so its hero hosts menu "format" > item
+//          "format:conditionalFormatting" through the kit's registered-menu
+//          seam (RegisteredMenuButton, @api/layout): children become submenus,
+//          a child's customContent becomes a gallery flyout, `disabled` and
+//          `icon` are honoured. Whatever is registered here is therefore what
+//          BOTH doors show -- change it here, never copy it.
+//
+//          The tree is Excel's, read from live Excel 16 (M365) on 2026-10-04
+//          over UI Automation (scratchpad styles-probe/cfprobe.ps1):
+//
+//            Highlight Cells Rules >   Greater Than... Less Than... Between...
+//                                      Equal To... Text that Contains...
+//                                      A Date Occurring... Duplicate Values...
+//                                      --- More Rules...
+//            Top/Bottom Rules >        Top 10 Items... Top 10 %... Bottom 10
+//                                      Items... Bottom 10 %... Above Average...
+//                                      Below Average... --- More Rules...
+//            ---
+//            Data Bars > (gallery)     Color Scales > (gallery)
+//            Icon Sets > (gallery)
+//            ---
+//            New Rule...
+//            Clear Rules >             from Selected Cells / Entire Sheet /
+//                                      This Table / This PivotTable
+//            Manage Rules...
+//
+//          "This Table" and "This PivotTable" are DISABLED unless the active
+//          cell is in one, as in Excel. A registered item's `disabled` is read
+//          when a menu renders, so it is kept current: index.ts calls
+//          refreshClearScopes() as the selection, the sheet, the tables or the
+//          pivots change, which resolves the active cell's table/pivot through
+//          @api/backend and patches the two items in place (the registry's
+//          documented "mutate, then notifyMenusChanged()" -- updateMenuItem
+//          reaches top-level items only). The click resolves again, so a stale
+//          state can never clear the wrong range.
+//
+//          Every write goes through lib/ruleWrites.ts: a backend refusal is a
+//          toast, never an unhandled promise rejection.
 
 import React from "react";
 import type { ExtensionContext } from "@api/contract";
 import {
   showDialog,
-  addConditionalFormat,
-  clearConditionalFormatsInRange,
+  showToast,
+  notifyMenusChanged,
   IconConditionalFormatting,
   IconHighlightCells,
   IconGreaterThan,
@@ -16,7 +56,6 @@ import {
   IconEqualTo,
   IconTextContains,
   IconDuplicateValues,
-  IconUniqueValues,
   IconTopBottom,
   IconTop10,
   IconTopPercent,
@@ -31,32 +70,36 @@ import {
   IconClear,
   IconManageRules,
 } from "@api";
-
 import type {
   ConditionalFormatRule,
   ConditionalFormat,
   ConditionalFormatRange,
-  AddCFParams,
   IconSetType,
 } from "@api";
-
+import type { MenuItemDefinition } from "@api/uiTypes";
+import type { PivotRegionData } from "@api/pivot";
+import { getTableAtCell, getPivotRegionsForSheet } from "@api/backend";
+import { MENU_ICON_BLANK } from "@api/layout";
 import { refuseIfSelectionOwned } from "@api/selectionOwner";
-import { invalidateAndRefresh } from "../lib/cfStore";
-import {
-  PRESET_STYLES,
-  PRESET_COLOR_SCALES,
-  PRESET_DATA_BAR_COLORS,
-  type PresetColorScale,
-} from "../types";
+import { addRuleReporting, clearRulesReporting } from "../lib/ruleWrites";
+import { colorScaleRule, dataBarRule, iconSetRule } from "../lib/presetRules";
+import type { PresetColorScale, NewRuleCategory, NewRuleFormatStyle } from "../types";
 import { ColorScaleGallery } from "../components/ColorScaleGallery";
 import { DataBarGallery } from "../components/DataBarGallery";
 import { IconSetGallery } from "../components/IconSetGallery";
+import { IconDateOccurring } from "../components/cfGlyphs";
 
 export const QUICK_CF_DIALOG_ID = "cf-quick-dialog";
 export const RULES_MANAGER_DIALOG_ID = "cf-rules-manager";
 export const NEW_RULE_DIALOG_ID = "cf-new-rule-dialog";
 
-// Module-level selection cache (updated by index.ts via onSelectionChange)
+// ============================================================================
+// The selection these items act on
+// ============================================================================
+
+// Module-level selection cache (updated by index.ts via onSelectionChange).
+// startRow/startCol is the ANCHOR and endRow/endCol the ACTIVE cell, as in
+// Core's Selection -- not yet normalised, so the active cell survives.
 let currentSelection: {
   startRow: number;
   startCol: number;
@@ -84,6 +127,12 @@ function getSelectionRange(): ConditionalFormatRange | null {
   return { startRow: minRow, startCol: minCol, endRow: maxRow, endCol: maxCol };
 }
 
+/** The active cell: what Excel's "This Table" / "This PivotTable" ask about. */
+function activeCell(): { row: number; col: number } | null {
+  if (!currentSelection) return null;
+  return { row: currentSelection.endRow, col: currentSelection.endCol };
+}
+
 /**
  * The selection these items act on is Core's. While something else owns the
  * selection (BUG-0185: a floating grid's selected cell, Core's selection
@@ -95,7 +144,12 @@ function refusedForSelection(action: string): boolean {
   return refuseIfSelectionOwned(action);
 }
 
-/** Add a quick rule with the current selection and given rule + format */
+// ============================================================================
+// Actions
+// ============================================================================
+
+/** Add a quick rule with the current selection and given rule + format. Never
+ *  rejects: a gallery pick calls it fire-and-forget. */
 async function addQuickRule(
   rule: ConditionalFormatRule,
   format: ConditionalFormat
@@ -103,16 +157,12 @@ async function addQuickRule(
   if (refusedForSelection("Conditional Formatting")) return;
   const range = getSelectionRange();
   if (!range) return;
-
-  const params: AddCFParams = {
+  await addRuleReporting({
     rule,
     format,
     ranges: [range],
     stopIfTrue: false,
-  };
-
-  await addConditionalFormat(params);
-  await invalidateAndRefresh();
+  });
 }
 
 /** Show a quick dialog for threshold-based rules */
@@ -121,32 +171,137 @@ function showQuickDialog(ruleType: string): void {
   showDialog(QUICK_CF_DIALOG_ID, { ruleType, selection: getSelectionRange() });
 }
 
-/** Open New Rule, seeded with the current selection (the item and every gallery's "More Rules"). */
-function showNewRuleDialog(): void {
+/** Open New Rule, seeded with the current selection, on the page the door
+ *  asks for (Excel's: see NewRuleDialogData in ../types.ts). */
+function showNewRuleDialog(start?: {
+  initialCategory: NewRuleCategory;
+  initialFormatStyle?: NewRuleFormatStyle;
+}): void {
   if (refusedForSelection("New Rule")) return;
-  showDialog(NEW_RULE_DIALOG_ID, { selection: getSelectionRange() });
+  showDialog(NEW_RULE_DIALOG_ID, { selection: getSelectionRange(), ...(start ?? {}) });
 }
 
-/** Clear rules from the current selection */
+/** Clear rules from the current selection -- and say so when nothing went. */
 async function handleClearRulesFromSelection(): Promise<void> {
   if (refusedForSelection("Clear Rules")) return;
   const range = getSelectionRange();
   if (!range) return;
-
-  await clearConditionalFormatsInRange(
-    range.startRow,
-    range.startCol,
-    range.endRow,
-    range.endCol
-  );
-  await invalidateAndRefresh();
+  const removed = await clearRulesReporting(range);
+  if (removed === 0) {
+    showToast("Clear Rules: no conditional formatting rule was cleared from the selected cells.", {
+      variant: "info",
+    });
+  }
 }
 
 /** Clear all rules from the entire sheet */
 async function handleClearAllRules(): Promise<void> {
-  await clearConditionalFormatsInRange(0, 0, 999999, 999999);
-  await invalidateAndRefresh();
+  await clearRulesReporting({ startRow: 0, startCol: 0, endRow: 999999, endCol: 999999 });
 }
+
+// ============================================================================
+// This Table / This PivotTable
+// ============================================================================
+
+/** The item objects as registered; patched in place by refreshClearScopes. */
+let clearFromTableItem: MenuItemDefinition | null = null;
+let clearFromPivotItem: MenuItemDefinition | null = null;
+/** Bumped by every refresh: only the newest one may write its answer. */
+let scopeGeneration = 0;
+
+/** A lookup's answer, or null when it failed (logged): a failed lookup is
+ *  "not in one", which leaves the row disabled -- never a thrown refresh. */
+async function settled<T>(lookup: Promise<T>): Promise<T | null> {
+  try {
+    return await lookup;
+  } catch (err) {
+    console.warn("[ConditionalFormatting] table/pivot lookup failed:", err);
+    return null;
+  }
+}
+
+/** The range of the table the cell is in (the backend's answer), or null. */
+async function tableRangeAt(row: number, col: number): Promise<ConditionalFormatRange | null> {
+  const table = await getTableAtCell(row, col);
+  if (!table) return null;
+  return { startRow: table.startRow, startCol: table.startCol, endRow: table.endRow, endCol: table.endCol };
+}
+
+/** The range of the PivotTable the cell is in, or null. A pivot drawn on a
+ *  canvas sheet (canvasFrame) occupies no grid cells, so no cell is "in" it. */
+async function pivotRangeAt(row: number, col: number): Promise<ConditionalFormatRange | null> {
+  const regions = (await getPivotRegionsForSheet<PivotRegionData>()) ?? [];
+  const hit = regions.find(
+    (r) =>
+      !r.canvasFrame &&
+      row >= r.startRow &&
+      row <= r.endRow &&
+      col >= r.startCol &&
+      col <= r.endCol,
+  );
+  if (!hit) return null;
+  return { startRow: hit.startRow, startCol: hit.startCol, endRow: hit.endRow, endCol: hit.endCol };
+}
+
+/**
+ * Re-derive whether "Clear Rules from This Table" / "from This PivotTable" are
+ * enabled for the active cell, and tell the menus only when that changed (a
+ * notification re-renders every menu host). Never rejects; a slower, older
+ * call can never overwrite a newer answer.
+ */
+export async function refreshClearScopes(): Promise<void> {
+  const generation = ++scopeGeneration;
+  const cell = activeCell();
+  let inTable = false;
+  let inPivot = false;
+  if (cell) {
+    const [table, pivot] = await Promise.all([
+      settled(tableRangeAt(cell.row, cell.col)),
+      settled(pivotRangeAt(cell.row, cell.col)),
+    ]);
+    inTable = table !== null;
+    inPivot = pivot !== null;
+  }
+  if (generation !== scopeGeneration) return;
+
+  let changed = false;
+  if (clearFromTableItem && clearFromTableItem.disabled !== !inTable) {
+    clearFromTableItem.disabled = !inTable;
+    changed = true;
+  }
+  if (clearFromPivotItem && clearFromPivotItem.disabled !== !inPivot) {
+    clearFromPivotItem.disabled = !inPivot;
+    changed = true;
+  }
+  if (changed) notifyMenusChanged();
+}
+
+/**
+ * Clear the rules of the table / PivotTable at the active cell. The region is
+ * resolved AGAIN at the click (the row's enabled state may be a moment old),
+ * and a cell that is no longer in one clears nothing and says why.
+ */
+async function handleClearRulesFromRegion(kind: "table" | "pivot"): Promise<void> {
+  if (refusedForSelection("Clear Rules")) return;
+  const cell = activeCell();
+  if (!cell) return;
+  const range = await settled(kind === "table" ? tableRangeAt(cell.row, cell.col) : pivotRangeAt(cell.row, cell.col));
+  const what = kind === "table" ? "a table" : "a PivotTable";
+  const which = kind === "table" ? "this table" : "this PivotTable";
+  if (!range) {
+    showToast(`Clear Rules: the active cell is not in ${what}.`, { variant: "info" });
+    void refreshClearScopes();
+    return;
+  }
+  const removed = await clearRulesReporting(range);
+  if (removed === 0) {
+    showToast(`Clear Rules: no conditional formatting rule was cleared from ${which}.`, { variant: "info" });
+  }
+}
+
+// ============================================================================
+// Registration
+// ============================================================================
 
 /**
  * Register Conditional Formatting menu items into the Format menu.
@@ -156,6 +311,25 @@ async function handleClearAllRules(): Promise<void> {
  * Standard Menus builds and Format Cells and others add to (wave E, Y14).
  */
 export function registerCFMenuItems(context: ExtensionContext): () => void {
+  // The two rows whose enabled state follows the active cell. Disabled until
+  // the first refresh says the cell is in one (Excel's state on a plain cell).
+  const clearFromTable: MenuItemDefinition = {
+    id: "cf:clearFromTable",
+    label: "Clear Rules from This Table",
+    icon: IconClear,
+    disabled: true,
+    action: () => void handleClearRulesFromRegion("table"),
+  };
+  const clearFromPivot: MenuItemDefinition = {
+    id: "cf:clearFromPivot",
+    label: "Clear Rules from This PivotTable",
+    icon: IconClear,
+    disabled: true,
+    action: () => void handleClearRulesFromRegion("pivot"),
+  };
+  clearFromTableItem = clearFromTable;
+  clearFromPivotItem = clearFromPivot;
+
   // Separator before CF items
   context.ui.menus.registerItem("format", {
     id: "format:cf-separator",
@@ -206,16 +380,25 @@ export function registerCFMenuItems(context: ExtensionContext): () => void {
             action: () => showQuickDialog("textContains"),
           },
           {
+            id: "cf:dateOccurring",
+            label: "A Date Occurring...",
+            icon: IconDateOccurring,
+            action: () => showQuickDialog("dateOccurring"),
+          },
+          {
+            // Excel has no "Unique Values..." row: Duplicate Values' own
+            // dialog offers Duplicate / Unique, and so does Calcula's.
             id: "cf:duplicateValues",
             label: "Duplicate Values...",
             icon: IconDuplicateValues,
             action: () => showQuickDialog("duplicateValues"),
           },
+          { id: "cf:separator-highlight-more", label: "", separator: true },
           {
-            id: "cf:uniqueValues",
-            label: "Unique Values...",
-            icon: IconUniqueValues,
-            action: () => showQuickDialog("uniqueValues"),
+            id: "cf:highlightMoreRules",
+            label: "More Rules...",
+            icon: MENU_ICON_BLANK,
+            action: () => showNewRuleDialog({ initialCategory: "formatContaining" }),
           },
         ],
       },
@@ -234,7 +417,7 @@ export function registerCFMenuItems(context: ExtensionContext): () => void {
           },
           {
             id: "cf:top10Percent",
-            label: "Top 10%...",
+            label: "Top 10 %...",
             icon: IconTopPercent,
             action: () => showQuickDialog("top10Percent"),
           },
@@ -246,7 +429,7 @@ export function registerCFMenuItems(context: ExtensionContext): () => void {
           },
           {
             id: "cf:bottom10Percent",
-            label: "Bottom 10%...",
+            label: "Bottom 10 %...",
             icon: IconBottomPercent,
             action: () => showQuickDialog("bottom10Percent"),
           },
@@ -262,7 +445,33 @@ export function registerCFMenuItems(context: ExtensionContext): () => void {
             icon: IconBelowAverage,
             action: () => showQuickDialog("belowAverage"),
           },
+          { id: "cf:separator-topbottom-more", label: "", separator: true },
+          {
+            id: "cf:topBottomMoreRules",
+            label: "More Rules...",
+            icon: MENU_ICON_BLANK,
+            action: () => showNewRuleDialog({ initialCategory: "topBottom" }),
+          },
         ],
+      },
+
+      // Excel draws a line between the rule submenus and the galleries.
+      { id: "cf:separator-galleries", label: "", separator: true },
+
+      // ---- Data Bars ----
+      {
+        id: "cf:dataBars",
+        label: "Data Bars",
+        icon: IconDataBars,
+        customContent: (onClose) =>
+          React.createElement(DataBarGallery, {
+            onSelect: (color: string, gradientFill: boolean) => {
+              void addQuickRule(dataBarRule(color, gradientFill), {});
+            },
+            onMoreRules: () =>
+              showNewRuleDialog({ initialCategory: "formatByValues", initialFormatStyle: "dataBar" }),
+            onClose,
+          }),
       },
 
       // ---- Color Scales ----
@@ -273,48 +482,10 @@ export function registerCFMenuItems(context: ExtensionContext): () => void {
         customContent: (onClose) =>
           React.createElement(ColorScaleGallery, {
             onSelect: (preset: PresetColorScale) => {
-              const rule: ConditionalFormatRule = {
-                type: "colorScale",
-                minPoint: { valueType: "autoMin", color: preset.minColor },
-                ...(preset.midColor
-                  ? {
-                      midPoint: {
-                        valueType: "percent",
-                        value: 50,
-                        color: preset.midColor,
-                      },
-                    }
-                  : {}),
-                maxPoint: { valueType: "autoMax", color: preset.maxColor },
-              } as ConditionalFormatRule;
-              addQuickRule(rule, {});
+              void addQuickRule(colorScaleRule(preset), {});
             },
-            onMoreRules: () => showNewRuleDialog(),
-            onClose,
-          }),
-      },
-
-      // ---- Data Bars ----
-      {
-        id: "cf:dataBars",
-        label: "Data Bars",
-        icon: IconDataBars,
-        customContent: (onClose) =>
-          React.createElement(DataBarGallery, {
-            onSelect: (color: string, gradientFill: boolean) => {
-              const rule: ConditionalFormatRule = {
-                type: "dataBar",
-                minValueType: "autoMin",
-                maxValueType: "autoMax",
-                fillColor: color,
-                axisPosition: "automatic",
-                direction: "context",
-                showValue: true,
-                gradientFill,
-              } as ConditionalFormatRule;
-              addQuickRule(rule, {});
-            },
-            onMoreRules: () => showNewRuleDialog(),
+            onMoreRules: () =>
+              showNewRuleDialog({ initialCategory: "formatByValues", initialFormatStyle: "colorScale" }),
             onClose,
           }),
       },
@@ -327,25 +498,10 @@ export function registerCFMenuItems(context: ExtensionContext): () => void {
         customContent: (onClose) =>
           React.createElement(IconSetGallery, {
             onSelect: (iconSetId: IconSetType, iconCount: number) => {
-              // Build evenly-spaced thresholds for the icon count
-              const thresholds = [];
-              for (let i = 1; i < iconCount; i++) {
-                thresholds.push({
-                  valueType: "percent" as const,
-                  value: Math.round((100 * i) / iconCount),
-                  operator: "greaterThanOrEqual" as const,
-                });
-              }
-              const rule: ConditionalFormatRule = {
-                type: "iconSet",
-                iconSet: iconSetId,
-                thresholds,
-                reverseIcons: false,
-                showIconOnly: false,
-              } as ConditionalFormatRule;
-              addQuickRule(rule, {});
+              void addQuickRule(iconSetRule(iconSetId, iconCount), {});
             },
-            onMoreRules: () => showNewRuleDialog(),
+            onMoreRules: () =>
+              showNewRuleDialog({ initialCategory: "formatByValues", initialFormatStyle: "iconSet" }),
             onClose,
           }),
       },
@@ -371,14 +527,16 @@ export function registerCFMenuItems(context: ExtensionContext): () => void {
             id: "cf:clearFromSelection",
             label: "Clear Rules from Selected Cells",
             icon: IconClear,
-            action: handleClearRulesFromSelection,
+            action: () => void handleClearRulesFromSelection(),
           },
           {
             id: "cf:clearFromSheet",
             label: "Clear Rules from Entire Sheet",
             icon: IconClear,
-            action: handleClearAllRules,
+            action: () => void handleClearAllRules(),
           },
+          clearFromTable,
+          clearFromPivot,
         ],
       },
 
@@ -395,5 +553,7 @@ export function registerCFMenuItems(context: ExtensionContext): () => void {
   return () => {
     context.ui.menus.unregisterItem("format", "format:cf-separator");
     context.ui.menus.unregisterItem("format", "format:conditionalFormatting");
+    if (clearFromTableItem === clearFromTable) clearFromTableItem = null;
+    if (clearFromPivotItem === clearFromPivot) clearFromPivotItem = null;
   };
 }

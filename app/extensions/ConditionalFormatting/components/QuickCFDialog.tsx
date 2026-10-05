@@ -1,20 +1,26 @@
 //! FILENAME: app/extensions/ConditionalFormatting/components/QuickCFDialog.tsx
 // PURPOSE: Quick configuration dialog for adding a conditional formatting rule.
-// CONTEXT: Opened from the Format > Conditional Formatting menu for threshold-based rules.
+// CONTEXT: Opened from Conditional Formatting > Highlight Cells Rules and
+//          Top/Bottom Rules (the Format menu and the Home tab show the same
+//          tree). "A Date Occurring" is Excel's period picker over the
+//          backend's timePeriod rule, which the backend evaluated all along but
+//          no door could create.
+//
+//          A refusal (a throw, or the backend's `success: false`) keeps the
+//          dialog OPEN with the reason in an alert line, so the user can fix the
+//          value and press OK again; it used to escape as an unhandled promise
+//          rejection with the dialog sitting there as if nothing had been asked.
 
 import React, { useState, useCallback } from "react";
-import type { DialogProps } from "@api";
-import {
-  addConditionalFormat,
-  restoreFocusToGrid,
-} from "@api";
+import type { DialogProps, TimePeriod } from "@api";
+import { restoreFocusToGrid } from "@api";
 import type {
   ConditionalFormatRule,
   ConditionalFormat,
   ConditionalFormatRange,
 } from "@api";
-import { invalidateAndRefresh } from "../lib/cfStore";
-import { PRESET_STYLES } from "../types";
+import { tryAddRule } from "../lib/ruleWrites";
+import { PRESET_STYLES, DATE_OCCURRING_PERIODS } from "../types";
 
 // ============================================================================
 // Styles
@@ -102,6 +108,15 @@ const primaryButtonStyle: React.CSSProperties = {
   borderColor: "#0060b0",
 };
 
+const errorStyle: React.CSSProperties = {
+  fontSize: 12,
+  color: "#a4262c",
+  backgroundColor: "#fde7e9",
+  border: "1px solid #f1bbbc",
+  borderRadius: 3,
+  padding: "6px 8px",
+};
+
 // ============================================================================
 // Rule Type Definitions
 // ============================================================================
@@ -141,6 +156,7 @@ const RULE_DEFS: Record<string, QuickRuleDef> = {
   uniqueValues: { title: "Unique Values", label1: "Format cells that contain:" },
   aboveAverage: { title: "Above Average", label1: "Format cells that are:" },
   belowAverage: { title: "Below Average", label1: "Format cells that are:" },
+  dateOccurring: { title: "A Date Occurring", label1: "Format cells that contain a date occurring:" },
 };
 
 // ============================================================================
@@ -155,6 +171,10 @@ export const QuickCFDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
   const [value1, setValue1] = useState(ruleType.includes("10") ? "10" : "");
   const [value2, setValue2] = useState("");
   const [formatIndex, setFormatIndex] = useState(0);
+  // Excel preselects Yesterday, the first period it lists.
+  const [period, setPeriod] = useState<TimePeriod>(DATE_OCCURRING_PERIODS[0].value);
+  const [refusal, setRefusal] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   // Dropdown state for duplicate/unique and above/below average
   const [dropdownValue, setDropdownValue] = useState(() => {
@@ -225,22 +245,32 @@ export const QuickCFDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
           ruleType: dropdownValue as "aboveAverage" | "belowAverage" | "equalOrAboveAverage" | "equalOrBelowAverage" | "oneStdDevAbove" | "oneStdDevBelow" | "twoStdDevAbove" | "twoStdDevBelow" | "threeStdDevAbove" | "threeStdDevBelow",
         };
         break;
+      case "dateOccurring":
+        rule = { type: "timePeriod", period };
+        break;
       default:
         onClose();
         return;
     }
 
-    await addConditionalFormat({
+    if (busy) return;
+    setBusy(true);
+    setRefusal(null);
+    const refused = await tryAddRule({
       rule,
       format,
       ranges: [selection],
       stopIfTrue: false,
     });
-
-    await invalidateAndRefresh();
+    setBusy(false);
+    if (refused !== null) {
+      // Stay open: the user can change the value and press OK again.
+      setRefusal(refused);
+      return;
+    }
     onClose();
     restoreFocusToGrid();
-  }, [ruleType, value1, value2, formatIndex, dropdownValue, selection, onClose]);
+  }, [ruleType, value1, value2, formatIndex, dropdownValue, period, selection, onClose, busy]);
 
   const handleCancel = useCallback(() => {
     onClose();
@@ -295,6 +325,23 @@ export const QuickCFDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
               <option value="twoStdDevBelow">2 Std Dev Below</option>
               <option value="threeStdDevAbove">3 Std Dev Above</option>
               <option value="threeStdDevBelow">3 Std Dev Below</option>
+            </select>
+          </div>
+        )}
+
+        {/* Period dropdown for A Date Occurring */}
+        {ruleType === "dateOccurring" && (
+          <div style={rowStyle}>
+            <select
+              style={selectStyle}
+              value={period}
+              onChange={(e) => setPeriod(e.target.value as TimePeriod)}
+              autoFocus
+              onKeyDown={(e) => { if (e.key === "Enter") handleOk(); if (e.key === "Escape") handleCancel(); }}
+            >
+              {DATE_OCCURRING_PERIODS.map((p) => (
+                <option key={p.value} value={p.value}>{p.label}</option>
+              ))}
             </select>
           </div>
         )}
@@ -359,9 +406,15 @@ export const QuickCFDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
           AaBbCcYyZz
         </div>
 
+        {refusal !== null && (
+          <div role="alert" style={errorStyle}>
+            The rule was not added: {refusal}
+          </div>
+        )}
+
         <div style={buttonRowStyle}>
           <button style={buttonStyle} onClick={handleCancel}>Cancel</button>
-          <button style={primaryButtonStyle} onClick={handleOk}>OK</button>
+          <button style={primaryButtonStyle} onClick={handleOk} disabled={busy}>OK</button>
         </div>
       </div>
     </div>

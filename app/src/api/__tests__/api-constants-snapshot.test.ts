@@ -3,7 +3,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { AppEvents } from '../events';
-import { CoreCommands } from '../commands';
+import { CoreCommands, ExtensionCommands } from '../commands';
 
 // ============================================================================
 // AppEvents snapshot
@@ -90,12 +90,36 @@ describe('CoreCommands', () => {
   });
 
   it('command count stays stable', () => {
-    expect(Object.keys(CoreCommands).length).toMatchInlineSnapshot(`35`);
+    expect(Object.keys(CoreCommands).length).toMatchInlineSnapshot(`63`);
   });
 
   it('all values use the core. prefix', () => {
     for (const [key, value] of Object.entries(CoreCommands)) {
       expect(value).toMatch(/^core\./);
+    }
+  });
+});
+
+// ============================================================================
+// ExtensionCommands snapshot (Excel's Home tab, 2026-10-04)
+// ============================================================================
+
+describe('ExtensionCommands', () => {
+  it('all command values match snapshot', () => {
+    expect(ExtensionCommands).toMatchSnapshot();
+  });
+
+  it('command count stays stable', () => {
+    expect(Object.keys(ExtensionCommands).length).toMatchInlineSnapshot(`15`);
+  });
+
+  // The namespace says who owns the handler: a core.* id belongs in
+  // CoreCommands, and an extension's id must never pose as one.
+  it('no value uses the core. prefix, and none repeats a CoreCommands value', () => {
+    const core = new Set<string>(Object.values(CoreCommands));
+    for (const value of Object.values(ExtensionCommands)) {
+      expect(value).not.toMatch(/^core\./);
+      expect(core.has(value)).toBe(false);
     }
   });
 });

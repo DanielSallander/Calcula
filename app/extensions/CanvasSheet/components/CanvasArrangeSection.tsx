@@ -59,16 +59,22 @@ function useSelectionTick(): number {
   return tick;
 }
 
+// All six rows draw OBJECTS (an accent edge with the object against it), as
+// Office's Align menu does -- never the TEXT alignment pictures, which in a
+// menu that moves shapes and charts would read as "align the text": not
+// AlignLeft/Center/Right (paragraph lines) and, since 2026-10-04, not
+// AlignTop/Middle/Bottom either (Excel's three-line text block pushed up,
+// centred or down).
 const ALIGN_ITEMS: ReadonlyArray<{ edge: AlignEdge; icon: React.ReactNode }> = [
-  { edge: "left", icon: <RibbonIcon.AlignLeft size={ICON_SIZE_SM} /> },
-  { edge: "center", icon: <RibbonIcon.AlignCenter size={ICON_SIZE_SM} /> },
-  { edge: "right", icon: <RibbonIcon.AlignRight size={ICON_SIZE_SM} /> },
+  { edge: "left", icon: <RibbonIcon.ObjectAlignLeft size={ICON_SIZE_SM} /> },
+  { edge: "center", icon: <RibbonIcon.ObjectAlignCenter size={ICON_SIZE_SM} /> },
+  { edge: "right", icon: <RibbonIcon.ObjectAlignRight size={ICON_SIZE_SM} /> },
 ];
 
 const ALIGN_ITEMS_VERTICAL: ReadonlyArray<{ edge: AlignEdge; icon: React.ReactNode }> = [
-  { edge: "top", icon: <RibbonIcon.AlignTop size={ICON_SIZE_SM} /> },
-  { edge: "middle", icon: <RibbonIcon.AlignMiddle size={ICON_SIZE_SM} /> },
-  { edge: "bottom", icon: <RibbonIcon.AlignBottom size={ICON_SIZE_SM} /> },
+  { edge: "top", icon: <RibbonIcon.ObjectAlignTop size={ICON_SIZE_SM} /> },
+  { edge: "middle", icon: <RibbonIcon.ObjectAlignMiddle size={ICON_SIZE_SM} /> },
+  { edge: "bottom", icon: <RibbonIcon.ObjectAlignBottom size={ICON_SIZE_SM} /> },
 ];
 
 const DISTRIBUTE_ITEMS: ReadonlyArray<{ axis: DistributeAxis; icon: React.ReactNode }> = [

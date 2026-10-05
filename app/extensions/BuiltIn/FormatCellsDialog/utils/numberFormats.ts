@@ -98,8 +98,19 @@ export function getNumberFormatCategories(dec = ".", thou = ","): NumberFormatCa
     description:
       "Accounting formats line up the currency symbols and decimal points in a column. " +
       "Use Currency formats for general monetary values.",
+    // Excel's Accounting "Symbol:" list, as far as the backend has presets for
+    // it: None (Comma Style's format) first, then the six symbols of the Home
+    // tab's Accounting split button menu, in that menu's order and with its
+    // labels -- so "More Accounting Formats..." lands on the same choices the
+    // menu offered. The last three rows are Calcula's older fixed presets.
     formats: [
-      { label: "$ (USD)", value: "accounting_usd", example: "$ " + fmt("1,234.00", dec, thou) },
+      { label: "None", value: "comma", example: fmt("1,234.00", dec, thou) },
+      { label: "$ English (United States)", value: "accounting_usd", example: "$ " + fmt("1,234.00", dec, thou) },
+      { label: "£ English (United Kingdom)", value: "accounting_gbp", example: "£ " + fmt("1,234.00", dec, thou) },
+      { label: "€ Euro (€ 123)", value: "accounting_eur_before", example: "€ " + fmt("1,234.00", dec, thou) },
+      { label: "€ Euro (123 €)", value: "accounting_eur_after", example: fmt("1,234.00", dec, thou) + " €" },
+      { label: "¥ Chinese (PRC)", value: "accounting_cny", example: "¥ " + fmt("1,234.00", dec, thou) },
+      { label: "CHF French (Switzerland)", value: "accounting_chf", example: "CHF " + fmt("1,234.00", dec, thou) },
       { label: "$ (no decimals)", value: "accounting_usd_0", example: "$ " + fmt("1,234", dec, thou) },
       { label: "EUR", value: "accounting_eur", example: "EUR " + fmt("1,234.00", dec, thou) },
       { label: "kr (SEK)", value: "accounting_sek", example: fmt("1,234.00", dec, thou) + " kr" },
@@ -255,6 +266,15 @@ const DISPLAY_NAME_TO_PRESET: Record<string, string> = {
   "Accounting ($, 0 decimals)": "accounting_usd_0",
   "Accounting (EUR, 2 decimals)": "accounting_eur",
   "Accounting (kr, 2 decimals, symbol after)": "accounting_sek",
+  // The Home tab's Accounting keywords (Comma Style is the empty symbol). On
+  // en-US each name also carries ", parenthesised negatives" -- see
+  // `normalizeToPresetValue` for why that clause is dropped, not composed.
+  "Accounting (, 2 decimals)": "comma",
+  "Accounting (£, 2 decimals)": "accounting_gbp",
+  "Accounting (€, 2 decimals)": "accounting_eur_before",
+  "Accounting (€, 2 decimals, symbol after)": "accounting_eur_after",
+  "Accounting (¥, 2 decimals)": "accounting_cny",
+  "Accounting (CHF, 2 decimals)": "accounting_chf",
   "Percentage (2 decimals)": "percentage",
   "Scientific (2 decimals)": "scientific",
   "Fraction (up to 1 digits)": "fraction_1",
@@ -425,6 +445,11 @@ const RIBBON_PRESET_TO_CATEGORY: Record<string, string> = Object.fromEntries(
   RIBBON_ROWS.map((r) => [r.preset, r.category])
 );
 
+/** True for a preset that resolves to the typed Accounting format. */
+function isAccountingPreset(preset: string): boolean {
+  return (PRESET_VALUE_TO_CATEGORY[preset] ?? RIBBON_PRESET_TO_CATEGORY[preset]) === "accounting";
+}
+
 /**
  * Normalize a format string (preset value OR backend display name) to a preset
  * value, or null if no preset is equivalent.
@@ -438,6 +463,12 @@ export function normalizeToPresetValue(
   ribbon: ReadonlyArray<RibbonResolvedFormat> = []
 ): string | null {
   if (!format) return null;
+
+  // The backend's own name for a ribbon row wins outright, before any clause is
+  // split off it: on en-US the regional Accounting row's name ENDS in the
+  // negative clause, and splitting first would light the fixed "$" row instead.
+  const exact = ribbon.find((r) => r.displayName === format);
+  if (exact) return exact.preset;
 
   // A CURRENCY'S NEGATIVE CHOICE IS RESOLVED SEPARATELY FROM ITS SYMBOL, in
   // both spellings the dialog can receive: a composed preset value
@@ -461,7 +492,16 @@ export function normalizeToPresetValue(
   const asName = splitNegativeDisplayClause(format);
   if (asName.suffix) {
     const base = normalizeToPresetValue(asName.base, ribbon);
-    return base === null ? null : `${base}${asName.suffix}`;
+    if (base === null) return null;
+    // AN ACCOUNTING FORMAT'S NEGATIVE IS THE REGION'S, NOT A CHOICE. The
+    // backend freezes the region's pattern into every accounting keyword
+    // (brackets on en-US, a leading minus elsewhere) and names it the way it
+    // names a Currency's choice, so on en-US every accounting cell reads back
+    // as "Accounting ($, 2 decimals, parenthesised negatives)". Composing
+    // `accounting_usd_neg_paren` from that lit NO row -- the Accounting list
+    // has no negative axis -- and the dialog showed the cell's own format as
+    // unselected.
+    return isAccountingPreset(base) ? base : `${base}${asName.suffix}`;
   }
 
   if (PRESET_VALUE_TO_CATEGORY[format]) return format;

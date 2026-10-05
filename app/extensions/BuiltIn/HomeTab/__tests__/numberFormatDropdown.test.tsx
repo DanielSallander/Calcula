@@ -83,13 +83,11 @@ vi.mock("../components/useHomeTabState", () => ({
     currentStyle,
     currentCellData: null,
     handleItemClick: vi.fn(),
-    handleColorSelect: vi.fn(),
     handleCellStyleApply: vi.fn(),
     handleFontFamilyChange: vi.fn(),
     handleFontSizeChange: vi.fn(),
     handleNumberFormatChange,
     isActive: () => false,
-    getCurrentColor: () => "#000000",
     applyFormat: vi.fn(),
     getItemById: vi.fn(),
   }),
@@ -371,5 +369,43 @@ describe("selectedPresetFor", () => {
     expect(selectedPresetFor("Date (MM/DD/YYYY)", US_ROWS)).toBe("date_short");
     // The sv-SE name is NOT an en-US entry: same preset, different region.
     expect(selectedPresetFor("Date (YYYY-MM-DD)", US_ROWS)).toBe(CUSTOM_FORMAT_VALUE);
+  });
+
+  describe("every Accounting format is the Accounting row (Excel's box reads 'Accounting')", () => {
+    // The Accounting split's six currency rows and Comma Style all write an
+    // Accounting format (CONTRACT 3.7); the dropdown's ONE Accounting entry is
+    // the locale's own. Excel's Number box reads "Accounting" for all of them,
+    // so an exact display-name match would wrongly put the box on "Custom".
+    // The names are the backend's (`format_number_format_name`): the negative
+    // clause appears for the bracket pattern, the position clause for a
+    // symbol after the number, and Comma Style's symbol is empty.
+    const ACCOUNTING_NAMES = [
+      "Accounting (kr, 2 decimals)", // the locale entry itself (sv-SE)
+      "Accounting ($, 2 decimals, parenthesised negatives)", // en-US $, accounting_usd
+      "Accounting ($, 2 decimals)", // $ under a minus-pattern region
+      "Accounting (£, 2 decimals, parenthesised negatives)", // accounting_gbp
+      "Accounting (€, 2 decimals)", // accounting_eur_before
+      "Accounting (€, 2 decimals, symbol after)", // accounting_eur_after
+      "Accounting (¥, 2 decimals)", // accounting_cny
+      "Accounting (CHF, 2 decimals)", // accounting_chf
+      "Accounting (, 2 decimals)", // Comma Style (no symbol)
+      "Accounting (, 2 decimals, parenthesised negatives)", // Comma Style, en-US
+      "Accounting (kr, 3 decimals, symbol after)", // after Increase Decimal
+    ];
+    for (const name of ACCOUNTING_NAMES) {
+      it(`"${name}"`, () => {
+        expect(selectedPresetFor(name, SV_SE_ROWS)).toBe("accounting");
+      });
+    }
+
+    it("before the first backend response too (the static rows hold Accounting)", () => {
+      expect(selectedPresetFor("Accounting ($, 2 decimals, parenthesised negatives)", [])).toBe("accounting");
+    });
+
+    it("but only an Accounting NAME: a Currency or a custom code is not swept in", () => {
+      expect(selectedPresetFor("Currency (£, 2 decimals)", SV_SE_ROWS)).toBe(CUSTOM_FORMAT_VALUE);
+      expect(selectedPresetFor("_(* #,##0.00_)", SV_SE_ROWS)).toBe(CUSTOM_FORMAT_VALUE);
+      expect(selectedPresetFor("Accounting", SV_SE_ROWS)).toBe(CUSTOM_FORMAT_VALUE);
+    });
   });
 });

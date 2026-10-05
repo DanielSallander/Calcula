@@ -376,13 +376,14 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
 
   items.push({ id: 'view.sep2', label: '', separator: true });
 
-  // Go To Special
+  // Go To Special. No shortcut: Ctrl+G (and F5) is Excel's GO TO, whose
+  // dialog's Special... button opens this one (keybindings.ts, 2026-10-04).
+  // The literal said Ctrl+G for as long as Ctrl+G ran this command.
   items.push({
     id: 'view.goToSpecial',
     label: 'Go To Special...',
     icon: IconGoToSpecial,
     action: handleGoToSpecial,
-    shortcut: 'Ctrl+G',
     disabled: onCanvas,
   });
 

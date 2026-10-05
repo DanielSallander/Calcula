@@ -189,8 +189,9 @@ describe("Reset to Default", () => {
     const before = localStorage.getItem(STORAGE_KEY);
 
     await press(paletteButton("Reset to Default"));
-    // The staged reset is visible in the dialog...
-    expect(chipLabels()[0]).toBe("Paste");
+    // The staged reset is visible in the dialog: Excel's Home tab starts with
+    // the Undo group (owner decision 2)...
+    expect(chipLabels().slice(0, 3)).toEqual(["Undo", "Row Break", "Redo"]);
 
     await press(paletteButton("Cancel"));
 
@@ -209,9 +210,62 @@ describe("Reset to Default", () => {
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) as string) as HomeTabLayout;
     expect(stored.groups.map((g) => g.id)).toEqual(DEFAULT_LAYOUT.groups.map((g) => g.id));
     expect(stored.groups.map((g) => g.items)).toEqual(DEFAULT_LAYOUT.groups.map((g) => g.items));
+    // The whole default, presentation included: Excel's collapse order and
+    // the three Format Cells launchers survive the round trip.
+    expect(stored.groups.map((g) => g.collapsePriority)).toEqual(
+      DEFAULT_LAYOUT.groups.map((g) => g.collapsePriority),
+    );
+    expect(stored.groups.map((g) => g.dialogLauncherId)).toEqual(
+      DEFAULT_LAYOUT.groups.map((g) => g.dialogLauncherId),
+    );
     expect(stored.version).toBe(LAYOUT_VERSION);
     expect(layoutChangedEvents).toBe(1);
     expect(closed).toBe(1);
+  });
+
+  it("shows one card per default group, the Undo group first", async () => {
+    await render();
+    await press(paletteButton("Reset to Default"));
+    const cards = Array.from(container.querySelectorAll("[data-hometab-group]")).map((c) =>
+      c.getAttribute("data-hometab-group"),
+    );
+    expect(cards).toEqual(DEFAULT_LAYOUT.groups.map((g) => g.id));
+  });
+});
+
+// ============================================================================
+// Excel's version-2 commands in the palette
+// ============================================================================
+
+describe("the version-2 commands", () => {
+  it("are offered while not placed (their pictures: homeTabIcons.test.tsx)", async () => {
+    await render();
+    for (const label of [
+      "Borders", "Orientation", "Accounting Number Format", "Conditional Formatting",
+      "Format as Table", "Insert", "Delete", "Format", "AutoSum", "Fill", "Clear",
+      "Sort & Filter", "Find & Select",
+    ]) {
+      expect(paletteButton(label).disabled, label).toBe(false);
+    }
+  });
+
+  it("are greyed once placed -- after Reset, every one of them is in the default", async () => {
+    await render();
+    await press(paletteButton("Reset to Default"));
+    for (const label of ["Borders", "AutoSum", "Sort & Filter", "Insert", "Conditional Formatting"]) {
+      expect(paletteButton(label).disabled, label).toBe(true);
+    }
+    // ...while a command Excel's Home tab dropped can be put back.
+    expect(paletteButton("Strikethrough").disabled).toBe(false);
+    expect(paletteButton("Clear All").disabled).toBe(false);
+  });
+
+  it("a hero can be added to a group of the user's own and is saved like any command", async () => {
+    await render();
+    await press(paletteButton("Sort & Filter"));
+    await press(paletteButton("Save"));
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) as string) as HomeTabLayout;
+    expect(stored.groups[0].items).toEqual(["bold", "rowBreak", "italic", "rowBreak", "sortFilter"]);
   });
 });
 

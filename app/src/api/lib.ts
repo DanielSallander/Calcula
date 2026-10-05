@@ -69,6 +69,9 @@ export {
   setRowHeight,
   getRowHeight,
   getAllRowHeights,
+  // Batch Row Height / Column Width over a selection span (runs), one undo step
+  setRowHeights,
+  setColumnWidths,
   setRowsHidden,
   setColsHidden,
   getUserHiddenRows,
@@ -86,12 +89,15 @@ export {
   setCellRichText,
   applyFormatting,
   applyBorderPreset,
+  // Home > Number > Increase / Decrease Decimal (the active cell first)
+  adjustNumberFormatDecimals,
   getStyleCount,
 
   // Multi-Sheet (Sheet Grouping) Operations
   updateCellOnSheets,
   recalculateSheetsAfterScriptWrite,
   applyFormattingToSheets,
+  applyBorderPresetToSheets,
   clearRangeOnSheets,
 
   // Functions
@@ -136,6 +142,11 @@ export {
   insertColumns,
   deleteRows,
   deleteColumns,
+  // Insert Cells / Delete Cells (shift right / down / left / up)
+  insertCellsRange,
+  deleteCellsRange,
+  // Delete Sheet's question: does the sheet hold anything at all?
+  isSheetBlank,
 
   // Undo/Redo
   getUndoState,
@@ -294,6 +305,13 @@ export type {
   SelectionAggregationResult,
   IterationSettings,
   AutoRecoverSettings,
+  // Batch Row Height / Column Width: an inclusive [first, last] run
+  LineRun,
+  // Insert Cells / Delete Cells
+  CellShiftResult,
+  CellShiftOptions,
+  InsertCellsShift,
+  DeleteCellsShift,
 } from "../core/lib/tauri-api";
 
 // ============================================================================

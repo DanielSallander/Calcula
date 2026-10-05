@@ -118,6 +118,10 @@ export interface AutoFilterController {
   clear(columnIndex: number | null): Promise<AutoFilterSnapshot>;
   /** Turn filtering off entirely and show every row again. */
   remove(): Promise<void>;
+  /** Re-run the filter's criteria over the CURRENT data (rows edited since the
+   *  filter was applied are shown or hidden again) -- Excel's Reapply. Rejects
+   *  when there is no filter to reapply. */
+  reapply(): Promise<AutoFilterSnapshot>;
 }
 
 let controller: AutoFilterController | null = null;
@@ -162,7 +166,85 @@ export function requireAutoFilterController(): AutoFilterController {
   return controller;
 }
 
-/** Test/reset hook: forget the registered controller. */
+/** Test/reset hook: forget the registered controller (and the last status it
+ *  published; listeners stay subscribed). */
 export function resetAutoFilterController(): void {
   controller = null;
+  status = NO_FILTER;
+}
+
+// ============================================================================
+// The filter's STATUS, pushed -- what a ribbon shows without asking
+// ============================================================================
+//
+// WHY A PUSHED STATUS AND NOT `get()`. The Home tab's Sort & Filter menu shows
+// Filter CHECKED while the sheet has a filter and enables Clear / Reapply only
+// while data is filtered (measured in live Excel 2026-10-04: both are disabled
+// for a filter that hides nothing). `get()` is a backend round trip that also
+// re-syncs the overlay region as a side effect -- a surface that called it on
+// every render, or on a timer, would be polling the workbook. The change events
+// that already said all of this were private to the AutoFilter extension
+// (its lib/filterEvents.ts), so nothing outside it could listen.
+//
+// So the extension PUBLISHES the two booleans every time its cached filter
+// changes (the same cache a chevron click reads), and a surface subscribes.
+// Listeners hear a real change only: publishing the same status twice is
+// silent, so a re-sync that changed nothing does not re-render anything.
+
+/** The two facts a ribbon needs, for the ACTIVE sheet. */
+export interface AutoFilterStatus {
+  /** The active sheet has an AutoFilter (its header buttons are showing). */
+  hasFilter: boolean;
+  /** Some column's criteria currently hide rows. */
+  isDataFiltered: boolean;
+}
+
+const NO_FILTER: AutoFilterStatus = Object.freeze({ hasFilter: false, isDataFiltered: false });
+
+let status: AutoFilterStatus = NO_FILTER;
+const statusListeners = new Set<(status: AutoFilterStatus) => void>();
+
+/** The last status the provider published (no filter until it says otherwise). */
+export function getAutoFilterStatus(): AutoFilterStatus {
+  return status;
+}
+
+/**
+ * Hear every change of the active sheet's filter status: turned on or off,
+ * criteria applied or cleared, the sheet switched. The listener is called with
+ * the NEW status, only when it differs from the last one. Returns the
+ * unsubscribe function.
+ */
+export function onChange(listener: (status: AutoFilterStatus) => void): () => void {
+  statusListeners.add(listener);
+  return () => {
+    statusListeners.delete(listener);
+  };
+}
+
+/**
+ * Called by the AutoFilter provider whenever its cached filter changes. A
+ * status equal to the last one is not re-announced.
+ */
+export function publishAutoFilterStatus(next: AutoFilterStatus): void {
+  const normalised: AutoFilterStatus = {
+    hasFilter: next.hasFilter,
+    // "Filtered" without a filter is not a state the ribbon can show.
+    isDataFiltered: next.hasFilter && next.isDataFiltered,
+  };
+  if (
+    normalised.hasFilter === status.hasFilter &&
+    normalised.isDataFiltered === status.isDataFiltered
+  ) {
+    return;
+  }
+  status = normalised;
+  // A COPY: a listener may unsubscribe while being told.
+  for (const listener of [...statusListeners]) {
+    try {
+      listener(status);
+    } catch (err) {
+      console.error("[autoFilterService] status listener threw:", err);
+    }
+  }
 }

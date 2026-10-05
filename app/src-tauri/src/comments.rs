@@ -12,8 +12,8 @@ use crate::persistence::FileState;
 use chrono::Utc;
 use uuid::Uuid;
 
-/// Record a comment change to the undo stack.
-fn record_comment_undo(state: &AppState, sheet_index: usize, row: u32, col: u32, previous: Option<Comment>, description: &str) {
+/// The "comment" restore payload: what one cell held before the change.
+fn comment_undo_bytes(sheet_index: usize, row: u32, col: u32, previous: Option<Comment>) -> Vec<u8> {
     #[derive(Serialize)]
     struct CommentSnapshot {
         sheet_index: usize,
@@ -21,7 +21,12 @@ fn record_comment_undo(state: &AppState, sheet_index: usize, row: u32, col: u32,
         col: u32,
         previous: Option<Comment>,
     }
-    let data = serde_json::to_vec(&CommentSnapshot { sheet_index, row, col, previous }).unwrap_or_default();
+    serde_json::to_vec(&CommentSnapshot { sheet_index, row, col, previous }).unwrap_or_default()
+}
+
+/// Record a comment change to the undo stack.
+fn record_comment_undo(state: &AppState, sheet_index: usize, row: u32, col: u32, previous: Option<Comment>, description: &str) {
+    let data = comment_undo_bytes(sheet_index, row, col, previous);
     let mut undo_stack = state.undo_stack.lock().unwrap();
     undo_stack.record_custom_restore("comment".to_string(), data, description);
 }
@@ -1096,7 +1101,7 @@ pub fn clear_all_comments(
         .unwrap_or(0)
 }
 
-/// Clear comments in a range (used when deleting rows/columns or clearing a range).
+/// Clear comments in a range (Clear Comments and Notes, Clear All).
 #[tauri::command]
 pub fn clear_comments_in_range(
     state: State<AppState>,
@@ -1106,30 +1111,73 @@ pub fn clear_comments_in_range(
     end_row: u32,
     end_col: u32,
 ) -> usize {
+    clear_comments_in_range_impl(&state, &file_state, start_row, start_col, end_row, end_col)
+}
+
+/// The body of `clear_comments_in_range`, over plain references.
+///
+/// UNDOABLE, which it was not: the single-comment delete records a "comment"
+/// restore, this range clear recorded nothing -- so Clear Comments could not be
+/// undone, and undoing Clear All brought the cells back without the comments
+/// it had removed. Every removed comment is recorded now, inside ONE owned
+/// transaction (its own step, or the caller's when Clear All holds one open).
+///
+/// A range with no comment in it changes nothing, so it constructs no
+/// `DocumentEffect` and leaves the document clean (it used to dirty it).
+pub(crate) fn clear_comments_in_range_impl(
+    state: &AppState,
+    file_state: &FileState,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> usize {
     let active_sheet = *state.active_sheet.read().unwrap();
+    let (min_row, max_row) = (start_row.min(end_row), start_row.max(end_row));
+    let (min_col, max_col) = (start_col.min(end_col), start_col.max(end_col));
+    let comments = state.comments.lock_pending().unwrap();
+    let keys_to_remove: Vec<(u32, u32)> = comments
+        .get(&active_sheet)
+        .map(|sheet_comments| {
+            sheet_comments
+                .keys()
+                .filter(|(r, c)| *r >= min_row && *r <= max_row && *c >= min_col && *c <= max_col)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    if keys_to_remove.is_empty() {
+        return 0;
+    }
     // Comments live in `sheet.comments` and are written only by the save path,
     // so changing one changes what a save would write. See `document_effect`.
-    let effect = DocumentEffect::mutates(&file_state);
-    let mut comments = state.comments.write(&effect).unwrap();
-
-    let sheet_comments = match comments.get_mut(&active_sheet) {
-        Some(sc) => sc,
-        None => return 0,
-    };
-
-    let keys_to_remove: Vec<(u32, u32)> = sheet_comments
-        .keys()
-        .filter(|(r, c)| {
-            *r >= start_row && *r <= end_row &&
-            *c >= start_col && *c <= end_col
-        })
-        .cloned()
-        .collect();
-
-    let count = keys_to_remove.len();
-    for key in keys_to_remove {
-        sheet_comments.remove(&key);
+    let effect = DocumentEffect::mutates(file_state);
+    let mut comments = comments.authorize(&effect);
+    let mut removed: Vec<((u32, u32), Comment)> = Vec::with_capacity(keys_to_remove.len());
+    if let Some(sheet_comments) = comments.get_mut(&active_sheet) {
+        for key in keys_to_remove {
+            if let Some(comment) = sheet_comments.remove(&key) {
+                removed.push((key, comment));
+            }
+        }
     }
+    drop(comments);
 
+    let count = removed.len();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    let txn = undo_stack.begin_owned_transaction("Clear comments");
+    for ((row, col), previous) in removed {
+        undo_stack.record_custom_restore(
+            "comment".to_string(),
+            comment_undo_bytes(active_sheet, row, col, Some(previous)),
+            "Clear comments",
+        );
+    }
+    undo_stack.commit_owned(txn);
     count
 }
+
+// Range clears of comments, notes and hyperlinks are undoable (one step).
+#[cfg(test)]
+#[path = "range_clear_undo_tests.rs"]
+mod range_clear_undo_tests;

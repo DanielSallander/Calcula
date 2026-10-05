@@ -797,11 +797,13 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
         ("scenario_manager.rs", "scenario_summary", "builds a report block from values it evaluated"),
         ("animation_commands.rs", "apply_set_ops_and_recalc", "transient frame playback; orders through the shared recalc_order_from_seeds"),
         // -- Style only: changes nothing a formula can read -----------------
-        ("commands/styles.rs", "apply_formatting", "style_index only"),
-        ("commands/styles.rs", "apply_formatting_to_sheets", "style_index only"),
+        // The cell writes of apply_formatting (and apply_formatting_to_sheets)
+        // live in their walk, write_style_delta; the border presets' and
+        // adjust_number_format_decimals' in write_range_style_plan (2026-10-04).
+        ("commands/styles.rs", "write_style_delta", "style_index only"),
         ("commands/styles.rs", "set_cell_style", "style_index only"),
         ("commands/styles.rs", "set_cell_rich_text", "rich-text runs only"),
-        ("commands/styles.rs", "apply_border_preset", "style_index only"),
+        ("commands/styles.rs", "write_range_style_plan", "style_index and row/column style tiers only"),
         ("protection.rs", "set_cell_protection", "lock/hidden flags only"),
         ("named_styles_cmd.rs", "apply_named_style_impl", "style_index only"),
         ("computed_properties.rs", "apply_fill_color", "style_index only"),
@@ -820,6 +822,18 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
         ("calp_commands.rs", "apply_override_value_to_grid", "helper of the three override commands; calp_revert_override, calp_accept_upstream and calp_refresh_apply each run recalculate_sheet_values after"),
         ("calp_commands.rs", "apply_refreshed_pivots", "helper of calp_refresh_apply (§2.z), which runs recalculate_sheet_values over every REFRESHED sheet index before it returns. That covers this function's writes exactly, and the coverage is stated rather than assumed: a pivot adopted from an application writes its output to that application's own destination sheet, and a withdrawn pivot's cleared region sits on the sheet it was written to — both of which are, by construction, sheets this refresh touched and therefore sheets in `refreshed_indices`. A pivot naming a destination this workbook does not have is SKIPPED before any write, so it cannot escape that set"),
         ("commands/structure.rs", "shift_per_sheet_cell_stores", "helper of the four structural edits; wraps shift_per_sheet_cell_map over every per-sheet store"),
+        // Insert/Delete Cells (`structure_cells.rs`): `shift_cells_impl` itself
+        // seeds the shared cascade; these are its helpers.
+        ("commands/structure_cells.rs", "shift_cell_maps_in_band", "helper of shift_cells_impl, which recalculates; moves the comment/note/hyperlink maps, writes no cell value"),
+        ("commands/structure_cells.rs", "shift_map", "the generic per-sheet map move inside shift_cell_maps_in_band; writes no cell value"),
+        ("commands/structure_cells.rs", "shift_cross_sheet_formulas_in_band", "helper of shift_cells_impl, which recalculates every sheet it reports (recalc_structural_side_effects)"),
+        ("commands/structure_cells.rs", "shift_spills_in_band", "helper of shift_cells_impl, which seeds every origin it returns into the shared cascade"),
+        // Inserted lines/cells take their neighbour's FORMAT (rust-followup,
+        // 2026-10-04): empty cells carrying a style index, no value, no formula.
+        ("commands/structure_cells.rs", "inherit_neighbour_styles", "creates EMPTY cells carrying only a style_index (Format Same As Above); no value a formula reads"),
+        // Remove Hyperlinks via clear_range_with_options: style_index -> 0 on the
+        // linked cells, like the Formats branch it mirrors.
+        ("commands/data.rs", "clear_hyperlinks_apply_to", "style_index only (Remove Hyperlinks resets the linked cells' own format); values and formulas untouched"),
         ("lib.rs", "repair_all_formulas", "helper: rewrites formula ASTs across every sheet for a caller-supplied repair; `delete_sheet` recalculates the workbook after it and `rename_sheet` is exempt because a rename moves no value"),
         ("commands/data.rs", "erase_released_spill_cells", "helper: erases the cells a released spill owned; every caller is inside, or immediately followed by, the shared cascade"),
         ("commands/data.rs", "apply_spill_decision", "THE ONE SPILL DECISION (§3bm): the inner step every per-cell evaluator ends in — the three edit paths, the cross-sheet walk and both recalculation passes. It decides what ONE already-evaluated result does to the grid; it never chooses which cells to evaluate, so it cannot seed anything"),

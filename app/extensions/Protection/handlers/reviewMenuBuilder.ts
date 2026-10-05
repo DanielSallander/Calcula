@@ -40,7 +40,13 @@ const REVIEW_MENU_ID = "review";
  *  back, which is what stops a late refresh from building it again. */
 let _context: ExtensionContext | null = null;
 
-async function toggleProtectSheet(): Promise<void> {
+/**
+ * Protect Sheet... / Unprotect Sheet...: the Review menu's item and the
+ * `protection.toggleProtectSheet` command (protectionCommands.ts) run THIS --
+ * one flow, so the no-password shortcut below cannot be skipped by a door that
+ * opened the dialogs itself.
+ */
+export async function toggleProtectSheet(): Promise<void> {
   if (isCurrentSheetProtected()) {
     // Sheet is protected - unprotect
     if (currentSheetHasPassword()) {

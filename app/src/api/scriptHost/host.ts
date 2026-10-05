@@ -224,7 +224,7 @@ import { showToast } from "../notifications";
 // The fill-handle's own machinery (drag parity for api.fillRange): SHARED with
 // core/hooks/useFillHandle so a script fill and a drag fill cannot diverge.
 import {
-  detectPattern,
+  fillPatternFor,
   processPendingFills,
   replicateMergeRegions,
   type PatternResult,
@@ -9033,9 +9033,11 @@ export interface ScriptFillOptions {
  * make the option useless for the commonest case.
  */
 function scriptSeriesPattern(values: string[]): PatternResult {
+  // The drag's own inference (fillEngine.fillPatternFor: the non-formula basis
+  // the fill-handle planner reads), never a copy of it (review finding (j)).
   const nonFormulaValues = values.filter((v) => !v.startsWith("="));
   const basis = nonFormulaValues.length > 0 ? nonFormulaValues : values;
-  const pattern = detectPattern(basis);
+  const pattern = fillPatternFor(values);
   if (
     pattern.type === "copy" &&
     basis.length === 1 &&

@@ -688,7 +688,7 @@ pub fn init_builtin_named_styles(state: &AppState) {
         {
             let mut s = CellStyle::new();
             s.font.bold = true;
-            s.font.size = 18;
+            s.font.size = engine::FontSize::from_whole_points(18);
             s.font.color = ThemeColor::Absolute(Color::new(0x1f, 0x4e, 0x79));
             s
         },
@@ -700,7 +700,7 @@ pub fn init_builtin_named_styles(state: &AppState) {
         {
             let mut s = CellStyle::new();
             s.font.bold = true;
-            s.font.size = 15;
+            s.font.size = engine::FontSize::from_whole_points(15);
             s.font.color = ThemeColor::Absolute(Color::new(0x1f, 0x4e, 0x79));
             s.borders.bottom = BorderStyle {
                 width: 3,
@@ -717,7 +717,7 @@ pub fn init_builtin_named_styles(state: &AppState) {
         {
             let mut s = CellStyle::new();
             s.font.bold = true;
-            s.font.size = 13;
+            s.font.size = engine::FontSize::from_whole_points(13);
             s.font.color = ThemeColor::Absolute(Color::new(0x1f, 0x4e, 0x79));
             s.borders.bottom = BorderStyle {
                 width: 1,

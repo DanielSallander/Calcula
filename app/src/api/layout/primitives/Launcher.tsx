@@ -27,16 +27,37 @@
 //          outside press, and closing the flyout unmounts the nested overlay
 //          before its click lands. The launcher therefore ignores any press
 //          inside ANY `[data-section-flyout]`, which it has always done and
-//          which the shell's placement journeys rely on.
+//          which the shell's placement journeys rely on. Its Escape follows
+//          Popover's ESCAPE NESTS rule: an Escape already handled inside the
+//          flyout, or one while an overlay opened from inside it is still
+//          open, is not the flyout's -- the innermost overlay closes first.
 //
 //          Colours come only from LT (../theme).
+//
+//          THE DIALOG LAUNCHER lives here too, and is a different thing with a
+//          confusingly similar name. Excel calls the small corner arrow under a
+//          group (Font, Alignment, Number) its "dialog box launcher"; Calcula
+//          already called the collapsed-group button a "launcher". The corner
+//          arrow is therefore always the DIALOG launcher in code, tests and test
+//          ids (`dialog-launcher-<sectionId>`, never `section-launcher-*`, which
+//          the width probes match as "this group is collapsed"). It is declared
+//          by a section (PanelSection.dialogLauncher, ../../uiTypes) and drawn
+//          by the shell in three places: the group's caption cell, the sidebar
+//          section header, and — because a collapsed group has no caption row
+//          worth the room — the heading of THIS flyout. That last one is why
+//          the button is kit chrome in this file rather than shell chrome: the
+//          kit cannot import the shell, and one drawing must serve all three.
 
 import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 import ReactDOM from "react-dom";
-import { css, keyframes } from "@emotion/css";
+import { css, cx, keyframes } from "@emotion/css";
 import { SurfaceLayoutProvider, popoverLayout } from "../context";
 import { LT } from "../theme";
 import {
+  CONTROL_HEIGHT_MD,
+  DIALOG_LAUNCHER_GLYPH_SIZE,
+  DIALOG_LAUNCHER_HEIGHT,
+  DIALOG_LAUNCHER_WIDTH,
   FONT_FAMILY,
   HERO_ICON_SLOT,
   LABEL_FONT_SIZE,
@@ -46,7 +67,198 @@ import {
   clampFlyoutWidth,
 } from "../tokens";
 import { RibbonIcon } from "../../ribbonIcons";
+import type { PanelSectionDialogLauncher } from "../../uiTypes";
 import { DropdownChevron } from "./Button";
+import { laterFlyoutIsOpen } from "./Popover";
+import { Tooltip } from "./Tooltip";
+import { focusWhenVisible } from "./roving";
+
+// ============================================================================
+// Dialog launcher (Excel's corner arrow) — geometry
+// ============================================================================
+
+// The geometry is band geometry -- the shell lays a caption out by it -- so it
+// lives in ../tokens.ts with the rest (and reaches the @api/layout barrel
+// through it). These names are re-exported here, unchanged, because the shell
+// (SectionChrome.tsx, its tests) imported them from this file first.
+export {
+  DIALOG_LAUNCHER_WIDTH,
+  DIALOG_LAUNCHER_HEIGHT,
+  DIALOG_LAUNCHER_GLYPH_SIZE,
+  DIALOG_LAUNCHER_CAPTION_PAD,
+  DIALOG_LAUNCHER_HIDDEN_INSET,
+} from "../tokens";
+/** The sidebar header row is 36px tall; there the launcher is a standard 28px
+ *  control so its target matches the header's other controls. */
+const DIALOG_LAUNCHER_HEADER_BOX = CONTROL_HEIGHT_MD;
+const DIALOG_LAUNCHER_HEADER_GLYPH = 12;
+
+/**
+ * Excel's dialog-launcher picture, drawn as kit chrome on the duotone set's
+ * 24-unit grid (like DropdownChevron) rather than as a RibbonIcon key: it is
+ * part of the group frame, not a command's picture, and an icon key would put
+ * it in the customisable icon set where a skin or an add-in could repaint the
+ * frame. The drawing: the top-left corner of a small square, and a diagonal
+ * arrow running from inside it to the bottom-right, whose head is the square's
+ * missing bottom-right corner. Stroked in currentColor so the button's token
+ * colour (and its hover) paints it.
+ */
+export function DialogLauncherGlyph({
+  size = DIALOG_LAUNCHER_GLYPH_SIZE,
+}: {
+  size?: number;
+}): React.ReactElement {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      style={{ display: "block", flex: "none" }}
+      aria-hidden
+      data-dialog-launcher-glyph=""
+    >
+      <path
+        d="M3.5 13V3.5H13"
+        stroke="currentColor"
+        strokeWidth={2.4}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M9 9L20 20M20 11.5V20H11.5"
+        stroke="currentColor"
+        strokeWidth={2.4}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+const dialogLauncherStyles = {
+  /** Flat at rest like every ribbon control; the glyph is secondary text so
+   *  the arrow never outweighs the caption it sits beside, and goes primary on
+   *  hover, the way Excel's darkens. */
+  button: css`
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    box-sizing: border-box;
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    background: ${LT.buttonBg};
+    color: ${LT.textSecondary};
+    cursor: pointer;
+    transition:
+      background-color ${LT.motionHover},
+      color ${LT.motionHover};
+
+    &:hover {
+      background: ${LT.hover};
+      color: ${LT.text};
+    }
+
+    &:active {
+      background: ${LT.active};
+    }
+
+    &:focus-visible {
+      outline: none;
+      box-shadow: ${LT.focusRing};
+    }
+  `,
+  caption: css`
+    width: ${DIALOG_LAUNCHER_WIDTH}px;
+    height: ${DIALOG_LAUNCHER_HEIGHT}px;
+  `,
+  header: css`
+    width: ${DIALOG_LAUNCHER_HEADER_BOX}px;
+    height: ${DIALOG_LAUNCHER_HEADER_BOX}px;
+    border-radius: ${LT.radiusControl};
+  `,
+};
+
+export interface DialogLauncherButtonProps {
+  /** The dialog's name: aria-label and tooltip. */
+  label: string;
+  /** Runs on click (and so on Enter / Space: it is a native button). */
+  onClick: () => void;
+  /** Live shortcut chip for the tooltip (resolved by Tooltip at open time). */
+  commandId?: string;
+  /** data-testid. */
+  testId?: string;
+  /** "caption" (default): the 16x13 corner button of a caption row or a
+   *  flyout heading. "header": a 28px square for the 36px sidebar header. */
+  size?: "caption" | "header";
+  /** Positioning hooks for the host (the shell anchors the caption one). */
+  className?: string;
+  style?: React.CSSProperties;
+}
+
+/**
+ * The dialog-launcher button: a real <button> (so Tab reaches it and Enter /
+ * Space press it), named by its label, explained by the shared Tooltip with
+ * the live shortcut of `commandId`, tagged `data-dialog-launcher` so tests and
+ * journeys can find every one without knowing its test id. Its only content is
+ * the glyph: no text, so a host's textContent (a caption, a heading) is never
+ * changed by its presence.
+ */
+export function DialogLauncherButton({
+  label,
+  onClick,
+  commandId,
+  testId,
+  size = "caption",
+  className,
+  style,
+}: DialogLauncherButtonProps): React.ReactElement {
+  return (
+    <Tooltip content={label} commandId={commandId}>
+      <button
+        type="button"
+        className={cx(
+          dialogLauncherStyles.button,
+          size === "header" ? dialogLauncherStyles.header : dialogLauncherStyles.caption,
+          className,
+        )}
+        style={style}
+        aria-label={label}
+        data-testid={testId}
+        data-dialog-launcher=""
+        onClick={onClick}
+      >
+        <DialogLauncherGlyph
+          size={size === "header" ? DIALOG_LAUNCHER_HEADER_GLYPH : DIALOG_LAUNCHER_GLYPH_SIZE}
+        />
+      </button>
+    </Tooltip>
+  );
+}
+
+/** Every element that CAN sit in the Tab order; firstTabStop keeps the ones
+ *  that do. */
+const TAB_STOP_CANDIDATES =
+  'button, [href], input:not([type="hidden"]), select, textarea, [tabindex], [contenteditable="true"]';
+
+/**
+ * The first element inside `root` that Tab would reach: not disabled, tabIndex
+ * 0 or more. Deliberately not Popover's firstFocusable, which also accepts the
+ * items a roving group (Segmented, a palette, SegmentedChoice) parks at
+ * tabIndex -1 -- focusable by script, skipped by Tab -- and would enter a pill
+ * on its FIRST item instead of its current one.
+ */
+function firstTabStop(root: HTMLElement | null): HTMLElement | null {
+  if (!root) return null;
+  for (const el of Array.from(root.querySelectorAll<HTMLElement>(TAB_STOP_CANDIDATES))) {
+    if (el.tabIndex < 0) continue;
+    if ((el as HTMLButtonElement).disabled === true) continue;
+    return el;
+  }
+  return null;
+}
 
 /** Longest label the button shows before ellipsis. */
 const LAUNCHER_LABEL_MAX_WIDTH = 110;
@@ -178,6 +390,24 @@ const styles = {
     overflow: hidden;
     text-overflow: ellipsis;
   `,
+  /** The heading as a row: label left, dialog launcher right. Only while a
+   *  launcher is declared, so a heading without one stays the plain text box
+   *  it always was. The ellipsis moves to the text's own span (a flex
+   *  container cannot truncate its anonymous text), and the row stops
+   *  clipping so the launcher's focus ring is not cut off. */
+  headingRow: css`
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    overflow: visible;
+  `,
+  headingText: css`
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  `,
   body: css`
     padding: 0 3px 3px;
   `,
@@ -195,14 +425,23 @@ export interface LauncherProps {
   children: React.ReactNode;
   /** Rendered as data-testid on the launcher button. */
   testId?: string;
+  /** The collapsed group's DIALOG launcher (Excel's corner arrow), drawn at
+   *  the right of the flyout's heading. Its `testId` is used as given (the
+   *  shell resolves the `dialog-launcher-<sectionId>` default before passing
+   *  it). Choosing it closes the flyout, returns focus to this launcher
+   *  button (so a dialog that restores focus on close lands somewhere real)
+   *  and then runs `onLaunch`. */
+  dialogLauncher?: PanelSectionDialogLauncher;
 }
 
 /**
  * Icon + label + chevron button opening a portal flyout. The flyout is tagged
  * `data-ribbon-content` (so the minimized-ribbon outside-click guard treats it
  * as ribbon content) and `data-section-flyout` (so nested outside-click checks
- * can recognize it). Escape closes it and, when focus was inside the flyout
- * or on the launcher, returns focus to the launcher.
+ * can recognize it). Opened from the keyboard (Enter / Space) it moves focus
+ * to the content's first tab stop; opened by the pointer it leaves focus
+ * alone. Escape closes it and, when focus was inside the flyout or on the
+ * launcher, returns focus to the launcher.
  */
 export function Launcher({
   label,
@@ -210,26 +449,62 @@ export function Launcher({
   flyoutWidth,
   children,
   testId,
+  dialogLauncher,
 }: LauncherProps): React.ReactElement {
   const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const flyoutRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  // Whether the toggle that opened the flyout came from the keyboard. A ref,
+  // not state: it is read once, by the effect that runs after that open.
+  const openedFromKeys = useRef(false);
   const [anchorRect, setAnchorRect] = useState<DOMRect | null>(null);
   const width = clampFlyoutWidth(flyoutWidth);
   const flyoutId = `${useId()}-flyout`;
 
-  const handleToggle = useCallback(() => {
+  const handleToggle = useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
     if (buttonRef.current) {
       setAnchorRect(buttonRef.current.getBoundingClientRect());
     }
+    // detail 0: Enter or Space on this native button, or an assistive
+    // technology's click -- never a pointer press, which counts its clicks.
+    openedFromKeys.current = e.detail === 0;
     setOpen((prev) => !prev);
   }, []);
+
+  // KEYBOARD OPEN MOVES FOCUS IN (Excel: a collapsed group's drop-down opened
+  // from the keyboard takes focus). The flyout is a body portal at the END of
+  // the document, so a keyboard user left on the group button would reach it
+  // only by tabbing through the whole rest of the window. Focus goes to the
+  // first TAB STOP of the content -- the section's first control, not the
+  // heading's dialog launcher, which Excel puts last in its drop-down (the
+  // caption row is at the bottom there) -- and to the heading's launcher only
+  // when the content has nothing to focus. A pointer open moves nothing: the
+  // pointer is where the user is working. Content that took focus itself while
+  // mounting (an autoFocus field) keeps it. Escape still hands focus back to
+  // this button (the listener below).
+  useEffect(() => {
+    if (!open || !openedFromKeys.current) return;
+    openedFromKeys.current = false;
+    const flyout = flyoutRef.current;
+    if (!flyout || flyout.contains(document.activeElement)) return;
+    focusWhenVisible(firstTabStop(bodyRef.current) ?? firstTabStop(flyout));
+  }, [open]);
 
   // Close on Escape and on mousedown outside both the button and any flyout.
   useEffect(() => {
     if (!open) return;
     const handleKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
+      // ESCAPE NESTS (Popover.tsx): Escape closes the INNERMOST open overlay.
+      // A key something inside the flyout already handled is not ours, and
+      // neither is one while an overlay opened from inside the flyout is
+      // still open (a gallery, a palette, the Cell Styles popover, a menu):
+      // that overlay closes on this Escape, and the flyout on the next. This
+      // listener was registered first (the flyout opened first), so without
+      // the check it closed the flyout too, and the inner overlay then sent
+      // focus to a trigger that was unmounting -- onto <body>.
+      if (e.defaultPrevented || laterFlyoutIsOpen(flyoutRef.current)) return;
       // Decide BEFORE closing: the flyout (and whatever in it held focus) is
       // gone after the re-render. Never take focus from an unrelated field.
       const button = buttonRef.current;
@@ -262,6 +537,17 @@ export function Launcher({
     : VIEWPORT_MARGIN;
   const top = anchorRect ? anchorRect.bottom + FLYOUT_OFFSET : 0;
   const hasIcon = icon !== undefined && icon !== null && icon !== false && icon !== "";
+
+  // Close first (Excel's drop-down closes when its dialog launcher is chosen),
+  // put focus back on the group button while the flyout that held it is
+  // unmounting, then open the dialog — which takes focus, and gives it back to
+  // the group button on close instead of to <body>.
+  const onLaunch = dialogLauncher?.onLaunch;
+  const handleDialogLaunch = useCallback(() => {
+    setOpen(false);
+    buttonRef.current?.focus();
+    onLaunch?.();
+  }, [onLaunch]);
 
   return (
     <>
@@ -299,8 +585,20 @@ export function Launcher({
             role="dialog"
             aria-label={label}
           >
-            <div className={styles.heading}>{label}</div>
-            <div className={styles.body}>
+            {dialogLauncher ? (
+              <div className={cx(styles.heading, styles.headingRow)}>
+                <span className={styles.headingText}>{label}</span>
+                <DialogLauncherButton
+                  label={dialogLauncher.label}
+                  onClick={handleDialogLaunch}
+                  commandId={dialogLauncher.commandId}
+                  testId={dialogLauncher.testId}
+                />
+              </div>
+            ) : (
+              <div className={styles.heading}>{label}</div>
+            )}
+            <div ref={bodyRef} className={styles.body}>
               <SurfaceLayoutProvider value={popoverLayout(width - FLYOUT_CONTENT_INSET)}>
                 {children}
               </SurfaceLayoutProvider>

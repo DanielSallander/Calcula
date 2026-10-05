@@ -17,7 +17,7 @@ vi.mock("../formatPainterLogic", () => ({
   activateFormatPainter: (...a: unknown[]) => activate(...a),
   deactivateFormatPainter: vi.fn(),
 }));
-vi.mock("../formatPainterState", () => ({ isFormatPainterActive: () => false }));
+vi.mock("../formatPainterState", () => ({ isFormatPainterActive: () => false, isFormatPainterStarting: () => false }));
 vi.mock("@api/ui", () => ({ registerMenuItem: vi.fn(), unregisterMenuItem: vi.fn() }));
 vi.mock("@api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@api")>()),

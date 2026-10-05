@@ -214,7 +214,12 @@ describe("census: every begin's answer is kept", () => {
       "src/core/hooks/useFillHandle.ts",
       "src/core/components/Spreadsheet/useSpreadsheetEditing.ts",
       "src/core/components/Spreadsheet/useSpreadsheetSelection.ts",
-      "src/core/components/Spreadsheet/Spreadsheet.tsx",
+      // Spreadsheet.tsx's Clear All moved into the clear gestures (2026-10-04),
+      // which -- like the Insert / Delete Sheet Rows / Columns gestures and the
+      // AutoFit commands -- open one step over several writes.
+      "src/core/lib/clearGestures/clearGestures.ts",
+      "src/core/lib/sheetRowsColumns/rowColumnGestures.ts",
+      "src/core/lib/autoFitCommands/autoFitCommands.ts",
       "extensions/AutoFilter/lib/filterStore.ts",
       "extensions/BuiltIn/FormatPainter/formatPainterLogic.ts",
       "extensions/BuiltIn/PasteSpecial/pasteSpecialExecute.ts",

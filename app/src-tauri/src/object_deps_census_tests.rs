@@ -131,6 +131,14 @@ const OUT_OF_SCOPE: &[(&str, &str)] = &[
         "Same as delete_rows.",
     ),
     (
+        "delete_cells",
+        "Excel's Delete Cells: a RANGE operation like delete_rows, confined to a \
+         band. Objects anchored in the deleted block move or go with the band \
+         shift (shift_controls_in_band, the spill maps, the rule ranges), and a \
+         PivotTable, table or other protected region it would cut or remove is \
+         REFUSED before anything changes (commands/structure_cells.rs).",
+    ),
+    (
         "remove_duplicates",
         "A data operation over cell VALUES; it deletes no object.",
     ),

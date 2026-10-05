@@ -2,7 +2,8 @@
 // PURPOSE: With a floating control selected and the grid focused, Ctrl+C /
 //          Ctrl+V / Ctrl+D / Ctrl+G reach CONTROLS -- copy, paste, duplicate
 //          and group the control -- instead of the grid's Copy / Paste / Fill
-//          Down / Go To Special acting on the cells hidden under it.
+//          Down / Go To acting on the cells hidden under it. (Ctrl+G ran Go To
+//          Special until 2026-10-04; it is Excel's Go To now, keybindings.ts.)
 // CONTEXT: Controls handled those four in a `document` capture keydown
 //          listener. The keybinding dispatcher is a `window` capture listener
 //          -- strictly earlier -- and binds Ctrl+C/V/D (grid-scoped: whenever
@@ -60,7 +61,7 @@ const builtIns = {
   copy: vi.fn(),
   paste: vi.fn(),
   fillDown: vi.fn(),
-  goToSpecial: vi.fn(),
+  goTo: vi.fn(),
 };
 
 let gridContainer: HTMLDivElement;
@@ -86,7 +87,7 @@ beforeEach(() => {
   CommandRegistry.register("core.clipboard.copy", builtIns.copy);
   CommandRegistry.register("core.clipboard.paste", builtIns.paste);
   CommandRegistry.register("core.edit.fillDown", builtIns.fillDown);
-  CommandRegistry.register("view.goToSpecial", builtIns.goToSpecial);
+  CommandRegistry.register("navigate.goTo", builtIns.goTo);
   gridContainer = document.createElement("div");
   gridContainer.setAttribute("data-focus-container", "spreadsheet");
   gridContainer.tabIndex = 0;
@@ -96,7 +97,7 @@ beforeEach(() => {
 
 afterEach(() => {
   while (cleanups.length) cleanups.pop()!();
-  for (const id of ["core.clipboard.copy", "core.clipboard.paste", "core.edit.fillDown", "view.goToSpecial"]) {
+  for (const id of ["core.clipboard.copy", "core.clipboard.paste", "core.edit.fillDown", "navigate.goTo"]) {
     CommandRegistry.unregister(id);
   }
   gridContainer.remove();
@@ -151,7 +152,7 @@ describe("with a control selected, the keys are Controls'", () => {
     press("g");
     await settle();
     expect(deps.group).toHaveBeenCalledWith(["control-0-1-1", "control-0-2-2"]);
-    expect(builtIns.goToSpecial).not.toHaveBeenCalled();
+    expect(builtIns.goTo).not.toHaveBeenCalled();
   });
 
   it("control: Ctrl+V with an EMPTY control clipboard is the grid's paste", async () => {
@@ -161,11 +162,11 @@ describe("with a control selected, the keys are Controls'", () => {
     expect(builtIns.paste).toHaveBeenCalledTimes(1);
   });
 
-  it("control: Ctrl+G with ONE control is Go To Special", async () => {
+  it("control: Ctrl+G with ONE control is Go To", async () => {
     press("g");
     await settle();
     expect(deps.group).not.toHaveBeenCalled();
-    expect(builtIns.goToSpecial).toHaveBeenCalledTimes(1);
+    expect(builtIns.goTo).toHaveBeenCalledTimes(1);
   });
 
   it("control: nothing selected -- every key is the grid's again", async () => {

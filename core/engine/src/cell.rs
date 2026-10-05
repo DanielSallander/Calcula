@@ -13,7 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 use crate::dependency_extractor::Expression;
-use crate::style::{Color, UnderlineStyle};
+use crate::style::{Color, FontSize, UnderlineStyle};
 
 /// Represents valid key types for Dict cells.
 /// Follows Python conventions: strings, numbers, and booleans are hashable.
@@ -248,9 +248,11 @@ pub struct RichTextRun {
     /// Override: strikethrough.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strikethrough: Option<bool>,
-    /// Override: font size in points.
+    /// Override: font size in points (twip resolution, 1..=409 -- the same
+    /// `FontSize` the cell style carries, so a 10.5 pt run is as storable as a
+    /// 10.5 pt cell).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub font_size: Option<u8>,
+    pub font_size: Option<FontSize>,
     /// Override: font family name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_family: Option<String>,
@@ -506,7 +508,7 @@ mod tests {
             italic: Some(false),
             underline: None,
             strikethrough: None,
-            font_size: Some(14),
+            font_size: Some(FontSize::from_whole_points(14)),
             font_family: None,
             color: Some(Color::new(255, 0, 0)),
             superscript: true,
@@ -529,7 +531,7 @@ mod tests {
         let run: RichTextRun = serde_json::from_str(json).unwrap();
         assert_eq!(run.text, "hi");
         assert_eq!(run.bold, Some(true));
-        assert_eq!(run.font_size, Some(12));
+        assert_eq!(run.font_size, Some(FontSize::from_whole_points(12)));
         assert!(run.superscript);
         assert!(!run.subscript); // default
         assert_eq!(run.italic, None); // missing = None
@@ -543,7 +545,7 @@ mod tests {
             italic: Some(true),
             underline: Some(UnderlineStyle::Single),
             strikethrough: Some(false),
-            font_size: Some(18),
+            font_size: Some(FontSize::from_whole_points(18)),
             font_family: Some("Arial".to_string()),
             color: Some(Color::new(0, 128, 255)),
             superscript: false,

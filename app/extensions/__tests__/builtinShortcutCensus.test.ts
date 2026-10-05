@@ -20,14 +20,16 @@
 //          behind an indirection this cannot see is one a reviewer cannot see
 //          either. Recognised: `register("id", ...)`, `register(CONST, ...)`
 //          with `const CONST = "id"` anywhere in the tree, `register(
-//          CoreCommands.KEY, ...)`, and the CoreCommands the grid-command bridge
+//          CoreCommands.KEY, ...)`, `register(ExtensionCommands.KEY, ...)` (the
+//          extension-owned ids the Home tab runs, 2026-10-04), and the
+//          CoreCommands the grid-command bridge
 //          routes (api/commands.ts GRID_COMMAND_MAP).
 
 import { describe, it, expect, beforeAll } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { initKeybindings, getAllKeybindings } from "@api/keybindings";
-import { CoreCommands } from "@api/commands";
+import { CoreCommands, ExtensionCommands } from "@api/commands";
 
 /** app/ -- this file is app/extensions/__tests__/. */
 const APP_ROOT = path.resolve(__dirname, "../..");
@@ -87,7 +89,10 @@ beforeAll(() => {
       .some(([name]) => new RegExp(`register\\(\\s*${esc(name)}\\b`).test(all));
     const coreKey = Object.entries(CoreCommands).find(([, value]) => value === id)?.[0];
     const viaCore = coreKey !== undefined && new RegExp(`register\\(\\s*CoreCommands\\.${coreKey}\\b`).test(all);
-    if (literal.test(all) || viaConstant || viaCore) registered.add(id);
+    const extKey = Object.entries(ExtensionCommands).find(([, value]) => value === id)?.[0];
+    const viaExtension =
+      extKey !== undefined && new RegExp(`register\\(\\s*ExtensionCommands\\.${extKey}\\b`).test(all);
+    if (literal.test(all) || viaConstant || viaCore || viaExtension) registered.add(id);
   }
 
   // The CoreCommands the grid-command bridge routes (Spreadsheet.tsx registers

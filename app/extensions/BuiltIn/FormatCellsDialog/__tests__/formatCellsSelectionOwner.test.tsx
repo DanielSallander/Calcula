@@ -28,6 +28,10 @@ vi.mock("@api/lib", () => ({
   getCell: vi.fn(async () => null),
   getStyle: vi.fn(),
   applyFormatting: (...a: unknown[]) => h.applyFormatting(...a),
+  applyBorderPreset: vi.fn(),
+  beginUndoTransaction: vi.fn(async () => 1),
+  commitUndoTransaction: vi.fn(async () => undefined),
+  cancelUndoTransaction: vi.fn(async () => undefined),
 }));
 vi.mock("@api/backend", () => ({
   setCellProtection: (...a: unknown[]) => h.setCellProtection(...a),
@@ -75,6 +79,9 @@ beforeEach(() => {
   h.openDialog.mockReset();
   toasts.length = 0;
   registerToastSink((t) => toasts.push(t));
+  // The store is a module singleton: a refused OK leaves its pending changes in
+  // it, and the next case's baseline would then already contain them.
+  useFormatCellsStore.getState().reset();
   useFormatCellsStore.getState().setActiveTab("number");
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -124,6 +131,12 @@ describe("Format Cells while a selection owner holds the selection", () => {
   it("OK in a dialog that is already open writes nothing -- formatting OR protection; one toast", async () => {
     const onClose = vi.fn();
     await renderDialog(onClose);
+    // Pending changes to BOTH halves, so an OK that slipped past the refusal
+    // would write them (OK writes only what changed -- survey D5).
+    act(() => {
+      useFormatCellsStore.getState().setBold(true);
+      useFormatCellsStore.getState().setLocked(false);
+    });
     claim();
     await pressEnter();
     expect(h.applyFormatting, "OK formatted Core's hidden selection").not.toHaveBeenCalled();
@@ -142,6 +155,7 @@ describe("positive controls: nothing owns the selection", () => {
   it("OK applies and closes", async () => {
     const onClose = vi.fn();
     await renderDialog(onClose);
+    act(() => useFormatCellsStore.getState().setBold(true));
     await pressEnter();
     expect(h.applyFormatting).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalledTimes(1);

@@ -2,9 +2,8 @@
 // PURPOSE: Modifies sheet tab context menu items when workbook is protected.
 // CONTEXT: Disables Insert/Delete/Rename/Move sheet operations when workbook structure is locked.
 
-import { sheetExtensions, showDialog } from "@api";
+import { sheetExtensions, showDialog, CommandRegistry, CoreCommands } from "@api";
 import { isCurrentWorkbookProtected } from "../lib/protectionStore";
-import { promptAsync } from "@api/dialogs";
 
 const PROTECTION_WARNING_DIALOG_ID = "protection-warning";
 
@@ -40,16 +39,10 @@ export function registerSheetTabProtection(): () => void {
         });
         return;
       }
-      const newName = await promptAsync("Enter new sheet name:", {
-        title: "Rename sheet",
-        defaultValue: context.sheet.name,
-      });
-      if (newName && newName.trim() !== "" && newName !== context.sheet.name) {
-        const event = new CustomEvent("sheet:requestRename", {
-          detail: { index: context.index, newName: newName.trim() },
-        });
-        window.dispatchEvent(event);
-      }
+      // The Shell's rename COMMAND for the right-clicked sheet: it asks the one
+      // rename prompt every door shares and renames through the tab strip.
+      // This override used to carry the third copy of that prompt.
+      await CommandRegistry.execute(CoreCommands.SHEET_RENAME, { index: context.index });
     },
   });
 
@@ -78,15 +71,17 @@ export function registerSheetTabProtection(): () => void {
     id: "core:insertSheet",
     label: "Insert Sheet",
     disabled: () => isCurrentWorkbookProtected(),
-    onClick: async () => {
+    onClick: async (context) => {
       if (isCurrentWorkbookProtected()) {
         showDialog(PROTECTION_WARNING_DIALOG_ID, {
           message: "Workbook structure is protected. You cannot insert sheets.",
         });
         return;
       }
-      const event = new CustomEvent("sheet:requestAdd", { detail: {} });
-      window.dispatchEvent(event);
+      // The Shell's insert COMMAND for the right-clicked sheet: Excel inserts
+      // the new worksheet BEFORE it, as every other Insert Sheet door does.
+      // This override used to dispatch `sheet:requestAdd`, which appended it.
+      await CommandRegistry.execute(CoreCommands.SHEET_INSERT, { index: context.index });
     },
   });
 

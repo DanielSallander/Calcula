@@ -6,7 +6,7 @@
 //! and freeze panes from the raw XML inside the archive.
 
 use engine::style::{
-    BorderLineStyle, BorderStyle, Borders, CellStyle, Color, CurrencyPosition, Fill,
+    BorderLineStyle, BorderStyle, Borders, CellStyle, Color, CurrencyPosition, Fill, FontSize,
     NegativeStyle, NumberFormat, PatternType, TextAlign, TextRotation, UnderlineStyle,
     VerticalAlign,
 };
@@ -70,7 +70,9 @@ pub struct ParsedFont {
     pub italic: bool,
     pub underline: UnderlineStyle,
     pub strikethrough: bool,
-    pub size: u8,
+    /// `<sz val>`, a double in OOXML. It used to be cast to `u8`, which
+    /// truncated 10.5 to 10 on import and wrapped anything above 255.
+    pub size: FontSize,
     pub color: Option<Color>,
     pub name: String,
 }
@@ -585,7 +587,7 @@ fn parse_styles_xml(xml: &str, data: &mut XlsxStyleData) {
                     "fonts" => context = StyleParseContext::Fonts,
                     "font" if matches!(context, StyleParseContext::Fonts) => {
                         current_font = ParsedFont {
-                            size: 11,
+                            size: FontSize::from_whole_points(11),
                             name: "Calibri".to_string(),
                             ..Default::default()
                         };
@@ -620,7 +622,10 @@ fn parse_styles_xml(xml: &str, data: &mut XlsxStyleData) {
                     }
                     "sz" if matches!(context, StyleParseContext::Fonts) => {
                         if let Some(v) = get_attr(e, "val") {
-                            current_font.size = v.parse::<f64>().unwrap_or(11.0) as u8;
+                            // Clamped, never refused: one odd size must not
+                            // stop the workbook loading (FontSize docs).
+                            current_font.size =
+                                FontSize::from_points_clamped(v.parse::<f64>().unwrap_or(11.0));
                         }
                     }
                     "color" if matches!(context, StyleParseContext::Fonts) => {
@@ -1737,15 +1742,7 @@ pub fn xf_to_cell_style(
     style.wrap_text = xf.alignment.wrap_text;
     style.indent = xf.alignment.indent;
     style.shrink_to_fit = xf.alignment.shrink_to_fit;
-    style.text_rotation = match xf.alignment.text_rotation {
-        0 => TextRotation::None,
-        90 => TextRotation::Rotate90,
-        180 => TextRotation::Rotate270, // Excel uses 180 for vertical down
-        255 => TextRotation::Rotate90,   // Vertical text
-        r if r <= 90 => TextRotation::Custom(r as i16),
-        r if r <= 180 => TextRotation::Custom(-((r - 90) as i16)),
-        _ => TextRotation::None,
-    };
+    style.text_rotation = text_rotation_from_ooxml(xf.alignment.text_rotation);
 
     // Protection. Excel stores locked/hidden as part of the cell FORMAT
     // (`cellXfs/<xf>/<protection>`), which is exactly where Calcula keeps them
@@ -1761,6 +1758,25 @@ pub fn xf_to_cell_style(
     }
 
     style
+}
+
+/// OOXML `<alignment textRotation>` to the engine's rotation.
+///
+/// OOXML spells a rotation as 0..=90 (counter-clockwise degrees), 91..=180
+/// (clockwise: 90 + degrees below horizontal) and the special value 255,
+/// STACKED text -- Excel's "Vertical Text". 255 used to be read as `Rotate90`,
+/// so a stacked header came back turned a quarter round: a silent change to
+/// the one orientation Excel keeps upright.
+pub(crate) fn text_rotation_from_ooxml(rotation: u16) -> TextRotation {
+    match rotation {
+        0 => TextRotation::None,
+        90 => TextRotation::Rotate90,
+        180 => TextRotation::Rotate270, // 90 degrees clockwise ("Rotate Text Down")
+        255 => TextRotation::Vertical,
+        r if r <= 90 => TextRotation::Custom(r as i16),
+        r if r <= 180 => TextRotation::Custom(-((r - 90) as i16)),
+        _ => TextRotation::None,
+    }
 }
 
 /// Map Excel font name to Calcula font family.
@@ -1959,10 +1975,15 @@ fn convert_number_format(num_fmt_id: u32, custom_formats: &HashMap<u32, String>)
         // SYMBOL and wrong for the decimals: 42 imported with 2 decimals and 43
         // with 0, i.e. the two middle ids each came back as the other one's
         // precision, and 41/43 were given a `$` the code does not contain.
+        //
+        // These four are the en-US spellings (`_(* (#,##0)` ...), so their
+        // negatives are PARENTHESISED -- the one region whose accounting
+        // pattern brackets them (`LocaleSettings::accounting_negative_style`).
         41 | 42 | 43 | 44 => NumberFormat::Accounting {
             decimal_places: if num_fmt_id >= 43 { 2 } else { 0 },
             symbol: if num_fmt_id % 2 == 0 { "$".to_string() } else { String::new() },
             symbol_position: CurrencyPosition::Before,
+            negative_style: NegativeStyle::Parentheses,
         },
         45 => NumberFormat::Time {
             format: "mm:ss".to_string(),
@@ -1996,8 +2017,223 @@ pub(crate) fn parse_format_code_for_test(code: &str) -> NumberFormat {
     parse_format_code(code)
 }
 
+/// What one ACCOUNTING-shaped section of a format code says, read the way
+/// Excel's own tokenizer reads it: `"..."` and `\x` are literal text, `_x`
+/// (padding) and `*x` (fill) consume the next character, `[$X-nnn]` is the
+/// currency `X` (its locale tag dropped), and `[Red]`-style brackets are
+/// colours. Anything that makes the section NOT an accounting section -- a
+/// date/time/scientific letter, `@`, `%`, a condition bracket -- answers `None`.
+#[derive(Debug, Default)]
+struct AccountingSectionScan {
+    /// Literal text before the first digit placeholder (a prefix symbol).
+    before: String,
+    /// Literal text after it (a suffix symbol such as ` kr`).
+    after: String,
+    /// Digit placeholders after the decimal point.
+    decimals: u8,
+    /// Whether the section has a `*` fill -- the defining mark of accounting.
+    has_fill: bool,
+    /// Whether it has `_x` padding.
+    has_padding: bool,
+    /// Whether it has any digit placeholder at all.
+    has_digits: bool,
+    /// A literal `(` that is NOT the character of a `_(` padding.
+    has_paren: bool,
+    /// A literal `-` that is NOT the character of a `_-` padding.
+    has_minus: bool,
+    /// A `[Red]` colour bracket.
+    red: bool,
+}
+
+fn scan_accounting_section(section: &str) -> Option<AccountingSectionScan> {
+    let chars: Vec<char> = section.chars().collect();
+    let mut scan = AccountingSectionScan::default();
+    let mut in_fraction = false;
+    let mut i = 0;
+    // Literal text goes to `before` until the first digit placeholder.
+    fn push_literal(scan: &mut AccountingSectionScan, text: &str) {
+        if scan.has_digits {
+            scan.after.push_str(text);
+        } else {
+            scan.before.push_str(text);
+        }
+    }
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '"' => {
+                let mut j = i + 1;
+                let mut text = String::new();
+                while j < chars.len() && chars[j] != '"' {
+                    text.push(chars[j]);
+                    j += 1;
+                }
+                push_literal(&mut scan, &text);
+                i = j + 1;
+                continue;
+            }
+            '\\' => {
+                if let Some(&next) = chars.get(i + 1) {
+                    match next {
+                        '(' => scan.has_paren = true,
+                        '-' => scan.has_minus = true,
+                        ')' => {}
+                        other => push_literal(&mut scan, &other.to_string()),
+                    }
+                }
+                i += 2;
+                continue;
+            }
+            '_' => {
+                scan.has_padding = true;
+                i += 2;
+                continue;
+            }
+            '*' => {
+                scan.has_fill = true;
+                i += 2;
+                continue;
+            }
+            '[' => {
+                let end = chars[i..].iter().position(|&ch| ch == ']')? + i;
+                let content: String = chars[i + 1..end].iter().collect();
+                if let Some(currency) = content.strip_prefix('$') {
+                    // `[$£-809]` is the currency `£` in locale 0x809; the tag
+                    // after the first `-` is not part of the symbol.
+                    let symbol = currency.split('-').next().unwrap_or("");
+                    push_literal(&mut scan, symbol);
+                } else if content.eq_ignore_ascii_case("red") {
+                    scan.red = true;
+                } else if content.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+                    // Another colour (`[Blue]`, `[Color10]`): presentation only.
+                } else {
+                    return None; // a condition such as `[>100]`
+                }
+                i = end + 1;
+                continue;
+            }
+            '#' | '0' | '?' => {
+                scan.has_digits = true;
+                if in_fraction {
+                    scan.decimals = scan.decimals.saturating_add(1);
+                }
+            }
+            '.' => {
+                if scan.has_digits {
+                    in_fraction = true;
+                } else {
+                    push_literal(&mut scan, ".");
+                }
+            }
+            ',' => {
+                if !scan.has_digits {
+                    push_literal(&mut scan, ",");
+                }
+            }
+            '(' => scan.has_paren = true,
+            '-' => scan.has_minus = true,
+            ')' | '+' | ' ' => {}
+            '@' | '%' => return None,
+            ch if ch.is_ascii_alphabetic() => return None,
+            other => push_literal(&mut scan, &other.to_string()),
+        }
+        i += 1;
+    }
+    Some(scan)
+}
+
+/// Split a format code into its sections on the semicolons that are not
+/// inside quotes or brackets.
+fn split_format_sections(code: &str) -> Vec<String> {
+    let mut sections = vec![String::new()];
+    let mut in_quotes = false;
+    let mut depth_bracket = 0u32;
+    let mut escaped = false;
+    for ch in code.chars() {
+        if escaped {
+            sections.last_mut().unwrap().push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if !in_quotes => {
+                escaped = true;
+                sections.last_mut().unwrap().push(ch);
+            }
+            '"' => {
+                in_quotes = !in_quotes;
+                sections.last_mut().unwrap().push(ch);
+            }
+            '[' if !in_quotes => {
+                depth_bracket += 1;
+                sections.last_mut().unwrap().push(ch);
+            }
+            ']' if !in_quotes => {
+                depth_bracket = depth_bracket.saturating_sub(1);
+                sections.last_mut().unwrap().push(ch);
+            }
+            ';' if !in_quotes && depth_bracket == 0 => sections.push(String::new()),
+            _ => sections.last_mut().unwrap().push(ch),
+        }
+    }
+    sections
+}
+
+/// Recognise an Excel ACCOUNTING code -- en-US `_("$"* #,##0.00_);...`,
+/// sv-SE `_-* #,##0.00\ "kr"_-;\-* #,##0.00\ "kr"_-;...`, Comma Style
+/// `_-* #,##0.00_-;...`, the Accounting dropdown's `_-[$$-409]* #,##0.00_ ;...`
+/// -- into the typed `Accounting` format, with its symbol, the symbol's SIDE,
+/// the decimals and the NEGATIVE pattern.
+///
+/// It used to recognise only `_(` codes, only the symbols `$ € £`, always on
+/// the left, and never read the negative section -- so the sv-SE accounting
+/// format Excel's own Accounting button writes imported as a plain number, and
+/// the codes Calcula's own writer emitted for a suffix currency did not come
+/// back. `xlsx_writer`'s round-trip test runs this against every shape the
+/// writer can produce.
+fn parse_accounting_code(full_code: &str) -> Option<NumberFormat> {
+    let sections = split_format_sections(full_code);
+    let positive = scan_accounting_section(&sections[0])?;
+    if !(positive.has_fill && positive.has_padding && positive.has_digits) {
+        return None;
+    }
+    let before = positive.before.trim();
+    let after = positive.after.trim();
+    let (symbol, symbol_position) = if !before.is_empty() {
+        (before.to_string(), CurrencyPosition::Before)
+    } else if !after.is_empty() {
+        (after.to_string(), CurrencyPosition::After)
+    } else {
+        (String::new(), CurrencyPosition::Before)
+    };
+    // No negative section: Excel renders a negative with a leading minus.
+    let negative_style = match sections.get(1).and_then(|s| scan_accounting_section(s)) {
+        None => NegativeStyle::Minus,
+        Some(neg) => match (neg.red, neg.has_paren, neg.has_minus) {
+            (true, true, _) => NegativeStyle::RedParentheses,
+            (true, false, false) => NegativeStyle::Red,
+            (false, true, _) => NegativeStyle::Parentheses,
+            _ => NegativeStyle::Minus,
+        },
+    };
+    Some(NumberFormat::Accounting {
+        decimal_places: positive.decimals,
+        symbol,
+        symbol_position,
+        negative_style,
+    })
+}
+
 /// Attempt to classify a custom format code string into a Calcula NumberFormat.
 fn parse_format_code(full_code: &str) -> NumberFormat {
+    // ACCOUNTING FIRST. Its symbol is free text, and the letter tests below
+    // would read `CHF` (an `h`) as a time format and `[$kr-41D]` (a `d`) as a
+    // date; `parse_accounting_code` tokenizes quotes and brackets, so it only
+    // accepts a code whose UNQUOTED letters are none at all.
+    if let Some(accounting) = parse_accounting_code(full_code) {
+        return accounting;
+    }
+
     // Multi-section format: positive;negative;zero;text — use the positive section
     let code = extract_positive_section(full_code);
     let lower = code.to_lowercase();
@@ -2025,25 +2261,7 @@ fn parse_format_code(full_code: &str) -> NumberFormat {
         };
     }
 
-    // Accounting format: _("$"* #,##0...) or _(* #,##0...) patterns
-    // These use _( padding and * space-fill characters
-    if (code.contains("_(") || code.contains("_ (")) && code.contains('*') {
-        let decimals = count_decimal_places(&code);
-        let symbol = if code.contains('$') {
-            "$".to_string()
-        } else if code.contains('\u{20AC}') {
-            "\u{20AC}".to_string()
-        } else if code.contains('\u{00A3}') {
-            "\u{00A3}".to_string()
-        } else {
-            String::new()
-        };
-        return NumberFormat::Accounting {
-            decimal_places: decimals,
-            symbol,
-            symbol_position: CurrencyPosition::Before,
-        };
-    }
+    // (Accounting codes were recognised above, by `parse_accounting_code`.)
 
     // Currency (contains $ or other currency symbols)
     if code.contains('$') || code.contains('\u{20AC}') || code.contains('\u{00A3}') {
@@ -2409,10 +2627,98 @@ mod tests {
                     decimal_places: decimals,
                     symbol: symbol.to_string(),
                     symbol_position: CurrencyPosition::Before,
+                    // The en-US built-ins bracket their negatives.
+                    negative_style: NegativeStyle::Parentheses,
                 },
                 "numFmtId {}",
                 id
             );
         }
+    }
+
+    /// OOXML 255 is STACKED text (Excel's Vertical Text). It used to import
+    /// as `Rotate90`, turning a stacked header a quarter round.
+    #[test]
+    fn ooxml_255_imports_as_stacked_vertical_text() {
+        assert_eq!(text_rotation_from_ooxml(255), TextRotation::Vertical);
+        // The angle encodings are unchanged.
+        assert_eq!(text_rotation_from_ooxml(0), TextRotation::None);
+        assert_eq!(text_rotation_from_ooxml(45), TextRotation::Custom(45));
+        assert_eq!(text_rotation_from_ooxml(90), TextRotation::Rotate90);
+        assert_eq!(text_rotation_from_ooxml(135), TextRotation::Custom(-45));
+        assert_eq!(text_rotation_from_ooxml(180), TextRotation::Rotate270);
+    }
+
+    /// A fractional `<sz>` survives the import (it used to be cast to `u8`,
+    /// so 10.5 arrived as 10 and anything above 255 wrapped).
+    #[test]
+    fn a_fractional_font_size_survives_the_import() {
+        let font = ParsedFont { size: FontSize::from_points_clamped(10.5), ..Default::default() };
+        let xf = ParsedXf::default();
+        let style = xf_to_cell_style(&xf, &[font], &[], &[], &HashMap::new());
+        assert_eq!(style.font.size.points(), 10.5);
+        // Clamped, not refused, at Excel's limit.
+        assert_eq!(FontSize::from_points_clamped(409.5).points(), 409.0);
+        // A <font> with no <sz> is Excel's 11, not 0.
+        assert_eq!(ParsedFont::default().size.points(), 11.0);
+    }
+
+    /// The accounting codes Excel itself writes, region by region, import as
+    /// the typed `Accounting` format with the right symbol, SIDE and negative
+    /// pattern. The sv-SE one is the exact code Excel's Accounting button
+    /// wrote on this machine (live probe 2026-10-04), in its OOXML spelling.
+    #[test]
+    fn excels_regional_accounting_codes_import_as_typed_accounting() {
+        let acct = |dp, sym: &str, pos, neg| NumberFormat::Accounting {
+            decimal_places: dp,
+            symbol: sym.to_string(),
+            symbol_position: pos,
+            negative_style: neg,
+        };
+        let before = CurrencyPosition::Before;
+        let after = CurrencyPosition::After;
+        let cases: Vec<(&str, NumberFormat)> = vec![
+            // sv-SE Accounting button.
+            (
+                r#"_-* #,##0.00\ "kr"_-;\-* #,##0.00\ "kr"_-;_-* "-"??\ "kr"_-;_-@_-"#,
+                acct(2, "kr", after, NegativeStyle::Minus),
+            ),
+            // sv-SE Comma Style.
+            (
+                r#"_-* #,##0.00_-;\-* #,##0.00_-;_-* "-"??_-;_-@_-"#,
+                acct(2, "", before, NegativeStyle::Minus),
+            ),
+            // en-US (built-in 44 spelled out).
+            (
+                r#"_("$"* #,##0.00_);_("$"* \(#,##0.00\);_("$"* "-"??_);_(@_)"#,
+                acct(2, "$", before, NegativeStyle::Parentheses),
+            ),
+            // en-GB: minus ahead of the symbol.
+            (
+                "_-\u{00A3}* #,##0.00_-;-\u{00A3}* #,##0.00_-;_-\u{00A3}* \"-\"??_-;_-@_-",
+                acct(2, "\u{00A3}", before, NegativeStyle::Minus),
+            ),
+            // The Accounting dropdown's locale-tagged form: the tag is dropped.
+            (
+                r#"_-[$$-409]* #,##0.00_ ;_-[$$-409]* -#,##0.00 ;_-[$$-409]* "-"??_ ;_-@_ "#,
+                acct(2, "$", before, NegativeStyle::Minus),
+            ),
+            // A symbol with an `h` in it is not a time format.
+            (
+                r#"_-[$CHF-100C]\ * #,##0.00_-;\-[$CHF-100C]\ * #,##0.00_-;_-[$CHF-100C]\ * "-"??_-;_-@_-"#,
+                acct(2, "CHF", before, NegativeStyle::Minus),
+            ),
+            // Zero decimals.
+            (
+                r#"_-* #,##0\ "kr"_-;\-* #,##0\ "kr"_-;_-* "-"\ "kr"_-;_-@_-"#,
+                acct(0, "kr", after, NegativeStyle::Minus),
+            ),
+        ];
+        for (code, expected) in cases {
+            assert_eq!(parse_format_code(code), expected, "{code}");
+        }
+        // NOT accounting: no fill, or a date, stays what it was.
+        assert!(!matches!(parse_format_code("#,##0.00"), NumberFormat::Accounting { .. }));
+        assert!(matches!(parse_format_code("yyyy-mm-dd"), NumberFormat::Date { .. }));
     }
 }

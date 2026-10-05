@@ -60,6 +60,9 @@ beforeEach(() => {
   h.addConditionalFormat.mockReset();
   h.addConditionalFormat.mockResolvedValue({ success: true });
   h.clearConditionalFormatsInRange.mockReset();
+  // The backend's answer is the number of rules removed; 0 is now REPORTED
+  // (cfExcelMenu.test.tsx), so the positive controls clear something.
+  h.clearConditionalFormatsInRange.mockResolvedValue(1);
   h.showDialog.mockReset();
   h.galleryOnSelect.length = 0;
   toasts.length = 0;

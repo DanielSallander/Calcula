@@ -82,8 +82,10 @@ test.describe("Build a budget table", () => {
     await grid.selectRange("B301", "C304");
     await grid.clickFormatButton("commaFormat");
 
+    // Excel's Comma Style: Accounting with no symbol and two decimals
+    // (2026-10-04; it used to write a bare `#,##0`).
     const fmt = await grid.getCellStyleStringProp("B301", "numberFormat");
-    expect(fmt).toContain("separator");
+    expect(fmt).toMatch(/^Accounting \(, 2 decimals/);
   });
 
   test("bold the total row", async ({ grid }) => {

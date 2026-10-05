@@ -405,9 +405,13 @@ pub fn apply_property_value(
         }
         "fontSize" => {
             if let Some(size) = value_as_f64(value) {
-                let size_u8 = (size.round() as u8).max(1);
+                // Half points and Excel's full 1..=409 range (engine FontSize).
+                // Clamped like the old cast, so a computed property never
+                // refuses, but no longer truncated to a whole point or wrapped
+                // above 255 by an `as u8`.
+                let font_size = engine::FontSize::from_points_clamped(size);
                 apply_style_change(target_type, target_index, target_index2, grid, grids, sheet_index, style_registry, |style| {
-                    style.font.size = size_u8;
+                    style.font.size = font_size;
                 });
                 needs_style_refresh = true;
             }

@@ -13,7 +13,7 @@ export { API_VERSION } from "./version";
 // Commands
 // ============================================================================
 
-export { CoreCommands, CommandRegistry } from "./commands";
+export { CoreCommands, ExtensionCommands, CommandRegistry } from "./commands";
 export type { ICommandRegistry } from "./commands";
 // Run a command from WHICHEVER registry holds it (CommandRegistry, else the
 // extension registry's commands). Not a script door: scripts stay behind isScriptSafe.
@@ -170,8 +170,16 @@ export {
   insertColumns,
   deleteRows,
   deleteColumns,
+  // Insert Cells / Delete Cells (Excel's shift right / down / left / up)
+  insertCellsRange,
+  deleteCellsRange,
+  // Delete Sheet's question: does the sheet hold anything at all?
+  isSheetBlank,
   getColumnWidth,
   getRowHeight,
+  // Batch Row Height / Column Width over a selection span (runs), one undo step
+  setRowHeights,
+  setColumnWidths,
   getDefaultDimensions,
   setDefaultRowHeight,
   setDefaultColumnWidth,
@@ -182,9 +190,12 @@ export {
   sortRangeByColumn,
   // Border presets
   applyBorderPreset,
+  // Increase / Decrease Decimal (Home > Number)
+  adjustNumberFormatDecimals,
   // Multi-Sheet (Sheet Grouping) Operations
   updateCellOnSheets,
   applyFormattingToSheets,
+  applyBorderPresetToSheets,
   clearRangeOnSheets,
   // Functions (built-in formula catalog)
   getAllFunctions,
@@ -213,6 +224,11 @@ export type {
   FormulaShiftInput,
   ClipboardData,
   SelectionAggregationResult,
+  LineRun,
+  CellShiftResult,
+  CellShiftOptions,
+  InsertCellsShift,
+  DeleteCellsShift,
 } from "./lib";
 
 // ============================================================================
@@ -1674,6 +1690,10 @@ export type {
   SheetSurface,
   SortRangeResult,
   UnderlineStyle,
+  // Home tab = Excel's Home tab (2026-10-04): the Orientation menu's values
+  // and the accounting split layout the renderer draws.
+  TextRotation,
+  AccountingLayout,
 } from "./types";
 
 // ============================================================================

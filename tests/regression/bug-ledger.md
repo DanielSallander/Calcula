@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 284 | Open: 4 | Triaged: 0 | Fixed: 280 | Other: 0
+Total: 399 | Open: 40 | Triaged: 0 | Fixed: 359 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -3142,3 +3142,1117 @@ A SCRIPT'S MERGE OF ONE CELL IS REPORTED AS AN OVERLAP. executeMergeCells (app/s
 A PANEL SCRIPT CAN CLOSE A TRANSPARENCY PANEL. Panel scripts may be attached to ANY panel id (PanelContextMenu "Edit Script..." emits edit-script with instanceId = panelId; nothing ties a panel script to a panel it owns), and object.setState panel.close / panel.open / panel.setBadge (host.ts executeSetState, ~8050) have no vSetState rule. A consented script bound to scriptable-objects.codeInThisFile or scriptable-objects.permissions can subscribe onActivate (fired for any panelId === instanceId) and call panel.close(), so every door that opens the panel -- the status-bar indicator, Developer, View > Sidebar -- opens it and it shuts at once. movable:false (2026-10-03) already refuses panel.moveTo for both.
 
 **Repro:** Attach an object script to panel instance scriptable-objects.codeInThisFile whose onActivate calls panel.close(); open Code in This File from the status-bar indicator: it closes immediately.
+
+## BUG-0285 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** paste-link-source-sheet
+
+PASTE LINK ON ANOTHER SHEET LINKED TO THE DESTINATION SHEET'S OWN CELLS. buildAbsoluteRef wrote =$A$1 with no sheet name and ClipboardData did not record the source sheet, so a link pasted on Sheet2 read Sheet2!A1 instead of Sheet1!A1 -- a plausible formula over the wrong data, with no error.
+
+**Repro:** Copy Sheet1!A1, switch to Sheet2, Paste Special > Paste Link: the cell reads =$A$1 and shows Sheet2's A1.
+**Fix:** fixed
+
+## BUG-0286 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** paste-link-filtered-rows
+
+PASTE LINK AFTER A FILTERED COPY LINKED TO THE HIDDEN ROWS. It addressed source rows as sourceMinRow + r, although ClipboardData's own comment says copied rows must be mapped through sourceRows.
+
+**Repro:** Filter a list so rows 3-4 are hidden, copy A2:A6 (visible rows only), Paste Link elsewhere: the links point at A2..A4 instead of A2, A5, A6.
+**Fix:** fixed
+
+## BUG-0287 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** paste-variant-stale-clipboard
+
+THE PASTE VARIANTS PASTED STALE CELLS. Paste Values / Formulas / Formatting / ... always used the internal clipboard; plain Paste first checks whether another program has put newer text on the system clipboard. After copying in Notepad, Paste Values pasted the old Calcula cells.
+
+**Repro:** Copy A1 in Calcula, copy some text in Notepad, run Paste Values on B1: B1 gets A1's value, not the Notepad text (and not a refusal).
+**Fix:** fixed
+
+## BUG-0288 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** paste-variant-guards
+
+THE PASTE VARIANTS SKIPPED THE CHECKS PLAIN PASTE RUNS. No protected-region / pivot check (checkRangeGuards) over the paste area, every variant ran after a Cut (Excel enables only plain Paste then; measured with GetEnabledMso), and nothing copied, a canvas sheet or no selection returned silently.
+
+**Repro:** Copy A1:B2, Paste Values over a PivotTable's cells: the variant writes into the pivot area where plain Paste refuses. Cut A1, then Paste Values: it runs.
+**Fix:** fixed
+
+## BUG-0289 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** paste-no-borders-fields
+
+NO BORDERS DROPPED MOST OF THE SOURCE FORMAT. It copied a hand-written list of style fields, which omitted indent, shrink-to-fit, fills, theme colours, locked and formula-hidden, and would silently omit any field added later.
+
+**Repro:** Give A1 indent 2 and an unlocked protection flag, copy, Paste Special > All except borders on C1: C1 has no indent and is locked.
+**Fix:** fixed
+
+## BUG-0290 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** paste-empty-source-format
+
+PASTE ALL (USED BY TRANSPOSE AND KEEP SOURCE COLUMN WIDTHS) AND PASTE FORMATTING LEFT THE DESTINATION'S OLD FORMAT UNDER AN EMPTY SOURCE CELL, where plain Paste gives it the default style.
+
+**Repro:** Bold C1, copy an empty A1, Paste Special > Formats on C1: C1 stays bold.
+**Fix:** fixed
+
+## BUG-0291 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** paste-refusal-console-only
+
+PASTE COMMENTS AND PASTE VALIDATION SWALLOWED A REFUSAL INTO THE CONSOLE, so a refused cell looked pasted.
+
+**Repro:** Protect the destination, copy a cell with a note, Paste Special > Comments: nothing changes and nothing is said.
+**Fix:** fixed
+
+## BUG-0292 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** format-painter-lock-race
+
+FORMAT PAINTER LOCK TOGGLED AN ARMED PAINTER OFF, AND A SECOND START WHILE THE FIRST WAS STILL READING ITS SOURCE STARTED TWO PAINTERS -- one paint was recorded as two undo steps (reproduced red first).
+
+**Repro:** Double-click Format Painter quickly (click, click, dblclick) and paint once: two undo steps; with the painter already armed, FORMAT_PAINTER_LOCK turns it off instead of locking it.
+**Fix:** fixed
+
+## BUG-0293 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** worksheet-control-clipboard-door
+
+THE RIBBON'S COPY AND PASTE IGNORED A SELECTED CONTROL ON A WORKSHEET: clipboardDoorCommand answered the cell command, while Ctrl+C / Ctrl+V with the same control selected copy and paste the control.
+
+**Repro:** Select a floating button on a worksheet, click Home > Copy, then Paste: the cell under it is copied, not the button.
+**Fix:** fixed
+
+## BUG-0294 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** row-column-commands-whole-lines-only
+
+INSERT / DELETE SHEET ROWS AND COLUMNS DID NOTHING UNLESS WHOLE ROWS OR COLUMNS WERE SELECTED. Each grid handler returned on selection.type !== 'rows' (Spreadsheet.tsx), so the Home buttons were dead on an ordinary cell selection and a script's DELETE_ROW over cells was a silent no-op. Excel acts on the rows/columns the selection spans.
+
+**Repro:** Select B3:C4 and click Insert Sheet Rows: nothing happens.
+**Fix:** fixed
+
+## BUG-0295 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** clear-main-block-only
+
+THE CLEARS ACTED ON THE MAIN RANGE ONLY. Clear Contents (Delete), Clear Formats, Clear Comments, Clear Hyperlinks and Clear All ignored the other Ctrl+click blocks -- after Go To Special > Constants, Delete cleared only the first area of constants.
+
+**Repro:** Put constants in A1 and C3, select A1 then Ctrl+click C3, press Delete: only A1 is cleared.
+**Fix:** fixed
+
+## BUG-0296 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** clear-and-fill-refusals-silent
+
+CLEAR CONTENTS, CLEAR FORMATS AND THE FOUR FILLS ONLY LOGGED A REFUSAL (Clear All already alerted), so a protected or pivot-guarded clear looked like a dead key.
+
+**Repro:** Protect the sheet, select a locked cell, Home > Clear > Clear Formats: nothing happens and nothing is said.
+**Fix:** fixed
+
+## BUG-0297 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** clear-comments-leaves-notes
+
+CLEAR COMMENTS LEFT NOTES IN PLACE, AND CLEAR ALL DID NOT CLEAR NOTES. Excel's 'Clear Comments and Notes' and Clear All remove both.
+
+**Repro:** Add a note to A1, Home > Clear > Clear All: the note stays.
+**Fix:** fixed
+
+## BUG-0298 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** fill-single-line-noop
+
+FILL DOWN / RIGHT / UP / LEFT ON ONE ROW OR COLUMN SILENTLY DID NOTHING. Each fill needed two lines selected; Excel's Fill Down on a single cell copies the cell above (measured live, an empty source clears the target).
+
+**Repro:** Type 5 in A1, select A2, press Ctrl+D: A2 stays empty.
+**Fix:** fixed
+
+## BUG-0299 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** range-clear-comments-not-undoable
+
+RANGE CLEARS OF COMMENTS, NOTES AND HYPERLINKS COULD NOT BE UNDONE, AND DIRTIED THE DOCUMENT EVEN WHEN NOTHING WAS CLEARED. Undoing Clear All brought the cells back but not the comments it removed.
+
+**Repro:** Add a comment to A1, Clear All, Ctrl+Z: the value returns, the comment does not.
+**Fix:** fixed
+
+## BUG-0300 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** resize-one-undo-per-line
+
+RIGHT-CLICK COLUMN WIDTH / ROW HEIGHT TOOK ONE UNDO STEP PER LINE: resizing five columns needed five Ctrl+Z (gridExtensions.ts onResult loop, no transaction).
+
+**Repro:** Select B:F, right-click > Column Width... 20, then Ctrl+Z: only column F goes back.
+**Fix:** fixed
+
+## BUG-0301 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** unhide-dialog-dblclick-wrong-sheet
+
+DOUBLE-CLICKING A SHEET IN THE UNHIDE DIALOG UNHID A DIFFERENT SHEET: the handler set the selection and then confirmed with its old closure.
+
+**Repro:** Hide Sheet2 and Sheet3, open Unhide, double-click Sheet3: Sheet2 is unhidden.
+**Fix:** fixed
+
+## BUG-0302 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** sheet-view-cache-scrambled
+
+DUPLICATE SHEET AND DELETE SHEET SCRAMBLED CORE'S SAVED PER-SHEET SELECTION AND SCROLL. The cache is keyed by sheet index and was not told about the insertion or removal, so every later sheet restored its neighbour's view.
+
+**Repro:** Scroll Sheet3 to row 500, duplicate Sheet1 (the copy lands before Sheet3), switch to Sheet3: it opens at another sheet's position.
+**Fix:** fixed
+
+## BUG-0303 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** rename-prompt-untrimmed
+
+THE SHEET RENAME PROMPT EXISTED IN THREE COPIES, AND THE TAB DOUBLE-CLICK COMPARED THE UNTRIMMED ANSWER, so ' Sheet1' renamed Sheet1 to itself through a backend call.
+
+**Repro:** Double-click the Sheet1 tab and answer ' Sheet1'.
+**Fix:** fixed
+
+## BUG-0304 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** goto-special-bounding-box
+
+GO TO SPECIAL SELECTED THE BOUNDING BOX OF ITS MATCHES, so 'Constants, then Delete' also cleared every formula inside that box. It also searched only the main area of a multi-area selection and made the backend scan a whole selected column to the sheet's last row.
+
+**Repro:** Constants in A1 and C3, a formula in B2: Go To Special > Constants, then Delete -- the formula in B2 is erased.
+**Fix:** fixed
+
+## BUG-0305 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** formula-assist-edit-flag
+
+FORMULA ASSIST'S EDIT OPENED THE CELL EDIT WITH CORE'S EDIT FLAG DOWN. It dispatched the raw startEditing grid action, which skips the edit guards, merge resolution and EDIT_STARTED, so clicking a cell during that edit moved the selection instead of inserting a reference.
+
+**Repro:** Open Formula Assist on a formula cell, choose Edit, click another cell: the selection moves; no reference is inserted.
+**Fix:** fixed
+
+## BUG-0306 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** cf-color-scales-reversed
+
+EVERY CONDITIONAL-FORMATTING COLOUR-SCALE PRESET WAS UPSIDE DOWN, AND THE MIDPOINT WAS WRONG. 'Green - Yellow - Red' coloured the lowest value green and the highest red (Excel: lowest red F8696B, highest green 63BE7B); the 3-colour midpoint was 50% of the range with automatic ends instead of Excel's 50th PERCENTILE between lowest/highest value; there were 8 presets, not Excel's 12. cfTypes.test.ts pinned the reversed colours.
+
+**Repro:** Select 1..10, Conditional Formatting > Color Scales > Green-Yellow-Red: 1 is green and 10 is red.
+**Fix:** fixed
+
+## BUG-0307 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** cf-refusal-unhandled
+
+A REFUSED CONDITIONAL-FORMATTING WRITE WAS AN UNHANDLED PROMISE REJECTION. Gallery picks and menu clears refused by the backend (thrown or success:false) reached nobody; the quick and New Rule dialogs closed with no message.
+
+**Repro:** Protect the sheet, pick Data Bars > Blue on a locked range: nothing happens; the devtools console shows an unhandled rejection.
+**Fix:** fixed
+
+## BUG-0308 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** cf-clear-selection-partial
+
+CLEAR RULES FROM SELECTED CELLS REMOVED NOTHING FOR A PARTIAL SELECTION, DIRTIED THE DOCUMENT ANYWAY, AND SAID NOTHING. The backend removed a rule only when the selection covered it whole (conditional_formatting.rs), DocumentEffect::mutates ran before knowing, and the frontend ignored the returned count.
+
+**Repro:** Rule over A1:A10, select A1:A5, Clear Rules > from Selected Cells: the rule still covers A1:A10 and the title gets an asterisk.
+**Fix:** fixed
+
+## BUG-0309 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** cf-icon-set-names
+
+THE ICON SETS GALLERY GROUPED AND NAMED SETS UNLIKE EXCEL: 5 Quarters sat under Shapes, gray arrow sets came after coloured ones from 4 arrows up, and 'Red To Black' / 'Unrimmed' used other names.
+
+**Repro:** Open Conditional Formatting > Icon Sets and compare with Excel's Directional / Shapes / Indicators / Ratings groups.
+**Fix:** fixed
+
+## BUG-0310 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** grouped-format-undo-corrupts-active
+
+UNDOING A FORMAT APPLIED TO GROUPED SHEETS WROTE THE OTHER SHEET'S CELL INTO THE ACTIVE SHEET. apply_formatting_to_sheets recorded every grouped sheet's change against active_sheet, so Ctrl+Z wrote the grouped sheet's previous cell -- value included -- into the active sheet and never reverted the grouped one.
+
+**Repro:** Sheet1!A1 = 'active', Sheet2!A1 = 'other', group both tabs, Bold A1, Ctrl+Z: Sheet1!A1 becomes 'other' and Sheet2!A1 stays bold.
+**Fix:** fixed
+
+## BUG-0311 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** font-size-half-points
+
+A FONT SIZE OF 10.5 COULD NEVER BE WRITTEN. FONT_SIZES lists 10.5, but FormattingParams.font_size and the engine size were u8, so deserialization failed and the error was only logged: Decrease Font Size from 11 (which sent 10.5) was stuck at 11, the Size box's 10.5 did nothing, and Format Cells' whole OK failed for any fractional size.
+
+**Repro:** Select a Calibri 11 cell, click Decrease Font Size: nothing changes; the console shows a deserialize error.
+**Fix:** fixed
+
+## BUG-0312 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** border-preset-own-style
+
+BORDER PRESETS IGNORED ROW/COLUMN FORMATS AND WALKED EVERY CELL. apply_border_preset built on the cell's OWN style_index, so under a column or row format (e.g. a column unlocked for protection) a border dropped that format and re-locked the cells; cell_count was a u32 product (overflow panic in debug on Select All) and the loop visited every coordinate.
+
+**Repro:** Unlock column B (Format Cells > Protection), select B2:B4, Outside Borders, protect the sheet: B2:B4 are locked again. Select All + All Borders: the app freezes.
+**Fix:** fixed
+
+## BUG-0313 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** border-preset-grouped-sheets
+
+THE applyBorderPreset WRAPPER DID NOT REPLICATE TO GROUPED SHEETS, while applyFormatting does, so a border on grouped sheets landed on the active sheet only.
+
+**Repro:** Group Sheet1 and Sheet2, select A1:B2, All Borders: Sheet2 gets no borders.
+**Fix:** fixed
+
+## BUG-0314 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** accounting-negative-zero-pattern
+
+ACCOUNTING FORMATS SHOWED EVERY NEGATIVE IN PARENTHESES AND ZERO AS A BARE DASH. Only en-US uses parentheses; sv-SE (measured live) shows a minus at the cell's left edge, and Excel's "-"?? pads the dash with digit-width spaces. A value that rounds to zero lost its sign.
+
+**Repro:** sv-SE locale, -42 in A1, Comma Style: Calcula shows (42,00) where Excel shows '-         42,00 '.
+**Fix:** fixed
+
+## BUG-0315 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** currency-locale-tag-in-symbol
+
+A [$X-nnn] CURRENCY CODE KEPT ITS LOCALE TAG IN THE SYMBOL: [$£-809]#,##0.00 on 1234.5 showed '£-809 1,234.50' instead of '£1,234.50' (try_parse_format_code took the whole bracket body).
+
+**Repro:** Apply numberFormat '[$£-809]#,##0.00' to 1234.5.
+**Fix:** fixed
+
+## BUG-0316 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** xlsx-accounting-codes
+
+THE .XLSX ACCOUNTING CODES WERE READ AND WRITTEN WRONG. The reader knew only _(-style codes with $ EUR GBP, always symbol-before, and never read the negative section -- sv-SE Excel's own Accounting code imported as a plain number and [$CHF-100C] codes were read as a TIME format (the h); the writer's symbol-after code had no closing _) pad on its negative section and wrote "" for an empty symbol.
+
+**Repro:** Import an .xlsx saved by sv-SE Excel with Accounting on A1: A1 opens as a plain number.
+**Fix:** fixed
+
+## BUG-0317 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** accounting-symbol-after-layout
+
+SYMBOL-AFTER ACCOUNTING WAS LAID OUT BACKWARDS: the value sat at the LEFT edge and the symbol at the right (cells.ts), where Excel right-aligns '1 234,50 kr' against the symbol with the fill first (measured live, sv-SE).
+
+**Repro:** sv-SE locale, 1234.5, Number > Accounting: '1 234,50' at the left edge and 'kr' at the right.
+**Fix:** fixed
+
+## BUG-0318 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** xlsx-rotation-stacked
+
+TEXT ROTATION ROUND-TRIPPED WRONG THROUGH .XLSX, AND AN UNKNOWN ROTATION CLEARED THE CELL'S ROTATION. OOXML 255 (stacked text) imported as Rotate90; Rotate270 was exported as set_rotation(270), which rust_xlsxwriter turns into 255 = stacked; parse_text_rotation answered None for an unknown value, silently removing an existing rotation.
+
+**Repro:** Rotate Text Down on A1, save as .xlsx, reopen: A1 is stacked vertical text.
+**Fix:** fixed
+
+## BUG-0319 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** decimal-buttons-flatten-format
+
+INCREASE / DECREASE DECIMAL REPLACED THE CELL'S FORMAT WITH A PLAIN NUMBER. Accounting and Currency lost symbol, separator and red negatives; Percent 25.6% became '0.3'; Scientific became fixed; a Date became its serial number; '@' text became 0.0; a custom '#,##0.00 "kr"' lost its suffix; and the step was read from the anchor, not the active cell.
+
+**Repro:** Format A1 as Accounting (kr) with 1234.5, click Increase Decimal: A1 shows '1234.500' with no symbol, separator or alignment.
+**Fix:** fixed
+
+## BUG-0320 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** comma-style-rounds
+
+COMMA STYLE WROTE "#,##0", WHICH ROUNDS AWAY THE DECIMALS. Excel's Comma style is Accounting with no symbol and 2 decimals (1234.5 shows '1,234.50', zero a dash).
+
+**Repro:** Type 1234.5, click Comma Style: '1,235'.
+**Fix:** fixed
+
+## BUG-0321 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** home-applyformat-refusal-console
+
+EVERY HOME-TAB FORMATTING BUTTON SWALLOWED A BACKEND REFUSAL INTO THE CONSOLE. useHomeTabState.applyFormat caught every failure and only console.error'd it, so Bold, Underline, Fill Color, Percent, Comma, rotation ... on a protected sheet did nothing visible; More Number Formats... failures were console-only too.
+
+**Repro:** Protect the sheet, select a locked cell, click Bold: nothing happens and nothing is said.
+**Fix:** fixed
+
+## BUG-0322 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** indent-cap-and-alignment
+
+INDENT WAS CAPPED AT 15 (EXCEL: 250) AND AN INDENT DID NOT TURN GENERAL OR CENTER INTO LEFT, as Excel does (measured: IndentLevel on either reads back xlLeft; Right stays Right). Increase Indent at the cap and Decrease at 0 still wrote, dirtying the document with an empty undo step.
+
+**Repro:** Increase Indent sixteen times: it stops at 15. Center a cell and increase its indent: it stays centred.
+**Fix:** fixed
+
+## BUG-0323 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** accounting-box-reads-custom
+
+THE NUMBER FORMAT BOX SHOWED 'CUSTOM' FOR SIX OF THE SEVEN ACCOUNTING FORMATS THE RIBBON WRITES: selectedPresetFor matched display names exactly.
+
+**Repro:** Apply Accounting > '£ English (United Kingdom)': the box reads Custom.
+**Fix:** fixed
+
+## BUG-0324 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** format-cells-ok-writes-everything
+
+FORMAT CELLS' OK WROTE EVERY PROPERTY TO EVERY SELECTED CELL. A mixed selection became uniform (the active cell's style everywhere), an empty active cell wrote the store defaults including fontFamily 'system-ui', an untouched OK flattened theme colours, protection was a second undo step, refusals went to the console, and the Border tab's Outline set all four sides of every cell (= All Borders).
+
+**Repro:** Bold A1 only, select A1:B1, open Format Cells, change nothing, OK: B1 is bold.
+**Fix:** fixed
+
+## BUG-0325 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** format-cells-font-tab-stale
+
+THE FORMAT CELLS FONT TAB SHOWED '11' AND 'system-ui' WHATEVER THE CELL CARRIED when the dialog opened directly on it (the Font launcher): the Size and Font fields copied the store once at mount, before the style loaded.
+
+**Repro:** Set A1 to Arial 14, click the Font group's dialog launcher: the tab shows system-ui 11.
+**Fix:** fixed
+
+## BUG-0326 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** format-cells-enus-accounting-row
+
+ON EN-US AN ACCOUNTING CELL LIT NO ROW IN FORMAT CELLS' NUMBER TAB: the exact display-name map missed the en-US names, which end ', parenthesised negatives'.
+
+**Repro:** en-US locale, Accounting on A1, Ctrl+1: no Accounting row is selected.
+**Fix:** fixed
+
+## BUG-0327 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** rotated-text-render
+
+ROTATED TEXT WAS PAINTED AND MEASURED UNLIKE EXCEL. It pivoted on the cell centre, ignoring both alignments; it took part in the horizontal spill and shrink-to-fit; column AutoFit measured it by its horizontal length; the frozen/split-pane painter drew it horizontally, ignored the indent and painted accounting as one string.
+
+**Repro:** A1 = 'Rotated', Rotate Text Up, bottom-aligned, in a tall row: the text sits in the middle; freeze row 1 and it is drawn horizontally.
+**Fix:** fixed
+
+## BUG-0328 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** indent-wider-than-column
+
+AN INDENT WIDER THAN ITS COLUMN SKIPPED THE WHOLE CELL -- its fill, borders and indicators, not just its text. With the new 250 limit any narrow indented cell hit it.
+
+**Repro:** Fill A1 yellow, give it indent 20 in a default-width column: the fill disappears.
+**Fix:** fixed
+
+## BUG-0329 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** font-200pt-ignored
+
+THE PAINTER IGNORED FONT SIZES OF 200 PT AND ABOVE AND PAINTED THE THEME'S 11 PT.
+
+**Repro:** Set A1's size to 250 (Format Cells accepts up to 409): it paints at 11.
+**Fix:** fixed
+
+## BUG-0330 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** structural-undo-spill
+
+UNDOING INSERT/DELETE ROWS OR COLUMNS TURNED A MOVED SPILL INTO #SPILL!. The GridSnapshot restores cells but not spill ownership, so after the undo both spill maps were empty and the origin showed #SPILL!.
+
+**Repro:** B5 =SEQUENCE(3), insert a row above row 5, Ctrl+Z: B5 shows #SPILL!.
+**Fix:** fixed
+
+## BUG-0331 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** whole-line-reference-rules
+
+WHOLE-ROW/COLUMN EDITS REWROTE REFERENCES UNLIKE EXCEL. A range a delete cut into became #REF! (=SUM(A5:A9), delete row 5 -> =SUM(#REF!); Excel: =SUM(A5:A8)); a range reaching the last row became #REF! on an insert (Excel keeps B12:B1048576); CF and DV ranges reaching the sheet edge were pushed past it by an insert and stopped one line short after a delete, and inserted lines under a CF/DV did not join it. An existing test pinned the wrong claim.
+
+**Repro:** =SUM(A5:A9) in C1, delete row 5: C1 becomes =SUM(#REF!).
+**Fix:** fixed
+
+## BUG-0332 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** inserted-lines-no-format
+
+INSERTED ROWS AND COLUMNS DID NOT TAKE THEIR NEIGHBOUR'S FORMAT (Excel's Format Same As Above / Left): no cell style, no row/column tier, no height/width, and CF/DV did not grow over them.
+
+**Repro:** Bold row 4 with a fill and height 30, insert a row at 5: the new row is plain and default height (Excel: bold, filled, 30).
+**Fix:** fixed
+
+## BUG-0333 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** default-size-ungated
+
+set_default_column_width AND set_default_row_height HAD NO PROTECTION CHECK, unlike set_column_width, so the standard width changed on a protected sheet that does not allow column formatting.
+
+**Repro:** Protect a sheet without 'Format columns', then invoke('set_default_column_width', { width: 120 }): it succeeds.
+**Fix:** fixed
+
+## BUG-0334 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** clear-apply-to-hyperlink-placeholders
+
+THE BACKEND'S ClearApplyTo HYPERLINK ARMS WERE PLACEHOLDERS: 'removeHyperlinks' reset the style of EVERY cell in the range and removed no link; 'hyperlinks' changed nothing yet dirtied the document and opened an undo step.
+
+**Repro:** Through the backend, clear_range_with_options(..., 'removeHyperlinks') over A1:C3 with one link in B2: every cell loses its format and the link stays.
+**Fix:** fixed
+
+## BUG-0335 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** cell-shift-whole-line-no-dimension-refresh
+
+THE INSERT/DELETE DIALOGS' ENTIRE ROW / ENTIRE COLUMN (AND CTRL+PLUS ON WHOLE ROWS) KEPT PAINTING THE OLD HEIGHTS: insertCellsRange / deleteCellsRange's whole-line route re-read cells only, not the dimension map.
+
+**Repro:** Give row 3 height 60, select row 2, Ctrl+Plus: the grid still paints 60 on row 3 (the document has it on row 4).
+**Fix:** fixed
+
+## BUG-0336 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** test-pivot-does-not-compile
+
+app/src-tauri/tests/test_pivot.rs DID NOT COMPILE (ProtectedRegion gained reserved_only; 4 errors), so `cargo check --tests` failed and its 56 tests never ran. cargo test --lib was unaffected, which is why nothing noticed.
+
+**Repro:** cd app/src-tauri && cargo check --tests.
+**Fix:** fixed
+
+## BUG-0337 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** pivot-guard-main-block
+
+THE PIVOT EXTENSION'S STRUCTURAL GUARDS JUDGED ONLY THE MAIN BLOCK. Once Insert/Delete Sheet Rows/Columns acted on every Ctrl+click block, a secondary block inside a PivotTable was not refused by the TS guard.
+
+**Repro:** Select a cell outside a pivot, Ctrl+click a cell inside it, Delete Sheet Rows.
+**Fix:** fixed
+
+## BUG-0338 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** color-hex-escape-applies
+
+ESCAPE IN A COLOUR PALETTE'S HEX FIELD APPLIED THE TYPED COLOUR: the Popover's Escape refocused the anchor, which blurred the field, whose blur commits -- a formatting write and an undo step the user had just cancelled.
+
+**Repro:** Open any colour palette, type 12ab34 in the hex field, press Escape: the colour is applied.
+**Fix:** fixed
+
+## BUG-0339 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** collapsed-group-flyout-keyboard
+
+A COLLAPSED RIBBON GROUP'S FLYOUT COULD NOT BE REACHED WITH THE KEYBOARD: opened with Enter it is a portal at the end of <body>, focus stayed on the group button, and Tab went to the next ribbon control.
+
+**Repro:** Narrow the window until Font collapses, Tab to its button, Enter, Tab: focus leaves the ribbon group instead of entering the flyout.
+**Fix:** fixed
+
+## BUG-0340 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** menusub-escape-closes-all
+
+ESCAPE CLOSED THE WHOLE MENU WHILE A POINTER-OPENED SUBMENU WAS SHOWING (and at depth, a level-2 row with a pointer-opened level 3 closed level 2). Windows and Office close the innermost popup first.
+
+**Repro:** Open a menu, rest the pointer on a MenuSub row 200 ms so its flyout opens, press Escape: the whole menu closes.
+**Fix:** fixed
+
+## BUG-0341 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** cell-styles-keyboard
+
+THE CELL STYLES GALLERY WAS UNREACHABLE BY KEYBOARD: focus stayed on the button while the gallery portalled to the end of <body>, focus fell to <body> after a pick, the popover was an unnamed role=dialog with no aria-controls, and a rejected apply would have been unhandled.
+
+**Repro:** Tab to Cell Styles, Enter, Tab: focus leaves for the next ribbon control, not the gallery.
+**Fix:** fixed
+
+## BUG-0342 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** sheet-tab-hide-greys-on-total
+
+THE TAB MENU'S HIDE SHEET GREYED ON THE TOTAL SHEET COUNT, NOT THE VISIBLE COUNT, so with only one sheet visible it stayed enabled and the backend refused.
+
+**Repro:** Hide Sheet2 of two sheets, right-click Sheet1's tab: Hide Sheet is enabled.
+**Fix:** fixed
+
+## BUG-0343 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** icon-contact-write-raises
+
+icon-accent-contact.mjs --write COULD RAISE ALLOWLIST ENTRIES: a value up to TOLERANCE above its pin is not growth, so --write silently stored it, breaking the file's 'entries only shrink' contract (it would have raised Gridlines, Loop, Pivot, Undo and Redo).
+
+**Repro:** Copy scripts/icon-accent-contact.allowlist.json, run ICON_CONTACT_ALLOWLIST=<copy> node scripts/icon-accent-contact.mjs --write, diff: five entries rose.
+**Fix:** fixed
+
+## BUG-0344 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** color-hex-blur-double-apply
+
+A TYPED HEX DRAFT FOLLOWED BY A SWATCH CLICK PROBABLY APPLIES TWICE (PLAUSIBLE, from code; jsdom cannot show it): in Chromium the mousedown focuses the swatch, the field's blur commits the draft, then the click applies the swatch -- two writes and two undo steps.
+
+**Repro:** Open Fill Color's palette, type 12ab34 without Enter, click Red; then Ctrl+Z once: if the cell shows #12ab34, it applied twice.
+
+## BUG-0345 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** paste-variant-per-cell-ipc
+
+THE PASTE VARIANTS STILL WRITE ONE CELL PER BACKEND CALL (updateCell plus setCellStyle per cell), where plain Paste makes one update_cells_batch call -- Paste Values over 1000 cells is 1000+ IPC round trips.
+
+**Repro:** Copy A1:A1000, Paste Values on B1 with the devtools network/IPC log open.
+
+## BUG-0346 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** paste-special-operation-drops-formula
+
+PASTE SPECIAL WITH AN OPERATION REPLACES A DESTINATION FORMULA WITH A CONSTANT. Add / Subtract / Multiply / Divide write a plain value; Excel keeps the formula as =(old)+src.
+
+**Repro:** B1 = =A1, copy a cell holding 1, Paste Special > Add onto B1: B1 becomes a constant.
+
+## BUG-0347 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** paste-no-borders-border-detail
+
+NO BORDERS PUTS THE DESTINATION'S BORDERS BACK WITH LESS DETAIL: applyFormatting takes a side as style + colour only, so a theme-coloured border comes back as a fixed colour, and a dashed/dotted side of width 2 comes back as width 1 (the backend reports it as plain dashed/dotted).
+
+**Repro:** Give C1 a theme-coloured medium dashed bottom border, copy A1, Paste Special > All except borders on C1, change the theme: C1's border keeps the old colour.
+
+## BUG-0348 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** paste-link-renamed-sheet
+
+PASTE LINK AFTER RENAMING THE SOURCE SHEET LINKS TO THE OLD NAME (-> #REF!): the name is recorded at copy time; Excel cancels copy mode when a sheet is renamed.
+
+**Repro:** Copy Sheet1!A1, rename Sheet1 to Data, Paste Link on Sheet2: =Sheet1!$A$1, which is #REF!.
+
+## BUG-0349 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** paste-special-selection-unmoved
+
+PASTE SPECIAL'S VARIANTS LEAVE THE SELECTION WHERE IT WAS, while plain Paste selects the pasted range (as Excel does for both). Values & Number Formatting and Formulas & Number Formatting also leave the destination's number format under an EMPTY source cell (Excel not probed for that half).
+
+**Repro:** Copy A1:B3, select D1, Paste Values: the selection stays on D1 alone.
+
+## BUG-0350 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** grouped-delete-active-only
+
+DELETE WITH GROUPED SHEETS PROBABLY CLEARS ONLY THE ACTIVE SHEET (found by reading the code, not run). The registry binding Delete runs core.edit.clearContents in the capture phase and stops the key, so useSpreadsheetSelection.handleDeleteContents -- which holds the grouped-sheet replication (clearRangeOnSheets) and the checkEditGuards pivot check -- runs only when the dispatcher stands down; the clear gesture replicates to nothing.
+
+**Repro:** Group Sheet1 + Sheet2, type in A1 on both, select A1, press Delete: Sheet2!A1 should be cleared too.
+
+## BUG-0351 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** autofit-contributor-column-wide
+
+AUTOFIT COLUMN WIDTH ON A PARTIAL RANGE STILL COUNTS A PIVOTTABLE ELSEWHERE IN THE COLUMN: AutoFitContributor.measureColumn has no row range, so a contributor's requiredWidth applies whatever rows are selected (Excel fits only the selected cells).
+
+**Repro:** A pivot in A20:C40, select A1 only, Home > Format > AutoFit Column Width: column A is sized for the pivot.
+
+## BUG-0352 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** standard-width-workbook-wide
+
+THE STANDARD COLUMN WIDTH IS ONE VALUE FOR THE WHOLE WORKBOOK (AppState.default_column_width); Excel keeps one per sheet.
+
+**Repro:** Home > Format > Default Width... 12 on Sheet1, switch to Sheet2: Sheet2's standard width changed too.
+
+## BUG-0353 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** select-all-row-height-refused
+
+SELECT ALL, THEN ROW HEIGHT IS REFUSED (a toast). The batch command is cheap now, but the sheet stores one explicit height per row (row_heights HashMap): 1,048,576 entries cost about 35 MB per copy, copied into every structural undo step (up to ~3.5 GB), ~51 MB of JSON per dimension refresh and ~6 ms per scroll forEach -- so Row Height keeps a 16,384-row bound. Excel sets the sheet's DEFAULT row height instead.
+
+**Repro:** Ctrl+A, Home > Format > Row Height... 30: refused with a toast.
+
+## BUG-0354 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** apply-formatting-dense-walk
+
+apply_formatting WALKS ROWS x COLUMNS: Select All + Bold sends 1,048,576 rows and 16,384 columns, 17.2 billion iterations -- the class of BUG-0282 in the command every Home button uses. The Borders split's Left/Right edge presets (and Top/Bottom on whole rows) go through it too, so Left Border on a whole column sends a million rows.
+
+**Repro:** Ctrl+A, then Ctrl+B: the app stops responding.
+
+## BUG-0355 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** general-decimals-not-width-based
+
+INCREASE/DECREASE DECIMAL ON A GENERAL CELL COUNTS THE DECIMALS OF THE FULL RENDERING, NOT THOSE SHOWN AT THE COLUMN'S WIDTH: Excel shows 1234.5678 as '1234,568' in a default column and Increase gives 4 decimals; Calcula gives 5.
+
+**Repro:** Type 1234.5678 in a default-width column, click Increase Decimal: 0.00000 (Excel: 0.0000).
+
+## BUG-0356 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** off-sheet-structural-spill-undo
+
+THE OFF-SHEET STRUCTURAL PATH RECORDS NO SPILL CLAIMS (off_sheet_structural_edit / sheet_structural_snapshot), so it probably has the #SPILL!-on-undo defect the active-sheet path had (not verified).
+
+**Repro:** From a script, insert rows on a non-active sheet above a SEQUENCE spill, undo, switch to that sheet: the origin may show #SPILL!.
+
+## BUG-0357 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** structural-edit-chart-ranges
+
+CHART AND SPARKLINE DATA RANGES ARE NOT ADJUSTED BY ANY STRUCTURAL EDIT (insert/delete rows, columns or cells). Pre-existing; Insert/Delete Cells inherits the gap.
+
+**Repro:** Chart over A1:B5, insert a row at 3: the chart still reads A1:B5, now missing the last data row.
+
+## BUG-0358 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** macro-recorder-cell-shift
+
+THE MACRO RECORDER DOES NOT RECORD INSERT CELLS / DELETE CELLS: there is no RecordedGridEvent kind for a cell shift, so a recorded macro replays without it.
+
+**Repro:** Record a macro, Home > Insert > Insert Cells... > Shift cells down, stop: the generated code has no insert.
+
+## BUG-0359 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** clear-range-noop-dirties
+
+clear_range_with_options (ACTIVE PATH) DIRTIES THE DOCUMENT EVEN WHEN NOTHING WAS CLEARED: record_subscription_override_edits is passed DocumentEffect::mutates(&file_state) unconditionally after the clear loop.
+
+**Repro:** New workbook, select an empty range, Clear Formats: the title gets its asterisk.
+
+## BUG-0360 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** direct-structural-no-dimension-refresh
+
+DIRECT insertRows / deleteRows / insertColumns / deleteColumns CALLERS OUTSIDE CORE'S GESTURES (scripts, the CLI) DO NOT REFRESH THE GRID'S DIMENSION MAP, so shifted rows keep painting the old heights until the next sheet switch.
+
+**Repro:** Give row 2 height 40, run api.insertRows(0, 3) from a script: row 2's old height stays painted on row 2.
+
+## BUG-0361 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** insert-pushes-cells-off-sheet
+
+INSERT ROWS / COLUMNS DO NOT REFUSE PUSHING NON-EMPTY CELLS OFF THE SHEET: insert_rows_impl moves a cell at row 1,048,576 to 1,048,577, outside the sheet. Excel refuses ('can't push non-empty cells off the worksheet'); the band path (Insert Cells) does refuse.
+
+**Repro:** Type x in A1048576, select row 1, Insert Sheet Rows: no refusal; the value is no longer on the sheet.
+**Fix:** fixed
+
+## BUG-0362 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** pane-painter-horizontal-text
+
+THE FROZEN/SPLIT-PANE PAINTER IS NARROWER THAN THE MAIN PAINTER FOR HORIZONTAL TEXT: it always centres vertically, has no wrap, no ####, no rich text, and detects General numbers with a regex.
+
+**Repro:** Freeze the top row, make A1 bottom-aligned in a tall row: the text is drawn in the middle.
+
+## BUG-0363 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** rotated-text-no-wrap
+
+ROTATED TEXT IGNORES WRAP TEXT AND HARD LINE BREAKS: it is painted on one line; Excel wraps along the text direction.
+
+**Repro:** A1 = 'one two three four' with Wrap Text, Rotate Text Up, in a short row: one long line, clipped.
+
+## BUG-0364 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** renderer-fit-and-indent-metrics
+
+TWO SMALL RENDERER METRIC GAPS: shrink-to-fit floors to whole points, and an indent level is 8 px where Excel measured 7.5 px with Aptos Narrow 11 (OOXML: 3 spaces of the Normal font).
+
+**Repro:** Indent 10 on a left-aligned cell: the text starts 5 px further right than in Excel.
+
+## BUG-0365 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** format-cells-border-mixed-edge
+
+FORMAT CELLS' BORDER TAB LOADS A RANGE'S OUTER EDGES FROM ITS CORNER CELLS: Excel greys a mixed edge; Calcula shows the corner cell's state, so OK can apply a side the user did not choose to cells that differed.
+
+**Repro:** Give A3 a bottom border and leave B3 without one, select A1:B3, Ctrl+1 > Border: the Bottom edge shows one corner cell's state instead of Excel's greyed mixed state.
+
+## BUG-0366 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** format-cells-angle-with-indent
+
+FORMAT CELLS ALLOWS AN ANGLE WHILE INDENT > 0. Excel disables the orientation angles when an indent is set (the ribbon's Orientation menu follows that rule; the dialog does not).
+
+**Repro:** Indent 2 on A1, Ctrl+1 > Alignment: the angle buttons are enabled.
+
+## BUG-0367 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** format-cells-reads-anchor
+
+FORMAT CELLS LOADS THE ANCHOR CELL'S STYLE WHILE EVERY OTHER SURFACE READS THE ACTIVE CELL. The grid draws the active cell at the selection's END (Selection documents end as active); the Home tab (activeCellOf) and the mini toolbar now read the end; Format Cells still reads selection.startRow/startCol.
+
+**Repro:** Bold B3 only, drag from A1 to B3, Ctrl+1: the Font tab shows A1's (not bold) state.
+**Fix:** fixed
+
+## BUG-0368 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** sheet-tab-delete-greys-on-total
+
+THE TAB MENU'S DELETE GREYS ON totalSheets <= 1, the flaw Hide Sheet had: with Sheet2 hidden, Sheet1's Delete is enabled and the strip/backend then refuses. core.sheet.delete itself refuses the last visible sheet correctly.
+
+**Repro:** Two sheets, hide Sheet2, right-click Sheet1's tab: Delete is enabled.
+
+## BUG-0369 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** borders-shared-edge-whole-column
+
+NO BORDER ON A WHOLE COLUMN DOES NOT CLEAR THE SHARED EDGE BESIDE IT: the frontend's neighbour read is bounded by NEIGHBOUR_READ_LIMIT (16,384 cells), so Excel's 'an edge is one line' rule is not applied for a 1M-cell strip.
+
+**Repro:** Give column A's cells right borders, select B:B, Borders > No Border: Excel removes the A|B line; Calcula keeps it.
+
+## BUG-0370 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** color-split-bar-stale-theme
+
+A REMEMBERED THEME COLOUR'S BAR ON FILL COLOR / FONT COLOR SHOWS THE HEX RESOLVED WHEN IT WAS PICKED: after a document theme change the bar is stale until the next pick (the colour the face APPLIES is right, it is the slot).
+
+**Repro:** Pick Accent 1 from Fill Color, change the document theme: the bar keeps the old accent colour.
+
+## BUG-0371 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** hosted-menu-command-refusal-console
+
+THE KIT ONLY LOGS A REFUSAL FROM A HOSTED commandId ROW: RegisteredMenuButton's runRegisteredItem console.errors a rejected command, so the user sees nothing. Conditional Formatting's rows are actions with their own toasts, so nothing is broken today; any future hosted commandId row would refuse silently.
+
+**Repro:** Register a format-menu item with a commandId whose handler throws, open it from the ribbon hero and choose it: nothing is shown.
+**Fix:** fixed
+
+## BUG-0372 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** color-palette-live-custom
+
+THE COLOUR PALETTE'S CUSTOM <input type=color> REPORTS LIVE WHILE THE OS PICKER IS DRAGGED, so Format > Tab Color > More Colors... runs SHEET_TAB_COLOR on every intermediate value (Excel opens a modal Colors dialog and applies once).
+
+**Repro:** Home > Format > Tab Color > More Colors..., drag in the picker, and count core.sheet.setTabColor executions.
+
+## BUG-0373 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** indicator-range-not-normalised
+
+get_comment_indicators_in_range AND get_note_indicators_in_range DO NOT NORMALISE THEIR RANGE (they filter start_row <= row <= end_row as given; get_hyperlinks_in_range uses min/max), so a caller that passes a selection drawn upward silently finds nothing.
+
+**Repro:** Comment on C4, then invoke('get_comment_indicators_in_range', { startRow: 4, startCol: 3, endRow: 2, endCol: 1 }): [].
+
+## BUG-0374 `[fixed]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** clearall-duplicate-testid
+
+TWO ELEMENTS CARRY data-testid="fmt-clearAll" WHEN A LAYOUT KEEPS THE STANDALONE CLEAR ALL BUTTON AND THE CLEAR MENU IS OPEN -- which every migrated version-1 layout does (the migration is additive), so a strict Playwright locator matches both.
+
+**Repro:** Seed SAVED_V1_DEFAULT (homeTabLayout.test.ts), reload, open Editing > Clear: two fmt-clearAll elements.
+**Fix:** fixed
+
+## BUG-0375 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** paste-special-shortcut
+
+PASTE SPECIAL IS BOUND TO CTRL+SHIFT+V (keybindings.ts:198); Excel opens Paste Special with Ctrl+Alt+V, and current Microsoft 365 uses Ctrl+Shift+V to paste VALUES. Not probed live.
+
+**Repro:** Open Home > Paste's menu and read the Paste Special row's chip: Ctrl+Shift+V.
+
+## BUG-0376 `[open]`
+
+**Found:** 2026-10-04 (manual)
+**Oracle:** styles-dialogs-hardcoded-colours
+
+THREE STYLES DIALOGS HARD-CODE THEIR COLOURS: QuickCFDialog and NewRuleDialog are always light and CreateTableDialog always dark; none uses the layout tokens, so each is wrong in one theme.
+
+**Repro:** Switch to the dark theme, Home > Conditional Formatting > Highlight Cells Rules > Greater Than...: a light dialog.
+
+## BUG-0377 `[fixed]`
+
+**Found:** 2026-10-05 (manual)
+**Oracle:** insert-cells-straddling-recalc
+
+INSERT/DELETE CELLS LEFT STRADDLING FORMULAS STALE: a formula whose range straddles the shifted band keeps its address, and only moved FORMULAS were seeded for recalc, so =SUM(A1:E12) kept the old total after cells inside it were deleted or pushed out.
+
+**Repro:** F20 =SUM(A1:E12), Sheet2!A3 =SUM(Sheet1!A1:E12); Delete Cells B2:C3 shift up: both keep 4080 (should be 3970).
+**Fix:** fixed
+
+## BUG-0378 `[fixed]`
+
+**Found:** 2026-10-05 (manual)
+**Oracle:** spill-claims-undo-empty
+
+SPILL CLAIMS CREATED BY A STRUCTURAL EDIT SURVIVED UNDO: the spill_claims restore was recorded only when the sheet already had claims.
+
+**Repro:** A1 =SEQUENCE(ROWS(A5:A7)) blocked by A3; Delete Cells A3 shift up (A1 now spills); Ctrl+Z: the claim stays and can later erase restored cells.
+**Fix:** fixed
+
+## BUG-0379 `[fixed]`
+
+**Found:** 2026-10-05 (manual)
+**Oracle:** select-all-insert-push-off
+
+SELECT ALL THEN INSERT PUSHED EVERY ROW OFF THE SHEET: Ctrl+A is a 'cells' selection, so the Insert main half / Ctrl+Plus treated it as cells, routed it as a whole-line insert of 1,048,576 rows, and insert_rows had no push-off refusal.
+
+**Repro:** Ctrl+A, Home > Insert (or Ctrl+Plus, OK): every cell lands past row 1,048,576.
+**Fix:** fixed
+
+## BUG-0380 `[fixed]`
+
+**Found:** 2026-10-05 (manual)
+**Oracle:** decimals-select-all-walk
+
+INCREASE/DECREASE DECIMAL ON SELECT ALL WALKED 17.2 BILLION POSITIONS (rows x cols, one undo record each).
+
+**Repro:** Ctrl+A, Home > Increase Decimal: the backend thread hangs.
+**Fix:** fixed
+
+## BUG-0381 `[fixed]`
+
+**Found:** 2026-10-05 (manual)
+**Oracle:** f5-reload-while-editing
+
+F5 WHILE EDITING A CELL REACHED WEBVIEW2'S RELOAD: the new Go To binding is not-editing and Core's own F5 branch was removed, so nothing prevented the browser default -- a page reload that loses the user's work.
+
+**Repro:** Type in a cell, press F5.
+**Fix:** fixed
+
+## BUG-0382 `[fixed]`
+
+**Found:** 2026-10-05 (manual)
+**Oracle:** clear-gestures-no-ribbon-refresh
+
+CLEAR FORMATS / CLEAR ALL / REMOVE HYPERLINKS DID NOT REFRESH THE RIBBON: Core's new clear gestures emitted no grid:refresh, so Home kept showing the cleared formatting.
+
+**Repro:** Bold A1, Home > Clear > Clear Formats: Bold stays lit.
+**Fix:** fixed
+
+## BUG-0383 `[fixed]`
+
+**Found:** 2026-10-05 (manual)
+**Oracle:** sort-filter-two-undo-steps
+
+SORT INSIDE AN AUTOFILTER RANGE TOOK TWO UNDO STEPS and the first Ctrl+Z restored the old hidden-row INDEX set over the sorted rows (the wrong rows hidden). Both the Home/Data Sort A to Z and the filter dropdown's own sorts had the shape.
+
+**Repro:** Filter a range, sort it A to Z, Ctrl+Z once: wrong rows hidden.
+**Fix:** fixed
+
+## BUG-0384 `[fixed]`
+
+**Found:** 2026-10-05 (manual)
+**Oracle:** delete-sheet-blank-rule
+
+DELETE SHEET'S 'BLANK, SO NO QUESTION' RULE MISSED NOTES, COMMENTS, VALIDATION, CF RULES AND SHEET-SCOPED NAMES, and deleting a sheet cannot be undone.
+
+**Repro:** A sheet with only a note: Home > Delete > Delete Sheet deletes it without asking.
+**Fix:** fixed
+
+## BUG-0385 `[fixed]`
+
+**Found:** 2026-10-05 (manual)
+**Oracle:** home-format-main-block-only
+
+HOME FORMATTING ACTED ON THE MAIN BLOCK ONLY: Bold, colours, alignment, number formats, decimals ... skipped every Ctrl+click area, and Go To Special's exact-area selection made that the common case.
+
+**Repro:** Go To Special > Constants over scattered cells, Home > Bold: only the first area is bold.
+**Fix:** fixed
+
+## BUG-0386 `[fixed]`
+
+**Found:** 2026-10-05 (manual)
+**Oracle:** paste-menu-stale-rows-live
+
+THE PASTE MENU SHOWED VARIANT ROWS LIVE ON A STALE CLIPBOARD, each then refusing with a dialog.
+
+**Repro:** Copy cells, copy text in another program, open Home > Paste options: Values etc. look enabled.
+**Fix:** fixed
+
+## BUG-0387 `[fixed]`
+
+**Found:** 2026-10-05 (manual)
+**Oracle:** autofit-script-safe-unhide
+
+AUTOFIT_ROW_HEIGHT / AUTOFIT_COLUMN_WIDTH WERE SCRIPT-SAFE, letting restricted sandboxed code unhide user-hidden rows/columns (a full AutoFit unhides, as Excel's does).
+
+**Repro:** A restricted object script runs core.format.autoFitRowHeight over a hidden row.
+**Fix:** fixed
+
+## BUG-0388 `[fixed]`
+
+**Found:** 2026-10-05 (manual)
+**Oracle:** format-cells-mixed-range-ok
+
+FORMAT CELLS OK ON A MIXED RANGE COULD NOT APPLY THE VALUE THE ACTIVE CELL ALREADY HAD (the changes-only diff compared with the active cell's baseline).
+
+**Repro:** A1 bold, A2 plain, select A1:A2, Format Cells > Font > Bold, OK: A2 stays plain.
+**Fix:** fixed
+
+## BUG-0389 `[fixed]`
+
+**Found:** 2026-10-05 (manual)
+**Oracle:** escape-nested-flyout
+
+ESCAPE IN A PALETTE OR GALLERY INSIDE A COLLAPSED GROUP'S FLYOUT CLOSED BOTH LEVELS and could drop focus to <body>.
+
+**Repro:** Narrow window, open Styles > Cell Styles, press Escape: the Styles flyout closes too.
+**Fix:** fixed
+
+## BUG-0390 `[fixed]`
+
+**Found:** 2026-10-05 (manual)
+**Oracle:** split-disabled-while-open
+
+A SPLIT MENU DISABLED WHILE OPEN REOPENED ON ITS OWN WHEN RE-ENABLED, with aria-expanded still true.
+
+**Repro:** Open Merge & Center's menu, protect the sheet from a script, unprotect: the menu pops open.
+**Fix:** fixed
+
+## BUG-0391 `[fixed]`
+
+**Found:** 2026-10-05 (manual)
+**Oracle:** menu-label-descenders
+
+MENU ROW LABELS CLIPPED DESCENDERS: 'Formatting' read 'Formattinq' in every kit menu and dropdown (line-height 1 plus overflow hidden gave a 12px line box).
+
+**Repro:** Home > Paste options: 'Keep Source Formatting'.
+**Fix:** fixed
+
+## BUG-0392 `[fixed]`
+
+**Found:** 2026-10-05 (manual)
+**Oracle:** band-last-row-collapse
+
+IN THE BAND PATH A ONE-ROW RANGE ON THE LAST ROW COLLAPSED back to one row where Excel keeps it pinned (found by the fix-rust lane's live Excel probe).
+
+**Repro:** A CF on A1048576:D1048576, Delete Cells above it, shift up.
+**Fix:** fixed
+
+## BUG-0393 `[open]`
+
+**Found:** 2026-10-05 (manual)
+**Oracle:** ctrl-r-reload-while-editing
+
+CTRL+R DURING A CELL EDIT MAY STILL REACH WEBVIEW2'S RELOAD: it is the Fill Right binding, and keybindings.editContext.test.ts pins that it is not prevented while editing.
+
+**Repro:** Type in a cell, press Ctrl+R (not verified live).
+
+## BUG-0394 `[open]`
+
+**Found:** 2026-10-05 (manual)
+**Oracle:** scattered-area-ipc-cost
+
+A SCATTERED SELECTION COSTS ONE IPC PER AREA: Delete after Go To Special (up to 10,000 areas) and Home formatting over N areas make N sequential backend calls, each with its own recalc.
+
+**Repro:** Go To Special > Constants over a large scattered sheet, then Delete or Bold.
+
+## BUG-0395 `[open]`
+
+**Found:** 2026-10-05 (manual)
+**Oracle:** clear-all-multi-area-not-atomic
+
+CLEAR ALL OVER SEVERAL AREAS IS NOT ATOMIC: a later area's refusal leaves the earlier areas cleared (committed in one step, but partial).
+
+**Repro:** Two areas, the second on a protected range: the first is cleared.
+
+## BUG-0396 `[open]`
+
+**Found:** 2026-10-05 (manual)
+**Oracle:** ctrl-enter-main-range-only
+
+CTRL+ENTER FILLS ONLY THE MAIN RANGE of a multi-area selection (Excel fills every area).
+
+**Repro:** Go To Special > Blanks, type a value, Ctrl+Enter.
+
+## BUG-0397 `[open]`
+
+**Found:** 2026-10-05 (manual)
+**Oracle:** autosum-single-area-mismatch
+
+TWO SINGLE-AREA AUTOSUM CASES DIFFER FROM EXCEL (measured live): A4:B4 empty under text/numbers -- Excel opens an edit, Calcula writes B4 only; A8:A9 under A5:A7 -- Excel writes A9 =SUM(A6:A8) (relative fill), Calcula =SUM(A5:A8).
+
+**Repro:** As described.
+
+## BUG-0398 `[open]`
+
+**Found:** 2026-10-05 (manual)
+**Oracle:** focus-lost-on-disable
+
+A SPLIT BUTTON OR COLOUR SPLIT DISABLED WHILE FOCUS IS IN ITS MENU/PALETTE DROPS FOCUS TO <body> when the overlay unmounts.
+
+**Repro:** Open Merge & Center's menu with the keyboard, then something makes the sheet protected.
+
+## BUG-0399 `[open]`
+
+**Found:** 2026-10-05 (manual)
+**Oracle:** cell-shift-wrapper-no-bound
+
+THE insertCellsRange / deleteCellsRange WRAPPER'S WHOLE-LINE BRANCH HAS NO SHEET-SIZE BOUND of its own (the backend push-off refusal now covers it; defence in depth only).
+
+**Repro:** A script calls the @api wrapper over every column.

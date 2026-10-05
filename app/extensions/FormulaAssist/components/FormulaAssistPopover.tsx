@@ -34,8 +34,9 @@ import {
   columnToLetter,
   dispatchGridAction,
   getAiCompletionProvider,
-  startEditing,
+  setSelection,
 } from "@api";
+import { isCellEditInProgress, useEditing } from "@api/editing";
 import { useDialogWindow } from "@api/dialogWindow";
 import { getGridStateSnapshot } from "@api/grid";
 import type { FormulaProposal } from "@api/formulaAssistService";
@@ -222,6 +223,10 @@ export const FormulaAssistPopover: React.FC<OverlayProps> = () => {
   const inputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const [insertError, setInsertError] = useState<string | null>(null);
+  // Core's own way into a cell edit (see `edit` below). Called before the
+  // closed-popover early return: the overlay is always mounted, so the hook
+  // runs on every render whatever the store says.
+  const { startEdit } = useEditing();
 
   const provider = getAiCompletionProvider();
   const hasModel = provider !== null && provider.isConfigured();
@@ -303,23 +308,67 @@ export const FormulaAssistPopover: React.FC<OverlayProps> = () => {
     [],
   );
 
-  const edit = useCallback(() => {
+  // Puts the proposal in the cell's editor WITHOUT committing it: only Enter
+  // (or the formula bar's tick) writes, so Edit keeps rule 1.
+  //
+  // THROUGH CORE'S OPEN PATH, useEditing().startEdit -- never the raw
+  // `startEditing` grid ACTION, which it used to dispatch. The action writes
+  // the editing state and nothing else: no edit guards (a protected cell, a
+  // PivotTable's), no merge resolution, no EDIT_STARTED, and no edit FLAG
+  // (core/lib/cellEditFlag.ts), which every keyboard and pointer gate reads.
+  // With the flag down the open editor was invisible to them: the keybinding
+  // dispatcher ran workbook keys over it (Delete cleared the cells under it)
+  // and a click on a cell moved the selection instead of picking a reference
+  // (formulaAssistEditOpensCoreEdit.test.tsx). AutoSum met the same trap and
+  // opens its edit the same way (extensions/AutoSum/lib/editOpener.ts).
+  //
+  // - The selection is put back on the target cell first when it had moved:
+  //   the request is still for that cell (the popover says so), and the
+  //   editor belongs on the ACTIVE cell.
+  // - Another sheet than the request's is refused, out loud: Core edits the
+  //   ACTIVE sheet, so opening there would put the formula in that sheet's
+  //   cell of the same address.
+  // - An edit the guards refused opens nothing; the popover stays and says so
+  //   (startEdit reports a refusal only by leaving the flag down).
+  const edit = useCallback(async () => {
     const { proposal, target } = getAssistState();
     if (!proposal || !target) return;
+    setInsertError(null);
     const snapshot = getGridStateSnapshot();
-    // Puts the text in the editor WITHOUT committing: `startEditing` opens the
-    // cell editor with a value; only Enter (or the formula bar's tick) writes.
-    dispatchGridAction(
-      startEditing({
-        row: target.row,
-        col: target.col,
-        value: proposal.formulaLocalized,
-        sourceSheetIndex: target.sheetIndex,
-        sourceSheetName: snapshot?.sheetContext.activeSheetName,
-      }),
-    );
+    if (snapshot && snapshot.sheetContext.activeSheetIndex !== target.sheetIndex) {
+      setInsertError(
+        `${target.a1} is on another sheet: go back to that sheet to edit the formula there. Nothing was written.`,
+      );
+      return;
+    }
+    const selection = snapshot?.selection;
+    const onTarget =
+      !!selection &&
+      selection.startRow === target.row &&
+      selection.endRow === target.row &&
+      selection.startCol === target.col &&
+      selection.endCol === target.col &&
+      !(selection.additionalRanges && selection.additionalRanges.length > 0);
+    if (!onTarget) {
+      dispatchGridAction(
+        setSelection({
+          startRow: target.row,
+          startCol: target.col,
+          endRow: target.row,
+          endCol: target.col,
+          type: "cells",
+        }),
+      );
+    }
+    await startEdit(target.row, target.col, proposal.formulaLocalized);
+    if (!isCellEditInProgress()) {
+      setInsertError(
+        `${target.a1} could not be opened for editing (it may be protected or part of a PivotTable). Nothing was written.`,
+      );
+      return;
+    }
     closeAssist();
-  }, []);
+  }, [startEdit]);
 
   if (!state.open || !state.target) return null;
 
@@ -465,7 +514,7 @@ export const FormulaAssistPopover: React.FC<OverlayProps> = () => {
           </button>
           <button
             style={btn}
-            onClick={edit}
+            onClick={() => void edit()}
             disabled={!canInsert(proposal) || state.inserting}
           >
             Edit

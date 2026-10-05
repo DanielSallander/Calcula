@@ -29,6 +29,8 @@ export type {
   // Formatting
   FormattingOptions,
   FormattingResult,
+  TextRotation,
+  AccountingLayout,
 
   // Functions
   FunctionInfo,

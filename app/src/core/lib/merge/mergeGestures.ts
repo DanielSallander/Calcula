@@ -290,9 +290,9 @@ async function finish(blocks: Block[], host: MergeGestureHost): Promise<void> {
   } catch (error) {
     console.error("[merge] refresh failed:", error);
   }
-  // The MAIN block is the last one (selectionBlocks lists the Ctrl+click
-  // ranges first): announce at its top-left, as Clear All does.
-  const main = blocks[blocks.length - 1];
+  // The MAIN block is the first one (selectionBlocks lists it first):
+  // announce at its top-left, as Clear All does.
+  const main = blocks[0];
   if (main) {
     cellEvents.emit({ row: main.startRow, col: main.startCol, oldValue: undefined, newValue: "", formula: null });
   }

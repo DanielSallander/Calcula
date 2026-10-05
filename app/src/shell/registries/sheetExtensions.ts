@@ -4,7 +4,10 @@
 // custom actions, and event handlers.
 // NOTE: Moved from core/registry to shell/registries per microkernel architecture.
 
-import { alertAsync, promptAsync } from "@api/dialogs";
+import { CommandRegistry, CoreCommands } from "@api/commands";
+import { promptForSheetName } from "../SheetTabs/renameSheetPrompt";
+import { registerSheetCommands, getSheetTabsController } from "../SheetTabs/sheetCommands";
+import { installSheetTabColorPicker, openSheetTabColorPicker } from "./sheetTabColorPicker";
 
 // ============================================================================
 // Types for Sheet Extensions
@@ -215,33 +218,47 @@ export const sheetExtensions = new SheetExtensionRegistry();
 // Built-in Context Menu Items (Core functionality)
 // ============================================================================
 
-/** Tab color presets for the color picker */
-const TAB_COLORS = [
-  { label: "Red", value: "#e74c3c" },
-  { label: "Orange", value: "#f39c12" },
-  { label: "Yellow", value: "#f1c40f" },
-  { label: "Green", value: "#2ecc71" },
-  { label: "Blue", value: "#3498db" },
-  { label: "Purple", value: "#9b59b6" },
-  { label: "Pink", value: "#e91e8b" },
-  { label: "Teal", value: "#1abc9c" },
-  { label: "No Color", value: "" },
-];
+/**
+ * Whether hiding the right-clicked sheet would leave the workbook with no
+ * VISIBLE sheet -- Excel greys Hide Sheet then. `totalSheets` counts hidden
+ * and veryHidden sheets too (it is the strip's whole list), so it cannot
+ * answer this: with Sheet2 hidden, Sheet1's menu offered Hide Sheet and the
+ * backend refused it. The strip's snapshot knows each sheet's visibility; with
+ * no strip seated (nothing to act through anyway) the workbook's count is the
+ * fallback.
+ */
+function isLastVisibleSheet(context: SheetContext): boolean {
+  const snapshot = getSheetTabsController()?.snapshot();
+  if (!snapshot) return context.totalSheets <= 1;
+  return !snapshot.sheets.some((s) => s.index !== context.index && s.visibility === "visible");
+}
+
+/** The right-clicked sheet's current tab colour, from the strip's snapshot. */
+function currentTabColor(context: SheetContext): string | null {
+  const sheet = getSheetTabsController()?.snapshot().sheets.find((s) => s.index === context.index);
+  return sheet?.tabColor ? sheet.tabColor : null;
+}
 
 /** Register the default/core context menu items */
 export function registerCoreSheetContextMenu(): void {
-  // Rename
+  // The core.sheet.* commands (Excel's Home > Cells sheet doors and Shift+F11)
+  // and the Move or Copy dialog. They act through the tab strip's own
+  // handlers, which the strip seats when it mounts (SheetTabs/sheetCommands.ts).
+  registerSheetCommands();
+  // Tab Color's palette (sheetTabColorPicker.tsx): a shell component the frame
+  // mounts, opened by the menu row below.
+  installSheetTabColorPicker();
+
+  // Rename -- the ONE rename prompt (SheetTabs/renameSheetPrompt.ts), shared
+  // with the tab double-click and core.sheet.rename.
   sheetExtensions.registerContextMenuItem({
     id: "core:rename",
     label: "Rename",
     onClick: async (context) => {
-      const newName = await promptAsync("Enter new sheet name:", {
-        title: "Rename sheet",
-        defaultValue: context.sheet.name,
-      });
-      if (newName && newName.trim() !== "" && newName !== context.sheet.name) {
+      const newName = await promptForSheetName(context.sheet.name);
+      if (newName !== null) {
         window.dispatchEvent(new CustomEvent("sheet:requestRename", {
-          detail: { index: context.index, newName: newName.trim() },
+          detail: { index: context.index, newName },
         }));
       }
     },
@@ -261,12 +278,16 @@ export function registerCoreSheetContextMenu(): void {
     },
   });
 
-  // Insert
+  // Insert -- the COMMAND, for the right-clicked sheet: Excel inserts the new
+  // worksheet BEFORE it, exactly as Home > Insert > Insert Sheet and Shift+F11
+  // do. This item used to dispatch `sheet:requestAdd`, which APPENDED the sheet
+  // at the end, so "Insert Sheet" landed in two places depending on the door;
+  // the command's refusals (a structure lock) now cover the tab menu too.
   sheetExtensions.registerContextMenuItem({
     id: "core:insertSheet",
     label: "Insert Sheet",
-    onClick: async () => {
-      window.dispatchEvent(new CustomEvent("sheet:requestAdd", { detail: {} }));
+    onClick: async (context) => {
+      await CommandRegistry.execute(CoreCommands.SHEET_INSERT, { index: context.index });
     },
   });
 
@@ -277,6 +298,16 @@ export function registerCoreSheetContextMenu(): void {
     label: "Insert Canvas",
     onClick: async () => {
       window.dispatchEvent(new CustomEvent("sheet:requestAdd", { detail: { kind: "canvas" } }));
+    },
+  });
+
+  // Move or Copy... (Excel's tab menu has it): the dialog the Home tab's
+  // Format > Move or Copy Sheet... opens, for the right-clicked sheet.
+  sheetExtensions.registerContextMenuItem({
+    id: "core:moveOrCopy",
+    label: "Move or Copy...",
+    onClick: async (context) => {
+      await CommandRegistry.execute(CoreCommands.SHEET_MOVE_OR_COPY, { index: context.index });
     },
   });
 
@@ -324,11 +355,11 @@ export function registerCoreSheetContextMenu(): void {
     },
   });
 
-  // Hide
+  // Hide -- greyed for the last VISIBLE sheet (Excel), not the last sheet.
   sheetExtensions.registerContextMenuItem({
     id: "core:hideSheet",
     label: "Hide Sheet",
-    disabled: (context) => context.totalSheets <= 1,
+    disabled: (context) => isLastVisibleSheet(context),
     onClick: async (context) => {
       window.dispatchEvent(new CustomEvent("sheet:requestHide", {
         detail: { index: context.index },
@@ -346,35 +377,15 @@ export function registerCoreSheetContextMenu(): void {
     },
   });
 
-  // Tab Color
+  // Tab Color -- Excel's palette dropping from the tab (Theme Colors, Standard
+  // Colors, No Color, More Colors...), running core.sheet.setTabColor for THIS
+  // sheet: the same command the Home tab's Format > Tab Color runs. It was a
+  // numbered text prompt with eight colours of its own and a raw window event.
   sheetExtensions.registerContextMenuItem({
     id: "core:tabColor",
     label: "Tab Color",
-    onClick: async (context) => {
-      const colorNames = TAB_COLORS.map((c, i) => `${i + 1}. ${c.label}`).join("\n");
-      const choice = await promptAsync(
-        `Select tab color for "${context.sheet.name}":\n\n${colorNames}\n\nEnter number (or hex color):`,
-        { title: "Tab Color" },
-      );
-      if (choice === null) return;
-
-      const trimmed = choice.trim();
-      let color = "";
-      const num = parseInt(trimmed, 10);
-      if (num >= 1 && num <= TAB_COLORS.length) {
-        color = TAB_COLORS[num - 1].value;
-      } else if (/^#[0-9a-fA-F]{3,8}$/.test(trimmed)) {
-        color = trimmed;
-      } else if (trimmed === "") {
-        color = "";
-      } else {
-        void alertAsync("Invalid color. Use a number from the list or a hex color like #ff0000.");
-        return;
-      }
-
-      window.dispatchEvent(new CustomEvent("sheet:requestTabColor", {
-        detail: { index: context.index, color },
-      }));
+    onClick: (context) => {
+      openSheetTabColorPicker(context.index, currentTabColor(context));
     },
   });
 }

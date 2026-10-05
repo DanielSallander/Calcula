@@ -13,13 +13,24 @@
 //          The catalog itself is untouched (ALL_ITEMS is part of the persisted
 //          layout's contract); this is a pure view over it.
 
-import { CoreCommands } from "@api/commands";
+import { CoreCommands, ExtensionCommands } from "@api/commands";
 import type { HomeTabItem } from "../homeTabConfig";
 
-/** Item id -> the command it runs, for the items that run a CoreCommand
- *  (mirrors useHomeTabState.handleItemClick). Tooltip resolves the chip
- *  through whichever keybinding runs that command; a command with no binding
- *  simply shows no chip. */
+/**
+ * Item id -> the command it runs, for the items that run ONE command
+ * (mirrors useHomeTabState.handleItemClick, and the main halves of the
+ * version-2 splits). Tooltip resolves the chip through whichever keybinding
+ * runs that command; a command with no binding simply shows no chip.
+ *
+ * Map an item to the command its FACE runs, never to a menu row's: a split
+ * whose picture runs INSERT must not borrow INSERT_CELLS's Ctrl+Plus, because
+ * Ctrl+Plus opens the dialog, not what the picture does. Menus and splits that
+ * run no single command (Borders, Orientation, Accounting, Fill, Clear, Sort &
+ * Filter, Find & Select, Format, Conditional Formatting, Format as Table, Cell
+ * Styles) have no entry: their tooltip is Excel's words alone, as Excel's is.
+ * The Format Cells dialog launchers name FORMAT_CELLS themselves (index.ts),
+ * so their Ctrl+1 chip is live too.
+ */
 export const ITEM_COMMAND_IDS: Readonly<Record<string, string>> = {
   cut: CoreCommands.CUT,
   copy: CoreCommands.COPY,
@@ -40,6 +51,14 @@ export const ITEM_COMMAND_IDS: Readonly<Record<string, string>> = {
   insertColumn: CoreCommands.INSERT_COLUMN,
   deleteRow: CoreCommands.DELETE_ROW,
   deleteColumn: CoreCommands.DELETE_COLUMN,
+  // Version 2 (Excel's Home tab). AutoSum's face runs AUTOSUM { fn: "SUM" },
+  // bound to Alt+= -- the catalog's "(Alt+=)" becomes the live chip.
+  autoSum: ExtensionCommands.AUTOSUM,
+  // The Insert / Delete pictures run Excel's selection-shape rule (INSERT /
+  // DELETE), which no key is bound to: Ctrl+Plus and Ctrl+- open the DIALOG.
+  // So no chip, which is also what Excel's Insert and Delete tooltips show.
+  insertCells: CoreCommands.INSERT,
+  deleteCells: CoreCommands.DELETE,
 };
 
 /** A trailing "(Ctrl+X)" / "(Ctrl+Shift+=)" / "(Del)". Only a KEY COMBO is

@@ -24,8 +24,25 @@ import * as S from "./SortDialog.styles";
 // Component
 // ============================================================================
 
+/**
+ * What sort.customDialog decided before opening (lib/sortCommands.ts): the
+ * block Excel would sort and its header guess. Absent when an older door opens
+ * the dialog bare -- it then detects the range itself, as it always did.
+ */
+interface SortDialogData {
+  range?: { startRow: number; startCol: number; endRow: number; endCol: number };
+  hasHeaders?: boolean;
+}
+
+function decidedByCommand(data: Record<string, unknown> | undefined): Required<SortDialogData> | null {
+  const d = data as SortDialogData | undefined;
+  if (!d?.range || typeof d.hasHeaders !== "boolean") return null;
+  return { range: d.range, hasHeaders: d.hasHeaders };
+}
+
 export function SortDialog(props: DialogProps): React.ReactElement | null {
   const { onClose } = props;
+  const decided = decidedByCommand(props.data);
 
   // Movable + resizable dialog window (shared @api hook)
   const win = useDialogWindow({ minWidth: 430, minHeight: 300 });
@@ -67,20 +84,24 @@ export function SortDialog(props: DialogProps): React.ReactElement | null {
     async function init() {
       try {
         setIsLoading(true);
-        if (!selection) {
+        if (!decided && !selection) {
           setError("No selection available.");
           setIsLoading(false);
           return;
         }
-        const range = await detectSortRange(selection);
+        // The command already chose the block (table body, filter range,
+        // current region or the selection) and Excel's header guess; a bare
+        // open falls back to detecting the range here.
+        const range = decided ? decided.range : await detectSortRange(selection!);
         if (!range) {
           setError("No data found in the selected range.");
           setIsLoading(false);
           return;
         }
 
-        // Default: assume headers if range has more than one row
-        const defaultHasHeaders = range.endRow > range.startRow;
+        // "My data has headers": the command's guess when it decided; else
+        // the old default (more than one row).
+        const defaultHasHeaders = decided ? decided.hasHeaders : range.endRow > range.startRow;
 
         const headers = await getColumnDisplayNames(
           range.startRow,

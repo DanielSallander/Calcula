@@ -4,7 +4,7 @@
 **Code:** the drawings live in `app/src/api/icons/` (`frame.tsx` + four groups: `home.tsx`,
 `chart.tsx`, `data.tsx`, `generic.tsx`); `app/src/api/ribbonIcons.tsx` aggregates them into the one
 `RibbonIcon` namespace every ribbon, rail, sidebar, launcher, menu and add-in token resolves against.
-**Guard:** `app/src/api/__tests__/ribbonIcons.test.tsx` (1,277 cases over 180 keys, 2026-10-02).
+**Guard:** `app/src/api/__tests__/ribbonIcons.test.tsx` (2,476 cases over 243 keys, 2026-10-04).
 **Approved drawings:** the mockup artifact https://claude.ai/artifact/W2RwKUxBA79azM4Qznargi (the
 Icons board, rev 2).
 
@@ -113,10 +113,35 @@ by default because the control that hosts them already carries the name.
 
 ### 2.3 Shape
 
-- **Filled shapes**, not outlines. Rect corners `rx >= 1.4`, with two exceptions: a 3px pixel-grid
+- **Filled shapes**, not outlines. Rect corners `rx >= 1.4`, with these exceptions: a 3px pixel-grid
   cell takes rx 0.75-1.0, because at 1.4 it paints as a plus sign (Merge & Center and Merge
-  Across's cell rows, Unmerge Cells' cut row, Waterfall, Keyboard);
-  a 2.4-thick bar takes rx 1.2, a full pill.
+  Across's cell rows, Unmerge Cells' cut row, Waterfall, Keyboard, the Cells heroes' grid rows);
+  a 2.4-thick bar takes rx 1.2, a full pill; and a whole-pixel SQUARE MARK of 2 or 3 px takes rx 0
+  (the Borders family's 2px dots and All Borders' 3px cells: any radius painted them as a plus sign at
+  150%, and rx 0.6 left stray antialiased pixels at 100%). Every 2px square mark in the set is rx 0
+  since the 2026-10-04 icon review, which rendered the Paste family's % and No Borders dots side by
+  side with Borders' at 150% (rx 0.6: plus signs; rx 0: squares; identical at 100%); the per-key
+  test "draws its 2 px square marks square" holds it.
+- **Outlines that are the subject (one recorded exception).** Fill Color's bucket (2026-10-04) is
+  three STROKED walls of a square tipped 45 degrees, its mouth left open: the open side is what
+  makes it a bucket and not a diamond, and a filled body cannot have an open side. A version with a
+  SOFT-filled body was rendered beside it and read no better (11 half-covered pixels either way;
+  weight 81 against Font Color's 101). Its handle is filled, as the rule asks.
+- **Dots under the part floor (2026-10-04).** frame.tsx asks for parts of at least 3.6 units and a
+  free-standing dot of at least 4.3. Two families draw 2.4-unit (2px) dots on purpose: the Borders
+  lattice, where the dots are not parts but the TEXTURE of a dotted line (the dotted-vs-solid
+  contrast is what lets No Border, All Borders and Outside Borders differ by shape; a faint solid soft
+  grid made them a colour-only difference), and the Paste family's corner % and No Borders frame, the
+  only way a % fits the 7px corner. Whole pixels at 20px, so they paint crisp.
+- **Only rigid transforms, and no PIXEL_STROKE inside one (2026-10-04).** The stroke rules read the
+  `stroke-width` and `d` attributes as written, so a drawing may translate, rotate or mirror a group
+  (the Fill menu, Link, the Excel letters of Wrap Text and Orientation) but never scale or skew it, and
+  a 2.4 line is always drawn in the frame's own coordinates (inside a rotation a path written on the
+  grid paints off it). Scaled drawings are written out at their final size (Paste Link's chain is Link
+  at 0.75, as coordinates). Both are test-enforced. **Letters turn only by a quarter.** A 6px letter
+  turned 45 degrees keeps two clean pixels of its hole: the first Orientation pictures painted "ab"
+  as two rings, a "%" (at 100% and 150%). The 45-degree pictures stand the letters upright and STEP
+  the word along the angle (a recorded departure from Excel's turned letters; test-enforced).
 - **Nothing thinner than 3 grid units, with one exception.** A line or arrow is a stroke of at least
   `MIN_STROKE` (2.6) with round caps and joins — use the `line(channel, width = 3)` helper, which
   clamps. At the 20px control size a 3-unit feature is 2.5 device pixels; that is what cured the
@@ -142,6 +167,10 @@ by default because the control that hosts them already carries the name.
   the X in STRONG vs DANGER — and ClearAll was redrawn on 2026-09-23 as a STACK of cells (a STRONG
   edge of the back layer peeking out above and right) with the DANGER X through the front one, so
   the two now differ by shape and still differ in high contrast or for a colour-blind reader.
+  Since 2026-10-04 the rule is test-enforced for every menu that shows pictures side by side
+  (`MENU_FAMILIES` in `ribbonIcons.test.tsx`: Borders, Underline, Paste, Alignment, Orientation,
+  object alignment, Cells, Styles, Number, Fill, Clear, Sort & Filter, Find & Select, Editing and the
+  colour splits): within a family no key may alias another and no two may render the same markup.
 - **No `<text>`, no emoji, no unicode glyph** as an icon.
 
 The one deliberate exception is not an icon at all: **typographic commands stay text**. B, I, U, S,
@@ -193,10 +222,10 @@ never drift apart; the test checks identity with `toBe`.
 
 ---
 
-## 4. The vocabulary (180 keys, 2026-10-02)
+## 4. The vocabulary (243 keys, 2026-10-04)
 
 Recount from the source rather than trusting this list (it is what an add-in author reads, and it
-must be current). **Home** (`icons/home.tsx`, 41):
+must be current). **Home** (`icons/home.tsx`, 104):
 
 - *Frozen 34:* Cut, Copy, Paste, FormatPainter, FontSizeUp, FontSizeDown, FormatCells, FillColor,
   AlignTop, AlignMiddle, AlignBottom, AlignLeft, AlignCenter, AlignRight, WrapText, IndentIncrease,
@@ -211,6 +240,50 @@ must be current). **Home** (`icons/home.tsx`, 41):
   arrow cut out of it pointing OUTWARD. A tall row with a double arrow (Merge & Center) or a
   right arrow (Merge Across), a thin row (Merge Cells), the thin row cut into four cells (Unmerge
   Cells): the four differ by shape, so they also differ in high contrast.
+- *Excel's Home tab (2026-10-04), 63 keys.* Drawn in the metaphor of Excel 365's own pictures
+  (captured from a live Excel), with Excel's grey lines STRONG or SOFT, its one blue element ACCENT
+  and its red DANGER; every one measures 0 accent contact. Two reviews checked them the same day
+  (Excel fidelity, and legibility at 20px); where they disagreed the 20px pixel map decided, and
+  `icons/home-excel-icon-review-before-after.png` shows each change and each alternative not
+  taken. Nine FROZEN keys were redrawn in place
+  the same day: AlignTop / AlignMiddle / AlignBottom (now Excel's three-line TEXT block pushed up,
+  centred or down, one colour), WrapText ("ab" over "c" with a return arrow), FillColor (a tipped
+  bucket with a loop handle and a soft pour, no accent: the host's bar is the colour), and
+  InsertRow / InsertColumn / DeleteRow / DeleteColumn (Excel's arriving or pointed row between its
+  neighbours, with an arrow or an X).
+  - *Paste options* (the Paste split's menu): PasteFormulas, PasteFormulasNumberFormats,
+    PasteKeepSourceFormatting, PasteNoBorders, PasteColumnWidths, PasteTranspose, PasteValues,
+    PasteValuesNumberFormats, PasteValuesSourceFormatting, PasteFormatting, PasteLink, PasteSpecial.
+    Paste's board cut back to an L with a STRONG clip; the ACCENT badge in front of it says what the
+    option pastes (fx, 123, a brush, dots, a width bar, a transpose arrow, a chain, an ellipsis), and
+    a % or a small brush in the free corner qualifies it.
+  - *Font:* Underline, DoubleUnderline (the Underline split's rows; the face stays the letter U), the
+    Borders split's 13 presets BorderBottom (the default face), BorderTop, BorderLeft, BorderRight,
+    BorderNone, BorderAll (also More Borders...), BorderOutside, BorderThickOutside,
+    BorderDoubleBottom, BorderThickBottom, BorderTopBottom, BorderTopThickBottom,
+    BorderTopDoubleBottom -- Excel's dotted 2 x 2 figure with the drawn edges solid ACCENT -- and
+    LineColor.
+  - *Alignment:* TextOrientation (the Orientation button's face and the Format Cell Alignment row),
+    AngleCounterclockwise, AngleClockwise (the 45-degree pictures: the word "ab" upright, stepping up
+    or down the angle, beside the arrow), VerticalText, RotateTextUp, RotateTextDown; and
+    ObjectAlignTop, ObjectAlignMiddle, ObjectAlignBottom, the pre-2026-10-04 AlignTop/Middle/Bottom
+    drawings (an accent edge with a soft object against it), with ObjectAlignLeft, ObjectAlignCenter,
+    ObjectAlignRight (the same three mirrored across the diagonal, added by the review): the Canvas
+    Arrange menu, which aligns OBJECTS, uses all six. The letters are three shared paths placed by
+    translate and quarter turns only.
+  - *Number and Styles:* Accounting (a banknote with a cut stack of ACCENT coins),
+    ConditionalFormatting (a table with two ACCENT runs: Excel's red is ACCENT here, because DANGER
+    means a destructive verb), FormatAsTable (a styled block cut round a STRONG brush).
+  - *Cells:* InsertCells, DeleteCells, FormatMenu (the three heroes' faces; FormatMenu is the Format
+    MENU, not the frozen FormatCells dialog picture), InsertSheet, DeleteSheet, RenameSheet,
+    ProtectSheet (one sheet corner with a curled cell, the verb in the free square), RowHeight,
+    ColumnWidth (a double arrow measuring a soft bracket).
+  - *Editing:* AutoSum (a STRONG sigma), FillDown, FillRight, FillUp, FillLeft (one picture turned:
+    the STRONG bar is the side copied from), Clear (Clear Formatting's eraser alone, larger; the
+    Clear menu's face AND its Clear All row, as in Excel -- the frozen ClearAll stack is not that
+    row's picture), RemoveHyperlinks (Excel's picture: a whole STRONG chain with a DANGER X in the
+    corner, Clear Filter's idiom), SortFilter, SortAscending,
+    SortDescending (an ACCENT A and a STRONG Z), GoTo (an ACCENT arrow at a SOFT cell).
 
 **Chart** (`icons/chart.tsx`, 41):
 
@@ -249,9 +322,10 @@ must be current). **Home** (`icons/home.tsx`, 41):
 - *Arrange (2026-09-25, the Canvas tab):* BringForward, SendBackward, BringToFront, SendToBack
   (two or three overlapping squares, the ACCENT one being the object moved; a covered square is CUT
   with a 1.2 gap, so front and back read by shape), AlignObjects (an accent edge with two objects
-  against it -- taller than the Align* text rows, which the Arrange menu reuses for its six
-  alignments), DistributeHorizontal, DistributeVertical (the accent object between two others with
-  equal 2.4 gaps)
+  against it -- the Align menu's face; since 2026-10-04 its six rows are Home's ObjectAlignLeft /
+  Center / Right / Top / Middle / Bottom, never the TEXT alignment pictures), DistributeHorizontal,
+  DistributeVertical (the accent object
+  between two others with equal 2.4 gaps)
 
 ---
 
@@ -272,9 +346,11 @@ must be current). **Home** (`icons/home.tsx`, 41):
    24-unit svg whose size follows the prop; no `<text>`; `findHardcodedColours` is `[]`; every
    fill/stroke is one of the four channels, with at least one SOFT or STRONG; not ACCENT and DANGER
    together; no stand-alone stroke under `MIN_STROKE` except `PIXEL_STROKE` on a pixel-aligned
-   horizontal/vertical path; and it scans the folder's SOURCE for hex /
-   rgb / hsl and `<text>`. The chrome hex ban in `app/eslint.boundaries.js` covers
-   `src/api/icons/**` with no exemptions.
+   horizontal/vertical path; only rigid transforms (translate, rotate, a mirror matrix), and no
+   `PIXEL_STROKE` line inside any transform; and it scans the folder's SOURCE for hex /
+   rgb / hsl and `<text>`. If the new key sits in a menu beside other pictures, add it to that
+   family in `MENU_FAMILIES` (no alias, no identical markup within a family). The chrome hex ban in
+   `app/eslint.boundaries.js` covers `src/api/icons/**` with no exemptions.
 6. **Look at it** at 20 and 30, in Light and Dark, beside its neighbours. The test cannot see
    legibility; the owner's review of rev 1 was the first time the blotchiness was visible.
 7. **Update section 4 of this file and §8 of `docs/design/third-party-addin-authoring.md`**, which
@@ -311,7 +387,22 @@ those three:
   the only thing separating two channels.
 - **Render before and after.** `icons/tools/render.mjs` (sheet at 20/24/30/120px, Light and Dark,
   beside the owner's file) and `icons/tools/pixels.mjs` (the real 20px pixels magnified) run from
-  `app/` with Node and the installed Playwright Chromium; the owner judges from the sheets.
+  `app/` with Node and the installed Playwright Chromium; the owner judges from the sheets. Render
+  the FINAL set from source, not from drafts: esbuild-bundle an entry that `renderToStaticMarkup`s
+  every `RibbonIcon` (what `scripts/icon-accent-contact.mjs` does). The 2026-10-04 sheets are
+  `icons/home-excel-icons-20px.png` (the 72 new and redrawn keys at 20/24/30, Light and Dark, after
+  the icon review), `icons/home-excel-redraws-before-after.png` (the nine redraws, before and after,
+  at 20 and 120) and `icons/home-excel-icon-review-before-after.png` (what the review changed, and
+  the alternatives it rendered and did not take).
+- **Two reviewers who disagree are settled on the 20px pixel map**, not by argument: render both
+  proposals side by side as real 20px pixels magnified, in Light and Dark, and count half-covered
+  pixels and ink weight. The 2026-10-04 review's Orientation, Delete Cells and Remove Hyperlinks
+  were decided that way.
+- **Lowering the contact allowlist.** `node scripts/icon-accent-contact.mjs --write` rewrites EVERY
+  entry with today's measurement, and an entry up to 1.0 above its pin passes as noise, so a write
+  can silently RAISE unrelated entries (on 2026-10-04 it would have raised Gridlines, Loop, Pivot,
+  Undo and Redo by 0.2-0.8). Write to a scratch copy first (`ICON_CONTACT_ALLOWLIST=<copy>`), diff,
+  and carry only the improvement into the repo file.
 
 ---
 

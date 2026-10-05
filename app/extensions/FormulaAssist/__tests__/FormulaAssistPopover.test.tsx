@@ -7,10 +7,12 @@
 //          absence of a preview on a declined answer are each asserted against
 //          the rendered DOM rather than against the store.
 //
-//          Mocked: @api (the facade), and the insert module — the latter so a
-//          test can assert it was NOT called, which is the only way to prove a
-//          negative about writing. The store, the popover's own markup and
-//          `useDialogWindow` all run for real.
+//          Mocked: @api (the facade), @api/editing (Core's edit opener: the
+//          REAL open path, with the real edit flag, is driven by
+//          formulaAssistEditOpensCoreEdit.test.tsx), and the insert module —
+//          the latter so a test can assert it was NOT called, which is the
+//          only way to prove a negative about writing. The store, the
+//          popover's own markup and `useDialogWindow` all run for real.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import React, { act } from "react";
@@ -24,13 +26,20 @@ import { makeFakeCompletionProvider } from "../../_shared/lib/fakeCompletionProv
 
 const insertProposalMock = vi.fn();
 const dispatchGridActionMock = vi.fn();
-const startEditingMock = vi.fn((cell: unknown) => ({ type: "START_EDITING", cell }));
+const setSelectionMock = vi.fn((sel: unknown) => ({ type: "SET_SELECTION", sel }));
+// Core's open path (useEditing().startEdit). It raises the edit flag; the
+// double says the edit opened unless a test closes `editOpens`.
+let editOpens = true;
+let editOpen = false;
+const startEditMock = vi.fn(async (_row: number, _col: number, _value?: string) => {
+  editOpen = editOpens;
+});
 let configuredModel: string | null = "qwen2.5-coder:1.5b";
 
 vi.mock("@api", () => ({
   columnToLetter: (col: number) => String.fromCharCode(65 + col),
   dispatchGridAction: (...args: unknown[]) => dispatchGridActionMock(...args),
-  startEditing: (cell: unknown) => startEditingMock(cell),
+  setSelection: (sel: unknown) => setSelectionMock(sel),
   // The SHARED factory, not a hand-rolled object. This fake was missing
   // `selectedModelKey` the moment the popover grew a model chooser, and the
   // failure arrived as `undefined is not a function` in ten tests about
@@ -57,6 +66,11 @@ vi.mock("@api/grid", () => ({
   }),
   rowHeaderGutter: () => 22,
   colHeaderGutter: () => 20,
+}));
+
+vi.mock("@api/editing", () => ({
+  useEditing: () => ({ startEdit: startEditMock }),
+  isCellEditInProgress: () => editOpen,
 }));
 
 vi.mock("../lib/insert", () => ({
@@ -139,7 +153,10 @@ beforeEach(() => {
     fillDownEmpty: false,
   });
   dispatchGridActionMock.mockReset();
-  startEditingMock.mockClear();
+  setSelectionMock.mockClear();
+  startEditMock.mockClear();
+  editOpens = true;
+  editOpen = false;
   resetAssistStore();
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -229,12 +246,23 @@ describe("verified", () => {
 
     await click(buttonLabelled("Edit"));
     expect(insertProposalMock).not.toHaveBeenCalled();
-    expect(startEditingMock).toHaveBeenCalledTimes(1);
-    expect(startEditingMock.mock.calls[0][0]).toMatchObject({
-      row: 5,
-      col: 2,
-      value: "=SUMMA(B2:B6)",
-    });
+    // Through Core's open path, on the target cell, holding the LOCALIZED text.
+    expect(startEditMock).toHaveBeenCalledTimes(1);
+    expect(startEditMock).toHaveBeenCalledWith(5, 2, "=SUMMA(B2:B6)");
+    // Never the raw grid action (it left Core's edit flag down), and the
+    // selection was already on the target, so nothing was dispatched at all.
+    expect(dispatchGridActionMock).not.toHaveBeenCalled();
+    expect(container.innerHTML).toBe("");
+  });
+
+  it("keeps the popover, saying why, when Core refused to open the cell", async () => {
+    editOpens = false;
+    await render();
+
+    await click(buttonLabelled("Edit"));
+    expect(startEditMock).toHaveBeenCalledTimes(1);
+    expect(insertProposalMock).not.toHaveBeenCalled();
+    expect(text()).toContain("C6 could not be opened for editing");
   });
 
   it("writes nothing on Discard", async () => {

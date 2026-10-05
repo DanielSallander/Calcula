@@ -35,6 +35,7 @@ import {
   initClickInterceptor,
 } from "./handlers/selectionHandler";
 import { registerTableSelectCommands } from "./handlers/selectCommands";
+import { registerFormatAsTable } from "./handlers/formatAsTable";
 import {
   resetTableStore,
   syncTableRegions,
@@ -92,6 +93,11 @@ function activate(context: ExtensionContext): void {
   // reaches the same geometry through the region's selectionScope instead,
   // because its gestures are progressive and a command yields one block.
   cleanupFunctions.push(registerTableSelectCommands(context.commands));
+
+  // Home > Format as Table: the `table.formatAsTable { styleId }` command and
+  // the Format-menu item whose gallery the Home tab's hero hosts through the
+  // kit's registered-menu seam (menu "format" > "format:formatAsTable").
+  cleanupFunctions.push(registerFormatAsTable(context));
 
   // Register grid overlay renderer for table borders
   cleanupFunctions.push(

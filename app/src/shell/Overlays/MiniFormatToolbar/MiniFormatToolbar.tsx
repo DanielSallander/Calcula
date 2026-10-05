@@ -40,8 +40,21 @@
 //          survive the switch.
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { getCell, getStyle, applyFormatting } from "../../../api/lib";
-import { cellEvents } from "../../../api";
+import {
+  getCell,
+  getStyle,
+  applyFormatting,
+  adjustNumberFormatDecimals,
+  beginUndoTransaction,
+  commitUndoTransaction,
+  cancelUndoTransaction,
+} from "../../../api/lib";
+import type { FormattingResult } from "../../../api/types";
+import { ownUndoTransaction } from "../../../api/undoTicket";
+import { activeCellOf } from "../../../api/activeCell";
+import { selectionBlocks } from "../../../api/selectionBlocks";
+import { announceFormattingResult } from "../../../api/announceFormatting";
+import { fontSizeStep } from "../../../api/fontSizeLadder";
 import { refuseIfSelectionOwned } from "../../../api/selectionOwner";
 import type { GridMenuContext } from "../../../api/extensions";
 import {
@@ -166,6 +179,37 @@ function getSelectionRange(context: GridMenuContext) {
   return { rows, cols, startRow, startCol };
 }
 
+/**
+ * The selection's rows and columns with the ACTIVE cell's first. Excel's
+ * Increase / Decrease Decimal reads the active cell's format and applies the
+ * result to the whole selection, and the backend reads `rows[0]` / `cols[0]`
+ * as that cell. The active cell is `@api/activeCell`'s (the selection's END,
+ * where the grid draws the active-cell border, unless the grid names another).
+ * The MAIN range only: a per-block step would let each block's own first cell
+ * decide, where Excel's active cell decides for all of them.
+ */
+function activeFirst(context: GridMenuContext): { rows: number[]; cols: number[] } | null {
+  const range = getSelectionRange(context);
+  const active = activeCellOf(context.selection);
+  if (!range || !active) return null;
+  return {
+    rows: [active.row, ...range.rows.filter((r) => r !== active.row)],
+    cols: [active.col, ...range.cols.filter((c) => c !== active.col)],
+  };
+}
+
+/** The rows and columns of one rectangle, as `applyFormatting` takes them. */
+function rowsColsOf(block: { startRow: number; startCol: number; endRow: number; endCol: number }): {
+  rows: number[];
+  cols: number[];
+} {
+  const rows: number[] = [];
+  const cols: number[] = [];
+  for (let r = block.startRow; r <= block.endRow; r++) rows.push(r);
+  for (let c = block.startCol; c <= block.endCol; c++) cols.push(c);
+  return { rows, cols };
+}
+
 // ============================================================================
 // Main Component
 // ============================================================================
@@ -193,11 +237,13 @@ export function MiniFormatToolbar({
   useEffect(() => {
     async function load() {
       try {
-        const sel = context.selection;
-        if (!sel) return;
-        const row = Math.min(sel.startRow, sel.endRow);
-        const col = Math.min(sel.startCol, sel.endCol);
-        const cell = await getCell(row, col);
+        // The ACTIVE cell (`@api/activeCell`), as the ribbon reads it -- not
+        // the top-left corner: after a drag from a bold B2 down to a plain B5
+        // the pill showed Bold on while the ribbon showed it off, and a toggle
+        // then computed from the wrong cell (review finding (g), 2026-10-04).
+        const active = activeCellOf(context.selection);
+        if (!active) return;
+        const cell = await getCell(active.row, active.col);
         if (!cell) return;
         const s = await getStyle(cell.styleIndex);
         setStyle({
@@ -271,30 +317,57 @@ export function MiniFormatToolbar({
   // selected cell, Core's selection hidden under it) -- the caller then leaves
   // its pressed/picked state alone, so the pill never shows a format it did
   // not apply. The refusal has already been announced, once.
+  //
+  // EVERY block of the selection (`@api/selectionBlocks`, the main one first),
+  // as Excel's mini toolbar formats every Ctrl+click area; several blocks are
+  // ONE undo step (a refusal part-way commits what landed, so one Ctrl+Z
+  // restores it). It formatted the main range only. What landed is announced
+  // through the ONE announcement (`@api/announceFormatting`).
   const apply = useCallback(
     async (formatting: Record<string, unknown>, action: string): Promise<boolean> => {
       if (refuseIfSelectionOwned(action)) return false;
-      const range = getSelectionRange(context);
-      if (!range) return true;
+      const blocks = selectionBlocks(context.selection);
+      if (blocks.length === 0) return true;
+      const results: FormattingResult[] = [];
+      const tx =
+        blocks.length > 1
+          ? ownUndoTransaction(await beginUndoTransaction(action).catch(() => null), {
+              commitUndoTransaction,
+              cancelUndoTransaction,
+            })
+          : null;
       try {
-        const result = await applyFormatting(range.rows, range.cols, formatting as never);
-        // Emit cell change events
-        for (const cell of result.cells) {
-          cellEvents.emit({
-            row: cell.row,
-            col: cell.col,
-            oldValue: undefined,
-            newValue: cell.display,
-            formula: cell.formula,
-          });
+        for (const block of blocks) {
+          const { rows, cols } = rowsColsOf(block);
+          results.push(await applyFormatting(rows, cols, formatting as never));
         }
-        // Refresh grid
-        window.dispatchEvent(new CustomEvent("styles:refresh"));
-        window.dispatchEvent(new CustomEvent("grid:refresh"));
+        await tx?.commit();
       } catch (err) {
         console.error("[MiniFormatToolbar] Failed to apply formatting:", err);
+        if (results.length > 0) await tx?.commit().catch(() => undefined);
+        else await tx?.cancel().catch(() => undefined);
       }
+      if (results.length > 0) announceFormattingResult(results);
       return true;
+    },
+    [context],
+  );
+
+  // Increase / Decrease Decimal. The toolbar used to write `#,##0.000` /
+  // `#,##0` whatever the cell carried -- a percentage became a plain number,
+  // a date its serial, accounting lost its symbol (number.md section 3). The
+  // backend's decimal step keeps the format's kind, decided by the ACTIVE cell
+  // and applied to the whole selection as one undo step: the Home tab's door.
+  const stepDecimals = useCallback(
+    async (delta: 1 | -1, action: string): Promise<void> => {
+      if (refuseIfSelectionOwned(action)) return;
+      const lists = activeFirst(context);
+      if (!lists) return;
+      try {
+        announceFormattingResult(await adjustNumberFormatDecimals(lists.rows, lists.cols, delta));
+      } catch (err) {
+        console.error("[MiniFormatToolbar] Failed to change decimals:", err);
+      }
     },
     [context],
   );
@@ -344,17 +417,20 @@ export function MiniFormatToolbar({
     [apply],
   );
 
+  // Grow / Shrink step through Excel's ladder (`@api/fontSizeLadder`, the
+  // Home tab's too). Past either end Excel changes nothing, so nothing is
+  // written -- no write, no undo step (review finding (i), 2026-10-04: this
+  // wrote 74 at 72pt and 6 at 8pt, and gave 28 where Excel gives 26).
   const increaseFontSize = useCallback(async () => {
-    const current = style.fontSize;
-    const next = FONT_SIZES.find((s) => s > current) ?? current + 2;
+    const next = fontSizeStep(style.fontSize, 1);
+    if (next === null) return;
     if (!(await apply({ fontSize: next }, "Increase Font Size"))) return;
     setStyle((s) => ({ ...s, fontSize: next }));
   }, [style.fontSize, apply]);
 
   const decreaseFontSize = useCallback(async () => {
-    const current = style.fontSize;
-    const smaller = FONT_SIZES.filter((s) => s < current);
-    const next = smaller.length > 0 ? smaller[smaller.length - 1] : Math.max(1, current - 2);
+    const next = fontSizeStep(style.fontSize, -1);
+    if (next === null) return;
     if (!(await apply({ fontSize: next }, "Decrease Font Size"))) return;
     setStyle((s) => ({ ...s, fontSize: next }));
   }, [style.fontSize, apply]);
@@ -387,18 +463,20 @@ export function MiniFormatToolbar({
     await apply({ numberFormat: "0%" }, "Percent Style");
   }, [apply]);
 
+  // Comma Style is Excel's "Comma" cell style: ACCOUNTING with no symbol and 2
+  // decimals -- the backend's `comma` preset, the one the Home tab sends. It
+  // was `#,##0.00`, a third Comma Style of the app's own.
   const applyCommaFormat = useCallback(async () => {
-    await apply({ numberFormat: "#,##0.00" }, "Comma Style");
+    await apply({ numberFormat: "comma" }, "Comma Style");
   }, [apply]);
 
   const increaseDecimals = useCallback(async () => {
-    // A simple approach: apply a format with more decimals
-    await apply({ numberFormat: "#,##0.000" }, "Increase Decimal");
-  }, [apply]);
+    await stepDecimals(1, "Increase Decimal");
+  }, [stepDecimals]);
 
   const decreaseDecimals = useCallback(async () => {
-    await apply({ numberFormat: "#,##0" }, "Decrease Decimal");
-  }, [apply]);
+    await stepDecimals(-1, "Decrease Decimal");
+  }, [stepDecimals]);
 
   const disabled = !context.selection;
 

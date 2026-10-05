@@ -16,7 +16,16 @@ import React from "react";
 import { RibbonIcon, type RibbonIconProps } from "@api";
 import { LAUNCHER_ICON_SIZE as API_LAUNCHER_ICON_SIZE } from "@api/layout";
 
+/**
+ * Item id -> its FACE: the picture the ribbon control draws (the controls under
+ * components/<group>/ read this map first), the Customize palette shows, and a
+ * collapsed group's flyout uses. One map, so a palette chip can never show a
+ * different picture from the button it adds (CONTRACT section 7).
+ */
 const ICONS: Record<string, React.ComponentType<RibbonIconProps>> = {
+  // Undo group
+  undo: RibbonIcon.Undo,
+  redo: RibbonIcon.Redo,
   // Clipboard
   cut: RibbonIcon.Cut,
   copy: RibbonIcon.Copy,
@@ -31,10 +40,14 @@ const ICONS: Record<string, React.ComponentType<RibbonIconProps>> = {
   textColor: RibbonIcon.FontColor,
   backgroundColor: RibbonIcon.FillColor,
   formatCells: RibbonIcon.FormatCells,
+  // The Borders split's resting face (Bottom Border, Excel's default); the
+  // ribbon then shows the LAST preset used, the palette always this one.
+  borders: RibbonIcon.BorderBottom,
   // Alignment
   alignTop: RibbonIcon.AlignTop,
   alignMiddle: RibbonIcon.AlignMiddle,
   alignBottom: RibbonIcon.AlignBottom,
+  orientation: RibbonIcon.TextOrientation,
   alignLeft: RibbonIcon.AlignLeft,
   alignCenter: RibbonIcon.AlignCenter,
   alignRight: RibbonIcon.AlignRight,
@@ -48,20 +61,32 @@ const ICONS: Record<string, React.ComponentType<RibbonIconProps>> = {
   // Number (numberFormat renders as a Dropdown in the ribbon; its icon shows
   // in the customize dialog)
   numberFormat: RibbonIcon.NumberFormat,
+  accountingFormat: RibbonIcon.Accounting,
   // Styles
+  conditionalFormatting: RibbonIcon.ConditionalFormatting,
+  formatAsTable: RibbonIcon.FormatAsTable,
   cellStyles: RibbonIcon.CellStyles,
   // Cells
+  insertCells: RibbonIcon.InsertCells,
+  deleteCells: RibbonIcon.DeleteCells,
+  formatMenu: RibbonIcon.FormatMenu,
   insertRow: RibbonIcon.InsertRow,
   insertColumn: RibbonIcon.InsertColumn,
   deleteRow: RibbonIcon.DeleteRow,
   deleteColumn: RibbonIcon.DeleteColumn,
   // Editing
-  undo: RibbonIcon.Undo,
-  redo: RibbonIcon.Redo,
+  autoSum: RibbonIcon.AutoSum,
+  fill: RibbonIcon.FillDown,
+  clear: RibbonIcon.Clear,
+  sortFilter: RibbonIcon.SortFilter,
+  findSelect: RibbonIcon.Find,
   find: RibbonIcon.Find,
   clearContents: RibbonIcon.ClearContents,
   clearFormatting: RibbonIcon.ClearFormatting,
-  clearAll: RibbonIcon.ClearAll,
+  // Excel's Clear All draws the eraser -- the Clear menu's Clear All row
+  // (CONTRACT 3.16) -- so the standalone button and that row are one picture.
+  // ClearAll (the stacked-cell X) is no Excel picture (icons-fix defect 2).
+  clearAll: RibbonIcon.Clear,
   // Layout (the separator paints nothing in the ribbon; its chip in the
   // customize dialog shows the page-break glyph)
   rowBreak: RibbonIcon.Breaks,
@@ -133,15 +158,19 @@ const GROUP_ICON_COMPONENTS: Record<string, React.ComponentType<RibbonIconProps>
   alignment: RibbonIcon.AlignLeft,
   number: RibbonIcon.NumberFormat,
   styles: RibbonIcon.CellStyles,
-  cells: RibbonIcon.InsertRow,
+  // Excel's Insert Cells picture, the Cells group's own (it was Insert Row,
+  // when the group was four row/column buttons).
+  cells: RibbonIcon.InsertCells,
   editing: RibbonIcon.Find,
+  // The Undo group (DEFAULT_LAYOUT since version 2; also one of the original
+  // extra choices, so its key long predates the group).
+  undo: RibbonIcon.Undo,
   // Extra choices for user-created groups (not used by DEFAULT_LAYOUT).
   format: RibbonIcon.FormatCells,
   fill: RibbonIcon.FillColor,
   merge: RibbonIcon.MergeCells,
   percent: RibbonIcon.Percent,
   wrap: RibbonIcon.WrapText,
-  undo: RibbonIcon.Undo,
   insertColumn: RibbonIcon.InsertColumn,
   deleteRow: RibbonIcon.DeleteRow,
 };
@@ -161,7 +190,7 @@ export function groupIcon(iconId: string | undefined, size?: number): React.Reac
 
 /**
  * Launcher glyph for a group, with the full fallback chain:
- * explicit `iconId` -> the group id (how the seven built-in groups have always
+ * explicit `iconId` -> the group id (how the eight built-in groups have always
  * resolved) -> the generic fallback glyph.
  */
 export function groupIconFor(

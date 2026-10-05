@@ -76,6 +76,9 @@ vi.mock("../InsertFunctionDialog", () => ({
 }));
 
 import { FormulaBar } from "../FormulaBar";
+// The dialog is hosted OUTSIDE the bar (insertFunctionHost.tsx), mounted by the
+// shell frame; rendered here beside the bar, as the frame does.
+import { InsertFunctionHost, resetInsertFunctionForTests } from "../insertFunctionHost";
 import { __resetExternalEditForTests } from "../../../core/lib/formulaEditTarget";
 import { createFakeExternalEdit } from "../../../core/lib/__tests__/helpers/fakeExternalEdit";
 
@@ -85,8 +88,14 @@ let container: HTMLDivElement;
 let root: Root;
 
 async function render(): Promise<void> {
+  resetInsertFunctionForTests();
   await act(async () => {
-    root.render(<FormulaBar />);
+    root.render(
+      <>
+        <FormulaBar />
+        <InsertFunctionHost />
+      </>,
+    );
   });
   await act(async () => {
     for (let i = 0; i < 6; i++) await Promise.resolve();

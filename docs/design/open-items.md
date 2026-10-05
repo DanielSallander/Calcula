@@ -14,11 +14,13 @@ pass that fixes a defect writes its own section and does not go back and strike 
 paragraphs that called it open. Read it for the WHY. Read this file for the WHAT.
 
 **Scope of this list.** Product and test-infrastructure items only. Individual defects with a
-reproduction live in `tests/regression/bug-ledger.json` (**283 entries, 279 fixed, 4 open** as of
-2026-10-02 — recounted from the file with node, not carried forward: BUG-0098 and BUG-0108 below,
+reproduction live in `tests/regression/bug-ledger.json` (**399 entries, 359 fixed, 40 open** as of
+2026-10-05 — recounted from the file with node, not carried forward: BUG-0098 and BUG-0108 below,
 BUG-0276 (touch cannot drag a slicer, a handle, the grip or a timeline range, and cannot select a
 cell -- the browser takes the gesture for panning; filed beside BUG-0258, which is fixed; §2.af's
-touch-and-pen row), and BUG-0283 (a script's 1x1 merge is reported as an overlap; §2.ag). The Merge
+touch-and-pen row), BUG-0283 (a script's 1x1 merge is reported as an overlap; §2.ag), and the 33
+the Home-tab programme left open, BUG-0344..BUG-0376 (§2.ai; it filed 92 on 2026-10-04, of which
+BUG-0285..BUG-0343 are fixed; BUG-0361, -0367, -0371 and -0374 were fixed by its final wave on 2026-10-05, which also filed BUG-0377..BUG-0399 from its adversarial review and live run: 16 fixed, 7 open, §2.ai). BUG-0284 (filed 2026-10-03) is fixed. The Merge
 menu build (§2.ag) filed and fixed BUG-0277..0282 the same day. Fixed 2026-10-02, both filed by M8's docs pass: BUG-0274 (the version diff never
 said that a script GAINS or LOSES a capability -- it read a key the published artifact never writes;
 it now reads both versions' signed manifests through the helper the Promote dialog's code summary
@@ -2731,6 +2733,148 @@ never). Filed and then overtaken: BUG-0284 (a panel script could close a transpa
 | **No keyboard route from the grid to the status bar** (Tab moves cells; there is no F6 landmark cycle). Keyboard users reach both panels from Developer; the indicator's own summary is not on that route. | app-wide |
 | **`objectScriptBadge` listens for `scriptable-objects:script-saved`, which nothing emits** (pre-existing dead listener). `OBJECT_SCRIPTS_CHANGED_EVENT` is the working signal now. | `app/src/api/objectScriptBadge.ts:171` |
 | **Goldens.** The rail (`sidebar-chrome.spec.ts`) and status-bar (`core-visual.spec.ts`) goldens change with this; they are already stale pending the owner's re-record (2026-10-02). | `app/e2e/tests/__screenshots__/` |
+
+### 2.ai Excel 365's Home tab — built 2026-10-04; what is open
+
+**Built.** The owner asked for Calcula's Home tab to BE Excel 365's (D1). The default layout is Excel's,
+left to right: Undo | Clipboard | Font | Alignment | Number | Styles | Cells | Editing, drawn in LAYOUT
+order (a hero is its own control, a run of other items one two-row grid), collapsing right to left
+(Styles first, Undo last), with Excel's corner dialog launchers on Font, Alignment and Number
+(`PanelSection.dialogLauncher`, `app/src/api/uiTypes.ts`). `LAYOUT_VERSION` is 2; a saved layout gains
+the 13 new items additively and re-takes the default collapse priorities
+(`app/extensions/BuiltIn/HomeTab/homeTabConfig.ts:122`, `:282`, `:418`). Every Excel menu is built row
+for row -- Paste, Underline, Borders (Line Color / Line Style pens), Fill / Font Color splits, Orientation,
+Accounting, Conditional Formatting and Format as Table (hosted from their owners through
+`RegisteredMenuButton`), Insert / Delete / Format, AutoSum, Fill, Clear, Sort & Filter, Find & Select
+(`components/{clipboard,font,alignment,styles,cells,editing}/`). New command owners: AutoSum, FillSeries
+and InsertDeleteCells extensions; Go To (F5 / Ctrl+G) and Insert Function as shell commands; sheet,
+Cell Size and Visibility commands in the shell; Ctrl+Plus / Ctrl+- run `core.grid.insertCells` /
+`deleteCells` (`app/src/api/keybindings.ts:260`). Backend: six new commands (828 in
+`generate_handler!`) -- `apply_border_preset_to_sheets`, `adjust_number_format_decimals`, `insert_cells`,
+`delete_cells`, `set_row_heights`, `set_column_widths` -- plus half-point font sizes (twips), stacked
+text, regional accounting patterns and Excel's reference rules for every structural edit. Kit:
+`SplitMenuButton` faces, `MenuSub`, `ColorPalette`, split `ColorSwatch` (`app/src/api/layout`). `@api`
+1.3.0 (`app/src/api/version.ts`). Every lane ran its unit tier red-first or proved its tests by
+sabotage; **nothing in the programme has been run live** (no E2E, no linked launch -- the six new
+commands mean the app must be LINKED once before anyone relies on it).
+
+**Fixed on the way:** BUG-0285..BUG-0343 (59). The heavy ones: Paste Link on another sheet linked to the
+destination's own cells (BUG-0285); Go To Special selected the bounding box, so "Constants, then Delete"
+erased formulas (BUG-0304); undoing a grouped-sheet format wrote the other sheet's cell into the active
+sheet (BUG-0310); Increase/Decrease Decimal flattened Accounting, Currency, Percent, dates and text to a
+plain number (BUG-0319); Format Cells' OK wrote every property to every cell (BUG-0324); undoing a
+structural edit turned a moved spill into `#SPILL!` (BUG-0330); whole-row deletes turned a cut range into
+`#REF!` (BUG-0331); every colour-scale preset was upside down (BUG-0306); every Home formatting button
+swallowed a refusal (BUG-0321).
+
+**Deferred by owner decision 2026-10-04** -- left OUT of the menus, not shown disabled:
+
+| Deferred | Where it would go |
+|---|---|
+| **Copy as Picture / Paste Picture / Linked Picture** (so Copy is a plain button, not a split). | `app/extensions/BuiltIn/HomeTab/components/clipboard/pasteMenu.ts` |
+| **Selection Pane and Select Objects mode** (Find & Select's object rows). | `app/extensions/BuiltIn/HomeTab/components/editing/FindSelectMenuButton.tsx` |
+| **Draw Border / Draw Border Grid / Erase Border** -- so a Line Color / Line Style pick only sets the pen and enters no draw mode, and the menu has no "Draw Borders" heading. | `app/extensions/BuiltIn/HomeTab/components/font/borders.ts` |
+| **Fill Across Worksheets and Fill Justify.** | `app/extensions/BuiltIn/HomeTab/components/editing/FillMenuButton.tsx` |
+| **The Undo history list** -- Undo stays a plain button. | `app/src/api/undoState.ts` |
+| **An Office Clipboard pane** -- so the Clipboard group has no dialog launcher. | `app/extensions/BuiltIn/HomeTab/homeTabConfig.ts` |
+| **New Table Style / New PivotTable Style / New Cell Style / Merge Styles.** | `app/extensions/Table/components/FormatAsTableGallery.tsx`, `app/extensions/_shared/components/CellStylesGallery.tsx` |
+
+| Open | Where |
+|---|---|
+| **The E2E journeys and goldens were not updated for the new default.** `fixall-edit.spec.ts:2347` clicks `fmt-clearAll` without opening `fmt-clear`; `:262`, `:292`, `:348`, `:1449`, `:1460` click `fmt-textColor` / `fmt-backgroundColor`, which now APPLY the colour (the palette is `fmt-<id>-options`); `tests/formatting.spec.ts:156-195` uses Strikethrough (no longer in the default); `shapes-hometab.spec.ts` counts 7 groups (`:86`, `:1260`) and reads Cells as rows (test 8); `owner-decisions.spec.ts:968-1083` expects 7 section ids and priorities `[10..60]` (now 8, `[80,70,60,50,40,10,20,30]`); `number-formatting.spec.ts` and the comma steps of `realistic-workflows` / `workflow-dashboard` pin the old Comma (`#,##0`); `goldenCorpus.ts`' pressed-fill pin (494 at x=579) moved with the redrawn AlignBottom; `ribbon-design-system.md`'s row "`sectionRows('Cells') === 3`" describes the old spec. | `app/e2e/journeys/`, `app/e2e/tests/`, `app/e2e/goldenCorpus.ts` |
+| **Open defects -- Clipboard:** a typed hex draft then a swatch click may apply twice (BUG-0344, plausible); variants still write one cell per call (BUG-0345); Paste Special with Add/Subtract/... replaces a destination formula with a constant (BUG-0346); No Borders loses a destination border's theme colour and dashed width (BUG-0347); Paste Link after renaming the source sheet links to the old name (BUG-0348); variants do not move the selection (BUG-0349); Paste Special bound to Ctrl+Shift+V, Excel's is Ctrl+Alt+V (BUG-0375, not probed). | `app/extensions/BuiltIn/PasteSpecial/pasteSpecialExecute.ts:90`, `:136`; `app/src/api/keybindings.ts:198`; `app/src/api/layout/primitives/Color.tsx` |
+| **Open defects -- Format and render:** `apply_formatting` walks rows x columns, so Select All + Bold is 17.2 billion iterations and Left Border on a whole column sends a million rows (BUG-0354, high); Decimal on General counts the full rendering, not the shown width (BUG-0355); the frozen-pane painter has no vertical alignment, wrap, `####` or rich text (BUG-0362); rotated text ignores Wrap Text (BUG-0363); shrink-to-fit floors to whole points and an indent level is 8 px, Excel 7.5 (BUG-0364); Format Cells shows a corner cell's edge instead of a greyed mixed edge (BUG-0365), allows an angle with an indent (BUG-0366) and reads the ANCHOR while every other surface reads the active cell (BUG-0367); No Border on a whole column leaves the shared edge beside it (BUG-0369); a remembered theme colour's bar is stale after a theme change (BUG-0370); three Styles dialogs hard-code light or dark colours (BUG-0376). | `app/src-tauri/src/commands/styles.rs:336`, `app/src/core/lib/gridRenderer/core.ts:353`, `app/extensions/BuiltIn/FormatCellsDialog/FormatCellsDialog.tsx:139`, `:177`, `app/extensions/BuiltIn/HomeTab/components/font/borders.ts:368` |
+| **Open defects -- Cells and structure:** Insert Rows/Columns push non-empty cells off the sheet without refusing (BUG-0361, high: the band path refuses); Delete with grouped sheets probably clears the active sheet only (BUG-0350, from code); chart and sparkline ranges are not adjusted by any structural edit (BUG-0357); the off-sheet structural path records no spill claims (BUG-0356, unverified); scripts' and the CLI's insertRows/... do not refresh the grid's dimension map (BUG-0360); the macro recorder does not record Insert/Delete Cells (BUG-0358); Select All + Row Height is refused (BUG-0353) and the standard width is workbook-wide (BUG-0352) -- both need per-sheet default sizes (owner question 8); `clear_range_with_options` dirties the document on a no-op (BUG-0359); a partial-range AutoFit still counts a pivot elsewhere in the column (BUG-0351). | `app/src-tauri/src/commands/structure.rs:1590`, `:2073`; `app/src/core/components/Spreadsheet/useSpreadsheetSelection.ts:655`; `app/src-tauri/src/commands/data.rs:5024`; `app/src/api/autoFitContributors.ts:54`; `app/src-tauri/src/lib.rs:448` |
+| **Open defects -- menus and kit:** the tab menu's Delete greys on the total sheet count (BUG-0368); a hosted `commandId` row's refusal reaches only the console (BUG-0371); the palette's custom colour input reports live, so Tab Color > More Colors... writes on every drag step (BUG-0372); `get_comment_indicators_in_range` / `get_note_indicators_in_range` do not normalise their range (BUG-0373); a migrated v1 layout shows two `fmt-clearAll` (BUG-0374). | `app/src/shell/registries/sheetExtensions.ts:271`, `app/src/api/layout/primitives/MenuTree.tsx:130`, `app/src-tauri/src/comments.rs:657`, `app/src-tauri/src/notes.rs:500` |
+| **Calcula-only bounds, each refused with a message (Excel has none):** Row Height and Hide over 16,384 lines; Go To Special over 10,000 areas; Insert Sheet Rows/Columns spanning the whole axis (Excel refuses only when non-blank cells would leave the sheet); inherited cell formats past 2,000,000 cells (skipped with a WARN, tier and size still inherited); Insert/Delete Cells that would move a PivotTable whole, change a table's column count, delete a whole table, or reach a filtered AutoFilter range or a writeback region being designed. | `app/src/shell/registries/gridFormatCommands.ts:82`, `app/extensions/GoToSpecial/lib/matchAreas.ts:40`, `app/src-tauri/src/commands/structure_cells.rs:457` |
+| **Not built, smaller:** the Rules Manager has no New / Edit / Duplicate Rule and no "Show formatting rules for"; Format Cells' orientation is five angles plus a Degrees field, not Excel's dial; no "High-contrast only" toggle on the palettes (Excel has one on Fill, Font and Tab Color); Excel's Format Cells Alignment "Merge cells" box is in §2.ag. | `app/extensions/ConditionalFormatting/components/`, `app/extensions/BuiltIn/FormatCellsDialog/tabs/AlignmentTab.tsx`, `app/src/api/layout/primitives/Color.tsx` |
+| **Cleanup, no behaviour:** `runHomeCommand` / `runCellsCommand` / `runEditingCommand` / `runFontCommand` are four copies of one function; the Fill menu's `fillHasSource` restates Core's fill rule (export a `canFill` through `@api`); `RegisteredStylesHero` copies the kit's `focusWhenVisible` / `firstFocusable`; two `getHyperlinksInRange` wrappers (`@api/backend` and Core's); `SheetTabs.tsx:458` still listens for `sheet:requestTabColor`, which only the e2e walker sends; stale comments: `ICONS.md` §5 still warns that `--write` raises entries (fixed, BUG-0343), `host.ts:11022` omits `"vertical"`, `NameBox.tsx:436` says "F5 / Go To"; `docs/EXTENSION_GUIDE.md` has no "New in API v1.3.0" section; a neutral `STRUCTURAL_CHANGED` event would read better than the cell shift announcing `STRUCTURAL_UNDO`. | `app/extensions/BuiltIn/HomeTab/components/{clipboard/runHomeCommand,cells/runCellsCommand,editing/runEditingCommand,font/fontCommand}.ts`, `app/extensions/BuiltIn/HomeTab/components/editing/editingRules.ts`, `app/src/api/backend.ts`, `app/src/core/lib/tauri-api.ts` |
+
+**Owner questions** (each is built one way today; the alternative is named):
+
+1. **Borders pictures: drawn edges ACCENT (built) or STRONG, as Excel's.** Both are on
+   `icons/home-excel-icon-review-before-after.png`. Also approve the three keys added beyond the contract,
+   `ObjectAlignLeft/Center/Right` (`app/src/api/icons/home.tsx`, used by the Canvas Arrange menu).
+2. **Other icon departures to confirm:** the Orientation face is an angle, not Excel's plain arrow; the
+   45-degree pictures keep the letters upright (Excel turns them -- they read as rings at 20 px);
+   Conditional Formatting's runs are green, not Excel's red (DANGER reads as delete); Fill Color's pour is
+   SOFT, not blue; Remove Hyperlinks is now Excel's chain with a corner X; Sort & Filter is weak at 20 px;
+   DoubleUnderline's ink runs to 22.8; Excel's paste-option pictures were never captured (the probe had an
+   empty clipboard); Table Design's Remove Duplicates borrows DeleteRow, now Excel's specific "Delete
+   Sheet Rows" picture (`app/extensions/Table/components/TableDesignTab.tsx:473`).
+3. **Underline pressed state:** pressed when the cell carries the FACE's kind (built; Excel, measured) or
+   when it has any underline (the contract). With the contract's rule a double-underlined cell shows a
+   pressed single "U" that, clicked, makes it SINGLE. `components/font/underline.ts:64`.
+4. **Fill Color's palette:** "No Fill" sits after Standard Colors (built; Excel's order) and **"More Fill
+   Options..." is kept although Excel has no such row** -- drop it? `components/font/ColorSplitButton.tsx`.
+5. **Go To on a canvas sheet** stays enabled (built: its owner does not refuse, a reference can name
+   another sheet) or greyed as the brief said. `components/editing/FindSelectMenuButton.tsx`
+   (`FIND_SELECT_ROWS_ON_CANVAS`).
+6. **Live shortcut chips on menu rows** (Insert Cells... Ctrl+Plus, Delete Cells... Ctrl+-, Insert Sheet
+   Shift+F11, Format Cells... Ctrl+1, Sum Alt+=, Fill Down Ctrl+D, Find Ctrl+F, Go To F5 ...): Excel's Home
+   menus show none; Calcula's Merge menu set the precedent. Keep or drop (`shortcutCommandId` props).
+7. **Paste menu with nothing copied:** variants greyed (built, the contract) or left out, as Excel does;
+   Excel also draws each section as a strip of icon tiles, not labelled rows.
+   `components/clipboard/pasteMenu.ts:177`.
+8. **Select All + Row Height needs a per-sheet DEFAULT row height** (Excel's `sheetFormatPr
+   defaultRowHeight`): may a lane add it -- `core/persistence` Sheet, `core/calcula-format` layout.json
+   under a feature id (an older reader only loses a size), the xlsx reader/writer, calp `html_export`,
+   AppState and `get_default_dimensions`? The same field per sheet fixes the workbook-wide standard width.
+   BUG-0353, BUG-0352.
+9. **Accounting negative pattern for the foreign-currency rows** ("$ English (United States)" picked on
+   a Swedish machine): the USER's region's pattern (built: minus at the left edge) or the LISTED
+   currency's region (parentheses)? If the latter, the renderer may also need a "minus at the number"
+   bit for codes like `-[$$-409]`. `app/src-tauri/src/commands/styles.rs:712`,
+   `core/engine/src/locale.rs:388`.
+10. **The Number Format box after Comma Style** reads "Accounting" (built, not probed); should every
+    "Currency (...)" name likewise select the Currency row? `components/numberFormatOptions.ts:87`.
+11. **Excel's active-cell model.** Excel's active cell is the ANCHOR (after dragging A3 to B5 it is A3);
+    Calcula draws and reads the moving END (B5). The Home tab, mini toolbar, Lock Cell and the quick Sort
+    key follow Calcula's end; Format Cells still reads the anchor (BUG-0367); the toggle-unmerge (§2.ag)
+    differs the same way. Settle one rule. `components/activeCell.ts:26`.
+12. **A parallelogram for angled text:** Excel slants an angled cell's borders and lets the text
+    overhang into the next column; Calcula clips at the column edge. A larger renderer change.
+    `app/src/core/lib/gridRenderer/rendering/cells.ts` (`drawOrientedText`).
+13. **Rotation's grow-only AutoFit** also grows a row the user set too short (Excel leaves a custom-height
+    row alone), and returning to horizontal never shrinks back -- both need a per-row "custom height" flag
+    in Core. `components/alignment/orientationMenu.ts:124`.
+14. **A migrated version-1 layout** keeps Undo/Redo in Editing and gets no Undo group (built: additive);
+    and its standalone Clear All duplicates the Clear menu's `fmt-clearAll` (BUG-0374) -- rename the row's
+    id, or let the migration drop the standalone button? `homeTabConfig.ts:418`.
+15. **Cells group shape:** three heroes (built, the contract) or Excel's MEDIUM layout of three stacked
+    labelled rows (the owner's `cells.png` crop); and labelled AutoSum / Fill / Clear faces at wide widths.
+16. **AutoFit unhides user-hidden rows/columns inside the selection** (built; Excel, measured) -- keep?
+    `app/src/core/lib/autoFitCommands/autoFitCommands.ts`.
+17. **Sheet tabs:** should the tab menu's Delete adopt Excel's "ask only when the sheet has data" rule
+    (the command does; three journeys drive the tab menu's confirm -- `fixall-lifecycle.spec.ts:745`,
+    `orphaned-sheet-state.spec.ts:139`, `report-store.spec.ts:394`)? Does Excel's Move or Copy list hidden
+    sheets (Calcula lists visible ones)? Excel's "+" inserts after the active sheet; Calcula's appends.
+18. **Insert/Delete Cells' Calcula-only refusals** (the bounds row above): make the pivot, table-column
+    and whole-table cases real moves? The pivot one needs an undo kind for a pivot's region.
+19. **`.cala` and the new values:** an older build REFUSES a fractional font size or stacked text with a
+    raw serde error rather than "needs a newer Calcula". CLAUDE.md's test says no version link is
+    required (a refusal, not a lie); stamp one anyway for the better message? `core/engine/src/style.rs`.
+20. **Smaller calls:** hosted menu icons 16 px (the kit) or 20 px (the Home menus); Styles heroes disabled on
+    a canvas sheet; Excel's description line in the Conditional Formatting / Format as Table tooltips;
+    Table Design's gallery limited to Excel's 60 styles as Format as Table is; `table.formatAsTable`
+    script-safe inside a table; "Unique Values..." removed from the CF menu (Excel reaches it through
+    Duplicate Values); AutoSum also on a Formulas menu; the Sort Warning for a single-row Sort A to Z; the
+    10,000-area Go To Special cap; a keyboard-opened launcher flyout trapping Tab, as Excel's does; a
+    dialog launcher for a single-section sidebar panel (it has no header); the Pivot insert guard
+    refusing a block that starts above a pivot and reaches into it.
+
+**Final review and live proof (2026-10-05).** A four-lens adversarial review (Rust invariants, Excel fidelity,
+seams and data integrity, test teeth) found 37 defects; the fix wave closed them or filed them, and the new
+journey `app/e2e/journeys/home-excel.spec.ts` passes 13/13 live (whole functional project 521 passed; the 42
+failures are 39 DPR-2 capture-guard stops and 3 that pass alone). Fixed: BUG-0377..BUG-0392 (straddling formulas
+after Insert/Delete Cells, Select All + Insert pushing every row off, F5 reloading the page mid-edit, Home formatting
+acting on the first Ctrl+click area only, sort-inside-a-filter taking two undo steps -- the filter dropdown's own
+sorts too -- and eleven more). Still open: Ctrl+R during an edit may reach WebView2's reload (BUG-0393); scattered
+selections cost one IPC per area (BUG-0394); Clear All over several areas is not atomic (BUG-0395); Ctrl+Enter fills
+the main range only (BUG-0396); two single-area AutoSum cases differ from Excel (BUG-0397); focus drops to <body> when
+a split is disabled with its overlay open (BUG-0398); the cell-shift wrapper has no bound of its own (BUG-0399).
+**Owner question added by the live run:** a collapsed group's flyout stays open after a plain command; Excel closes it.
+Screenshots of the live tab and four open menus: `icons/home-excel-live-*.png`.
 
 ## 3. How to keep this file honest
 

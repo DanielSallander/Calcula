@@ -5,7 +5,7 @@
 // UPDATED: Added vertical alignment, text wrapping, text rotation, and empty cell background rendering
 
 import type { RenderState } from "../types";
-import type { RichTextRun, AccountingLayout, UnderlineStyle, StyleData } from "../../../types";
+import type { RichTextRun, AccountingLayout, UnderlineStyle, StyleData, CellData } from "../../../types";
 import { formulaA1ToR1C1 } from "../../r1c1";
 import { calculateVisibleRange } from "../layout/viewport";
 import { getColumnWidth, getRowHeight } from "../layout/dimensions";
@@ -49,6 +49,118 @@ import { rowHeaderGutter, colHeaderGutter } from "../layout/headerVisibility";
 // The measurer has to mirror the painter exactly; there is one copy, and the
 // painter is not it.
 import { wrapText, splitHardBreaks, hasHardBreak } from "../layout/autoFit";
+// ROTATED / STACKED TEXT AND INDENT GEOMETRY live in layout/ for the same
+// reason line breaking does: row and column AutoFit measure with the very same
+// functions, so "the row grew for 45-degree text" and "the 45-degree text fits
+// in the row" are one fact, not two copies that agree by coincidence.
+import {
+  parseTextOrientation,
+  layoutRotatedText,
+  layoutStackedText,
+  ORIENTATION_LINE_HEIGHT_FACTOR,
+  type TextOrientation,
+  type OrientationBox,
+} from "../layout/textOrientation";
+import { alignmentWithIndent, effectiveIndentPx, indentedTextBox } from "../layout/cellIndent";
+import { layoutAccountingRuns } from "./accountingLayout";
+
+/**
+ * Excel's largest font size, in points. The painter used to ignore any size of
+ * 200pt or more and paint the theme's 11pt instead -- a sanity bound from when
+ * the backend stored sizes as a u8. Sizes are now half points up to 409.
+ */
+const MAX_FONT_SIZE_POINTS = 409;
+
+/**
+ * Paint rotated or STACKED text inside a cell's content box.
+ *
+ * Shared by BOTH painters -- `drawCellText` (the ordinary grid) and
+ * `drawCellTextZone` (every frozen or split pane) -- because a frozen header
+ * row is exactly where rotated column titles live, and the pane painter used to
+ * draw every value horizontally. The placement is `layoutRotatedText` /
+ * `layoutStackedText` (layout/textOrientation.ts, where Excel's measured rules
+ * are written down): both alignments are honoured and a run longer than the
+ * cell is anchored by them and cut by the caller's clip, never pre-shortened.
+ *
+ * `box` is the TRUE cell geometry minus padding, not the visible part: a cell
+ * half-scrolled under a header must not have its text slide along with the
+ * visible edge. The caller's clip decides what shows.
+ */
+export function drawOrientedText(
+  ctx: CanvasRenderingContext2D,
+  orientation: Exclude<TextOrientation, { kind: "horizontal" }>,
+  text: string,
+  box: OrientationBox,
+  hAlign: string,
+  vAlign: string,
+  fontSizePx: number,
+): void {
+  const lineHeight = fontSizePx * ORIENTATION_LINE_HEIGHT_FACTOR;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  if (orientation.kind === "stacked") {
+    const glyphs = layoutStackedText({
+      text,
+      measure: (t) => ctx.measureText(t).width,
+      lineHeight,
+      box,
+      hAlign,
+      vAlign,
+    });
+    for (const g of glyphs) ctx.fillText(g.text, g.x, g.y);
+    return;
+  }
+  const textWidth = ctx.measureText(text).width;
+  const placement = layoutRotatedText({
+    degrees: orientation.degrees,
+    textWidth,
+    lineHeight,
+    box,
+    hAlign,
+    vAlign,
+  });
+  ctx.save();
+  ctx.translate(placement.cx, placement.cy);
+  ctx.rotate(placement.radians);
+  ctx.fillText(text, -textWidth / 2, 0);
+  ctx.restore();
+}
+
+/**
+ * Paint an ACCOUNTING value's runs between `left` and `right` (the content box)
+ * on the baseline `textY` the caller has set up -- or Excel's '####' across the
+ * box when the runs do not fit: Excel will not drop the symbol or the decimals
+ * to make an accounting value fit.
+ *
+ * Shared by both painters. The pane painter used to paint the one-string
+ * fallback (`display`), so a frozen column of amounts lost its alignment.
+ */
+export function paintAccountingValue(
+  ctx: CanvasRenderingContext2D,
+  layout: AccountingLayout,
+  left: number,
+  right: number,
+  textY: number,
+  numberFormat: string,
+  transported: CellData["overflow"],
+): void {
+  const measure = (t: string) => ctx.measureText(t).width;
+  const available = right - left;
+  const { runs, width } = layoutAccountingRuns(layout, left, right, measure);
+  if (width > available) {
+    const marker = fitNumericDisplay({
+      display: layout.value,
+      numberFormat,
+      availableWidth: available,
+      measure,
+      displayWidth: width,
+      transported,
+    });
+    ctx.fillText(marker.text, left, textY);
+    return;
+  }
+  for (const run of runs) ctx.fillText(run.text, run.x, textY);
+}
 
 // ============================================================================
 // Over-selection cell decorations
@@ -1032,12 +1144,19 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
       const styleIndex = cell.styleIndex ?? 0;
       const baseCellStyle = getStyleFromCache(styleCache, styleIndex);
 
-      // Calculate indent offset (each level = 8px at zoom 1.0)
+      // The indent is applied once the cell's ALIGNMENT is known (below):
+      // Excel measures it from the right edge for Right, ignores it for Center
+      // and draws an indented General value as Left (layout/cellIndent.ts).
       const indentLevel = (baseCellStyle as { indent?: number }).indent ?? 0;
-      const indentOffset = indentLevel * 8;
 
-      // Available width for text (reduced by indent) — may be extended by overflow later
-      let availableWidth = cellRight - cellLeft - paddingX * 2 - indentOffset;
+      // Available width for text -- narrowed by the indent and widened by a
+      // spill below, both once the alignment is known.
+      //
+      // ONLY THE PADDING may skip the cell here. This test used to include the
+      // indent, so an indent wider than the column skipped the WHOLE cell --
+      // its fill, its borders and its indicators along with its text. With
+      // Excel's 250-level indent that is any indented cell in a narrow column.
+      let availableWidth = cellRight - cellLeft - paddingX * 2;
 
       if (availableWidth <= 0) {
         baseX += colWidth;
@@ -1084,7 +1203,11 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
         hasStrikethrough = true;
       }
 
-      if (typeof effectiveStyle.fontSize === "number" && effectiveStyle.fontSize > 0 && effectiveStyle.fontSize < 200) {
+      if (
+        typeof effectiveStyle.fontSize === "number" &&
+        effectiveStyle.fontSize > 0 &&
+        effectiveStyle.fontSize <= MAX_FONT_SIZE_POINTS
+      ) {
         fontSize = effectiveStyle.fontSize;
       }
 
@@ -1132,6 +1255,11 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
         cell.overflow
       );
       const shrinkToFit = (baseCellStyle as { shrinkToFit?: boolean }).shrinkToFit === true;
+      // Rotated and stacked text is laid out on its own (drawOrientedText): it
+      // neither spills sideways nor shrinks against the column width, both of
+      // which are questions about a HORIZONTAL run.
+      const orientation = parseTextOrientation(baseCellStyle.textRotation);
+      const isHorizontal = orientation.kind === "horizontal";
 
       // In Show Formulas mode, force left alignment for formula cells
       if (state.showFormulas && cell.formula) {
@@ -1158,7 +1286,19 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
         } else if (contentKind === "numeric") {
           textAlign = "right";
         }
+        // An INDENTED General value is drawn Left, number or not: Excel turns
+        // General into Left the moment an indent is set (measured), so a
+        // General cell with an indent is a state Excel itself never shows.
+        textAlign = alignmentWithIndent(baseCellStyle.textAlign, textAlign, indentLevel);
       }
+
+      // The indent, now that the side is known: from the left edge for Left
+      // (and the General it became), from the RIGHT edge for Right, nothing for
+      // Center. It used to be applied from the left for every alignment, so a
+      // right-aligned value showed no indent and a centred one moved by half.
+      const indentOffset = effectiveIndentPx(baseCellStyle.textAlign, indentLevel);
+      let textBox = indentedTextBox(textAlign, cellLeft + paddingX, cellRight - paddingX, indentOffset);
+      availableWidth = textBox.width;
 
       // Calculate overflow width for text that extends beyond the cell.
       //
@@ -1195,6 +1335,7 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
         !hardBreak &&
         !isMergedMaster &&
         !shrinkToFit &&
+        isHorizontal &&
         contentKind === "text" &&
         (textAlign === "left" || textAlign === "center")
       ) {
@@ -1237,7 +1378,8 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
 
       // Update available width if overflow extended the region
       if (overflowRight > cellRight) {
-        availableWidth = overflowRight - cellLeft - paddingX * 2 - indentOffset;
+        textBox = indentedTextBox(textAlign, cellLeft + paddingX, overflowRight - paddingX, indentOffset);
+        availableWidth = textBox.width;
       }
 
       // Set up clipping region (extended for text overflow)
@@ -1364,7 +1506,7 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
       // the marker appears only if even the shrunken text will not fit. Running
       // it here means every measurement below — including the '####' decision —
       // is taken at the font the cell will really paint.
-      if (shrinkToFit && availableWidth > 0 && !isEmpty) {
+      if (shrinkToFit && isHorizontal && availableWidth > 0 && !isEmpty) {
         const testFont = buildCellFont(fontStyle, fontWeight, fontSize, fontFamily);
         ctx.font = testFont;
         const textWidth = ctx.measureText(displayValue).width;
@@ -1384,41 +1526,37 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
       // Pixel font size for all vertical metrics (line height, baseline offsets).
       const fontSizePx = pointsToPixels(fontSize);
 
-      // Get vertical alignment and text rotation from style
+      // Vertical alignment from the style (the DOCUMENT default is bottom)
       const vAlign = baseCellStyle.verticalAlign || "bottom";
-      const textRotation = baseCellStyle.textRotation || "none";
 
       // -----------------------------------------------------------------------
-      // Text Rotation
+      // Rotated and stacked text (Orientation)
       // -----------------------------------------------------------------------
-      if (textRotation !== "none" && textRotation !== "0") {
-        let angleDeg = 0;
-        if (textRotation === "rotate90" || textRotation === "90") {
-          angleDeg = -90;
-        } else if (textRotation === "rotate270" || textRotation === "270" || textRotation === "-90") {
-          angleDeg = 90;
-        } else if (textRotation.startsWith("custom:")) {
-          angleDeg = -(parseInt(textRotation.substring(7), 10) || 0);
-        }
-
-        if (angleDeg !== 0) {
-          const angleRad = (angleDeg * Math.PI) / 180;
-          const centerX = (cellLeft + cellRight) / 2;
-          const centerY = (cellTop + cellBottom) / 2;
-
-          ctx.translate(centerX, centerY);
-          ctx.rotate(angleRad);
-
-          // For rotated text, use available height as the "width" for truncation
-          const rotatedMaxWidth = cellBottom - cellTop - paddingY * 2;
-          ctx.textBaseline = "middle";
-          drawTextWithTruncation(ctx, displayValue, -rotatedMaxWidth / 2, 0, rotatedMaxWidth, textAlign);
-
-          // Reset transform (restore handles this)
-          ctx.restore();
-          baseX += colWidth;
-          continue;
-        }
+      //
+      // This branch used to pivot every rotated run on the cell CENTRE, ignore
+      // the vertical alignment, size the run to `cell height - padding`, and
+      // knew nothing of stacked text ("vertical", Excel's Vertical Text), which
+      // therefore painted horizontally. Placement now follows Excel's measured
+      // rules (layout/textOrientation.ts) through the helper the pane painter
+      // shares. The box is the TRUE cell geometry; the clip set up above cuts it.
+      if (orientation.kind !== "horizontal") {
+        drawOrientedText(
+          ctx,
+          orientation,
+          displayValue,
+          {
+            left: x + paddingX,
+            top: y + paddingY,
+            right: x + actualWidth - paddingX,
+            bottom: y + actualHeight - paddingY,
+          },
+          baseCellStyle.textAlign,
+          vAlign,
+          fontSizePx,
+        );
+        ctx.restore();
+        baseX += colWidth;
+        continue;
       }
 
       // -----------------------------------------------------------------------
@@ -1488,8 +1626,7 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
           // Skip lines above the cell
           if (lineY + lineHeight / 2 < cellTop) continue;
 
-          const lineTextX = cellLeft + paddingX + indentOffset;
-          drawTextWithTruncation(ctx, lines[i], lineTextX, lineY, availableWidth, textAlign);
+          drawTextWithTruncation(ctx, lines[i], textBox.x, lineY, availableWidth, textAlign);
         }
 
         ctx.restore();
@@ -1504,7 +1641,7 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
       // to know whether this cell belongs to this painter before it claims it.
       if (richTextRuns && hasRichText) {
         ctx.textBaseline = "middle";
-        const textX = cellLeft + paddingX + indentOffset;
+        const textX = textBox.x;
         const textY = vAlign === "top"
           ? cellTop + paddingY + fontSizePx / 2
           : vAlign === "bottom"
@@ -1525,8 +1662,15 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
       }
 
       // -----------------------------------------------------------------------
-      // Accounting layout: symbol at left edge, value at right edge
+      // Accounting layout: Excel's left-edge run, fill, right-edge run
       // -----------------------------------------------------------------------
+      //
+      // The runs are positioned by `layoutAccountingRuns` (rendering/
+      // accountingLayout.ts). Symbol-AFTER used to be drawn as a mirror image
+      // of symbol-before -- the number at the LEFT edge, the symbol at the
+      // right -- where Excel puts the fill first and the number against the
+      // symbol (survey defect A). An accounting value fills the cell edge to
+      // edge, so neither the alignment nor the indent moves it.
       const acctLayout = (cell as { accountingLayout?: AccountingLayout }).accountingLayout;
       if (acctLayout) {
         let acctTextY: number;
@@ -1541,41 +1685,18 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
           acctTextY = y + actualHeight / 2;
         }
 
-        const symbolX = cellLeft + paddingX;
-        const valueX = cellLeft + paddingX;
-        const valueWidth = availableWidth;
-
         // Accounting is a currency layout and currency is a number: an
-        // Accounting cell too narrow for symbol + value shows '####' across the
-        // whole box, exactly as any other explicit format does. Excel will not
-        // drop the symbol or the decimals to make it fit.
-        const acctWidth =
-          ctx.measureText(acctLayout.symbol).width + ctx.measureText(acctLayout.value).width;
-        if (acctWidth > valueWidth) {
-          const marker = fitNumericDisplay({
-            display: acctLayout.value,
-            numberFormat: baseCellStyle.numberFormat ?? "",
-            availableWidth: valueWidth,
-            measure: measureAt,
-            displayWidth: acctWidth,
-            transported: cell.overflow,
-          });
-          ctx.fillText(marker.text, valueX, acctTextY);
-          ctx.restore();
-          baseX += colWidth;
-          continue;
-        }
-
-        if (acctLayout.symbolBefore) {
-          // Symbol left-aligned, value right-aligned
-          ctx.fillText(acctLayout.symbol, symbolX, acctTextY);
-          drawTextWithTruncation(ctx, acctLayout.value, valueX, acctTextY, valueWidth, "right");
-        } else {
-          // Value left-aligned, symbol right-aligned
-          drawTextWithTruncation(ctx, acctLayout.value, valueX, acctTextY, valueWidth, "left");
-          const symbolWidth = ctx.measureText(acctLayout.symbol).width;
-          ctx.fillText(acctLayout.symbol, cellRight - paddingX - symbolWidth, acctTextY);
-        }
+        // Accounting cell too narrow for its runs shows '####' across the
+        // whole box, exactly as any other explicit format does.
+        paintAccountingValue(
+          ctx,
+          acctLayout,
+          cellLeft + paddingX,
+          cellRight - paddingX,
+          acctTextY,
+          baseCellStyle.numberFormat ?? "",
+          cell.overflow,
+        );
 
         ctx.restore();
         baseX += colWidth;
@@ -1585,7 +1706,7 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
       // -----------------------------------------------------------------------
       // Standard (single-line) rendering with vertical alignment
       // -----------------------------------------------------------------------
-      const textX = cellLeft + paddingX + indentOffset;
+      const textX = textBox.x;
       let textY: number;
 
       if (vAlign === "top") {

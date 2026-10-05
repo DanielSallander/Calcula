@@ -41,6 +41,8 @@
 import { CommandRegistry } from "@api/commands";
 import { registerKeybinding, isGridFocused } from "@api/keybindings";
 import {
+  WORKSHEET_CONTROL_COPY_COMMAND,
+  WORKSHEET_CONTROL_PASTE_COMMAND,
   canvasOwnsObjectClipboard,
   copySelectedObjects,
   duplicateSelectedObjects,
@@ -64,8 +66,15 @@ export interface ControlClipboardKeyDeps {
   group(controlIds: string[]): void;
 }
 
-export const CONTROLS_COPY_COMMAND = "ext.controls.copySelection";
-export const CONTROLS_PASTE_COMMAND = "ext.controls.pasteSelection";
+// Copy and Paste register under the ids @api/objectClipboard names, so the
+// ribbon's and the Edit menu's doors (`clipboardDoorCommand`, which answers
+// these on a worksheet with a control selected) run exactly these commands:
+// one spelling of each id, owned by the seam (as CanvasSheet's canvas ids are,
+// lib/canvasClipboard.ts). A literal spelled here again would drift from the
+// door on its first rename -- the ribbon's Copy then falling back, silently,
+// to the refused cell copy.
+export const CONTROLS_COPY_COMMAND = WORKSHEET_CONTROL_COPY_COMMAND;
+export const CONTROLS_PASTE_COMMAND = WORKSHEET_CONTROL_PASTE_COMMAND;
 export const CONTROLS_DUPLICATE_COMMAND = "ext.controls.duplicateSelection";
 export const CONTROLS_GROUP_COMMAND = "ext.controls.groupSelection";
 

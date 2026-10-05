@@ -1,7 +1,7 @@
 //! FILENAME: app/extensions/Pivot/lib/__tests__/pivotMergeGuard.test.ts
 // PURPOSE: Merging or unmerging cells of a PivotTable is refused for EVERY
-//          block of the selection (the structural guards beside it read only
-//          the main range), and allowed outside every pivot.
+//          block of the selection (as the row/column guards beside it are,
+//          pivotStructuralGuard.test.ts), and allowed outside every pivot.
 
 import { describe, it, expect } from "vitest";
 import type { Selection } from "@api/types";

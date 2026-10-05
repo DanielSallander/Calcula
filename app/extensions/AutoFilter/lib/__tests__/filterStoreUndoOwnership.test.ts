@@ -169,4 +169,32 @@ describe.each(SORTS)("AutoFilter dropdown: $name", (g) => {
     expect(slot.dropped).toEqual([g.name]);
     expect(slot.open).toBeNull();
   });
+
+  // 2026-10-05 (the Home tab's Sort A to Z had the same shape, fixed in
+  // Sorting/lib/quickSort.ts): the REAPPLY records its own "Filter" undo entry,
+  // so committing before it made the sort two Ctrl+Z steps, and the first one
+  // put the old hidden-row INDEX set back over the sorted rows -- the wrong
+  // rows hidden. The reapply must land inside the sort's own step.
+  it("reapplies the filter INSIDE its own undo step, so one Ctrl+Z takes back sort and filter together", async () => {
+    // Recorded, not asserted inside the double: an assertion thrown there would
+    // land in the sort's own catch and be swallowed.
+    let openDuringReapply: string | null = "never reapplied";
+    mockReapplyAutoFilter.mockImplementation(async () => {
+      openDuringReapply = slot.open?.label ?? null;
+      return okResult();
+    });
+    await g.run();
+    expect(openDuringReapply, "the reapply ran after the sort's step was closed").toBe(g.name);
+    expect(slot.committed).toEqual([g.name]);
+    expect(slot.open).toBeNull();
+  });
+
+  it("a reapply that throws after the sort landed still COMMITS the sort's step (never drops a landed write)", async () => {
+    mockReapplyAutoFilter.mockImplementation(async () => {
+      throw new Error("reapply failed");
+    });
+    await g.run();
+    expect(slot.committed).toEqual([g.name]);
+    expect(slot.dropped).toEqual([]);
+  });
 });

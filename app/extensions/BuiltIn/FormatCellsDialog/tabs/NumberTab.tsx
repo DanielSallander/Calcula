@@ -40,7 +40,17 @@ function localeCategories(loc: LocaleSettings | null): NumberFormatCategory[] {
 }
 
 export function NumberTab(): React.ReactElement {
-  const { numberFormat, setNumberFormat } = useFormatCellsStore();
+  const { numberFormat, setNumberFormat, numberCategory } = useFormatCellsStore();
+
+  /**
+   * The category a caller asked to open on (`FORMAT_CELLS { category }` --
+   * the Accounting split button's "More Accounting Formats..." asks for
+   * "accounting", as Excel's does). It is PINNED until the user moves: the
+   * cell's own format lands asynchronously after mount and would otherwise
+   * yank a General cell's dialog straight back to General. Clicking a category
+   * or a format releases it.
+   */
+  const pinnedCategory = useRef<string | null>(numberCategory);
 
   const [locale, setLocale] = useState<LocaleSettings | null>(() => getCachedLocale());
   /**
@@ -95,24 +105,42 @@ export function NumberTab(): React.ReactElement {
   // formatted cell always reopened on General with nothing highlighted.
   const findCurrentCategory = (): string => categoryForFormat(numberFormat, ribbon);
 
-  const [selectedCategory, setSelectedCategory] = useState(findCurrentCategory);
+  const [selectedCategory, setSelectedCategory] = useState(
+    () => pinnedCategory.current ?? findCurrentCategory()
+  );
   const [customInput, setCustomInput] = useState(() => {
     // If already a custom format, initialize with it
     if (findCurrentCategory() === "custom") return numberFormat;
     return "";
   });
 
+  // The request is recorded by the dialog's own mount effect, which runs
+  // AFTER this tab's first render -- so it is picked up here, not only in the
+  // initial state above.
+  useEffect(() => {
+    if (numberCategory === null) return;
+    pinnedCategory.current = numberCategory;
+    setSelectedCategory(numberCategory);
+  }, [numberCategory]);
+
   // The dialog loads the cell's style asynchronously AFTER mount
   // (FormatCellsDialog.loadCurrentStyle), so re-derive the selected category
   // when the format lands or changes. Selecting a preset maps to its own
-  // category, so this never yanks the user away while browsing categories.
+  // category, so this never yanks the user away while browsing categories --
+  // and a PINNED category (see above) is not yanked away either.
   useEffect(() => {
+    if (pinnedCategory.current !== null) return;
     const next = categoryForFormat(numberFormat, ribbon);
     setSelectedCategory((prev) => (prev === next ? prev : next));
     if (next === "custom") setCustomInput(numberFormat);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- format and the
     // resolved ribbon rows; re-running when the rows land is the point.
   }, [numberFormat, ribbon]);
+
+  /** The user moved: the request has done its job. */
+  const releasePin = (): void => {
+    pinnedCategory.current = null;
+  };
   const [preview, setPreview] = useState<{ display: string; color?: string }>({ display: "Sample" });
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -152,6 +180,7 @@ export function NumberTab(): React.ReactElement {
   }, [customInput, selectedCategory, fetchPreview]);
 
   const handleCustomInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    releasePin();
     const val = e.target.value;
     setCustomInput(val);
     if (val.trim()) {
@@ -188,6 +217,7 @@ export function NumberTab(): React.ReactElement {
     "1,234.00";
 
   const handlePresetClick = (value: string) => {
+    releasePin();
     if (selectedCategory === "custom") {
       setCustomInput(value);
       setNumberFormat(value);
@@ -208,6 +238,7 @@ export function NumberTab(): React.ReactElement {
     // empty in exactly that case (see above), so the fallback is reachable
     // rather than dead.
     const symbol = currentSymbolValue || currencyRows?.[0]?.value;
+    releasePin();
     if (symbol) setNumberFormat(`${symbol}${suffix}`);
   };
 
@@ -222,7 +253,10 @@ export function NumberTab(): React.ReactElement {
               <CategoryItem
                 key={cat.id}
                 $selected={selectedCategory === cat.id}
-                onClick={() => setSelectedCategory(cat.id)}
+                onClick={() => {
+                  releasePin();
+                  setSelectedCategory(cat.id);
+                }}
               >
                 {cat.label}
               </CategoryItem>

@@ -82,8 +82,8 @@ describe("PRESET_STYLES", () => {
 // ============================================================================
 
 describe("PRESET_COLOR_SCALES", () => {
-  it("contains 8 color scale presets", () => {
-    expect(PRESET_COLOR_SCALES).toHaveLength(8);
+  it("contains Excel's 12 color scale presets (cfPresets.test.ts pins each one)", () => {
+    expect(PRESET_COLOR_SCALES).toHaveLength(12);
   });
 
   it("each preset has label, minColor, and maxColor", () => {
@@ -112,12 +112,13 @@ describe("PRESET_COLOR_SCALES", () => {
     expect(twoColorScales.length).toBeGreaterThanOrEqual(4);
   });
 
-  it("Green-Yellow-Red scale has correct colors", () => {
+  it("Green-Yellow-Red scale has Excel's colors: the HIGHEST value green [LIVE 2026-10-04]", () => {
+    // This test used to pin the upside-down scale (min green, max red).
     const gyr = PRESET_COLOR_SCALES[0];
     expect(gyr.label).toBe("Green - Yellow - Red");
-    expect(gyr.minColor).toBe("#63BE7B");
+    expect(gyr.minColor).toBe("#F8696B");
     expect(gyr.midColor).toBe("#FFEB84");
-    expect(gyr.maxColor).toBe("#F8696B");
+    expect(gyr.maxColor).toBe("#63BE7B");
   });
 
   it("Red-Yellow-Green is reverse of Green-Yellow-Red", () => {
