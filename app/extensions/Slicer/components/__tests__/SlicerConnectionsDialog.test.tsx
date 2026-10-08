@@ -175,7 +175,11 @@ describe("Report Connections for a model slicer", () => {
     const page = container.querySelector('[data-testid="model-slicer-page"]');
     expect(page?.textContent).toContain("Revenue by Region");
     expect(page?.textContent).toContain("Units by Year");
-    expect(page?.textContent).toContain("Charts that query the model directly are not filtered yet");
+    // Design-query charts on the page follow the slicer (@api/pageFilters,
+    // owner decision 5 of 2026-10-08): the dialog names them, and never says
+    // the old "not filtered yet" any more -- that would be a lie now.
+    expect(page?.textContent).toContain("every chart that queries this model directly");
+    expect(page?.textContent).not.toContain("not filtered yet");
     const boxes = Array.from(page!.querySelectorAll("input[type=checkbox]")) as HTMLInputElement[];
     expect(boxes).toHaveLength(2);
     expect(boxes.every((b) => b.checked && b.disabled)).toBe(true);

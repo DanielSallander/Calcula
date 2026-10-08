@@ -3,7 +3,7 @@
 // CONTEXT: The ChartSpec is the single source of truth for chart rendering.
 //          The dialog produces it, the renderer reads it, the script editor exposes it.
 
-import { getChartMarkMeta } from "@api/chartMarks";
+import { getChartMarkMeta, chartMarkFurniture, type ChartMarkFurniture } from "@api/chartMarks";
 
 // ============================================================================
 // Chart Types
@@ -28,7 +28,18 @@ export type ChartType =
   | "stock"
   | "boxPlot"
   | "sunburst"
-  | "pareto";
+  | "pareto"
+  // Power BI's tile visuals (2026-10-08, owner decision 2). They are chart MARKS
+  // rather than a new object family because a mark inherits, for free, every
+  // thing a chart already has on a canvas: selection, Size & Position, z-order,
+  // copy/paste, undo, `.cala`/`.calp` persistence, object scripts and the three
+  // data sources (range, pivot, design query). None of them has axes; they
+  // register with layoutFamily "other" and furniture "titleOnly" — see
+  // rendering/visuals/.
+  | "card"
+  | "multiRowCard"
+  | "kpi"
+  | "gauge";
 
 /**
  * A chart mark: a built-in {@link ChartType}, or any custom mark id registered
@@ -51,7 +62,33 @@ export type RadialChartType = "pie" | "donut" | "radar";
 export function isCartesianChart(mark: string): boolean {
   const family = getChartMarkMeta(mark)?.layoutFamily;
   if (family) return family === "cartesian";
-  return mark !== "pie" && mark !== "donut" && mark !== "radar" && mark !== "funnel" && mark !== "treemap" && mark !== "sunburst";
+  return !NON_CARTESIAN_BUILTIN_MARKS.has(mark);
+}
+
+/**
+ * The built-in marks without axes, for {@link isCartesianChart}'s fallback
+ * (before the registry is populated). The four tile visuals are in it: a Card
+ * read as "cartesian" during the first paint would be offered gridlines and an
+ * axis-label toggle for a chart that has neither.
+ */
+const NON_CARTESIAN_BUILTIN_MARKS: ReadonlySet<string> = new Set([
+  "pie", "donut", "radar", "funnel", "treemap", "sunburst",
+  "card", "multiRowCard", "kpi", "gauge",
+]);
+
+/** The built-in tile visuals, for {@link markFurniture}'s pre-registry fallback. */
+const TITLE_ONLY_BUILTIN_MARKS: ReadonlySet<string> = new Set(["card", "multiRowCard", "kpi", "gauge"]);
+
+/**
+ * Which furniture a mark has — the REGISTRY's answer (`@api/chartMarks`
+ * `chartMarkFurniture`, contract §4.2) when the mark is registered, and a
+ * built-in fallback before the registry is populated, the same arrangement
+ * {@link isCartesianChart} uses. Every Charts surface that offers a legend,
+ * data labels or a data table asks this.
+ */
+export function markFurniture(mark: string): ChartMarkFurniture {
+  if (getChartMarkMeta(mark)) return chartMarkFurniture(mark);
+  return TITLE_ONLY_BUILTIN_MARKS.has(mark) ? "titleOnly" : "full";
 }
 
 // ============================================================================
@@ -298,6 +335,21 @@ export interface ComboMarkOptions {
   secondaryAxisSeries?: number[];
   /** Secondary Y axis configuration. */
   secondaryAxis?: AxisSpec;
+  /**
+   * How the BAR series sit in a category: side by side ("none", Power BI's
+   * "Line and clustered column") or on top of each other ("stacked", Power BI's
+   * "Line and stacked column"). Lines and areas are never stacked — they are the
+   * comparison drawn OVER the columns. Default: "none".
+   *
+   * THE NAME IS SHARED WITH BAR/LINE/AREA ON PURPOSE (contract §4.1), and that
+   * has a cost the reader should know: `updateChartSpec` deep-merges, so a
+   * type switch that writes only `mark` carries a stacked column's
+   * `stackMode: "stacked"` into the combo and the combo's columns stack. That
+   * is what "turn this stacked column into a line and stacked column" means, so
+   * it is kept; a percent mode has no meaning here (the line shares the value
+   * axis) and the painter reads anything but "stacked" as clustered.
+   */
+  stackMode?: "none" | "stacked";
 }
 
 /** Options specific to radar charts. */
@@ -431,6 +483,118 @@ export interface ParetoMarkOptions {
   show80PercentLine?: boolean;
 }
 
+// ----------------------------------------------------------------------------
+// Tile visuals: Card, Multi-row card, KPI, Gauge (Power BI's report visuals)
+// ----------------------------------------------------------------------------
+
+/**
+ * Power BI's "Display units". "auto" picks K / M / bn / T from the magnitude
+ * (11,732 shows as "12K"); "none" shows the number as the SOURCE formatted it
+ * (a currency cell stays "$1,234.50"). The others force one unit.
+ */
+export type VisualDisplayUnits = "auto" | "none" | "thousands" | "millions" | "billions" | "trillions";
+
+/**
+ * How a card or a gauge turns a value FIELD (one series, many categories) into
+ * the one number it shows. "auto" is Power BI's default: one datum is shown as
+ * it is; many numbers are summed; a text field shows its first value.
+ */
+export type VisualAggregate = "auto" | "first" | "last" | "sum" | "average" | "min" | "max" | "count";
+
+/** Options for the Card visual: one callout value per series, with its label. */
+export interface CardMarkOptions {
+  /** Display units for the callout. Default: "auto". */
+  displayUnits?: VisualDisplayUnits;
+  /** Decimal places. Default: automatic (0 at 10 or more of a unit, else 1). */
+  decimals?: number;
+  /** How a multi-row series becomes one value. Default: "auto". */
+  aggregate?: VisualAggregate;
+  /** Show the category label (the series name) under the callout. Default: true. */
+  showCategoryLabel?: boolean;
+  /** Callout font size in px. Default: fitted to the card. */
+  calloutFontSize?: number;
+}
+
+/** Options for the Multi-row card: one row per category, one field per series. */
+export interface MultiRowCardMarkOptions {
+  /** Display units for every value. Default: "auto". */
+  displayUnits?: VisualDisplayUnits;
+  /** Decimal places. Default: automatic. */
+  decimals?: number;
+  /** Show the coloured accent bar on each row's left edge. Default: true. */
+  showAccentBar?: boolean;
+  /** Show the category as the row's title. Default: true. */
+  showRowTitle?: boolean;
+}
+
+/** Whether a higher or a lower indicator is the good direction. */
+export type KpiDirection = "higherIsBetter" | "lowerIsBetter";
+
+/**
+ * Options for the KPI visual. Data: categories are the TREND AXIS (sorted
+ * ascending, as Power BI requires), series 0 is the INDICATOR and series 1, when
+ * present, is the GOAL per period. The visual shows the latest period.
+ */
+export interface KpiMarkOptions {
+  /** Which direction is good. Default: "higherIsBetter". */
+  direction?: KpiDirection;
+  /** A fixed goal, used when the data has no goal series. */
+  goal?: number;
+  /** Draw the trend area behind the value. Default: true. */
+  showTrend?: boolean;
+  /** Show the "Goal: ... (+x%)" line. Default: true. */
+  showGoal?: boolean;
+  /** Show the distance to goal in that line. Default: true. */
+  showDistance?: boolean;
+  /** Colour when the indicator is on the good side of the goal. */
+  goodColor?: string;
+  /** Colour when it is on the bad side. */
+  badColor?: string;
+  /** Colour when there is no goal to compare with. */
+  neutralColor?: string;
+  /** Display units for the indicator and the goal. Default: "auto". */
+  displayUnits?: VisualDisplayUnits;
+  /** Decimal places. Default: automatic. */
+  decimals?: number;
+}
+
+/**
+ * Options for the Gauge visual: a 180-degree arc filled from the minimum to the
+ * value, with a needle at the target. Power BI's defaults: minimum 0, maximum
+ * DOUBLE the value (so the value sits half way).
+ */
+export interface GaugeMarkOptions {
+  /** Fixed minimum. Default: the min series, else 0. */
+  min?: number;
+  /** Fixed maximum. Default: the max series, else twice the value. */
+  max?: number;
+  /** Fixed target. Default: the target series. */
+  target?: number;
+  /**
+   * The series that feeds the target, in PAINTER space. Default: series 1 when
+   * there are two or more series; -1 for none.
+   */
+  targetSeriesIndex?: number;
+  /** The series that feeds the minimum. Default: none. */
+  minSeriesIndex?: number;
+  /** The series that feeds the maximum. Default: none. */
+  maxSeriesIndex?: number;
+  /** How the value series becomes one number. Default: "auto". */
+  aggregate?: VisualAggregate;
+  /** Display units for every label. Default: "auto". */
+  displayUnits?: VisualDisplayUnits;
+  /** Decimal places. Default: automatic. */
+  decimals?: number;
+  /** Colour of the unfilled track. */
+  trackColor?: string;
+  /** Colour of the target needle. */
+  targetColor?: string;
+  /** Show the min / max labels at the arc's ends. Default: true. */
+  showMinMax?: boolean;
+  /** Show the target's value beside the needle. Default: true. */
+  showTargetLabel?: boolean;
+}
+
 /** Options for rule marks (reference lines). Used in layers. */
 export interface RuleMarkOptions {
   /** Y value for a horizontal reference line. */
@@ -501,6 +665,10 @@ export type MarkOptions =
   | BoxPlotMarkOptions
   | SunburstMarkOptions
   | ParetoMarkOptions
+  | CardMarkOptions
+  | MultiRowCardMarkOptions
+  | KpiMarkOptions
+  | GaugeMarkOptions
   | RuleMarkOptions
   | TextMarkOptions
   | MarkerMarkOptions;
@@ -1517,6 +1685,14 @@ export interface ChartSpec {
    * reports the count (`seriesNameArity`) rather than picking one silently.
    */
   seriesColors?: Record<string, string>;
+  /**
+   * Plot the source range's HIDDEN rows and columns too (Excel's Select Data >
+   * Hidden and Empty Cells > "Show data in hidden rows and columns"). Off by
+   * default, as in Excel: a range chart leaves hidden category rows out, so
+   * an AutoFilter -- and a table slicer, which filters through one -- filters
+   * the chart. Range sources only; a pivot or design query filters itself.
+   */
+  plotHiddenCells?: boolean;
   /** Mark-specific options (type depends on `mark`). */
   markOptions?: MarkOptions;
   /** Additional layers overlaid on the primary chart (annotations, overlays). */
@@ -1671,6 +1847,69 @@ export interface ParsedChartData {
    * dataPointOverrides keys (see {@link keptSeriesIndices}).
    */
   keptCategoryIndices?: number[];
+  /**
+   * The SOURCE TEXT of every datum, as the cell or pivot showed it:
+   * `displayValues[seriesIndex][categoryIndex]`, aligned with `series[i].values`
+   * in PAINTER space. Present only when a reader had the text to hand (a range
+   * or a pivot); absent means "use the number".
+   *
+   * WHY IT EXISTS. `values` is numbers only: the parsers turn a cell they cannot
+   * read as a number into 0. That was harmless while every mark was a bar or a
+   * line, and it is a lie on a Card — a card over a text cell would show a
+   * confident "0", and a card over "$1,234.50" would show "1.2K" stripped of the
+   * currency. A Card and a Multi-row card show THIS text when the value is text,
+   * and keep its number format when display units are "none".
+   *
+   * WHO KEEPS IT ALIGNED. The chart filters and the selection keep drop the same
+   * series and categories from it that they drop from `values`; a TRANSFORM
+   * drops it entirely (a calculate or an aggregate makes new numbers the source
+   * never showed, and a stale text beside a recomputed number is the one wrong
+   * answer this field must never give).
+   */
+  displayValues?: string[][];
+  /**
+   * What every datum IS in its source: `datumKinds[seriesIndex][categoryIndex]`,
+   * aligned exactly like {@link displayValues}. Present only when the reader
+   * knew the type (a typed range read, a pivot or design-query view).
+   *
+   * WHY IT EXISTS. `values` cannot say "blank": the readers write 0 for an
+   * empty cell and for a pivot's empty measure, and `displayValues` cannot say
+   * it either, because "" there already means "a plain number, use it". So a
+   * Card over an empty cell, or over a measure that has no rows under the
+   * page's slicers, showed a confident "0" instead of Power BI's "(Blank)", an
+   * average counted the blank as a 0, and a KPI whose latest period has no
+   * actual yet reported it as "0, -100% off goal". And the source TYPE is what
+   * tells a number from a text that merely looks like one ("2026 budget").
+   *
+   * WHO KEEPS IT ALIGNED. The same code that keeps `displayValues` aligned: the
+   * chart filters and the selection keep drop the same entries, a transform
+   * drops the field.
+   */
+  datumKinds?: DatumKind[][];
+  /**
+   * The SOURCE'S OWN TOTAL of each series, aligned with `series` (null where a
+   * series has none): the pivot's or the design query's grand-total cell.
+   * Present only when the reader had a total row it did not chart.
+   *
+   * A Card over "Average of Price by Region" must show the average over ALL
+   * regions, which only the source can compute: adding up the regional
+   * averages is a different, wrong number, and so is adding up per-region
+   * distinct counts. Power BI's card evaluates the measure at the total; this
+   * is that total. Dropped whenever a category is filtered out (the total then
+   * describes rows the chart no longer shows) and by any transform.
+   */
+  seriesTotals?: Array<SeriesTotal | null>;
+}
+
+/** What one datum is in its source (see {@link ParsedChartData.datumKinds}). */
+export type DatumKind = "number" | "text" | "blank";
+
+/** One series' source total (see {@link ParsedChartData.seriesTotals}). */
+export interface SeriesTotal {
+  /** The total, or null when the source's total cell is blank. */
+  value: number | null;
+  /** The text the source shows for it ("" = a plain number). */
+  text: string;
 }
 
 /**

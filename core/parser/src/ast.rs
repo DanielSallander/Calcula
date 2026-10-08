@@ -507,6 +507,9 @@ pub enum BuiltinFunction {
     TextSplit,
     TextBefore,
     TextAfter,
+    // Calcula-only padding (not in Excel); Snowflake semantics, see fn_lpad.
+    LPad,
+    RPad,
     ValueToText,
     ArrayToText,
 
@@ -1107,6 +1110,8 @@ impl BuiltinFunction {
             "TEXTSPLIT" => BuiltinFunction::TextSplit,
             "TEXTBEFORE" => BuiltinFunction::TextBefore,
             "TEXTAFTER" => BuiltinFunction::TextAfter,
+            "LPAD" => BuiltinFunction::LPad,
+            "RPAD" => BuiltinFunction::RPad,
             "VALUETOTEXT" => BuiltinFunction::ValueToText,
             "ARRAYTOTEXT" => BuiltinFunction::ArrayToText,
 
@@ -1441,6 +1446,40 @@ impl BuiltinFunction {
         }
     }
 
+    /// True for a Calcula-only builtin that a USER DEFINITION of the same
+    /// name takes over: a workbook defined name, a LET binding or a LAMBDA
+    /// parameter called `LPAD` runs instead of the builtin.
+    ///
+    /// WHY ONLY THESE. Excel has no LPAD or RPAD, so they are among the LAMBDAs
+    /// Excel users write most often -- and many of those keep the RIGHT end of
+    /// a long text, where Calcula's builtin (Snowflake's rule) keeps the LEFT.
+    /// When the builtins landed, `from_name("LPAD")` silently took every such
+    /// call over: an imported workbook's `=LPAD(A1,3,"0")` gave a different
+    /// answer with no error. A name an Excel workbook can legitimately carry
+    /// must keep meaning what the workbook says. Excel's own function names
+    /// are not on this list: in Excel a call to one of them always runs the
+    /// function, so no imported workbook can depend on overriding it.
+    pub fn yields_to_user_definitions(&self) -> bool {
+        matches!(self, BuiltinFunction::LPad | BuiltinFunction::RPad)
+    }
+
+    /// The name a user definition must carry to take this call over: the
+    /// callee of a `Custom` call (`=myLambda(5)`), or the canonical name of a
+    /// builtin that [`yields_to_user_definitions`](Self::yields_to_user_definitions).
+    /// `None` for every other builtin.
+    ///
+    /// Every walk that treats a name in FUNCTION position as a possible
+    /// defined name (the dependency edge, the eval-time expansion, the casing
+    /// restamp, the rename) asks THIS, so they cannot disagree about which
+    /// calls a definition can reach.
+    pub fn user_definable_name(&self) -> Option<&str> {
+        match self {
+            BuiltinFunction::Custom(name) => Some(name.as_str()),
+            f if f.yields_to_user_definitions() => Some(f.to_canonical_name()),
+            _ => None,
+        }
+    }
+
     /// Returns the canonical uppercase function name for serialization.
     /// This is the inverse of `from_name`: for each variant, returns the primary
     /// (most common) name. Aliases like "AVG" map to "AVERAGE".
@@ -1654,6 +1693,8 @@ impl BuiltinFunction {
             BuiltinFunction::TextSplit => "TEXTSPLIT",
             BuiltinFunction::TextBefore => "TEXTBEFORE",
             BuiltinFunction::TextAfter => "TEXTAFTER",
+            BuiltinFunction::LPad => "LPAD",
+            BuiltinFunction::RPad => "RPAD",
             BuiltinFunction::ValueToText => "VALUETOTEXT",
             BuiltinFunction::ArrayToText => "ARRAYTOTEXT",
             BuiltinFunction::Days => "DAYS",
@@ -2095,6 +2136,8 @@ impl BuiltinFunction {
             FunctionMeta::new("TEXTSPLIT", "Text", "TEXTSPLIT(text, col_delimiter, [row_delimiter], [ignore_empty], [match_mode], [pad_with])", "Splits text into rows or columns"),
             FunctionMeta::new("TEXTBEFORE", "Text", "TEXTBEFORE(text, delimiter, [instance_num], [match_mode], [match_end], [if_not_found])", "Returns text before a delimiter"),
             FunctionMeta::new("TEXTAFTER", "Text", "TEXTAFTER(text, delimiter, [instance_num], [match_mode], [match_end], [if_not_found])", "Returns text after a delimiter"),
+            FunctionMeta::new("LPAD", "Text", "LPAD(text, length, [pad])", "Pads text on the left with a fill string to an exact length; longer text is cut to that length (Calcula function, not in Excel)"),
+            FunctionMeta::new("RPAD", "Text", "RPAD(text, length, [pad])", "Pads text on the right with a fill string to an exact length; longer text is cut to that length (Calcula function, not in Excel)"),
             FunctionMeta::new("VALUETOTEXT", "Text", "VALUETOTEXT(value, [format])", "Converts a value to text"),
             FunctionMeta::new("ARRAYTOTEXT", "Text", "ARRAYTOTEXT(array, [format])", "Converts an array to text"),
 

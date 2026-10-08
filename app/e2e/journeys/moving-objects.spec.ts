@@ -354,6 +354,8 @@ import {
   controlsOn,
   persistedCharts,
   type Obj,
+  canvasControl,
+  clickCanvasControl,
 } from "../helpers/canvas-live";
 import { samplePixelGrids, type PixelClip, type PixelSample } from "../viewportSample";
 import {
@@ -738,7 +740,7 @@ test.describe("a LOCKED timeline (canvas)", () => {
       await click(page, header);
       await eventually(() => objectOf(page, TL_REGION(tid)), (o) => o.selected, "a header click did not select the timeline");
       await openCanvasTab(page);
-      await page.locator('[data-testid="canvas-arrange-lock"]').click();
+      await clickCanvasControl(page, "canvas-arrange-lock");
       await eventually(() => lockedOn(page, sheet.index), (l) => l.length === 1, "Arrange > Lock locked nothing");
 
       const before = await timelineAt(page, tid);
@@ -1145,7 +1147,7 @@ test.describe("phase 3: eight handles that resize, a lock that shows (canvas)", 
 
       // ---- Locked: the padlock, and NO handle.
       await openCanvasTab(page);
-      await page.locator('[data-testid="canvas-arrange-lock"]').click();
+      await clickCanvasControl(page, "canvas-arrange-lock");
       await eventually(() => lockedOn(page, sheet.index), (l) => l.length === 1, "Arrange > Lock locked nothing");
       expect(await regionWidth(), "BUG-0268: locking put the shape's region back to its old width").toBe(W);
       await eventually(() => objectOf(page, made.instanceId), (o) => o.selected, "locking deselected the shape");
@@ -1984,21 +1986,6 @@ async function sizePosRowsShown(page: Page): Promise<number> {
   }, SIZE_POS_LABEL);
 }
 
-/** A ribbon control by test id, opening the band's launchers when its section is folded. */
-async function ribbonControl(page: Page, testId: string) {
-  const el = page.locator(`[data-testid="${testId}"]`).first();
-  if (!(await el.isVisible().catch(() => false))) {
-    const launchers = page.locator("[data-ribbon-content] button[aria-haspopup]");
-    const n = await launchers.count();
-    for (let i = 0; i < n && !(await el.isVisible().catch(() => false)); i++) {
-      await launchers.nth(i).click().catch(() => undefined);
-      await page.waitForTimeout(250);
-      if (!(await el.isVisible().catch(() => false))) await page.keyboard.press("Escape");
-    }
-  }
-  return el;
-}
-
 /** A bar chart of Sales by Product over Sheet1!A1:C7 (the TL_DATA table). */
 async function salesChart(page: Page, sheetIndex: number, C: { x: number; y: number; width: number; height: number }, title: string): Promise<string> {
   const sheetId = (await invoke<{ sheets: Array<{ sheetId?: string }> }>(page, "get_sheets")).sheets[0].sheetId;
@@ -2258,12 +2245,12 @@ for (const surface of ["worksheet", "canvas"] as const) {
           // ---- Canvas > Arrange > Size & Position: enabled with a selection, disabled without.
           await deselectAll(page, surface, sheet);
           await openCanvasTab(page);
-          const button = await ribbonControl(page, "canvas-arrange-size-position");
+          const button = await canvasControl(page, "canvas-arrange-size-position");
           await expect(button, "Size & Position is enabled with nothing selected").toBeDisabled();
           await click(page, await clientOf(page, Sh.x + Sh.width / 2, Sh.y + Sh.height / 2));
           await eventually(() => objectOf(page, shape.instanceId), (o) => o.selected, "a body click did not select the shape");
           await openCanvasTab(page);
-          const enabled = await ribbonControl(page, "canvas-arrange-size-position");
+          const enabled = await canvasControl(page, "canvas-arrange-size-position");
           await expect(enabled, "Size & Position is disabled with the shape selected").toBeEnabled();
           await enabled.click();
           await expect(sizePosDialog(page), "Arrange's Size & Position opened no dialog").toBeVisible();

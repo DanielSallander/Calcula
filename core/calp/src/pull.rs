@@ -2527,6 +2527,66 @@ mod tests {
         assert!(result.sheets[1].sheet.kind.is_worksheet(), "the worksheet beside it stays a worksheet");
     }
 
+    /// CONTRACT-CANVAS 4.7: a published canvas's WALLPAPER, LOCK OBJECTS and a
+    /// new page preset (Tooltip) ride the signed per-sheet metadata through a
+    /// real publish + pull, and a hostile wallpaper is repaired on the way in.
+    #[test]
+    fn a_pulled_canvas_keeps_its_wallpaper_lock_and_tooltip_page() {
+        let publish_and_pull = |layout: persistence::CanvasLayout| {
+            let mut wb = make_test_workbook();
+            wb.sheets[0].kind = persistence::SheetKind::Canvas(layout);
+            let dir = TempDir::new().unwrap();
+            let prof = TempDir::new().unwrap();
+            let reg = LocalWorkspace::open(dir.path()).unwrap();
+            let req = PublishRequest {
+                model_writebacks: None,
+                workbook: &wb,
+                package_name: "canvas-wallpaper".to_string(),
+                version: SemVer::new(1, 0, 0),
+                kind: "report".to_string(),
+                mode: PushMode::CreateNew,
+                change_summary: String::new(),
+                sheet_indices: vec![0],
+                now: "2026-10-08T00:00:00Z".to_string(),
+                published_by: "tester".to_string(),
+                writeback_regions: None,
+                object_scripts: None,
+                module_scripts: None,
+                notebooks: None,
+                data_sources: Vec::new(),
+                excluded_regions: Vec::new(),
+                custom_objects: Vec::new(),
+                include_comments: false,
+                min_app_version: String::new(),
+            };
+            publish::publish(&reg, &req, prof.path()).unwrap();
+            let pull_req = PullRequest {
+                package_name: "canvas-wallpaper".to_string(),
+                target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
+                now: "2026-10-08T01:00:00Z".to_string(),
+            };
+            let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+            result.sheets[0].sheet.kind.canvas_layout().expect("still a canvas").clone()
+        };
+
+        let layout = persistence::CanvasLayout {
+            wallpaper: "#0b1d2e".to_string(),
+            objects_locked: true,
+            page_preset: "tooltip".to_string(),
+            page_width: 320,
+            page_height: 240,
+            ..persistence::CanvasLayout::default()
+        };
+        assert_eq!(publish_and_pull(layout.clone()), layout, "the page arrives exactly as published");
+
+        let hostile = publish_and_pull(persistence::CanvasLayout {
+            wallpaper: "#fff;background:url(x)".to_string(),
+            ..persistence::CanvasLayout::default()
+        });
+        hostile.validate().unwrap();
+        assert_eq!(hostile.wallpaper, "", "a wallpaper that is not a hex colour is repaired to the theme's");
+    }
+
     /// A package whose canvas layout this build cannot express (a newer
     /// build's page preset, a zero grid) is REPAIRED on pull, not installed
     /// raw: installed raw, every later layout edit would fail on a field the

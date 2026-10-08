@@ -9024,6 +9024,13 @@ mod floating_range_recalc_tests;
 #[path = "canvas_sheet_tests.rs"]
 mod canvas_sheet_tests;
 
+/// CONTRACT-CANVAS 4.7: a canvas's wallpaper and LOCK OBJECTS, and every
+/// geometry door refusing a move on a locked page. A CHILD module of `data`
+/// only to reuse the `cross_sheet_recalc_tests::Workbook` harness.
+#[cfg(test)]
+#[path = "canvas_objects_lock_tests.rs"]
+mod canvas_objects_lock_tests;
+
 /// §2c follow-on — bulk range commands that rewrite cells must seed the ONE
 /// shared cascade, and cycles must be detected across sheet boundaries. Also a
 /// CHILD module of `data` for the same reason as above.

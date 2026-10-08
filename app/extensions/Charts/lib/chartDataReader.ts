@@ -20,7 +20,7 @@
 //          than 100,000 cells per call, so a larger range is read in bands (see
 //          `readRangeDisplayGrid`) instead of failing where the old read did not.
 
-import { getRangeCellsTyped } from "@api/lib";
+import { getRangeCellsTyped, getHiddenRowsInfo, getHiddenColsInfo } from "@api/lib";
 import { indexToCol, isSandboxTransformMounted, runSandboxTransform } from "@api";
 
 import type {
@@ -29,6 +29,7 @@ import type {
   DataRangeRef,
   DataSource,
   ParsedChartData,
+  DatumKind,
   SeriesOrientation,
   TransformSpec,
   TransformDiagnostic,
@@ -46,6 +47,7 @@ import { readDesignQueryData } from "./designQueryChartDataReader";
 import { applyChartFilters, applySelectionKeep } from "./chartFilters";
 import { parseDisplayNumber, detectCategoryField } from "./chartFieldTypes";
 import { lowerEncoding } from "./lowerEncoding";
+import { forgetHiddenSignature, rememberHiddenSignature } from "./hiddenLinesWatch";
 
 // ============================================================================
 // Sandboxed-transform routing
@@ -88,12 +90,44 @@ export const TYPED_RANGE_READ_CAP = 100_000;
  * after another, so a big source range still charts instead of failing.
  */
 export async function readRangeDisplayGrid(ref: DataRangeRef): Promise<string[][]> {
+  return (await readRangeGrid(ref)).display;
+}
+
+/**
+ * What one cell's TYPED value says about its number, beside its display text:
+ * a number (the engine's own value -- a date is its serial), `null` for an
+ * empty cell, or `undefined` for anything else (text, a boolean, an error), for
+ * which the display text is all there is.
+ */
+export type RangeCellNumber = number | null | undefined;
+
+/** A range read twice over: the text each cell shows, and what it holds. */
+export interface RangeGrid {
+  display: string[][];
+  numbers: RangeCellNumber[][];
+}
+
+/**
+ * Read a RESOLVED range into its display strings AND its typed values (see
+ * {@link readRangeDisplayGrid} for the sheet, the sparse read and the bands).
+ *
+ * THE TYPED VALUE IS THE NUMBER. Parsing the display text back into a number
+ * is a guess at the locale, and in the owner's sv-SE locale it guessed wrong:
+ * "1 234,50 kr" read as 123450 and an ISO date "2026-10-08" as 2026. The
+ * engine already said what the cell holds; the text is kept for what a Card
+ * WRITES, never for what it counts.
+ */
+export async function readRangeGrid(ref: DataRangeRef): Promise<RangeGrid> {
   const numRows = ref.endRow - ref.startRow + 1;
   const numCols = ref.endCol - ref.startCol + 1;
-  const grid: string[][] = Array.from({ length: numRows }, () =>
-    Array(numCols).fill(""),
+  const display: string[][] = Array.from({ length: Math.max(0, numRows) }, () =>
+    Array(Math.max(0, numCols)).fill(""),
   );
-  if (numRows <= 0 || numCols <= 0) return grid;
+  // An absent cell is EMPTY (the typed read is sparse), so null is the default.
+  const numbers: RangeCellNumber[][] = Array.from({ length: Math.max(0, numRows) }, () =>
+    Array(Math.max(0, numCols)).fill(null),
+  );
+  if (numRows <= 0 || numCols <= 0) return { display, numbers };
 
   const colsPerBand = Math.min(numCols, TYPED_RANGE_READ_CAP);
   const rowsPerBand = Math.max(1, Math.floor(TYPED_RANGE_READ_CAP / colsPerBand));
@@ -107,12 +141,100 @@ export async function readRangeDisplayGrid(ref: DataRangeRef): Promise<string[][
         const r = cell.row - ref.startRow;
         const c = cell.col - ref.startCol;
         if (r >= 0 && r < numRows && c >= 0 && c < numCols) {
-          grid[r][c] = cell.display ?? "";
+          display[r][c] = cell.display ?? "";
+          numbers[r][c] = typedCellNumber(cell);
         }
       }
     }
   }
-  return grid;
+  return { display, numbers };
+}
+
+/** {@link RangeCellNumber} of one typed cell. */
+function typedCellNumber(cell: { value: unknown; type?: string; display?: string }): RangeCellNumber {
+  if (cell.type === "number" && typeof cell.value === "number" && Number.isFinite(cell.value)) return cell.value;
+  if (cell.type === "empty" || (cell.value === null && (cell.display ?? "") === "")) return null;
+  return undefined;
+}
+
+// ============================================================================
+// Hidden rows and columns (Excel's "Show data in hidden rows and columns")
+// ============================================================================
+
+/** The hidden row / column OFFSETS inside a range (0 = its first row/col). */
+export interface HiddenLines {
+  rows: ReadonlySet<number>;
+  cols: ReadonlySet<number>;
+}
+
+export const NO_HIDDEN_LINES: HiddenLines = Object.freeze({ rows: new Set<number>(), cols: new Set<number>() });
+
+/**
+ * Which rows and columns of a resolved range are hidden on its sheet -- by
+ * hand, by an AutoFilter (a table slicer filters through one) or by an outline
+ * -- as offsets into the range.
+ *
+ * A read that fails answers "none hidden": the chart then shows every row, as
+ * it did before this existed, rather than failing to draw.
+ */
+export async function readHiddenLines(ref: DataRangeRef): Promise<HiddenLines> {
+  try {
+    const [rowsInfo, colsInfo] = await Promise.all([
+      getHiddenRowsInfo(ref.sheetIndex),
+      getHiddenColsInfo(ref.sheetIndex),
+    ]);
+    return hiddenLinesInRange(ref, rowsInfo?.effective ?? [], colsInfo?.effective ?? []);
+  } catch {
+    return NO_HIDDEN_LINES;
+  }
+}
+
+/** The hidden lines of a sheet that fall inside `ref`, as range offsets. Pure. */
+export function hiddenLinesInRange(
+  ref: Pick<DataRangeRef, "startRow" | "endRow" | "startCol" | "endCol">,
+  hiddenRows: readonly number[],
+  hiddenCols: readonly number[],
+): HiddenLines {
+  const rows = new Set<number>();
+  for (const r of hiddenRows) if (r >= ref.startRow && r <= ref.endRow) rows.add(r - ref.startRow);
+  const cols = new Set<number>();
+  for (const c of hiddenCols) if (c >= ref.startCol && c <= ref.endCol) cols.add(c - ref.startCol);
+  return { rows, cols };
+}
+
+/**
+ * The range as a chart sees it with its hidden lines left out, Excel's default
+ * (Select Data > Hidden and Empty Cells > "Show data in hidden rows and
+ * columns" off). Pure.
+ *
+ * The lines that hold CATEGORIES are dropped (hidden data rows in a columns
+ * chart, hidden data columns in a rows chart); the header line is always kept,
+ * because it names the series. A hidden SERIES line is still charted: the
+ * series definitions, the series filters and per-point formatting all address
+ * a series by its position, and dropping one here would shift every one after
+ * it onto another series' settings. AutoFilter, and so a table slicer, hides
+ * rows -- category lines -- which is the case this exists for.
+ */
+export function withoutHiddenLines(
+  grid: RangeGrid,
+  hidden: HiddenLines,
+  orientation: SeriesOrientation,
+  hasHeaders: boolean,
+): RangeGrid {
+  if (orientation === "columns") {
+    if (hidden.rows.size === 0) return grid;
+    const keep = (r: number) => (hasHeaders && r === 0) || !hidden.rows.has(r);
+    return {
+      display: grid.display.filter((_, r) => keep(r)),
+      numbers: grid.numbers.filter((_, r) => keep(r)),
+    };
+  }
+  if (hidden.cols.size === 0) return grid;
+  const keep = (c: number) => (hasHeaders && c === 0) || !hidden.cols.has(c);
+  return {
+    display: grid.display.map((row) => row.filter((_, c) => keep(c))),
+    numbers: grid.numbers.map((row) => row.filter((_, c) => keep(c))),
+  };
 }
 
 // ============================================================================
@@ -184,14 +306,16 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
   if (isPivotDataSource(resolvedSpec.data) || isDesignQueryDataSource(resolvedSpec.data)) {
     let parsedData = isPivotDataSource(resolvedSpec.data)
       ? await readPivotChartData(resolvedSpec.data)
-      : await readDesignQueryData(resolvedSpec.data);
+      // The chart id lets the design-query reader find the chart's PAGE, and
+      // so the model slicers on it (@api/pageFilters, model lane).
+      : await readDesignQueryData(resolvedSpec.data, chartId ? { chartId } : undefined);
 
     // Apply data transforms if specified
     if (resolvedSpec.transform && resolvedSpec.transform.length > 0) {
       // Pre-resolve lookup sources (async) so the pipeline can join by index.
       const lookupData = await resolveLookupSources(resolvedSpec.transform);
       // Async pipeline: sandboxed transforms await IN ORDER; built-ins/in-process run sync.
-      parsedData = await applyTransformsAsync(parsedData, resolvedSpec.transform, sandboxTransformRunner, diagnostics, lookupData, undefined, params);
+      parsedData = withoutSourceText(await applyTransformsAsync(parsedData, resolvedSpec.transform, sandboxTransformRunner, diagnostics, lookupData, undefined, params));
     }
 
     const unfilteredData = parsedData;
@@ -223,10 +347,19 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
   // deleted source sheet throws here, and the renderer shows that message).
   const dataRef = await resolveDataSource(resolvedSpec.data);
 
-  // A 2D grid of display values, read from the data's OWN sheet.
-  const numRows = dataRef.endRow - dataRef.startRow + 1;
-  const numCols = dataRef.endCol - dataRef.startCol + 1;
-  const grid = await readRangeDisplayGrid(dataRef);
+  // A 2D grid of display values AND typed values, read from the data's OWN
+  // sheet -- without its hidden rows/columns unless the spec plots them (an
+  // AutoFilter, and so a table slicer, filters a range chart by hiding rows).
+  const plotsHidden = resolvedSpec.plotHiddenCells === true;
+  const hidden = plotsHidden ? NO_HIDDEN_LINES : await readHiddenLines(dataRef);
+  if (chartId) {
+    if (plotsHidden) forgetHiddenSignature(chartId);
+    else rememberHiddenSignature(chartId, dataRef, hidden);
+  }
+  const typedGrid = withoutHiddenLines(await readRangeGrid(dataRef), hidden, seriesOrientation, hasHeaders);
+  const grid = typedGrid.display;
+  const numRows = grid.length;
+  const numCols = grid[0]?.length ?? (dataRef.endCol - dataRef.startCol + 1);
 
   // Compile an encoding spec to the series model now that we know the headers.
   const headers = seriesOrientation === "columns"
@@ -235,8 +368,8 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
   const lowered = resolvedSpec.encoding ? lowerEncoding(resolvedSpec, headers) : resolvedSpec;
 
   let parsedData = seriesOrientation === "columns"
-    ? parseColumnOriented(grid, numRows, numCols, hasHeaders, lowered.categoryIndex, lowered.series)
-    : parseRowOriented(grid, numRows, numCols, hasHeaders, lowered.categoryIndex, lowered.series);
+    ? parseColumnOriented(grid, numRows, numCols, hasHeaders, lowered.categoryIndex, lowered.series, typedGrid.numbers)
+    : parseRowOriented(grid, numRows, numCols, hasHeaders, lowered.categoryIndex, lowered.series, typedGrid.numbers);
 
   // Long-format view of the source columns, for the pivot transform.
   const tidyData = buildTidyData(grid, numRows, numCols, hasHeaders, seriesOrientation);
@@ -251,7 +384,7 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
   // transforms so encoding (which may prepend a pivot) keeps indices aligned.
   // Async pipeline: sandboxed transforms await IN ORDER; built-ins/in-process run sync.
   if (lowered.transform && lowered.transform.length > 0) {
-    parsedData = await applyTransformsAsync(parsedData, lowered.transform, sandboxTransformRunner, diagnostics, lookupData, tidyData, params);
+    parsedData = withoutSourceText(await applyTransformsAsync(parsedData, lowered.transform, sandboxTransformRunner, diagnostics, lookupData, tidyData, params));
   }
 
   const unfilteredData = parsedData;
@@ -376,6 +509,10 @@ const SERIES_COLOUR_BLIND_MARKS = new Set([
   "sunburst",
   "waterfall",
   "stock",
+  // A KPI colours its trend and its distance-to-goal by STATUS (good / bad /
+  // neutral against the goal); a series colour would contradict the status it
+  // exists to show, so the painter never reads one.
+  "kpi",
 ]);
 
 /**
@@ -502,6 +639,21 @@ async function readLookupRange(from: DataSource): Promise<ParsedChartData> {
 }
 
 /**
+ * Drop `displayValues` after a TRANSFORM ran. A calculate, an aggregate, a
+ * window or a pivot makes numbers the source never showed (and may reorder or
+ * reshape the rows), so the source text beside them would be the one wrong
+ * answer `displayValues` must never give: a card writing "$99.00" for a
+ * recomputed 198. Without it the visuals format the number themselves.
+ */
+function withoutSourceText(d: ParsedChartData): ParsedChartData {
+  if (d.displayValues === undefined && d.datumKinds === undefined && d.seriesTotals === undefined) return d;
+  // The kinds and the source's totals describe the SOURCE rows just as the
+  // text does: after a transform they describe rows that are no longer there.
+  const { displayValues: _text, datumKinds: _kinds, seriesTotals: _totals, ...rest } = d;
+  return rest;
+}
+
+/**
  * Attach a typed categoryField when the (post-transform) category labels are
  * all numeric or all dates — enabling a quantitative/temporal X axis for
  * scatter/bubble. Computed here, after transforms/filters, so the values always
@@ -616,7 +768,7 @@ export async function partitionByFacet(
       // a sandbox transform degrades to an "Unknown transform" diagnostic in this
       // throwaway sink rather than blocking the panel. filter/calculate evaluate
       // via the real engine (async) just like the single-chart path.
-      parsed = await applyTransformsAsync(parsed, lowered.transform, () => null, sink, lookupData, subTidy, params);
+      parsed = withoutSourceText(await applyTransformsAsync(parsed, lowered.transform, () => null, sink, lookupData, subTidy, params));
     }
     // NOTE: chart filters (hiddenCategories/hiddenSeries) are POSITIONAL indices
     // into the top-level chart's arrays — they don't map onto each panel's own
@@ -774,6 +926,32 @@ export async function autoDetectSeriesForOrientation(
 // Internal Parsers
 // ============================================================================
 
+/**
+ * One datum of a range: its number, what it IS, and the text it showed.
+ *
+ * - A cell whose typed value is a NUMBER is that number (a date is its serial),
+ *   whatever its display text looks like.
+ * - An EMPTY cell is blank: 0 in `values` (the cartesian painters plot it at
+ *   zero, as before), "blank" in its kind, so a Card writes "(Blank)" and an
+ *   average skips it.
+ * - Anything else (text, a boolean, an error) is TEXT; its number is what its
+ *   display text reads as, or 0 -- the lenient reading a bar chart always had.
+ * - Without a typed value (`numbers` absent: a lookup table, a caller that
+ *   only read text) the display text decides, as it always did.
+ */
+function rangeDatum(raw: string | undefined, typed: RangeCellNumber | "untyped"): { value: number; kind: DatumKind } {
+  const text = raw ?? "";
+  if (typed !== "untyped") {
+    if (typeof typed === "number") return { value: typed, kind: "number" };
+    if (typed === null) return { value: 0, kind: "blank" };
+    const n = parseDisplayNumber(text);
+    return { value: isNaN(n) ? 0 : n, kind: "text" };
+  }
+  if (text === "") return { value: 0, kind: "blank" };
+  const n = parseDisplayNumber(text);
+  return isNaN(n) ? { value: 0, kind: "text" } : { value: n, kind: "number" };
+}
+
 function parseColumnOriented(
   grid: string[][],
   numRows: number,
@@ -781,6 +959,7 @@ function parseColumnOriented(
   hasHeaders: boolean,
   categoryIndex: number,
   seriesDefs: ChartSeries[],
+  numbers?: RangeCellNumber[][],
 ): ParsedChartData {
   const dataStartRow = hasHeaders ? 1 : 0;
 
@@ -790,14 +969,24 @@ function parseColumnOriented(
     categories.push(grid[row][categoryIndex] || `Row ${row + 1}`);
   }
 
-  // Extract series values
+  // Extract series values, the text each one was read from and what it is
+  // (see ParsedChartData.displayValues / datumKinds: a Card shows a text cell
+  // as its text and an empty one as "(Blank)", never as the 0 written here).
+  const displayValues: string[][] = [];
+  const datumKinds: DatumKind[][] = [];
   const series = seriesDefs.map((def) => {
     const values: number[] = [];
+    const texts: string[] = [];
+    const kinds: DatumKind[] = [];
     for (let row = dataStartRow; row < numRows; row++) {
       const raw = grid[row][def.sourceIndex];
-      const num = parseDisplayNumber(raw);
-      values.push(isNaN(num) ? 0 : num);
+      const d = rangeDatum(raw, numbers ? numbers[row]?.[def.sourceIndex] : "untyped");
+      values.push(d.value);
+      kinds.push(d.kind);
+      texts.push(raw ?? "");
     }
+    displayValues.push(texts);
+    datumKinds.push(kinds);
     return {
       name: def.name,
       values,
@@ -805,7 +994,7 @@ function parseColumnOriented(
     };
   });
 
-  return { categories, series };
+  return { categories, series, displayValues, datumKinds };
 }
 
 function parseRowOriented(
@@ -815,6 +1004,7 @@ function parseRowOriented(
   hasHeaders: boolean,
   categoryIndex: number,
   seriesDefs: ChartSeries[],
+  numbers?: RangeCellNumber[][],
 ): ParsedChartData {
   const dataStartCol = hasHeaders ? 1 : 0;
 
@@ -824,14 +1014,22 @@ function parseRowOriented(
     categories.push(grid[categoryIndex][col] || `Col ${col + 1}`);
   }
 
-  // Extract series values
+  // Extract series values, their source text and kind (see parseColumnOriented).
+  const displayValues: string[][] = [];
+  const datumKinds: DatumKind[][] = [];
   const series = seriesDefs.map((def) => {
     const values: number[] = [];
+    const texts: string[] = [];
+    const kinds: DatumKind[] = [];
     for (let col = dataStartCol; col < numCols; col++) {
       const raw = grid[def.sourceIndex][col];
-      const num = parseDisplayNumber(raw);
-      values.push(isNaN(num) ? 0 : num);
+      const d = rangeDatum(raw, numbers ? numbers[def.sourceIndex]?.[col] : "untyped");
+      values.push(d.value);
+      kinds.push(d.kind);
+      texts.push(raw ?? "");
     }
+    displayValues.push(texts);
+    datumKinds.push(kinds);
     return {
       name: def.name,
       values,
@@ -839,5 +1037,5 @@ function parseRowOriented(
     };
   });
 
-  return { categories, series };
+  return { categories, series, displayValues, datumKinds };
 }

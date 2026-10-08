@@ -69,7 +69,8 @@ export const SIZE_POSITION_NO_PROVIDER = "This object cannot be moved or sized f
 /** Why: the page is a subscribed application page (the layout is the publisher's). */
 export const SIZE_POSITION_SUBSCRIBED =
   "This page comes from an application, so its layout is the publisher's. Detach the sheet to change it.";
-/** Why: the page locks the object. */
+/** Why: the page locks the object (its own, per-object lock). A PAGE-WIDE lock
+ *  says its own sentence instead (`LayoutSurface.pageLockedReason`). */
 export const SIZE_POSITION_LOCKED = "This object is locked. Unlock it to move or size it.";
 /** Why: the family refuses a move outside Design Mode (a run-mode button). */
 export const SIZE_POSITION_DESIGN_MODE = "Turn on Design Mode to move or size it.";
@@ -106,6 +107,9 @@ function activeSurface() {
  *
  *   - no geometry provider owns it (or it is cell-anchored): nothing;
  *   - the active page is not editable (a subscribed canvas): nothing;
+ *   - the page is locked as a whole (Lock Objects): nothing, in the page's
+ *     own words -- "unlock it" would be wrong advice for an object with no
+ *     lock of its own;
  *   - the page locks it: nothing;
  *   - its family published `movable: false` (a run-mode button): nothing;
  *   - otherwise it moves, and it resizes where its provider allows
@@ -126,6 +130,7 @@ export function sizeAndPositionAvailability(region: GridRegion): SizeAndPosition
   });
   if (!canMoveObject(region)) return refuse(false, SIZE_POSITION_NO_PROVIDER);
   if (surface && !surface.editable) return refuse(true, SIZE_POSITION_SUBSCRIBED);
+  if (surface?.pageLockedReason) return refuse(true, surface.pageLockedReason);
   if (isRegionLocked(surface, region)) return refuse(true, SIZE_POSITION_LOCKED);
   if (region.data?.movable === false) {
     return refuse(true, getDesignMode() ? SIZE_POSITION_IMMOVABLE : SIZE_POSITION_DESIGN_MODE);

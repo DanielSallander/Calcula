@@ -40,3 +40,10 @@ export function themeRowTestId(name: string): string {
 export function fontPairTestId(pair: { heading: string; body: string }): string {
   return `page-layout-font-${slug(pair.heading)}--${slug(pair.body)}`;
 }
+
+/** The theme gallery card's width: six dots, a theme name and the check
+ *  column side by side (the Page Layout card and every hosted copy). */
+export const GALLERY_WIDTH = 260;
+
+/** The theme gallery card's heading, wherever the gallery is hosted. */
+export const GALLERY_HEADING = "Built-in Themes";

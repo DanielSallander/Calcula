@@ -21,6 +21,11 @@
 //          The ACCENT follows the furniture rule: the soft table or page is the
 //          ground, the accent is the part the command names (the header row,
 //          the total row, the banding, the print area, the page break).
+//
+//          The Canvas tab (2026-10-08) added Power BI's Matrix, Calcula's
+//          Floating Grid (on the table figure's columns), and the report-page
+//          keys: New Page, Page Navigator, Clear All Slicers, the Page View
+//          rows and Wallpaper.
 
 import React from "react";
 import {
@@ -34,6 +39,7 @@ import {
   type RibbonIconProps,
 } from "./frame";
 import { FUNNEL } from "./chart";
+import { roundedPlus } from "./generic";
 
 // ============================================================================
 // The table figure
@@ -645,6 +651,249 @@ function Breaks({ size }: RibbonIconProps): React.ReactElement {
 }
 
 // ============================================================================
+// The Canvas tab: Power BI's report authoring (2026-10-08)
+// ============================================================================
+//
+// The grid-shaped visuals (Matrix, Floating Grid), the report PAGE and what
+// is done to it (New Page, Page Navigator, the three Page View rows,
+// Wallpaper) and Clear All Slicers. Power BI's compositions where it has a
+// picture -- its blue is ACCENT, its grey SOFT, its dark outline STRONG and
+// filled -- and Power BI's page-view rows from memory where its ribbon shows
+// a checkbox or nothing. Until 2026-10-08 the Canvas tab drew Floating Grid
+// with Table, Fit to Window with Resize and Actual Size with Search. No
+// transform anywhere; every key measures 0 accent contact.
+
+/** Matrix (the Visuals gallery's Matrix tile, a pivot table on the page):
+ *  Power BI's matrix, a grid under a header with the totals -- the last
+ *  column and the last row -- in blue. Power BI's exact picture is a 3 x 3
+ *  grid with blue total cells, which is GrandTotals here (the pivot option),
+ *  so the header and the totals are each MERGED instead: a SOFT header bar
+ *  2.4..21.6 x 2.4..6 (rx 1.6; Power BI's grey header), a 2 x 2 STRONG body
+ *  on the table figure's tracks (6 / 4.8 wide, rows 7.2..10.8 and 12..15.6;
+ *  Power BI's white cells), and the ACCENT totals as ONE L-shaped path (the
+ *  last column 15.6..21.6 x 7.2..21.6 with the last row 2.4..21.6 x
+ *  16.8..21.6; outer corners r 1.6, inside corner r 1.2), 1.2 clear of the
+ *  header and of every cell. Table is nine cells, Pivot an L of headers round
+ *  an accent cell, GrandTotals nine cells with the totals apart; the merged L
+ *  is the shape no other key has. A STRONG header L was Pivot's silhouette;
+ *  stepped rows read as a list.
+ *
+ *  Until review 0 of 2026-10-08 the header was STRONG and the cells SOFT --
+ *  the inverse of this family's own mapping (grey is SOFT, white cells are
+ *  STRONG), and FloatingGrid's silhouette (a full-width STRONG bar over grey
+ *  cells). The cells are 3 px pixel-grid cells, so they take ICONS.md 2.3's
+ *  rx 1.0 (they were 1.2, a radius neither rule allows; review 1). The
+ *  header keeps 1.6: it is a bar, 16 px long. Table draws the same inversion
+ *  and is out of scope (an existing key; keys never change meaning, and a
+ *  colour swap there is the owner's call). */
+function Matrix({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <rect x="2.4" y="2.4" width="19.2" height="3.6" rx="1.6" fill={SOFT} />
+      <rect x="2.4" y="7.2" width="6" height="3.6" rx="1" fill={STRONG} />
+      <rect x="9.6" y="7.2" width="4.8" height="3.6" rx="1" fill={STRONG} />
+      <rect x="2.4" y="12" width="6" height="3.6" rx="1" fill={STRONG} />
+      <rect x="9.6" y="12" width="4.8" height="3.6" rx="1" fill={STRONG} />
+      <path
+        d="M17.2 7.2H20A1.6 1.6 0 0 1 21.6 8.8V20A1.6 1.6 0 0 1 20 21.6H4A1.6 1.6 0 0 1 2.4 20V18.4A1.6 1.6 0 0 1 4 16.8H14.4A1.2 1.2 0 0 0 15.6 15.6V8.8A1.6 1.6 0 0 1 17.2 7.2Z"
+        fill={ACCENT}
+      />
+    </IconFrame>
+  );
+}
+
+/** Floating Grid (Calcula's own object, no Power BI picture): a small grid of
+ *  cells that floats on the page and is moved by its title bar. ONE unbroken
+ *  STRONG title bar 2.4..21.6 x 2.4..7.2 (rx 2), what you drag, over two rows
+ *  of cells on the table figure's GRID columns (rows 8.4..14.4 and
+ *  15.6..21.6, 5 px each, 1.2 gutters, rx 1.6), SOFT with the active cell
+ *  ACCENT. Table, which drew this button until 2026-10-08 and is the Table
+ *  visual's tile on the same tab, is a 3 x 3 lattice whose header is three
+ *  STRONG cells (HeaderRow the same with ACCENT cells); the one bar over two
+ *  rows is a different shape. A thinner title over three rows smeared into
+ *  Table at 20px; a SOFT drop shadow beside SOFT cells was two greys of one
+ *  tint. */
+function FloatingGrid({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <rect x="2.4" y="2.4" width="19.2" height="4.8" rx="2" fill={STRONG} />
+      {[8.4, 15.6].map((y, row) =>
+        GRID.map((x, col) => (
+          <rect
+            key={`${row}-${col}`}
+            x={x}
+            y={y}
+            width={TRACK[col]}
+            height="6"
+            rx="1.6"
+            fill={row === 0 && col === 0 ? ACCENT : SOFT}
+          />
+        )),
+      )}
+    </IconFrame>
+  );
+}
+
+/** New Page (the Pages hero): Power BI's page with a plus at its lower right.
+ *  Report's page -- SOFT, with Report's STRONG title bar 4.8..16.8 x 4.8..8.4,
+ *  so it reads as a REPORT page and not a worksheet (InsertSheet) or a file
+ *  -- with More's ACCENT plus (roundedPlus at half 4.2, centred (17.4, 17.4),
+ *  arms 15.6..19.2) in a notch cut from the page's lower right corner. The
+ *  page is 2.4..19.2 x 2.4..21.6 (outer rx 3) minus the square from (12, 12)
+ *  (inner corner r 1.6): an L whose notch edges leave exactly 1.2 to the
+ *  plus's tips. Portrait: a landscape page read as a card at 20px because the
+ *  plus took half its height. */
+function NewPage({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <path
+        d="M5.4 2.4H16.2a3 3 0 0 1 3 3V9a3 3 0 0 1-3 3H13.6a1.6 1.6 0 0 0-1.6 1.6V18.6a3 3 0 0 1-3 3H5.4a3 3 0 0 1-3-3V5.4a3 3 0 0 1 3-3z"
+        fill={SOFT}
+      />
+      <rect x="4.8" y="4.8" width="12" height="3.6" rx="1.6" fill={STRONG} />
+      <path d={roundedPlus(17.4, 17.4, 4.2)} fill={ACCENT} />
+    </IconFrame>
+  );
+}
+
+/** Page Navigator (the Buttons menu's row): Power BI's row of page tabs
+ *  above the page, the current one highlighted. Three 4.8 square page
+ *  buttons (rx 1.6, 2.4 apart, y 3.6..8.4): the current one ACCENT, the
+ *  others STRONG; under them, 2.4 clear, a SOFT page 2.4..21.6 x 10.8..20.4
+ *  (rx 2.4, the page you are on). Power BI's buttons carry page names; ours
+ *  are blank (no text). 3 px pills read as a carousel's pager dots. Ink
+ *  3.6..20.4 tall, centred. The first drawing put the buttons UNDER the page
+ *  -- a soft box over three marks on x 2.4 / 9.6 / 16.8 with the first one
+ *  green, which is Legend exactly (review 0 of 2026-10-08); tabs over the
+ *  page is the familiar "tabs" picture and Legend's opposite. */
+function PageNavigator({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <rect x="2.4" y="3.6" width="4.8" height="4.8" rx="1.6" fill={ACCENT} />
+      <rect x="9.6" y="3.6" width="4.8" height="4.8" rx="1.6" fill={STRONG} />
+      <rect x="16.8" y="3.6" width="4.8" height="4.8" rx="1.6" fill={STRONG} />
+      <rect x="2.4" y="10.8" width="19.2" height="9.6" rx="2.4" fill={SOFT} />
+    </IconFrame>
+  );
+}
+
+/** Clear All Slicers (the Buttons menu's row): Power BI's funnel with an
+ *  eraser, said in Clear Filter's language -- a SOFT slicer CARD (Slicer's
+ *  19.2 square, rx 3.4) carrying a STRONG funnel, with Clear Filter's DANGER
+ *  X (2.8 lines, arms 2.4 from (18, 18)) in a round bite out of the card's
+ *  lower right: a circle r 6.094 about (18, 18), the X's reach plus its cap
+ *  plus 1.3, meeting the edges at 13.083. The funnel is its own smaller
+ *  polygon, not FUNNEL: mouth 4.8..15.6, a 3 px stem 8.4..12 on whole pixels,
+ *  rounded by a 1.2 same-channel stroke. Card (slicers) + funnel (filter) + X
+ *  (clear), and no ACCENT: DANGER is the verb. Clear Filter is a bare funnel
+ *  with the X, so the menu shows the two by shape. The X's round caps reach
+ *  21.8 (Clear Filter's reach 22.8). A larger funnel ran its stem into the
+ *  bite; the card with Slicer's item bars read as a list. */
+function ClearSlicers({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <path
+        d="M5.8 2.4H18.2a3.4 3.4 0 0 1 3.4 3.4V13.083A6.094 6.094 0 0 0 13.083 21.6H5.8a3.4 3.4 0 0 1-3.4-3.4V5.8a3.4 3.4 0 0 1 3.4-3.4z"
+        fill={SOFT}
+      />
+      <path
+        d="M5.5 5.4L14.9 5.4L11.4 10.2L11.4 13.8L9 15L9 10.2Z"
+        fill={STRONG}
+        stroke={STRONG}
+        strokeWidth={1.2}
+        strokeLinejoin="round"
+      />
+      <path d="M15.6 15.6l4.8 4.8M20.4 15.6l-4.8 4.8" {...line(DANGER, 2.8)} />
+    </IconFrame>
+  );
+}
+
+/** The landscape window the Page View rows Fit to Width and Actual Size draw
+ *  in: 19.2 x 14.4 at 2.4..21.6 x 4.8..19.2, rx 2.4 (16 x 12 px, a 4:3
+ *  page), every straight edge on the 2.4 grid. Each row cuts its own hole. */
+const PAGE_WINDOW =
+  "M4.8 4.8H19.2A2.4 2.4 0 0 1 21.6 7.2V16.8A2.4 2.4 0 0 1 19.2 19.2H4.8A2.4 2.4 0 0 1 2.4 16.8V7.2A2.4 2.4 0 0 1 4.8 4.8Z";
+
+/** Fit to Page (the Page View menu's face and first row): the page held by
+ *  the window's four corners, Power BI's page-view "fit" picture. A SOFT
+ *  landscape page 6..18 x 7.2..16.8 (rx 1.6) and four ACCENT corner brackets
+ *  as ONE PIXEL_STROKE path, centre lines on x 3.6 / 20.4 and y 4.8 / 19.2,
+ *  whose inner edges sit exactly 1.2 off the page on all four sides: the
+ *  window hugs the page. Resize drew Fit to Window until 2026-10-08, and
+ *  Size & Position with the same picture; each now has its own. */
+function FitToPage({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <rect x="6" y="7.2" width="12" height="9.6" rx="1.6" fill={SOFT} />
+      <path
+        d="M3.6 8.4V4.8H8.4M15.6 4.8H20.4V8.4M20.4 15.6V19.2H15.6M8.4 19.2H3.6V15.6"
+        {...line(ACCENT, PIXEL_STROKE)}
+      />
+    </IconFrame>
+  );
+}
+
+/** Fit to Width (Page View): the window and a double arrow from side to
+ *  side. PAGE_WINDOW in SOFT with a HOLE 4.8..19.2 x 7.2..16.8 (rx 1.2),
+ *  walls 2.4 all round, and an ACCENT double arrow 6..18 on y 12 (Size &
+ *  Position's measuring arrow, longer), its tips 1.2 from the hole's sides
+ *  and its heads 1.2 from the hole's top and bottom. Beside Fit to Page in
+ *  the same menu: a closed frame with a level arrow against four open corners
+ *  round a solid page. */
+function FitToWidth({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <path
+        d={`${PAGE_WINDOW}M6 7.2A1.2 1.2 0 0 0 4.8 8.4V15.6A1.2 1.2 0 0 0 6 16.8H18A1.2 1.2 0 0 0 19.2 15.6V8.4A1.2 1.2 0 0 0 18 7.2Z`}
+        fill={SOFT}
+      />
+      <path d="M6 12L9.6 8.4V10.8H14.4V8.4L18 12L14.4 15.6V13.2H9.6V15.6Z" fill={ACCENT} />
+    </IconFrame>
+  );
+}
+
+/** Actual Size (Page View): "1:1" on a page, 100%. PAGE_WINDOW in SOFT with a
+ *  SLOT cut through it at x 9.6..14.4, y 7.2..16.8; two STRONG ones, each a
+ *  2.4 stem (x 7.2..9.6 and 16.8..19.2, y 7.2..16.8) with a 45-degree flag
+ *  whose vertical edge is the whole-pixel column x 4.8 / 14.4; the colon is
+ *  two ACCENT 2.4 squares (rx 0) in the slot, 1.2 clear of the stems, the flag
+ *  and the slot's ends. No text. Square flat flags were crisper but read
+ *  "7:7"; Power BI's "100%" would need three digits and a % at 20px. Search,
+ *  which drew this button until 2026-10-08, is also Find's picture. */
+function ActualSize({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <path d={`${PAGE_WINDOW}M9.6 7.2V16.8H14.4V7.2Z`} fill={SOFT} />
+      <path d="M7.2 7.2H9.6V16.8H7.2V9.6L4.8 12V9.6Z" fill={STRONG} />
+      <path d="M16.8 7.2H19.2V16.8H16.8V9.6L14.4 12V9.6Z" fill={STRONG} />
+      <rect x="10.8" y="8.4" width="2.4" height="2.4" rx="0" fill={ACCENT} />
+      <rect x="10.8" y="13.2" width="2.4" height="2.4" rx="0" fill={ACCENT} />
+    </IconFrame>
+  );
+}
+
+/** Wallpaper (Page, a ColorSwatch split: the area OUTSIDE the page): the page
+ *  with its surround filled. An ACCENT surround 2.4..21.6 square (rx 3) with
+ *  a landscape HOLE 4.8..19.2 x 6..18 (rx 1.2) -- walls 2.4 at the sides,
+ *  3.6 above and below -- and a STRONG page 6..18 x 7.2..16.8 (rx 1.4) inside
+ *  it, 1.2 clear all round. Page Background (Background: a soft sheet with
+ *  accent hills) has the colour INSIDE the page, this one outside it. The
+ *  page is STRONG, not SOFT, so it stays apart from Fit to Page's grey page
+ *  in high contrast too. Power BI's Format-pane Wallpaper card has no
+ *  picture. */
+function Wallpaper({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <path
+        d="M5.4 2.4H18.6A3 3 0 0 1 21.6 5.4V18.6A3 3 0 0 1 18.6 21.6H5.4A3 3 0 0 1 2.4 18.6V5.4A3 3 0 0 1 5.4 2.4ZM6 6A1.2 1.2 0 0 0 4.8 7.2V16.8A1.2 1.2 0 0 0 6 18H18A1.2 1.2 0 0 0 19.2 16.8V7.2A1.2 1.2 0 0 0 18 6Z"
+        fill={ACCENT}
+      />
+      <rect x="6" y="7.2" width="12" height="9.6" rx="1.4" fill={STRONG} />
+    </IconFrame>
+  );
+}
+
+// ============================================================================
 // Group export
 // ============================================================================
 
@@ -691,5 +940,15 @@ export const DATA_ICONS = {
   Collapse,
   ClearFilter,
   Connection,
+  // ---- the Canvas tab: Power BI's report authoring (2026-10-08) -------------
+  Matrix,
+  FloatingGrid,
+  NewPage,
+  PageNavigator,
+  ClearSlicers,
+  FitToPage,
+  FitToWidth,
+  ActualSize,
+  Wallpaper,
 } as const;
 /* eslint-enable @typescript-eslint/naming-convention */

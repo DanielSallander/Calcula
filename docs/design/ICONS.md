@@ -4,7 +4,7 @@
 **Code:** the drawings live in `app/src/api/icons/` (`frame.tsx` + four groups: `home.tsx`,
 `chart.tsx`, `data.tsx`, `generic.tsx`); `app/src/api/ribbonIcons.tsx` aggregates them into the one
 `RibbonIcon` namespace every ribbon, rail, sidebar, launcher, menu and add-in token resolves against.
-**Guard:** `app/src/api/__tests__/ribbonIcons.test.tsx` (2,476 cases over 243 keys, 2026-10-04).
+**Guard:** `app/src/api/__tests__/ribbonIcons.test.tsx` (2,769 cases over 270 keys, 2026-10-08).
 **Approved drawings:** the mockup artifact https://claude.ai/artifact/W2RwKUxBA79azM4Qznargi (the
 Icons board, rev 2).
 
@@ -128,17 +128,25 @@ by default because the control that hosts them already carries the name.
   SOFT-filled body was rendered beside it and read no better (11 half-covered pixels either way;
   weight 81 against Font Color's 101). Its handle is filled, as the rule asks.
 - **Dots under the part floor (2026-10-04).** frame.tsx asks for parts of at least 3.6 units and a
-  free-standing dot of at least 4.3. Two families draw 2.4-unit (2px) dots on purpose: the Borders
+  free-standing dot of at least 4.3. These draw 2.4-unit (2px) dots on purpose: the Borders
   lattice, where the dots are not parts but the TEXTURE of a dotted line (the dotted-vs-solid
   contrast is what lets No Border, All Borders and Outside Borders differ by shape; a faint solid soft
-  grid made them a colour-only difference), and the Paste family's corner % and No Borders frame, the
-  only way a % fits the 7px corner. Whole pixels at 20px, so they paint crisp.
+  grid made them a colour-only difference); the Paste family's corner % and No Borders frame, the
+  only way a % fits the 7px corner; and, since 2026-10-08, the Canvas grid lattices (SnapToGrid,
+  ShowGrid: the dots ARE Power BI's canvas grid, the same texture argument as Borders) and
+  ActualSize's colon (the ":" of "1:1"). Whole pixels at 20px, so they paint crisp.
 - **Only rigid transforms, and no PIXEL_STROKE inside one (2026-10-04).** The stroke rules read the
   `stroke-width` and `d` attributes as written, so a drawing may translate, rotate or mirror a group
   (the Fill menu, Link, the Excel letters of Wrap Text and Orientation) but never scale or skew it, and
   a 2.4 line is always drawn in the frame's own coordinates (inside a rotation a path written on the
   grid paints off it). Scaled drawings are written out at their final size (Paste Link's chain is Link
-  at 0.75, as coordinates). Both are test-enforced. **Letters turn only by a quarter.** A 6px letter
+  at 0.75, as coordinates). Both are test-enforced. A written-out copy is a second source of truth,
+  so where one key draws another's part the test pins the relation, not the coordinates (2026-10-08):
+  Button's cursor must be Pointer at 0.66 about its tip, and Card's "123" must be Paste Values'
+  digits moved by whole pixels, so a redraw of Pointer or of the digits fails until the copy follows.
+  The same holds for Lock Objects' padlock body (Protect Sheet's outline) and Line and stacked
+  column's two columns (Stacked's), both pinned by the 2026-10-08 icon review.
+  The 27 Canvas keys of 2026-10-08 use no transform at all (test-enforced). **Letters turn only by a quarter.** A 6px letter
   turned 45 degrees keeps two clean pixels of its hole: the first Orientation pictures painted "ab"
   as two rings, a "%" (at 100% and 150%). The 45-degree pictures stand the letters upright and STEP
   the word along the angle (a recorded departure from Excel's turned letters; test-enforced).
@@ -170,7 +178,12 @@ by default because the control that hosts them already carries the name.
   Since 2026-10-04 the rule is test-enforced for every menu that shows pictures side by side
   (`MENU_FAMILIES` in `ribbonIcons.test.tsx`: Borders, Underline, Paste, Alignment, Orientation,
   object alignment, Cells, Styles, Number, Fill, Clear, Sort & Filter, Find & Select, Editing and the
-  colour splits): within a family no key may alias another and no two may render the same markup.
+  colour splits; since 2026-10-08 also the Canvas tab's Visuals gallery -- all 33 tiles and the All
+  Visuals hero -- and its grids, Pages, Elements, Buttons, Arrange, Page, Page view and View): within
+  a family no key may alias another and no two may render the same markup. A Canvas family also
+  lists the pictures its rows REPLACED (Layout, Controls, Table, Resize, Search, chart Gridlines,
+  Pencil), so a new key can never become an alias or a copy of the picture it replaced. Which key a
+  control USES is the tab's own business and its own tests'; this test cannot see it.
 - **No `<text>`, no emoji, no unicode glyph** as an icon.
 
 The one deliberate exception is not an icon at all: **typographic commands stay text**. B, I, U, S,
@@ -222,7 +235,7 @@ never drift apart; the test checks identity with `toBe`.
 
 ---
 
-## 4. The vocabulary (243 keys, 2026-10-04)
+## 4. The vocabulary (270 keys, 2026-10-08)
 
 Recount from the source rather than trusting this list (it is what an add-in author reads, and it
 must be current). **Home** (`icons/home.tsx`, 104):
@@ -285,18 +298,42 @@ must be current). **Home** (`icons/home.tsx`, 104):
     corner, Clear Filter's idiom), SortFilter, SortAscending,
     SortDescending (an ACCENT A and a STRONG Z), GoTo (an ACCENT arrow at a SOFT cell).
 
-**Chart** (`icons/chart.tsx`, 41):
+**Chart** (`icons/chart.tsx`, 51):
 
 - *Chart types (18):* ChartColumn, ChartBar, ChartLine, ChartArea, ChartPie, ChartDonut,
   ChartScatter, ChartWaterfall, ChartCombo, ChartRadar, ChartBubble, ChartHistogram, ChartFunnel,
   ChartTreemap, ChartStock, ChartBoxPlot, ChartSunburst, ChartPareto
 - *Furniture:* ChartTitle, Gridlines, Legend, AxisLabels, DataLabels
 - *Layout and marks:* Grouped, Stacked, Stacked100, SecondaryAxis, Trendline, MarkOptions,
-  LineStraight, LineSmooth, LineStep, Markers
+  LineStraight, LineSmooth, LineStep, Markers. **Stacked was redrawn on 2026-10-08**: its two
+  columns topped out 2px apart, so beside Stacked100 in the Visuals gallery the two read as one
+  picture; the left column now stops well short (Power BI's proportion).
 - *Style and data:* Palette, Series, Filter, SwitchRowCol
 - *Actions:* EditChart, SaveImage, FormatPoint, Code
+- *Power BI's Visualizations pane (2026-10-08, the Canvas tab's Visuals gallery):* drawn in Power
+  BI's compositions with Power BI's blue as ACCENT, its grey as SOFT and its outlined white marks
+  STRONG and filled; every one measures 0 accent contact. ChartBarStacked, ChartBarStacked100 (two
+  bars off ChartBar's axis, each a STRONG part and an ACCENT part; the 100% pair both reach the end),
+  ChartAreaStacked, ChartAreaStacked100 (a STRONG area with an ACCENT band riding on it; the 100%
+  band fills down from a flat top), ChartComboStacked (Stacked's two columns as STRONG bodies with
+  flush SOFT caps, the ACCENT line above -- Power BI's line crosses the columns, ours cannot keep its
+  gap if it does), ChartCard (an ACCENT "123", Paste Values' digits, over a SOFT rule, no frame:
+  KPI's "value over a rule"), ChartMultiRowCard (three records, each a STRONG value over a SOFT
+  label, the first record's card bar ACCENT), ChartKpi (an ACCENT up triangle interlocked with a
+  STRONG down triangle over a SOFT rule: Power BI's red triangle is STRONG, since ACCENT and DANGER
+  never meet), ChartGauge (a half ring, ACCENT from the minimum, SOFT beyond, the STRONG needle in
+  its own gap), AllVisuals (the gallery hero: columns, a pie with its ACCENT slice pulled out, an
+  area and a SOFT donut in a 2 x 2). The stacked pictures show two categories and the clustered
+  ones (ChartColumn, ChartBar, ChartCombo) three, which is what tells them apart at 20px.
+  **AllVisuals is drawn for 30px only** (its column marks are on the 0.8 grid, whole pixels at 30
+  and half pixels at 20; test-enforced): use it for the All Visuals hero, never as a 20px button or a
+  24px gallery tile. **Reviewed 2026-10-08** (two reviews: Power BI fidelity; 20px legibility),
+  which redrew ChartComboStacked (three capped columns were ChartCombo with soft tops), ChartCard
+  (a framed card read as a monitor), ChartBarStacked (its short bar now ends 6.0 short, Stacked's
+  proportion), ChartAreaStacked (the lower series 1.2 lower, so the band reads first) and
+  AllVisuals (columns moved onto the 30px grid).
 
-**Data, BI and page** (`icons/data.tsx`, 41):
+**Data, BI and page** (`icons/data.tsx`, 50):
 
 - *Objects:* Table, Pivot, Slicer, Timeline, Sparkline, Report, Connection
 - *Pivot:* PivotFields, CalcField, FilterPages, Fx, ChangeSource, Subtotals, GrandTotals,
@@ -308,8 +345,20 @@ must be current). **Home** (`icons/home.tsx`, 104):
 - *Page layout:* Theme, Fonts, Colors, Effects, Margins, Orientation, PageSize, PrintArea, Breaks,
   Background
 - *Other:* Lightning
+- *The Canvas tab (2026-10-08):* Matrix (Power BI's matrix with its header and its totals each
+  MERGED -- a SOFT header bar over STRONG cells and one ACCENT L of last column and last row --
+  because Power BI's exact nine-cell picture is GrandTotals; the review of 2026-10-08 swapped the
+  header and cells to Power BI's grey-over-white, which also parted it from FloatingGrid), FloatingGrid
+  (one STRONG title bar over two rows of cells on the table figure's columns, the active cell ACCENT;
+  it was drawn with Table), NewPage (Report's page with More's ACCENT plus in a notch), PageNavigator
+  (three page tabs, the current one ACCENT, ABOVE a SOFT page; the first drawing had them under it
+  and was Legend), ClearSlicers (a SOFT slicer card with a STRONG funnel and Clear Filter's
+  DANGER X in a bite out of its corner; no ACCENT), the Page View rows FitToPage (ACCENT corner
+  brackets hugging a SOFT page), FitToWidth (an ACCENT double arrow in a SOFT window) and
+  ActualSize (STRONG "1:1" with an ACCENT colon through a SOFT page), and Wallpaper (an ACCENT
+  surround round a STRONG page: the colour outside the page, where Background has it inside)
 
-**Generic** (`icons/generic.tsx`, 57):
+**Generic** (`icons/generic.tsx`, 65):
 
 - *Structure and navigation:* Group (the fallback section/launcher glyph), More, MoreHorizontal,
   Close, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Sidebar, Ribbon, Panel, Layout, Resize
@@ -326,6 +375,16 @@ must be current). **Home** (`icons/home.tsx`, 104):
   Center / Right / Top / Middle / Bottom, never the TEXT alignment pictures), DistributeHorizontal,
   DistributeVertical (the accent object
   between two others with equal 2.4 gaps)
+- *The Canvas tab (2026-10-08):* Shapes (a STRONG triangle, SOFT square and ACCENT circle kept
+  apart: Elements' Shapes menu, which Layout drew until then), ButtonControl (an ACCENT button
+  notched round Pointer's cursor at two-thirds size: the Buttons menu, which Controls drew),
+  NavigateBack (an ACCENT left arrow cut into a SOFT disc: the Back button), SizePosition (a SOFT
+  object measured by an ACCENT width arrow and a STRONG height arrow: Arrange's Size & Position,
+  which Resize drew), SnapToGrid (a SOFT dot lattice with an ACCENT object snapped across two
+  cells; chart Gridlines drew it), ShowGrid (ACCENT grid dots in a SOFT page frame), LockObjects
+  (Shapes' SOFT square and circle and an all-ACCENT padlock: View's Lock Objects, which must not be
+  Arrange's Lock; the review of 2026-10-08 replaced two grey blocks that made it Home's
+  ProtectSheet), DesignMode (an ACCENT pencil on a SOFT set square, Excel's metaphor; Pencil drew it)
 
 ---
 
@@ -393,7 +452,13 @@ those three:
   `icons/home-excel-icons-20px.png` (the 72 new and redrawn keys at 20/24/30, Light and Dark, after
   the icon review), `icons/home-excel-redraws-before-after.png` (the nine redraws, before and after,
   at 20 and 120) and `icons/home-excel-icon-review-before-after.png` (what the review changed, and
-  the alternatives it rendered and did not take).
+  the alternatives it rendered and did not take). The 2026-10-08 sheet is
+  `icons/canvas-powerbi-icons-20px.png`: the 27 Canvas keys and the Stacked redraw at 20/24/30 and
+  as magnified 20px pixels, Light and Dark, each beside Power BI's own picture where the owner's
+  screenshot has one, and the picture each one replaced on the Canvas tab (re-rendered after the
+  icon review); `icons/canvas-powerbi-icon-review-before-after.png` shows what that review changed
+  and the alternatives it rendered and did not take, as real 20px pixels with each picture's
+  half-covered pixel count and ink weight.
 - **Two reviewers who disagree are settled on the 20px pixel map**, not by argument: render both
   proposals side by side as real 20px pixels magnified, in Light and Dark, and count half-covered
   pixels and ink weight. The 2026-10-04 review's Orientation, Delete Cells and Remove Hyperlinks

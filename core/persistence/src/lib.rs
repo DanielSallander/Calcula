@@ -872,10 +872,33 @@ pub const CANVAS_MIN_PAGE_EDGE_PX: u32 = 100;
 pub const CANVAS_MAX_PAGE_EDGE_PX: u32 = 10_000;
 /// The page presets a canvas offers, with their logical-px sizes. "custom"
 /// keeps whatever width/height the layout carries.
+///
+/// Power BI's page TYPES (Format page > Canvas settings > Type: 16:9, 4:3,
+/// Letter, Tooltip, Custom) plus the SIZES its docs list for 16:9 ("When you
+/// select a standard aspect ratio like 16:9, the Size dropdown offers common
+/// screen dimensions": 1280 x 720 HD, 1920 x 1080 Full HD, 2560 x 1440 QHD,
+/// 3840 x 2160 4K UHD -- learn.microsoft.com, power-bi-report-display-
+/// settings, 2026-08-31). Each size is its OWN preset id rather than a second
+/// "size" field, so the one rule every layer already applies -- a named
+/// preset fixes the page size, anything else is `custom` -- covers them with
+/// no new field: `"16:9"` stays the HD default every existing file carries,
+/// and the larger sizes are `"16:9-fhd"`, `"16:9-qhd"` and `"16:9-4k"`. The
+/// Page Size menu groups them under 16:9 (`@api/canvasSheet` carries the
+/// labels and the grouping).
+///
+/// Tooltip is Power BI's tooltip-page size, 320 x 240.
+///
+/// A file written with one of these ids and opened by an OLDER build loses
+/// nothing but the name: its sanitizer turns an unknown preset into `custom`
+/// at the exact size the file carries (`CanvasLayout::sanitized`).
 pub const CANVAS_PAGE_PRESETS: &[(&str, u32, u32)] = &[
     ("16:9", 1280, 720),
+    ("16:9-fhd", 1920, 1080),
+    ("16:9-qhd", 2560, 1440),
+    ("16:9-4k", 3840, 2160),
     ("4:3", 960, 720),
     ("letter", 816, 1056),
+    ("tooltip", 320, 240),
 ];
 /// The preset id meaning "the width/height fields are authoritative".
 pub const CANVAS_CUSTOM_PAGE_PRESET: &str = "custom";
@@ -1059,7 +1082,8 @@ fn sanitize_object_refs(name: &str, refs: Vec<CanvasObjectRef>) -> (Vec<CanvasOb
 }
 
 /// The layout of a canvas sheet: its page, its snap grid, its background and
-/// the stacking/lock state of the objects on it. All sizes are LOGICAL px, the
+/// wallpaper, the page-wide object lock, and the stacking/lock state of the
+/// objects on it. All sizes are LOGICAL px, the
 /// same units as a floating object's `x/y/width/height`, so the snap grid and
 /// the objects it positions can never disagree about scale.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1079,6 +1103,59 @@ pub struct CanvasLayout {
     pub page_height: u32,
     /// Page background as a CSS hex colour; empty means the theme's default.
     pub background: String,
+    /// WALLPAPER: the colour of the area OUTSIDE the page -- Power BI's
+    /// Format page > Wallpaper (also on its 2026 Design ribbon, Customize page
+    /// > Wallpaper), as opposed to `background`, which fills the page itself.
+    /// A CSS hex colour; empty means the theme's (the grid-area colour the
+    /// page painter has always used).
+    ///
+    /// Not undoable, like `background` (decision D1: page and view state).
+    /// Omitted from the wire when empty, so an ordinary canvas serializes
+    /// exactly as it did before the field existed -- a signed `.calp`
+    /// manifest of an unchanged canvas keeps its bytes. An older reader that
+    /// drops it loses a colour around the page and nothing else, which is
+    /// why it rides a manifest FEATURE ID (`canvas_wallpaper`,
+    /// calcula-format) and no format-version link (CLAUDE.md, ".cala Format
+    /// Versioning": a visible, cosmetic loss).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub wallpaper: String,
+    /// LOCK OBJECTS -- Power BI's View > Page options > Lock objects for this
+    /// page: "Lock all objects on the canvas so that they can't be moved or
+    /// resized" (learn.microsoft.com, power-bi-report-display-settings).
+    ///
+    /// WHAT IT MEANS HERE (decided 2026-10-08 from those docs, CONTRACT-CANVAS
+    /// 4.7): while set, EVERY object on the page behaves as though it were in
+    /// `locked` -- no object's POSITION or SIZE changes, by any door:
+    /// a drag, a resize handle, an arrow-key nudge, Align / Distribute, the
+    /// Size & Position dialog, a property pane, a script or the CLI. The
+    /// backend refuses each geometry write that would change an object on a
+    /// locked page (`ensure_canvas_objects_unlocked` in the app's sheets.rs),
+    /// and the frontend reads this flag through `@api/canvasSheet`
+    /// (`canvasObjectsLocked`) to stop offering the gestures in the first
+    /// place. What it does NOT stop, because Power BI's lock does not either
+    /// (the docs name only move and resize, and the lock "is primarily a
+    /// layout and positioning feature"):
+    ///
+    /// * SELECTING an object, and everything a selection is for: formatting
+    ///   it, editing its data or text, renaming it, restacking it (Bring
+    ///   Forward / Send Backward), locking it individually;
+    /// * INTERACTING with it: a slicer click, a button press, a chart tooltip;
+    /// * DELETING it, and INSERTING a new object (which lands where the
+    ///   insert puts it and is then locked in place like the rest);
+    /// * rotating or flipping a shape (Power BI's Rotation is a FORMAT card);
+    /// * UNDO / REDO, which replay history rather than move anything anew.
+    ///
+    /// A write that leaves an object exactly where it is (a re-sync of the
+    /// same geometry) is not a move and is never refused. Per PAGE, as in
+    /// Power BI: locking one canvas leaves every other canvas editable. Not
+    /// undoable (D1, like snap and show-grid: a View option), persisted like
+    /// them, omitted from the wire when false, and carried by a manifest
+    /// feature id (`canvas_objects_locked`) with no format-version link: an
+    /// older reader that drops it hands back a page whose objects can be
+    /// dragged again -- a lost convenience the user sees at once, never a
+    /// document that lies.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub objects_locked: bool,
     /// Paint order of the canvas's objects, bottom first. Objects MISSING from
     /// the list paint ABOVE every listed one, in their family's own order -- so
     /// a newly inserted object appears on top without a layout write, and the
@@ -1103,6 +1180,8 @@ impl Default for CanvasLayout {
             page_width: CANVAS_DEFAULT_PAGE_WIDTH,
             page_height: CANVAS_DEFAULT_PAGE_HEIGHT,
             background: String::new(),
+            wallpaper: String::new(),
+            objects_locked: false,
             z_order: Vec::new(),
             locked: Vec::new(),
         }
@@ -1136,10 +1215,15 @@ impl CanvasLayout {
         if self.page_preset != CANVAS_CUSTOM_PAGE_PRESET {
             match CANVAS_PAGE_PRESETS.iter().find(|(id, _, _)| *id == self.page_preset) {
                 None => {
+                    // Named from the list itself, so a new preset can never be
+                    // missing from the message that tells the user what to type.
+                    let known: Vec<&str> = CANVAS_PAGE_PRESETS.iter().map(|(id, _, _)| *id).collect();
                     return Err(format!(
-                        "Unknown canvas page preset '{}'. Use one of 16:9, 4:3, letter or custom.",
-                        self.page_preset
-                    ))
+                        "Unknown canvas page preset '{}'. Use one of {} or {}.",
+                        self.page_preset,
+                        known.join(", "),
+                        CANVAS_CUSTOM_PAGE_PRESET
+                    ));
                 }
                 Some((_, w, h)) if *w != self.page_width || *h != self.page_height => {
                     return Err(format!(
@@ -1157,6 +1241,12 @@ impl CanvasLayout {
                 self.background
             ));
         }
+        if !self.wallpaper.is_empty() && !is_css_hex_colour(&self.wallpaper) {
+            return Err(format!(
+                "Canvas wallpaper '{}' is not a CSS hex colour (#rgb or #rrggbb).",
+                self.wallpaper
+            ));
+        }
         validate_object_refs("stacking order (zOrder)", &self.z_order)?;
         validate_object_refs("lock list (locked)", &self.locked)?;
         Ok(())
@@ -1170,7 +1260,10 @@ impl CanvasLayout {
     /// * an unknown preset id (a newer build's `"a4"`) becomes `custom` at the
     ///   exact size the file carries, as does a known preset whose size does
     ///   not match it;
-    /// * a background that is not a CSS hex colour becomes the theme default;
+    /// * a background or wallpaper that is not a CSS hex colour becomes the
+    ///   theme default (the HTML export puts both into a `style` attribute,
+    ///   so a pulled colour is never trusted raw);
+    /// * `objects_locked` is a plain flag and is kept as it is;
     /// * `z_order` and `locked` are trimmed, lose blank or over-long refs and
     ///   duplicates (the FIRST occurrence is kept), and are cut to
     ///   [`CANVAS_MAX_OBJECT_REFS`].
@@ -1214,6 +1307,10 @@ impl CanvasLayout {
         if !self.background.is_empty() && !is_css_hex_colour(&self.background) {
             repairs.push(format!("background '{}' -> theme default", self.background));
             self.background.clear();
+        }
+        if !self.wallpaper.is_empty() && !is_css_hex_colour(&self.wallpaper) {
+            repairs.push(format!("wallpaper '{}' -> theme default", self.wallpaper));
+            self.wallpaper.clear();
         }
         let (z_order, z_repairs) = sanitize_object_refs("zOrder", std::mem::take(&mut self.z_order));
         self.z_order = z_order;
@@ -2384,6 +2481,8 @@ mod sheet_kind_tests {
             page_width: 1123,
             page_height: 20_000,
             background: "rebeccapurple".to_string(),
+            wallpaper: "url(x)".to_string(),
+            objects_locked: true,
             z_order: vec![CanvasObjectRef { kind: "chart".into(), id: "7".into() }],
             locked: Vec::new(),
         };
@@ -2395,9 +2494,86 @@ mod sheet_kind_tests {
         assert_eq!(fixed.page_height, CANVAS_MAX_PAGE_EDGE_PX);
         assert_eq!(fixed.page_preset, CANVAS_CUSTOM_PAGE_PRESET, "a newer build's preset keeps its size as custom");
         assert_eq!(fixed.background, "");
+        assert_eq!(fixed.wallpaper, "", "a wallpaper that is not a hex colour becomes the theme's");
+        assert!(fixed.objects_locked, "the page lock is a plain flag and survives a repair");
         assert!(!fixed.snap_to_grid && !fixed.show_grid, "valid fields are untouched");
         assert_eq!(fixed.z_order.len(), 1, "the stacking order survives a repair");
-        assert_eq!(repairs.len(), 4, "{repairs:?}");
+        assert_eq!(repairs.len(), 5, "{repairs:?}");
+    }
+
+    /// CONTRACT-CANVAS 4.7: Power BI's page TYPES (16:9, 4:3, Letter,
+    /// Tooltip) plus the four SIZES its docs list for 16:9 (HD, Full HD, QHD,
+    /// 4K), each a preset whose size is fixed; Custom stays the escape hatch.
+    #[test]
+    fn the_page_presets_are_power_bis_types_and_16_9_sizes() {
+        let expect: [(&str, u32, u32); 7] = [
+            ("16:9", 1280, 720),
+            ("16:9-fhd", 1920, 1080),
+            ("16:9-qhd", 2560, 1440),
+            ("16:9-4k", 3840, 2160),
+            ("4:3", 960, 720),
+            ("letter", 816, 1056),
+            ("tooltip", 320, 240),
+        ];
+        assert_eq!(CANVAS_PAGE_PRESETS, &expect[..]);
+        for (id, w, h) in expect {
+            assert_eq!(CanvasLayout::preset_size(id), Some((w, h)), "{id}");
+            let layout = CanvasLayout {
+                page_preset: id.to_string(),
+                page_width: w,
+                page_height: h,
+                ..CanvasLayout::default()
+            };
+            layout.validate().unwrap_or_else(|e| panic!("{id}: {e}"));
+            assert!((CANVAS_MIN_PAGE_EDGE_PX..=CANVAS_MAX_PAGE_EDGE_PX).contains(&w), "{id} width in range");
+            assert!((CANVAS_MIN_PAGE_EDGE_PX..=CANVAS_MAX_PAGE_EDGE_PX).contains(&h), "{id} height in range");
+        }
+        // The refusal names every preset this build knows, not a stale list.
+        let err = CanvasLayout { page_preset: "a4".into(), ..CanvasLayout::default() }.validate().unwrap_err();
+        for (id, _, _) in CANVAS_PAGE_PRESETS {
+            assert!(err.contains(id), "the refusal does not name {id}: {err}");
+        }
+        assert!(err.contains(CANVAS_CUSTOM_PAGE_PRESET), "{err}");
+    }
+
+    /// The wallpaper is a colour like the page background: a hex colour or
+    /// "" (the theme's), validated on an edit and repaired on a load.
+    #[test]
+    fn the_wallpaper_is_validated_like_the_background() {
+        for ok in ["", "#abc", "#A0b1C2"] {
+            CanvasLayout { wallpaper: ok.to_string(), ..CanvasLayout::default() }
+                .validate()
+                .unwrap_or_else(|e| panic!("{ok:?}: {e}"));
+        }
+        for bad in ["red", "#abcd", "abc", "#ggg", "url(javascript:x)", "#fff;background:url(x)"] {
+            let err = CanvasLayout { wallpaper: bad.to_string(), ..CanvasLayout::default() }
+                .validate()
+                .expect_err(bad);
+            assert!(err.to_lowercase().contains("wallpaper"), "the refusal names the field: {err}");
+        }
+    }
+
+    /// The two new fields are omitted from the wire at their defaults, so an
+    /// ordinary canvas serializes exactly as before (a signed `.calp`
+    /// manifest of an unchanged canvas keeps its bytes), and a layout written
+    /// by an older build reads them as their defaults.
+    #[test]
+    fn wallpaper_and_the_page_lock_ride_the_wire_only_when_set() {
+        let plain = serde_json::to_value(SheetKind::new_canvas()).unwrap();
+        assert!(plain.get("wallpaper").is_none(), "{plain}");
+        assert!(plain.get("objectsLocked").is_none(), "{plain}");
+
+        let set = CanvasLayout { wallpaper: "#123456".into(), objects_locked: true, ..CanvasLayout::default() };
+        let json = serde_json::to_value(SheetKind::Canvas(set.clone())).unwrap();
+        assert_eq!(json["wallpaper"], "#123456");
+        assert_eq!(json["objectsLocked"], true);
+        let back: SheetKind = serde_json::from_value(json).unwrap();
+        assert_eq!(back, SheetKind::Canvas(set));
+
+        let old: SheetKind = serde_json::from_value(serde_json::json!({ "type": "canvas", "gridSizePx": 30 })).unwrap();
+        let layout = old.canvas_layout().unwrap();
+        assert_eq!(layout.wallpaper, "");
+        assert!(!layout.objects_locked, "an older file's canvas is not locked");
     }
 
     #[test]
@@ -2520,6 +2696,7 @@ mod sheet_kind_tests {
             ("unknown preset", Box::new(|l| l.page_preset = "a4".to_string())),
             ("preset disagrees with size", Box::new(|l| l.page_width = 1000)),
             ("bad background", Box::new(|l| l.background = "red".to_string())),
+            ("bad wallpaper", Box::new(|l| l.wallpaper = "red".to_string())),
         ];
         for (label, mutate) in cases {
             let mut layout = CanvasLayout::default();

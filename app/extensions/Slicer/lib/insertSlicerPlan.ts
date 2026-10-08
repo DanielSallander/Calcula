@@ -214,12 +214,19 @@ export function modelSources(
 /**
  * What a model slicer reaches, said where the user chooses one (owner
  * decision 2026-09-27: the dialog must name the objects). PivotCharts follow
- * their pivot; charts that query the model directly are not reached in v1.
+ * their pivot. Charts that query the model directly (a design-query source:
+ * cards, KPIs, gauges and every other chart on a DSL query) follow the page's
+ * model slicers too since owner decision 5 of 2026-10-08 -- through
+ * @api/pageFilters (lib/slicerPageFilters.ts publishes, Charts merges the
+ * filter into its query). The sentence used to end "Charts that query the
+ * model directly are not filtered yet."; it must name them now, or the dialog
+ * would tell the user a chart is unfiltered while it is filtered.
  */
 export const MODEL_SLICER_REACH =
-  "A model slicer filters every PivotTable (and its PivotChart) built on this model " +
-  "on the sheet or canvas where the slicer is placed, including PivotTables added later. " +
-  "Other sheets are not affected. Charts that query the model directly are not filtered yet.";
+  "A model slicer filters every PivotTable (and its PivotChart) built on this model, " +
+  "and every chart that queries this model directly (cards, KPIs, gauges and other visuals), " +
+  "on the sheet or canvas where the slicer is placed, including ones added later. " +
+  "Other sheets are not affected.";
 
 /** The dropdown label: name, kind, and the source's sheet when known. A BI
  *  pivot says "PivotTable on model" so it never reads like the model itself. */

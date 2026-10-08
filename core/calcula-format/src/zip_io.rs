@@ -19,7 +19,7 @@ use crate::features::scheduled_jobs::{
 use crate::features::script_authoring::{SCRIPT_AUTHORING_FEATURE, SCRIPT_AUTHORING_FILE};
 use crate::manifest::{
     stamp_feature_format_version, Manifest, CALA_BASE_FORMAT_VERSION, PINNED_FILTER_MIN_FORMAT_VERSION,
-    CANVAS_SHEET_MIN_FORMAT_VERSION,
+    CANVAS_OBJECTS_LOCKED_FEATURE, CANVAS_SHEET_MIN_FORMAT_VERSION, CANVAS_WALLPAPER_FEATURE,
     PENDING_RECALC_MIN_FORMAT_VERSION, SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION,
     SHEET_VIEW_MIN_FORMAT_VERSION,
     SPILL_EXTENT_MIN_FORMAT_VERSION,
@@ -259,6 +259,19 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     if workbook.sheets.iter().any(|s| s.kind.is_canvas()) {
         manifest.features.push("canvas_sheets".to_string());
         stamp_feature_format_version(&mut manifest, CANVAS_SHEET_MIN_FORMAT_VERSION);
+    }
+    // A canvas's WALLPAPER and LOCK OBJECTS (CONTRACT-CANVAS 4.7): feature ids
+    // and DELIBERATELY NO version link -- an older reader that drops them
+    // loses a colour around the page or a drag lock, visible losses, never a
+    // lie (see CANVAS_WALLPAPER_FEATURE). Each is declared only when some
+    // canvas actually carries it. Both ride the sheet's own metadata.json, so
+    // the read needs no id and is unconditional.
+    let layouts = || workbook.sheets.iter().filter_map(|s| s.kind.canvas_layout());
+    if layouts().any(|l| !l.wallpaper.is_empty()) {
+        manifest.features.push(CANVAS_WALLPAPER_FEATURE.to_string());
+    }
+    if layouts().any(|l| l.objects_locked) {
+        manifest.features.push(CANVAS_OBJECTS_LOCKED_FEATURE.to_string());
     }
     manifest.features.push("theme".to_string());
 
@@ -2201,6 +2214,100 @@ mod tests {
         let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(manifest.format_version, CANVAS_SHEET_MIN_FORMAT_VERSION);
         assert!(manifest.features.iter().any(|f| f == "canvas_sheets"));
+    }
+
+    /// CONTRACT-CANVAS 4.7: the WALLPAPER and LOCK OBJECTS round-trip the real
+    /// archive, and each declares a manifest FEATURE ID but takes NO link in
+    /// the format-version chain -- an older reader that drops them loses a
+    /// colour around the page or a convenience lock, visible losses, never a
+    /// document that lies (CLAUDE.md, ".cala Format Versioning"). So a canvas
+    /// carrying them stamps exactly what a plain canvas stamps (v9), no more.
+    #[test]
+    fn canvas_wallpaper_and_lock_declare_feature_ids_but_never_raise_the_version() {
+        let mut workbook = make_test_workbook();
+        let mut layout = persistence::CanvasLayout::default();
+        layout.wallpaper = "#202020".to_string();
+        layout.objects_locked = true;
+        layout.page_preset = "tooltip".to_string();
+        layout.page_width = 320;
+        layout.page_height = 240;
+        workbook.sheets[0].kind = persistence::SheetKind::Canvas(layout.clone());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("canvas-wallpaper.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+        assert_eq!(loaded.sheets[0].kind, persistence::SheetKind::Canvas(layout), "wallpaper, lock and the Tooltip page survive");
+
+        let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(manifest.features.iter().any(|f| f == CANVAS_WALLPAPER_FEATURE), "{:?}", manifest.features);
+        assert!(manifest.features.iter().any(|f| f == CANVAS_OBJECTS_LOCKED_FEATURE), "{:?}", manifest.features);
+        assert_eq!(
+            manifest.format_version, CANVAS_SHEET_MIN_FORMAT_VERSION,
+            "a cosmetic canvas field must not raise the version above the canvas link itself"
+        );
+
+        // Each id is declared ONLY by a canvas that actually carries it: a
+        // plain canvas -- and a lock without a wallpaper -- declare no more.
+        let mut plain = make_test_workbook();
+        plain.sheets[0].kind = persistence::SheetKind::new_canvas();
+        let path = dir.path().join("canvas-plain.cala");
+        write_calcula(&plain, &path).unwrap();
+        let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(!manifest.features.iter().any(|f| f == CANVAS_WALLPAPER_FEATURE));
+        assert!(!manifest.features.iter().any(|f| f == CANVAS_OBJECTS_LOCKED_FEATURE));
+
+        let mut lock_only = make_test_workbook();
+        lock_only.sheets[0].kind = persistence::SheetKind::Canvas(persistence::CanvasLayout {
+            objects_locked: true,
+            ..persistence::CanvasLayout::default()
+        });
+        let path = dir.path().join("canvas-lock-only.cala");
+        write_calcula(&lock_only, &path).unwrap();
+        let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(!manifest.features.iter().any(|f| f == CANVAS_WALLPAPER_FEATURE));
+        assert!(manifest.features.iter().any(|f| f == CANVAS_OBJECTS_LOCKED_FEATURE));
+    }
+
+    /// The READ is unconditional: the fields ride the sheet's own metadata
+    /// (`kind`), so a file whose manifest forgot the id still loads them.
+    #[test]
+    fn canvas_wallpaper_and_lock_load_even_without_their_feature_ids() {
+        let mut workbook = make_test_workbook();
+        let layout = persistence::CanvasLayout {
+            wallpaper: "#abc".to_string(),
+            objects_locked: true,
+            ..persistence::CanvasLayout::default()
+        };
+        workbook.sheets[0].kind = persistence::SheetKind::Canvas(layout.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("canvas-noid.cala");
+        write_calcula(&workbook, &path).unwrap();
+
+        // Rewrite manifest.json without the two ids.
+        let bytes = std::fs::read(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let out_path = dir.path().join("canvas-noid-stripped.cala");
+        {
+            let mut out = zip::ZipWriter::new(std::fs::File::create(&out_path).unwrap());
+            for i in 0..archive.len() {
+                let mut entry = archive.by_index(i).unwrap();
+                let name = entry.name().to_string();
+                let mut data = Vec::new();
+                std::io::Read::read_to_end(&mut entry, &mut data).unwrap();
+                if name == "manifest.json" {
+                    let mut m: serde_json::Value = serde_json::from_slice(&data).unwrap();
+                    let features = m["features"].as_array_mut().unwrap();
+                    features.retain(|f| f != CANVAS_WALLPAPER_FEATURE && f != CANVAS_OBJECTS_LOCKED_FEATURE);
+                    data = serde_json::to_vec(&m).unwrap();
+                }
+                out.start_file(name, FileOptions::<()>::default()).unwrap();
+                std::io::Write::write_all(&mut out, &data).unwrap();
+            }
+            out.finish().unwrap();
+        }
+        let loaded = read_calcula(&out_path).unwrap();
+        assert_eq!(loaded.sheets[0].kind, persistence::SheetKind::Canvas(layout));
     }
 
     /// A canvas at the DEFAULT layout must still be written: its metadata.json

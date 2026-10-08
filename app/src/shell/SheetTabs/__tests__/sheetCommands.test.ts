@@ -76,6 +76,7 @@ function fakeController(snapshot: SheetTabsSnapshot) {
   const c = {
     snapshot: () => snapshot,
     insertSheetBefore: vi.fn(async () => undefined),
+    appendSheet: vi.fn(async () => undefined),
     deleteSheet: vi.fn(async () => undefined),
     renameSheet: vi.fn(async () => undefined),
     hideSheet: vi.fn(async () => undefined),
@@ -147,6 +148,41 @@ describe("Insert Sheet", () => {
     await CommandRegistry.execute(CoreCommands.SHEET_INSERT, { index: 9 });
     expect(c.insertSheetBefore).not.toHaveBeenCalled();
     expect(toasts.length).toBe(1);
+  });
+
+  // Review finding (2026-10-08): the Canvas tab's New Page reached the strip
+  // through the Shell's PRIVATE `sheet:requestAdd` window event, because this
+  // command could not say "a canvas". It can now: `{ kind }` names the kind
+  // of sheet, `{ atEnd: true }` appends instead of inserting before an anchor.
+  it("`{ kind: \"canvas\" }` inserts a CANVAS before the anchor", async () => {
+    const c = mount(TWO_SHEETS);
+    await CommandRegistry.execute(CoreCommands.SHEET_INSERT, { kind: "canvas" });
+    expect(c.insertSheetBefore).toHaveBeenCalledWith(1, "canvas");
+    expect(c.appendSheet).not.toHaveBeenCalled();
+  });
+
+  it("`{ atEnd: true }` APPENDS (the strip's \"+\"), of the kind named or a worksheet", async () => {
+    const c = mount(TWO_SHEETS);
+    await CommandRegistry.execute(CoreCommands.SHEET_INSERT, { kind: "canvas", atEnd: true });
+    expect(c.appendSheet).toHaveBeenCalledWith("canvas");
+    await CommandRegistry.execute(CoreCommands.SHEET_INSERT, { atEnd: true });
+    expect(c.appendSheet).toHaveBeenLastCalledWith(undefined);
+    expect(c.insertSheetBefore).not.toHaveBeenCalled();
+  });
+
+  it("an unknown kind is refused by name, not guessed into a worksheet", async () => {
+    const c = mount(TWO_SHEETS);
+    await CommandRegistry.execute(CoreCommands.SHEET_INSERT, { kind: "chart" });
+    expect(c.insertSheetBefore).not.toHaveBeenCalled();
+    expect(c.appendSheet).not.toHaveBeenCalled();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].message).toMatch(/chart/);
+  });
+
+  it("the structure lock refuses the canvas insert too (one door, one set of refusals)", async () => {
+    const c = mount({ ...TWO_SHEETS, locked: true });
+    await CommandRegistry.execute(CoreCommands.SHEET_INSERT, { kind: "canvas", atEnd: true });
+    expect(c.appendSheet).not.toHaveBeenCalled();
   });
 });
 

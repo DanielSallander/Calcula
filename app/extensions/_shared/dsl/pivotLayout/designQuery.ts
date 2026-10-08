@@ -30,6 +30,11 @@ export interface DesignQueryFieldRef {
    *  backend inverts it against the query's own result -- a design query has
    *  no pivot whose item list could invert it here (BUG-0197). */
   includedItems?: string[];
+  /** The FILTER LEVEL an engine-routed filter applies at (Rust
+   *  `DesignQueryFieldRef.level`): absent = 1, an ordinary slicer that a bare
+   *  CLEAR/RESET removes; 2..9 = a slicer PINNED above that range
+   *  (`@api/pageFilters` `filterLevel`). Only engine-routed filters read it. */
+  level?: number;
 }
 
 /** A measure reference. Mirrors the Rust `BiValueFieldRef`. */
@@ -45,6 +50,12 @@ export interface DesignQueryRequest {
   columnFields: DesignQueryFieldRef[];
   valueFields: DesignQueryValueRef[];
   filterFields: DesignQueryFieldRef[];
+  /** The canvas PAGE's model filters (`@api/pageFilters`), merged by the
+   *  chart reader and kept apart from the query's own FILTERS: the backend
+   *  runs them INSIDE the engine query, never as a GROUP BY column, so a
+   *  non-additive measure under a slicer keeping several items is exact
+   *  (Rust `DesignQueryRequest.page_filter_fields`). */
+  pageFilterFields?: DesignQueryFieldRef[];
   calculatedFields?: CalculatedFieldDef[];
   valueColumnOrder?: ValueColumnRefDef[];
   layout?: LayoutConfig;

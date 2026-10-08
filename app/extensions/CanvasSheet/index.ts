@@ -31,6 +31,9 @@
 //              (lib/groupDrag.ts) and the arrow-key NUDGE (lib/objectNudge.ts)
 //              -- every multi-object move through @api/objectGeometry, as ONE
 //              undo step,
+//            - LOCK OBJECTS for a whole page (View > Lock Objects): the layout
+//              surface locks every object while it is on, and a drag or nudge
+//              attempt is told why in one toast (lib/objectsLock.ts),
 //            - the GRIP MENU's page verbs (Bring Forward, Send Backward,
 //              Lock -- lib/gripMenuItems.ts, through @api/objectPosition) and
 //              Arrange's "Size & Position" (the dialog every object menu
@@ -79,6 +82,7 @@ import { installCanvasObjectDelete } from "./lib/canvasDelete";
 import { installCanvasObjectClipboard } from "./lib/canvasClipboard";
 import { installCanvasLayoutRefs } from "./lib/layoutRefs";
 import { installCanvasGripMenuItems } from "./lib/gripMenuItems";
+import { installObjectsLockedNotice } from "./lib/objectsLock";
 
 /** The id of the page layer; one per app. */
 export const CANVAS_PAGE_LAYER_ID = "canvas-sheet-page";
@@ -207,6 +211,9 @@ function activate(_context: ExtensionContext): void {
   // Bring Forward, Send Backward and Lock for the object whose grip was
   // clicked -- the Arrange group's own commands (lib/gripMenuItems.ts).
   cleanupFns.push(...installCanvasGripMenuItems());
+  // A drag attempt on a page whose Lock Objects is on is told why (Core has
+  // already refused to arm the move: the surface says every object is locked).
+  cleanupFns.push(...installObjectsLockedNotice());
 
   cleanupFns.push(() => resetCanvasTab());
   cleanupFns.push(() => resetCanvasSheetStore());

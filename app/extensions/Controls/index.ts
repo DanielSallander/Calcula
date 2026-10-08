@@ -21,12 +21,13 @@ import { registerKeybinding, isGridFocused } from "@api/keybindings";
 import { registerControlsProvider } from "@api/controlsService";
 import type {
   CreateShapeControlRequest,
-  ShapeCatalogEntry,
   ShapeControlHandle,
 } from "@api/controlsService";
 import {
   registerButtonControlProvider,
   MACRO_REF_PROPERTY,
+  buttonActionProperties,
+  checkCreateButtonAction,
 } from "@api/buttonControlService";
 import type {
   ButtonControlAnchor,
@@ -128,7 +129,8 @@ import {
   legacyInlineImageWarning,
 } from "./Image/legacyInlineImages";
 import React from "react";
-import { getShapeDefinition, getShapeCategories } from "./Shape/shapeCatalog";
+import { getShapeDefinition } from "./Shape/shapeCatalog";
+import { listShapeCatalogEntries } from "./Shape/shapeCatalogEntries";
 import { ShapeGalleryPanel } from "./Shape/ShapeGalleryOverlay";
 import {
   selectFloatingControl,
@@ -190,6 +192,8 @@ import { installControlObjectMenu } from "./lib/controlObjectMenu";
 import { hitTestFloatingControl } from "./lib/controlHitTest";
 import { floatingControlZoneAt } from "./lib/controlZoneAt";
 import { beginFloatingButtonPress, cancelFloatingButtonPress } from "./lib/buttonPress";
+import { buttonActionOfControl, tryStoredButtonAction } from "./lib/buttonActions";
+import { startSheetHistory } from "@api/sheetHistory";
 import {
   copyControls,
   pasteControl,
@@ -690,6 +694,30 @@ function activate(context: ExtensionContext): void {
   };
   window.addEventListener("controls:pin-changed", onPinChanged);
   cleanupFns.push(() => window.removeEventListener("controls:pin-changed", onPinChanged));
+
+  // 6b-4. Keep the floating store's copy of a button's DECLARATIVE action in
+  //     step with what the Properties pane's Action section just wrote
+  //     (PropertiesPane/ButtonActionSection.tsx): the run-mode click reads it
+  //     synchronously, before the script door (lib/buttonActions.ts). The
+  //     caption glyph and the page-navigator highlight are painted from it too.
+  const onActionChanged = (e: Event) => {
+    const d = (e as CustomEvent).detail as {
+      sheetIndex: number; row: number; col: number; properties?: Record<string, { valueType: string; value: string }>;
+    };
+    const id = makeFloatingControlId(d.sheetIndex, d.row, d.col);
+    const ctrl = getFloatingControl(id);
+    if (!ctrl) return;
+    ctrl.buttonAction = buttonActionOfControl(ctrl.controlType, d.properties);
+    invalidateFloatingButtonCache(id);
+    emitAppEvent(AppEvents.GRID_REFRESH);
+  };
+  window.addEventListener("controls:action-changed", onActionChanged);
+  cleanupFns.push(() => window.removeEventListener("controls:action-changed", onActionChanged));
+
+  // 6b-5. The page history a Back button walks (@api/sheetHistory): recorded
+  //     from the moment Controls is up, so the first Back after opening a
+  //     report has the page the reader came from.
+  cleanupFns.push(startSheetHistory());
 
   // 6c. STRUCTURAL EDITS. Controls are anchored to a cell, and the backend
   //     shifts that anchor when rows/columns are inserted or deleted — but this
@@ -1598,6 +1626,11 @@ export async function createButtonControlAt(
   const { sheetIndex } = request;
   const askedWidth = requestedSize("A button's width", request.width);
   const askedHeight = requestedSize("A button's height", request.height);
+  // A DECLARATIVE action (Canvas contract §4.4) is refused beside code BEFORE
+  // an anchor is claimed or anything written: one button, one thing.
+  const actionRefusal = checkCreateButtonAction(request);
+  if (actionRefusal) throw new Error(actionRefusal);
+  const buttonAction = request.action;
 
   return withControlAnchor(request, async ({ row, col }, position) => {
     let btnX: number;
@@ -1666,10 +1699,22 @@ export async function createButtonControlAt(
         ...(request.macroRef
           ? { [MACRO_REF_PROPERTY]: { valueType: "static", value: request.macroRef } }
           : {}),
+        // A declarative action's three properties (go to a page, back, clear
+        // the page's slicers), only when asked for -- ordinary buttons stay
+        // free of them, as they do of `macroRef`.
+        ...(buttonAction
+          ? Object.fromEntries(
+              Object.entries(buttonActionProperties(buttonAction)).map(([k, value]) => [
+                k,
+                { valueType: "static" as const, value },
+              ]),
+            )
+          : {}),
       },
     });
 
-    // Add to floating store
+    // Add to floating store -- with the action, which the run-mode click reads
+    // from here before (and instead of) the script door.
     const controlId = makeFloatingControlId(sheetIndex, row, col);
     addFloatingControl({
       id: controlId,
@@ -1681,6 +1726,7 @@ export async function createButtonControlAt(
       width: btnWidth,
       height: btnHeight,
       controlType: "button",
+      ...(buttonAction ? { buttonAction } : {}),
     });
 
     // Sync overlay regions and refresh
@@ -1897,27 +1943,9 @@ function getCurrentSelectionFromInterceptor() {
 // Shape Controls Provider (@api/controlsService)
 // ============================================================================
 
-/** The shape catalog, flattened out of its categories — the feature-neutral
- *  answer to "what can createShape draw?". Built once: the catalog is a module
- *  constant, so nothing about it can change during a session. */
-let flattenedShapeCatalog: ShapeCatalogEntry[] | null = null;
-
-function listShapeCatalogEntries(): ShapeCatalogEntry[] {
-  if (!flattenedShapeCatalog) {
-    flattenedShapeCatalog = getShapeCategories().flatMap((cat) =>
-      cat.shapes.map((s) => ({
-        id: s.id,
-        label: s.label,
-        categoryId: cat.id,
-        categoryLabel: cat.label,
-        defaultWidth: s.defaultWidth,
-        defaultHeight: s.defaultHeight,
-        isLine: s.isLine === true,
-      })),
-    );
-  }
-  return flattenedShapeCatalog;
-}
+// The shape catalog, flattened out of its categories — the feature-neutral
+// answer to "what can createShape draw?" — with a thumbnail per shape (Canvas
+// contract §4.3) is `listShapeCatalogEntries` (Shape/shapeCatalogEntries.ts).
 
 /**
  * Create a floating SHAPE — THE one place a shape is made, for the ribbon's
@@ -2536,9 +2564,9 @@ function setupFloatingObjectEvents(): void {
   // press -- part 'button', a run-mode button's whole body -- to this event and
   // never moves the button from it. The press only arms: the button shows
   // pressed while the pointer is inside it, and RUNS AT THE RELEASE inside it,
-  // exactly once -- the `button:clicked` hook first, then the M4 click path
-  // (`runFloatingButtonClick`: macro link, application approval, audit),
-  // both unchanged, only later. Sliding off, Escape, a window blur or a lost
+  // exactly once -- its declarative action if it has one (and then nothing
+  // else), otherwise the `button:clicked` hook first, then the M4 click path
+  // (`runFloatingButtonClick`: macro link, application approval, audit). Sliding off, Escape, a window blur or a lost
   // release runs nothing. Moving a button still needs Design Mode (there it
   // is frame, and never reaches this listener).
   const handleButtonPress = (e: Event) => {
@@ -2552,9 +2580,23 @@ function setupFloatingObjectEvents(): void {
       controlId,
       regionId: controlId,
       run: () => {
+        // A DECLARATIVE action (go to a page, back, clear the page's slicers;
+        // Canvas contract §4.4) is performed HERE, and the script door is not
+        // asked: it is not code, and a report reader's navigation button must
+        // work with Script Security off and on a subscribed canvas
+        // (lib/buttonActions.ts). ONE BUTTON, ONE THING: a button with an
+        // action runs no code of ANY kind -- no macro, no inline code (the
+        // seam and the Properties pane refuse the pair), and no object script
+        // either, so the onClick hook below is not fired for it. That is what
+        // the Properties pane tells the author ("A click performs this
+        // action") and what @api/buttonControlService says (an action button
+        // "has no code"); the hook used to fire first, so a Back button with a
+        // bound object script ran both (review finding 2026-10-08).
+        if (tryStoredButtonAction(controlId, controlSheet)) return;
         // Fire the scriptable button's onClick hook (the #1 VBA entry point)
-        // FIRST, synchronously, so a mounted object script starts without
-        // waiting on the metadata round trip the inline path needs.
+        // first on the CODE path, synchronously, so a mounted object script
+        // starts without waiting on the metadata round trip the inline path
+        // needs.
         emitAppEvent("button:clicked", { instanceId: controlId, x: 0, y: 0 });
         // Not fire-and-forget: an unhandled rejection here used to be the whole
         // story a user got for a button that did nothing.
@@ -3077,9 +3119,10 @@ async function handleEmbeddedToggle(
     await setControlProperty(sheetIndex, row, col, "button", "y", "static", String(cellY));
     await setControlProperty(sheetIndex, row, col, "button", "width", "static", String(btnWidth));
     await setControlProperty(sheetIndex, row, col, "button", "height", "static", String(btnHeight));
-    await setControlProperty(sheetIndex, row, col, "button", "pinToGrid", "static", "false");
+    const afterPin = await setControlProperty(sheetIndex, row, col, "button", "pinToGrid", "static", "false");
 
-    // Add to floating store
+    // Add to floating store -- with the button's declarative action, if it
+    // kept one while it sat in its cell: the run-mode click reads it from here.
     addFloatingControl({
       id: controlId,
       sheetIndex,
@@ -3090,6 +3133,7 @@ async function handleEmbeddedToggle(
       width: btnWidth,
       height: btnHeight,
       controlType: "button",
+      buttonAction: buttonActionOfControl("button", afterPin?.properties),
     });
 
     syncFloatingControlRegions();
@@ -3205,6 +3249,9 @@ async function loadFloatingControls(knownSheetIndex?: number): Promise<void> {
           width,
           height,
           controlType: entry.metadata.controlType,
+          // A button's declarative action survives reload (and arrives with a
+          // subscribed canvas: a pull strips code, never an action).
+          buttonAction: buttonActionOfControl(entry.metadata.controlType, props),
         });
         if (pinToGrid && offsetX === undefined && offsetY === undefined) {
           // Older pinned controls have no stored offsets — derive them from

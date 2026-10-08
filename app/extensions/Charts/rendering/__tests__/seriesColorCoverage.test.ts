@@ -76,6 +76,10 @@ const DATA_FOR: Record<string, ParsedChartData> = {
   bubble: MULTI, radar: MULTI, combo: MULTI,
   pie: SINGLE, donut: SINGLE, waterfall: SINGLE, treemap: SINGLE, funnel: SINGLE,
   sunburst: SINGLE, boxPlot: MULTI, stock: OHLC, histogram: SINGLE, pareto: SINGLE,
+  // Tile visuals: a Card's callout and a Gauge's progress arc take the series
+  // colour, a Multi-row card's accent bar takes series 0's; a KPI colours by
+  // STATUS and is one of the marks that decline it.
+  card: MULTI, multiRowCard: MULTI, kpi: SINGLE, gauge: SINGLE,
 };
 
 /** Marks that need a spec nudge before they draw their own series marks. */
@@ -159,7 +163,7 @@ describe("series colour: markReadsSeriesColor matches what the painters do", () 
     });
   }
 
-  it("the marks that ignore it are exactly the ten we refuse a swatch for", () => {
+  it("the marks that ignore it are exactly the eleven we refuse a swatch for", () => {
     const ignored = BUILTIN_MARKS.filter((m) => !paintsTheSeriesColour(m)).sort();
     expect(ignored).toEqual([...seriesColourBlindMarks()].sort());
   });

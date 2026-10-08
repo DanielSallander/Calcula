@@ -437,7 +437,9 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     // so a command runs the same switch steps a click does.
     const releaseController = registerSheetTabsController({
       snapshot: () => controllerStateRef.current,
-      insertSheetBefore: (beforeIndex) => handleInsertSheetBeforeRef.current(beforeIndex),
+      insertSheetBefore: (beforeIndex, kind) => handleInsertSheetBeforeRef.current(beforeIndex, kind),
+      // The strip's own "+" (append), for the command's `{ atEnd: true }`.
+      appendSheet: (kind) => handleAddSheetRef.current(kind),
       // Excel's rule for the command door: a blank sheet goes without asking.
       deleteSheet: (index) => handleDeleteSheetRef.current(index, { confirm: "whenNotBlank" }),
       renameSheet: (index, newName) => handleRenameSheetRef.current(index, newName),
@@ -802,7 +804,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
    * anchor's index, so the active INDEX can come back unchanged while the
    * active SHEET is a different one.
    */
-  const handleInsertSheetBefore = useCallback(async (beforeIndex: number) => {
+  const handleInsertSheetBefore = useCallback(async (beforeIndex: number, kind?: SheetKindName) => {
     if (structuralLocked) return;
     const anchor = sheetAt(sheets, beforeIndex);
     try {
@@ -810,7 +812,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         detail: { oldSheetIndex: activeIndex, newSheetIndex: -1 },
       }));
       const { result, error } = await insertSheetBefore(
-        { addSheet: () => addSheet(), copySheet, moveSheet },
+        { addSheet: () => addSheet(undefined, kind), copySheet, moveSheet },
         announceReorder,
         anchor,
       );

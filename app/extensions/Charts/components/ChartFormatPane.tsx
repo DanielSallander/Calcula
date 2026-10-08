@@ -1493,6 +1493,7 @@ const SERIES_FILL_REFUSAL: Record<string, string> = {
   sunburst: "A sunburst colours its rings from the palette by branch. Click a single segment to colour it, or change the palette in Chart Design.",
   waterfall: "A waterfall colours each bar by what it does — increase, decrease or total. Set those three colours in Chart Design, or click a single bar to override it.",
   stock: "A stock chart colours each candle by whether the period closed up or down. Set those two colours in Chart Design, or click a single candle to override it.",
+  kpi: "A KPI colours its trend by status: good, bad, or no goal, against the goal. Set those colours in Chart Design under Visual, or click one period of the trend to mark it.",
   default: "This chart type paints its own colours rather than reading a series fill. Click a single data point to colour it, or change the palette in Chart Design.",
 };
 

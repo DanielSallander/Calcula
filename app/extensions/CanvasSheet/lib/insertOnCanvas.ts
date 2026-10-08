@@ -1,13 +1,27 @@
 //! FILENAME: app/extensions/CanvasSheet/lib/insertOnCanvas.ts
-// PURPOSE: The Canvas tab's INSERT group: put a chart, a pivot table, a slicer,
-//          a timeline, a floating grid, a text box, a shape, a picture or a
-//          button on the active canvas, at a sensible place.
+// PURPOSE: What the Canvas tab's VISUALS and ELEMENTS groups insert: a chart
+//          (optionally PRESET to a type -- "Stacked bar", "Card"), a pivot
+//          table (optionally in the Table visual's form), a slicer, a timeline,
+//          a floating grid, a text box, a shape (by catalog id, at the
+//          catalog's size), a picture or a button (blank, or one of Power BI's
+//          declarative action buttons) -- on the active canvas, at a sensible
+//          place.
 // CONTEXT: Every object is created by the extension that OWNS it, through its
 //          feature-neutral @api seam (the Seam Rule): this module says WHAT and
 //          WHERE, never how -- no recipe keys, no backend calls, no geometry
 //          walk. Dialog-driven families (chart, pivot, slicer, timeline)
 //          receive the placement through their dialog's data; the others
 //          through their provider's request.
+//
+//          WHAT. A chart tile names a mark and its options; the Charts dialog
+//          opens preset to them (`initialMark` / `initialMarkOptions`,
+//          CONTRACT-CANVAS 4.1) and the user still picks the data. The Table
+//          tile asks the Pivot dialog for its Table preset (@api/pivotPresets).
+//          A shape is asked for by its catalog id and NOT sized here: the
+//          provider's catalog default applies (CONTRACT 4.3), and the same
+//          catalog size places it. A Back / Clear all slicers button is a
+//          DECLARATIVE action (@api/buttonControlService), never code: it works
+//          with Script Security off and on a subscribed page.
 //
 //          WHERE. A new object lands centred in what the user is looking at,
 //          on the snap grid when snap is on, kept on the page, and each further
@@ -22,7 +36,8 @@ import { importImageViaPicker } from "@api/filesystem";
 import { requireFloatingRangeProvider } from "@api/floatingRangeService";
 import { requireControlsProvider } from "@api/controlsService";
 import { requirePictureControlProvider } from "@api/pictureControlService";
-import { requireButtonControlProvider } from "@api/buttonControlService";
+import { BUTTON_ACTION_LABELS, requireButtonControlProvider, type ButtonAction } from "@api/buttonControlService";
+import type { PivotCreatePreset } from "@api/pivotPresets";
 import { clampMoveToPage, snapValue, type LayoutRect } from "@api/layoutSurface";
 import { canvasLayoutSurface } from "./layoutSurfaceProvider";
 
@@ -35,10 +50,36 @@ export const INSERT_SIZES = {
   slicer: { width: 180, height: 240 },
   timeline: { width: 360, height: 120 },
   textBox: { width: 240, height: 64 },
-  shape: { width: 160, height: 96 },
   button: { width: 112, height: 32 },
+  // "Clear all slicers" is the longest caption a single-button insert writes.
+  wideButton: { width: 144, height: 32 },
+  floatingGrid: { width: 240, height: 120 },
   pictureMax: 400,
 } as const;
+
+/**
+ * The chart marks that get a box of their OWN size instead of the chart's:
+ * the tile visuals, which show one number (Card), a few (Multi-row card), a
+ * number with its trend (KPI) or a dial (Gauge). Dropped at the full chart
+ * size, a Card was one number in a box the size of a column chart (review
+ * finding 2026-10-08). Every other mark is placed at INSERT_SIZES.chart.
+ */
+export const CHART_MARK_INSERT_SIZES: Readonly<Record<string, { width: number; height: number }>> = {
+  card: { width: 240, height: 140 },
+  multiRowCard: { width: 320, height: 240 },
+  kpi: { width: 280, height: 180 },
+  gauge: { width: 320, height: 220 },
+};
+
+/** The box a chart of `mark` is placed in (the chart size unless it has its own). */
+function chartInsertSize(mark: string | undefined): { width: number; height: number } {
+  return (mark !== undefined && Object.prototype.hasOwnProperty.call(CHART_MARK_INSERT_SIZES, mark)
+    ? CHART_MARK_INSERT_SIZES[mark]
+    : INSERT_SIZES.chart);
+}
+
+/** The shape a bare Shapes press (the split's face) inserts. */
+export const DEFAULT_SHAPE_ID = "rectangle";
 
 /** What the default-placement maths needs to know about the view. */
 export interface InsertView {
@@ -114,7 +155,13 @@ export function currentInsertView(): InsertView | null {
   };
 }
 
-function placeFor(
+/**
+ * Where an object of `size` goes on the active canvas (its sheet with the
+ * default rect), or null before the grid exists. Exported for the inserts that
+ * place several objects at once (lib/pageNavigator.ts), so a row of buttons is
+ * placed by the same rule as one.
+ */
+export function placeFor(
   size: { width: number; height: number },
   options?: InsertRectOptions,
 ): (LayoutRect & { sheetIndex: number }) | null {
@@ -123,7 +170,8 @@ function placeFor(
   return { sheetIndex: view.sheetIndex, ...defaultInsertRect(view, size, options) };
 }
 
-async function refusal(what: string, err: unknown): Promise<void> {
+/** Tell the user an insert was refused, with the owner's reason (one dialog). */
+export async function insertRefusal(what: string, err: unknown): Promise<void> {
   await alertAsync(`Could not insert ${what}: ${err instanceof Error ? err.message : String(err)}`, {
     title: "Canvas",
   });
@@ -140,25 +188,67 @@ export type CanvasInsertKind =
   | "picture"
   | "button";
 
+/**
+ * The button kinds Buttons v inserts one at a time: a blank button (a script
+ * button, the old Insert > Button) and Power BI's Back and Clear all slicers.
+ * The Page Navigator is a ROW of buttons (lib/pageNavigator.ts).
+ */
+export type CanvasButtonKind = "blank" | "back" | "clearSlicers";
+
+/** What an insert may say beyond its kind; each field belongs to one kind. */
+export interface CanvasInsertOptions {
+  /** chart: the type the dialog opens with (a ChartMark id: "bar", "card"...). */
+  mark?: string;
+  /** chart: that type's options (`{ stackMode: "stacked" }`...). */
+  markOptions?: Record<string, unknown>;
+  /** pivot: a create preset (the Table visual's, @api/pivotPresets). */
+  preset?: PivotCreatePreset;
+  /** shape: the catalog id (default {@link DEFAULT_SHAPE_ID}). */
+  shapeId?: string;
+  /** button: which button (default "blank"). */
+  button?: CanvasButtonKind;
+}
+
+/** The caption, action and size of each single-button kind. */
+const BUTTON_KINDS: Readonly<
+  Record<CanvasButtonKind, { label: string; action?: ButtonAction; size: { width: number; height: number } }>
+> = {
+  blank: { label: "Button", size: INSERT_SIZES.button },
+  back: { label: BUTTON_ACTION_LABELS.back, action: { kind: "back" }, size: INSERT_SIZES.button },
+  clearSlicers: {
+    label: BUTTON_ACTION_LABELS.clearSlicers,
+    action: { kind: "clearSlicers" },
+    size: INSERT_SIZES.wideButton,
+  },
+};
+
 /** Insert one object on the active canvas. Resolves when it is placed (or refused). */
-export async function insertOnCanvas(kind: CanvasInsertKind): Promise<void> {
+export async function insertOnCanvas(kind: CanvasInsertKind, options: CanvasInsertOptions = {}): Promise<void> {
   switch (kind) {
     case "chart": {
-      const place = placeFor(INSERT_SIZES.chart);
+      const place = placeFor(chartInsertSize(options.mark));
       if (!place) return;
       // The chart dialog takes its data range WITH its sheet (a canvas has no
       // cells), and must not guess a range from the canvas's empty selection.
-      showDialog("chart:createDialog", { placement: place, suppressAutoRange: true });
+      // A tile's preset rides along -- a copy, so the dialog can never edit
+      // the catalogue's own object.
+      showDialog("chart:createDialog", {
+        placement: place,
+        suppressAutoRange: true,
+        ...(options.mark ? { initialMark: options.mark } : {}),
+        ...(options.markOptions ? { initialMarkOptions: { ...options.markOptions } } : {}),
+      });
       return;
     }
     case "pivot": {
       // A canvas pivot is a REAL pivot, written into the canvas's hidden grid
       // and shown inside this box (its frame); the Pivot extension's create
       // dialog owns everything else -- the source (a range with its sheet, a
-      // table or a data model), the anchor, and what happens after.
+      // table or a data model), the anchor, the preset's layout, and what
+      // happens after.
       const place = placeFor(INSERT_SIZES.pivot, { fitPage: true });
       if (!place) return;
-      showDialog("pivot:createDialog", { placement: place });
+      showDialog("pivot:createDialog", { placement: place, ...(options.preset ? { preset: options.preset } : {}) });
       return;
     }
     case "slicer": {
@@ -174,24 +264,23 @@ export async function insertOnCanvas(kind: CanvasInsertKind): Promise<void> {
       return;
     }
     case "floatingGrid": {
-      const place = placeFor({ width: 240, height: 120 });
+      const place = placeFor(INSERT_SIZES.floatingGrid);
       if (!place) return;
       try {
         await requireFloatingRangeProvider().create({ x: place.x, y: place.y, rows: 5, cols: 3 });
       } catch (err) {
-        await refusal("a floating grid", err);
+        await insertRefusal("a floating grid", err);
       }
       return;
     }
-    case "textBox":
-    case "shape": {
-      const size = kind === "textBox" ? INSERT_SIZES.textBox : INSERT_SIZES.shape;
-      const place = placeFor(size);
+    case "textBox": {
+      // A text box is sized for words, not by the shape catalog.
+      const place = placeFor(INSERT_SIZES.textBox);
       if (!place) return;
       try {
         await requireControlsProvider().createShape({
           sheetIndex: place.sheetIndex,
-          shapeType: kind === "textBox" ? "textBox" : "rectangle",
+          shapeType: "textBox",
           x: place.x,
           y: place.y,
           width: place.width,
@@ -199,24 +288,49 @@ export async function insertOnCanvas(kind: CanvasInsertKind): Promise<void> {
           text: "",
         });
       } catch (err) {
-        await refusal(kind === "textBox" ? "a text box" : "a shape", err);
+        await insertRefusal("a text box", err);
+      }
+      return;
+    }
+    case "shape": {
+      const shapeId = options.shapeId ?? DEFAULT_SHAPE_ID;
+      try {
+        const provider = requireControlsProvider();
+        // The catalog's own size places it, and the request names NO size, so
+        // the provider applies that same default (CONTRACT 4.3): one number,
+        // one owner.
+        const entry = provider.listShapeCatalog().find((e) => e.id === shapeId);
+        if (!entry) throw new Error(`there is no shape "${shapeId}" in the shape catalog`);
+        const place = placeFor({ width: entry.defaultWidth, height: entry.defaultHeight });
+        if (!place) return;
+        await provider.createShape({
+          sheetIndex: place.sheetIndex,
+          shapeType: shapeId,
+          x: place.x,
+          y: place.y,
+          text: "",
+        });
+      } catch (err) {
+        await insertRefusal("a shape", err);
       }
       return;
     }
     case "button": {
-      const place = placeFor(INSERT_SIZES.button);
+      const spec = BUTTON_KINDS[options.button ?? "blank"];
+      const place = placeFor(spec.size);
       if (!place) return;
       try {
         await requireButtonControlProvider().createButton({
           sheetIndex: place.sheetIndex,
-          label: "Button",
+          label: spec.label,
           x: place.x,
           y: place.y,
           width: place.width,
           height: place.height,
+          ...(spec.action ? { action: spec.action } : {}),
         });
       } catch (err) {
-        await refusal("a button", err);
+        await insertRefusal("a button", err);
       }
       return;
     }
@@ -225,7 +339,7 @@ export async function insertOnCanvas(kind: CanvasInsertKind): Promise<void> {
       try {
         media = await importImageViaPicker({ title: "Insert Picture" });
       } catch (err) {
-        await refusal("the picture", err);
+        await insertRefusal("the picture", err);
         return;
       }
       if (!media) return; // cancelled
@@ -246,7 +360,7 @@ export async function insertOnCanvas(kind: CanvasInsertKind): Promise<void> {
           height: place.height,
         });
       } catch (err) {
-        await refusal("the picture", err);
+        await insertRefusal("the picture", err);
       }
       return;
     }

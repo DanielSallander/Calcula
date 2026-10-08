@@ -325,6 +325,15 @@ fn is_omitted(expr: &Expression) -> bool {
     matches!(expr, Expression::Literal(Value::Blank))
 }
 
+/// Which end of the text LPAD / RPAD fill. The ONLY difference between the
+/// two functions — see `Evaluator::fn_pad`, which they share so that the cut,
+/// the cycling pad and every refusal cannot drift apart between them.
+#[derive(Clone, Copy)]
+enum PadSide {
+    Left,
+    Right,
+}
+
 /// The number the OPERAND OF A CRITERIA STRING is read as — the `2025-01-01`
 /// in `">=2025-01-01"`, the `1000` in `">1000"`, a bare `"1000"`.
 ///
@@ -2965,6 +2974,22 @@ impl<'a> Evaluator<'a> {
 
     /// Evaluates a function call, lifting it over any array arguments first.
     fn eval_function(&self, func: &BuiltinFunction, args: &[Expression]) -> EvalResult {
+        // A Calcula-only builtin (LPAD, RPAD) YIELDS to a lambda the user bound
+        // under its name in LET or as a LAMBDA parameter: route the call
+        // through the `Custom` arm, which is where the scope lookup lives.
+        // A binding that is not a lambda does not capture the call, the same
+        // rule the `Custom` arm applies. Workbook defined names reach this
+        // through name resolution, which rewrites the call to `__INVOKE__`.
+        if func.yields_to_user_definitions() {
+            let name = func.to_canonical_name();
+            let bound_to_lambda = matches!(
+                self.scope.borrow().get(name),
+                Some(EvalResult::Lambda { .. })
+            );
+            if bound_to_lambda {
+                return self.dispatch_function(&BuiltinFunction::Custom(name.to_string()), args);
+            }
+        }
         if Self::lifts_over_arrays(func) && args.len() <= LIFT_SLOTS.len() {
             return self.eval_lifted_function(func, args);
         }
@@ -3062,6 +3087,14 @@ impl<'a> Evaluator<'a> {
                 | BuiltinFunction::TFn
                 | BuiltinFunction::TextBefore
                 | BuiltinFunction::TextAfter
+                // Calcula's padding pair. Every parameter is a scalar (text,
+                // length, pad). Off this list `=LPAD(A1:A3,4,"0")` is not an
+                // error but ONE text built from A1 alone — `as_text` reads an
+                // array as its first element — so a column silently loses
+                // all but its first row. `the_padding_functions_lift_over_
+                // texts_lengths_and_pads` pins it.
+                | BuiltinFunction::LPad
+                | BuiltinFunction::RPad
                 // Logical and information
                 | BuiltinFunction::Not
                 | BuiltinFunction::IsBlank
@@ -3604,6 +3637,8 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::TextSplit => self.fn_textsplit(args),
             BuiltinFunction::TextBefore => self.fn_textbefore(args),
             BuiltinFunction::TextAfter => self.fn_textafter(args),
+            BuiltinFunction::LPad => self.fn_pad(args, PadSide::Left),
+            BuiltinFunction::RPad => self.fn_pad(args, PadSide::Right),
             BuiltinFunction::ValueToText => self.fn_valuetotext(args),
             BuiltinFunction::ArrayToText => self.fn_arraytotext(args),
 
@@ -5376,6 +5411,101 @@ impl<'a> Evaluator<'a> {
         }
         charge!(self, bytes);
         EvalResult::Text(text.repeat(times))
+    }
+
+    /// LPAD(text, length, [pad]) and RPAD(text, length, [pad]) — Calcula
+    /// functions, not in Excel (owner decision 2026-10-08).
+    ///
+    /// THE SEMANTICS ARE SNOWFLAKE'S, because there is no Excel LPAD to be
+    /// compatible with and the model engine already pushes LPAD/RPAD down to
+    /// SQL under these very names; a workbook formula that disagreed with the
+    /// same name one layer down would be the worse surprise:
+    ///
+    /// ```text
+    /// LPAD("5",8,"0")               "00000005"
+    /// LPAD("123.50",19,"*_")        "*_*_*_*_*_*_*123.50"   pad cycles from ITS start, then is cut
+    /// RPAD("123.50",19,"*_")        "123.50*_*_*_*_*_*_*"
+    /// LPAD("Twelve Dollars",10,"$") "Twelve Dol"            over-long text keeps its LEFT end — for BOTH
+    /// LPAD("abc",5,"")              "abc"                   empty pad: nothing added, but still cut
+    /// ```
+    ///
+    /// The LEFT-END CUT for LPAD is the rule most likely to be "fixed" by
+    /// someone who expects a left pad to keep the right end. Every SQL dialect
+    /// with the function cuts this way; `a_text_longer_than_length_is_cut_to_
+    /// its_left_most_characters_for_both` pins it, and the doc says so.
+    ///
+    /// WHERE A GRID DIFFERS FROM SQL, the text family's existing rule wins:
+    ///
+    ///   * NEGATIVE length is `#VALUE!` (LEFT/RIGHT/MID/REPT refuse; Postgres
+    ///     returns ''), checked BEFORE the cut toward zero so -0.5 is refused
+    ///     rather than quietly read as 0. A fraction is then cut toward zero.
+    ///   * length above `MAX_CELL_TEXT_LEN` (32,767, Excel's cell-text limit)
+    ///     is `#VALUE!` ALWAYS — even when the pad is "" and the answer would
+    ///     have been short. One rule about the length you asked for is
+    ///     predictable; "it depends on the pad" is not. Decided on the f64,
+    ///     before the `as usize` cast and before anything is allocated, so
+    ///     `LPAD("a",1E+20)` is an answer and not an out-of-memory abort. The
+    ///     comparison is written so that a NaN fails it too.
+    ///   * There is no NULL: a blank text is "" (so `LPAD(blank,3,"0")` is
+    ///     "000"), and a number or boolean is coerced exactly as LEFT coerces
+    ///     it — General format in the workbook's decimal dialect, so sv-SE pads
+    ///     1.5 as "001,5". A cell's display format is NOT used; that is what
+    ///     `LPAD(TEXT(A1,"0.00"),...)` is for.
+    ///   * An OMITTED pad — `LPAD(A1,5)` or the empty slot `LPAD(A1,5,)` — is
+    ///     one space (BUG-0114: an empty slot means the default). A pad that
+    ///     REFERENCES an empty cell is that cell's value, "", and pads nothing.
+    ///     The lift preserves the difference: `call_with_values_masked` hands an
+    ///     omitted slot back as the literal `is_omitted` recognises.
+    ///
+    /// CHARACTERS, NOT BYTES, throughout — `chars()` for the count, the cut and
+    /// the cycle — so "åäö" is three and a cut never lands inside a character
+    /// (`text_character_semantics_tests`).
+    ///
+    /// Errors: `text_arg!` / `arg_or_err!` give left-most-error-wins, and as a
+    /// LIFTED builtin the lift gate has usually returned the error before this
+    /// body runs; the guards are what answer when it has not.
+    fn fn_pad(&self, args: &[Expression], side: PadSide) -> EvalResult {
+        if args.len() < 2 || args.len() > 3 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let text = text_arg!(self.evaluate(&args[0]));
+
+        let length = match arg_or_err!(self.evaluate(&args[1])).as_number() {
+            Some(n) if n < 0.0 => return EvalResult::Error(CellError::Value),
+            Some(n) => {
+                let n = n.trunc();
+                // `!(n <= max)` rather than `n > max`: a NaN must be refused,
+                // not cast to 0.
+                if !(n <= MAX_CELL_TEXT_LEN as f64) {
+                    return EvalResult::Error(CellError::Value);
+                }
+                n as usize
+            }
+            None => return EvalResult::Error(CellError::Value),
+        };
+
+        let pad = if args.len() == 3 && !is_omitted(&args[2]) {
+            text_arg!(self.evaluate(&args[2]))
+        } else {
+            " ".to_string()
+        };
+
+        // The output is at most `length` characters, already bounded above.
+        charge!(self, length as u64);
+
+        let have = text.chars().count();
+        if have >= length {
+            return EvalResult::Text(text.chars().take(length).collect());
+        }
+        if pad.is_empty() {
+            return EvalResult::Text(text);
+        }
+        let fill: String = pad.chars().cycle().take(length - have).collect();
+        EvalResult::Text(match side {
+            PadSide::Left => fill + &text,
+            PadSide::Right => text + &fill,
+        })
     }
 
     fn fn_text(&self, args: &[Expression]) -> EvalResult {

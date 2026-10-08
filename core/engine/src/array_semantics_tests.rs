@@ -224,6 +224,30 @@ fn a_scalar_function_lifts_over_an_array_argument() {
     );
 }
 
+/// LPAD/RPAD (Calcula functions, 2026-10-08) are on the `lifts_over_arrays`
+/// allowlist, and that one line is the difference between a spill and a
+/// CONFIDENTLY WRONG single text: off the list, `as_text` reads an array as its
+/// FIRST element, so `=LPAD(C1:C3,3,"0")` answered "00a" in one cell and
+/// dropped "b" and "c" without a word. A number column pads its General-format
+/// text, the length broadcasts as a row, and a range of pads pairs up.
+#[test]
+fn the_padding_functions_lift_over_texts_lengths_and_pads() {
+    let grid = fixture();
+    let t = |s: &str| EvalResult::Text(s.into());
+    assert_eq!(eval(&grid, "=LPAD(C1:C3,3,\"0\")"), column(vec![t("00a"), t("00b"), t("00c")]));
+    assert_eq!(eval(&grid, "=RPAD(A1:A3,2,\"x\")"), column(vec![t("1x"), t("2x"), t("3x")]));
+    // A LENGTH array: a 1x3 row from a scalar text.
+    assert_eq!(eval(&grid, "=RPAD(\"x\",{2,3,4},\".\")"), row(vec![t("x."), t("x.."), t("x...")]));
+    // Lengths from a ROW range broadcast against a COLUMN of texts: a matrix.
+    assert_eq!(
+        eval(&grid, "=LPAD(C1:C2,D1:E1,\"-\")"),
+        EvalResult::Array(vec![
+            EvalResult::Array(vec![t("----a"), t("-----a")]),
+            EvalResult::Array(vec![t("----b"), t("-----b")]),
+        ])
+    );
+}
+
 #[test]
 fn an_aggregate_is_not_lifted_or_it_would_run_once_per_cell() {
     let grid = fixture();

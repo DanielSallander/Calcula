@@ -15,6 +15,7 @@
 
 import { registerChartContextMenuContribution } from "@api/chartContextMenu";
 import { getChartDataProvider } from "@api/chartData";
+import { chartMarkFurniture } from "@api/chartMarks";
 import { getSelectedChartCue, keepChartCue, snapshotChart } from "@api/chartCues";
 import { registerChartQuickAction } from "@api/chartQuickActions";
 import { promptAsync } from "@api/dialogs";
@@ -52,6 +53,22 @@ function toggleOverlayReporting(chartId: string): void {
   });
 }
 
+/**
+ * Is this chart a title-only TILE (Card, Multi-row card, KPI, Gauge)? Charts
+ * paints no points of interest on one (its tile cue rule), so "Show points of
+ * interest" there would flip a toggle with nothing to show. Asked through the
+ * chart-data seam's listing; a chart it cannot name is not a tile.
+ */
+function isTile(chartId: string): boolean {
+  let mark: string | undefined;
+  try {
+    mark = getChartDataProvider()?.listCharts?.().find((c) => c.chartId === chartId)?.mark;
+  } catch {
+    mark = undefined;
+  }
+  return mark !== undefined && chartMarkFurniture(mark) === "titleOnly";
+}
+
 /** Contribute the menu items AND the two quick-access buttons. Returns one disposer. */
 export function registerOverlayMenu(): () => void {
   const off: Array<() => void> = [];
@@ -64,7 +81,7 @@ export function registerOverlayMenu(): () => void {
       // contributions carry one label, so two entries alternate visibility.
       label: SHOW_POINTS_LABEL,
       order: 51,
-      visible: (chartId) => available() && !isOverlayOn(chartId),
+      visible: (chartId) => available() && !isOverlayOn(chartId) && !isTile(chartId),
       onSelect: toggleOverlayReporting,
     }),
   );
@@ -113,7 +130,7 @@ export function registerOverlayMenu(): () => void {
       id: OVERLAY_SNAPSHOT_CONTRIBUTION_ID,
       label: "Snapshot with points of interest",
       order: 54,
-      visible: (chartId) => isOverlayOn(chartId),
+      visible: (chartId) => isOverlayOn(chartId) && !isTile(chartId),
       onSelect: (chartId) => {
         void snapshotChart(chartId).catch((err) => report(err, "The snapshot could not be taken."));
       },
@@ -130,7 +147,8 @@ export function registerOverlayMenu(): () => void {
       icon: "insight",
       order: 10,
       tooltip: (chartId) => (isOverlayOn(chartId) ? HIDE_POINTS_LABEL : SHOW_POINTS_LABEL),
-      visible: () => available(),
+      // On a tile only while an overlay is still on (so it can be turned off).
+      visible: (chartId) => available() && (!isTile(chartId) || isOverlayOn(chartId)),
       active: (chartId) => isOverlayOn(chartId),
       onSelect: toggleOverlayReporting,
     }),
@@ -143,7 +161,7 @@ export function registerOverlayMenu(): () => void {
       tooltip: () => "Snapshot with points of interest",
       // Only while there is an overlay to snapshot, exactly as the menu item is:
       // a camera that copies a plain chart is not what this button promises.
-      visible: (chartId) => isOverlayOn(chartId),
+      visible: (chartId) => isOverlayOn(chartId) && !isTile(chartId),
       onSelect: (chartId) => {
         void snapshotChart(chartId).catch((err) => report(err, "The snapshot could not be taken."));
       },

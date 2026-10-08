@@ -18,6 +18,7 @@ import { resolveChartTheme } from "../rendering/chartTheme";
 import { paintChartCues } from "../rendering/cuePainter";
 import { paintChartComments } from "../rendering/cueChrome";
 import { getChartOverlay, visibleChartCues } from "@api/chartCues";
+import { cuesShownOn } from "./tileCues";
 
 export const EXPORT_SCALE = 2;
 
@@ -64,7 +65,7 @@ export async function renderChartPng(chartId: string, options: RasterOptions = {
       // The overlay is drawn at the export layout's own geometry, in logical
       // pixels (the context is already scaled), chart origin at (0, 0).
       const geometry = dispatchComputeGeometry(data, spec, layout, theme);
-      paintChartCues(ctx, 0, 0, geometry, data, visibleChartCues(chartId), overlay.selectedCueId, { spec, layout, data });
+      paintChartCues(ctx, 0, 0, geometry, data, cuesShownOn(spec.mark, visibleChartCues(chartId)), overlay.selectedCueId, { spec, layout, data });
       const byCue = new Map(overlay.cues.map((c) => [c.cueId, c] as const));
       paintChartComments(ctx, 0, 0, logicalWidth, logicalHeight, geometry, data, overlay.comments, byCue);
     }

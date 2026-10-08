@@ -107,6 +107,11 @@ fn an_error_argument_propagates_out_of_every_text_function() {
         "=TEXTBEFORE(1/0,\"a\")",
         "=TEXTAFTER(1/0,\"a\")",
         "=TEXTSPLIT(1/0,\",\")",
+        // Calcula's padding pair (not in Excel). Lifted builtins, so the
+        // lift gate decides this before the function body runs; the body's
+        // own `text_arg!` is what answers when the gate is bypassed.
+        "=LPAD(1/0,3)",
+        "=RPAD(1/0,3)",
         // --- text -> value conversions ---------------------------------
         "=VALUE(1/0)",
         "=NUMBERVALUE(1/0)",
@@ -167,6 +172,11 @@ fn an_error_in_a_later_argument_propagates_too() {
         "=FIND(\"a\",\"abc\",1/0)",
         "=SEARCH(\"a\",\"abc\",1/0)",
         "=DECIMAL(\"FF\",1/0)",
+        // LPAD/RPAD: the numeric LENGTH and the text PAD, each in turn.
+        "=LPAD(\"a\",1/0)",
+        "=LPAD(\"a\",3,1/0)",
+        "=RPAD(\"a\",1/0)",
+        "=RPAD(\"a\",3,1/0)",
     ];
     for formula in cases {
         assert_eq!(

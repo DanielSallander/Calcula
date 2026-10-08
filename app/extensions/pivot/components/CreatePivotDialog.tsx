@@ -32,6 +32,8 @@ import {
   getPivotStoreService,
 } from '@api';
 import { emitAppEvent, AppEvents } from '@api/events';
+import { showToast } from '@api/notifications';
+import { pivotPresetLayout, readPivotCreatePreset } from '@api/pivotPresets';
 import { getTableByName, type ConnectionInfo } from '@api/backend';
 import { getConnections } from '../../_shared/lib/bi-api';
 import { getConnectionBiModel } from '../lib/pivot-api';
@@ -86,6 +88,11 @@ export interface CreatePivotDialogProps {
    *  from it and the source starts EMPTY. A `tableName` still applies: it is
    *  the opener's explicit choice, not a guess from the selection. */
   suppressAutoRange?: boolean;
+  /** A preset from the opener's dialog data (@api/pivotPresets), as handed
+   *  over: the form the new pivot is laid out in before it is handed on --
+   *  the Canvas tab's Table visual asks for tabular with no column field.
+   *  Validated here; a malformed one is ignored whole. */
+  preset?: unknown;
 }
 
 type DestinationType = 'new' | 'existing';
@@ -203,6 +210,7 @@ export function CreatePivotDialog({
   tableName,
   placement,
   suppressAutoRange = false,
+  preset,
 }: CreatePivotDialogProps): React.ReactElement | null {
   // Read current grid selection (active cell) for auto-detection
   const gridState = useGridState();
@@ -212,6 +220,26 @@ export function CreatePivotDialog({
   // chosen here, centred in the view, through the layout surface).
   const canvasPlacement = readCanvasPivotPlacement(placement);
   const canvasMode = canvasPlacement !== null || gridState.surface === 'canvas';
+
+  // The opener's preset (Canvas contract §4.6): applied to the NEW pivot,
+  // after the create and before it is handed on, through the ordinary layout
+  // door -- so the field list opens on a pivot already in its final form. A
+  // refusal (the overwrite question declined) keeps the pivot and says why it
+  // is not in that form; the create itself is never undone for it.
+  const pivotPreset = readPivotCreatePreset(preset);
+  const applyPivotPreset = async (pivotId: string): Promise<void> => {
+    const layout = pivotPresetLayout(pivotPreset);
+    if (!layout) return;
+    try {
+      await pivot.updateLayout({ pivotId, layout });
+    } catch (err) {
+      const form = pivotPreset?.layout === 'tabular' ? 'table' : (pivotPreset?.layout ?? 'the asked');
+      showToast(
+        `The PivotTable was created, but not in ${form} form: ${err instanceof Error ? err.message : String(err)}`,
+        { variant: 'warning' },
+      );
+    }
+  };
 
   // Movable + resizable dialog window (shared @api hook)
   const win = useDialogWindow({ minWidth: 340, minHeight: 300 });
@@ -469,6 +497,7 @@ export function CreatePivotDialog({
           connectionId,
           canvasFrame,
         });
+        await applyPivotPreset(view.pivotId);
         handleClose();
         // The new pivot is in the canvas's hidden grid: re-read the regions so
         // its box paints where it was inserted.
@@ -512,6 +541,7 @@ export function CreatePivotDialog({
         sourceTableName: source.sourceTableName,
         canvasFrame,
       });
+      await applyPivotPreset(view.pivotId);
 
       if (onCreated) {
         onCreated(view.pivotId);
@@ -652,6 +682,7 @@ export function CreatePivotDialog({
       });
 
       console.log('[CreatePivotDialog] Pivot table created:', view.pivotId, 'rows:', view.rowCount, 'cols:', view.colCount);
+      await applyPivotPreset(view.pivotId);
 
       // Notify parent and close
       if (onCreated) {

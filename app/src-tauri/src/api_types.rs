@@ -2796,6 +2796,11 @@ pub struct CanvasLayoutPatch {
     pub page_width: Option<u32>,
     pub page_height: Option<u32>,
     pub background: Option<String>,
+    /// The colour of the area outside the page (`CanvasLayout::wallpaper`);
+    /// trimmed like `background`, "" restores the theme's.
+    pub wallpaper: Option<String>,
+    /// Lock Objects for the page (`CanvasLayout::objects_locked`).
+    pub objects_locked: Option<bool>,
     pub z_order: Option<Vec<CanvasObjectRef>>,
     pub locked: Option<Vec<CanvasObjectRef>>,
 }
@@ -2836,6 +2841,12 @@ impl CanvasLayoutPatch {
         }
         if let Some(v) = &self.background {
             layout.background = v.trim().to_string();
+        }
+        if let Some(v) = &self.wallpaper {
+            layout.wallpaper = v.trim().to_string();
+        }
+        if let Some(v) = self.objects_locked {
+            layout.objects_locked = v;
         }
         // The stacking and lock lists are NORMALIZED (trimmed, duplicates
         // dropped keeping the first occurrence -- the one that paints) and then

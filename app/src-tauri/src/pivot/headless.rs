@@ -14,9 +14,11 @@
 //! frontend chart reader reuse the existing pivot→chart extraction verbatim.
 //!
 //! v1 supports the common design-query subset: ROWS, COLUMNS, VALUES, FILTERS
-//! (via hidden-items), CALC. LOOKUP columns, hierarchies, calculation groups,
-//! and measure-less / dimension-less queries are rejected with a clear message
-//! and will be added in later slices.
+//! (via hidden-items), CALC -- and, since CONTRACT-CANVAS 4.8, a MEASURE-ONLY
+//! query (VALUES with no ROWS and no COLUMNS: a Card, Gauge or KPI), whose
+//! filters run inside the engine query and whose view is one grand-total row.
+//! LOOKUP columns, hierarchies, calculation groups and measure-less queries
+//! are rejected with a clear message and will be added in later slices.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -96,6 +98,13 @@ pub struct DesignQueryFieldRef {
     /// query ran UNFILTERED (BUG-0197); the result's own items invert it here.
     #[serde(default)]
     pub included_items: Option<Vec<String>>,
+    /// The FILTER LEVEL an engine-routed filter applies at: 1 (absent) is an
+    /// ordinary slicer, which a bare `CLEAR`/`RESET` removes; 2..=9 is a
+    /// slicer PINNED above that range (`@api/pageFilters` carries it as
+    /// `filterLevel`). Clamped to the engine's range. Only a filter that runs
+    /// inside the engine query reads it -- a host-masked filter has no level.
+    #[serde(default)]
+    pub level: Option<u8>,
 }
 
 impl DesignQueryFieldRef {
@@ -107,6 +116,10 @@ impl DesignQueryFieldRef {
     /// The items to hide, or none.
     fn hidden(&self) -> &[String] {
         self.hidden_items.as_deref().unwrap_or(&[])
+    }
+
+    fn same_column(&self, other: &DesignQueryFieldRef) -> bool {
+        self.table == other.table && self.column == other.column
     }
 }
 
@@ -125,12 +138,41 @@ pub struct DesignQueryRequest {
     pub value_fields: Vec<BiValueFieldRef>,
     #[serde(default)]
     pub filter_fields: Vec<DesignQueryFieldRef>,
+    /// The canvas PAGE's model filters (`@api/pageFilters`, merged by the
+    /// chart reader), kept apart from the query's own FILTERS: they always run
+    /// INSIDE the engine query -- never a GROUP BY column, never a report's
+    /// filter area -- so a non-additive measure under a slicer that keeps
+    /// several items is the model's exact answer on every path.
+    #[serde(default)]
+    pub page_filter_fields: Vec<DesignQueryFieldRef>,
     #[serde(default)]
     pub calculated_fields: Option<Vec<CalculatedFieldDef>>,
     #[serde(default)]
     pub value_column_order: Option<Vec<ValueColumnRefDef>>,
     #[serde(default)]
     pub layout: Option<LayoutConfig>,
+}
+
+/// Where a design query's OWN `FILTERS` are applied.
+///
+/// THE DEFECT THIS SPLIT CLOSES. A grouped query used to put every FILTERS
+/// column into GROUP BY and roll the groups back up host-side with SUM ("SUM
+/// of pre-aggregated = identity", `expand_bi_value_fields`) -- identity only
+/// when ONE group feeds each cell. Under a filter keeping two regions, an
+/// AVERAGE bar read avg(East) + avg(West), a DISTINCTCOUNT double-counted, and
+/// a high-cardinality slicer column (Customer) multiplied the result just to
+/// roll it back up. Once page slicers reached grouped charts
+/// (`@api/pageFilters`), every click on a canvas produced such numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FiltersRoute {
+    /// A CHART (`run_design_query`): the filters run inside the engine query
+    /// as level-tagged IN-lists. A chart draws no filter area, so nothing is
+    /// lost, and every number is the model's own.
+    Engine,
+    /// A GRID REPORT: the filters stay GROUP BY columns placed as the pivot's
+    /// filter fields, because the report renders them as its filter area
+    /// (`report.rs`). A measure-only query is engine-routed either way.
+    FilterArea,
 }
 
 /// Execute a design query headlessly and return the resulting pivot view.
@@ -143,13 +185,81 @@ pub async fn run_design_query(
     Ok(view_to_response(&view, &def, &mut cache))
 }
 
-/// Compile + run a design query and compute its pivot view — WITHOUT writing to
-/// the grid or persisting anything. Shared by `run_design_query` (charts, which
-/// serialize the view to a response) and the report commands (which materialize
-/// the same view into grid cells via `write_pivot_to_grid`).
+/// Compile + run a design query for a CHART and compute its pivot view --
+/// WITHOUT writing to the grid or persisting anything. Its FILTERS run inside
+/// the engine query ([`FiltersRoute::Engine`]).
 pub(crate) async fn compute_design_query_view(
     bi_state: &BiState,
     request: &DesignQueryRequest,
+) -> Result<
+    (
+        pivot_engine::PivotDefinition,
+        pivot_engine::PivotCache,
+        pivot_engine::PivotView,
+    ),
+    String,
+> {
+    compute_design_query_view_routed(bi_state, request, FiltersRoute::Engine).await
+}
+
+/// The same for a GRID REPORT (`report.rs`), which materializes the view into
+/// cells and renders the query's FILTERS as a filter area
+/// ([`FiltersRoute::FilterArea`]).
+pub(crate) async fn compute_design_query_view_for_report(
+    bi_state: &BiState,
+    request: &DesignQueryRequest,
+) -> Result<
+    (
+        pivot_engine::PivotDefinition,
+        pivot_engine::PivotCache,
+        pivot_engine::PivotView,
+    ),
+    String,
+> {
+    compute_design_query_view_routed(bi_state, request, FiltersRoute::FilterArea).await
+}
+
+/// Why one attempt at a design query failed.
+enum QueryFailure {
+    /// The engine refused a measure that CLEARs/RESETs a filter this request
+    /// sends into the engine query (`is_contested_clear_refusal`).
+    ContestedClear(String),
+    Other(String),
+}
+
+impl From<String> for QueryFailure {
+    fn from(message: String) -> Self {
+        QueryFailure::Other(message)
+    }
+}
+
+impl QueryFailure {
+    fn message(self) -> String {
+        match self {
+            QueryFailure::ContestedClear(m) | QueryFailure::Other(m) => m,
+        }
+    }
+}
+
+/// True for the engine's typed refusal of a measure that removes (CLEAR /
+/// RESET) a filter the REQUEST carries, where it cannot thread that removal
+/// through the measure: a compound measure (`DIVIDE(SUM(x), SUM(x, RESET()))`),
+/// an axis-spanning clear, a column reached through an unsafe join. Each is a
+/// `QueryError::InvalidQuery` whose text says the measure "clears" the
+/// filter -- the variant is the type, the verb is the only discriminator the
+/// engine offers between its InvalidQuery cases (model-engine-lib
+/// `local_aggregation.rs`, `scoped_filters.rs`). Such a measure is exactly
+/// what the host-mask route answers correctly: it evaluates with NO request
+/// filter, so the clear has nothing to remove, and the mask then keeps the
+/// filtered items -- exact for a share whose numerator is additive.
+fn is_contested_clear_refusal(error: &bi_engine::QueryError) -> bool {
+    matches!(error, bi_engine::QueryError::InvalidQuery(message) if message.contains(" clears "))
+}
+
+async fn compute_design_query_view_routed(
+    bi_state: &BiState,
+    request: &DesignQueryRequest,
+    route: FiltersRoute,
 ) -> Result<
     (
         pivot_engine::PivotDefinition,
@@ -162,32 +272,112 @@ pub(crate) async fn compute_design_query_view(
     if request.value_fields.is_empty() {
         return Err("A design query needs at least one measure (VALUES).".to_string());
     }
-    if request.row_fields.is_empty() && request.column_fields.is_empty() {
-        return Err("A design query needs at least one dimension (ROWS or COLUMNS).".to_string());
-    }
-    if request
-        .row_fields
-        .iter()
-        .chain(request.column_fields.iter())
-        .chain(request.filter_fields.iter())
-        .any(|f| f.is_calc_group())
-    {
+    let every_field = || {
+        request
+            .row_fields
+            .iter()
+            .chain(request.column_fields.iter())
+            .chain(request.filter_fields.iter())
+            .chain(request.page_filter_fields.iter())
+    };
+    if every_field().any(|f| f.is_calc_group()) {
         return Err(
             "Calculation groups aren't supported in design queries yet. \
              Remove the calculation group from the query."
                 .to_string(),
         );
     }
-    if request
-        .row_fields
-        .iter()
-        .chain(request.column_fields.iter())
-        .chain(request.filter_fields.iter())
-        .any(|f| f.is_lookup)
-    {
+    if every_field().any(|f| f.is_lookup) {
         return Err("LOOKUP columns are not supported in design queries yet.".to_string());
     }
 
+    // A MEASURE-ONLY query (no ROWS, no COLUMNS) is a Card / Gauge / KPI read
+    // straight from the model, as Power BI's are (CONTRACT-CANVAS 4.8): ONE
+    // engine query with an empty group-by, its filters INSIDE that query,
+    // giving a view of exactly one grand-total row.
+    let measure_only = request.row_fields.is_empty() && request.column_fields.is_empty();
+    let group_own_filters = !measure_only && route == FiltersRoute::FilterArea;
+    let engine_fields: Vec<&DesignQueryFieldRef> = request
+        .page_filter_fields
+        .iter()
+        .chain(request.filter_fields.iter().filter(|_| !group_own_filters))
+        .collect();
+
+    match compute_once(bi_state, request, &engine_fields, group_own_filters).await {
+        Err(QueryFailure::ContestedClear(refusal)) if !engine_fields.is_empty() => {
+            // The HOST-MASK ROUTE: every filter becomes a GROUP BY column the
+            // pivot then masks, the engine evaluates with no request filter,
+            // so the clearing measure has nothing to contest.
+            crate::log_info!(
+                "PIVOT",
+                "design query: the engine refused filtered evaluation ({}); answering on the host-mask route",
+                refusal
+            );
+            let masked = with_engine_filters_masked(request);
+            compute_once(bi_state, &masked, &[], true).await.map_err(QueryFailure::message)
+        }
+        other => other.map_err(QueryFailure::message),
+    }
+}
+
+/// `request` with every engine-routed filter folded into the query's own
+/// FILTERS for the host-mask route: a filter on a column the query already
+/// places (ROWS, COLUMNS or FILTERS) narrows it IN PLACE -- inclusions
+/// intersected, exclusions united -- so no column is grouped twice; any other
+/// becomes a FILTERS field. The query's own FILTERS need no folding: on this
+/// route they are grouped and placed as filter fields wherever they ran before.
+fn with_engine_filters_masked(request: &DesignQueryRequest) -> DesignQueryRequest {
+    let mut out = request.clone();
+    let incoming = std::mem::take(&mut out.page_filter_fields);
+    for filter in incoming {
+        let existing = out
+            .row_fields
+            .iter_mut()
+            .chain(out.column_fields.iter_mut())
+            .chain(out.filter_fields.iter_mut())
+            .find(|f| f.same_column(&filter));
+        match existing {
+            Some(field) => {
+                if let Some(kept) = filter.included_items {
+                    field.included_items = Some(match field.included_items.take() {
+                        Some(mine) => mine.into_iter().filter(|i| kept.contains(i)).collect(),
+                        None => kept,
+                    });
+                }
+                if let Some(hidden) = filter.hidden_items {
+                    let mine = field.hidden_items.get_or_insert_with(Vec::new);
+                    for h in hidden {
+                        if !mine.contains(&h) {
+                            mine.push(h);
+                        }
+                    }
+                }
+            }
+            None => out.filter_fields.push(DesignQueryFieldRef { level: None, ..filter }),
+        }
+    }
+    out
+}
+
+/// One attempt at a design query.
+///
+/// - `engine_fields` run INSIDE the engine query as level-tagged IN-lists
+///   ([`engine_filters`]) and are never grouped by.
+/// - `group_own_filters`: the query's own FILTERS are GROUP BY columns,
+///   placed as the pivot's filter fields and masked host-side.
+async fn compute_once(
+    bi_state: &BiState,
+    request: &DesignQueryRequest,
+    engine_fields: &[&DesignQueryFieldRef],
+    group_own_filters: bool,
+) -> Result<
+    (
+        pivot_engine::PivotDefinition,
+        pivot_engine::PivotCache,
+        pivot_engine::PivotView,
+    ),
+    QueryFailure,
+> {
     let connection_id = request.connection_id;
 
     // ---- Resolve the engine for this connection --------------------------
@@ -199,17 +389,24 @@ pub(crate) async fn compute_design_query_view(
         let conn = connections
             .get(&connection_id)
             .ok_or_else(|| format!("Connection {} not found", connection_id))?;
-        conn.engine.clone().ok_or("No BI model loaded for this connection.")?
+        conn.engine
+            .clone()
+            .ok_or_else(|| "No BI model loaded for this connection.".to_string())?
     };
 
-    // ---- Gather referenced tables (dimensions + measures) ----------------
-    let mut referenced_tables: Vec<String> = Vec::new();
-    for f in request
+    // ---- The GROUP BY columns: ROWS, COLUMNS, and -- on the filter-area /
+    // host-mask route -- the query's own FILTERS. Cache column layout:
+    // [GROUP BY cols] [measure cols] (v1 has no lookups/hierarchies).
+    let group_fields: Vec<&DesignQueryFieldRef> = request
         .row_fields
         .iter()
         .chain(request.column_fields.iter())
-        .chain(request.filter_fields.iter())
-    {
+        .chain(request.filter_fields.iter().filter(|_| group_own_filters))
+        .collect();
+
+    // ---- Gather referenced tables (dimensions + measures) ----------------
+    let mut referenced_tables: Vec<String> = Vec::new();
+    for f in group_fields.iter().copied().chain(engine_fields.iter().copied()) {
         if !referenced_tables.contains(&f.table) {
             referenced_tables.push(f.table.clone());
         }
@@ -257,25 +454,18 @@ pub(crate) async fn compute_design_query_view(
     }
 
     // ---- Build the BI engine QueryRequest --------------------------------
-    // Filtering is applied post-query by the pivot engine (via hidden-items on
-    // the filter fields), so filter columns are included as GROUP BY, not as
-    // engine filters (matching update_bi_pivot_fields).
     let query_measures: Vec<String> =
         request.value_fields.iter().map(|v| v.measure_name.clone()).collect();
-    let group_fields: Vec<&DesignQueryFieldRef> = request
-        .row_fields
-        .iter()
-        .chain(request.column_fields.iter())
-        .chain(request.filter_fields.iter())
-        .collect();
     let query_group_by: Vec<bi_engine::ColumnRef> = group_fields
         .iter()
         .map(|f| bi_engine::ColumnRef::new(&f.table, &f.column))
         .collect();
+    let scoped_in_filters = engine_filters(bi_state, &engine_arc, connection_id, engine_fields).await?;
     let query_request = bi_engine::QueryRequest {
         measures: query_measures.clone(),
         group_by: query_group_by,
         filters: vec![],
+        scoped_in_filters,
         ..Default::default()
     };
 
@@ -288,15 +478,19 @@ pub(crate) async fn compute_design_query_view(
     // Through the shared mapper, so a design query gets the same actionable
     // security message the pivot path does ("the role chosen in \"View as\"
     // denies it …") rather than a raw engine string.
-    .map_err(|e| crate::bi::commands::friendly_bi_query_error("BI query failed", &e))?;
+    .map_err(|e| {
+        let message = crate::bi::commands::friendly_bi_query_error("BI query failed", &e);
+        if is_contested_clear_refusal(&e) {
+            QueryFailure::ContestedClear(message)
+        } else {
+            QueryFailure::Other(message)
+        }
+    })?;
 
     // ---- Build the transient pivot cache + definition --------------------
     let pivot_id = identity::EntityId::from_bytes(identity::generate_uuid_v7()); // throwaway id — never stored
     let mut cache = build_cache_from_arrow_batches(pivot_id, &batches)?;
 
-    // Cache column layout: [GROUP BY cols] [measure cols] [lookup cols].
-    // v1 has no lookups/hierarchies/synthetic columns, so the mapping is a
-    // straight enumeration of the group fields, then measures right after.
     let num_group_by = group_fields.len();
     let mut field_to_cache_idx: HashMap<(String, String), usize> = HashMap::new();
     for (i, f) in group_fields.iter().enumerate() {
@@ -305,7 +499,14 @@ pub(crate) async fn compute_design_query_view(
     let measure_start = num_group_by;
 
     let mut def = pivot_engine::PivotDefinition::new(pivot_id, (0, 0), (0, 0));
-    apply_design_query_zones(&mut def, request, &field_to_cache_idx, &cache);
+    // Only GROUPED fields have a cache column to place. An engine-routed
+    // filter was applied inside the query: the cache holds the kept rows only
+    // and there is no field to place (mapping one would point it at another
+    // column). A query with nothing grouped is one grand-total row -- the
+    // shape the chart reader takes as a Card's value.
+    if !group_fields.is_empty() {
+        apply_design_query_zones(&mut def, request, &field_to_cache_idx, &cache, group_own_filters);
+    }
 
     // Value fields: map each measure to its engine-reported cache column.
     // No synthetic dimension on this path, so the cache offset is 0.
@@ -339,13 +540,161 @@ pub(crate) async fn compute_design_query_view(
     }
 
     // ---- Compute the view (no grid write, no persistence) ----------------
-    let view = safe_calculate_pivot(&def, &mut cache);
+    let mut view = safe_calculate_pivot(&def, &mut cache);
+    if group_fields.is_empty() {
+        blank_measures_without_data(&mut view, &def, &batches);
+    }
     Ok((def, cache, view))
 }
 
-/// The query's ROWS, COLUMNS and FILTERS as the transient definition's
-/// fields, each on its cache column (`field_to_cache_idx`), each with every
-/// item filter the query says:
+/// A measure-only view's total for a measure the engine answered with NO
+/// value -- no row kept (`includedItems: []`, a slicer that keeps nothing) or
+/// only NULLs -- is BLANK, not 0. The pivot engine sums an empty set to 0,
+/// which on a Card reads as "zero sales" when the truth is "nothing to
+/// measure"; Power BI's card says "(Blank)" there, and so does ours now: the
+/// cell's value is `Empty` and its text "". Only the GRAND-TOTAL row is
+/// touched (it is the only row a measure-only view has), cell by cell through
+/// `value_field_index`, so one measure's blank never blanks another's number.
+///
+/// The cache of a query with nothing grouped holds the measure columns alone,
+/// at the result's own positions (no group-by, no lookups, no synthetic
+/// column), so a value field's `source_index` IS its column in `batches`.
+///
+/// The parameter is `pivot_view`, not `view`, on purpose: the recalculation
+/// census (`commands/bulk_rewrite_recalc_tests.rs`, NOT_A_GRID) exempts a
+/// `cells` write by its RECEIVER's spelling, and a generic `view` would exempt
+/// every future `view.cells` write in the crate along with this one.
+fn blank_measures_without_data(
+    pivot_view: &mut pivot_engine::PivotView,
+    def: &pivot_engine::PivotDefinition,
+    batches: &[arrow::record_batch::RecordBatch],
+) {
+    use arrow::array::Array;
+    let has_value = |col: usize| {
+        batches
+            .iter()
+            .any(|b| col < b.num_columns() && b.column(col).null_count() < b.column(col).len())
+    };
+    let total_rows: Vec<usize> = pivot_view
+        .rows
+        .iter()
+        .filter(|r| r.row_type == pivot_engine::PivotRowType::GrandTotal)
+        .map(|r| r.view_row)
+        .collect();
+    for row in total_rows {
+        let Some(cells) = pivot_view.cells.get_mut(row) else { continue };
+        for cell in cells.iter_mut() {
+            let Some(vf) = cell.value_field_index.and_then(|k| def.value_fields.get(k)) else { continue };
+            if !has_value(vf.source_index) {
+                cell.value = pivot_engine::PivotCellValue::Empty;
+                cell.formatted_value = String::new();
+            }
+        }
+    }
+}
+
+/// The items an engine-routed filter KEEPS of one field, as an engine
+/// IN-list -- or `None` when the field restricts nothing.
+///
+/// - `included_items` (`= (...)`): those items, minus any it also hides. An
+///   EMPTY inclusion keeps nothing, and stays an empty list: the engine reads
+///   an empty IN-list as "matches nothing", never "everything"
+///   (`bi_engine::InFilter`).
+/// - `hidden_items` alone (`NOT IN (...)`): every item of the column the model
+///   lists (`all_values`, which offers the blank member as `(blank)`, last)
+///   minus the hidden ones -- so the blank rows stay unless the list hides
+///   them, exactly as the pivot's own `NOT IN` keeps them. The engine has no
+///   level-tagged NOT-IN, and a SQL `<>` would drop NULLs, which is why the
+///   complement is taken here instead.
+/// - neither: `None`.
+///
+/// Items match EXACTLY, the pivot path's rule (`apply_design_query_zones`).
+fn measure_only_kept_items(field: &DesignQueryFieldRef, all_values: Option<&[String]>) -> Option<Vec<String>> {
+    let hidden = field.hidden();
+    match (&field.included_items, all_values) {
+        (Some(included), _) => Some(included.iter().filter(|i| !hidden.contains(i)).cloned().collect()),
+        (None, Some(all)) if !hidden.is_empty() => {
+            Some(all.iter().filter(|v| !hidden.contains(v)).cloned().collect())
+        }
+        _ => None,
+    }
+}
+
+/// An item as the ENGINE's IN-list matches it on a column of `data_type`.
+///
+/// The items a filter carries are spelled the way the model's value list
+/// spells them (`bi_get_column_values_core` -> `arrow_value_to_string`, f64
+/// DISPLAY: `2024.0` is "2024") -- that is what a model slicer lists and
+/// publishes. The engine matches a FLOAT64 column only in its own spelling
+/// ("2024.0"), so "2024" matched nothing and every engine-routed Card under an
+/// ordinary slicer click on a float column answered BLANK, with no error,
+/// while a bar chart on the same page (host labels) kept working. A float item
+/// is therefore re-spelled through `f64`'s round-trip form. The blank member
+/// and anything that is not a number stay as written.
+fn engine_spelling(data_type: Option<&bi_engine::DataType>, item: &str) -> String {
+    match data_type {
+        Some(bi_engine::DataType::Float64) if !pivot_engine::is_blank_item_label(item) => {
+            match item.trim().parse::<f64>() {
+                Ok(v) if v.is_finite() => format!("{:?}", v),
+                _ => item.to_string(),
+            }
+        }
+        _ => item.to_string(),
+    }
+}
+
+/// Engine-routed filters as the engine's level-tagged IN-lists, each
+/// attributed to its table at its own level (`LEVEL_SLICER`, an ordinary
+/// slicer, unless the field says it is pinned). The engine reads `(blank)` in
+/// such a list as the BLANK member (NULL and empty), the same reading a
+/// pinned slicer's list gets (`bi/blank_member_tests.rs`). A field that only
+/// HIDES items needs the column's value list to take the complement of, read
+/// through `bi_get_column_values_core` (role applied, so it lists what the
+/// role may see). Every kept item is re-spelled for the column's type
+/// ([`engine_spelling`]).
+async fn engine_filters(
+    bi_state: &BiState,
+    engine_arc: &std::sync::Arc<tokio::sync::Mutex<bi_engine::Engine>>,
+    connection_id: ConnectionId,
+    fields: &[&DesignQueryFieldRef],
+) -> Result<Vec<bi_engine::ScopedInFilter>, String> {
+    let mut out = Vec::with_capacity(fields.len());
+    for field in fields {
+        let all_values = if field.included_items.is_none() && !field.hidden().is_empty() {
+            Some(
+                crate::bi::commands::bi_get_column_values_core(bi_state, connection_id, &field.table, &field.column)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let Some(kept) = measure_only_kept_items(field, all_values.as_deref()) else { continue };
+        let data_type = {
+            let engine = engine_arc.lock().await;
+            engine
+                .model()
+                .table(&field.table)
+                .ok()
+                .and_then(|t| t.column(&field.column).ok())
+                .map(|c| c.data_type().clone())
+        };
+        let kept: Vec<String> = kept.iter().map(|item| engine_spelling(data_type.as_ref(), item)).collect();
+        let level = field
+            .level
+            .map(|l| l.clamp(bi_engine::LEVEL_SLICER, bi_engine::LEVEL_MAX))
+            .unwrap_or(bi_engine::LEVEL_SLICER);
+        out.push(bi_engine::ScopedInFilter {
+            table: Some(field.table.clone()),
+            filter: bi_engine::InFilter::new(field.column.clone(), kept),
+            level,
+        });
+    }
+    Ok(out)
+}
+
+/// The query's ROWS, COLUMNS and -- when `place_filters` (they were grouped)
+/// -- FILTERS as the transient definition's fields, each on its cache column
+/// (`field_to_cache_idx`), each with every item filter the query says:
 ///
 /// - `hidden_items` (`NOT IN`) on any zone. Only FILTERS carried one: a
 ///   ROWS / COLUMNS `NOT IN` ran with every item.
@@ -355,11 +704,15 @@ pub(crate) async fn compute_design_query_view(
 ///   the same exact-match rule. It ran UNFILTERED (BUG-0197). The BLANK item
 ///   ("(blank)", a NULL member) is hidden too unless the list names it -- the
 ///   item list never shows it, so the inversion alone kept every blank row.
+///
+/// FILTERS that ran inside the engine query (`place_filters == false`) have
+/// no cache column and are not placed.
 pub(crate) fn apply_design_query_zones(
     def: &mut pivot_engine::PivotDefinition,
     request: &DesignQueryRequest,
     field_to_cache_idx: &HashMap<(String, String), usize>,
     cache: &pivot_engine::PivotCache,
+    place_filters: bool,
 ) {
     let field_of = |f: &DesignQueryFieldRef| -> pivot_engine::PivotField {
         let idx = *field_to_cache_idx
@@ -386,15 +739,25 @@ pub(crate) fn apply_design_query_zones(
     };
     def.row_fields = request.row_fields.iter().map(field_of).collect();
     def.column_fields = request.column_fields.iter().map(field_of).collect();
-    def.filter_fields = request
-        .filter_fields
-        .iter()
-        .map(|f| pivot_engine::PivotFilter {
-            field: field_of(f),
-            condition: pivot_engine::FilterCondition::ValueList(Vec::new()),
-        })
-        .collect();
+    def.filter_fields = if place_filters {
+        request
+            .filter_fields
+            .iter()
+            .map(|f| pivot_engine::PivotFilter {
+                field: field_of(f),
+                condition: pivot_engine::FilterCondition::ValueList(Vec::new()),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 }
+
+/// CONTRACT-CANVAS 4.8: the measure-only path, engine-backed. A CHILD module
+/// so it drives `compute_design_query_view` directly.
+#[cfg(test)]
+#[path = "design_query_measure_only_tests.rs"]
+mod design_query_measure_only_tests;
 
 #[cfg(test)]
 mod design_query_filter_tests {
@@ -429,6 +792,7 @@ mod design_query_filter_tests {
             is_lookup: false,
             hidden_items: None,
             included_items: None,
+            level: None,
         }
     }
 
@@ -439,6 +803,7 @@ mod design_query_filter_tests {
             column_fields: Vec::new(),
             value_fields: Vec::new(),
             filter_fields: filters,
+            page_filter_fields: Vec::new(),
             calculated_fields: None,
             value_column_order: None,
             layout: None,
@@ -465,7 +830,7 @@ mod design_query_filter_tests {
         region.included_items = Some(vec!["East".to_string()]);
         let mut def = pivot_engine::PivotDefinition::new(identity::EntityId::ZERO, (0, 0), (0, 0));
 
-        apply_design_query_zones(&mut def, &request(vec![fref("Time", "Year")], vec![region]), &columns(), &cache);
+        apply_design_query_zones(&mut def, &request(vec![fref("Time", "Year")], vec![region]), &columns(), &cache, true);
 
         assert_eq!(
             sorted(def.filter_fields[0].field.hidden_items.clone()),
@@ -483,7 +848,7 @@ mod design_query_filter_tests {
         region.hidden_items = Some(vec!["West".to_string()]);
         let mut def = pivot_engine::PivotDefinition::new(identity::EntityId::ZERO, (0, 0), (0, 0));
 
-        apply_design_query_zones(&mut def, &request(vec![region], Vec::new()), &columns(), &cache);
+        apply_design_query_zones(&mut def, &request(vec![region], Vec::new()), &columns(), &cache, true);
 
         assert_eq!(def.row_fields[0].hidden_items, vec!["West".to_string()], "a row's NOT IN ran unfiltered");
     }
@@ -495,7 +860,7 @@ mod design_query_filter_tests {
         let mut region = fref("Geo", "Region");
         region.included_items = Some(vec!["East".to_string()]);
         let mut def = pivot_engine::PivotDefinition::new(identity::EntityId::ZERO, (0, 0), (0, 0));
-        apply_design_query_zones(&mut def, &request(vec![fref("Time", "Year")], vec![region]), &columns(), &cache);
+        apply_design_query_zones(&mut def, &request(vec![fref("Time", "Year")], vec![region]), &columns(), &cache, true);
         def.value_fields
             .push(pivot_engine::ValueField::new(2, "Revenue".to_string(), pivot_engine::AggregationType::Sum));
 
@@ -549,7 +914,7 @@ mod design_query_filter_tests {
         let mut region = fref("Geo", "Region");
         region.included_items = Some(included.iter().map(|s| s.to_string()).collect());
         let mut def = pivot_engine::PivotDefinition::new(identity::EntityId::ZERO, (0, 0), (0, 0));
-        apply_design_query_zones(&mut def, &request(vec![fref("Time", "Year")], vec![region]), &columns(), &cache);
+        apply_design_query_zones(&mut def, &request(vec![fref("Time", "Year")], vec![region]), &columns(), &cache, true);
         def.value_fields
             .push(pivot_engine::ValueField::new(2, "Revenue".to_string(), pivot_engine::AggregationType::Sum));
         let view = safe_calculate_pivot(&def, &mut cache);

@@ -1664,12 +1664,23 @@ export interface CanvasLayout {
   snapToGrid: boolean;
   gridSizePx: number;
   showGrid: boolean;
-  /** "16:9" | "4:3" | "letter" | "custom". */
+  /** A preset id from `CANVAS_PAGE_PRESETS` (@api/canvasSheet) or "custom". */
   pagePreset: string;
   pageWidth: number;
   pageHeight: number;
   /** CSS hex colour; "" means the theme's default page colour. */
   background: string;
+  /**
+   * The colour of the area OUTSIDE the page (Power BI's Wallpaper): a CSS hex
+   * colour, or absent / "" for the theme's. Absent on the wire when "".
+   */
+  wallpaper?: string;
+  /**
+   * Lock Objects for this page (Power BI's View > Lock objects): no object on
+   * it may be moved or resized while set. Absent on the wire when false. Read
+   * it through `canvasObjectsLocked` (@api/canvasSheet).
+   */
+  objectsLocked?: boolean;
   /**
    * Paint order, bottom first (absent when empty). Objects MISSING from the
    * list paint above every listed one; a duplicated ref counts at its first

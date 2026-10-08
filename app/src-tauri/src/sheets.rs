@@ -1774,7 +1774,16 @@ pub(crate) fn set_canvas_layout_inner(
         // held while the recorder waits for the undo stack.
         let id = state.sheet_ids.read().unwrap().get(index).copied();
         if let Some(id) = id {
-            let description = if reordered { "Reorder objects" } else { "Lock objects" };
+            // Never "Lock objects": that is the page's View > Lock Objects
+            // toggle, which is deliberately NOT undoable, so the label would
+            // tell the user Ctrl+Z undoes the toggle while it undoes this.
+            let description = if reordered {
+                "Reorder objects"
+            } else if next.locked.iter().any(|r| !current.locked.contains(r)) {
+                "Lock selected objects"
+            } else {
+                "Unlock selected objects"
+            };
             crate::undo_commands::record_restores_joining_open_transaction(
                 state,
                 description,
@@ -2119,6 +2128,77 @@ pub(crate) fn ensure_not_canvas(
     } else {
         Ok(())
     }
+}
+
+/// Is LOCK OBJECTS on for sheet `index` (`CanvasLayout::objects_locked`)? A
+/// worksheet -- and a missing slot -- is never locked.
+pub(crate) fn canvas_objects_locked_in(sheet_kinds: &[::persistence::SheetKind], index: usize) -> bool {
+    matches!(sheet_kinds.get(index), Some(::persistence::SheetKind::Canvas(layout)) if layout.objects_locked)
+}
+
+/// THE ONE REFUSAL for a write that would MOVE or RESIZE an object on a page
+/// whose LOCK OBJECTS is on (Power BI's View > Lock objects; the semantics are
+/// on `CanvasLayout::objects_locked`). `action` reads as a verb phrase ("move
+/// or resize a slicer").
+///
+/// Every geometry door asks it -- chart (`update_chart`, `save_chart`, the AI
+/// tool's `update_chart`), control (`set_control_geometry`, a single x / y /
+/// width / height / offset property, `move_control`), slicer and timeline
+/// position, floating range, and a canvas pivot's box -- and asks it ONLY on
+/// the branch where the geometry actually CHANGES, after its own "nothing
+/// moved" test, so a re-sync of the same geometry is never refused. Each asks
+/// before its `DocumentEffect`, so a refusal leaves the document clean and
+/// records no undo step. The frontend reads the same flag
+/// (`canvasObjectsLocked`, @api/canvasSheet) to stop offering the gesture in
+/// the first place; this is the rule where it cannot be skipped -- a script,
+/// the CLI, an AI tool, a renderer that missed a door. Undo and redo are not
+/// asked: they restore history through the restore paths, never through a
+/// geometry command. Not enforced either (stated so nobody assumes it): the
+/// raw JSON object editor (`json_view.rs`, a developer tool that replaces a
+/// whole object), and -- as before -- the per-object `locked` list, which
+/// stays a frontend rule.
+///
+/// LOCK ORDER: takes ONLY the `sheet_kinds` read lock and releases it before
+/// returning -- the same leaf read `protection::check_sheet_action` already
+/// makes inside the slicer and timeline stores' `lock_pending` holds, so
+/// asking it there adds no new edge to the lock order.
+///
+/// CHECK-THEN-WRITE, KNOWINGLY (review 2026-10-08). The read guard is released
+/// before the caller writes its store, so a `set_canvas_layout { objectsLocked:
+/// true }` landing in between lets ONE move through on a page that was locked
+/// a moment earlier. That is the TOCTOU shape CLAUDE.md forbids for
+/// PROTECTION gates, and it is accepted here because this is not one: Lock
+/// Objects is an authoring convenience that the same author toggles (a
+/// protected sheet's own gate is `protection::check_sheet_action`), and a
+/// move racing the toggle by microseconds has no "right" order a user could
+/// observe. Holding the `sheet_kinds` read guard across every door's store
+/// write would close it at a real cost: it adds a `sheet_kinds -> store`
+/// edge to eight doors while the slicer and timeline doors already take
+/// `store -> sheet_kinds`, and on an RwLock where a queued writer blocks new
+/// readers (std's makes no fairness promise either way) a
+/// `set_canvas_layout` writer queued between two such readers can deadlock
+/// them. A convenience lock must never be able to hang the app.
+pub(crate) fn ensure_canvas_objects_unlocked(state: &AppState, index: usize, action: &str) -> Result<(), String> {
+    let locked = {
+        let kinds = state.sheet_kinds.read().map_err(|e| e.to_string())?;
+        canvas_objects_locked_in(&kinds, index)
+    };
+    if locked {
+        Err(canvas_objects_locked_refusal(action))
+    } else {
+        Ok(())
+    }
+}
+
+/// The message [`ensure_canvas_objects_unlocked`] refuses with -- also used by
+/// the doors that decide the lock from a snapshot taken before their store
+/// lock (the control batch). Names the setting AND the remedy.
+pub(crate) fn canvas_objects_locked_refusal(action: &str) -> String {
+    format!(
+        "Cannot {}: the objects on this canvas page are locked (Canvas > View > Lock Objects). \
+         Turn Lock Objects off to move or resize them.",
+        action
+    )
 }
 
 /// `ensure_not_canvas` reading the kinds from state. Takes ONLY the

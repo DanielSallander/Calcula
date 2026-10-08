@@ -33,60 +33,131 @@ use std::path::Path;
 /// formula whose text legitimately contains the prefix; rewriting inside the
 /// quotes would corrupt the user's data. Doubled quotes (`""`) are Excel's
 /// escape for a literal quote inside a string and keep us inside the literal.
+/// A quoted sheet name (`'...'`, `''` escaping an apostrophe) is opaque the
+/// same way -- a sheet may be called `_xlfn.Data`, and Excel allows `"` in a
+/// sheet name, which must not open a string literal -- and so is a bracketed
+/// structured reference, where `'` is an ESCAPE character, not a quote.
+///
+/// The scan steps by CHARACTER and compares prefixes on bytes. It used to step
+/// by byte and push each byte as a `char`, which turned every UTF-8 byte into
+/// a Latin-1 character (`"åäö"` came back as `"Ã¥Ã¤Ã¶"`) and, outside a
+/// literal, sliced the string inside a character and PANICKED -- so any
+/// workbook with a formula naming a Swedish sheet could not be opened. Every
+/// delimiter involved (`"`, `'`, `[`, `]`, the prefixes, the boundary
+/// punctuation) is ASCII, so byte comparison at a char boundary is exact.
 ///
 /// The export side needs no counterpart: `rust_xlsxwriter::Formula::new`
 /// re-adds the prefixes from its own table when it writes the formula back.
 pub(crate) fn strip_future_function_prefixes(formula: &str) -> String {
     const PREFIXES: [&str; 3] = ["_xlfn._xlws.", "_xlfn.", "_xlpm."];
 
-    let bytes = formula.as_bytes();
+    #[derive(PartialEq)]
+    enum Span {
+        Code,
+        /// Inside `"..."`.
+        Literal,
+        /// Inside `'...'` (a quoted sheet name).
+        SheetName,
+    }
+
     let mut out = String::with_capacity(formula.len());
+    let mut span = Span::Code;
+    // Nesting depth of `[...]` (structured references nest: `T[@[A]:[B]]`).
+    let mut bracket_depth = 0usize;
+    // The last character copied in CODE, for the identifier-boundary test.
+    let mut prev: Option<char> = None;
     let mut i = 0;
-    let mut in_string = false;
 
-    while i < bytes.len() {
-        let c = bytes[i];
+    while i < formula.len() {
+        let rest = &formula[i..];
+        let c = rest.chars().next().expect("i is always on a char boundary");
+        let next_is = |ch: char| rest[c.len_utf8()..].starts_with(ch);
 
-        if in_string {
-            out.push(c as char);
-            if c == b'"' {
-                // `""` inside a literal is an escaped quote, not the end.
-                if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
-                    out.push('"');
-                    i += 2;
-                    continue;
+        match span {
+            Span::Literal | Span::SheetName => {
+                let close = if span == Span::Literal { '"' } else { '\'' };
+                out.push(c);
+                i += c.len_utf8();
+                if c == close {
+                    // A doubled delimiter is an escaped one, not the end.
+                    if next_is(close) {
+                        out.push(close);
+                        i += 1;
+                    } else {
+                        span = Span::Code;
+                        prev = Some(close);
+                    }
                 }
-                in_string = false;
+                continue;
             }
-            i += 1;
+            Span::Code => {}
+        }
+
+        if bracket_depth > 0 {
+            // Inside a structured reference: copy verbatim. `'` escapes the
+            // next character (`[Price'[USD']]`), so it must not be read as a
+            // bracket or a quote.
+            out.push(c);
+            i += c.len_utf8();
+            match c {
+                '\'' => {
+                    if let Some(e) = formula[i..].chars().next() {
+                        out.push(e);
+                        i += e.len_utf8();
+                    }
+                }
+                '[' => bracket_depth += 1,
+                ']' => bracket_depth -= 1,
+                _ => {}
+            }
+            prev = Some(c);
             continue;
         }
 
-        if c == b'"' {
-            in_string = true;
-            out.push('"');
-            i += 1;
-            continue;
+        match c {
+            '"' => {
+                span = Span::Literal;
+                out.push(c);
+                i += 1;
+                continue;
+            }
+            '\'' => {
+                span = Span::SheetName;
+                out.push(c);
+                i += 1;
+                continue;
+            }
+            '[' => {
+                bracket_depth = 1;
+                out.push(c);
+                i += 1;
+                prev = Some(c);
+                continue;
+            }
+            _ => {}
         }
 
         // Only strip at an identifier BOUNDARY: the prefix must not be the tail
-        // of a longer name (a user range named `MY_xlfn.X` is not a prefix).
-        let at_boundary = i == 0 || {
-            let prev = bytes[i - 1];
-            !(prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'.')
+        // of a longer name (a user range named `MY_xlfn.X`, or `Ö_xlfn.X` --
+        // a non-ASCII letter is part of a name too).
+        let at_boundary = match prev {
+            None => true,
+            Some(p) => !(p.is_alphanumeric() || p == '_' || p == '.'),
         };
         if at_boundary {
             if let Some(p) = PREFIXES
                 .iter()
-                .find(|p| formula[i..].starts_with(**p))
+                .find(|p| rest.as_bytes().starts_with(p.as_bytes()))
             {
+                // The character before the stripped name is still `prev`.
                 i += p.len();
                 continue;
             }
         }
 
-        out.push(c as char);
-        i += 1;
+        out.push(c);
+        i += c.len_utf8();
+        prev = Some(c);
     }
 
     out
@@ -766,11 +837,14 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
                     }
                     None => None,
                 };
-                let refers_to = if refers_to.starts_with('=') {
-                    refers_to
-                } else {
-                    format!("={}", refers_to)
-                };
+                // A defined name's formula carries the same `_xlfn.`/`_xlpm.`
+                // storage prefixes as a cell formula (an Excel named LAMBDA is
+                // stored as `_xlfn.LAMBDA(_xlpm.x,...)`); kept, every imported
+                // named LAMBDA lexed as one unknown identifier and was #NAME?.
+                let refers_to = format!(
+                    "={}",
+                    strip_future_function_prefixes(refers_to.strip_prefix('=').unwrap_or(&refers_to))
+                );
                 let key = name.trim().to_uppercase();
                 if let Some(&existing_idx) = by_name.get(&key) {
                     let existing_is_global = wb.named_ranges[existing_idx].sheet_id.is_none();

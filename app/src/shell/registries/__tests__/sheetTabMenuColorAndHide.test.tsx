@@ -60,6 +60,7 @@ function seat(sheets: SheetInfo[], activeIndex = 0): void {
   controller = {
     snapshot: () => snapshot,
     insertSheetBefore: vi.fn(async () => {}),
+    appendSheet: vi.fn(async () => {}),
     deleteSheet: vi.fn(async () => {}),
     renameSheet: vi.fn(async () => {}),
     hideSheet: vi.fn(async () => {}),

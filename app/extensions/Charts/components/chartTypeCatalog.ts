@@ -31,8 +31,17 @@ export interface ChartTypeEntry {
 }
 
 /**
- * All 18 built-in chart types, quick tiles first in band order, then the rest
- * in the order the former "More..." list offered them.
+ * All 22 built-in chart types, quick tiles first in band order, then the rest
+ * in the order the former "More..." list offered them, then Power BI's four
+ * tile visuals (Card, Multi-row card, KPI, Gauge — rendering/visuals/).
+ *
+ * THE ONE LIST. The Insert/Edit Chart dialog's picker reads it too
+ * (tabs/DesignTab.tsx), and `chartTypeNames.test.ts` holds the renderer's
+ * registry labels (rendering/chartDispatch.ts) to these names, so "Column" is
+ * the column chart's name everywhere.
+ *
+ * The four visuals draw with the icon programme's ChartCard / ChartMultiRowCard
+ * / ChartKpi / ChartGauge (contract §5); the test asserts every key is real.
  */
 export const CHART_TYPES: readonly ChartTypeEntry[] = Object.freeze([
   { value: "bar", label: "Column", icon: "ChartColumn", quick: true },
@@ -53,6 +62,10 @@ export const CHART_TYPES: readonly ChartTypeEntry[] = Object.freeze([
   { value: "boxPlot", label: "Box & Whisker", icon: "ChartBoxPlot", quick: false },
   { value: "sunburst", label: "Sunburst", icon: "ChartSunburst", quick: false },
   { value: "pareto", label: "Pareto", icon: "ChartPareto", quick: false },
+  { value: "card", label: "Card", icon: "ChartCard", quick: false },
+  { value: "multiRowCard", label: "Multi-row card", icon: "ChartMultiRowCard", quick: false },
+  { value: "kpi", label: "KPI", icon: "ChartKpi", quick: false },
+  { value: "gauge", label: "Gauge", icon: "ChartGauge", quick: false },
 ] as ChartTypeEntry[]);
 
 /** The six band tiles, in band order. */

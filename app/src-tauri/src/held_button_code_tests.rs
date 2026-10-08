@@ -2284,3 +2284,158 @@ fn a_subscribed_inline_button_runs_through_the_door_only_after_its_bytes_are_app
         other => panic!("the approved code did not run: {other:?}"),
     }
 }
+
+// ============================================================================
+// Declarative button actions (Canvas: Page navigation, Back, Clear slicers)
+// ============================================================================
+
+/// A navigation button: the recipe's empty `onSelect` plus an action.
+fn navigation_button_props() -> serde_json::Value {
+    serde_json::json!({
+        "onSelect": { "valueType": "static", "value": "" },
+        "text": { "valueType": "static", "value": "Next page" },
+        "action": { "valueType": "static", "value": "navigate" },
+        "actionTarget": { "valueType": "static", "value": "0192f6a0-0000-7000-8000-000000000002" },
+        "actionTargetName": { "valueType": "static", "value": "Page 2" }
+    })
+}
+
+/// The three action keys are the seam's spellings, and none of them is CODE
+/// or a held key: a pull keeps an action live.
+///
+/// SABOTAGE: add "action" to `EXECUTABLE_CONTROL_PROPERTIES`.
+#[test]
+fn button_action_keys_match_the_seam_and_are_never_code() {
+    use crate::controls::{BUTTON_ACTION_PROPERTIES, EXECUTABLE_CONTROL_PROPERTIES};
+    for key in BUTTON_ACTION_PROPERTIES {
+        assert!(!EXECUTABLE_CONTROL_PROPERTIES.contains(key), "'{key}' is an action, not code");
+        assert!(!HELD_CONTROL_PROPERTIES.contains(key), "'{key}' is an action, not a held key");
+    }
+    // The spellings are the seam's own (read at test time, so a rename on
+    // either side fails here instead of silently stripping or keeping the
+    // wrong key).
+    let seam = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/api/buttonControlService.ts"),
+    )
+    .expect("app/src/api/buttonControlService.ts");
+    for (ts_const, rust_key) in [
+        ("BUTTON_ACTION_PROPERTY", BUTTON_ACTION_PROPERTIES[0]),
+        ("BUTTON_ACTION_TARGET_PROPERTY", BUTTON_ACTION_PROPERTIES[1]),
+        ("BUTTON_ACTION_TARGET_NAME_PROPERTY", BUTTON_ACTION_PROPERTIES[2]),
+    ] {
+        let decl = format!("export const {ts_const} = \"{rust_key}\";");
+        assert!(seam.contains(&decl), "buttonControlService.ts no longer declares `{decl}`");
+    }
+}
+
+/// Every admission door -- a subscriber's strip, a checkout's hold, a
+/// subscriber's link-landing -- keeps an action, byte for byte.
+#[test]
+fn every_admission_door_keeps_a_buttons_action_live() {
+    use crate::controls::BUTTON_ACTION_PROPERTIES;
+    let sheet = identity::SheetId::from_bytes(identity::generate_uuid_v7());
+    let saved = vec![SavedSheetControls {
+        sheet_id: sheet,
+        controls: serde_json::json!([
+            { "row": 0, "col": 0, "controlType": "button", "properties": navigation_button_props() }
+        ]),
+    }];
+    for wiring in [
+        DistributedWiring::Strip,
+        DistributedWiring::Hold(stamp()),
+        DistributedWiring::LinkLanded { from: stamp(), landed_macros: HashSet::new(), sheet_names: names(sheet) },
+    ] {
+        let (out, report) = admit_wiring(&saved, &wiring);
+        let props = out[0].controls[0]["properties"].as_object().unwrap();
+        for key in BUTTON_ACTION_PROPERTIES {
+            assert_eq!(
+                props.get(*key),
+                navigation_button_props().get(*key),
+                "{wiring:?} did not keep '{key}' live"
+            );
+        }
+        assert_eq!(report.stripped, 0, "{wiring:?}: an action is not code to strip");
+        assert!(!props.contains_key(HELD_FROM_PROPERTY), "{wiring:?}: nothing was held");
+    }
+    let stripped = crate::controls::sanitize_distributed_controls(&saved);
+    assert_eq!(stripped[0].controls[0]["properties"]["action"]["value"], "navigate");
+}
+
+/// End to end: a published report's navigation button arrives at a
+/// subscriber with its action live, through the real publish, pull and
+/// materialize.
+#[test]
+fn a_subscribed_navigation_button_arrives_with_its_action() {
+    let dir = TempDir::new().unwrap();
+    let alice = TempDir::new().unwrap();
+    let reg = LocalWorkspace::open(dir.path()).unwrap();
+    let mut app = dashboard();
+    if let serde_json::Value::Array(entries) = &mut app.controls[0].controls {
+        entries.push(serde_json::json!({
+            "row": 4, "col": 4, "controlType": "button", "properties": navigation_button_props()
+        }));
+    }
+    publish_version(&reg, alice.path(), &app, SemVer::new(1, 0, 0), PushMode::CreateNew);
+
+    let subscriber = Stores::new();
+    subscriber.materialize(subscribe_pull(&dir, "1.0.0"), MaterializeMode::Subscribe);
+    let sheet = subscriber.dashboard_index();
+    let nav = subscriber.control(sheet, 4, 4);
+    assert_eq!(slot(&nav, "action"), ("static", "navigate"), "the action arrived dead");
+    assert_eq!(slot(&nav, "actionTarget"), ("static", "0192f6a0-0000-7000-8000-000000000002"));
+    assert_eq!(slot(&nav, "actionTargetName"), ("static", "Page 2"));
+}
+
+fn redo_once(state: &crate::AppState) {
+    let transaction = state.undo_stack.lock().unwrap().pop_redo().expect("nothing to redo");
+    crate::undo_commands::apply_changes(
+        state,
+        &FileState::default(),
+        &crate::persistence::UserFilesState::default(),
+        &crate::pivot::types::PivotState::new(),
+        &crate::slicer::SlicerState::new(),
+        &crate::ribbon_filter::RibbonFilterState::new(),
+        &crate::pane_control::PaneControlState::new(),
+        &crate::timeline_slicer::TimelineSlicerState::new(),
+        transaction,
+        false,
+    );
+}
+
+/// ONE BUTTON, ONE THING, across Ctrl+Z and Ctrl+Y. Choosing an action for a
+/// button that runs code writes `onSelect ""` and then the three action keys
+/// (the Properties pane's order). The code write snapshots the WHOLE store and
+/// is the one undoable step; Ctrl+Z restores that snapshot -- the code, and no
+/// action -- and Ctrl+Y restores the action with no code. A button never
+/// comes back holding both, which is what the click path relies on.
+#[test]
+fn choosing_an_action_for_a_coded_button_undoes_to_the_code_and_redoes_to_the_action() {
+    let mut properties = HashMap::new();
+    properties.insert("text".to_string(), prop("Go"));
+    properties.insert(ON_SELECT_PROPERTY.to_string(), prop("Report();"));
+    let state = seeded(ControlMetadata { control_type: "button".into(), properties });
+    let file = FileState::default();
+    let write = |key: &str, value: &str| {
+        crate::controls::set_control_property_core(
+            &state, &file, 0, 2, 1, "".into(), key.into(), "static".into(), value.into(),
+        )
+        .unwrap();
+    };
+    write(ON_SELECT_PROPERTY, "");
+    write("action", "back");
+    write("actionTarget", "");
+    write("actionTargetName", "");
+    let now = state.controls.read().unwrap()[&(0, 2, 1)].clone();
+    assert_eq!(slot(&now, ON_SELECT_PROPERTY), ("static", ""));
+    assert_eq!(slot(&now, "action"), ("static", "back"));
+
+    undo_once(&state);
+    let undone = state.controls.read().unwrap()[&(0, 2, 1)].clone();
+    assert_eq!(slot(&undone, ON_SELECT_PROPERTY), ("static", "Report();"), "Ctrl+Z did not bring the code back");
+    assert!(!undone.properties.contains_key("action"), "Ctrl+Z left the code AND the action: {undone:?}");
+
+    redo_once(&state);
+    let redone = state.controls.read().unwrap()[&(0, 2, 1)].clone();
+    assert_eq!(slot(&redone, ON_SELECT_PROPERTY), ("static", ""), "Ctrl+Y brought the code back with the action");
+    assert_eq!(slot(&redone, "action"), ("static", "back"), "Ctrl+Y did not restore the action");
+}

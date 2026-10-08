@@ -214,7 +214,27 @@ export interface ChartMarkMeta {
    * test in the Charts extension proves it mark by mark.
    */
   honoursDataPointOverrides?: boolean;
+  /**
+   * Which CHART FURNITURE the mark has, so a surface offering it can ask
+   * instead of guessing from the layout family (contract §4.2, 2026-10-08).
+   *
+   *   - "full" (the default, and every mark before the tile visuals): title,
+   *     legend, data labels, and — for a cartesian mark — axes and gridlines.
+   *   - "titleOnly": the mark draws its own labels inside its own box and has a
+   *     title and nothing else. Power BI's Card, Multi-row card, KPI and Gauge.
+   *
+   * WHY A DECLARATION. `layoutFamily` answered "does it have axes?", and every
+   * surface used it as a proxy for "does it have a legend?" too. A funnel says
+   * yes to the second and no to the first, a Card says no to both — and the
+   * Chart Design band offered a Card a Legend toggle that writes
+   * `legend.visible`, dirties the document and paints nothing: the silent
+   * no-op this codebase keeps finding. Ask {@link chartMarkFurniture}.
+   */
+  furniture?: ChartMarkFurniture;
 }
+
+/** The furniture a mark has (see {@link ChartMarkMeta.furniture}). */
+export type ChartMarkFurniture = "full" | "titleOnly";
 
 /**
  * A chart mark: how to paint it, lay it out, and hit-test it. The data/spec/
@@ -292,4 +312,20 @@ export function chartMarkHonoursDataPointOverrides(mark: string): boolean {
   const meta = registry.get(mark)?.meta;
   if (!meta) return false;
   return meta.builtin === true || meta.honoursDataPointOverrides === true;
+}
+
+/**
+ * The furniture a mark has: "titleOnly" only when the mark DECLARED it, "full"
+ * otherwise — including for an unregistered id.
+ *
+ * THE ASYMMETRY IS DELIBERATE, and it is the opposite of
+ * {@link chartMarkHonoursDataPointOverrides}. That predicate guards a WRITE a
+ * mark might ignore, so the unknown answers "no". This one decides which
+ * controls a surface SHOWS for a chart whose mark has not registered yet (a
+ * custom-mark library still loading): hiding the legend toggle from every chart
+ * whose registry entry is late would take a working control away on a guess.
+ * The Chart Design band and the Insights cue host (Charts) are its consumers.
+ */
+export function chartMarkFurniture(mark: string): ChartMarkFurniture {
+  return registry.get(mark)?.meta.furniture === "titleOnly" ? "titleOnly" : "full";
 }

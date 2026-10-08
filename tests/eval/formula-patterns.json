@@ -15595,6 +15595,32 @@
       "statedResult": ""
     },
     {
+      "id": "LPAD#1",
+      "function": "LPAD",
+      "intent": "The LPAD function pads text on the left with a fill string until the result is exactly the length you ask for.",
+      "fixture": [
+        {
+          "a1": "A1",
+          "input": "Invoice"
+        },
+        {
+          "a1": "B1",
+          "input": "Invoice Code"
+        },
+        {
+          "a1": "A2",
+          "input": "42"
+        }
+      ],
+      "target": "B2",
+      "formula": "=LPAD(A2, 6, \"0\")",
+      "stated": {
+        "kind": "text",
+        "text": "000042"
+      },
+      "statedResult": "\"000042\""
+    },
+    {
       "id": "MATCH#1",
       "function": "MATCH",
       "intent": "The MATCH function searches for a specified value in a range and returns its relative position within that range.",
@@ -22622,6 +22648,32 @@
       "formula": "=ROWS(A2:A5)",
       "stated": null,
       "statedResult": ""
+    },
+    {
+      "id": "RPAD#1",
+      "function": "RPAD",
+      "intent": "The RPAD function pads text on the right with a fill string until the result is exactly the length you ask for.",
+      "fixture": [
+        {
+          "a1": "A1",
+          "input": "Section"
+        },
+        {
+          "a1": "B1",
+          "input": "Contents Line"
+        },
+        {
+          "a1": "A2",
+          "input": "Chapter 1"
+        }
+      ],
+      "target": "B2",
+      "formula": "=RPAD(A2, 15, \".\")",
+      "stated": {
+        "kind": "text",
+        "text": "Chapter 1......"
+      },
+      "statedResult": "\"Chapter 1......\""
     },
     {
       "id": "RRI#1.A7",

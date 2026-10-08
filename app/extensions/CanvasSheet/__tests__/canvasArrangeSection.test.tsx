@@ -7,7 +7,14 @@
 //          note when nothing is selected; Distribute disabled below three
 //          objects; the menus run the right commands; Lock reads "Unlock"
 //          when every selected object is locked; and the section sits in the
-//          Canvas tab's panel definition.
+//          Canvas tab's panel definition, after Elements (Power BI's Insert >
+//          Elements, then Format > Arrange). Size & Position draws its own
+//          picture (SizePosition) since 2026-10-08: Resize drew it AND Fit to
+//          Window on one tab. With the page's LOCK OBJECTS on, Align (and the
+//          Distribute rows in its menu) -- the verb that only MOVES -- is
+//          disabled with the lock's own sentence; restacking and the
+//          per-object Lock stay, and Size & Position still opens, read-only
+//          with the reason, exactly as it does for a per-object lock.
 // CONTEXT: @testing-library/react is not installed; react-dom + `act`.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -51,6 +58,8 @@ import type { PanelSectionProps } from "@api/uiTypes";
 import { CanvasArrangeSection } from "../components/CanvasArrangeSection";
 import { CanvasPanelDefinition } from "../components/CanvasTabSections";
 import { NOTHING_SELECTED_NOTE, SUBSCRIBED_NOTE } from "../lib/canvasNotes";
+import { OBJECTS_LOCKED_NOTE } from "../lib/objectsLock";
+import { drawsIcon } from "./tabHarness";
 import type { GridRegion } from "@api/gridOverlays";
 import { registerObjectGeometryProvider, resetObjectGeometryProviders } from "@api/objectGeometry";
 import { registerSizeAndPositionOpener, resetObjectPosition } from "@api/objectPosition";
@@ -127,9 +136,26 @@ async function openAndRun(trigger: string, item: string): Promise<void> {
 }
 
 describe("the Arrange section", () => {
-  it("is in the Canvas tab, after Insert", () => {
+  it("is in the Canvas tab, after Elements", () => {
     const ids = CanvasPanelDefinition.sections.map((s) => s.id);
-    expect(ids.indexOf("canvas-tab.arrange")).toBe(ids.indexOf("canvas-tab.insert") + 1);
+    expect(ids.indexOf("canvas-tab.arrange")).toBe(ids.indexOf("canvas-tab.elements") + 1);
+  });
+
+  it("Size & Position draws SizePosition, never Resize (Fit to Window's old picture)", () => {
+    render();
+    const button = byTestId("canvas-arrange-size-position", container);
+    expect(drawsIcon(button, "SizePosition")).toBe(true);
+    expect(drawsIcon(button, "Resize")).toBe(false);
+  });
+
+  it("Lock Objects ON: Align is disabled with the lock's sentence; restacking, Lock and Size & Position stay", () => {
+    h.snapshot = { active: { index: 2, name: "Canvas1", layout: { objectsLocked: true } }, activeSubscribed: false };
+    render();
+    expect(byTestId("canvas-arrange-align", container).disabled).toBe(true);
+    for (const id of ["canvas-arrange-forward", "canvas-arrange-backward", "canvas-arrange-lock", "canvas-arrange-size-position"]) {
+      expect(byTestId(id, container).disabled, id).toBe(false);
+    }
+    expect(OBJECTS_LOCKED_NOTE).toContain("Lock Objects");
   });
 
   it("five heroes, enabled with a selection", () => {

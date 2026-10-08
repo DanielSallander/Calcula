@@ -8,11 +8,14 @@
 import React from "react";
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { registerPanel, unregisterPanel } from "@api/ui";
+import { registerThemeGallery } from "@api/themeGallery";
 import { AppEvents, onAppEvent } from "@api/events";
 import { markSheetDirty } from "@api/styleInterceptors";
 import { ICON_SIZE_MD, ICON_SIZE_SM } from "@api/layout";
 import { RibbonIcon } from "@api/ribbonIcons";
 import { ThemesSection } from "./components/ThemesSection";
+import { ThemeGalleryMenu } from "./components/ThemeGallery";
+import { GALLERY_HEADING, GALLERY_WIDTH } from "./lib/themeChoices";
 
 const PAGE_LAYOUT_PANEL_ID = "page-layout";
 
@@ -45,6 +48,21 @@ function activate(_context: ExtensionContext): void {
     ribbonOrder: 30,
     priority: 970, // 1000 - ribbonOrder
   });
+
+  // The SAME theme gallery on the theme-gallery seam (@api/themeGallery), so
+  // another tab -- the Canvas tab's Page group -- hosts it without importing
+  // this extension (Canvas contract §4.5). The body is ThemeGalleryMenu, the
+  // very rows the Page Layout hero opens, test ids included. It is NOT a
+  // menu-bar item: it used to be Format > Themes, an entry Excel does not
+  // have, added only so the gallery could be hosted (review finding
+  // 2026-10-08).
+  cleanupFns.push(
+    registerThemeGallery({
+      heading: GALLERY_HEADING,
+      width: GALLERY_WIDTH,
+      render: (onClose: () => void) => React.createElement(ThemeGalleryMenu, { onClose }),
+    }),
+  );
 
   // Listen for theme changes and trigger re-render
   const unsubTheme = onAppEvent(AppEvents.THEME_CHANGED, () => {

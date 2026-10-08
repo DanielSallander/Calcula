@@ -68,6 +68,8 @@ import {
   registerObjectGeometryProvider,
 } from "@api/objectGeometry";
 import { createSlicerGeometryProvider } from "./lib/slicerGeometry";
+import { installSlicerPageFilterPublisher } from "./lib/slicerPageFilters";
+import { installSlicerClearProvider } from "./lib/slicerClearProvider";
 
 import {
   renderSlicer,
@@ -200,6 +202,12 @@ function activate(context: ExtensionContext): void {
   // Tab cycling selects slicers through this, never through the mouse route
   // below, which arms a pending click the next mouseup anywhere would complete.
   cleanupFunctions.push(registerSlicerObjectSelection());
+
+  // A model slicer's filter on the PAGE's design-query charts (@api/
+  // pageFilters, owner decision 5 of 2026-10-08): the store's notifications
+  // republish what each page's model slicers keep; the chart side re-queries.
+  cleanupFunctions.push(installSlicerPageFilterPublisher());
+  cleanupFunctions.push(installSlicerClearProvider()); // @api/slicerClearService: a Clear all slicers button
 
   // The keyboard INSIDE a selected slicer (M8 S7): Enter goes in, the arrows
   // move a focus ring between the items, Space applies, Escape leaves, Alt+C

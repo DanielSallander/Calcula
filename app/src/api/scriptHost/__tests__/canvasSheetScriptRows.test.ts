@@ -16,6 +16,8 @@
 //          parameter and the grid-sync side effects are module-mocked.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import * as fs from "fs";
+import * as path from "path";
 
 const mocks = vi.hoisted(() => ({
   grid: {
@@ -40,6 +42,7 @@ import {
   executeSetCanvasLayout,
 } from "../host";
 import {
+  CANVAS_LAYOUT_READ_ONLY_KEYS,
   CANVAS_LAYOUT_SCRIPT_KEYS,
   vAddSheet,
   vCanvasLayout,
@@ -53,6 +56,7 @@ import type { MountSpec, W2H } from "../protocol";
 import {
   CANVAS_MAX_GRID_SIZE_PX,
   CANVAS_MIN_GRID_SIZE_PX,
+  CANVAS_PAGE_PRESETS,
   defaultCanvasLayout,
 } from "../../canvasSheet";
 import type { CanvasLayout, SheetInfo } from "../../lib";
@@ -196,15 +200,79 @@ describe("vCanvasLayout", () => {
     expect(vCanvasLayout([{ background: "" }])).toBe(true);
   });
 
-  it("the settable keys are exactly the seven layout scalars", () => {
+  it("the settable keys are exactly the eight cosmetic layout scalars (wallpaper included)", () => {
     expect(Object.keys(CANVAS_LAYOUT_SCRIPT_KEYS).sort()).toEqual(
-      ["background", "gridSizePx", "pageHeight", "pagePreset", "pageWidth", "showGrid", "snapToGrid"],
+      ["background", "gridSizePx", "pageHeight", "pagePreset", "pageWidth", "showGrid", "snapToGrid", "wallpaper"],
     );
   });
 
   it("refuses the READ-ONLY keys by name (zOrder / locked name other objects)", () => {
     expect(vCanvasLayout([{ zOrder: [] }])).toMatch(/"zOrder" cannot be set from a script/);
     expect(vCanvasLayout([{ gridSizePx: 20, locked: [] }])).toMatch(/"locked" cannot be set/);
+  });
+
+  // Review finding (2026-10-08): `wallpaper` and `objectsLocked` were in NO
+  // list, so both were refused as "unknown" keys although getCanvasLayout
+  // returns them -- and objectsLocked stayed unsettable only by omission,
+  // with nothing to stop the next edit from adding it to the settable list.
+  // Wallpaper is cosmetic like background: settable. Lock Objects binds the
+  // SCRIPT too (the backend refuses a script's move on a locked page), so a
+  // script that could turn it off could undo the page's lock: read-only,
+  // refused with a reason that says so.
+  it("wallpaper is settable, validated like background", () => {
+    expect(vCanvasLayout([{ wallpaper: "#0a0b0c" }])).toBe(true);
+    expect(vCanvasLayout([{ wallpaper: "" }])).toBe(true);
+    expect(vCanvasLayout([{ wallpaper: 3 }])).toBe("wallpaper must be a string");
+    expect(vCanvasLayout([{ wallpaper: "blue" }])).toMatch(/[Ww]allpaper/);
+  });
+
+  it("objectsLocked is READ-ONLY, refused by name with its own reason (it binds the script itself)", () => {
+    const verdict = vCanvasLayout([{ objectsLocked: false }]);
+    expect(verdict).toMatch(/"objectsLocked" cannot be set from a script/);
+    expect(verdict).toMatch(/Lock Objects/);
+    expect(verdict).not.toMatch(/unknown/);
+  });
+
+  // THE CENSUS: every field the Rust CanvasLayout declares is classified for
+  // scripts exactly once -- settable or read-only -- so a new field cannot
+  // arrive unclassified, and no field can be both.
+  it("every Rust CanvasLayout field is in EXACTLY one of the settable / read-only lists", () => {
+    const rust = fs.readFileSync(
+      path.resolve(__dirname, "../../../../../core/persistence/src/lib.rs"),
+      "utf8",
+    );
+    const at = rust.indexOf("pub struct CanvasLayout {");
+    expect(at, "the Rust struct moved").toBeGreaterThan(-1);
+    const body = rust.slice(at, rust.indexOf("\n}", at));
+    const fields = [...body.matchAll(/^\s*pub (\w+):/gm)].map((m) =>
+      m[1].replace(/_([a-z])/g, (_x, c: string) => c.toUpperCase()),
+    );
+    expect(fields.length, "parsed no fields").toBeGreaterThan(8);
+    const settable = new Set(Object.keys(CANVAS_LAYOUT_SCRIPT_KEYS));
+    for (const f of fields) {
+      const n = Number(settable.has(f)) + Number(CANVAS_LAYOUT_READ_ONLY_KEYS.has(f));
+      expect(n, `CanvasLayout field "${f}" must be classified once (settable or read-only)`).toBe(1);
+    }
+    // And neither list names a field Rust does not have.
+    for (const k of [...settable, ...CANVAS_LAYOUT_READ_ONLY_KEYS]) expect(fields, k).toContain(k);
+  });
+
+  // The object browser (objectContexts.d.ts, generated from its template)
+  // listed only three page sizes and neither new field.
+  it("the script typings name every page preset and both new layout fields", () => {
+    const dts = fs.readFileSync(
+      path.resolve(__dirname, "../../../../scripts/scriptTypings/objectContexts.template.d.ts"),
+      "utf8",
+    );
+    const read = dts.slice(dts.indexOf("declare interface ScriptCanvasLayout {"));
+    const readBody = read.slice(0, read.indexOf("\n}"));
+    for (const p of CANVAS_PAGE_PRESETS) expect(readBody, p.id).toContain(`"${p.id}"`);
+    expect(readBody).toMatch(/wallpaper\?: string;/);
+    expect(readBody).toMatch(/objectsLocked\?: boolean;/);
+    const patch = dts.slice(dts.indexOf("declare interface ScriptCanvasLayoutPatch {"));
+    const patchBody = patch.slice(0, patch.indexOf("\n}"));
+    expect(patchBody).toMatch(/wallpaper\?: string;/);
+    expect(patchBody).not.toMatch(/objectsLocked/);
   });
 
   it("refuses an unknown key by name instead of dropping it", () => {

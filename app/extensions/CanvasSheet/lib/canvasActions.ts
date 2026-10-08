@@ -1,6 +1,8 @@
 //! FILENAME: app/extensions/CanvasSheet/lib/canvasActions.ts
 // PURPOSE: What the Canvas ribbon tab DOES: change the active canvas's layout
-//          through the one backend door, and zoom the page to fit or to 100%.
+//          through the one backend door; show the page at one of Power BI's
+//          three Page Views (Fit to Page, Fit to Width, Actual Size) and say
+//          which one it is shown at; and add a new report page.
 // CONTEXT: Every layout change goes to `set_canvas_layout`, which validates the
 //          merged result and announces it (CANVAS_LAYOUT_CHANGED). The returned
 //          layout is applied to the store at once so the ribbon and the snap
@@ -25,6 +27,7 @@ import type { CanvasLayoutPatch } from "@api";
 import { getGridStateSnapshot } from "@api/grid";
 import { alertAsync } from "@api/dialogs";
 import { checkCanvasLayoutPatch } from "@api/canvasSheet";
+import { CommandRegistry, CoreCommands } from "@api/commands";
 import { LAYOUT_PAGE_MARGIN, GRID_SCROLLBAR_GUTTER_PX } from "@api/layoutSurface";
 import { applyCanvasLayout, getCanvasSheetSnapshot, refreshCanvasSheets } from "./canvasSheetStore";
 
@@ -81,23 +84,116 @@ export function fitPageZoom(
   return Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, percent));
 }
 
-/** Zoom so the whole page of the active canvas is in view, scrolled home. */
-export function fitActiveCanvasToWindow(): void {
+/**
+ * The zoom factor at which the page's WIDTH (plus its margin) fills a viewport
+ * `viewportW` screen px wide -- Power BI's Fit to Width: the height is free
+ * and scrolls. Whole percent, clamped like {@link fitPageZoom}, and never
+ * below it (only one edge binds). Pure; exported for tests.
+ */
+export function fitWidthZoom(viewportW: number, page: { width: number; height: number }): number {
+  const availW = Math.max(1, viewportW - SCROLLBAR_GUTTER_PX);
+  const percent = Math.floor((availW / (page.width + LAYOUT_PAGE_MARGIN)) * 100) / 100;
+  return Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, percent));
+}
+
+/** Power BI's three Page Views (View > Page view). */
+export type PageViewMode = "fitPage" | "fitWidth" | "actual";
+
+/** The Page View chosen last this session: the tie-break when two give one zoom. */
+let lastPageView: PageViewMode | null = null;
+
+/** The active canvas's page and the grid's viewport, or null off a canvas / before layout. */
+function activePageAndViewport(): {
+  page: { width: number; height: number };
+  width: number;
+  height: number;
+  zoom: number;
+} | null {
   const snap = getCanvasSheetSnapshot();
   const state = getGridStateSnapshot();
-  if (!snap.active || !state) return;
-  const { width, height } = state.viewportDimensions;
-  if (width <= 0 || height <= 0) return;
-  const zoom = fitPageZoom(width, height, {
-    width: snap.active.layout.pageWidth,
-    height: snap.active.layout.pageHeight,
-  });
+  if (!snap.active || !state) return null;
+  const { width, height } = state.viewportDimensions ?? { width: 0, height: 0 };
+  if (!(width > 0) || !(height > 0)) return null;
+  return {
+    page: { width: snap.active.layout.pageWidth, height: snap.active.layout.pageHeight },
+    width,
+    height,
+    zoom: state.zoom > 0 ? state.zoom : 1,
+  };
+}
+
+/** Zoom to `zoom` and put the page's corner in view (SET_ZOOM does not re-clamp scroll). */
+function showAt(zoom: number, mode: PageViewMode): void {
+  lastPageView = mode;
   dispatchGridAction(setZoom(zoom));
-  // SET_ZOOM does not re-clamp scroll: put the page's corner in view.
   dispatchGridAction(scrollToPosition(0, 0));
 }
 
-/** Show the active canvas at 100%. */
+/** Fit to Page: zoom so the whole page of the active canvas is in view, scrolled home. */
+export function fitActiveCanvasToWindow(): void {
+  const v = activePageAndViewport();
+  if (!v) return;
+  showAt(fitPageZoom(v.width, v.height, v.page), "fitPage");
+}
+
+/** Fit to Width: zoom so the active canvas's page fills the view's width, scrolled home. */
+export function fitActiveCanvasToWidth(): void {
+  const v = activePageAndViewport();
+  if (!v) return;
+  showAt(fitWidthZoom(v.width, v.page), "fitWidth");
+}
+
+/** Actual Size: show the active canvas at 100%. */
 export function showActiveCanvasAtActualSize(): void {
+  lastPageView = "actual";
   dispatchGridAction(setZoom(ZOOM_DEFAULT));
+}
+
+/**
+ * Which Page View a page is shown at: the mode whose zoom equals `zoom` for
+ * this viewport and page, or null for a zoom of the user's own (the zoom
+ * slider, Ctrl+wheel). A Page View in Calcula is a one-shot zoom, not a
+ * standing setting, so the check follows the zoom rather than a remembered
+ * choice -- the menu never claims "Fit to Page" for a page the user has since
+ * zoomed. When two modes give the SAME zoom (a short wide page: fit to page =
+ * fit to width), `preferred` -- the mode chosen last -- keeps the check;
+ * otherwise the menu's order decides. Pure; exported for tests.
+ */
+export function pageViewOf(
+  zoom: number,
+  viewportW: number,
+  viewportH: number,
+  page: { width: number; height: number },
+  preferred: PageViewMode | null = null,
+): PageViewMode | null {
+  const close = (a: number, b: number): boolean => Math.abs(a - b) < 0.005;
+  const matches: PageViewMode[] = [];
+  if (close(zoom, fitPageZoom(viewportW, viewportH, page))) matches.push("fitPage");
+  if (close(zoom, fitWidthZoom(viewportW, page))) matches.push("fitWidth");
+  if (close(zoom, ZOOM_DEFAULT)) matches.push("actual");
+  if (matches.length === 0) return null;
+  return preferred !== null && matches.includes(preferred) ? preferred : matches[0];
+}
+
+/** The Page View the ACTIVE canvas is shown at now, or null (see {@link pageViewOf}). */
+export function currentPageView(): PageViewMode | null {
+  const v = activePageAndViewport();
+  if (!v) return null;
+  return pageViewOf(v.zoom, v.width, v.height, v.page, lastPageView);
+}
+
+/**
+ * What New Page asks the public sheet command (core.sheet.insert, @api
+ * CoreCommands.SHEET_INSERT) for: a CANVAS, appended at the END -- as the
+ * strip's own "+" and Power BI's New page do (canvas-tab lane D3). The strip
+ * owns the whole switch (the backend add, the prime, the tab, SHEET_CHANGED)
+ * and the command owns the refusals (a formula being written), so the Canvas
+ * tab neither calls the backend nor borrows the Shell's private
+ * `sheet:requestAdd` event, which it used to (review finding 2026-10-08).
+ */
+export const NEW_CANVAS_PAGE_ARGS = Object.freeze({ kind: "canvas", atEnd: true } as const);
+
+/** Pages > New Page: a blank report page -- a new canvas sheet, made active. */
+export async function addBlankCanvasPage(): Promise<void> {
+  await CommandRegistry.execute(CoreCommands.SHEET_INSERT, { ...NEW_CANVAS_PAGE_ARGS });
 }

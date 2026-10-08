@@ -274,11 +274,15 @@ function pick<T>(source: readonly T[], indices: readonly number[]): T[] {
 async function strategyFor(
   source: DesignQueryDataSource,
   seriesNames: readonly string[],
+  chartId: string,
 ): Promise<ChartSeriesSnapshot["strategy"]> {
   if (!source.connectionId) return undefined;
   let valueFields: Array<{ measureName: string; customName?: string }>;
   try {
-    valueFields = (await compileDesignQuerySource(source)).valueFields;
+    // Compiled for THIS chart, so its page's filters are the ones the drawn
+    // data was queried with (the measures do not change, but one compile path
+    // is one answer).
+    valueFields = (await compileDesignQuerySource(source, { chartId })).valueFields;
   } catch {
     // The chart itself already drew (or failed visibly); a strategy that
     // cannot be established is simply not claimed.
@@ -358,7 +362,7 @@ async function resolveSeries(
   // A design-query chart knows which measure each series plots, which is what
   // lets a fact about a Cost series be judged by Cost's declared direction.
   const strategy = isDesignQueryDataSource(spec.data)
-    ? await strategyFor(spec.data, data.series.map((s) => s.name))
+    ? await strategyFor(spec.data, data.series.map((s) => s.name), chartId)
     : undefined;
 
   // Sampling happens LAST so it applies to whichever numbers won above, and to

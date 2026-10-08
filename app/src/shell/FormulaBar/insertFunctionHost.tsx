@@ -129,7 +129,7 @@ export function openInsertFunction(): boolean {
 export function InsertFunctionHost(): React.ReactElement | null {
   const req = useSyncExternalStore(subscribe, getRequest);
   const { state } = useGridContext();
-  const { editing, commitEdit, updateValue, startEditing } = useEditing();
+  const { editing, commitEdit, updateValue, startEditing, cancelEdit } = useEditing();
 
   // A live EXTERNAL session (a floating grid's cell edit) is the edit the
   // dialog works on when Core has none. Subscribed by VERSION and read during
@@ -145,6 +145,22 @@ export function InsertFunctionHost(): React.ReactElement | null {
     startedForSeq.current = req.seq;
     void startEditing("=");
   }, [req, startEditing]);
+
+  /**
+   * Cancel (the X, Escape, a click outside): Excel's Insert Function Cancel.
+   * When THIS open typed the "=" (nothing was being edited, so the host began
+   * Core's edit) and the cell still holds only that "=", the entry is taken
+   * back -- the cell returns to what it was and leaves edit mode. Leaving it
+   * open stranded an invisible "=" entry with the focus on <body>: the next
+   * click on a cell was read as POINT mode and wrote "=G2" into the cell the
+   * user had left (live journey canvas-powerbi P10, 2026-10-08). An edit the
+   * user had already started (or typed into since) is theirs and is kept.
+   */
+  const handleCancel = useCallback(() => {
+    const seededByThisOpen = startedForSeq.current === req.seq;
+    closeInsertFunction();
+    if (seededByThisOpen && editing !== null && editing.value === "=") void cancelEdit();
+  }, [req.seq, editing, cancelEdit]);
 
   const handleFunctionSelect = useCallback(
     (functionName: string, template: string) => {
@@ -241,7 +257,7 @@ export function InsertFunctionHost(): React.ReactElement | null {
       onSelect={handleFunctionSelect}
       onBuilt={handleFunctionBuilt}
       anchor={anchor}
-      onClose={closeInsertFunction}
+      onClose={handleCancel}
     />
   );
 }

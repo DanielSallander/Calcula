@@ -1,6 +1,8 @@
 //! FILENAME: app/extensions/CanvasSheet/lib/pagePainter.ts
-// PURPOSE: Paint a canvas sheet's PAGE: the area around it, the page itself
-//          (its background colour), its border, and the transparent snap grid.
+// PURPOSE: Paint a canvas sheet's PAGE: the area around it (the page's
+//          WALLPAPER when it has one, else the theme's grid-area colour), the
+//          page itself (its background colour), its border, and the
+//          transparent snap grid.
 // CONTEXT: Registered as ONE grid layer at "under-cells", the bottom of the
 //          stack: every floating object (charts, slicers, shapes, floating
 //          grids) paints above it. The "under-selection" anchor would not do --
@@ -19,6 +21,7 @@
 import type { GridLayerContext } from "@api";
 import { getGridStateSnapshot } from "@api/grid";
 import { canvasLayoutSurface } from "./layoutSurfaceProvider";
+import { canvasWallpaper } from "@api/canvasSheet";
 import { canvasAt } from "./canvasSheetStore";
 
 /** Below this on-screen pitch the dots merge into a tint; skip them. */
@@ -86,8 +89,10 @@ export function paintCanvasPage(context: GridLayerContext, palette?: PagePalette
   const originY = gutterY - viewport.scrollY;
   const { width: pageW, height: pageH } = surface.page;
 
-  // Around the page.
-  ctx.fillStyle = pal.outside;
+  // Around the page: Power BI's Wallpaper (Format page > Wallpaper), the
+  // colour of everything that is not the page. "" is the theme's surround,
+  // so a page with no wallpaper follows the skin as it always did.
+  ctx.fillStyle = canvasWallpaper(entry.layout) || pal.outside;
   ctx.fillRect(0, 0, canvasWidth, canvasHeight);
 
   // The page.

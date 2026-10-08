@@ -245,7 +245,9 @@ fn walk_needs(ast: &Expression, nr: &HashMap<String, NamedRange>) -> bool {
         Expression::BinaryOp { left, right, .. } => walk_needs(left, nr) || walk_needs(right, nr),
         Expression::UnaryOp { operand, .. } => walk_needs(operand, nr),
         Expression::FunctionCall { func, args, .. } => {
-            if let BuiltinFunction::Custom(name) = func {
+            // `user_definable_name`: a Custom call, or a Calcula-only builtin
+            // (LPAD) that a workbook definition of the same name takes over.
+            if let Some(name) = func.user_definable_name() {
                 if is_defined(name, nr) {
                     return true;
                 }
@@ -329,7 +331,7 @@ fn collect_with_shadows(ast: &Expression, shadows: &[String], out: &mut NameSet)
             _ => {
                 // `=myLambda(5)` is a name in FUNCTION position. `__INVOKE__` is
                 // the already-expanded marker, never a user name.
-                if let BuiltinFunction::Custom(name) = func {
+                if let Some(name) = func.user_definable_name() {
                     let key = name.to_uppercase();
                     if key != "__INVOKE__" && !shadows.contains(&key) {
                         out.insert(key);
@@ -494,9 +496,9 @@ fn restamp(ast: &mut Expression, nr: &HashMap<String, NamedRange>, shadows: &[St
                         .collect(),
                 ),
                 _ => {
-                    if let BuiltinFunction::Custom(name) = func {
+                    if let Some(name) = func.user_definable_name().map(str::to_string) {
                         if !shadows.contains(&name.to_uppercase()) {
-                            if let Some(spelling) = defined_spelling(name, nr) {
+                            if let Some(spelling) = defined_spelling(&name, nr) {
                                 *func = BuiltinFunction::Custom(spelling);
                             }
                         }
@@ -659,7 +661,7 @@ fn rename_walk(
                         .collect(),
                 ),
                 _ => {
-                    if let BuiltinFunction::Custom(name) = func {
+                    if let Some(name) = func.user_definable_name().map(str::to_string) {
                         let key = name.to_uppercase();
                         if key != "__INVOKE__"
                             && !shadows.contains(&key)
@@ -823,7 +825,7 @@ fn reads_any(ast: &Expression, wanted: &NameSet, shadows: &[String]) -> bool {
                 })
             }
             _ => {
-                if let BuiltinFunction::Custom(name) = func {
+                if let Some(name) = func.user_definable_name() {
                     let key = name.to_uppercase();
                     if key != "__INVOKE__" && !shadows.contains(&key) && wanted.contains(&key) {
                         return true;
@@ -960,6 +962,71 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A workbook DEFINED NAME called LPAD (or RPAD) takes the call over from
+    /// Calcula's builtin -- in every walk that treats a name in function
+    /// position as a name, not only in the expansion.
+    ///
+    /// Excel has no LPAD, so an Excel workbook may well define one, often
+    /// keeping the RIGHT end of a long text where the builtin keeps the LEFT.
+    /// When the builtin landed, `from_name("LPAD")` made the call a builtin and
+    /// every walk here only looked at `Custom` calls, so the workbook's own
+    /// LAMBDA silently never ran: `"abc"` where the workbook says `"def"`.
+    #[test]
+    fn a_defined_name_called_lpad_or_rpad_takes_the_call_over_from_the_builtin() {
+        let def = |name: &str, refers_to: &str| NamedRange {
+            name: name.to_string(),
+            sheet_index: None,
+            refers_to: refers_to.to_string(),
+            comment: None,
+            folder: None,
+        };
+        let mut nr: HashMap<String, NamedRange> = HashMap::new();
+        nr.insert("LPAD".to_string(), def("LPad", "=LAMBDA(t,n,c,RIGHT(REPT(c,n)&t,n))"));
+        nr.insert("RPAD".to_string(), def("RPAD", "=LAMBDA(t,\"<\"&t&\">\")"));
+
+        let evaluate = |formula: &str| {
+            let tree = ast(formula);
+            assert!(
+                needs_name_resolution(&tree, &nr),
+                "`{}` must be routed through name resolution when LPAD/RPAD are defined",
+                formula
+            );
+            let mut visited = HashSet::new();
+            let expanded = crate::resolve_names_in_ast(&tree, &nr, 0, &mut visited);
+            let grid = engine::Grid::new();
+            engine::Evaluator::new(&grid).evaluate(&crate::convert_expr(&expanded))
+        };
+        assert_eq!(
+            evaluate("=LPAD(\"abcdef\",3,\"0\")"),
+            engine::EvalResult::Text("def".to_string()),
+            "the workbook's LPAD keeps the right end; the builtin would say \"abc\""
+        );
+        assert_eq!(evaluate("=RPAD(\"a\")"), engine::EvalResult::Text("<a>".to_string()));
+
+        // The dependency edge: defining or repointing LPAD must recalculate it.
+        assert_eq!(names("=LPAD(A1,3)"), vec!["LPAD".to_string()]);
+        let cell = engine::Cell::new_formula_with_ast(ast("=LPAD(A1,3)"));
+        let mut wanted = NameSet::default();
+        wanted.insert("LPAD".to_string());
+        assert!(cell_reads_any_name(&cell, &wanted));
+
+        // The casing restamp writes the Name Manager's spelling.
+        let mut tree = ast("=LPAD(A1,3)");
+        restamp_name_casing(&mut tree, &nr);
+        assert_eq!(engine::ast_render::render_formula_raw(&tree), "LPad(A1,3)");
+
+        // The rename carries the call with it.
+        assert_eq!(renamed("=LPAD(A1,3)", "LPAD", "PadLeft").as_deref(), Some("=PadLeft(A1,3)"));
+
+        // A LET binding still shadows the workbook name...
+        assert!(names("=LET(lpad, LAMBDA(t, t), lpad(A1))").is_empty());
+        // ...and with NO definition the builtin is untouched and costs nothing.
+        let none: HashMap<String, NamedRange> = HashMap::new();
+        assert!(!needs_name_resolution(&ast("=LPAD(A1,3)"), &none));
+        // Every OTHER builtin stays a builtin even if a name collides with it.
+        assert!(names("=LEFT(A1,3)").is_empty());
     }
 
     #[test]

@@ -74,6 +74,8 @@ import {
   createSlicer,
   slicersAll,
   type Obj,
+  clickCanvasControl,
+  clickCanvasMenuRow,
 } from "../helpers/canvas-live";
 
 // ---------------------------------------------------------------------------
@@ -1050,7 +1052,7 @@ test.describe("fix-all canvas, live", () => {
         await pick(page, edge2, grab(edge2));
         await eventually(() => selectedObjects(page), (s) => s.length === 1, `${family}: precondition, the edge member alone is not selected`);
         await openCanvasTab(page);
-        await page.locator('[data-testid="canvas-arrange-lock"]').click();
+        await clickCanvasControl(page, "canvas-arrange-lock");
         await eventually(() => stacking(page, c.index), (s) => s.locked.length === 1, `${family}: Arrange > Lock locked nothing`);
         const lead2 = [...os2].sort((a, b) => a.x - b.x)[0];
         await pick(page, lead2, grab(lead2));
@@ -1137,8 +1139,7 @@ test.describe("fix-all canvas, live", () => {
       await pick(page, await aObj(), { dx: 24, dy: 24 });
       await eventually(() => selectedObjects(page), (s) => s.length === 1 && s[0].chartId === scene.chartA, "precondition: chart A alone is not selected");
       await openCanvasTab(page);
-      await page.locator('[data-testid="canvas-arrange-forward"]').click();
-      await page.locator('[data-testid="canvas-arrange-bring-to-front"]').click();
+      await clickCanvasMenuRow(page, "canvas-arrange-forward", "canvas-arrange-bring-to-front");
       await eventually(() => stacking(page, ci), (s) => s.zOrder[s.zOrder.length - 1] === refA, "Bring to Front did not put chart A on top");
       expect((await undoState(page)).undoDescription, "the step Edit > Undo would take is the reorder").toBe("Reorder objects");
       await gridKey(page, "Control+z");
@@ -1149,9 +1150,9 @@ test.describe("fix-all canvas, live", () => {
       // ---- Lock: one step; while locked a drag does not move it; after Ctrl+Z it drags.
       await pick(page, await aObj(), { dx: 24, dy: 24 });
       await openCanvasTab(page);
-      await page.locator('[data-testid="canvas-arrange-lock"]').click();
+      await clickCanvasControl(page, "canvas-arrange-lock");
       await eventually(() => stacking(page, ci), (s) => s.locked.includes(refA), "Arrange > Lock did not lock chart A");
-      expect((await undoState(page)).undoDescription).toBe("Lock objects");
+      expect((await undoState(page)).undoDescription).toBe("Lock selected objects");
       await dragObject(page, await aObj(), [{ dx: 24, dy: 0 }, { dx: 48, dy: 0 }], { dx: 24, dy: 24 });
       await page.waitForTimeout(900);
       expect((await persistedCharts(page)).find((c) => c.id === scene.chartA)!.x, "a LOCKED chart moved (positive control of the lock)").toBe(A_RECT.x);
@@ -1167,7 +1168,7 @@ test.describe("fix-all canvas, live", () => {
       // ---- A snap-grid change is not an undo step: Ctrl+Z skips it and takes back the drag.
       const snapBefore = (await stacking(page, ci)).snapToGrid;
       await openCanvasTab(page);
-      await page.locator('[data-testid="canvas-snap-to-grid"]').click();
+      await clickCanvasControl(page, "canvas-snap-to-grid");
       await eventually(() => stacking(page, ci), (s) => s.snapToGrid === !snapBefore, "Snap to Grid did not toggle");
       await gridKey(page, "Control+z");
       await eventually(
@@ -1208,7 +1209,7 @@ test.describe("fix-all canvas, live", () => {
         const B = os0.find((o) => o.x === 256)!;
         await pick(page, B, at(B));
         await openCanvasTab(page);
-        await page.locator('[data-testid="canvas-arrange-lock"]').click();
+        await clickCanvasControl(page, "canvas-arrange-lock");
         await eventually(() => stacking(page, ci), (s) => s.locked.includes(B.refKey!), "Arrange > Lock did not lock shape B");
         return { ci, B, refB: B.refKey! };
       };
@@ -1262,11 +1263,7 @@ test.describe("fix-all canvas, live", () => {
       await eventually(() => controlsOn(page, p2.ci), (c) => c.length === 1, "Delete did not remove the locked B");
       await clickEmpty(page, 600, 400);
       await openCanvasTab(page);
-      const insertItem = page.locator('[data-testid="canvas-insert-shape"]');
-      if (!(await insertItem.isVisible())) {
-        await page.locator("[data-ribbon-content]").getByRole("button", { name: /^Insert/ }).first().click();
-      }
-      await insertItem.click();
+      await clickCanvasControl(page, "canvas-insert-shape");
       await eventually(() => controlsOn(page, p2.ci), (c) => c.length === 2, "the Canvas tab's Insert Shape created nothing");
       const os2 = await eventually(() => objects(page), (o) => o.length === 2, "the inserted shape was not published");
       const inserted = os2.find((o) => o.x !== 64)!;

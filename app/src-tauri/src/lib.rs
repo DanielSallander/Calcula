@@ -1834,7 +1834,9 @@ pub fn resolve_names_in_ast(
                     // Check if a Custom function name is actually a named range
                     // (e.g., =testing(5,9) where "testing" is a named LAMBDA).
                     // If so, resolve it and wrap as __INVOKE__(resolved_lambda, args...).
-                    if let ParserBuiltinFn::Custom(ref custom_name) = func {
+                    // A Calcula-only builtin (LPAD) yields to a defined name of
+                    // its own name too (`BuiltinFunction::user_definable_name`).
+                    if let Some(custom_name) = func.user_definable_name() {
                         let key = custom_name.to_uppercase();
                         let nr = named_ranges
                             .values()
@@ -2004,7 +2006,7 @@ fn resolve_names_in_ast_with_shadows(
                 _ => {
                     // Check if a Custom function name is actually a named range
                     // (e.g., =testing(5,9) where "testing" is a named LAMBDA).
-                    if let ParserBuiltinFn::Custom(ref custom_name) = func {
+                    if let Some(custom_name) = func.user_definable_name() {
                         let key = custom_name.to_uppercase();
                         // Don't resolve if shadowed by a LAMBDA/LET parameter
                         if !shadows.iter().any(|s| s == &key) {
@@ -2291,7 +2293,7 @@ pub fn ast_has_named_refs(ast: &ParserExpr) -> bool {
         ParserExpr::UnaryOp { operand, .. } => ast_has_named_refs(operand),
         ParserExpr::FunctionCall { func, args, .. } => {
             // Custom function names might be named ranges pointing to LAMBDAs
-            if matches!(func, ParserBuiltinFn::Custom(_)) {
+            if func.user_definable_name().is_some() {
                 return true;
             }
             args.iter().any(ast_has_named_refs)

@@ -230,6 +230,23 @@ fn the_character_correct_text_functions_stay_character_correct() {
     assert_eq!(num("=LEN(LOWER(\"ÅÄÖ\"))"), 3.0);
 }
 
+/// LPAD/RPAD (Calcula functions, added 2026-10-08) were written character-
+/// correct from the start and join the control set: a target LENGTH is a
+/// character count, the pad cycles by character, and a cut never lands inside
+/// one. A byte implementation would answer "öåäö" (one "ö" short, because the
+/// six-byte text already "exceeds" five) and could panic on the cut. The full
+/// semantics live in `pad_function_tests.rs`.
+#[test]
+fn the_padding_functions_count_characters_too() {
+    assert_eq!(text("=LPAD(\"åäö\",5,\"ö\")"), "ööåäö");
+    assert_eq!(text("=RPAD(\"åäö\",5,\"ö\")"), "åäööö");
+    assert_eq!(num("=LEN(LPAD(\"åäö\",5,\"ö\"))"), 5.0);
+    // Cut through multibyte text: LEFT's answer, character for character.
+    assert_eq!(text("=LPAD(\"åäö\",2,\"x\")"), text("=LEFT(\"åäö\",2)"));
+    // Astral-plane pad: four bytes per character, one character each.
+    assert_eq!(num("=LEN(RPAD(\"a\",4,\"😀\"))"), 4.0);
+}
+
 /// LEN over a NUMBER goes through the same coercion, so the character count has
 /// to survive it. A locale that renders a decimal comma is still one character
 /// per glyph.

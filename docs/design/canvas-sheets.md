@@ -1,17 +1,19 @@
 # Canvas sheets — report pages of floating objects
 
 Status: M1–M9 BUILT 2026-09-25 and PROVED LIVE (`app/e2e/journeys/canvas.spec.ts` #1–#7,
-`floating-range.spec.ts`). What is open lives in `open-items.md` §2.af, never here. The plan, with the owner's
+`floating-range.spec.ts`). The Canvas tab was rebuilt as Power BI's report authoring on 2026-10-08 (§13, proved
+live by `canvas-powerbi.spec.ts`). What is open lives in `open-items.md` §2.af and §2.aj, never here. The plan, with the owner's
 decisions, is `i-want-to-introduce-wiggly-wozniak.md` in the owner's plans folder.
 
 ## 0. What a canvas is
 
 A **canvas** is a sheet kind modelled on the Power BI report canvas: no cell grid, only floating
 objects — charts, slicers, timelines, controls (buttons, shapes, pictures, text boxes), floating grids
-and pivot tables — on a fixed page (16:9 1280×720 by default; 4:3, Letter or custom) with a snap grid.
+and pivot tables — on a fixed page (16:9 1280×720 by default; 16:9 Full HD / QHD / 4K, 4:3, Letter,
+Tooltip 320×240 or custom) with a snap grid.
 Objects on a canvas read their data from cells on other sheets. It is added from the sheet-tab "+"
-caret ("Canvas"), and a contextual **Canvas** ribbon tab appears while one is active: Insert, Snap to
-grid, Grid size, Show grid, Page size, Background, Fit / Actual size.
+caret ("Canvas") or Canvas > New Page, and a contextual **Canvas** ribbon tab appears while one is active,
+laid out as Power BI's report authoring: Pages | Visuals | Elements | Arrange | Page | View (§13).
 
 The word "canvas" alone already names the HTML painter, so code and strings say **canvas sheet** where
 the two could be confused.
@@ -25,8 +27,8 @@ formula context and 3D ranges keep working unchanged. Three things make it a can
 1. **Kind authority.** `AppState.sheet_kinds: Persisted<Vec<SheetKind>>`
    (`persistence::SheetKind` / `CanvasLayout`, `core/persistence/src/lib.rs`), maintained at every
    site `sheet_display_flags` is (append, rotation, delete, move; copy of a canvas is refused).
-   `CanvasLayout` holds snap, grid size, show grid, page preset and size, background, `z_order` and
-   `locked`. It is saved in `SheetMetadata` (`.cala` format **v9**, stamped only when a canvas exists:
+   `CanvasLayout` holds snap, grid size, show grid, page preset and size, background, `wallpaper`,
+   `objects_locked` (Lock Objects), `z_order` and `locked` (the last two per object; §13 for the new two). It is saved in `SheetMetadata` (`.cala` format **v9**, stamped only when a canvas exists:
    an older reader would show an editable worksheet — the *mishandle* class) and in
    `PublishedSheetMetadata` (`.calp`). `sanitized()` repairs out-of-range values on load and pull;
    `validate()` refuses them on edit (`set_canvas_layout`, not undoable, like display flags).
@@ -598,6 +600,10 @@ a sheet it moves. Publish follows what objects need: a chart's source sheet, a p
 and source, a floating range's host and backing sheet — but never silently drags in a SUBSCRIBED sheet
 (another publisher's content) or an object sheet whose host is not published. Detaching a sheet
 claims the objects on it, so the next refresh neither deletes them nor rewrites their cells.
+The page's `wallpaper` and Lock Objects travel with the layout (sanitised on pull; the `.calp` HTML export
+paints both colours from the sanitised layout), and a button's declarative action (`action`,
+`actionTarget`, `actionTargetName`) is neither code nor held, so a pull keeps it and published navigation
+buttons work for the subscriber (`BUTTON_ACTION_PROPERTIES`, `app/src-tauri/src/controls.rs`; §13).
 
 ## 5. Pivot tables on a canvas
 
@@ -674,14 +680,16 @@ column letters and row numbers, on canvases and worksheets alike.
   before the transaction commits; a refused move (a protected sheet) reverts and shows one toast.
   Controls persist a whole gesture through one `set_control_geometry` batch.
 - **Lock** is `CanvasLayout.locked`: Core treats a locked object as unmovable and unresizable, but it
-  stays selectable. Bring/Send and Lock always write the FULL list.
+  stays selectable. Bring/Send and Lock always write the FULL list. This is the PER-OBJECT lock (its undo
+  step is "Lock selected objects"); the page-wide, not undoable Lock Objects is §13.5.
 - **Size and Position** (§2d): Arrange's fifth button, "Size & Position"
   (`canvas-arrange-size-position`), opens the dialog for the PRIMARY selected object; it is disabled
   with nothing selected, on a subscribed page, or when no dialog can open. The selected object's grip
   menu carries the same dialog plus Bring Forward, Send Backward and Lock for THAT object (the Arrange
   commands, `lib/zOrderStore.ts`, so both doors change the one z-order and lock list the same way, each
   as one undo step). A fifth hero widens the group, so at narrow widths the Canvas tab folds sooner: a
-  journey that clicks an Arrange control directly may need the band's launcher.
+  journey reaches an Arrange control through `canvasControl` (`app/e2e/helpers/canvas-live.ts`, §13.1),
+  which opens the folded group when it has to.
 - **Nudge**: arrows move the selection to the next snap multiple (snap on, no Alt), else 1px / 10px
   with Shift; a burst is one undo step. A floating grid with a cell selected, or a chart below chart
   level, keeps the arrows.
@@ -737,6 +745,8 @@ Owner finding 2026-09-27: Insert Slicers said "No Tables or PivotTables found" i
 pivots come from a Calcula model. Owner decisions: a model slicer filters every pivot of that model
 on its OWN sheet or canvas, including pivots added later; deleting any slicer removes its filter and
 one Ctrl+Z restores both; model slicers reach pivots and pivot charts now, design-query charts next.
+**Design-query charts: built 2026-10-08** -- a model slicer filters every design-query chart (Cards, KPIs,
+gauges and other visuals) on its own sheet or canvas through `@api/pageFilters`, inside the engine (§13).
 
 - **The source.** `SlicerSourceType::BiConnection` with the connection's id in `data_source_id`.
   Insert Slicers lists every loaded model first ("Sales (Model)"), its columns as fields, and says
@@ -771,7 +781,8 @@ one Ctrl+Z restores both; model slicers reach pivots and pivot charts now, desig
 
 - Cells of any kind, from any door (§1) — except canvas pivots.
 - Print and PDF (v1): printing reads cells and a canvas has none; refused with a message.
-- Copying a canvas sheet (no object store is cloned); `core:copySheet` is hidden for a canvas.
+- Copying a canvas sheet (no object store is cloned); `core:copySheet` is hidden for a canvas, and the
+  Canvas tab has no Duplicate Page (owner question in `open-items.md` §2.aj).
 - Freeze panes, split, headings/gridlines toggles, view modes.
 - Converting a sheet between worksheet and canvas: a kind is fixed at creation.
 - xlsx: a canvas is written as a hidden worksheet and the loss report says "Canvas sheets".
@@ -865,3 +876,124 @@ Live proofs: `fixall-canvas.spec.ts` (LIVE-1 controls per sheet, LIVE-2 marquee,
 B5/B6), `fixall-calp.spec.ts` (subscribe/checkout/refresh renames, validation wires, undo batches, the
 command line), `fixall-edit.spec.ts`, `fixall-pivot.spec.ts`, `fixall-lifecycle.spec.ts`. The ledger
 entries carry the fix notes (`tests/regression/bug-ledger.json`).
+
+## 13. The Canvas tab as Power BI's report authoring (2026-10-08)
+
+Owner decision 2026-10-08: the Canvas tab mirrors Power BI Desktop's report authoring. What it left out
+(maps, the AI visuals, Ribbon chart, Selection pane, Edit interactions, persistent groups, Duplicate Page, ...)
+and every open question are in `open-items.md` §2.aj.
+
+### 13.1 The tab
+
+Six groups, left to right; groups fold from the RIGHT (View first, Pages last). At 1920 px all six are
+inline (long hero labels break onto two lines, Excel's own convention); at 1280 px Arrange, Page and View
+fold into their group buttons. Components: `app/extensions/CanvasSheet/components/Canvas{Pages,Visuals,
+Elements,Arrange,Page,View}Section.tsx`; `CanvasTabSections.tsx` is only the panel definition.
+
+| Group | Contents |
+|---|---|
+| **Pages** | **New Page** (`canvas-new-page`): `CoreCommands.SHEET_INSERT { kind: "canvas", atEnd: true }`, the same command as the sheet-tab menu's Insert Canvas, so one door holds the refusals. It appends. No menu: Duplicate Page is left out because a canvas cannot be copied (§10). |
+| **Visuals** | Two 28 px rows of icon buttons in Power BI's pane order -- Stacked bar, Stacked column, Clustered bar, Clustered column, Line, Line and clustered column / Pie, Donut, Matrix, Card, KPI, Slicer -- then **All Visuals** (`canvas-all-visuals`): a card of 33 tiles in six headed sections (Bar & column, Line & area, Other charts, Cards, Tables & filters, More charts), 6 columns, 2-D arrow keys. In a panel (sidebar or folded flyout) the same gallery is inline in 4 columns. The catalogue is ONE list, `lib/canvasVisuals.ts` (`CANVAS_VISUALS`). |
+| **Elements** | **Text Box**, **Buttons** (split: face = a blank button; menu Blank, Run Macro..., Page Navigator, Back, Clear All Slicers), **Shapes** (split: face = a rectangle; menu "Basic shapes" 16 rows and "Arrows" 6 rows with Power BI's names and thumbnails, then **More Shapes >** with every catalog category), **Image**, **Floating Grid**. |
+| **Arrange** | Bring Forward, Send Backward, Align, Lock, Size & Position (§7). Align is disabled while Lock Objects is on; Size & Position opens read-only and names the page lock. |
+| **Page** | **Page Size** (7 presets as radio rows with their sizes, then Custom Size... with W/H fields that take focus), **Page Background** and **Wallpaper** (colour splits, "Theme default" automatic; the face re-applies the last colour picked this session), **Themes** (Page Layout's own theme gallery, hosted through `@api/themeGallery`; disabled with a reason while no provider is registered). |
+| **View** | **Page View** (Fit to Page / Fit to Width / Actual Size; the check follows the live zoom, ties break to the mode chosen last), a two-row grid Gridlines . Snap to Grid / **Lock Objects** . Grid size, and **Design Mode**. |
+
+Every Power BI-shaped picture is a duotone key of its own (`docs/design/ICONS.md` §4); the borrowed ones
+(Layout, Controls, Resize, Search, Gridlines, Pencil, Plus) are forbidden on the tab by
+`__tests__/canvasTabIcons.test.ts`.
+
+**Test ids.** Kept: every `canvas-insert-<kind>` the live specs press (`canvas-insert-slicer` and
+`canvas-insert-pivot` are the Slicer and Matrix row buttons AND, in a panel, those gallery tiles;
+`canvas-insert-button` / `canvas-insert-shape` are the split faces), `canvas-arrange-*`,
+`canvas-snap-to-grid`, `canvas-grid-size`, `canvas-show-grid` (both now toggle buttons, in View),
+`canvas-page-size`, `canvas-page-size-<preset>`, `canvas-page-background`, `canvas-page-width`,
+`canvas-page-height`, `canvas-design-mode`. New: `canvas-new-page`, `canvas-visual-<visualId>` (band rows),
+`canvas-visual-gallery-<visualId>` (gallery tiles), `canvas-all-visuals`, `canvas-buttons`,
+`canvas-buttons-<id>`, `canvas-shapes`, `canvas-shapes-<shapeId>`, `canvas-shapes-more`,
+`canvas-page-wallpaper`, `canvas-themes`, `canvas-page-view` (rows `-fitPage`, `-fitWidth`, `-actual`),
+`canvas-lock-objects`. RETIRED: `canvas-insert-chart`, `canvas-insert-timeline` (a gallery tile now),
+`canvas-fit-page`, `canvas-actual-size`. A journey reaches a control that may be folded through
+`canvasControl` / `clickCanvasControl` in `app/e2e/helpers/canvas-live.ts`, which opens the group's
+flyout when it has to -- never a hard-coded launcher name.
+
+### 13.2 Visuals: every tile is a chart preset
+
+A chart tile runs `insertOnCanvas("chart", { mark, markOptions })`, which opens the chart dialog with that
+type preselected (`chart:createDialog` data `initialMark` / `initialMarkOptions`). Presets write every
+option explicitly ("Clustered" writes `stackMode: "none"`), because the chart store deep-merges, and a type
+change in the dialog or the band NARROWS the options to what the new mark declares
+(`Charts/lib/markOptionsForMark.ts`); the dialog validates the spec before it creates or replaces. Matrix is
+a PivotTable; Table is a PivotTable created in tabular form (`@api/pivotPresets`
+`TABLE_VISUAL_PIVOT_PRESET`); Slicer and Timeline are their families' own inserts.
+
+**Card, Multi-row card, KPI and Gauge are chart MARKS**, not a new object family, so they inherit the
+canvas, selection, z-order, lock, undo, persistence, Collaboration and scripts. They declare
+`furniture: "titleOnly"` (`app/src/api/chartMarks.ts`): no legend, data labels, data table, axes or cues;
+Chart Design shows a **Visual** section in Layout's slot (display units, aggregate, decimals, KPI
+direction and goal, gauge min/max/target). Painters: `app/extensions/Charts/rendering/visuals/`.
+
+- **Card**: one callout per series; display units Auto (11,732 -> "12K"), "None" shows the SOURCE text
+  (its currency format kept); text is shown as text; a blank is "(Blank)". Over a pivot or a grouped
+  design query it shows the source's GRAND TOTAL, never the sum of the rows (`ParsedChartData.seriesTotals`).
+- **Multi-row card**: one row per category, value-over-label per field, an accent bar, "+N more".
+- **KPI**: categories are the trend axis, series 0 the indicator, series 1 (or `markOptions.goal`) the goal;
+  the latest period large, a status badge, the trend area, "Goal: ... (+10%)" in the measure's format.
+- **Gauge**: a 180-degree arc, progress in the series colour, the needle at the target; default min 0 and
+  max 2 x value, widened to take a target in.
+- A Card or Gauge can read ONE cell or a defined name. Range readers carry the typed value (the number is
+  never re-parsed from display text) and skip hidden rows unless `plotHiddenCells`. Insert sizes:
+  Card 240 x 140, KPI 280 x 180, Gauge 320 x 220, Multi-row card 320 x 240 (`insertOnCanvas.ts`).
+- **Line and stacked column** is the combo with `stackMode: "stacked"`: every series but the last is a
+  column, unless the dialog's per-series "Series as" picker says otherwise.
+
+### 13.3 Model visuals and the page's slicers
+
+A design query may be **measure-only** (`VALUES: [Revenue]`, no ROWS or COLUMNS): the backend returns one
+GrandTotal row (blank when the engine has no value -- never 0) and the chart reads it as one category. A
+**model slicer filters every design-query chart on its own sheet or canvas**: the Slicer publishes each
+page's kept items per model column through `@api/pageFilters` (silent when a re-publish changes nothing),
+and Charts merges them into the request as `pageFilterFields` and re-queries only the charts on the pages
+that changed. The backend runs page filters -- and a chart's own FILTERS -- INSIDE the engine with no
+GROUP BY, so an AVERAGE or a distinct count under a multi-item slicer is the model's exact answer; a pinned
+slicer keeps its level; a share measure the engine refuses under a filter falls back to the host mask; a
+Float64 column's items are re-spelled the engine's way. A grid REPORT keeps its filter-area rows (the old
+host mask). Clear All Slicers and an undo re-publish through the Slicer store.
+
+### 13.4 Buttons that navigate
+
+A floating button may carry a DECLARATIVE action instead of code: `navigate` (to a page by stable uuid,
+then by name), `back` (`@api/sheetHistory`, the last 50 visible pages) or `clearSlicers`
+(`@api/slicerClearService`, one queued Clear per slicer on the page). An action is never code: a button with
+one runs no `onSelect`, macro or bound object script, the Script Door is not asked, scripts cannot write the
+three keys, and a pull keeps them -- so navigation works with Script Security off and on a subscribed
+canvas. Choosing an action for a coded button asks first and removes the code (one undo step restores the
+code without the action). **Page Navigator** inserts one navigate button per visible canvas in tab order,
+wrapping inside the page, as ONE undo step; the button of the page on screen paints pressed. Actions are
+set in the Properties pane's Action section.
+
+### 13.5 Page: sizes, wallpaper, Lock Objects
+
+`CANVAS_PAGE_PRESETS` (`core/persistence/src/lib.rs`, mirrored in `app/src/api/canvasSheet.ts` and pinned by
+the drift test): `16:9` 1280 x 720 (default), `16:9-fhd`, `16:9-qhd`, `16:9-4k`, `4:3`, `letter`, `tooltip`
+320 x 240, and `custom`. **Wallpaper** is the colour of the area OUTSIDE the page (hex or "" for the theme's).
+**Lock Objects** (`objects_locked`) is Power BI's View > Lock objects: nothing on the page can be MOVED or
+RESIZED -- from the UI, a script, the CLI or an AI tool; the backend refuses every geometry write with one
+sentence naming "Canvas > View > Lock Objects" -- while select, format, delete, insert and undo stay allowed.
+It is per page, persisted and not undoable (like the background); the UI shows ONE toast per gesture (not
+on a subscribed page, where the reader cannot turn it off). Scripts may set `wallpaper`; `objectsLocked` is
+read-only to them. Both fields are manifest FEATURE IDS with no format-version link (`canvas_wallpaper`,
+`canvas_objects_locked`): an older reader loses a colour or a drag lock, a visible loss, so `.cala` stays at
+v9.
+
+### 13.6 Where the proofs are
+
+| Claim | Test |
+|---|---|
+| The tab's six groups, order, fold order, ids, icons | `canvasTabPanel.test.tsx`, `canvas{Visuals,Elements,Page,View}Section.test.tsx`, `canvasTabIcons.test.ts`, `canvasArrangeSection.test.tsx` |
+| Visual presets and the dialog preset / narrowing / validation | `canvasVisuals.test.ts`, `insertOnCanvas.test.ts`, `createChartDialogPreset.test.tsx`, `createChartDialogTypeSwitch.test.tsx` |
+| The four marks, display text, blanks, totals, formats | `rendering/visuals/__tests__/*`, `visualsReviewFixes.test.ts`, `chartDisplayValues.test.ts` |
+| Measure-only queries, page filters inside the engine, the share fallback, Float64 spelling | `app/src-tauri/src/pivot/design_query_measure_only_tests.rs`; `pageFilters.test.ts`, `modelSlicerFiltersDesignQueryCharts.test.ts`, `slicerPageFilters*.test.ts` |
+| Button actions: create, perform, paint, pane, refusal to scripts, pull survival, undo | `buttonAction{Create,Perform,Paint}.test.ts`, `buttonActionSection.test.tsx`, `buttonActionRefusal.test.ts`, `held_button_code_tests.rs`; `pageNavigator.test.ts`, `sheetHistory.test.ts`, `slicerClearService.test.ts` |
+| Lock Objects at every backend door; the UI notice; wallpaper; presets | `commands/canvas_objects_lock_tests.rs`, `objectsLock.test.ts`, `objectsLockWiring.test.ts`, `canvasSheet.test.ts`, `canvasSheetConstantsDrift.test.ts`, `canvasSheetScriptRows.test.ts` |
+| LIVE: P1 tab at 1280 and 1920, P2 presets, P3 Card from a cell, P4 KPI and Gauge with undo/redo pixels, P5 a measure-only Card refiltered by a model slicer and Clear All Slicers, P6 Shapes, P7 Page Navigator and Back, P8 Tooltip / wallpaper / Lock Objects, P9 Page View and Themes, P10 LPAD/RPAD | `app/e2e/journeys/canvas-powerbi.spec.ts`, 10/10 on 2026-10-08 (three live sabotages turned P5, P2 and P1 red) |

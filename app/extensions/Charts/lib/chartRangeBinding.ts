@@ -103,25 +103,49 @@ function colToLetters(index: number): string {
 }
 
 /**
- * Parse the RANGE part ("A1:D10", "$A$1:$D$10") -- two corners, as the dialog
- * has always required. Corners are normalized (top-left first). Null when the
- * text is not a two-corner range.
+ * Parse the RANGE part ("A1:D10", "$A$1:$D$10", or one cell "B2") into
+ * corners, normalized top-left first. Null when the text is neither.
+ *
+ * ONE CELL IS A RANGE (2026-10-08). The dialog used to require two corners,
+ * which was harmless while every chart plotted a table. A Card or a Gauge is
+ * pointed at ONE value — Power BI's card over a single measure — and "B2" is
+ * how a reader writes that, so it binds as the one-cell range B2:B2. The
+ * resolver (dataSourceResolver.parseA1Reference) already read it that way.
  */
 export function parseA1Corners(range: string): A1Corners | null {
   const ref = range.replace(/\$/g, "").trim().toUpperCase();
-  const match = ref.match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/);
+  const match = ref.match(/^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/);
   if (!match) return null;
   const r1 = parseInt(match[2], 10);
-  const r2 = parseInt(match[4], 10);
+  const r2 = match[4] !== undefined ? parseInt(match[4], 10) : r1;
   if (!Number.isFinite(r1) || !Number.isFinite(r2) || r1 < 1 || r2 < 1) return null;
   const c1 = lettersToCol(match[1]);
-  const c2 = lettersToCol(match[3]);
+  const c2 = match[3] !== undefined ? lettersToCol(match[3]) : c1;
   return {
     startRow: Math.min(r1, r2) - 1,
     startCol: Math.min(c1, c2),
     endRow: Math.max(r1, r2) - 1,
     endCol: Math.max(c1, c2),
   };
+}
+
+/**
+ * Could this text be a DEFINED NAME ("TotalSales") rather than a range? Excel's
+ * shape: a letter, underscore or backslash, then letters, digits, periods,
+ * underscores or backslashes — and not something that is a cell reference
+ * ("A1", "XFD1048576"), an R1C1 form ("R1C1", "R", "C") or a boolean.
+ *
+ * Only the SHAPE is decided here; whether the workbook defines it is the
+ * resolver's question (dataSourceResolver), asked by the dialog. A Card fed
+ * from a named cell is Power BI's card over a named measure.
+ */
+export function looksLikeDefinedName(text: string): boolean {
+  const t = text.trim();
+  if (!/^[A-Za-z_\\][A-Za-z0-9_.\\]*$/.test(t)) return false;
+  if (/^[A-Za-z]{1,3}[0-9]+$/.test(t)) return false;
+  if (/^(R[0-9]*C[0-9]*|R|C)$/i.test(t)) return false;
+  if (/^(TRUE|FALSE)$/i.test(t)) return false;
+  return true;
 }
 
 /** Find a sheet by name, case-insensitively (the resolver's own rule). */

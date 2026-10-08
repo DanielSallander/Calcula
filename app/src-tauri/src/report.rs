@@ -42,7 +42,7 @@ use tauri::State;
 use engine::{Cell, CellValue};
 
 use crate::bi::types::BiState;
-use crate::pivot::headless::{compute_design_query_view, DesignQueryRequest};
+use crate::pivot::headless::{compute_design_query_view_for_report, DesignQueryRequest};
 use crate::pivot::operations::{
     clear_pivot_region_from_grid, recalculate_sheet_formulas, write_pivot_to_grid,
 };
@@ -653,7 +653,7 @@ pub async fn create_report(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: CreateReportRequest,
 ) -> Result<ReportResult, String> {
-    let (_def, _cache, view) = compute_design_query_view(&bi_state, &request.query).await?;
+    let (_def, _cache, view) = compute_design_query_view_for_report(&bi_state, &request.query).await?;
     // A grid report materializes CELLS; a canvas sheet shows none, so the
     // report would be invisible there. Refused before the effect so the
     // refusal leaves the document clean.
@@ -747,7 +747,7 @@ pub async fn refresh_report(
         )
     };
 
-    let (_def, _cache, view) = compute_design_query_view(&bi_state, &request.query).await?;
+    let (_def, _cache, view) = compute_design_query_view_for_report(&bi_state, &request.query).await?;
     // The query resolved and the report exists. Everything below rewrites the
     // report's grid region and the definition registry (mirrored into
     // `workbook.extension_data`), so it changes what a save writes.

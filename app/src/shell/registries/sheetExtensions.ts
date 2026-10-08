@@ -292,12 +292,15 @@ export function registerCoreSheetContextMenu(): void {
   });
 
   // Insert a CANVAS sheet. A CORE item on purpose: the registry has no ordering
-  // key, so only an item registered here lands next to "Insert Sheet".
+  // key, so only an item registered here lands next to "Insert Sheet". It runs
+  // the same COMMAND as every other sheet insert -- a canvas, appended at the
+  // end as it always was -- so the command's refusals cover it, and the Canvas
+  // tab's New Page goes through the same public door.
   sheetExtensions.registerContextMenuItem({
     id: "core:insertCanvas",
     label: "Insert Canvas",
     onClick: async () => {
-      window.dispatchEvent(new CustomEvent("sheet:requestAdd", { detail: { kind: "canvas" } }));
+      await CommandRegistry.execute(CoreCommands.SHEET_INSERT, { kind: "canvas", atEnd: true });
     },
   });
 

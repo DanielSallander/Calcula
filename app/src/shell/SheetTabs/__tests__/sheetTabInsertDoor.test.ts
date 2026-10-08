@@ -85,11 +85,15 @@ describe("the tab menu's Insert Sheet", () => {
     expect(requestAdds).toEqual([]);
   });
 
-  it("Insert Canvas keeps its own door (a canvas page is not core.sheet.insert)", async () => {
+  // Since 2026-10-08 core.sheet.insert can say "a canvas, at the end", so
+  // Insert Canvas is the same command door as every other sheet insert (the
+  // Canvas tab's New Page uses it too), never the strip's private event. It
+  // still APPENDS, as it always did.
+  it("Insert Canvas runs core.sheet.insert for a canvas at the end, never the private add event", async () => {
     const canvas = sheetExtensions.getContextMenuItems().find((i) => i.id === "core:insertCanvas");
     await canvas!.onClick(clicked);
-    expect(executed).toEqual([]);
-    expect(requestAdds).toEqual([{ kind: "canvas" }]);
+    expect(executed).toEqual([{ id: CoreCommands.SHEET_INSERT, args: { kind: "canvas", atEnd: true } }]);
+    expect(requestAdds).toEqual([]);
   });
 });
 

@@ -90,6 +90,14 @@ mod offset_sheet_tests;
 #[cfg(test)]
 mod text_character_semantics_tests;
 
+/// LPAD and RPAD, Calcula's padding functions (not in Excel), pinned to the
+/// Snowflake semantics the owner chose on 2026-10-08. Their own file because
+/// the cross-cutting files below each pin ONE rule across the family; this one
+/// states what the two functions MEAN — above all that an over-long text keeps
+/// its LEFT end for both, which is the decision most likely to be "fixed" back.
+#[cfg(test)]
+mod pad_function_tests;
+
 /// Excel's TYPE RANKING for the comparison operators — number < text < FALSE <
 /// TRUE — and the two equality sites that used a numeric tolerance. Its own file
 /// for the reason `blank_semantics_tests` has one: the rule is ONE ladder behind

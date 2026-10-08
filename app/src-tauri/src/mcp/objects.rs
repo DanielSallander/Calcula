@@ -267,6 +267,12 @@ pub(crate) fn update_chart_core(
         sheet_index: target_sheet,
         spec_json,
     };
+    // LOCK OBJECTS: an AI tool is one more door, refused exactly like the
+    // chart store's own (`chart_commands::update_chart_core`) when the edit
+    // moves or resizes the chart on a locked page.
+    if crate::chart_commands::chart_moves(&previous, &updated) {
+        crate::sheets::ensure_canvas_objects_unlocked(state, previous.sheet_index, "move or resize a chart")?;
+    }
     {
         let mut charts = state.charts.write(effect).map_err(|e| e.to_string())?;
         let slot = charts

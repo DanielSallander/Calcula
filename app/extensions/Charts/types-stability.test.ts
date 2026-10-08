@@ -100,9 +100,10 @@ describe("ChartType recognized values", () => {
       "pie", "donut", "waterfall", "combo", "radar",
       "bubble", "histogram", "funnel", "treemap",
       "stock", "boxPlot", "sunburst", "pareto",
+      "card", "multiRowCard", "kpi", "gauge",
     ];
 
-    expect(allTypes).toHaveLength(18);
+    expect(allTypes).toHaveLength(22);
     // Verify the type guard works for cartesian vs radial
     for (const t of allTypes) {
       expect(typeof isCartesianChart(t)).toBe("boolean");
@@ -117,7 +118,7 @@ describe("ChartType recognized values", () => {
   });
 
   it("isCartesianChart returns false for non-cartesian types", () => {
-    const nonCartesian: ChartType[] = ["pie", "donut", "radar", "funnel", "treemap", "sunburst"];
+    const nonCartesian: ChartType[] = ["pie", "donut", "radar", "funnel", "treemap", "sunburst", "card", "multiRowCard", "kpi", "gauge"];
     for (const t of nonCartesian) {
       expect(isCartesianChart(t)).toBe(false);
     }

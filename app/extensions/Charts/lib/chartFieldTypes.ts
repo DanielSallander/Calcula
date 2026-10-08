@@ -46,6 +46,13 @@ export function parseDisplayNumber(raw: string): number {
   // Strip spaces used as thousands separators (incl. non-breaking spaces)
   s = s.replace(/[\s ]/g, "");
 
+  // Strip unit text at either end (" units", " kg", the sv-SE currency " kr",
+  // "SEK 100") BEFORE the decimal-comma test: that test anchors on the END of
+  // the string, so with "kr" still there "1 234,50 kr" lost its decimal comma
+  // and read as 123450 -- every kr-formatted cell on a chart and a Card was a
+  // hundred times too large.
+  s = s.replace(/[a-zA-Z]+\.?$/, "").replace(/^[a-zA-Z]+\.?/, "");
+
   // European decimal comma: a single trailing comma with 1-2 digits, no period
   if (!s.includes(".") && /,\d{1,2}$/.test(s)) {
     s = s.replace(/,/, ".");
@@ -54,10 +61,11 @@ export function parseDisplayNumber(raw: string): number {
   // Strip remaining commas (thousands separators)
   s = s.replace(/,/g, "");
 
-  // Strip trailing units text (e.g. " units", " kg")
-  s = s.replace(/[a-zA-Z\s]+$/, "");
-
-  const num = parseFloat(s);
+  // WHAT IS LEFT MUST BE A NUMBER, ALL OF IT. `parseFloat` reads the longest
+  // numeric prefix and ignores the rest, so an ISO date "2026-10-08" read as
+  // 2026 and a time "10:30" as 10 -- and a Card printed a date as "2K".
+  if (!/^(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i.test(s)) return NaN;
+  const num = Number(s);
   if (isNaN(num)) return NaN;
 
   let result = negative ? -num : num;

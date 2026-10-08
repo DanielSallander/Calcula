@@ -2249,3 +2249,48 @@ fn an_external_workbook_reference_is_refused() {
     assert!(parse("='Q3 Results'!A1").is_ok(), "a spaced sheet name must still parse");
     assert!(parse("='John''s Sheet'!A1").is_ok(), "an apostrophe in a name is not a path");
 }
+
+// ========================================
+// LPAD / RPAD (Calcula functions, 2026-10-08)
+// ========================================
+//
+// The census tests above already catch a catalogue entry the parser cannot
+// read and a parser name the catalogue does not offer. This pins the rest of
+// what makes the pair usable from the formula bar: the call parses to the
+// BUILTIN (never `Custom`, which evaluates as #NAME? and is what a user-defined
+// LPAD would have become), the canonical name round-trips (it is what `.cala`
+// stores), and the catalogue entry is a TEXT function whose syntax string -
+// the source of the argument hint - names the optional pad in brackets.
+
+#[test]
+fn lpad_and_rpad_are_builtin_text_functions() {
+    use crate::ast::BuiltinFunction as BF;
+
+    for name in ["LPAD", "RPAD"] {
+        let f = BF::from_name(name);
+        assert!(!matches!(f, BF::Custom(_)), "{name} must be a builtin, not a custom call");
+        assert_eq!(f.to_canonical_name(), name, "{name} must serialise as itself");
+        // Lower case, as typed: the lexer uppercases, from_name does too.
+        assert_eq!(BF::from_name(&name.to_lowercase()).to_canonical_name(), name);
+
+        let entry = BF::all_catalog_entries()
+            .into_iter()
+            .find(|m| m.name == name)
+            .unwrap_or_else(|| panic!("{name} has no catalogue entry"));
+        assert_eq!(entry.category, "Text");
+        assert_eq!(entry.syntax, format!("{name}(text, length, [pad])"));
+        assert!(
+            entry.description.contains("not in Excel"),
+            "{name}'s description must say it is a Calcula function: {}",
+            entry.description
+        );
+
+        match parse(&format!("={name}(A1,5,\"0\")")).expect("parses") {
+            Expression::FunctionCall { func, args, .. } => {
+                assert_eq!(func.to_canonical_name(), name);
+                assert_eq!(args.len(), 3);
+            }
+            other => panic!("={name}(...) is not a call: {other:?}"),
+        }
+    }
+}

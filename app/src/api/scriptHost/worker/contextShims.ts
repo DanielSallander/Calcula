@@ -389,7 +389,7 @@ interface ScriptSheetInfo {
 }
 
 /** A canvas sheet's page layout, as api.getCanvasLayout answers it. Sizes are
- *  logical px. zOrder / locked are READ-ONLY to scripts. */
+ *  logical px. zOrder / locked / objectsLocked are READ-ONLY to scripts. */
 interface ScriptCanvasLayoutShim {
   snapToGrid: boolean;
   gridSizePx: number;
@@ -398,6 +398,8 @@ interface ScriptCanvasLayoutShim {
   pageWidth: number;
   pageHeight: number;
   background: string;
+  wallpaper?: string;
+  objectsLocked?: boolean;
   zOrder?: Array<{ kind: string; id: string }>;
   locked?: Array<{ kind: string; id: string }>;
 }
@@ -411,6 +413,7 @@ interface ScriptCanvasLayoutPatchShim {
   pageWidth?: number;
   pageHeight?: number;
   background?: string;
+  wallpaper?: string;
 }
 
 /** How one column of an AutoFilter is currently filtered (read back). */

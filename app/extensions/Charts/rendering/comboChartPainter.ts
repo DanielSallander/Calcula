@@ -81,6 +81,210 @@ export function computeComboLayout(
 }
 
 // ============================================================================
+// Shared scales and bar layout (paint and hit geometry read the SAME answer)
+// ============================================================================
+
+/** The series roles, the scales and the stacking rule one combo is drawn with. */
+interface ComboFrame {
+  barSeries: number[];
+  lineSeries: number[];
+  areaSeries: number[];
+  stacked: boolean;
+  yScale: LinearScale;
+  yScaleSecondary: LinearScale | null;
+  getYScale(si: number): LinearScale;
+  xBandScale: ReturnType<typeof createBandScale>;
+  xPointScale: ReturnType<typeof createPointScale>;
+}
+
+/**
+ * The value extent of the series on one axis. With stacked columns the bars
+ * contribute their per-category STACK (positive and negative stacks apart, as
+ * Excel and Power BI stack them), not each series alone: a "Line and stacked
+ * column" whose axis only reached the tallest single series clipped every
+ * stack off the top of the plot.
+ */
+function axisExtent(
+  data: ParsedChartData,
+  onAxis: number[],
+  barSeries: ReadonlySet<number>,
+  stacked: boolean,
+): [number, number] {
+  const values: number[] = [];
+  // Every series' own values (a stacked bar's own value always lies inside its
+  // stack's [negative total, positive total], so it never widens the extent).
+  for (const si of onAxis) values.push(...(data.series[si]?.values ?? []));
+  if (stacked) {
+    const bars = onAxis.filter((si) => barSeries.has(si));
+    if (bars.length > 0) {
+      for (let ci = 0; ci < data.categories.length; ci++) {
+        let pos = 0;
+        let neg = 0;
+        for (const si of bars) {
+          const v = data.series[si]?.values[ci] ?? 0;
+          if (v >= 0) pos += v;
+          else neg += v;
+        }
+        values.push(pos, neg);
+      }
+    }
+  }
+  if (values.length === 0) return [0, 1];
+  return [Math.min(...values), Math.max(...values)];
+}
+
+/**
+ * What series `si` of `count` is drawn as when `seriesMarks` does not say.
+ *
+ * "Line and clustered column" (no stacking) keeps the combo's old default:
+ * the first series is the column, the rest are lines. "Line and STACKED
+ * column" is Power BI's other preset -- several column values stacked under
+ * one line -- so with stackMode "stacked" every series but the LAST is a
+ * column and the last is the line. The old default left that preset with ONE
+ * column in its stack, which drew exactly the clustered picture.
+ */
+export function comboDefaultSeriesMark(si: number, count: number, stacked: boolean): ComboSeriesMark {
+  if (stacked && count >= 2) return si < count - 1 ? "bar" : "line";
+  return si === 0 ? "bar" : "line";
+}
+
+function comboFrame(data: ParsedChartData, spec: ChartSpec, layout: ChartLayout): ComboFrame {
+  const { plotArea } = layout;
+  const opts = (spec.markOptions ?? {}) as ComboMarkOptions;
+  const seriesMarks = opts.seriesMarks ?? {};
+  const secondaryAxisSeries = new Set(opts.secondaryAxisSeries ?? []);
+  // Only "stacked" stacks: a percent mode is refused by the schema, and a
+  // leftover one from a 100% column must not silently become something else.
+  const stacked = opts.stackMode === "stacked";
+
+  const barSeries: number[] = [];
+  const lineSeries: number[] = [];
+  const areaSeries: number[] = [];
+  for (let si = 0; si < data.series.length; si++) {
+    const mark = seriesMarks[si] ?? comboDefaultSeriesMark(si, data.series.length, stacked);
+    if (mark === "bar") barSeries.push(si);
+    else if (mark === "line") lineSeries.push(si);
+    else areaSeries.push(si);
+  }
+  const barSet = new Set(barSeries);
+
+  const primaryIndices = data.series.map((_, i) => i).filter((i) => !secondaryAxisSeries.has(i));
+  const secondaryIndices = [...secondaryAxisSeries];
+
+  const [primaryMin, primaryMax] = axisExtent(data, primaryIndices, barSet, stacked);
+  const yScale = createScaleFromSpec(
+    spec.yAxis.scale,
+    [spec.yAxis.min ?? primaryMin, spec.yAxis.max ?? primaryMax],
+    [plotArea.y + plotArea.height, plotArea.y],
+  );
+
+  let yScaleSecondary: LinearScale | null = null;
+  if (opts.secondaryYAxis && secondaryIndices.length > 0) {
+    const [secMin, secMax] = axisExtent(data, secondaryIndices, barSet, stacked);
+    const secAxis = opts.secondaryAxis;
+    yScaleSecondary = createScaleFromSpec(
+      secAxis?.scale,
+      [secAxis?.min ?? secMin, secAxis?.max ?? secMax],
+      [plotArea.y + plotArea.height, plotArea.y],
+    );
+  }
+
+  const xBandScale = createBandScale(data.categories, [plotArea.x, plotArea.x + plotArea.width], 0.3);
+  const xPointScale = createPointScale(data.categories, [plotArea.x, plotArea.x + plotArea.width]);
+
+  return {
+    barSeries,
+    lineSeries,
+    areaSeries,
+    stacked,
+    yScale,
+    yScaleSecondary,
+    getYScale: (si) => (yScaleSecondary && secondaryAxisSeries.has(si) ? yScaleSecondary : yScale),
+    xBandScale,
+    xPointScale,
+  };
+}
+
+/**
+ * Every bar of the combo, clipped to the plot, in paint order (category by
+ * category, bar series in order). THE ONE BAR LAYOUT: the painter draws these
+ * rectangles and the hit geometry returns them, so a click can never land on a
+ * bar that was drawn somewhere else.
+ *
+ * Clustered: the bar series side by side in the band. Stacked: one bar width
+ * per category, each series laid on the running total of the series before it
+ * ON THE SAME AXIS — positive values grow up from zero, negative values hang
+ * down from zero, each in their own stack.
+ */
+function comboBarRects(
+  data: ParsedChartData,
+  frame: ComboFrame,
+  plotArea: ChartLayout["plotArea"],
+  theme: ChartRenderTheme,
+): BarRect[] {
+  const { barSeries, xBandScale, stacked } = frame;
+  const rects: BarRect[] = [];
+  if (barSeries.length === 0) return rects;
+
+  const groupWidth = xBandScale.bandwidth;
+  const numBars = stacked ? 1 : barSeries.length;
+  const barWidth = Math.max((groupWidth - theme.barGap * (numBars - 1)) / numBars, 2);
+
+  for (let ci = 0; ci < data.categories.length; ci++) {
+    const groupX = xBandScale.scaleIndex(ci);
+    // Running stack per axis scale: [positive total, negative total].
+    const running = new Map<LinearScale, [number, number]>();
+
+    for (let bi = 0; bi < barSeries.length; bi++) {
+      const si = barSeries[bi];
+      const series = data.series[si];
+      const ys = frame.getYScale(si);
+      const value = series.values[ci] ?? 0;
+
+      let from = 0;
+      let to = value;
+      if (stacked) {
+        const totals = running.get(ys) ?? [0, 0];
+        if (value >= 0) {
+          from = totals[0];
+          to = totals[0] + value;
+          totals[0] = to;
+        } else {
+          from = totals[1];
+          to = totals[1] + value;
+          totals[1] = to;
+        }
+        running.set(ys, totals);
+      }
+
+      const barX = stacked ? groupX : groupX + bi * (barWidth + theme.barGap);
+      const yFrom = ys.scale(from);
+      const yTo = ys.scale(to);
+      const barY = Math.min(yFrom, yTo);
+      const barHeight = Math.abs(yFrom - yTo);
+
+      const clippedY = Math.max(barY, plotArea.y);
+      const clippedBottom = Math.min(barY + barHeight, plotArea.y + plotArea.height);
+      const clippedHeight = clippedBottom - clippedY;
+      if (clippedHeight <= 0) continue;
+
+      rects.push({
+        seriesIndex: si,
+        categoryIndex: ci,
+        x: barX,
+        y: clippedY,
+        width: barWidth,
+        height: clippedHeight,
+        value,
+        seriesName: series.name,
+        categoryName: data.categories[ci],
+      });
+    }
+  }
+  return rects;
+}
+
+// ============================================================================
 // Main Paint Function
 // ============================================================================
 
@@ -93,63 +297,8 @@ export function paintComboChart(
 ): void {
   const { plotArea } = layout;
   const opts = (spec.markOptions ?? {}) as ComboMarkOptions;
-  const seriesMarks = opts.seriesMarks ?? {};
-  const secondaryAxisSeries = new Set(opts.secondaryAxisSeries ?? []);
-
-  // Classify series by mark type
-  const barSeries: number[] = [];
-  const lineSeries: number[] = [];
-  const areaSeries: number[] = [];
-
-  for (let si = 0; si < data.series.length; si++) {
-    const mark = seriesMarks[si] ?? (si === 0 ? "bar" : "line");
-    if (mark === "bar") barSeries.push(si);
-    else if (mark === "line") lineSeries.push(si);
-    else areaSeries.push(si);
-  }
-
-  // Compute Y scales (primary and optionally secondary)
-  const primaryIndices = data.series.map((_, i) => i).filter((i) => !secondaryAxisSeries.has(i));
-  const secondaryIndices = [...secondaryAxisSeries];
-
-  const primaryValues = primaryIndices.flatMap((i) => data.series[i]?.values ?? []);
-  const primaryMin = primaryValues.length > 0 ? Math.min(...primaryValues) : 0;
-  const primaryMax = primaryValues.length > 0 ? Math.max(...primaryValues) : 1;
-
-  const yScale = createScaleFromSpec(
-    spec.yAxis.scale,
-    [spec.yAxis.min ?? primaryMin, spec.yAxis.max ?? primaryMax],
-    [plotArea.y + plotArea.height, plotArea.y],
-  );
-
-  let yScaleSecondary: LinearScale | null = null;
-  if (opts.secondaryYAxis && secondaryIndices.length > 0) {
-    const secValues = secondaryIndices.flatMap((i) => data.series[i]?.values ?? []);
-    const secMin = secValues.length > 0 ? Math.min(...secValues) : 0;
-    const secMax = secValues.length > 0 ? Math.max(...secValues) : 1;
-    const secAxis = opts.secondaryAxis;
-    yScaleSecondary = createScaleFromSpec(
-      secAxis?.scale,
-      [secAxis?.min ?? secMin, secAxis?.max ?? secMax],
-      [plotArea.y + plotArea.height, plotArea.y],
-    );
-  }
-
-  const xBandScale = createBandScale(
-    data.categories,
-    [plotArea.x, plotArea.x + plotArea.width],
-    0.3,
-  );
-
-  const xPointScale = createPointScale(
-    data.categories,
-    [plotArea.x, plotArea.x + plotArea.width],
-  );
-
-  // Get Y scale for a given series
-  function getYScale(si: number): LinearScale {
-    return (yScaleSecondary && secondaryAxisSeries.has(si)) ? yScaleSecondary : yScale;
-  }
+  const frame = comboFrame(data, spec, layout);
+  const { lineSeries, areaSeries, yScale, yScaleSecondary, xBandScale, xPointScale, getYScale } = frame;
 
   // 1. Background
   drawChartBackground(ctx, layout, theme);
@@ -209,78 +358,53 @@ export function paintComboChart(
     ctx.stroke();
   }
 
-  // Bars
-  if (barSeries.length > 0) {
-    const numBars = barSeries.length;
-    const groupWidth = xBandScale.bandwidth;
-    const barWidth = Math.max(
-      (groupWidth - theme.barGap * (numBars - 1)) / numBars,
-      2,
+  // Bars — the one bar layout (comboBarRects), clustered or stacked.
+  for (const bar of comboBarRects(data, frame, plotArea, theme)) {
+    const si = bar.seriesIndex;
+    const ci = bar.categoryIndex;
+    const color = getSeriesColor(spec.palette, seriesPaletteIndex(data, si), data.series[si].color);
+    const { x: barX, y: clippedY, width: barWidth, height: clippedHeight } = bar;
+
+    // ONE shared resolver: `si`/`ci` are PAINTER-space loop counters and the
+    // resolver translates to authoring space itself. Hand-rolling the
+    // translation here is what aliases an override onto the wrong bar as
+    // soon as a filter hides a lower-index series.
+    const style = resolveDatumStyle(spec, data, si, ci, { fill: color });
+
+    if (style.opacity != null) ctx.globalAlpha = style.opacity;
+    applyFillStyle(
+      ctx,
+      style.fill,
+      style.gradientFill ?? undefined,
+      barX,
+      clippedY,
+      barWidth,
+      clippedHeight,
     );
 
-    for (let ci = 0; ci < data.categories.length; ci++) {
-      const groupX = xBandScale.scaleIndex(ci);
+    const borderWidth = style.borderWidth ?? 1;
+    const hasBorder = style.borderColor != null && borderWidth > 0;
 
-      for (let bi = 0; bi < barSeries.length; bi++) {
-        const si = barSeries[bi];
-        const series = data.series[si];
-        const color = getSeriesColor(spec.palette, seriesPaletteIndex(data, si), series.color);
-        const ys = getYScale(si);
-        const value = series.values[ci] ?? 0;
-
-        const barX = groupX + bi * (barWidth + theme.barGap);
-        const barTop = ys.scale(value);
-        const zeroY = ys.scale(0);
-        const barHeight = Math.abs(zeroY - barTop);
-        const barY = value >= 0 ? barTop : zeroY;
-
-        const clippedY = Math.max(barY, plotArea.y);
-        const clippedBottom = Math.min(barY + barHeight, plotArea.y + plotArea.height);
-        const clippedHeight = clippedBottom - clippedY;
-        if (clippedHeight <= 0) continue;
-
-        // ONE shared resolver: `si`/`ci` are PAINTER-space loop counters and the
-        // resolver translates to authoring space itself. Hand-rolling the
-        // translation here is what aliases an override onto the wrong bar as
-        // soon as a filter hides a lower-index series.
-        const style = resolveDatumStyle(spec, data, si, ci, { fill: color });
-
-        if (style.opacity != null) ctx.globalAlpha = style.opacity;
-        applyFillStyle(
-          ctx,
-          style.fill,
-          style.gradientFill ?? undefined,
-          barX,
-          clippedY,
-          barWidth,
-          clippedHeight,
-        );
-
-        const borderWidth = style.borderWidth ?? 1;
-        const hasBorder = style.borderColor != null && borderWidth > 0;
-
-        if (theme.barBorderRadius > 0 && clippedHeight > theme.barBorderRadius * 2) {
-          drawRoundedRect(ctx, barX, clippedY, barWidth, clippedHeight, theme.barBorderRadius);
-          ctx.fill();
-          if (hasBorder) {
-            ctx.strokeStyle = style.borderColor as string;
-            ctx.lineWidth = borderWidth;
-            // The rounded path is still current after fill(), so stroking it
-            // traces exactly the shape that was filled.
-            ctx.stroke();
-          }
-        } else {
-          ctx.fillRect(barX, clippedY, barWidth, clippedHeight);
-          if (hasBorder) {
-            ctx.strokeStyle = style.borderColor as string;
-            ctx.lineWidth = borderWidth;
-            ctx.strokeRect(barX, clippedY, barWidth, clippedHeight);
-          }
-        }
-
-        if (style.opacity != null) ctx.globalAlpha = 1;
+    if (theme.barBorderRadius > 0 && clippedHeight > theme.barBorderRadius * 2) {
+      drawRoundedRect(ctx, barX, clippedY, barWidth, clippedHeight, theme.barBorderRadius);
+      ctx.fill();
+      if (hasBorder) {
+        ctx.strokeStyle = style.borderColor as string;
+        ctx.lineWidth = borderWidth;
+        // The rounded path is still current after fill(), so stroking it
+        // traces exactly the shape that was filled.
+        ctx.stroke();
+      }
+    } else {
+      ctx.fillRect(barX, clippedY, barWidth, clippedHeight);
+      if (hasBorder) {
+        ctx.strokeStyle = style.borderColor as string;
+        ctx.lineWidth = borderWidth;
+        ctx.strokeRect(barX, clippedY, barWidth, clippedHeight);
       }
     }
+
+    if (style.opacity != null) ctx.globalAlpha = 1;
   }
 
   // Lines
@@ -526,112 +650,27 @@ export function computeComboHitGeometry(
   theme: ChartRenderTheme,
 ): HitGeometry {
   const { plotArea } = layout;
-  const opts = (spec.markOptions ?? {}) as ComboMarkOptions;
-  const seriesMarks = opts.seriesMarks ?? {};
-  const secondaryAxisSeries = new Set(opts.secondaryAxisSeries ?? []);
-
-  const primaryIndices = data.series.map((_, i) => i).filter((i) => !secondaryAxisSeries.has(i));
-  const primaryValues = primaryIndices.flatMap((i) => data.series[i]?.values ?? []);
-  const primaryMin = primaryValues.length > 0 ? Math.min(...primaryValues) : 0;
-  const primaryMax = primaryValues.length > 0 ? Math.max(...primaryValues) : 1;
-
-  const yScale = createScaleFromSpec(
-    spec.yAxis.scale,
-    [spec.yAxis.min ?? primaryMin, spec.yAxis.max ?? primaryMax],
-    [plotArea.y + plotArea.height, plotArea.y],
-  );
-
-  let yScaleSecondary: LinearScale | null = null;
-  if (opts.secondaryYAxis && secondaryAxisSeries.size > 0) {
-    const secIndices = [...secondaryAxisSeries];
-    const secValues = secIndices.flatMap((i) => data.series[i]?.values ?? []);
-    const secMin = secValues.length > 0 ? Math.min(...secValues) : 0;
-    const secMax = secValues.length > 0 ? Math.max(...secValues) : 1;
-    const secAxis = opts.secondaryAxis;
-    yScaleSecondary = createScaleFromSpec(
-      secAxis?.scale,
-      [secAxis?.min ?? secMin, secAxis?.max ?? secMax],
-      [plotArea.y + plotArea.height, plotArea.y],
-    );
-  }
-
-  function getYScale(si: number): LinearScale {
-    return (yScaleSecondary && secondaryAxisSeries.has(si)) ? yScaleSecondary : yScale;
-  }
-
-  const xBandScale = createBandScale(
-    data.categories,
-    [plotArea.x, plotArea.x + plotArea.width],
-    0.3,
-  );
-
-  const xPointScale = createPointScale(
-    data.categories,
-    [plotArea.x, plotArea.x + plotArea.width],
-  );
-
+  const frame = comboFrame(data, spec, layout);
   const groups: HitGeometry[] = [];
 
-  // Bar rects
-  const barSeries = data.series.map((_, i) => i).filter((i) => (seriesMarks[i] ?? (i === 0 ? "bar" : "line")) === "bar");
-  if (barSeries.length > 0) {
-    const numBars = barSeries.length;
-    const groupWidth = xBandScale.bandwidth;
-    const barWidth = Math.max(
-      (groupWidth - theme.barGap * (numBars - 1)) / numBars,
-      2,
-    );
-    const rects: BarRect[] = [];
-
-    for (let ci = 0; ci < data.categories.length; ci++) {
-      const groupX = xBandScale.scaleIndex(ci);
-      for (let bi = 0; bi < barSeries.length; bi++) {
-        const si = barSeries[bi];
-        const series = data.series[si];
-        const ys = getYScale(si);
-        const value = series.values[ci] ?? 0;
-        const barX = groupX + bi * (barWidth + theme.barGap);
-        const barTop = ys.scale(value);
-        const zeroY = ys.scale(0);
-        const barHeight = Math.abs(zeroY - barTop);
-        const barY = value >= 0 ? barTop : zeroY;
-        const clippedY = Math.max(barY, plotArea.y);
-        const clippedBottom = Math.min(barY + barHeight, plotArea.y + plotArea.height);
-        const clippedHeight = clippedBottom - clippedY;
-        if (clippedHeight <= 0) continue;
-
-        rects.push({
-          seriesIndex: si,
-          categoryIndex: ci,
-          x: barX,
-          y: clippedY,
-          width: barWidth,
-          height: clippedHeight,
-          value,
-          seriesName: series.name,
-          categoryName: data.categories[ci],
-        });
-      }
-    }
-    groups.push({ type: "bars", rects });
+  // Bar rects — the SAME layout the painter draws (comboBarRects).
+  if (frame.barSeries.length > 0) {
+    groups.push({ type: "bars", rects: comboBarRects(data, frame, plotArea, theme) });
   }
 
-  // Point markers for line and area series
-  const pointSeries = data.series.map((_, i) => i).filter((i) => {
-    const mark = seriesMarks[i] ?? (i === 0 ? "bar" : "line");
-    return mark === "line" || mark === "area";
-  });
+  // Point markers for line and area series (never stacked).
+  const pointSeries = [...frame.lineSeries, ...frame.areaSeries].sort((a, b) => a - b);
   if (pointSeries.length > 0) {
     const markers: PointMarker[] = [];
     for (const si of pointSeries) {
       const series = data.series[si];
-      const ys = getYScale(si);
+      const ys = frame.getYScale(si);
       for (let ci = 0; ci < data.categories.length; ci++) {
         const value = series.values[ci] ?? 0;
         markers.push({
           seriesIndex: si,
           categoryIndex: ci,
-          cx: xPointScale.scaleIndex(ci),
+          cx: frame.xPointScale.scaleIndex(ci),
           cy: ys.scale(value),
           radius: 4,
           value,

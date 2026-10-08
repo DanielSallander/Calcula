@@ -2,8 +2,11 @@
 // PURPOSE: The sheet-tab "+" is a SPLIT control: the "+" still adds a worksheet
 //          in one click (eighteen journeys and walkers select it by its title
 //          and expect exactly that), and a caret beside it offers the kind --
-//          Worksheet or Canvas. The context menu's "Insert Canvas" reaches the
-//          same handler through `sheet:requestAdd`, which now reads its kind.
+//          Worksheet or Canvas. The context menu's "Insert Canvas" runs
+//          core.sheet.insert `{ kind: "canvas", atEnd: true }` (since
+//          2026-10-08), which reaches the same append handler through the
+//          strip's controller; `sheet:requestAdd` still reads its kind for the
+//          journeys that dispatch it.
 // CONTEXT: SOURCE-TEXT assertions, as in sheetTabContextIdentity.test.ts:
 //          rendering SheetTabs means mocking ~25 symbols across three modules.
 //          The kind's own path to the backend (`addSheet(name, kind)` ->
@@ -104,9 +107,12 @@ describe("sheet groups", () => {
 });
 
 describe("the context menu route", () => {
-  it("'Insert Canvas' asks for a canvas through sheet:requestAdd", () => {
+  it("'Insert Canvas' asks for a canvas at the end through core.sheet.insert (the public door)", () => {
     const item = EXT_CODE.slice(EXT_CODE.indexOf('id: "core:insertCanvas"'));
-    expect(item.slice(0, 400)).toMatch(/sheet:requestAdd"[\s\S]{0,40}detail: \{ kind: "canvas" \}/);
+    expect(item.slice(0, 400)).toMatch(
+      /CommandRegistry\.execute\(CoreCommands\.SHEET_INSERT, \{ kind: "canvas", atEnd: true \}\)/,
+    );
+    expect(item.slice(0, 400)).not.toMatch(/sheet:requestAdd/);
   });
 
   it("the strip's requestAdd listener reads the kind instead of ignoring the detail", () => {

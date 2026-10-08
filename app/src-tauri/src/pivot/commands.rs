@@ -4080,6 +4080,17 @@ pub(crate) fn update_pivot_properties_core(
             }
             let frame: pivot_engine::CanvasFrame = config.into();
             frame.validate()?;
+            // LOCK OBJECTS on the box's page: a frame that MOVES or RESIZES
+            // the box is refused before the effect. Freezing its headers is
+            // formatting and goes through. `pivot_tables` was released above,
+            // so resolving the destination sheet here takes no pivot lock.
+            if let Some(old) = before.canvas_frame {
+                let moves = (old.x, old.y, old.width, old.height) != (frame.x, frame.y, frame.width, frame.height);
+                if moves {
+                    let sheet = crate::pivot::operations::resolve_dest_sheet_index(state, &before);
+                    crate::sheets::ensure_canvas_objects_unlocked(state, sheet, "move or resize a PivotTable box")?;
+                }
+            }
             Some((frame, before))
         }
     };

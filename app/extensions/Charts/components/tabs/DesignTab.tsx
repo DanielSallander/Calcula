@@ -2,9 +2,23 @@
 // PURPOSE: Design tab of the chart dialog. Chart type, title, axis, legend, palette, mark options.
 
 import React from "react";
-import type { ChartSpec, ChartType, ChartMark, DataLabelSpec, DataTableOptions, ErrorBarOptions, BoxPlotMarkOptions, SunburstMarkOptions, ParetoMarkOptions } from "../../types";
-import { isCartesianChart } from "../../types";
+import type {
+  ChartSpec,
+  ChartMark,
+  DataLabelSpec,
+  DataTableOptions,
+  ErrorBarOptions,
+  StackMode,
+  VisualDisplayUnits,
+  VisualAggregate,
+  ComboMarkOptions,
+  ComboSeriesMark,
+} from "../../types";
+import { comboDefaultSeriesMark } from "../../rendering/comboChartPainter";
+import { isCartesianChart, markFurniture } from "../../types";
 import { listChartMarks, getChartMarkMeta } from "@api/chartMarks";
+import { CHART_TYPES } from "../chartTypeCatalog";
+import { getStackModeFromSpec, setStackModeInOptions, stackModesFor } from "../../lib/stackMode";
 import { PALETTES, PALETTE_NAMES, getSeriesColor } from "../../rendering/chartTheme";
 import { readSeriesColor, seriesColorPatch } from "../../lib/chartDataReader";
 // The one answer to "which marks have error bars, and where do their options
@@ -33,42 +47,32 @@ interface DesignTabProps {
   previewSeriesNames?: string[];
 }
 
-/** Built-in chart types with display names (the canonical, always-present list). */
-const CHART_TYPES: Array<{ value: ChartType; label: string }> = [
-  { value: "bar", label: "Bar Chart" },
-  { value: "horizontalBar", label: "Horizontal Bar Chart" },
-  { value: "line", label: "Line Chart" },
-  { value: "area", label: "Area Chart" },
-  { value: "scatter", label: "Scatter Plot" },
-  { value: "pie", label: "Pie Chart" },
-  { value: "donut", label: "Donut Chart" },
-  { value: "waterfall", label: "Waterfall Chart" },
-  { value: "combo", label: "Combo Chart" },
-  { value: "radar", label: "Radar Chart" },
-  { value: "bubble", label: "Bubble Chart" },
-  { value: "histogram", label: "Histogram" },
-  { value: "funnel", label: "Funnel Chart" },
-  { value: "treemap", label: "Treemap" },
-  { value: "stock", label: "Stock (OHLC)" },
-  { value: "boxPlot", label: "Box & Whisker" },
-  { value: "sunburst", label: "Sunburst" },
-  { value: "pareto", label: "Pareto" },
-];
-
 /**
- * Chart-type options for the picker: the built-ins (always present) plus any
- * custom marks registered via the @api chart-mark registry, appended.
+ * Chart-type options for the picker: the CATALOG's built-ins (always present,
+ * in the catalog's order and with its names) plus any custom marks registered
+ * via the @api chart-mark registry, appended.
+ *
+ * THIS USED TO BE A THIRD LIST. The dialog kept its own eighteen entries with
+ * their own names ("Bar Chart" for the mark Excel and Power BI call a COLUMN
+ * chart, "Horizontal Bar Chart" for their BAR chart) beside the band's
+ * catalog and the renderer's registry labels, so one chart had two names
+ * depending on where the reader looked. It now reads the catalog, and
+ * chartTypeNames.test.ts holds the registry's labels to it.
  */
 function chartTypeOptions(): Array<{ value: string; label: string }> {
   const builtinValues = new Set<string>(CHART_TYPES.map((t) => t.value));
   const custom = listChartMarks()
     .filter((m) => !builtinValues.has(m))
     .map((m) => ({ value: m, label: getChartMarkMeta(m)?.label ?? m }));
-  return [...CHART_TYPES, ...custom];
+  return [...CHART_TYPES.map((t) => ({ value: t.value as string, label: t.label })), ...custom];
 }
 
 export function DesignTab({ spec, onSpecChange, previewSeriesNames }: DesignTabProps): React.ReactElement {
   const cartesian = isCartesianChart(spec.mark);
+  // A title-only mark (Card, Multi-row card, KPI, Gauge) draws its own labels
+  // and nothing else: offering it a legend, data labels or a data table would
+  // write settings the painter never reads (contract §4.2).
+  const fullFurniture = markFurniture(spec.mark) === "full";
 
   return (
     <DesignGrid>
@@ -77,6 +81,7 @@ export function DesignTab({ spec, onSpecChange, previewSeriesNames }: DesignTabP
         <Label>Chart Type</Label>
         <Select
           value={spec.mark}
+          data-testid="chart-dialog-type"
           onChange={(e) => onSpecChange({ mark: e.target.value as ChartMark })}
         >
           {chartTypeOptions().map(({ value, label }) => (
@@ -99,6 +104,10 @@ export function DesignTab({ spec, onSpecChange, previewSeriesNames }: DesignTabP
           placeholder="Enter chart title (optional)"
         />
       </FieldGroup>
+
+      {/* Stacking: one control, through the one writer, for every mark that stacks */}
+      <StackingSection spec={spec} onSpecChange={onSpecChange} />
+      <ComboSeriesMarksSection spec={spec} onSpecChange={onSpecChange} previewSeriesNames={previewSeriesNames} />
 
       {/* Mark-specific options */}
       <MarkOptions spec={spec} onSpecChange={onSpecChange} />
@@ -221,6 +230,7 @@ export function DesignTab({ spec, onSpecChange, previewSeriesNames }: DesignTabP
       )}
 
       {/* Legend */}
+      {fullFurniture && (
       <FieldGroup>
         <Label>Legend</Label>
         <CheckboxLabel>
@@ -257,8 +267,10 @@ export function DesignTab({ spec, onSpecChange, previewSeriesNames }: DesignTabP
           </div>
         )}
       </FieldGroup>
+      )}
 
       {/* Data Labels */}
+      {fullFurniture && (
       <FieldGroup>
         <Label>Data Labels</Label>
         <CheckboxLabel>
@@ -292,14 +304,15 @@ export function DesignTab({ spec, onSpecChange, previewSeriesNames }: DesignTabP
           </div>
         )}
       </FieldGroup>
+      )}
 
       {/* Error Bars — the mark list is the painter's, not a fourth copy of it. */}
       {markSupportsErrorBars(spec.mark) && (
         <ErrorBarsSection spec={spec} onSpecChange={onSpecChange} />
       )}
 
-      {/* Data Table (cartesian charts only) */}
-      {cartesian && (
+      {/* Data Table (cartesian charts only — never a title-only tile) */}
+      {cartesian && fullFurniture && (
         <DataTableSection spec={spec} onSpecChange={onSpecChange} />
       )}
 
@@ -505,14 +518,9 @@ function MarkOptions({ spec, onSpecChange }: DesignTabProps): React.ReactElement
               <option value="step">Step</option>
             </Select>
           </div>
-          <CheckboxLabel>
-            <input
-              type="checkbox"
-              checked={(opts as any).stacked ?? false}
-              onChange={(e) => updateMarkOptions({ stacked: e.target.checked })}
-            />
-            Stacked areas
-          </CheckboxLabel>
+          {/* Stacking is the Stacking section above, through the one writer.
+              The checkbox that lived here wrote `stacked` alone, which the
+              painter's stackMode-first rule could ignore (charts.md §7.1). */}
         </FieldGroup>
       );
 
@@ -592,10 +600,17 @@ function MarkOptions({ spec, onSpecChange }: DesignTabProps): React.ReactElement
             Secondary Y axis (right)
           </CheckboxLabel>
           <div style={{ fontSize: "11px", color: "var(--text-secondary)", marginTop: "4px" }}>
-            First series renders as bars, others as lines. Customize in Spec tab.
+            First series renders as bars, others as lines. Stacking above sets
+            clustered or stacked columns. Customize in Spec tab.
           </div>
         </FieldGroup>
       );
+
+    case "card":
+    case "multiRowCard":
+    case "kpi":
+    case "gauge":
+      return <VisualOptions spec={spec} onSpecChange={onSpecChange} />;
 
     case "radar":
       return (
@@ -886,6 +901,283 @@ function MarkOptions({ spec, onSpecChange }: DesignTabProps): React.ReactElement
 
     default:
       return null;
+  }
+}
+
+// ============================================================================
+// Stacking (every mark that stacks, through lib/stackMode.ts)
+// ============================================================================
+
+const STACK_LABELS: Record<StackMode, string> = {
+  none: "Grouped (clustered)",
+  stacked: "Stacked",
+  percentStacked: "100% stacked",
+};
+
+/**
+ * Grouped / Stacked / 100% for the marks that stack — the modes the mark can
+ * actually draw (`stackModesFor`: a combo has no 100%), read and written by
+ * the ONE reader/writer the Chart Design band uses. Power BI's Visuals gallery
+ * presets these at insert time; this is where they are changed afterwards
+ * without leaving the dialog.
+ */
+function StackingSection({ spec, onSpecChange }: DesignTabProps): React.ReactElement | null {
+  const modes = stackModesFor(spec.mark);
+  if (modes.length === 0) return null;
+  return (
+    <FieldGroup>
+      <Label>Stacking</Label>
+      <Select
+        value={getStackModeFromSpec(spec)}
+        data-testid="chart-dialog-stacking"
+        onChange={(e) => onSpecChange({ markOptions: setStackModeInOptions(spec, e.target.value as StackMode) })}
+      >
+        {modes.map((m) => (
+          <option key={m} value={m}>
+            {STACK_LABELS[m]}
+          </option>
+        ))}
+      </Select>
+    </FieldGroup>
+  );
+}
+
+const COMBO_SERIES_MARK_LABELS: Record<ComboSeriesMark, string> = {
+  bar: "Column",
+  line: "Line",
+  area: "Area",
+};
+
+/**
+ * Column or line, per series, on a combo (Power BI's "Column y-axis" and
+ * "Line y-axis" wells). Without it the only way to make a second series a
+ * column -- and so to give "Line and stacked column" more than one column to
+ * stack -- was the JSON Spec tab. Each row shows what the painter draws today
+ * (the default the stack mode implies, `comboDefaultSeriesMark`) and writes
+ * `markOptions.seriesMarks` only when changed.
+ */
+function ComboSeriesMarksSection({ spec, onSpecChange, previewSeriesNames }: DesignTabProps): React.ReactElement | null {
+  if (spec.mark !== "combo") return null;
+  const names = previewSeriesNames && previewSeriesNames.length > 0
+    ? previewSeriesNames
+    : spec.series.map((s) => s.name);
+  if (names.length === 0) return null;
+  const opts = (spec.markOptions ?? {}) as ComboMarkOptions;
+  const stacked = opts.stackMode === "stacked";
+  const current = (si: number): ComboSeriesMark =>
+    opts.seriesMarks?.[si] ?? comboDefaultSeriesMark(si, names.length, stacked);
+  const setMark = (si: number, mark: ComboSeriesMark): void => {
+    // Every row is written, so the choice cannot shift when the series count
+    // (and with it the default) changes later.
+    const seriesMarks: Record<number, ComboSeriesMark> = {};
+    for (let i = 0; i < names.length; i++) seriesMarks[i] = i === si ? mark : current(i);
+    onSpecChange({ markOptions: { ...opts, seriesMarks } });
+  };
+  return (
+    <FieldGroup>
+      <Label>Series as</Label>
+      {names.map((name, si) => (
+        <div key={`${si}:${name}`} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
+          <Select
+            value={current(si)}
+            aria-label={`${name} as`}
+            data-testid={`chart-dialog-combo-series-${si}`}
+            onChange={(e) => setMark(si, e.target.value as ComboSeriesMark)}
+          >
+            {(Object.keys(COMBO_SERIES_MARK_LABELS) as ComboSeriesMark[]).map((m) => (
+              <option key={m} value={m}>
+                {COMBO_SERIES_MARK_LABELS[m]}
+              </option>
+            ))}
+          </Select>
+        </div>
+      ))}
+    </FieldGroup>
+  );
+}
+
+// ============================================================================
+// Tile visuals: Card, Multi-row card, KPI, Gauge
+// ============================================================================
+
+const DISPLAY_UNITS: ReadonlyArray<{ value: VisualDisplayUnits; label: string }> = [
+  { value: "auto", label: "Auto" },
+  { value: "none", label: "None (as the source shows it)" },
+  { value: "thousands", label: "Thousands" },
+  { value: "millions", label: "Millions" },
+  { value: "billions", label: "Billions" },
+  { value: "trillions", label: "Trillions" },
+];
+
+const AGGREGATES: ReadonlyArray<{ value: VisualAggregate; label: string }> = [
+  { value: "auto", label: "Auto (sum numbers, first text)" },
+  { value: "sum", label: "Sum" },
+  { value: "average", label: "Average" },
+  { value: "min", label: "Minimum" },
+  { value: "max", label: "Maximum" },
+  { value: "count", label: "Count" },
+  { value: "first", label: "First" },
+  { value: "last", label: "Last" },
+];
+
+/**
+ * The options of the four tile visuals (Power BI's Format pane cards for them,
+ * reduced to what the painters read). A number field left EMPTY removes its key
+ * — "no fixed maximum" is the absence of one, and a 0 written in its place
+ * would pin a gauge to 0..0.
+ */
+function VisualOptions({ spec, onSpecChange }: DesignTabProps): React.ReactElement {
+  const opts = (spec.markOptions ?? {}) as Record<string, unknown>;
+  const set = (key: string, value: unknown): void => {
+    const next: Record<string, unknown> = { ...opts };
+    if (value === undefined || value === "") delete next[key];
+    else next[key] = value;
+    onSpecChange({ markOptions: next as ChartSpec["markOptions"] });
+  };
+  const numberField = (key: string, label: string, testId: string): React.ReactElement => (
+    <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+      <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>{label}</span>
+      <Input
+        type="number"
+        data-testid={testId}
+        value={typeof opts[key] === "number" ? (opts[key] as number) : ""}
+        placeholder="auto"
+        onChange={(e) => {
+          const raw = e.target.value;
+          const n = Number(raw);
+          set(key, raw === "" || !Number.isFinite(n) ? undefined : n);
+        }}
+        style={{ width: "80px" }}
+      />
+    </div>
+  );
+  const unitsField = (
+    <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+      <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Display units:</span>
+      <Select
+        value={(opts.displayUnits as string) ?? "auto"}
+        data-testid="chart-dialog-display-units"
+        onChange={(e) => set("displayUnits", e.target.value)}
+      >
+        {DISPLAY_UNITS.map((u) => (
+          <option key={u.value} value={u.value}>{u.label}</option>
+        ))}
+      </Select>
+    </div>
+  );
+  const aggregateField = (
+    <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+      <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Summarize:</span>
+      <Select
+        value={(opts.aggregate as string) ?? "auto"}
+        data-testid="chart-dialog-aggregate"
+        onChange={(e) => set("aggregate", e.target.value)}
+      >
+        {AGGREGATES.map((a) => (
+          <option key={a.value} value={a.value}>{a.label}</option>
+        ))}
+      </Select>
+    </div>
+  );
+
+  switch (spec.mark) {
+    case "card":
+      return (
+        <FieldGroup>
+          <Label>Card Options</Label>
+          {unitsField}
+          {aggregateField}
+          {numberField("decimals", "Decimals:", "chart-dialog-decimals")}
+          <CheckboxLabel>
+            <input
+              type="checkbox"
+              checked={opts.showCategoryLabel !== false}
+              onChange={(e) => set("showCategoryLabel", e.target.checked ? undefined : false)}
+            />
+            Show category label
+          </CheckboxLabel>
+          <div style={{ fontSize: "11px", color: "var(--text-secondary)", marginTop: "4px" }}>
+            One card per series. A text value is shown as its text.
+          </div>
+        </FieldGroup>
+      );
+    case "multiRowCard":
+      return (
+        <FieldGroup>
+          <Label>Multi-row Card Options</Label>
+          {unitsField}
+          {numberField("decimals", "Decimals:", "chart-dialog-decimals")}
+          <CheckboxLabel>
+            <input
+              type="checkbox"
+              checked={opts.showAccentBar !== false}
+              onChange={(e) => set("showAccentBar", e.target.checked ? undefined : false)}
+            />
+            Accent bar
+          </CheckboxLabel>
+          <CheckboxLabel>
+            <input
+              type="checkbox"
+              checked={opts.showRowTitle !== false}
+              onChange={(e) => set("showRowTitle", e.target.checked ? undefined : false)}
+            />
+            Category as row title
+          </CheckboxLabel>
+        </FieldGroup>
+      );
+    case "kpi":
+      return (
+        <FieldGroup>
+          <Label>KPI Options</Label>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+            <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Direction:</span>
+            <Select
+              value={(opts.direction as string) ?? "higherIsBetter"}
+              data-testid="chart-dialog-kpi-direction"
+              onChange={(e) => set("direction", e.target.value)}
+            >
+              <option value="higherIsBetter">High is good</option>
+              <option value="lowerIsBetter">Low is good</option>
+            </Select>
+          </div>
+          {numberField("goal", "Fixed goal:", "chart-dialog-kpi-goal")}
+          {unitsField}
+          <CheckboxLabel>
+            <input
+              type="checkbox"
+              checked={opts.showTrend !== false}
+              onChange={(e) => set("showTrend", e.target.checked ? undefined : false)}
+            />
+            Trend axis
+          </CheckboxLabel>
+          <CheckboxLabel>
+            <input
+              type="checkbox"
+              checked={opts.showGoal !== false}
+              onChange={(e) => set("showGoal", e.target.checked ? undefined : false)}
+            />
+            Goal and distance
+          </CheckboxLabel>
+          <div style={{ fontSize: "11px", color: "var(--text-secondary)", marginTop: "4px" }}>
+            Categories are the trend axis (sorted ascending); series 1 is the indicator, series 2 the goal.
+          </div>
+        </FieldGroup>
+      );
+    default:
+      return (
+        <FieldGroup>
+          <Label>Gauge Options</Label>
+          {numberField("min", "Minimum:", "chart-dialog-gauge-min")}
+          {numberField("max", "Maximum:", "chart-dialog-gauge-max")}
+          {numberField("target", "Target:", "chart-dialog-gauge-target")}
+          {unitsField}
+          {aggregateField}
+          <div style={{ fontSize: "11px", color: "var(--text-secondary)", marginTop: "4px" }}>
+            Empty = Power BI's defaults: minimum 0, maximum twice the value; the target comes from a second series.
+          </div>
+        </FieldGroup>
+      );
   }
 }
 

@@ -10,6 +10,7 @@ import {
   getChartMarkMeta,
   isChartMarkRegistered,
   listChartMarks,
+  chartMarkFurniture,
   type ChartMarkDefinition,
   type ChartMarkMeta,
 } from "../chartMarks";
@@ -68,5 +69,21 @@ describe("@api chartMarks registry", () => {
     registerChartMark("__api_builtin2__", fakeDef("Builtin2", "cartesian", { builtin: true }));
     unregisterChartMark("__api_builtin2__");
     expect(isChartMarkRegistered("__api_builtin2__")).toBe(true);
+  });
+});
+
+describe("@api chartMarks furniture (contract 4.2)", () => {
+  it("a mark that declares titleOnly answers titleOnly", () => {
+    registerChartMark("__api_tile__", fakeDef("Tile", "other", { furniture: "titleOnly" }));
+    expect(chartMarkFurniture("__api_tile__")).toBe("titleOnly");
+  });
+
+  it("a mark that says nothing has the full furniture (every chart before tiles)", () => {
+    registerChartMark("__api_plain__", fakeDef("Plain", "other"));
+    expect(chartMarkFurniture("__api_plain__")).toBe("full");
+  });
+
+  it("an UNREGISTERED mark has the full furniture: refusing a legend to a mark we cannot see is a lie", () => {
+    expect(chartMarkFurniture("__never_registered_tile__")).toBe("full");
   });
 });

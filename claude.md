@@ -229,22 +229,26 @@ enforced by the compiler, not by review.
 
 ### `.cala` Format Versioning
 
-One `format_version` lives in `manifest.json` and is currently at **8**
-(`CALA_MAX_SUPPORTED_FORMAT_VERSION`, `core/calcula-format/src/manifest.rs`; re-read on 2026-09-04 —
-this paragraph said 7 for a while after the code moved, so check the constant, not the sentence). The writer stamps the
+One `format_version` lives in `manifest.json` and is currently at **9**
+(`CALA_MAX_SUPPORTED_FORMAT_VERSION`, `core/calcula-format/src/manifest.rs`; re-read on 2026-10-08 —
+this paragraph said 8 for two weeks after canvas sheets moved the constant to 9 on 2026-09-25, and 7 for a
+while before that, so check the constant, not the sentence). The writer stamps the
 highest minimum any feature ACTUALLY PRESENT requires (`stamp_feature_format_version`, raise never
 lower); the reader refuses anything higher rather than half-understanding it.
 
 - **Bump explicitly** when the saved shape changes — nothing infers it.
-- **Stamp conditionally.** `USER_HIDDEN_MIN_FORMAT_VERSION` (4), `SHEET_VIEW_MIN_FORMAT_VERSION` (5)
-  `SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION` (6), `SPILL_EXTENT_MIN_FORMAT_VERSION` (7) and
-  `PINNED_FILTER_MIN_FORMAT_VERSION` (8) are written only when the document actually carries that
-  state -- per SHEET for the first three, per CELL for the spill extent (stamped only when some
-  cell has an `sp` field), and for 8 only when some slicer/ribbon filter is pinned above level 1 or
-  some BI pivot carries an `engine_filters` entry (`zip_io.rs:243`) -- so an ordinary workbook
-  keeps the lowest version that can express it and stays openable by older builds. Version 8 is a
-  *lie* case, not a loss case: an older reader drops the pin and the pivot comes back UNFILTERED
-  with no error anywhere, which is the reason it links the version rather than a feature id.
+- **Stamp conditionally.** `SCHEDULED_JOBS_MIN_FORMAT_VERSION` (2), `PENDING_RECALC_MIN_FORMAT_VERSION`
+  (3), `USER_HIDDEN_MIN_FORMAT_VERSION` (4), `SHEET_VIEW_MIN_FORMAT_VERSION` (5),
+  `SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION` (6), `SPILL_EXTENT_MIN_FORMAT_VERSION` (7),
+  `PINNED_FILTER_MIN_FORMAT_VERSION` (8) and `CANVAS_SHEET_MIN_FORMAT_VERSION` (9) are written only when
+  the document actually carries that state -- a scheduler file, a non-empty pending-recalc set, per SHEET
+  for user hides, view and display flags, per CELL for the spill extent (stamped only when some cell has
+  an `sp` field), for 8 only when some slicer/ribbon filter is pinned above level 1 or some BI pivot
+  carries an `engine_filters` entry (`zip_io.rs:240`), and for 9 only when some sheet IS a canvas (an
+  older reader would show it as an editable worksheet and drop the kind on its next save) -- so an
+  ordinary workbook keeps the lowest version that can express it and stays openable by older builds.
+  Version 8 is a *lie* case, not a loss case: an older reader drops the pin and the pivot comes back
+  UNFILTERED with no error anywhere, which is the reason it links the version rather than a feature id.
 - **The test for whether a section deserves a version link at all:** would an older reader
   MISHANDLE the document, or merely lose something? Ignoring an unknown section is usually fine — it
   is dropped on the next save and the user loses cosmetic state. A link is warranted when the drop
@@ -254,7 +258,10 @@ lower); the reader refuses anything higher rather than half-understanding it.
   alone. Embedded media did exactly that — pictures are content-addressed under `media/{sha256}`,
   and an older reader that drops them loses images, which is visible loss rather than
   misinterpretation (pinned by `media_declares_a_feature_id_but_never_raises_the_format_version`
-  in `core/calcula-format/src/zip_io.rs`).
+  in `core/calcula-format/src/zip_io.rs`). A canvas page's `canvas_wallpaper` and
+  `canvas_objects_locked` (Lock Objects, 2026-10-08) are feature ids the same way: an older reader paints
+  the theme's colour round the page or lets its objects be dragged again -- a visible loss, never a lie
+  (`canvas_wallpaper_and_lock_declare_feature_ids_but_never_raise_the_version`).
 
 ### Coding Standards
 
@@ -367,7 +374,7 @@ builds pass `--config src-tauri/tauri.runtime-<arch>.conf.json` (see
 `externalBin` or a static resource — a sidecar must exist at every `cargo build`, and a resource
 glob that matches nothing FAILS the build.
 
-`generate_handler!` in `app/src-tauri/src/lib.rs` registers 829 commands (recounted 2026-10-05 after the Home-tab programme's final wave added `commands::sheet_blank::sheet_is_blank` -- the one "is this sheet blank?" question Delete Sheet asks before deleting without a prompt; 828 on 2026-10-04 after the Home-tab programme added six: `commands::apply_border_preset_to_sheets` and `commands::adjust_number_format_decimals` (border presets on grouped sheets; Increase/Decrease Decimal), `commands::structure::structure_cells::insert_cells` and `commands::structure::structure_cells::delete_cells` (Excel's Insert/Delete Cells), and `commands::set_row_heights` / `commands::set_column_widths` (batch resize); 822 on 2026-10-01 after plan_M8 Task A added `scripting::control_action::authorize_button_command`, the second question of an application's button command; 821 earlier the same day after owner decision B's all-or-nothing runs (M6b follow-up F9): `undo_commands::begin_undo_savepoint` and `undo_commands::roll_back_to_undo_savepoint`; 819 earlier the same day after owner decision B's audit trail: `scripting::explicit_run_audit::audit_explicit_run_writes` and `scripting::explicit_run_audit::audit_explicit_run_refusal`; 817 earlier the same day after M6 Task B: the button door added `scripting::control_action::run_control_action` and "Make this my own" added `controls::adopt_held_button_code`; 815 on 2026-09-30 after M6 Task A: approvals sealed to this computer added `consent_seal::record_script_consent` and `consent_seal::list_script_consents`; 813 at the end of M4 earlier the same day: the developer anchor added `calp_commands::calp_forget_developer_anchor`, and `button_cells::audit_button_cell_refusal` was renamed `audit_button_refusal` -- net zero; 812 earlier on 2026-09-30, when the BUG-0257 programme added `controls::move_control` and `button_cells::audit_button_cell_refusal`, on a tree that already read 810 after one more command from other work; 809 on 2026-09-25, when the canvas-sheet programme added `set_canvas_layout` and `set_control_geometry`, and one more command from other work landed between 09-10 and the canvas work -- the committed tree before `set_control_geometry` already read 808; 806 on 2026-09-10 after the on-board runtime added six `ai_builtin_*` commands; 800 on 2026-09-07 after the AI programme added eight; bracket-matched parse, comments stripped LINE-WISE, all unique -- the same figure docs/design/backend-facade.md reports independently, and BOTH were re-run together, because updating one of two "independent" counts is how they stop being independent). **How you strip the comments changes the answer**: a parse that splits the bracket on commas and strips `//` per chunk reads 789, because four doc comments in there contain a comma -- each swallows the command name after it AND leaves a fragment standing as an entry, net +4. That parse is where the "787" and "789" recounts came from. Nothing enforces this number, so re-run the parse -- line-wise -- rather than trusting the sentence. Its debug-build
+`generate_handler!` in `app/src-tauri/src/lib.rs` registers 829 commands (recounted 2026-10-08 after the Canvas = Power BI programme, which added NONE -- Lock Objects, the wallpaper and the new page sizes ride `set_canvas_layout`, measure-only design queries and page filters ride `run_design_query`, and button actions are control properties; 829 on 2026-10-05 after the Home-tab programme's final wave added `commands::sheet_blank::sheet_is_blank` -- the one "is this sheet blank?" question Delete Sheet asks before deleting without a prompt; 828 on 2026-10-04 after the Home-tab programme added six: `commands::apply_border_preset_to_sheets` and `commands::adjust_number_format_decimals` (border presets on grouped sheets; Increase/Decrease Decimal), `commands::structure::structure_cells::insert_cells` and `commands::structure::structure_cells::delete_cells` (Excel's Insert/Delete Cells), and `commands::set_row_heights` / `commands::set_column_widths` (batch resize); 822 on 2026-10-01 after plan_M8 Task A added `scripting::control_action::authorize_button_command`, the second question of an application's button command; 821 earlier the same day after owner decision B's all-or-nothing runs (M6b follow-up F9): `undo_commands::begin_undo_savepoint` and `undo_commands::roll_back_to_undo_savepoint`; 819 earlier the same day after owner decision B's audit trail: `scripting::explicit_run_audit::audit_explicit_run_writes` and `scripting::explicit_run_audit::audit_explicit_run_refusal`; 817 earlier the same day after M6 Task B: the button door added `scripting::control_action::run_control_action` and "Make this my own" added `controls::adopt_held_button_code`; 815 on 2026-09-30 after M6 Task A: approvals sealed to this computer added `consent_seal::record_script_consent` and `consent_seal::list_script_consents`; 813 at the end of M4 earlier the same day: the developer anchor added `calp_commands::calp_forget_developer_anchor`, and `button_cells::audit_button_cell_refusal` was renamed `audit_button_refusal` -- net zero; 812 earlier on 2026-09-30, when the BUG-0257 programme added `controls::move_control` and `button_cells::audit_button_cell_refusal`, on a tree that already read 810 after one more command from other work; 809 on 2026-09-25, when the canvas-sheet programme added `set_canvas_layout` and `set_control_geometry`, and one more command from other work landed between 09-10 and the canvas work -- the committed tree before `set_control_geometry` already read 808; 806 on 2026-09-10 after the on-board runtime added six `ai_builtin_*` commands; 800 on 2026-09-07 after the AI programme added eight; bracket-matched parse, comments stripped LINE-WISE, all unique -- the same figure docs/design/backend-facade.md reports independently, and BOTH were re-run together, because updating one of two "independent" counts is how they stop being independent). **How you strip the comments changes the answer**: a parse that splits the bracket on commas and strips `//` per chunk reads 789, because four doc comments in there contain a comma -- each swallows the command name after it AND leaves a fragment standing as an entry, net +4. That parse is where the "787" and "789" recounts came from. Nothing enforces this number, so re-run the parse -- line-wise -- rather than trusting the sentence. Its debug-build
 dispatch frame sits on the OS MAIN thread (tao requires the event loop there, so wrapping it in a
 larger-stack `thread::spawn` panics); `app/src-tauri/build.rs` links with `/STACK:33554432` (32 MB)
 to hold it. Adding commands in bulk eats that headroom -- the symptom is

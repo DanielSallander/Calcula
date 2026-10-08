@@ -70,6 +70,12 @@ struct RenderSheet {
 struct CanvasSummary {
     page_width: u32,
     page_height: u32,
+    /// The colour of the area OUTSIDE the page (`CanvasLayout::wallpaper`),
+    /// already sanitized to a hex colour or "" -- it is written into a
+    /// `style` attribute, and a package is untrusted input.
+    wallpaper: String,
+    /// The page's own colour (`CanvasLayout::background`), sanitized likewise.
+    background: String,
     charts: usize,
     /// Slicers plus timeline slicers.
     filters: usize,
@@ -136,9 +142,18 @@ impl ObjectCounts {
 
     fn summary_for(&self, sheet_id: identity::SheetId, layout: &persistence::CanvasLayout) -> CanvasSummary {
         let get = |m: &HashMap<identity::SheetId, usize>| m.get(&sheet_id).copied().unwrap_or(0);
+        // SANITIZED FIRST. The layout is read straight from the package's
+        // metadata.json, not through a pull, so nothing has repaired it yet --
+        // and its two colours are about to be written into `style` attributes.
+        // `sanitized` keeps a colour only when it is a plain `#rgb`/`#rrggbb`
+        // and clears it otherwise, which is exactly the alphabet a style value
+        // may safely carry.
+        let (layout, _) = layout.clone().sanitized();
         CanvasSummary {
             page_width: layout.page_width,
             page_height: layout.page_height,
+            wallpaper: layout.wallpaper,
+            background: layout.background,
             charts: get(&self.charts),
             filters: get(&self.filters),
             controls: get(&self.controls),
@@ -400,12 +415,31 @@ fn build_viewer_body(out: &mut String, sheets: &[RenderSheet]) {
 // Sheet table rendering
 // ===========================================================================
 
+/// ` style="background:#rrggbb"` for a SANITIZED colour, or nothing for the
+/// theme's (""), so the stylesheet decides. Only ever called with a colour
+/// that passed `CanvasLayout::sanitized` (`#` plus 3 or 6 hex digits).
+fn canvas_colour_style(colour: &str) -> String {
+    if colour.is_empty() {
+        String::new()
+    } else {
+        format!(" style=\"background:{}\"", escape_html(colour))
+    }
+}
+
 /// A canvas page as a labelled summary: its page size and a count per object
 /// family. HTML export draws no floating object on any sheet, so a canvas --
 /// which is nothing BUT floating objects -- says what is on it instead of
 /// claiming to be empty.
+///
+/// THE PAGE AND ITS WALLPAPER (CONTRACT-CANVAS 4.7). The summary is drawn the
+/// way the page is: an outer frame in the WALLPAPER (the area outside the
+/// page) holding a page box in the page BACKGROUND, so a dark report keeps its
+/// look in the export. Each colour is inlined only when the author set one;
+/// the theme's default stays the stylesheet's. Lock Objects says nothing here:
+/// a static page has nothing to drag.
 fn render_canvas_summary(out: &mut String, canvas: &CanvasSummary) {
-    out.push_str("<div class=\"calp-canvas\">\n");
+    let _ = write!(out, "<div class=\"calp-canvas\"{}>\n", canvas_colour_style(&canvas.wallpaper));
+    let _ = write!(out, "<div class=\"calp-canvas-page\"{}>\n", canvas_colour_style(&canvas.background));
     let _ = write!(
         out,
         "<p class=\"calp-canvas-label\">Canvas page, {} &times; {} px</p>\n",
@@ -434,7 +468,7 @@ fn render_canvas_summary(out: &mut String, canvas: &CanvasSummary) {
     out.push_str(
         "<p class=\"calp-empty\">Canvas objects are not drawn in an HTML export; open the application in Calcula to see the page.</p>\n",
     );
-    out.push_str("</div>\n");
+    out.push_str("</div>\n</div>\n");
 }
 
 fn render_sheet_table(out: &mut String, sheet: &RenderSheet) {
@@ -838,6 +872,7 @@ body {
 .calp-canvas { border: 1px dashed #c8c8c8; padding: 12px 16px; margin-bottom: 12px; }
 .calp-canvas-label { margin: 0 0 6px 0; font-weight: bold; }
 .calp-canvas-objects { margin: 0 0 6px 0; }
+.calp-canvas-page { padding: 8px 12px; }
 table.calp-grid {
   border-collapse: collapse;
   table-layout: fixed;
@@ -877,6 +912,7 @@ body {
 .calp-canvas { border: 1px dashed #c8c8c8; padding: 12px 16px; margin-bottom: 12px; }
 .calp-canvas-label { margin: 0 0 6px 0; font-weight: bold; }
 .calp-canvas-objects { margin: 0 0 6px 0; }
+.calp-canvas-page { padding: 8px 12px; }
 .calp-tabs {
   display: flex;
   flex-wrap: wrap;
@@ -1413,5 +1449,92 @@ mod tests {
         assert!(html.contains("Canvas page, 1280 &times; 720 px"), "{html}");
         assert!(html.contains("No objects on this page."), "{html}");
         assert!(!html.contains("(empty sheet)"));
+    }
+
+    /// Publish ONE canvas with `layout` and render the HTML export.
+    fn export_canvas(layout: persistence::CanvasLayout) -> String {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+        let mut canvas = Sheet::new("Page".to_string());
+        canvas.kind = persistence::SheetKind::Canvas(layout);
+        let mut wb = Workbook::default();
+        wb.sheets = vec![canvas];
+        let request = PublishRequest {
+            model_writebacks: None,
+            workbook: &wb,
+            package_name: "wallpaper-canvas".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
+            sheet_indices: vec![0],
+            now: "2026-10-08T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
+        };
+        publish::publish(&reg, &request, prof.path()).unwrap();
+        render_application_html(&reg, "wallpaper-canvas", "1.0.0", &HtmlExportOptions { mode: HtmlExportMode::Static })
+            .unwrap()
+    }
+
+    /// CONTRACT-CANVAS 4.7: the WALLPAPER is the area OUTSIDE the page, the
+    /// background the page itself -- so the export paints the summary's outer
+    /// frame in the wallpaper and the page box inside it in the background.
+    #[test]
+    fn a_canvas_export_paints_the_wallpaper_around_the_page_and_the_background_on_it() {
+        let html = export_canvas(persistence::CanvasLayout {
+            wallpaper: "#112233".to_string(),
+            background: "#fafafa".to_string(),
+            ..persistence::CanvasLayout::default()
+        });
+        assert!(
+            html.contains("<div class=\"calp-canvas\" style=\"background:#112233\">"),
+            "the wallpaper fills the frame around the page: {html}"
+        );
+        assert!(
+            html.contains("<div class=\"calp-canvas-page\" style=\"background:#fafafa\">"),
+            "the background fills the page box: {html}"
+        );
+        assert!(html.contains("Canvas page, 1280 &times; 720 px"), "the label is unchanged: {html}");
+
+        // At the theme's defaults nothing is inlined: the stylesheet decides.
+        let plain = export_canvas(persistence::CanvasLayout::default());
+        assert!(plain.contains("<div class=\"calp-canvas\">\n"), "{plain}");
+        assert!(plain.contains("<div class=\"calp-canvas-page\">\n"), "{plain}");
+    }
+
+    /// A PACKAGE is untrusted input, and these colours land inside a `style`
+    /// attribute: anything that is not a plain hex colour is dropped (the
+    /// layout is sanitized before it is read), never written raw.
+    #[test]
+    fn a_canvas_colour_that_is_not_a_hex_colour_never_reaches_the_html() {
+        let hostile = "#fff\"><script>alert(1)</script><p style=\"x";
+        let html = export_canvas(persistence::CanvasLayout {
+            wallpaper: hostile.to_string(),
+            background: "red;background-image:url(http://evil)".to_string(),
+            ..persistence::CanvasLayout::default()
+        });
+        assert!(!html.contains("<script>alert"), "{html}");
+        assert!(!html.contains("evil"), "{html}");
+        assert!(html.contains("<div class=\"calp-canvas\">\n"), "the bad wallpaper reads as the theme's: {html}");
+    }
+
+    /// Lock Objects says nothing in a static export: there is nothing there to
+    /// drag. The page renders exactly as an unlocked one does.
+    #[test]
+    fn a_locked_page_exports_like_an_unlocked_one() {
+        let locked = export_canvas(persistence::CanvasLayout { objects_locked: true, ..persistence::CanvasLayout::default() });
+        let unlocked = export_canvas(persistence::CanvasLayout::default());
+        let body = |h: &str| h[h.find("<div class=\"calp-canvas\"").unwrap()..].to_string();
+        assert_eq!(body(&locked), body(&unlocked));
     }
 }

@@ -239,6 +239,30 @@ fn an_empty_if_not_found_is_supplied_not_absent() {
     assert_eq!(num(&g, "=XLOOKUP(20,A1:A3,B1:B3,,0)"), 2.0);
 }
 
+/// LPAD's empty `pad` is the DEFAULT (one space), while a pad that REFERENCES
+/// an empty cell is that cell's value, the empty string — which pads nothing.
+///
+/// This is the one function in the file where the two spellings must answer
+/// DIFFERENTLY rather than the same, and both directions are a silent wrong
+/// text: read the empty slot as a blank value and `=LPAD(A1,3,)` stops
+/// padding; read the blank cell as omitted and `=LPAD(A1,3,B1)` pads with
+/// spaces nobody asked for. LPAD is a LIFTED builtin, so the slot's omission
+/// has to survive `call_with_values_masked` — the route that once erased it
+/// for WEEKDAY and SUBSTITUTE.
+#[test]
+fn an_empty_pad_slot_is_a_space_but_a_blank_pad_cell_is_nothing() {
+    let mut g = Grid::new();
+    g.set_cell(0, 0, Cell::new_text("a".to_string()));
+    assert_eq!(argc("=LPAD(A1,3,)"), 3, "the empty pad slot must still occupy its place");
+    assert_eq!(eval(&g, "=LPAD(A1,3,)"), EvalResult::Text("  a".to_string()));
+    assert_eq!(eval(&g, "=RPAD(A1,3,)"), EvalResult::Text("a  ".to_string()));
+    // B1 is empty: a value, not an omission.
+    assert_eq!(eval(&g, "=LPAD(A1,3,B1)"), EvalResult::Text("a".to_string()));
+    assert_eq!(eval(&g, "=RPAD(A1,3,B1)"), EvalResult::Text("a".to_string()));
+    // CONTROL: the argument left out entirely is the same default as the slot.
+    assert_eq!(eval(&g, "=LPAD(A1,3)"), EvalResult::Text("  a".to_string()));
+}
+
 // ---------------------------------------------------------------------------
 // THE RENDER
 // ---------------------------------------------------------------------------

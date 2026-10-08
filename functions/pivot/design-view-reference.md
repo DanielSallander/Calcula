@@ -473,7 +473,15 @@ changes.
 **v1 scope:** ROWS, COLUMNS, VALUES, FILTERS, and CALC are supported. LOOKUP
 columns, hierarchies, and calculation groups are not yet available in a chart
 design query (they still work in a pivot). A design query must have at least one
-measure (VALUES) and at least one dimension (ROWS or COLUMNS).
+measure (VALUES). A query with no ROWS and no COLUMNS returns one total (a Card,
+KPI or Gauge). In a chart, the query's FILTERS and the model slicers on the same
+canvas page are applied by the model itself, so a non-additive measure (an
+average, a distinct count) is exact under a filter that keeps several items. The
+one exception is a measure that removes that filter inside a larger expression
+(a share of the grand total, `DIVIDE(SUM(x), SUM(x, RESET()))`), which the model
+cannot answer that way; it is computed per item and added up instead, which is
+exact for such a share. A grid report keeps its FILTERS as a filter area above
+the report.
 
 A chart's `FILTERS` can bind a **pane control or ribbon filter** with `@Name` /
 `@"Products.Category"` — the same binding grid reports use (see the grid-report

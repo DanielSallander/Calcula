@@ -348,6 +348,10 @@ export interface TileGalleryItem<T extends string = string> {
   icon: React.ReactNode;
   /** Group heading the tile is listed under; groups keep first-seen order. */
   group?: string;
+  /** This tile's own test id, instead of `<testIdPrefix>-<value>` -- for a
+   *  tile that must keep an id a control elsewhere had before it (the Canvas
+   *  tab's kept `canvas-insert-slicer` in its folded Visuals gallery). */
+  testId?: string;
 }
 
 export interface TileGalleryProps<T extends string = string> {
@@ -496,7 +500,7 @@ export function TileGallery<T extends string = string>({
                   label={item.label}
                   selected={item.value === value}
                   tabIndex={index === entry ? 0 : -1}
-                  testId={testIdPrefix ? `${testIdPrefix}-${item.value}` : undefined}
+                  testId={item.testId ?? (testIdPrefix ? `${testIdPrefix}-${item.value}` : undefined)}
                   onFocus={() => setFocused(index)}
                   onClick={() => onChange(item.value)}
                 />

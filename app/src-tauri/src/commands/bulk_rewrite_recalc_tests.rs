@@ -1505,6 +1505,16 @@ fn every_direct_cells_map_receiver_is_a_recognised_spelling() {
              extent onto cells `Sheet::from_grid` has already produced -- it writes \
              no document cell, so there is nothing to recalculate",
         ),
+        (
+            // Spelled `pivot_view`, never a bare `view`: the census matches
+            // the receiver's NAME crate-wide, so a generic name here would
+            // exempt every future `view.cells` write along with this one.
+            "pivot_view",
+            "`pivot_engine::PivotView`: the transient VIEW a headless design query \
+             computes (`pivot/headless.rs`, `blank_measures_without_data` blanks a \
+             measure-only total the engine answered with no value). A display grid \
+             returned to a chart reader, never a document sheet -- nothing to recalculate",
+        ),
     ];
 
     let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");

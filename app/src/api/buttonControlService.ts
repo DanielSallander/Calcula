@@ -56,6 +56,169 @@
  */
 export const MACRO_REF_PROPERTY = "macroRef";
 
+// ============================================================================
+// Declarative actions (Canvas contract §3/§4.4, owner decisions 2026-10-08)
+// ============================================================================
+//
+// Power BI's report buttons do not run code: each has ONE "Action" -- Page
+// navigation, Back, Clear all slicers, ... -- chosen from a list. Calcula gives
+// a button the same three it can honour, as DECLARATIVE PROPERTIES rather than
+// as code, for three reasons that are each a rule elsewhere in this codebase:
+//
+//   1. NOT CODE, SO NOT STRIPPED. Rust's `EXECUTABLE_CONTROL_PROPERTIES`
+//      (app/src-tauri/src/controls.rs) is the list a pull STRIPS from a
+//      subscriber's buttons, because code from an application must not run on
+//      a click without consent. A Back button is not code; listing it there
+//      would disarm every navigation button of every published report -- and
+//      Power BI's buttons are exactly what a report reader is meant to click.
+//      So these keys are deliberately absent from that list: a subscribed
+//      canvas keeps them, and its buttons work read-only.
+//   2. NOT THROUGH THE SCRIPT DOOR. A click on a button with an action performs
+//      it on the page, without `run_control_action` -- a navigation button
+//      must work with Script Security off (the door's prompt would otherwise
+//      stand between a reader and the next page).
+//   3. NOT WRITABLE BY A SCRIPT. An action is the author's decision about
+//      where a reader's click goes. The script validator refuses all three keys
+//      by THESE spellings (`SCRIPT_REFUSED_BUTTON_ACTION_KEYS`,
+//      app/src/api/scriptHost/validators.ts, which imports them from here).
+//
+// ONE BUTTON, ONE THING. A button with an action has no code (`onSelect` "",
+// no `macroRef`): createButton refuses both together, and the Properties pane
+// asks before it replaces a button's code with an action. Otherwise which of
+// the two a click runs would be a precedence rule nobody can see.
+//
+// A NAVIGATE TARGET IS NAMED TWICE: by the sheet's stable uuid (`sheetId`,
+// survives a rename) and by its name (`sheetName`). The name is the fallback
+// the click uses when no sheet here has that id -- which is every subscriber,
+// because a pull remaps sheet ids to the subscriber's own while keeping the
+// names (core/calp/src/pull.rs).
+
+/** The control property naming a button's declarative action: one of
+ *  `BUTTON_ACTION_KINDS`, or "" / absent for "run its code". */
+export const BUTTON_ACTION_PROPERTY = "action";
+
+/** A navigate action's target page: the sheet's stable uuid (`SheetInfo.sheetId`). */
+export const BUTTON_ACTION_TARGET_PROPERTY = "actionTarget";
+
+/** A navigate action's target page by NAME: the fallback when the uuid is not
+ *  known here (a subscriber), and what the Properties pane shows. */
+export const BUTTON_ACTION_TARGET_NAME_PROPERTY = "actionTargetName";
+
+/** Every property a declarative action is stored in. The script validator
+ *  refuses exactly these; a writer always writes all three (see
+ *  `buttonActionProperties`). */
+export const BUTTON_ACTION_PROPERTY_KEYS: readonly string[] = [
+  BUTTON_ACTION_PROPERTY,
+  BUTTON_ACTION_TARGET_PROPERTY,
+  BUTTON_ACTION_TARGET_NAME_PROPERTY,
+];
+
+/** The actions Calcula honours, in the order a menu lists them. */
+export const BUTTON_ACTION_KINDS = ["navigate", "back", "clearSlicers"] as const;
+
+/** One of `BUTTON_ACTION_KINDS`. */
+export type ButtonActionKind = (typeof BUTTON_ACTION_KINDS)[number];
+
+/** Power BI's names for the actions, for a menu row or a pane option. */
+export const BUTTON_ACTION_LABELS: Readonly<Record<ButtonActionKind, string>> = {
+  navigate: "Page navigation",
+  back: "Back",
+  clearSlicers: "Clear all slicers",
+};
+
+/** A button's declarative action. */
+export type ButtonAction =
+  /** Go to a page (a sheet of this workbook, canvas or worksheet). */
+  | { kind: "navigate"; sheetId?: string; sheetName: string }
+  /** Go to the page that was active before this one (@api/sheetHistory). */
+  | { kind: "back" }
+  /** Clear every slicer on the button's own page (@api/slicerClearService). */
+  | { kind: "clearSlicers" };
+
+/** A property bag as the backend returns a control's (`ControlMetadata.properties`). */
+export type ButtonPropertyBag = Readonly<Record<string, { valueType: string; value: string } | undefined>>;
+
+/**
+ * The three action properties for `action` -- ALL three, "" for the unused
+ * ones, and all "" for `null` (no action). Writing all three every time is the
+ * point: a change from "navigate" to "back" must not leave the old target
+ * behind for a later reader to resurrect.
+ */
+export function buttonActionProperties(action: ButtonAction | null): Record<string, string> {
+  return {
+    [BUTTON_ACTION_PROPERTY]: action ? action.kind : "",
+    [BUTTON_ACTION_TARGET_PROPERTY]: action?.kind === "navigate" ? (action.sheetId ?? "") : "",
+    [BUTTON_ACTION_TARGET_NAME_PROPERTY]: action?.kind === "navigate" ? action.sheetName : "",
+  };
+}
+
+/**
+ * The action a button's properties declare, or null for none.
+ *
+ * Only a STATIC `action` counts: a formula there would let the data decide
+ * where a click goes, which no author chose. An unknown kind is no action (a
+ * newer build's kind is not guessed at), and so is a navigate with no page.
+ */
+export function readButtonAction(properties: ButtonPropertyBag | undefined | null): ButtonAction | null {
+  const slot = properties?.[BUTTON_ACTION_PROPERTY];
+  if (!slot || slot.valueType !== "static") return null;
+  const staticValue = (key: string): string => {
+    const p = properties?.[key];
+    return p && p.valueType === "static" ? p.value.trim() : "";
+  };
+  switch (slot.value) {
+    case "back":
+      return { kind: "back" };
+    case "clearSlicers":
+      return { kind: "clearSlicers" };
+    case "navigate": {
+      const sheetName = staticValue(BUTTON_ACTION_TARGET_NAME_PROPERTY);
+      const sheetId = staticValue(BUTTON_ACTION_TARGET_PROPERTY);
+      if (!sheetName) return null;
+      return sheetId ? { kind: "navigate", sheetId, sheetName } : { kind: "navigate", sheetName };
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * Why a create request's `action` cannot be honoured, or null when it can.
+ * The provider THROWS this sentence before writing anything.
+ */
+export function checkCreateButtonAction(
+  request: Pick<CreateButtonControlRequest, "label" | "onSelect" | "macroRef" | "action">,
+): string | null {
+  if (!("action" in request) || request.action === undefined) return null;
+  const action = request.action as unknown;
+  if (!action || typeof action !== "object") {
+    return "A button's action must be one of: navigate, back, clearSlicers.";
+  }
+  const kind = (action as { kind?: unknown }).kind;
+  if (typeof kind !== "string" || !(BUTTON_ACTION_KINDS as readonly string[]).includes(kind)) {
+    return `Unknown button action "${String(kind)}". A button's action is one of: ${BUTTON_ACTION_KINDS.join(", ")}.`;
+  }
+  if (kind === "navigate") {
+    const name = (action as { sheetName?: unknown }).sheetName;
+    if (typeof name !== "string" || name.trim() === "") {
+      return "A navigation button needs the page it goes to (sheetName).";
+    }
+  }
+  if (request.onSelect && request.onSelect.length > 0) {
+    return (
+      "A button does one thing: it either runs its code (onSelect) or performs an action, " +
+      "never both. Leave onSelect empty for a button with an action."
+    );
+  }
+  if (request.macroRef) {
+    return (
+      "A button does one thing: it either runs a linked macro (macroRef) or performs an action, " +
+      "never both. Leave macroRef out for a button with an action."
+    );
+  }
+  return null;
+}
+
 /** Where a control sits: the anchor cell it is attached to. */
 export interface ButtonControlAnchor {
   sheetIndex: number;
@@ -132,6 +295,15 @@ export type CreateButtonControlRequest = ButtonControlPlacement & {
    * source of its own.
    */
   macroRef?: string;
+  /**
+   * A DECLARATIVE action instead of code (see "Declarative actions" above):
+   * go to a page, go back, or clear the page's slicers. Written as the three
+   * `BUTTON_ACTION_PROPERTY_KEYS`; refused together with a non-empty
+   * `onSelect` or a `macroRef` (one button, one thing). The click performs it
+   * on the page, with no script door, so it also works on a subscribed
+   * (read-only) canvas and with Script Security off.
+   */
+  action?: ButtonAction;
 };
 
 /** A created button, as the provider actually placed it. `row`/`col` are the

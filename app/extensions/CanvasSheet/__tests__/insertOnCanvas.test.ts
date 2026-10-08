@@ -18,9 +18,21 @@ vi.mock("@api/grid", async (importOriginal) => ({
 }));
 
 const createShape = vi.fn();
+// The catalog rows the shapes menu and the insert read (sizes as Controls'
+// shapeCatalog.ts has them: a rectangle 160x100, a right arrow 160x80).
+const SHAPE_CATALOG = [
+  { id: "rectangle", label: "Rectangle", categoryId: "rectangles", categoryLabel: "Rectangles", defaultWidth: 160, defaultHeight: 100, isLine: false },
+  { id: "rightArrow", label: "Right Arrow", categoryId: "blockArrows", categoryLabel: "Block Arrows", defaultWidth: 160, defaultHeight: 80, isLine: false },
+  { id: "textBox", label: "Text Box", categoryId: "basicShapes", categoryLabel: "Basic Shapes", defaultWidth: 160, defaultHeight: 60, isLine: false },
+];
 vi.mock("@api/controlsService", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@api/controlsService")>()),
-  requireControlsProvider: () => ({ createShape }),
+  requireControlsProvider: () => ({ createShape, listShapeCatalog: () => SHAPE_CATALOG }),
+}));
+const alertAsync = vi.fn(async (..._a: unknown[]) => {});
+vi.mock("@api/dialogs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@api/dialogs")>()),
+  alertAsync: (...a: unknown[]) => alertAsync(...a),
 }));
 const createButton = vi.fn();
 vi.mock("@api/buttonControlService", async (importOriginal) => ({
@@ -48,7 +60,8 @@ vi.mock("../lib/layoutSurfaceProvider", () => ({
   canvasLayoutSurface: () => surface,
 }));
 
-import { INSERT_SIZES, defaultInsertRect, insertOnCanvas, resetInsertCascade } from "../lib/insertOnCanvas";
+import { CHART_MARK_INSERT_SIZES, INSERT_SIZES, defaultInsertRect, insertOnCanvas, resetInsertCascade } from "../lib/insertOnCanvas";
+import { TABLE_VISUAL_PIVOT_PRESET } from "@api/pivotPresets";
 
 const VIEW = { sheetIndex: 2, scrollX: 0, scrollY: 0, viewWidth: 1000, viewHeight: 600 };
 
@@ -61,7 +74,7 @@ beforeEach(() => {
     viewportDimensions: { width: 1000, height: 600 },
     zoom: 1,
   };
-  for (const f of [showDialog, createShape, createButton, createPicture, createFloating, importImageViaPicker]) f.mockReset();
+  for (const f of [showDialog, createShape, createButton, createPicture, createFloating, importImageViaPicker, alertAsync]) f.mockReset();
 });
 
 describe("where a new object lands", () => {
@@ -189,5 +202,111 @@ describe("each kind goes to its owner's seam", () => {
   it("floating grid: the floating-range seam with a position and a starting size", async () => {
     await insertOnCanvas("floatingGrid");
     expect(createFloating).toHaveBeenCalledWith(expect.objectContaining({ rows: 5, cols: 3, x: expect.any(Number) }));
+  });
+
+  it("chart with a type: the dialog opens PRESET to it (initialMark / initialMarkOptions), still with the placement", async () => {
+    await insertOnCanvas("chart", { mark: "horizontalBar", markOptions: { stackMode: "stacked" } });
+    const [id, data] = showDialog.mock.calls[0];
+    expect(id).toBe("chart:createDialog");
+    expect(data).toMatchObject({
+      suppressAutoRange: true,
+      initialMark: "horizontalBar",
+      initialMarkOptions: { stackMode: "stacked" },
+      placement: { sheetIndex: 2, width: INSERT_SIZES.chart.width, height: INSERT_SIZES.chart.height },
+    });
+  });
+
+  // Review finding (2026-10-08): every chart -- a Card showing one number
+  // included -- was dropped at the full chart size (480 x 300). The tile
+  // visuals (Card, Multi-row card, KPI, Gauge) get boxes sized for what they
+  // show; every other mark keeps the chart size.
+  it.each(Object.entries(CHART_MARK_INSERT_SIZES))("chart preset to %s: placed at its own, smaller size", async (mark, size) => {
+    await insertOnCanvas("chart", { mark });
+    const placement = (showDialog.mock.calls[0][1] as { placement: { width: number; height: number } }).placement;
+    expect([placement.width, placement.height]).toEqual([size.width, size.height]);
+    expect(size.width * size.height).toBeLessThan(INSERT_SIZES.chart.width * INSERT_SIZES.chart.height);
+  });
+
+  it("the tile visuals that get a size of their own are exactly Card, Multi-row card, KPI and Gauge", () => {
+    expect(Object.keys(CHART_MARK_INSERT_SIZES).sort()).toEqual(["card", "gauge", "kpi", "multiRowCard"]);
+  });
+
+  it("chart with no type: no preset keys at all (the dialog's own default)", async () => {
+    await insertOnCanvas("chart");
+    const data = showDialog.mock.calls[0][1];
+    expect("initialMark" in data).toBe(false);
+    expect("initialMarkOptions" in data).toBe(false);
+  });
+
+  it("pivot with the Table preset: the pivot dialog receives it beside the placement", async () => {
+    await insertOnCanvas("pivot", { preset: TABLE_VISUAL_PIVOT_PRESET });
+    expect(showDialog.mock.calls[0][1]).toEqual({
+      placement: { sheetIndex: 2, x: 256, y: 144, width: 480, height: 320 },
+      preset: TABLE_VISUAL_PIVOT_PRESET,
+    });
+  });
+});
+
+describe("shapes by catalog id, at the catalog's size", () => {
+  it("a named shape is created by its id with NO width/height (the catalog's default applies)", async () => {
+    await insertOnCanvas("shape", { shapeId: "rightArrow" });
+    const req = createShape.mock.calls[0][0];
+    expect(req.shapeType).toBe("rightArrow");
+    expect(req.width).toBeUndefined();
+    expect(req.height).toBeUndefined();
+  });
+
+  it("it is placed as an object of the CATALOG size: centred by 160x80, snapped", async () => {
+    await insertOnCanvas("shape", { shapeId: "rightArrow" });
+    const req = createShape.mock.calls[0][0];
+    // (1000-160)/2 = 420 -> 416, (600-80)/2 = 260 -> 256 on the 16 px grid.
+    expect({ x: req.x, y: req.y }).toEqual({ x: 416, y: 256 });
+  });
+
+  it("no id is a rectangle", async () => {
+    await insertOnCanvas("shape");
+    expect(createShape.mock.calls[0][0].shapeType).toBe("rectangle");
+  });
+
+  it("an id the catalog does not hold is refused, named, and nothing is created", async () => {
+    await insertOnCanvas("shape", { shapeId: "noSuchShape" });
+    expect(createShape).not.toHaveBeenCalled();
+    expect(alertAsync).toHaveBeenCalledTimes(1);
+    expect(String(alertAsync.mock.calls[0][0])).toContain("noSuchShape");
+  });
+
+  it("the text box keeps its own 240x64 (a text box is sized for words, not by the shape catalog)", async () => {
+    await insertOnCanvas("textBox");
+    expect(createShape.mock.calls[0][0]).toMatchObject({ shapeType: "textBox", width: 240, height: 64 });
+  });
+});
+
+describe("button kinds", () => {
+  it("blank: a captioned button with no action and no code", async () => {
+    await insertOnCanvas("button", { button: "blank" });
+    const req = createButton.mock.calls[0][0];
+    expect(req).toMatchObject({ sheetIndex: 2, label: "Button" });
+    expect(req.action).toBeUndefined();
+    expect(req.onSelect).toBeUndefined();
+    expect(req.macroRef).toBeUndefined();
+  });
+
+  it("back: Power BI's Back button -- the declarative action, never code", async () => {
+    await insertOnCanvas("button", { button: "back" });
+    const req = createButton.mock.calls[0][0];
+    expect(req).toMatchObject({ label: "Back", action: { kind: "back" } });
+    expect(req.onSelect).toBeUndefined();
+  });
+
+  it("clear all slicers: the declarative action, captioned as Power BI does", async () => {
+    await insertOnCanvas("button", { button: "clearSlicers" });
+    expect(createButton.mock.calls[0][0]).toMatchObject({ label: "Clear all slicers", action: { kind: "clearSlicers" } });
+  });
+
+  it("a refused button is said once, with the provider's reason", async () => {
+    createButton.mockRejectedValueOnce(new Error("no anchor left"));
+    await insertOnCanvas("button", { button: "back" });
+    expect(alertAsync).toHaveBeenCalledTimes(1);
+    expect(String(alertAsync.mock.calls[0][0])).toContain("no anchor left");
   });
 });

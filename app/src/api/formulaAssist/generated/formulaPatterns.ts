@@ -47,7 +47,7 @@ export interface FormulaPattern {
 }
 
 /** sha256 (truncated) of the parsed candidates this artifact was built from. */
-export const FORMULA_PATTERNS_SOURCE_HASH = "060cff44e882110f";
+export const FORMULA_PATTERNS_SOURCE_HASH = "600083d26189a484";
 
 export const FORMULA_PATTERNS: readonly FormulaPattern[] = [
   {
@@ -3769,6 +3769,17 @@ export const FORMULA_PATTERNS: readonly FormulaPattern[] = [
     result: "mixed case text",
   },
   {
+    id: "LPAD#1",
+    fn: "LPAD",
+    intent: "The LPAD function pads text on the left with a fill string until the result is exactly the length you ask for.",
+    fixture: [{ a1: "A1", input: "Invoice" }, { a1: "B1", input: "Invoice Code" }, { a1: "A2", input: "42" }],
+    target: "B2",
+    formula: "=LPAD(A2, 6, \"0\")",
+    expect: { kind: "text", text: "000042" },
+    oracle: "doc",
+    result: "000042",
+  },
+  {
     id: "MATCH#1",
     fn: "MATCH",
     intent: "The MATCH function searches for a specified value in a range and returns its relative position within that range.",
@@ -5078,6 +5089,17 @@ export const FORMULA_PATTERNS: readonly FormulaPattern[] = [
     result: "4",
   },
   {
+    id: "RPAD#1",
+    fn: "RPAD",
+    intent: "The RPAD function pads text on the right with a fill string until the result is exactly the length you ask for.",
+    fixture: [{ a1: "A1", input: "Section" }, { a1: "B1", input: "Contents Line" }, { a1: "A2", input: "Chapter 1" }],
+    target: "B2",
+    formula: "=RPAD(A2, 15, \".\")",
+    expect: { kind: "text", text: "Chapter 1......" },
+    oracle: "doc",
+    result: "Chapter 1......",
+  },
+  {
     id: "RRI#1.A7",
     fn: "RRI",
     intent: "The RRI function returns an equivalent interest rate for the growth of an investment over a specified number of periods.",
@@ -5645,9 +5667,9 @@ export const FORMULA_PATTERNS: readonly FormulaPattern[] = [
     fixture: [{ a1: "A1", input: "Amount" }, { a1: "B1", input: "Formatted" }, { a1: "A2", input: "1234567.8" }, { a1: "B2", input: "=TEXT(A2, \"$#,##0.00\")" }, { a1: "A3", input: "0.156" }, { a1: "B3", input: "=TEXT(A3, \"0.0%\")" }],
     target: "B4",
     formula: "=\"Invoice dated \" & TEXT(TODAY(), \"mmmm d, yyyy\")",
-    expect: { kind: "text", text: "Invoice dated September 8, 2026" },
+    expect: { kind: "text", text: "Invoice dated October 8, 2026" },
     oracle: "engine",
-    result: "Invoice dated September 8, 2026",
+    result: "Invoice dated October 8, 2026",
   },
   {
     id: "TEXTAFTER#1",
@@ -5788,9 +5810,9 @@ export const FORMULA_PATTERNS: readonly FormulaPattern[] = [
     fixture: [{ a1: "A1", input: "Description" }, { a1: "B1", input: "Value" }, { a1: "A2", input: "Today's Date" }, { a1: "A3", input: "Birth Date" }, { a1: "B3", input: "1990-06-15" }, { a1: "A4", input: "Age in Days" }, { a1: "B4", input: "=TODAY()-B3" }, { a1: "A5", input: "Age in Years" }, { a1: "B5", input: "=DATEDIF(B3, TODAY(), \"Y\")" }],
     target: "B2",
     formula: "=TODAY()",
-    expect: { kind: "number", number: 46273 },
+    expect: { kind: "number", number: 46303 },
     oracle: "engine",
-    result: "46273",
+    result: "46303",
   },
   {
     id: "TODAY#1.B4",
@@ -5799,9 +5821,9 @@ export const FORMULA_PATTERNS: readonly FormulaPattern[] = [
     fixture: [{ a1: "A1", input: "Description" }, { a1: "B1", input: "Value" }, { a1: "A2", input: "Today's Date" }, { a1: "B2", input: "=TODAY()" }, { a1: "A3", input: "Birth Date" }, { a1: "B3", input: "1990-06-15" }, { a1: "A4", input: "Age in Days" }, { a1: "A5", input: "Age in Years" }, { a1: "B5", input: "=DATEDIF(B3, TODAY(), \"Y\")" }],
     target: "B4",
     formula: "=TODAY()-B3",
-    expect: { kind: "number", number: 13234 },
+    expect: { kind: "number", number: 13264 },
     oracle: "engine",
-    result: "13234",
+    result: "13264",
   },
   {
     id: "TODAY#1.B5",

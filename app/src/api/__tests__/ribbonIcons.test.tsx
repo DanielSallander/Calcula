@@ -143,6 +143,19 @@ const CONTRACT_KEYS = [
   // - editing
   "AutoSum", "FillDown", "FillRight", "FillUp", "FillLeft", "Clear",
   "RemoveHyperlinks", "SortFilter", "SortAscending", "SortDescending", "GoTo",
+  // Power BI's report authoring on the Canvas tab (2026-10-08; ICONS.md
+  // section 4). Typed out because the Canvas tab, the Charts gallery and the
+  // Controls button menu are written against these names in parallel.
+  // - the Visuals gallery: chart variants, the new visuals and its hero
+  "ChartBarStacked", "ChartBarStacked100", "ChartAreaStacked", "ChartAreaStacked100",
+  "ChartComboStacked", "ChartCard", "ChartMultiRowCard", "ChartKpi", "ChartGauge",
+  "AllVisuals", "Matrix",
+  // - Pages and Elements, and the Buttons menu's rows
+  "NewPage", "Shapes", "ButtonControl", "FloatingGrid", "PageNavigator", "NavigateBack",
+  "ClearSlicers",
+  // - Arrange, Page and View
+  "SizePosition", "FitToPage", "FitToWidth", "ActualSize", "SnapToGrid", "ShowGrid",
+  "LockObjects", "DesignMode", "Wallpaper",
 ] as const;
 
 /**
@@ -152,6 +165,7 @@ const CONTRACT_KEYS = [
  * same menu for two different commands -- the "one icon used twice" failure
  * of ICONS.md 2.3, which the Merge test below pinned first for its four rows.
  */
+/* eslint-disable @typescript-eslint/naming-convention -- the family names are the human labels it.each prints in each test's title ("Sort & Filter: every key is its own drawing"), not identifiers. */
 const MENU_FAMILIES: Readonly<Record<string, readonly (keyof typeof RibbonIcon)[]>> = {
   // Font > Borders: the 13 presets, Line Color, and More Borders (= BorderAll).
   Borders: [
@@ -210,7 +224,51 @@ const MENU_FAMILIES: Readonly<Record<string, readonly (keyof typeof RibbonIcon)[
   Editing: ["AutoSum", "FillDown", "Clear", "SortFilter", "Find"],
   // The two colour splits: the host paints the colour, so the glyphs differ by shape.
   Colour: ["FillColor", "FontColor", "LineColor"],
+  // ---- The Canvas tab: Power BI's report authoring (2026-10-08) ------------
+  // The Visuals gallery: every tile of the card popover (Power BI's pane order,
+  // then the new visuals, the table tiles and Calcula's extra charts) and the
+  // All Visuals hero that opens it. Thirty-four pictures on one surface; two
+  // that drew the same thing would be one visual offered twice.
+  "Visuals gallery": [
+    "ChartBarStacked", "Stacked", "ChartBar", "ChartColumn", "ChartBarStacked100", "Stacked100",
+    "ChartLine", "ChartArea", "ChartAreaStacked", "ChartAreaStacked100", "ChartComboStacked", "ChartCombo",
+    "ChartWaterfall", "ChartFunnel", "ChartScatter", "ChartPie", "ChartDonut", "ChartTreemap", "ChartGauge",
+    "ChartCard", "ChartMultiRowCard", "ChartKpi",
+    "Matrix", "Table", "Slicer", "Timeline",
+    "ChartRadar", "ChartBubble", "ChartHistogram", "ChartStock", "ChartBoxPlot", "ChartSunburst", "ChartPareto",
+    "AllVisuals",
+  ],
+  // The grid-shaped things a report page can hold, side by side on one tab:
+  // the Matrix and Table tiles, the Floating Grid hero, and the pivot pictures
+  // Matrix must not be confused with (Pivot is Insert > PivotTable's face;
+  // GrandTotals IS Power BI's matrix picture, already taken by the pivot
+  // option, which is why Matrix merges its totals into one L).
+  "Canvas grids": ["Matrix", "Table", "FloatingGrid", "Pivot", "GrandTotals", "HeaderRow"],
+  // Pages > New Page: a report page, not Home's worksheet insert or More's tiles.
+  Pages: ["NewPage", "InsertSheet", "Report", "More"],
+  // Elements: the five heroes, and the faces they replaced on 2026-10-08
+  // (Layout drew Shape, Controls drew Button, Table drew Floating Grid).
+  Elements: ["Text", "ButtonControl", "Shapes", "Image", "FloatingGrid", "Layout", "Controls", "Table"],
+  // Elements > Buttons: the menu's rows, and the pictures each must not echo.
+  Buttons: ["ButtonControl", "PageNavigator", "NavigateBack", "ClearSlicers", "ClearFilter", "Slicer", "Undo", "Controls"],
+  // Arrange: the menus' faces and the toggles beside them. Resize drew Size &
+  // Position until 2026-10-08, and the same picture also drew Fit to Window.
+  Arrange: [
+    "BringForward", "SendBackward", "BringToFront", "SendToBack", "AlignObjects", "Lock",
+    "SizePosition", "Resize", "LockObjects",
+  ],
+  // Page: the page-size face and the two colour splits (Page Background,
+  // Wallpaper), the Themes gallery face, and the page-view face beside them.
+  Page: ["PageSize", "Background", "Wallpaper", "Theme", "FitToPage"],
+  // View > Page View: the face (= Fit to Page) and its three radio rows, and
+  // the pictures Fit to Window and Actual Size borrowed until 2026-10-08.
+  "Page view": ["FitToPage", "FitToWidth", "ActualSize", "Resize", "Search"],
+  // View: the grid toggles and Design Mode, and the pictures they replaced
+  // (chart Gridlines drew Snap to Grid, Pencil drew Design Mode) or sit
+  // beside (Arrange's Lock; Home's ProtectSheet, the known look-alike).
+  View: ["ShowGrid", "SnapToGrid", "LockObjects", "DesignMode", "Gridlines", "Pencil", "Lock", "ProtectSheet"],
 };
+/* eslint-enable @typescript-eslint/naming-convention */
 
 const CHANNELS = new Set<string>([SOFT, STRONG, ACCENT, DANGER]);
 const ALL_KEYS = Object.keys(RibbonIcon) as Array<keyof typeof RibbonIcon>;
@@ -508,6 +566,333 @@ describe("Excel's Home tab drawings (2026-10-04)", () => {
       expect(paints.has(ACCENT), `${key} paints no ACCENT`).toBe(true);
       expect(paints.has(DANGER), `${key} paints DANGER`).toBe(false);
     }
+  });
+});
+
+/** The endpoints of an ABSOLUTE path (M/L/H/V/A/Z, relative l/h/v too), in
+ *  order: the corners a polygon, a rounded polygon or a written-out glyph
+ *  passes through. An arc contributes its end point only. */
+function pointsOf(d: string): Array<[number, number]> {
+  const tokens = d.match(/[A-Za-z]|-?(?:\d+\.?\d*|\.\d+)(?:e-?\d+)?/g) ?? [];
+  const out: Array<[number, number]> = [];
+  let i = 0;
+  let cmd = "";
+  let x = 0;
+  let y = 0;
+  const num = (): number => Number(tokens[i++]);
+  const at = (nx: number, ny: number): void => {
+    x = nx;
+    y = ny;
+    out.push([x, y]);
+  };
+  while (i < tokens.length) {
+    if (/[A-Za-z]/.test(tokens[i])) cmd = tokens[i++];
+    switch (cmd) {
+      case "M": case "L": { const nx = num(); at(nx, num()); if (cmd === "M") cmd = "L"; break; }
+      case "l": { const nx = x + num(); at(nx, y + num()); break; }
+      case "H": at(num(), y); break;
+      case "h": at(x + num(), y); break;
+      case "V": at(x, num()); break;
+      case "v": at(x, y + num()); break;
+      case "A": { i += 5; const nx = num(); at(nx, num()); break; }
+      case "Z": case "z": cmd = ""; break;
+      default: throw new Error(`pointsOf: unsupported command ${cmd} in ${d}`);
+    }
+  }
+  return out;
+}
+
+/** The numbers of `rect` elements painted with `fill`. */
+function rectBoxes(key: keyof typeof RibbonIcon): Array<{ x: number; y: number; w: number; h: number; fill: string | null }> {
+  return Array.from(renderIcon(key, { size: 20 }).querySelectorAll("rect")).map((r) => ({
+    x: Number(r.getAttribute("x")),
+    y: Number(r.getAttribute("y")),
+    w: Number(r.getAttribute("width")),
+    h: Number(r.getAttribute("height")),
+    fill: r.getAttribute("fill"),
+  }));
+}
+
+describe("Power BI's report authoring on the Canvas tab (2026-10-08)", () => {
+  const CANVAS_KEYS = CONTRACT_KEYS.slice(CONTRACT_KEYS.indexOf("ChartBarStacked"));
+
+  it("names all 27 new keys", () => {
+    expect(CANVAS_KEYS.length).toBe(27);
+  });
+
+  it("draws every new picture in the frame's own coordinates (no transform at all)", () => {
+    // The designers wrote every scaled or moved part out as coordinates
+    // (the Card's digits, the Button's cursor), so the pixel-grid checks read
+    // what actually paints.
+    const turned = CANVAS_KEYS.filter((key) => renderIcon(key, { size: 20 }).querySelector("[transform]"));
+    expect(turned).toEqual([]);
+  });
+
+  it("KPI is Power BI's pair of triangles with ONE accent: ACCENT points up, STRONG points down, no DANGER", () => {
+    // Owner decision 2026-10-08: Power BI's green up and red down triangles
+    // become ACCENT and STRONG, because ACCENT and DANGER never share an icon
+    // and a red triangle would read as "delete".
+    const svg = renderIcon("ChartKpi", { size: 20 });
+    expect(paintsOf("ChartKpi").has(DANGER)).toBe(false);
+    const byFill = (fill: string): Element[] => shapesOf(svg).filter((el) => el.getAttribute("fill") === fill);
+    const pointsUp = (el: Element): boolean => {
+      const pts = pointsOf(el.getAttribute("d") ?? "");
+      const ys = pts.map((p) => p[1]);
+      const spread = (atY: number): number => {
+        const xs = pts.filter((p) => Math.abs(p[1] - atY) < 1.5).map((p) => p[0]);
+        return Math.max(...xs) - Math.min(...xs);
+      };
+      return spread(Math.min(...ys)) < spread(Math.max(...ys));
+    };
+    const accent = byFill(ACCENT).filter((el) => el.tagName.toLowerCase() === "path");
+    const strong = byFill(STRONG).filter((el) => el.tagName.toLowerCase() === "path");
+    expect(accent.length).toBe(1);
+    expect(strong.length).toBe(1);
+    expect(pointsUp(accent[0]), "the ACCENT triangle points up").toBe(true);
+    expect(pointsUp(strong[0]), "the STRONG triangle points down").toBe(false);
+  });
+
+  it("Clear All Slicers is a clearing verb: DANGER and no ACCENT, like Clear Filter", () => {
+    for (const key of ["ClearSlicers", "ClearFilter"] as const) {
+      const paints = paintsOf(key);
+      expect(paints.has(DANGER), `${key} paints no DANGER`).toBe(true);
+      expect(paints.has(ACCENT), `${key} paints ACCENT`).toBe(false);
+    }
+  });
+
+  it("a stacked picture's two categories end at least 5 px apart; a 100% picture's end together", () => {
+    // Before 2026-10-08 Stacked's columns topped out 2 px apart and read as
+    // Stacked100 at 20px; in a gallery that shows both side by side the
+    // difference of shape is the only thing that tells them apart. The floor
+    // is Stacked's own 6.0 (5 px): the first Canvas review found the stacked
+    // BAR ending only 4.8 short, its difference from the 100% bar one 4 x 5 px
+    // corner, so both stacked pictures now keep the same proportion.
+    const columnTops = (key: keyof typeof RibbonIcon): number[] => {
+      const marks = rectBoxes(key).filter((r) => r.w < 19.2);
+      const byX = new Map<number, number>();
+      for (const r of marks) byX.set(r.x, Math.min(byX.get(r.x) ?? Infinity, r.y));
+      return Array.from(byX.values());
+    };
+    const barEnds = (key: keyof typeof RibbonIcon): number[] => {
+      const marks = rectBoxes(key).filter((r) => r.h < 19.2);
+      const byRow = new Map<number, number>();
+      for (const r of marks) byRow.set(r.y, Math.max(byRow.get(r.y) ?? -Infinity, r.x + r.w));
+      return Array.from(byRow.values());
+    };
+    const apart = (ends: number[]): number => Math.max(...ends) - Math.min(...ends);
+    expect(columnTops("Stacked").length).toBe(2);
+    expect(apart(columnTops("Stacked"))).toBeGreaterThanOrEqual(6 - 1e-9);
+    expect(apart(columnTops("Stacked100"))).toBeCloseTo(0);
+    expect(barEnds("ChartBarStacked").length).toBe(2);
+    expect(apart(barEnds("ChartBarStacked"))).toBeGreaterThanOrEqual(6 - 1e-9);
+    expect(barEnds("ChartBarStacked100").length).toBe(2);
+    expect(apart(barEnds("ChartBarStacked100"))).toBeCloseTo(0);
+    // The areas: the 100% accent fills down from a FLAT top across the plot;
+    // the stacked accent is a band whose top is the zigzag.
+    const accentTopRun = (key: keyof typeof RibbonIcon): number => {
+      const accent = shapesOf(renderIcon(key, { size: 20 })).find((el) => el.getAttribute("fill") === ACCENT);
+      const pts = pointsOf(accent?.getAttribute("d") ?? "");
+      const top = Math.min(...pts.map((p) => p[1]));
+      const xs = pts.filter((p) => Math.abs(p[1] - top) < 1e-9).map((p) => p[0]);
+      return Math.max(...xs) - Math.min(...xs);
+    };
+    expect(accentTopRun("ChartAreaStacked100")).toBeGreaterThanOrEqual(14.4);
+    expect(accentTopRun("ChartAreaStacked")).toBeLessThan(4.8);
+  });
+
+  it("Card's 123 is Paste Values' digits moved by whole pixels, not redrawn", () => {
+    // One glyph for "a number" across the set: if Paste Values' digits are
+    // redrawn, the Card must follow, and the move must keep every run on the
+    // pixel grid (PIXEL_STROKE may not sit inside a transform, so the digits
+    // are written out at their new place).
+    const digits = (key: keyof typeof RibbonIcon): string => {
+      const el = shapesOf(renderIcon(key, { size: 20 })).find(
+        (s) => s.getAttribute("stroke") === ACCENT && Number(s.getAttribute("stroke-width")) === PIXEL_STROKE,
+      );
+      if (!el) throw new Error(`${key} draws no PIXEL_STROKE accent digits`);
+      return el.getAttribute("d") ?? "";
+    };
+    const card = digits("ChartCard");
+    const paste = digits("PasteValues");
+    // Same commands in the same order...
+    expect(card.replace(/[\d.\s-]+/g, " ")).toBe(paste.replace(/[\d.\s-]+/g, " "));
+    // ...and every point moved by one offset that is a whole number of pixels.
+    const a = pointsOf(card);
+    const b = pointsOf(paste);
+    expect(a.length).toBe(b.length);
+    const dx = a[0][0] - b[0][0];
+    const dy = a[0][1] - b[0][1];
+    for (let i = 0; i < a.length; i++) {
+      expect(a[i][0] - b[i][0]).toBeCloseTo(dx, 9);
+      expect(a[i][1] - b[i][1]).toBeCloseTo(dy, 9);
+    }
+    expect(onPixelGrid(dx) && onPixelGrid(dy), `offset ${dx}, ${dy}`).toBe(true);
+  });
+
+  it("Button's cursor is the Pointer at two-thirds size, written out", () => {
+    // A Pointer redraw must be mirrored here; this fails until it is.
+    const silhouette = (key: keyof typeof RibbonIcon): Array<[number, number]> => {
+      const el = shapesOf(renderIcon(key, { size: 20 })).find(
+        (s) => s.tagName.toLowerCase() === "path" && s.getAttribute("fill") === STRONG,
+      );
+      if (!el) throw new Error(`${key} draws no STRONG path`);
+      return pointsOf(el.getAttribute("d") ?? "");
+    };
+    const pointer = silhouette("Pointer");
+    const cursor = silhouette("ButtonControl");
+    expect(cursor.length).toBe(pointer.length);
+    const [tipX, tipY] = pointer[0];
+    const [toX, toY] = cursor[0];
+    for (let i = 0; i < pointer.length; i++) {
+      expect(cursor[i][0]).toBeCloseTo(toX + (pointer[i][0] - tipX) * 0.66, 2);
+      expect(cursor[i][1]).toBeCloseTo(toY + (pointer[i][1] - tipY) * 0.66, 2);
+    }
+  });
+
+  it("Matrix merges its totals into ONE accent L, so it differs from GrandTotals by shape", () => {
+    const accents = (key: keyof typeof RibbonIcon): number =>
+      shapesOf(renderIcon(key, { size: 20 })).filter((el) => el.getAttribute("fill") === ACCENT).length;
+    expect(accents("Matrix")).toBe(1);
+    expect(accents("GrandTotals")).toBeGreaterThan(1);
+  });
+
+  // ---- the Canvas icon reviews (2026-10-08) --------------------------------
+  // Two reviews of the 28 pictures (Power BI fidelity; 20px legibility and the
+  // set's rules) found five pictures that read as a neighbour or as something
+  // else. Each test below pins the property the fix restored, as a relation
+  // where one key draws another's part.
+
+  /** The x-extent [left, right] of a filled shape: a rect's box, or the
+   *  extreme x of a path's points (end points, so arcs count by their ends). */
+  const xExtent = (el: Element): [number, number] => {
+    if (el.tagName.toLowerCase() === "rect") {
+      const x = Number(el.getAttribute("x"));
+      return [x, x + Number(el.getAttribute("width"))];
+    }
+    const xs = pointsOf(el.getAttribute("d") ?? "").map((p) => p[0]);
+    return [Math.min(...xs), Math.max(...xs)];
+  };
+
+  it("Line and stacked column shows Stacked's TWO columns; Line and clustered column three whole ones", () => {
+    // The family rule (chart.tsx, Power BI's pane row 2, tiles 5 and 6): two
+    // split marks against three whole ones is what tells a stacked picture
+    // from a clustered one at 20px. The first ChartComboStacked drew three
+    // columns under the line and differed from ChartCombo only by its caps.
+    // Its columns are Stacked's columns, so a Stacked redraw must carry over.
+    const strongColumns = (key: keyof typeof RibbonIcon): Array<[number, number]> =>
+      shapesOf(renderIcon(key, { size: 20 }))
+        .filter((el) => el.getAttribute("fill") === STRONG)
+        .map(xExtent)
+        .sort((a, b) => a[0] - b[0]);
+    expect(strongColumns("ChartCombo").length).toBe(3);
+    const combo = strongColumns("ChartComboStacked");
+    const stacked = strongColumns("Stacked");
+    expect(combo.length).toBe(2);
+    expect(stacked.length).toBe(2);
+    for (let i = 0; i < 2; i++) {
+      expect(combo[i][0]).toBeCloseTo(stacked[i][0], 9);
+      expect(combo[i][1]).toBeCloseTo(stacked[i][1], 9);
+    }
+  });
+
+  it("Card and KPI are each a value over a SOFT rule, with no frame round them", () => {
+    // Power BI's card is a large "123" with a grey caption rule under it; the
+    // first ChartCard put the rule in a soft frame's bottom wall, and at 20px
+    // it read as a monitor with a chin, heavier than any visual beside it and
+    // wider than the set's 2.4 margins. KPI on the same row already draws its
+    // value over a SOFT rule and no box: the two cards now say it one way.
+    for (const key of ["ChartCard", "ChartKpi"] as const) {
+      const shapes = shapesOf(renderIcon(key, { size: 20 }));
+      const soft = shapes.filter((el) => el.getAttribute("fill") === SOFT);
+      expect(soft.length, `${key} draws exactly one SOFT shape, the rule`).toBe(1);
+      const rule = soft[0];
+      expect(rule.tagName.toLowerCase()).toBe("rect");
+      expect(Number(rule.getAttribute("height")), `${key}'s rule is a 2.4 bar`).toBe(2.4);
+      const ruleTop = Number(rule.getAttribute("y"));
+      for (const el of shapes) {
+        if (el === rule) continue;
+        const ys = el.tagName.toLowerCase() === "rect"
+          ? [Number(el.getAttribute("y")) + Number(el.getAttribute("height"))]
+          : pointsOf(el.getAttribute("d") ?? "").map((p) => p[1]);
+        expect(Math.max(...ys), `${key}: everything else stands above the rule`).toBeLessThan(ruleTop);
+      }
+    }
+    // The card's digits keep the set's 2.4 margins (their round caps reach 1.2
+    // past the centre line).
+    const digits = shapesOf(renderIcon("ChartCard", { size: 20 })).find((el) => el.getAttribute("stroke") === ACCENT);
+    const pts = pointsOf(digits?.getAttribute("d") ?? "");
+    expect(Math.min(...pts.map((p) => p[0])) - 1.2).toBeGreaterThanOrEqual(2.4 - 1e-9);
+    expect(Math.max(...pts.map((p) => p[0])) + 1.2).toBeLessThanOrEqual(21.6 + 1e-9);
+  });
+
+  it("Matrix paints Power BI's colours: a SOFT header over STRONG cells, so it is not Floating Grid's outline", () => {
+    // data.tsx maps Power BI's grey to SOFT and its white cells to STRONG.
+    // The first Matrix had a STRONG header over SOFT cells -- the inverse, and
+    // Floating Grid's silhouette (a full-width STRONG bar over grey cells).
+    // Its cells are 3 px pixel-grid cells, so they take ICONS.md 2.3's rx
+    // 0.75-1.0 (at 1.4 a 3 px cell paints as a plus sign).
+    const rects = rectBoxes("Matrix");
+    const header = rects.find((r) => r.w === 19.2);
+    expect(header?.fill).toBe(SOFT);
+    const cells = Array.from(renderIcon("Matrix", { size: 20 }).querySelectorAll("rect")).filter(
+      (r) => Number(r.getAttribute("width")) < 19.2,
+    );
+    expect(cells.length).toBe(4);
+    for (const cell of cells) {
+      expect(cell.getAttribute("fill")).toBe(STRONG);
+      const rx = Number(cell.getAttribute("rx"));
+      expect(rx >= 0.75 && rx <= 1.0, `cell rx ${rx}`).toBe(true);
+    }
+    expect(rectBoxes("FloatingGrid").find((r) => r.w === 19.2)?.fill).toBe(STRONG);
+  });
+
+  it("Page Navigator's page buttons sit ABOVE the page (tabs), so it is not Legend's page over keys", () => {
+    // The first Page Navigator was a soft box over three marks on Legend's
+    // columns with the first one green: Legend at 20px. Power BI's navigator
+    // is a row of page tabs; tabs over the page is the familiar picture.
+    const rects = rectBoxes("PageNavigator");
+    const page = rects.filter((r) => r.fill === SOFT);
+    const tabs = rects.filter((r) => r.fill !== SOFT);
+    expect(page.length).toBe(1);
+    expect(tabs.length).toBe(3);
+    for (const tab of tabs) expect(tab.y + tab.h).toBeLessThan(page[0].y);
+    const legend = rectBoxes("Legend");
+    const legendBody = legend.find((r) => r.fill === SOFT);
+    for (const key of legend.filter((r) => r.fill !== SOFT)) expect(key.y).toBeGreaterThan(legendBody?.y ?? Infinity);
+  });
+
+  it("Lock Objects locks Shapes' objects (a square and a circle) with Protect Sheet's padlock body", () => {
+    // The first Lock Objects drew grey blocks top and left round a padlock
+    // bottom right -- Home's Protect Sheet with other cells. Its objects are
+    // now a square and a circle, Shapes' own (a circle is a shape no sheet
+    // cell is). The padlock body is copied from Protect Sheet's (only the
+    // keyhole differs), so the copy is pinned: a padlock redraw must follow.
+    const svg = renderIcon("LockObjects", { size: 20 });
+    const soft = shapesOf(svg).filter((el) => el.getAttribute("fill") === SOFT);
+    expect(soft.map((el) => el.tagName.toLowerCase()).sort()).toEqual(["circle", "rect"]);
+    const circle = soft.find((el) => el.tagName.toLowerCase() === "circle");
+    const shapesCircle = renderIcon("Shapes", { size: 20 }).querySelector("circle");
+    expect(circle?.getAttribute("r")).toBe(shapesCircle?.getAttribute("r"));
+    const outline = (key: keyof typeof RibbonIcon): string => {
+      const body = shapesOf(renderIcon(key, { size: 20 })).find(
+        (el) => el.tagName.toLowerCase() === "path" && el.getAttribute("fill") === ACCENT,
+      );
+      return (body?.getAttribute("d") ?? "").split(/Z/i)[0];
+    };
+    expect(outline("LockObjects")).not.toBe("");
+    expect(outline("LockObjects")).toBe(outline("ProtectSheet"));
+  });
+
+  it("All Visuals (the 30px hero) has its column marks on whole pixels at 30px", () => {
+    // AllVisuals is drawn for its 30px hero, where one pixel is 0.8 units; the
+    // first drawing's 3.6 columns at x 6.0 and 10.8 fell on 7.5 and 13.5 px.
+    // (A 1.2-grid edge is whole only at 20px, a 2.4 one at both, but two
+    // columns and a gap cannot all be 2.4 multiples in an 8.4 quadrant.)
+    const onThirty = (v: number): boolean => Math.abs(v / 0.8 - Math.round(v / 0.8)) < 1e-6;
+    const off = rectBoxes("AllVisuals")
+      .flatMap((r) => [r.x, r.x + r.w, r.y, r.y + r.h])
+      .filter((v) => !onThirty(v));
+    expect(off).toEqual([]);
   });
 });
 

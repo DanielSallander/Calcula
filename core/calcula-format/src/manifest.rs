@@ -176,6 +176,33 @@ pub const PINNED_FILTER_MIN_FORMAT_VERSION: u32 = 8;
 /// keeps the lowest version that can express it.
 pub const CANVAS_SHEET_MIN_FORMAT_VERSION: u32 = 9;
 
+/// Manifest FEATURE ID declared when some canvas carries a WALLPAPER (the
+/// colour of the area outside its page, `CanvasLayout::wallpaper`).
+///
+/// DELIBERATELY NO LINK IN THE FORMAT-VERSION CHAIN. The chain's test (above):
+/// would an older reader MISHANDLE the document, or merely lose something? An
+/// older reader ignores the unknown field (`CanvasLayout` reads with
+/// `#[serde(default)]` and no `deny_unknown_fields`) and paints the theme's
+/// colour around the page -- a visible, cosmetic loss on a page that is
+/// otherwise exactly the author's. Stamping a version would make every such
+/// canvas unopenable by that build instead, a strictly worse trade (the
+/// `media` precedent in zip_io.rs). The id still lets `read_calcula_manifest`
+/// answer "does a page here carry a wallpaper?" without materializing the
+/// workbook. The READ is unconditional: the field rides each sheet's own
+/// metadata.json, so a manifest that forgot the id loses nothing.
+pub const CANVAS_WALLPAPER_FEATURE: &str = "canvas_wallpaper";
+
+/// Manifest FEATURE ID declared when some canvas has LOCK OBJECTS on
+/// (`CanvasLayout::objects_locked`, Power BI's View > Lock objects).
+///
+/// No format-version link, for the reason [`CANVAS_WALLPAPER_FEATURE`] gives:
+/// an older reader hands back a page whose objects can be dragged again. The
+/// lock is an authoring convenience, not a protection (sheet protection is
+/// the protection, and it has its own persisted state), so the loss is a
+/// convenience the user notices at the first drag -- never a document that
+/// silently says something it did not. Same unconditional read.
+pub const CANVAS_OBJECTS_LOCKED_FEATURE: &str = "canvas_objects_locked";
+
 /// Raise (never lower) a manifest's `format_version` to the minimum a present
 /// feature requires. Idempotent, and safe to call once per feature.
 pub fn stamp_feature_format_version(manifest: &mut Manifest, minimum: u32) {

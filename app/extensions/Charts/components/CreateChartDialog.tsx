@@ -33,7 +33,7 @@ import type {
   DesignQueryDataSource,
   TransformDiagnostic,
 } from "../types";
-import { isPivotDataSource, isDesignQueryDataSource } from "../types";
+import { isPivotDataSource, isDesignQueryDataSource, markFurniture } from "../types";
 import { chartsBackend } from "../lib/chartsBackend";
 import { createChart, getChartById, replaceChartSpec, syncChartRegions } from "../lib/chartStore";
 import { invalidateChartCache } from "../rendering/chartRenderer";
@@ -53,9 +53,14 @@ import {
   bindRangeText,
   formatSheetQualifiedRange,
   rangeRefDisplayText,
+  looksLikeDefinedName,
+  canvasSourceMessage,
   RANGE_FORMAT_MESSAGE,
   type RangeBinding,
 } from "../lib/chartRangeBinding";
+import { resolveDataSource } from "../lib/dataSourceResolver";
+import { validateChartSpec } from "../lib/chartSpecValidate";
+import { markOptionsForMark } from "../lib/markOptionsForMark";
 
 import { DataTab } from "./tabs/DataTab";
 import { DesignTab } from "./tabs/DesignTab";
@@ -130,6 +135,34 @@ export function readDialogPlacement(raw: unknown): DialogPlacement | null {
     width: p.width as number,
     height: p.height as number,
   };
+}
+
+/**
+ * Read `dialogData.initialMark`: the chart type an opener asks the dialog to
+ * START with (contract §4.1 — the Canvas tab's Visuals gallery opens "Card",
+ * "Stacked bar", "Line and stacked column" ...). Only a mark-id-shaped string
+ * (the spec schema's own pattern) is accepted; anything else is ignored and the
+ * dialog starts on a column chart, as before.
+ */
+export function readInitialMark(raw: unknown): ChartMark | null {
+  return typeof raw === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(raw) ? (raw as ChartMark) : null;
+}
+
+/**
+ * Read `dialogData.initialMarkOptions` (e.g. `{ stackMode: "stacked" }`): a
+ * plain object or nothing. It is not validated here: a later type change keeps
+ * only the options the new type declares (markOptionsForMark), and Create /
+ * Save validate the whole spec against the schema and refuse it inline, the
+ * same gate a script's chart write passes through.
+ */
+export function readInitialMarkOptions(raw: unknown): MarkOptions | null {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+  return { ...(raw as Record<string, unknown>) } as MarkOptions;
+}
+
+/** "B2" for a one-cell ref: what a single-cell series is called. */
+function cellAddress(ref: DataRangeRef): string {
+  return toA1Notation(ref.startRow, ref.startCol);
 }
 
 /**
@@ -239,6 +272,12 @@ export function CreateChartDialog({
   // it never does: a canvas has no cells, so its "selection" is not data.
   const placement = readDialogPlacement(dialogData?.placement);
   const suppressAutoRange = dialogData?.suppressAutoRange === true;
+
+  // The type an opener asks the dialog to START with (contract §4.1). Kept as
+  // PRIMITIVES (the options as their JSON) so they can sit in the open
+  // effect's dependency list without the dialog data's identity re-running it.
+  const initialMark = readInitialMark(dialogData?.initialMark);
+  const initialMarkOptionsJson = JSON.stringify(readInitialMarkOptions(dialogData?.initialMarkOptions));
   const isCanvasSurface = gridState.surface === "canvas";
 
   // Active tab
@@ -342,6 +381,16 @@ export function CreateChartDialog({
   const sourceRangeRef = useRef(sourceRange);
   sourceRangeRef.current = sourceRange;
 
+  // A DEFINED NAME as the source ("TotalSales"): resolved through the
+  // workbook's names (the same resolver every chart read uses) and STORED by
+  // name, so the chart follows the name when it is redefined. The answer is
+  // kept with the text it answers, so a stale resolution never binds new text.
+  const [nameResolution, setNameResolution] = useState<
+    { name: string; ref: DataRangeRef | null; error: string | null } | null
+  >(null);
+  // True while the header row is off only because the source is one cell.
+  const headersForcedOffRef = useRef(false);
+
   // The ACTIVE sheet, from Core's live grid state when it is there (it moves in
   // the same reducer step as the sheet switch) and from this dialog's own
   // sheet read otherwise. The auto-detected range is qualified by this name,
@@ -359,7 +408,17 @@ export function CreateChartDialog({
       }),
     [sourceRange, sheetList, activeSheetIndex, activeSheetName, isCanvasSurface],
   );
-  const boundRef: DataRangeRef | null = rangeBinding.ok ? rangeBinding.ref : null;
+  // The text is a defined name when it is not a range and has a name's shape.
+  const nameCandidate =
+    !isPivotMode && sourceMode === "range" && !rangeBinding.ok && looksLikeDefinedName(sourceRange)
+      ? sourceRange.trim()
+      : null;
+  const nameAnswer = nameCandidate !== null && nameResolution?.name === nameCandidate ? nameResolution : null;
+  const nameRef = nameAnswer?.ref ?? null;
+  const boundRef: DataRangeRef | null = rangeBinding.ok ? rangeBinding.ref : nameRef;
+  // One cell ("Sheet1!B2", or a name over one cell) is ONE value: a Card or a
+  // Gauge over it. It has no header row and no category column to detect.
+  const isSingleCell = boundRef !== null && boundRef.startRow === boundRef.endRow && boundRef.startCol === boundRef.endCol;
   // Primitive identity for effects: which cells, on which sheet. The id is left
   // out on purpose -- it names the same sheet the index does, and a key that
   // changed when the sheet list merely ARRIVED would re-run series detection.
@@ -369,7 +428,42 @@ export function CreateChartDialog({
   // Why the typed range cannot be charted, in the reader's terms (null: fine,
   // or nothing to say yet). Only meaningful for a range source.
   const rangeError =
-    !isPivotMode && sourceMode === "range" && !rangeBinding.ok ? rangeBinding.message : null;
+    nameCandidate !== null
+      ? (nameAnswer?.error ?? null)
+      : !isPivotMode && sourceMode === "range" && !rangeBinding.ok
+        ? rangeBinding.message
+        : null;
+
+  // Resolve a defined name when the text has a name's shape. A name over a
+  // CANVAS sheet is refused like a typed canvas range: a canvas has no cells.
+  useEffect(() => {
+    if (nameCandidate === null) return;
+    let live = true;
+    resolveDataSource(nameCandidate)
+      .then((ref) => {
+        if (!live) return;
+        const sheet = sheetListRef.current.find((sh) => sh.index === ref.sheetIndex);
+        if (sheet && sheet.kind === "canvas") {
+          setNameResolution({ name: nameCandidate, ref: null, error: canvasSourceMessage(sheet.name) });
+          return;
+        }
+        const withId: DataRangeRef =
+          sheet && typeof sheet.sheetId === "string" && sheet.sheetId !== "" ? { ...ref, sheetId: sheet.sheetId } : ref;
+        setNameResolution({ name: nameCandidate, ref: withId, error: null });
+      })
+      .catch((err) => {
+        if (!live) return;
+        const why = err instanceof Error ? err.message : String(err);
+        setNameResolution({
+          name: nameCandidate,
+          ref: null,
+          error: `"${nameCandidate}" is not a range or a defined name in this workbook. ${why}`,
+        });
+      });
+    return () => {
+      live = false;
+    };
+  }, [nameCandidate, sheetList]);
 
   // Compose the current spec from all state
   const currentSpec = useMemo((): ChartSpec | null => {
@@ -380,9 +474,13 @@ export function CreateChartDialog({
     } else if (sourceMode === "designQuery") {
       if (!connectionId || !dslText.trim()) return null;
       dataSource = { type: "designQuery" as const, dslText, connectionId };
-    } else {
-      if (!rangeBinding.ok) return null;
+    } else if (rangeBinding.ok) {
       dataSource = { ...rangeBinding.ref };
+    } else if (nameCandidate !== null && nameRef !== null) {
+      // Stored BY NAME: the chart follows the name when it is redefined.
+      dataSource = nameCandidate;
+    } else {
+      return null;
     }
 
     const spec: ChartSpec = {
@@ -404,7 +502,7 @@ export function CreateChartDialog({
       spec.markOptions = markOptions;
     }
     return spec;
-  }, [rangeBinding, sourceMode, dslText, connectionId, hasHeaders, orientation, categoryIndex, series, title, xAxis, yAxis, legend, palette, mark, markOptions, specOverlay, isPivotMode, pivotId]);
+  }, [rangeBinding, nameCandidate, nameRef, sourceMode, dslText, connectionId, hasHeaders, orientation, categoryIndex, series, title, xAxis, yAxis, legend, palette, mark, markOptions, specOverlay, isPivotMode, pivotId]);
 
   // Switch source mode; seed a starter design query the first time (Monaco has
   // no placeholder text).
@@ -419,6 +517,12 @@ export function CreateChartDialog({
   const handleSpecChange = useCallback((updates: Partial<ChartSpec>) => {
     if (updates.mark !== undefined) setMark(updates.mark);
     if (updates.markOptions !== undefined) setMarkOptions(updates.markOptions);
+    // A TYPE change keeps only the options the new type understands: a
+    // gallery preset's `stackMode` must not ride into a Card (markOptionsForMark).
+    else if (updates.mark !== undefined) {
+      const nextMark = updates.mark;
+      setMarkOptions((prev) => markOptionsForMark(nextMark, prev));
+    }
     if (updates.title !== undefined) setTitle(updates.title);
     if (updates.palette !== undefined) setPalette(updates.palette);
     if (updates.xAxis !== undefined) setXAxis(updates.xAxis);
@@ -475,6 +579,22 @@ export function CreateChartDialog({
       // previous open must not be offered as if it had been.
       if (!isEditMode && (suppressAutoRange || isCanvasSurface)) {
         setSourceRange("");
+      }
+
+      // A NEW chart starts with the type its opener asked for (contract §4.1),
+      // or a column chart — NEVER the previous open's. This component stays
+      // mounted while closed (the early return sits after the hooks), so
+      // without this reset a Gauge inserted from the Visuals gallery made the
+      // next Insert > Chart a gauge too.
+      if (!isEditMode) {
+        const startMark: ChartMark = initialMark ?? "bar";
+        const startOptions = JSON.parse(initialMarkOptionsJson) as MarkOptions | null;
+        setMark(startMark);
+        setMarkOptions(startOptions ?? undefined);
+        // A title-only tile draws no legend; starting it "on" would only
+        // write a setting the painter never reads.
+        setLegend({ visible: markFurniture(startMark) === "full", position: "bottom" });
+        setNameResolution(null);
       }
 
       // Load BI connections for the design-query source picker (non-fatal).
@@ -545,7 +665,7 @@ export function CreateChartDialog({
         }).catch(() => {});
       }
     }
-  }, [isOpen, isPivotMode, pivotId, isEditMode, editChartId, currentSheetName, requestedTab, suppressAutoRange, isCanvasSurface]);
+  }, [isOpen, isPivotMode, pivotId, isEditMode, editChartId, currentSheetName, requestedTab, suppressAutoRange, isCanvasSurface, initialMark, initialMarkOptionsJson]);
 
   // Edit mode, once the sheet list has arrived: show the stored reference
   // qualified by its own sheet's CURRENT name (found by id, so a rename or a
@@ -649,6 +769,28 @@ export function CreateChartDialog({
       setAvailableAxes(axes);
     }
 
+    // ONE CELL is one value: no header row, and the cell itself is the series
+    // (named by the defined name, or by its address). Detection would find no
+    // series at all — it treats the first column as the category.
+    if (isSingleCell) {
+      if (hasHeaders) {
+        headersForcedOffRef.current = true;
+        setHasHeaders(false);
+      }
+      setCategoryIndex(0);
+      setSeries([{ name: nameCandidate ?? cellAddress(dataRange), sourceIndex: 0, color: null }]);
+      return;
+    }
+    // Back from one cell to a table: the header row the single cell switched
+    // off is switched back on (the reader did not ask for it to go).
+    if (headersForcedOffRef.current) {
+      headersForcedOffRef.current = false;
+      if (!hasHeaders) {
+        setHasHeaders(true);
+        return; // this effect runs again with the header row
+      }
+    }
+
     // Auto-detect series
     autoDetectSeries(dataRange, hasHeaders)
       .then((detected) => {
@@ -660,7 +802,7 @@ export function CreateChartDialog({
       });
     // boundRefKey stands for boundRef (see its declaration).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [boundRefKey, hasHeaders, orientation]);
+  }, [boundRefKey, hasHeaders, orientation, nameCandidate]);
 
   // Update preview when spec changes (also resolves cell references).
   // Composition containers (concat/facet/repeat) read their data via children /
@@ -773,7 +915,10 @@ export function CreateChartDialog({
         if (!sourceRange.trim()) {
           throw new Error("Please enter a data range for the chart.");
         }
-        if (!rangeBinding.ok) {
+        if (nameCandidate !== null && nameRef === null) {
+          throw new Error(nameAnswer?.error ?? "Still looking up that name. Try again in a moment.");
+        }
+        if (!rangeBinding.ok && nameRef === null) {
           throw new Error(
             rangeBinding.message ??
               (sheetList.length === 0
@@ -801,6 +946,18 @@ export function CreateChartDialog({
         if (series.length === 0 && !isComposition) {
           throw new Error("Please select at least one data series.");
         }
+      }
+
+      // THE SCHEMA GATE, the same one a script's chart write passes. A spec
+      // that fails it would be refused by every later script edit of this
+      // chart (the broker validates the merged spec) and warned about on every
+      // open; refuse it HERE, inline, where it can still be fixed.
+      const violations = validateChartSpec(currentSpec);
+      if (violations.length > 0) {
+        throw new Error(
+          `This chart's settings are not valid:\n${violations.slice(0, 5).join("\n")}` +
+            (violations.length > 5 ? `\n(+${violations.length - 5} more)` : ""),
+        );
       }
 
       // Pixel placement. An opener-supplied rectangle wins (a canvas insert

@@ -70,6 +70,14 @@ pub const GEOMETRY_PROPERTIES: &[&str] = &[
     "flipV",
 ];
 
+/// The properties that MOVE or RESIZE a control: the subset of
+/// [`GEOMETRY_PROPERTIES`] a page's LOCK OBJECTS refuses to change
+/// (`CanvasLayout::objects_locked`, Power BI's "can't be moved or resized").
+/// Narrower on purpose: rotation and flips are Power BI's Rotation FORMAT
+/// card, which a locked page still allows, and `pinToGrid` says how a control
+/// follows its cells -- a behaviour, not a position.
+pub const POSITION_SIZE_PROPERTIES: &[&str] = &["x", "y", "width", "height", "offsetX", "offsetY"];
+
 /// Does this control move when the grid shifts under it?
 ///
 /// * Absent -> YES. Every control authored before this existed is IN-CELL, and
@@ -192,6 +200,20 @@ pub const MACRO_REF_PROPERTY: &str = "macroRef";
 /// no reach outside the grid), and geometry/paint keys cannot run anything at
 /// all. This is the EXECUTION list, not the "publisher-authored" list.
 pub const EXECUTABLE_CONTROL_PROPERTIES: &[&str] = &[ON_SELECT_PROPERTY, MACRO_REF_PROPERTY];
+
+/// A button's DECLARATIVE action (Power BI's button actions: Page navigation,
+/// Back, Clear all slicers) -- the spellings of `BUTTON_ACTION_PROPERTY_KEYS`
+/// in `app/src/api/buttonControlService.ts`, pinned against that file by
+/// `held_button_code_tests::button_action_keys_match_the_seam_and_are_never_code`.
+///
+/// DELIBERATELY NOT EXECUTABLE AND NOT HELD. An action names a page to show or
+/// slicers to clear; it runs no code and reaches nothing a viewer could not
+/// click to themselves, so a pull keeps it LIVE: a subscribed report's Back,
+/// navigation and Clear-slicers buttons rest on "a pull strips code, never an
+/// action". Adding one of these to `EXECUTABLE_CONTROL_PROPERTIES` "to refuse
+/// it like code" would make every published navigation button arrive dead,
+/// with no error anywhere -- which is why the pin exists.
+pub const BUTTON_ACTION_PROPERTIES: &[&str] = &["action", "actionTarget", "actionTargetName"];
 
 /// THE HELD COMPARTMENT (BUG-0257): where a WORKING COPY keeps the button code
 /// its application shipped, so an untouched push publishes it unchanged.
@@ -539,6 +561,14 @@ pub(crate) fn set_control_property_with(
     if GEOMETRY_PROPERTIES.contains(&property_name.as_str()) {
         crate::protection::check_sheet_action(state, sheet_index, "editObjects", "move, resize or rotate a control")?;
     }
+    // LOCK OBJECTS: is this a POSITION or SIZE write on a locked page? Decided
+    // before the store is locked (a leaf read of `sheet_kinds`), applied below
+    // only to an EXISTING control whose value actually changes -- a create is
+    // an insert, and re-writing the value it has is no move.
+    let locked_position_write = POSITION_SIZE_PROPERTIES.contains(&property_name.as_str()) && {
+        let kinds = state.sheet_kinds.read().map_err(|e| e.to_string())?;
+        crate::sheets::canvas_objects_locked_in(&kinds, sheet_index)
+    };
 
     // The `editObjects` answer for a CREATE (wave-B B5), computed before the
     // store is locked -- the gate takes its own locks, as in the geometry
@@ -562,6 +592,17 @@ pub(crate) fn set_control_property_with(
     .map_err(|why| format!("Control at sheet {} r{}c{}: {}", sheet_index, row, col, why))?;
     if !pending.contains_key(&key) {
         create_gate?;
+    }
+    if locked_position_write {
+        if let Some(existing) = pending.get(&key) {
+            let unchanged = existing
+                .properties
+                .get(&property_name)
+                .is_some_and(|p| p.value_type == value_type && p.value == value);
+            if !unchanged {
+                return Err(crate::sheets::canvas_objects_locked_refusal("move or resize a control"));
+            }
+        }
     }
 
     // AN EXECUTABLE SLOT (onSelect, macroRef) is the button's CODE, and two
@@ -700,6 +741,19 @@ pub(crate) fn set_control_metadata_core(
         .iter()
         .map(|(k, v)| (*k, v.clone()))
         .collect();
+    // LOCK OBJECTS: a REPLACE of an existing control that changes its position
+    // or size is a move by another name, refused on a locked page; a create
+    // (nothing at the cell) is an insert, which a locked page allows.
+    if let Some((_, existing)) = previous.iter().find(|(k, _)| *k == (sheet_index, row, col)) {
+        let moves = POSITION_SIZE_PROPERTIES.iter().any(|name| {
+            let before = existing.properties.get(*name).map(|p| (&p.value_type, &p.value));
+            let after = metadata.properties.get(*name).map(|p| (&p.value_type, &p.value));
+            before != after
+        });
+        if moves {
+            crate::sheets::ensure_canvas_objects_unlocked(state, sheet_index, "move or resize a control")?;
+        }
+    }
     let effect = DocumentEffect::mutates(&file_state);
     {
         let mut controls = state.controls.write(&effect).map_err(|e| e.to_string())?;
@@ -822,6 +876,14 @@ pub(crate) fn move_control_core(
         check_property_value(name, &prop.value)?;
     }
     crate::protection::check_sheet_action(state, sheet_index, "editObjects", "move a control")?;
+    // LOCK OBJECTS, read before the store is locked (a leaf read). Applied
+    // below: a new ANCHOR re-places the control (the in-cell toggle draws it at
+    // its cell), and an override of x / y / width / height / offsets that
+    // differs from what the control has moves or resizes it.
+    let page_locked = {
+        let kinds = state.sheet_kinds.read().map_err(|e| e.to_string())?;
+        crate::sheets::canvas_objects_locked_in(&kinds, sheet_index)
+    };
 
     let from_key = (sheet_index, from.0, from.1);
     let to_key = (sheet_index, to.0, to.1);
@@ -837,6 +899,18 @@ pub(crate) fn move_control_core(
             "Another control already sits at sheet {} r{}c{}; move or delete it first. Nothing was moved.",
             sheet_index, to.0, to.1
         ));
+    }
+    if page_locked {
+        let moves_geometry = overrides.iter().any(|(name, prop)| {
+            POSITION_SIZE_PROPERTIES.contains(&name.as_str())
+                && existing
+                    .properties
+                    .get(name)
+                    .map_or(true, |p| p.value_type != prop.value_type || p.value != prop.value)
+        });
+        if to_key != from_key || moves_geometry {
+            return Err(crate::sheets::canvas_objects_locked_refusal("move a control"));
+        }
     }
     let mut moved = existing.clone();
     for (name, prop) in overrides {
@@ -1243,8 +1317,18 @@ pub(crate) fn set_control_geometry_core(
     let mut sheets: Vec<usize> = encoded.iter().map(|((sheet, _, _), _)| *sheet).collect();
     sheets.sort_unstable();
     sheets.dedup();
+    // LOCK OBJECTS, decided HERE from a snapshot of the kinds -- before the
+    // store is locked, like the protection gate -- and applied below to the
+    // controls that actually CHANGE, so a re-sync of the same geometry on a
+    // locked page is still a clean no-op. One locked control refuses the
+    // whole batch: a cross-family arrange is one step, never half of one.
+    let mut locked_sheets: HashSet<usize> = HashSet::new();
     for sheet in sheets {
         crate::protection::check_sheet_action(state, sheet, "editObjects", "move or resize a control")?;
+        let kinds = state.sheet_kinds.read().map_err(|e| e.to_string())?;
+        if crate::sheets::canvas_objects_locked_in(&kinds, sheet) {
+            locked_sheets.insert(sheet);
+        }
     }
 
     // Resolve, decide and write under ONE hold of the store (`lock_pending`),
@@ -1270,6 +1354,9 @@ pub(crate) fn set_control_geometry_core(
         .collect();
     if changed.is_empty() {
         return Ok(0);
+    }
+    if changed.iter().any(|((sheet, _, _), _)| locked_sheets.contains(sheet)) {
+        return Err(crate::sheets::canvas_objects_locked_refusal("move or resize a control"));
     }
     let previous: Vec<(ControlKey, ControlMetadata)> =
         pending.iter().map(|(k, v)| (*k, v.clone())).collect();

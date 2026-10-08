@@ -55,6 +55,7 @@ import {
 import type { ControlMetadata } from "./types";
 import { runInUndoTransaction } from "@api/objectGeometry";
 import { FLOATING_CONTROL_REGION_TYPE } from "./controlHitTest";
+import { buttonActionOfControl } from "./buttonActionOfControl";
 
 // ============================================================================
 // Snapshots
@@ -426,6 +427,9 @@ async function createControlCopy(
     width,
     height,
     controlType: metadata.controlType,
+    // A copied navigation / Back / Clear-all-slicers button acts like its
+    // original at once (the paste door strips code, never a declarative action).
+    buttonAction: buttonActionOfControl(metadata.controlType, metadata.properties),
   });
 
   // Select the new control

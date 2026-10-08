@@ -62,6 +62,9 @@ describe("the strip seats the controller the commands reach it through", () => {
     expect(body).toMatch(/deleteSheet: \(index\) => handleDeleteSheetRef\.current\(index, \{ confirm: "whenNotBlank" \}\)/);
     expect(body).toMatch(/renameSheet: \(index, newName\) => handleRenameSheetRef\.current\(index, newName\)/);
     expect(body).toMatch(/moveOrCopySheet:/);
+    // core.sheet.insert { atEnd } is the strip's own "+", with the kind asked for.
+    expect(body).toMatch(/appendSheet: \(kind\) => handleAddSheetRef\.current\(kind\)/);
+    expect(body).toMatch(/insertSheetBefore: \(beforeIndex, kind\) => handleInsertSheetBeforeRef\.current\(beforeIndex, kind\)/);
     // SABOTAGE: `deleteSheet: (index) => deleteSheet(index)` skips the switch steps.
     expect(body).not.toMatch(/=> deleteSheet\(/);
     expect(body).not.toMatch(/=> addSheet\(/);
@@ -78,6 +81,8 @@ describe("insert before / move or copy apply through the strip's commit-before-s
     expect(body).toMatch(/insertSheetBefore\(/);
     expect(body).toMatch(/forceSwitch: true/);
     expect(body).toMatch(/if \(structuralLocked\)/);
+    // The kind the command named reaches the backend add (a canvas, not a worksheet).
+    expect(body).toMatch(/addSheet: \(\) => addSheet\(undefined, kind\)/);
   });
 
   it("move or copy runs the flow and forces the switch for a copy", () => {

@@ -18,7 +18,16 @@
 //              even out);
 //            - Size & Position, when no Size and Position dialog can open for
 //              the primary object. A primary Core would refuse to move (locked,
-//              a run-mode button) still opens it, read-only, with the reason.
+//              a run-mode button) still opens it, read-only, with the reason;
+//            - Align (and the Distribute rows in its menu), while the page's
+//              LOCK OBJECTS is on (View > Lock Objects, lib/objectsLock.ts):
+//              aligning only moves, and every object on the page is locked
+//              against moving. Restacking and the per-object Lock stay -- the
+//              backend allows both on a locked page, as Power BI does.
+//
+//          Size & Position draws its own picture (SizePosition) since
+//          2026-10-08: Resize drew it AND Fit to Window, two commands on one
+//          tab with one picture (ICONS.md 2.3).
 //
 //          The section follows the selection (@api/objectSelection) and the
 //          canvas store (the lock state lives in the layout), so a selection
@@ -51,6 +60,8 @@ import {
 } from "../lib/arrange";
 import { STACKING_LABELS, allLocked, restackObjects, setObjectsLocked } from "../lib/zOrderStore";
 import { NOTHING_SELECTED_NOTE, SUBSCRIBED_NOTE } from "../lib/canvasNotes";
+import { canvasObjectsLocked } from "@api/canvasSheet";
+import { OBJECTS_LOCKED_NOTE } from "../lib/objectsLock";
 
 /** Re-render on every selection change (a family's own, or the set's). */
 function useSelectionTick(): number {
@@ -95,6 +106,10 @@ export function CanvasArrangeSection(_props: PanelSectionProps): React.ReactElem
   const why = activeSubscribed ? SUBSCRIBED_NOTE : none ? NOTHING_SELECTED_NOTE : null;
   const locked = !none && allLocked(selected);
   const canDistribute = count >= DISTRIBUTE_MIN_OBJECTS;
+  // The page's Lock Objects: nothing on it may move, so Align has nothing to do.
+  const pageLocked = canvasObjectsLocked(active.layout);
+  const alignDisabled = disabled || pageLocked;
+  const alignWhy = why ?? (pageLocked ? OBJECTS_LOCKED_NOTE : null);
   // Size & Position acts on ONE object: the primary member, the one Core's
   // grip and the Name Box name.
   const primary = none ? null : getPrimaryObjectRegion();
@@ -114,6 +129,9 @@ export function CanvasArrangeSection(_props: PanelSectionProps): React.ReactElem
           <CommandButton
             icon={<RibbonIcon.BringForward size={HERO_ICON_SIZE} />}
             label="Bring Forward"
+            // Two lines, as Excel writes its long Arrange heroes ("Bring / Forward v"):
+            // one line made Arrange 467 px wide and folded View even at 1920 px (live 2026-10-08).
+            labelLines={2}
             chevron
             disabled={disabled}
             tooltip={why ?? "Bring the selected objects forward, or all the way to the front"}
@@ -143,6 +161,7 @@ export function CanvasArrangeSection(_props: PanelSectionProps): React.ReactElem
           <CommandButton
             icon={<RibbonIcon.SendBackward size={HERO_ICON_SIZE} />}
             label="Send Backward"
+            labelLines={2}
             chevron
             disabled={disabled}
             tooltip={why ?? "Send the selected objects backward, or all the way to the back"}
@@ -173,9 +192,9 @@ export function CanvasArrangeSection(_props: PanelSectionProps): React.ReactElem
             icon={<RibbonIcon.AlignObjects size={HERO_ICON_SIZE} />}
             label="Align"
             chevron
-            disabled={disabled}
+            disabled={alignDisabled}
             tooltip={
-              why ??
+              alignWhy ??
               (count === 1
                 ? "Align the selected object to the page, or distribute three or more"
                 : "Line the selected objects up on an edge or centre, or space them evenly")
@@ -228,8 +247,9 @@ export function CanvasArrangeSection(_props: PanelSectionProps): React.ReactElem
       />
 
       <CommandButton
-        icon={<RibbonIcon.Resize size={HERO_ICON_SIZE} />}
+        icon={<RibbonIcon.SizePosition size={HERO_ICON_SIZE} />}
         label="Size & Position"
+        labelLines={2}
         disabled={sizeDisabled}
         tooltip={sizeWhy}
         data-testid="canvas-arrange-size-position"

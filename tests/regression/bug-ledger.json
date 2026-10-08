@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 400,
+  "nextId": 453,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -11481,6 +11481,1324 @@
         "description": "A script calls the @api wrapper over every column."
       },
       "notes": "fix-ext lane report."
+    },
+    {
+      "id": "BUG-0400",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "xlsx-import-non-ascii-panic",
+        "severity": "high",
+        "message": "XLSX IMPORT GARBLED NON-ASCII FORMULA TEXT AND PANICKED ON A NON-ASCII NAME: strip_future_function_prefixes walked BYTES, pushed each UTF-8 byte as a Latin-1 char inside string literals, and sliced formula[i..] inside a character outside them.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Import an .xlsx with =LEN(\"åäö\") (comes back as LEN(\"Ã¥Ã¤Ã¶\")) or ='Försäljning'!A1+1 (load_xlsx panics: byte index 3 is not a char boundary, xlsx_reader.rs:81). Any Swedish sheet name in a cross-sheet reference aborted the open."
+      },
+      "notes": "Found by the lpad lane's live Excel probe beside the strip list (lpad.md defect 1) and confirmed end to end by the rust-lpad review lens.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "core/persistence/src/xlsx_reader.rs strip_future_function_prefixes steps one character at a time, compares prefixes on bytes, copies each char whole, counts a non-ASCII letter as part of a name, and skips quoted sheet names ('' escape) and bracketed structured references as units. 15 new cases in future_function_prefixes_are_stripped_on_import_but_not_inside_strings plus a real load_xlsx round trip a_non_ascii_sheet_name_and_literal_and_a_prefixed_defined_name_import_intact (xlsx_writer.rs). 4 sabotages RED (fix-rust lane)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0401",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "xlsx-defined-name-xlfn-prefix",
+        "severity": "low",
+        "message": "XLSX IMPORT KEPT _xlfn./_xlpm. PREFIXES ON DEFINED NAMES, so every imported named LAMBDA evaluated to #NAME?: the defined-name loop only added '=' and never ran the prefix strip.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Excel workbook with <definedName name=\"LPAD\">_xlfn.LAMBDA(_xlpm.t,...)</definedName>: imported refers_to keeps the prefixes."
+      },
+      "notes": "Pre-existing; review rust-lpad lens.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "Each defined name's formula goes through the same char-safe strip (xlsx_reader.rs); pinned in the load_xlsx round-trip test (fix-rust lane)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0402",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "lpad-rpad-shadow-user-lambdas",
+        "severity": "medium",
+        "message": "THE NEW LPAD/RPAD BUILTINS SILENTLY TOOK OVER USER LAMBDAS OF THE SAME NAME (LET-bound, LAMBDA parameter, defined name, imported Excel name): named-LAMBDA resolution only looked at BuiltinFunction::Custom.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "=LET(lpad, LAMBDA(t,n,c, RIGHT(REPT(c,n)&t,n)), lpad(\"abcdef\",3,\"0\")) gave \"abc\" (the builtin's left cut) where the user's lambda says \"def\"; a defined name LPAD never ran."
+      },
+      "notes": "Review rust-lpad lens. GET.* deliberately not included (the AST does not keep the typed alias).",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "BuiltinFunction::yields_to_user_definitions() (LPad/RPad only) and user_definable_name() in core/parser/src/ast.rs; the evaluator sends a yielding call bound to a LAMBDA to the Custom arm; every host walk in name_resolution.rs and lib.rs asks user_definable_name(). Tests: pad_function_tests.rs a_let_bound_lambda_named_lpad_or_rpad_shadows_the_builtin, name_resolution.rs a_defined_name_called_lpad_or_rpad_takes_the_call_over_from_the_builtin. 3 sabotages RED (fix-rust lane)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0403",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "design-query-grouped-slicer-sum-rollup",
+        "severity": "high",
+        "message": "MODEL SLICERS FED GROUPED DESIGN-QUERY CHARTS INTO THE HOST-SIDE SUM ROLL-UP: page filters were appended to the query's FILTERS, which the grouped path puts in GROUP BY and the pivot engine re-adds with SUM, so AVERAGE / DISTINCTCOUNT / ratio measures under a slicer keeping 2+ items were silently wrong (and a high-cardinality slicer column multiplied every query).",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Column chart AvgAmount by Year on a canvas, model slicer keeping East and West: Y1 showed 30 (10 + 20) instead of 15; the measure-only Card on the same page showed the exact value."
+      },
+      "notes": "Model lane defect 1, rust-canvas defect 2, review visuals HIGH 1 and rust-lpad medium. Fixed on the measure-only path first by rust-canvas (engine ScopedInFilters, exact AVERAGE 30 vs roll-up 55). Grid REPORTS keep the host mask by design.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "TS: mergePageFilters sends page filters in DesignQueryRequest.pageFilterFields (+ level), never in filterFields (designQueryChartDataReader.ts; mirror in _shared/dsl/pivotLayout/designQuery.ts). Rust: headless.rs runs page_filter_fields inside the engine on both paths and a CHART's own FILTERS too (FiltersRoute); report.rs keeps the old host mask and its filter-area rows through compute_design_query_view_for_report. Tests: a_grouped_chart_under_a_multi_item_filter_is_the_engines_answer_per_bar, page_filters_run_inside_the_engine_on_a_grouped_chart (fix-rust + fix-charts lanes)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0404",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "measure-only-float64-filter-no-match",
+        "severity": "medium",
+        "message": "A PAGE OR DSL FILTER ON A FLOAT64 MODEL COLUMN MATCHED NOTHING IN THE ENGINE: the slicer lists \"2024\" (f64 Display) but the engine's IN-list matches a Float64 column only as \"2024.0\", so every measure-only Card/KPI/Gauge went blank with no error.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Model with Float64 Year; model slicer on Year, click 2024: the Card on the page answers NULL while a grouped chart on the same page still filters."
+      },
+      "notes": "The real fix (the engine's IN-list comparing a numeric column by number) is model-engine-lib's and stays open as open-items.md item 6 (Boolean and Float spelling).",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "Host stop-gap engine_spelling (app/src-tauri/src/pivot/headless.rs) re-spells items for a Float64 column in Rust's round-trip form for every engine-run filter, NOT IN complement included. Test a_float_column_filter_matches_the_items_the_slicer_lists (fix-rust lane)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0405",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "measure-only-reset-share-refused-under-slicer",
+        "severity": "medium",
+        "message": "A SHARE / %-OF-TOTAL MEASURE (RESET or CLEAR inside a compound expression) ON A CARD ERRORED AS SOON AS A PAGE SLICER HAD A SELECTION: the engine's typed refusal 'a measure clears request filter ...' surfaced as the visual's error.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Share = DIVIDE(SUM(Sales[amount]), SUM(Sales[amount], RESET())) on a Card, model slicer region = East: Invalid query error."
+      },
+      "notes": "On a SINGLE-TABLE model the fallback then hits a separate engine defect (compound RESET grouped by a fact-table column), filed open in this run.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "compute_design_query_view_routed falls back to the host mask when is_contested_clear_refusal matches (InvalidQuery containing ' clears '): engine-run filters become FILTERS fields (narrowing a field already present) and the query re-runs as GROUP BY. Tests a_share_card_under_a_slicer_is_answered_not_refused (90/120) and a_grouped_share_chart_under_a_page_slicer_falls_back_to_the_mask (fix-rust lane)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0406",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "visual-blank-shows-zero",
+        "severity": "medium",
+        "message": "A BLANK VALUE SHOWED \"0\", NEVER \"(Blank)\": the measure-only grand total over nothing was 0 in Rust, and once Rust sent Empty the readers turned it (and range blank cells, pivot Empty cells) back into 0; aggregates counted blanks; the KPI's blank latest period showed a red 0 and 'Goal: X (-100%)'.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Card over an empty cell, or a measure-only Card whose model slicer keeps nothing: '0'."
+      },
+      "notes": "Review visuals MEDIUM + rust-lpad medium (pivotChartDataReader.ts:305).",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "Rust: blank_measures_without_data sets the grand-total cell Empty with formattedValue '' (rust-canvas). TS: ParsedChartData.datumKinds carried by the range and pivot readers and filtered like displayValues; aggregates skip blanks; formatVisualValue writes '(Blank)'; KPI blank latest is neutral (fix-charts lane, visualsReviewFixes.test.ts)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0407",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "range-tiles-reparse-display-text",
+        "severity": "high",
+        "message": "RANGE-SOURCED CARD/KPI/GAUGE NUMBERS CAME FROM RE-PARSING DISPLAY TEXT: in sv-SE \"1 234,50 kr\" showed as \"123K kr\" (100x) and an ISO date as \"2K\"; parseDisplayNumber tested the decimal comma before stripping the unit and ended in a parseFloat prefix read.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "sv-SE workbook, cell 1234.5 formatted currency kr, Visuals > Card over it: '123K kr'. A date cell: '2K'."
+      },
+      "notes": "Review visuals HIGH 2. Bars were wrong by the same factor before; a Card prints the number outright.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "chartDataReader.ts readRangeGrid carries display + typed number; the typed number wins, text keeps the lenient bar-chart reading; chartFieldTypes.ts parseDisplayNumber strips unit text first and rejects partial numeric reads (fix-charts lane; F01-F03 sabotages)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0408",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "card-gauge-sum-rows-not-total",
+        "severity": "medium",
+        "message": "CARD/GAUGE OVER A PIVOT OR GROUPED DESIGN QUERY SUMMED THE ROWS INSTEAD OF USING THE SOURCE'S TOTAL: wrong for AVERAGE, DISTINCTCOUNT and ratios, while the pivot already held the right grand total.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Card on a pivot 'Average of Price by Region' (2 regions): shows the sum of the regional averages."
+      },
+      "notes": "Review visuals MEDIUM.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "ParsedChartData.seriesTotals from the visible GrandTotal row; aggregate 'auto' uses the source total when there is one (pivotChartDataReader.ts, visualValues.ts; fix-charts lane, F08)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0409",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "line-stacked-column-clustered-picture",
+        "severity": "medium",
+        "message": "'LINE AND STACKED COLUMN' DREW EXACTLY THE CLUSTERED PICTURE: the combo default made only series 0 a column, so the stack had one member, and no UI could make a second series a column.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "All Visuals > Line and stacked column over three numeric columns: identical rects to Line and clustered column."
+      },
+      "notes": "Review visuals MEDIUM. The clustered default is unchanged so existing combos keep their picture.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "comboDefaultSeriesMark (comboChartPainter.ts): with stackMode 'stacked' every series but the last is a column (Power BI's default); DesignTab ComboSeriesMarksSection 'Series as' Column/Line/Area per series writing markOptions.seriesMarks (fix-charts lane; comboStackedDefault.test.ts, designTabComboSeries.test.tsx)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0410",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "chart-dialog-type-switch-invalid-spec",
+        "severity": "medium",
+        "message": "CHANGING THE TYPE IN INSERT CHART (OR THE BAND) KEPT THE PREVIOUS TYPE'S markOptions AND SAVED A SCHEMA-INVALID SPEC UNVALIDATED; every later script edit of that chart was then refused and the load canary warned on each open.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Visuals > Stacked column, pick Card in the dialog, Insert: stored card carries stackMode; scripts' updateChartSpec refused."
+      },
+      "notes": "Review visuals MEDIUM; the deep-merge cause was charts survey §7.3.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "markOptionsForMark / markSwitchPatch (Charts/lib/markOptionsForMark.ts) narrow options on every type switch (dialog and Chart Design band); validateChartSpec runs before create/replace with violations shown inline (fix-charts lane; createChartDialogTypeSwitch.test.tsx)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0411",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "range-charts-ignore-hidden-rows",
+        "severity": "medium",
+        "message": "RANGE CHARTS AND RANGE CARD/KPI/GAUGE IGNORED TABLE SLICERS AND AUTOFILTER: hidden rows were read, so a table slicer on the same canvas never changed a range Card.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Canvas with a table slicer and a Card over that table: clicking the slicer leaves the total unchanged."
+      },
+      "notes": "Review visuals MEDIUM. Behaviour change: an existing range chart over rows hidden by hand now leaves them out. Hidden SERIES columns are still charted (series are addressed by position).",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "chartDataReader.ts drops hidden category lines (header kept); Charts/lib/hiddenLinesWatch.ts invalidates only charts whose hidden lines moved (coalesced 120 ms); ChartSpec.plotHiddenCells (default false, Excel parity) opts out (fix-charts lane; hiddenRowsRangeChart.test.ts)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0412",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "insights-poi-on-tiles",
+        "severity": "low",
+        "message": "INSIGHTS 'SHOW POINTS OF INTEREST' AND THE SNAPSHOT ACTION WERE OFFERED ON CARD/KPI/GAUGE/MULTI-ROW TILES, where Charts paints no cues, so the toggle did nothing visible.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Right-click a Card: Show points of interest."
+      },
+      "notes": "Review visuals LOW; contract §4.2.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "app/extensions/Insights/lib/overlayMenu.ts hides the actions on title-only marks via @api/chartMarks chartMarkFurniture (fix-charts lane; overlayMenuTiles.test.ts)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0413",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "chart-schema-bounds-advisory",
+        "severity": "low",
+        "message": "THE CHART SPEC SCHEMA GATE IGNORED minimum/maximum/pattern, so the new visuals' declared bounds were advisory (calloutFontSize 5000, decimals 99, targetSeriesIndex -9 all passed).",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Script updateSpec on a Card with decimals 99: accepted."
+      },
+      "notes": "Review visuals LOW.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "jsonSchemaCheck.ts enforces minimum / maximum / exclusiveMinimum / exclusiveMaximum / minLength / maxLength / pattern / minItems / maxItems (fix-charts lane; schemaBounds.test.ts)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0414",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "visual-secondary-text-loses-format",
+        "severity": "low",
+        "message": "AGGREGATED VALUES AND THE KPI GOAL / GAUGE MIN-MAX-TARGET LABELS LOST THE SOURCE FORMAT: the sum of 45% and 30% showed '0.75'; the goal read '10K' beside '$12K'.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Card over two percent cells: '0.75'."
+      },
+      "notes": "Review visuals LOW.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "aggregateSeries carries a formatSource exemplar; kpiPainter / gaugePainter format goal, min, max and target in the value's format (fix-charts lane)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0415",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "design-query-pinned-level-dropped",
+        "severity": "low",
+        "message": "A PINNED MODEL SLICER (LEVEL >= 2) FILTERED A BI PIVOT AND A DESIGN-QUERY CARD ON THE SAME PAGE DIFFERENTLY: mergePageFilters dropped the level and headless.rs tagged every page filter LEVEL_SLICER.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Pinned Region slicer, % of total measure in a BI pivot and in a Card: two numbers."
+      },
+      "notes": "Review visuals LOW.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "DesignQueryFieldRef.level carried TS -> Rust and clamped to 1..=LEVEL_MAX (fix-charts + fix-rust lanes; a_pinned_page_filter_keeps_its_level_inside_the_engine)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0416",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "design-query-card-caption-brackets",
+        "severity": "low",
+        "message": "A DESIGN-QUERY CARD'S CAPTION READ \"[Revenue]\" WITH BRACKETS: the DSL compiler sets customName to the bracketed measure name, which became the engine column header and the series name.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Visuals > Card, design query VALUES: [Revenue]: caption '[Revenue]'."
+      },
+      "notes": "Model lane defect 2, review visuals LOW (confirmed by code reading, then live in P5: caption 'Revenue').",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "designQueryChartData drops one enclosing pair from un-aliased measure captions and designQuerySeriesBinding still finds the field (fix-charts lane; designQueryCaptions.test.ts). PivotCharts over BI pivots keep the pivot grid's convention."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0417",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "gauge-default-max-ignores-target",
+        "severity": "low",
+        "message": "THE GAUGE'S DEFAULT MAX (2x VALUE) IGNORED THE TARGET, so a target above it was drawn pinned at the max end while its label read the real target.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Gauge value 100, target 300: needle at the 200 end, label '300'."
+      },
+      "notes": "Review visuals LOW (Power BI's exact widening rule not verified).",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "gaugePainter.ts widens a default end to take the target in (1.1x target); fixed ends never move (fix-charts lane, F13)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0418",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "chart-area-stacked-checkbox-no-op",
+        "severity": "medium",
+        "message": "THE CHART DIALOG'S AREA 'STACKED AREAS' CHECKBOX COULD DO NOTHING: it wrote only `stacked` while the painter prefers `stackMode`, so after Grouped it stacked nothing and after 100% unticking left the chart stacked.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Area chart, band > Grouped, dialog > tick Stacked areas: nothing stacks."
+      },
+      "notes": "Pre-existing; charts survey §7.1.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "Replaced by a Stacking select for every stackable mark through setStackModeInOptions (DesignTab.tsx; charts lane)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0419",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "chart-dialog-stale-type-between-opens",
+        "severity": "medium",
+        "message": "INSERT CHART KEPT THE PREVIOUS OPEN'S CHART TYPE: the dialog never reset mark/markOptions/legend for a new chart.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Insert a pie, then open Insert Chart again: pie preselected."
+      },
+      "notes": "Pre-existing; charts survey §2.2/§7.4.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "CreateChartDialog resets mark, markOptions and legend on every new-chart open (charts lane, sabotage S8)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0420",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "chart-type-names-three-lists",
+        "severity": "low",
+        "message": "THE THREE CHART-TYPE LISTS DISAGREED ON COLUMN vs BAR NAMING (dialog picker, band, registry labels).",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Compare the dialog's type list with the Chart Design band."
+      },
+      "notes": "Pre-existing.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "One catalog (chartTypeCatalog.ts) with Excel names; registry labels pinned by chartTypeNames.test.ts (charts lane)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0421",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "measure-only-pivot-charts-nothing",
+        "severity": "medium",
+        "message": "A PIVOT (OR DESIGN QUERY) WITH NO ROW FIELDS CHARTED NOTHING: its only row is the grand total, which the reader always dropped.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Pivot with Values only, insert a chart over it: empty chart."
+      },
+      "notes": "Pre-existing.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "extractChartData includes the grand total when the view has no visible Data rows (includeGrandTotal ?? !hasDataRows, pivotChartDataReader.ts; charts lane, S9)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0422",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "canvas-kept-ids-vanish-in-panel",
+        "severity": "medium",
+        "message": "THE KEPT TEST IDS canvas-insert-slicer / canvas-insert-pivot DISAPPEARED WHENEVER THE VISUALS GROUP WAS NOT IN THE BAND (sidebar or folded launcher), and the live specs' /^Insert/ launcher fallbacks no longer found any group.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Narrow window so Visuals folds; look for canvas-insert-slicer in the flyout: absent."
+      },
+      "notes": "Review tab MEDIUM.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "TileGalleryItem.testId (@api/layout Tile.tsx) lets the panel gallery give the Slicer and Matrix tiles their kept ids (fix-canvas lane, T1a/T1b); app/e2e/helpers/canvas-live.ts canvasControl opens the folded group and five specs were moved off /^Insert/ (live-e2e lane)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0423",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "size-position-says-object-locked-on-page-lock",
+        "severity": "medium",
+        "message": "WITH LOCK OBJECTS ON, SIZE & POSITION (DIALOG, ARRANGE TOOLTIP, GRIP MENU) SAID 'This object is locked. Unlock it' for an object that was not locked; the per-object button read 'Lock'.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Canvas > View > Lock Objects, select an unlocked shape, Arrange > Size & Position."
+      },
+      "notes": "Review tab MEDIUM.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "Core LayoutSurface.pageLockedReason (app/src/core/lib/layoutSurface.ts); sizeAndPositionAvailability returns that sentence first; the canvas surface sets it to OBJECTS_LOCKED_NOTE (fix-canvas lane; objectPosition.test.ts, objectsLock.test.ts)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0424",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "subscribed-locked-page-wrong-toast",
+        "severity": "medium",
+        "message": "ON A SUBSCRIBED CANVAS THE PUBLISHER LOCKED, A DRAG TOLD THE READER TO 'Turn Lock Objects off' -- a toggle disabled for them.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Subscribe to an application whose canvas has Lock Objects on; drag a chart."
+      },
+      "notes": "Review tab MEDIUM.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "objectsLock.ts onObjectPress asks lockNoticeApplies(): locked AND not subscribed (fix-canvas lane, T3)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0425",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "custom-size-keyboard-focus",
+        "severity": "medium",
+        "message": "PAGE SIZE > CUSTOM SIZE... FROM THE KEYBOARD LEFT FOCUS ON THE PAGE SIZE BUTTON; the W/H fields sat in a portalled card Tab could not reach in a sensible order.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Focus Page Size, ArrowDown to Custom Size..., Enter: focus stays on the button."
+      },
+      "notes": "Review tab MEDIUM.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "The card moves focus into the width field with its text selected (setTimeout(0) + rAF retry, the All Visuals rule) (CanvasPageSection.tsx; fix-canvas lane, T4)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0426",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "lock-toast-repeats-on-held-key",
+        "severity": "low",
+        "message": "HOLDING AN ARROW KEY ON A LOCKED PAGE SHOWED A NEW TOAST EVERY 2 S (3 over a 5 s hold), not one per gesture.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Lock Objects on, select a shape, hold ArrowRight for 5 s."
+      },
+      "notes": "Review tab LOW.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "The quiet window slides: lastAttemptAt updates on every attempt, suppressed ones included (objectsLock.ts; fix-canvas lane, T5)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0427",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "page-navigator-off-page",
+        "severity": "low",
+        "message": "A WRAPPED PAGE NAVIGATOR RAN OFF THE BOTTOM OF THE PAGE: only a one-row box was placed and clamped.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Tooltip page (320x240) in a workbook with 10 canvases: Buttons > Page Navigator puts a button's bottom edge at 280."
+      },
+      "notes": "Review tab LOW.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "pageNavigatorBlockSize places and clamps the whole wrapped block; pageNavigatorButtonWidth narrows buttons (never below 40 px) when even that cannot fit (pageNavigator.ts; fix-canvas lane, T7a/T7b)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0428",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "shape-thumbnails-squashed",
+        "severity": "low",
+        "message": "SHAPE THUMBNAILS IN THE SHAPES MENU WERE SQUASHED INTO A SQUARE: a 2:1 right arrow looked twice as tall as the arrow inserted.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Elements > Shapes: Right arrow row."
+      },
+      "notes": "Review tab LOW.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "ShapeThumbnail draws at the catalog's defaultWidth x defaultHeight proportions centred in a square slot (tabParts.tsx; fix-canvas lane, T8)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0429",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "per-object-lock-undo-label-collision",
+        "severity": "low",
+        "message": "THE PER-OBJECT LOCK'S UNDO STEP WAS NAMED 'Lock objects', the words of the new, NOT undoable page toggle Lock Objects: Undo after the toggle undid an earlier per-object lock under that name.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Arrange > Lock a shape, then View > Lock Objects, then Edit > Undo: 'Undo Lock objects' undoes the per-object lock."
+      },
+      "notes": "Review tab LOW.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "sheets.rs names the step 'Lock selected objects' / 'Unlock selected objects'; canvas_stacking_undo_tests.rs a_lock_toggle_is_one_undo_step and fixall-canvas.spec.ts updated (fix-rust lane)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0430",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "card-inserted-at-chart-size",
+        "severity": "low",
+        "message": "CARD, MULTI-ROW CARD, KPI AND GAUGE WERE INSERTED AT THE FULL CHART SIZE (480x300).",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Visuals > Card on a canvas."
+      },
+      "notes": "Review tab LOW, UNVERIFIED against Power BI's own default sizes (owner question).",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "CHART_MARK_INSERT_SIZES in insertOnCanvas.ts: card 240x140, kpi 280x180, gauge 320x220, multiRowCard 320x240 (fix-canvas lane, T11; live P3 pins 240x140)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0431",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "new-page-private-shell-event",
+        "severity": "medium",
+        "message": "CANVAS > NEW PAGE REACHED INTO THE SHELL THROUGH ITS PRIVATE 'sheet:requestAdd' WINDOW EVENT, a string contract with a Shell internal the codebase had deliberately moved away from (Facade Rule).",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Read canvasActions.ts: window.dispatchEvent(new CustomEvent('sheet:requestAdd', ...))."
+      },
+      "notes": "Review security MEDIUM. The strip's sheet:requestAdd listener stays because E2E helpers dispatch it.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "CoreCommands.SHEET_INSERT takes { kind?: 'worksheet'|'canvas', atEnd?: boolean } (unknown kind refused by name); the strip controller gains appendSheet(kind); New Page and the Shell's own Insert Canvas run SHEET_INSERT {kind:'canvas', atEnd:true} (canvasActions.ts NEW_CANVAS_PAGE_ARGS; fix-canvas lane, S1a-S1e)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0432",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "action-button-runs-object-scripts",
+        "severity": "low",
+        "message": "A BUTTON WITH A DECLARATIVE ACTION STILL RAN THE OBJECT SCRIPTS BOUND TO IT: button:clicked was emitted before the stored-action check, so 'A click performs this action' and 'has no code' were untrue.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Bind an object script's onClick to a button, give the button the Back action, press it in run mode: both run."
+      },
+      "notes": "Review security LOW. Owner asked to confirm 'one button, one thing'.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "Controls/index.ts handleButtonPress runs tryStoredButtonAction first; the hook fires only on the code path (fix-canvas lane; buttonActionCreate.test.ts, S2)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0433",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "canvas-layout-script-keys-unclassified",
+        "severity": "low",
+        "message": "THE NEW CanvasLayout FIELDS WERE UNCLASSIFIED FOR SCRIPTS: wallpaper and objectsLocked were refused as 'unknown' keys yet returned by getCanvasLayout, no census tied the script lists to the Rust struct, and the d.ts / context shims listed only three page presets.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "api.setCanvasLayout({ objectsLocked: false }): 'unknown canvas layout key'."
+      },
+      "notes": "Rust-canvas defect 4; review security + rust-lpad LOW. Whether a script may turn Lock Objects off is an owner question.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "validators.ts: wallpaper settable (cosmetic), objectsLocked read-only with its reason (CANVAS_LAYOUT_READ_ONLY_KEYS); a census parses the Rust struct and fails unless every field is in exactly one list; template d.ts, contextShims.ts and the generated objectContexts.d.ts list all 7 presets and both fields (fix-canvas lane; canvasSheetScriptRows.test.ts, S3a-S3c)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0434",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "button-action-keys-pull-unpinned",
+        "severity": "low",
+        "message": "NOTHING PINNED THAT A PULL KEEPS A BUTTON'S DECLARATIVE ACTION: published Back / Clear / Navigate buttons rest on action keys staying out of EXECUTABLE_CONTROL_PROPERTIES, and adding them there would have arrived every navigation button dead with no test failing.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Add 'action' to EXECUTABLE_CONTROL_PROPERTIES: before the fix nothing failed."
+      },
+      "notes": "Review security LOW. The seams lane's 'undo leaves both' note was FALSE and is deliberately not filed.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "controls.rs BUTTON_ACTION_PROPERTIES; held_button_code_tests.rs button_action_keys_match_the_seam_and_are_never_code (reads buttonControlService.ts), every_admission_door_keeps_a_buttons_action_live, a_subscribed_navigation_button_arrives_with_its_action. Also pinned: choosing_an_action_for_a_coded_button_undoes_to_the_code_and_redoes_to_the_action (fix-rust lane)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0435",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "theme-seam-format-menu-item",
+        "severity": "low",
+        "message": "THE THEME-GALLERY SEAM ADDED A USER-VISIBLE FORMAT > THEMES MENU-BAR ITEM (Excel has Themes only on Page Layout) as a side effect of hosting the gallery on the Canvas tab.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Menu bar > Format: a 'Themes' item appended."
+      },
+      "notes": "Review security LOW.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "@api/themeGallery is its own provider registry (registerThemeGallery / getThemeGallery / subscribeThemeGallery / useThemeGallery); DocumentTheme registers there and adds no menu item; Canvas > Themes hosts it in its own card (fix-canvas lane; themeGallerySeam.test.ts, S6a-S6d)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0436",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "census-not-a-grid-bare-view",
+        "severity": "low",
+        "message": "THE RECALCULATION CENSUS'S NEW NOT_A_GRID EXEMPTION WAS KEYED ON THE BARE RECEIVER NAME 'view', exempting any future view.cells.get_mut anywhere in app/src-tauri.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Read bulk_rewrite_recalc_tests.rs NOT_A_GRID."
+      },
+      "notes": "Review security LOW (a).",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "The local in blank_measures_without_data is pivot_view and NOT_A_GRID allows exactly that spelling (fix-rust lane)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0437",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "lpad-docs-overclaim",
+        "severity": "low",
+        "message": "LPAD.md / RPAD.md PROMISED 'the same answer in a cell and in a model query' and 'an emoji is one', and called 32,767 'the most text a cell can hold'; none holds (DataFusion counts graphemes and accepts negatives; REPT allows 1,048,576 bytes).",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "LPAD(\"é\",3,\"0\") in a cell gives \"0é\"; the model's DataFusion lpad gives \"00é\"."
+      },
+      "notes": "Review rust-lpad LOW.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "Docs say the model follows the same SQL rules for ordinary text, a cell refuses a negative or >32,767 length and counts code points, 'Excel's cell-text limit', 'most emoji are one', and that a workbook's own LPAD/RPAD wins (fix-rust lane)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0438",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "design-view-reference-needs-dimension",
+        "severity": "low",
+        "message": "functions/pivot/design-view-reference.md STILL SAID A DESIGN QUERY NEEDS A ROWS OR COLUMNS DIMENSION after measure-only queries became legal.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Read design-view-reference.md:475."
+      },
+      "notes": "Rust-canvas defect 3; review rust-lpad LOW.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "The reference says a query with no ROWS/COLUMNS returns one total, chart FILTERS and page slicers run inside the model (share-measure exception), and a grid report keeps its filter area (fix-rust lane)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0439",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "rept-doc-stale-limit",
+        "severity": "low",
+        "message": "functions/REPT.md CLAIMED A 32,767-CHARACTER LIMIT WITH #VALUE!; the code applies 1,048,576 BYTES with #LIMIT! (evaluator.rs fn_rept, budget.rs MAX_TEXT_LEN).",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "=REPT(\"a\",40000) returns 40,000 characters, not #VALUE!."
+      },
+      "notes": "Pre-existing.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "REPT.md remark corrected, including the byte versus character difference (lpad lane)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0440",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "fx-cancel-strands-equals-entry",
+        "severity": "medium",
+        "message": "CANCELLING THE INSERT FUNCTION (fx) DIALOG LEFT AN INVISIBLE '=' ENTRY OPEN with focus on <body>: the next click on another cell was read as POINT mode and wrote '=G2' into the cell the user had left, and keystrokes did not reach the grid.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Select G1 with no edit open, press fx, close the dialog (X / Escape / click outside), click G2: G1 now holds =G2."
+      },
+      "notes": "Pre-existing Shell defect, found live by canvas-powerbi.spec.ts P10.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "src/shell/FormulaBar/insertFunctionHost.tsx handleCancel calls cancelEdit() when THIS open seeded the '=' (startedForSeq === req.seq) and the cell still holds only '='; an edit the user started or typed into is kept (live-e2e lane; 3 tests in insertFunctionCommand.test.tsx; 2 sabotages RED; live P10)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0441",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "canvas-tab-folds-at-1920",
+        "severity": "low",
+        "message": "AT 1920 PX THE CANVAS TAB STILL FOLDED THE VIEW GROUP WITH ABOUT 300 PX OF BAND UNUSED: one-line hero labels made Arrange 467 px and View 434 px (total 1977 > 1920).",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "1920 px window, open a canvas: View is a launcher."
+      },
+      "notes": "Owner screenshot; found live.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "labelLines={2} on Bring Forward, Send Backward, Size & Position, Floating Grid, Page Size, Page View and Design Mode (CanvasArrangeSection / CanvasElementsSection / CanvasPageSection / CanvasViewSection); all six groups inline at 1920 (1780 px) (live-e2e lane; pinned live by P1, sabotage RED)."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0442",
+      "status": "fixed",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "control-placement-test-no-size-assert",
+        "severity": "low",
+        "message": "THE controlPlacement TEST TITLED 'catalog default size' DID NOT ASSERT THE SIZE, so a shape inserted at a fixed 160 x 160 would have passed.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Change createShape to request.width ?? 160: the titled test stays green."
+      },
+      "notes": "Test without teeth (seams lane).",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-08",
+        "description": "shapeDefaultSize.test.ts pins five shapes of different sizes on the positioned (canvas) path (seams lane, sabotage #20 RED); the canvas Shapes menu sends no width/height."
+      },
+      "fixedAt": "2026-10-08"
+    },
+    {
+      "id": "BUG-0443",
+      "status": "open",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "lock-objects-check-then-write",
+        "severity": "low",
+        "message": "LOCK OBJECTS IS CHECKED UNDER A READ LOCK RELEASED BEFORE THE GEOMETRY WRITE (ensure_canvas_objects_unlocked, sheets.rs:2181), the check-then-write shape CLAUDE.md forbids for gated commands: a set_canvas_layout { objectsLocked: true } landing between check and write lets ONE move through.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Race a move against the toggle (not reproduced; by reading)."
+      },
+      "notes": "Left in place by decision and documented in the doc comment (sheets.rs:2163-2180): holding sheet_kinds across eight doors' store writes would add a sheet_kinds -> store edge against the slicer/timeline doors' store -> sheet_kinds order and can deadlock behind a queued writer. Owner question in open-items §2.aj."
+    },
+    {
+      "id": "BUG-0444",
+      "status": "open",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "engine-compound-reset-fact-group-by",
+        "severity": "medium",
+        "message": "MODEL ENGINE: A COMPOUND RESET MEASURE CANNOT BE GROUPED BY ANY COLUMN OF THE FACT TABLE: DIVIDE(SUM(Sales[amount]), SUM(Sales[amount], RESET())) grouped by a fact column fails 'Schema error: No field named __scalar_sq_1.__clear_scalar. Valid fields are ..., __scalar_sq_2.__clear_scalar'. Grouping by a dimension-table column and the scalar query work.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "scratchpad/fixrust/shareprobe (standalone crate): single-table model 'share by region' -> ERR; star model 'share by year' (fact) -> ERR, 'share by name' (dimension) -> OK."
+      },
+      "notes": "model-engine-lib (not fixed). Consequence: on a single-table model a share Card under a slicer still errors after the host-mask fallback (the error is now the engine's schema error, not the refusal). Found by the fix-rust lane."
+    },
+    {
+      "id": "BUG-0445",
+      "status": "open",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "combo-second-axis-no-op",
+        "severity": "medium",
+        "message": "THE COMBO '2nd AXIS' SWITCH DOES NOTHING USEFUL: both the band (ChartDesignSections.tsx:903-906) and the dialog (DesignTab.tsx:597-598) write only secondaryYAxis, nothing in the UI writes secondaryAxisSeries, and the layout reserves a 46 px right margin on the flag alone -- an empty strip and no secondary axis.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Line and clustered column chart, Chart Design > 2nd axis on."
+      },
+      "notes": "Pre-existing; charts survey §7.2, charts lane 'not fixed (out of scope)'."
+    },
+    {
+      "id": "BUG-0446",
+      "status": "open",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "quick-access-axis-titles-on-pie",
+        "severity": "low",
+        "message": "THE CHART QUICK-ACCESS ELEMENTS POPUP STILL OFFERS AXIS TITLES AND GRIDLINES ON PIE AND FUNNEL CHARTS (only title-only marks were narrowed).",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Select a pie chart, open the quick-access Elements button."
+      },
+      "notes": "Pre-existing; Charts/components/QuickAccessPopup.tsx (charts lane)."
+    },
+    {
+      "id": "BUG-0447",
+      "status": "open",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "tile-visuals-locale-separators",
+        "severity": "low",
+        "message": "THE TILE VISUALS WRITE '.' DECIMALS AND ',' GROUPING WHATEVER THE LOCALE: an sv-SE Card shows '1.2K kr' beside cells showing '1 234,50 kr', and a percent Card's source text '34,20%' sits beside '$4.5M' on the same page.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "sv-SE workbook, Cards over a currency cell and a percent cell (seen live in icons/canvas-powerbi-live-visuals.png)."
+      },
+      "notes": "groupDigits in app/extensions/Charts/rendering/visuals/visualValues.ts:233 is not locale-aware (fix-charts open item, live-e2e)."
+    },
+    {
+      "id": "BUG-0448",
+      "status": "open",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "chart-dialog-series-column-letters",
+        "severity": "low",
+        "message": "THE CREATE CHART DIALOG'S SERIES LIST NAMES SERIES BY COLUMN LETTER (B, C, D) WHILE THE LEGEND SAYS Q1, Q2, Q3.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Insert a column chart over a range with a header row; open the dialog's series list."
+      },
+      "notes": "Pre-existing; seen live by the live-e2e lane (CreateChartDialog)."
+    },
+    {
+      "id": "BUG-0449",
+      "status": "open",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "nav-button-subscriber-renamed-page",
+        "severity": "low",
+        "message": "A PUBLISHED NAVIGATE BUTTON FAILS ON A SUBSCRIBER WHO ALREADY HAD A SHEET OF THE TARGET PAGE'S NAME: pull remaps the sheet ids, the conflicting page is renamed, and the name fallback finds nothing (a toast says so).",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Publish a canvas with a Page Navigator to 'Sales'; subscribe in a workbook that already has a 'Sales' sheet; press the button."
+      },
+      "notes": "Full fix: Rust remaps actionTarget on pull (core/calp/src/pull.rs). Seams lane open item."
+    },
+    {
+      "id": "BUG-0450",
+      "status": "open",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "report-dry-run-filter-area-count",
+        "severity": "low",
+        "message": "THE REPORT DRY RUN CAN UNDER-COUNT THE REPORT'S FILTER-AREA ROWS: since the chart route runs the query's own FILTERS inside the engine, the dry run (which goes through run_design_query, headless.rs:180) has up to one filter-area row per FILTERS field fewer than the real report, which keeps them (report.rs:656 compute_design_query_view_for_report).",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "A grid report with FILTERS: compare the dry run's 'describe the report in words' row count with the report."
+      },
+      "notes": "Consequence of the grouped-path fix (fix-rust lane); needs a dry-run route of its own if it matters."
+    },
+    {
+      "id": "BUG-0451",
+      "status": "open",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "formula-patterns-date-churn",
+        "severity": "low",
+        "message": "check:formula-patterns GOES STALE EVERY DAY AFTER A REGENERATION: the generated formulaPatterns.ts records TODAY-based answers (TEXT#1.B4, TODAY#1.B2 and the next entry) although the generator's own comment says volatile patterns carry no recorded results.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Regenerate, wait a day, run npm run check:formula-patterns: stale."
+      },
+      "notes": "app/scripts/gen-formula-patterns.mjs renderArtifact (:396) still writes expect/result for volatile patterns (lpad lane)."
+    },
+    {
+      "id": "BUG-0452",
+      "status": "open",
+      "discovered": "2026-10-08",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas tab = Power BI report authoring + LPAD/RPAD programme: lane reports, adversarial review, fix lanes, live E2E (2026-10-08)"
+      },
+      "violation": {
+        "oracleId": "formula-patterns-randbetween-flaky",
+        "severity": "low",
+        "message": "THE VERIFIED FORMULA-PATTERN COUNT IS FLAKY: RANDBETWEEN#1.B3 'settles' in about 1 run in 6 (583, 584, 583 ...), ships as {number: 1}, and --check then reports stale against an artifact emitted a minute earlier.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Run node scripts/gen-formula-patterns.mjs --emit six times."
+      },
+      "notes": "app/scripts/gen-formula-patterns.mjs (lpad lane). The committed artifact is the 583 version."
     }
   ]
 }

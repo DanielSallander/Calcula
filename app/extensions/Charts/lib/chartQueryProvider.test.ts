@@ -23,6 +23,7 @@ vi.mock("@api/events", () => ({
 
 import { registerChartQueryProvider } from "./chartQueryProvider";
 import { refreshBoundQueryObjects } from "../../_shared/lib/queryObjectRefresh";
+import { publishPageFilters } from "@api/pageFilters";
 
 function chart(chartId: string, data: unknown, name = chartId) {
   return { chartId, name, spec: { data } };
@@ -56,6 +57,41 @@ describe("chartQueryProvider", () => {
     // Charts are overlays: repaint-only app event, exactly once per pass.
     expect(mockEmitAppEvent).toHaveBeenCalledTimes(1);
     expect(mockEmitAppEvent).toHaveBeenCalledWith("app:grid-refresh");
+  });
+
+  it("re-runs only the design-query charts on a changed page AND model when the page's filters move", () => {
+    mockGetAllCharts.mockReturnValue([
+      { chartId: "c-1", name: "c-1", sheetIndex: 1, spec: { data: { type: "designQuery", dslText: "VALUES: [M]", connectionId: "conn" } } },
+      { chartId: "c-2", name: "c-2", sheetIndex: 2, spec: { data: { type: "designQuery", dslText: "VALUES: [M]", connectionId: "conn" } } },
+      { chartId: "c-3", name: "c-3", sheetIndex: 1, spec: { data: { type: "designQuery", dslText: "VALUES: [M]", connectionId: "other" } } },
+      { chartId: "c-4", name: "c-4", sheetIndex: 1, spec: { data: { type: "pivot", pivotId: "p-1" } } },
+    ]);
+
+    publishPageFilters("test", [
+      { sourceId: "s", sourceName: "S", sheetIndex: 1, connectionId: "conn", field: "T.C", includedItems: ["a"] },
+    ]);
+    expect(mockInvalidateChartCache.mock.calls.map((c) => c[0])).toEqual(["c-1"]);
+    expect(mockEmitAppEvent).toHaveBeenCalledTimes(1);
+
+    // Clearing it is a change too.
+    mockInvalidateChartCache.mockClear();
+    publishPageFilters("test", []);
+    expect(mockInvalidateChartCache.mock.calls.map((c) => c[0])).toEqual(["c-1"]);
+  });
+
+  it("stops following the page's filters once unregistered", () => {
+    mockGetAllCharts.mockReturnValue([
+      { chartId: "c-1", name: "c-1", sheetIndex: 1, spec: { data: { type: "designQuery", dslText: "VALUES: [M]", connectionId: "conn" } } },
+    ]);
+    unregister?.();
+    unregister = null;
+
+    publishPageFilters("test", [
+      { sourceId: "s", sourceName: "S", sheetIndex: 1, connectionId: "conn", field: "T.C", includedItems: ["a"] },
+    ]);
+    publishPageFilters("test", []);
+
+    expect(mockInvalidateChartCache).not.toHaveBeenCalled();
   });
 
   it("does nothing when no design-query chart references the control", async () => {

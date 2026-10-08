@@ -301,6 +301,9 @@ pub(crate) fn update_timeline_position_core(
         // Nothing moved: no dirty flag, no Ctrl+Z step that restores itself.
         return Ok(());
     }
+    // LOCK OBJECTS on its page: a real move is refused before the effect. The
+    // same leaf read of `sheet_kinds` the protection gate above makes.
+    crate::sheets::ensure_canvas_objects_unlocked(state, pre_edit.sheet_index, "move or resize a timeline")?;
 
     let effect = crate::document_effect::DocumentEffect::mutates(file_state);
     {

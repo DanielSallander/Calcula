@@ -33,6 +33,13 @@ import { paintStockChart, computeStockLayout, computeStockBarRects } from "./sto
 import { paintBoxPlotChart, computeBoxPlotLayout, computeBoxPlotBarRects } from "./boxPlotChartPainter";
 import { paintSunburstChart, computeSunburstLayout, computeSunburstBarRects } from "./sunburstChartPainter";
 import { paintParetoChart, computeParetoLayout, computeParetoBarRects, computeParetoHitGeometry } from "./paretoChartPainter";
+import {
+  paintCardChart, computeCardLayout, computeCardBarRects,
+  paintMultiRowCardChart, computeMultiRowCardLayout, computeMultiRowCardBarRects,
+  paintKpiChart, computeKpiLayout, computeKpiPointMarkers,
+  paintGaugeChart, computeGaugeLayout, computeGaugeBarRects,
+} from "./visuals";
+import { chartMarkFurniture } from "@api/chartMarks";
 import { paintRule } from "./rulePainter";
 import { paintTextMark } from "./textMarkPainter";
 import { paintMarkerMark } from "./markerPainter";
@@ -46,7 +53,7 @@ import { chartDataTableView } from "../lib/dataTableView";
 // ============================================================================
 // Built-in Mark Registration
 // ============================================================================
-// The 18 built-in marks register through the same registry a third-party would
+// The 22 built-in marks register through the same registry a third-party would
 // use, so the dispatch functions below are data-driven lookups rather than
 // hardcoded switch statements.
 
@@ -57,27 +64,48 @@ const asBars = (fn: GeomFn<BarRect[]>): GeomFn<HitGeometry> => (d, s, l, t) => (
 const asPoints = (fn: GeomFn<PointMarker[]>): GeomFn<HitGeometry> => (d, s, l, t) => ({ type: "points", markers: fn(d, s, l, t) });
 const asSlices = (fn: GeomFn<SliceArc[]>): GeomFn<HitGeometry> => (d, s, l, t) => ({ type: "slices", arcs: fn(d, s, l, t) });
 
-/** Build built-in mark metadata (label + axis family). */
-const meta = (label: string, layoutFamily: "cartesian" | "radial" | "other") => ({ label, layoutFamily, builtin: true as const });
+/**
+ * Build built-in mark metadata (label + axis family [+ furniture]).
+ *
+ * THE LABEL IS THE CATALOG'S (components/chartTypeCatalog.ts), in Excel's
+ * vocabulary: our "bar" mark draws vertical bars, which Excel and Power BI call
+ * a COLUMN chart, and "horizontalBar" is the BAR chart. This list used to say
+ * "Bar Chart" / "Horizontal Bar Chart" while the band said "Column" / "Bar", so
+ * the same chart had two names depending on where the reader looked.
+ * `chartTypeNames.test.ts` holds the two lists (and the dialog's picker) to one
+ * spelling. It is not imported from the catalog because the catalog belongs to
+ * the UI layer and this file is the renderer every surface (and the spec
+ * editor window) loads.
+ */
+const meta = (
+  label: string,
+  layoutFamily: "cartesian" | "radial" | "other",
+  furniture?: "titleOnly",
+) => ({ label, layoutFamily, builtin: true as const, ...(furniture ? { furniture } : {}) });
 
-registerChartMark("bar", { meta: meta("Bar Chart", "cartesian"), paint: paintBarChart, computeLayout: computeBarLayout, computeGeometry: asBars(computeBarRects) });
-registerChartMark("horizontalBar", { meta: meta("Horizontal Bar Chart", "cartesian"), paint: paintHorizontalBarChart, computeLayout: computeHorizontalBarLayout, computeGeometry: asBars(computeHorizontalBarRects) });
-registerChartMark("line", { meta: meta("Line Chart", "cartesian"), paint: paintLineChart, computeLayout: computeLineLayout, computeGeometry: asPoints(computeLinePointMarkers) });
-registerChartMark("area", { meta: meta("Area Chart", "cartesian"), paint: paintAreaChart, computeLayout: computeAreaLayout, computeGeometry: asPoints(computeAreaPointMarkers) });
-registerChartMark("scatter", { meta: meta("Scatter Plot", "cartesian"), paint: paintScatterChart, computeLayout: computeScatterLayout, computeGeometry: asPoints(computeScatterPointMarkers) });
-registerChartMark("pie", { meta: meta("Pie Chart", "radial"), paint: paintPieChart, computeLayout: computePieLayout, computeGeometry: asSlices(computePieSliceArcs) });
-registerChartMark("donut", { meta: meta("Donut Chart", "radial"), paint: paintPieChart, computeLayout: computePieLayout, computeGeometry: asSlices(computePieSliceArcs) });
-registerChartMark("waterfall", { meta: meta("Waterfall Chart", "cartesian"), paint: paintWaterfallChart, computeLayout: computeWaterfallLayout, computeGeometry: asBars(computeWaterfallBarRects) });
-registerChartMark("combo", { meta: meta("Combo Chart", "cartesian"), paint: paintComboChart, computeLayout: computeComboLayout, computeGeometry: computeComboHitGeometry });
-registerChartMark("radar", { meta: meta("Radar Chart", "radial"), paint: paintRadarChart, computeLayout: computeRadarLayout, computeGeometry: asPoints(computeRadarPointMarkers) });
-registerChartMark("bubble", { meta: meta("Bubble Chart", "cartesian"), paint: paintBubbleChart, computeLayout: computeBubbleLayout, computeGeometry: asPoints(computeBubblePointMarkers) });
+registerChartMark("bar", { meta: meta("Column", "cartesian"), paint: paintBarChart, computeLayout: computeBarLayout, computeGeometry: asBars(computeBarRects) });
+registerChartMark("horizontalBar", { meta: meta("Bar", "cartesian"), paint: paintHorizontalBarChart, computeLayout: computeHorizontalBarLayout, computeGeometry: asBars(computeHorizontalBarRects) });
+registerChartMark("line", { meta: meta("Line", "cartesian"), paint: paintLineChart, computeLayout: computeLineLayout, computeGeometry: asPoints(computeLinePointMarkers) });
+registerChartMark("area", { meta: meta("Area", "cartesian"), paint: paintAreaChart, computeLayout: computeAreaLayout, computeGeometry: asPoints(computeAreaPointMarkers) });
+registerChartMark("scatter", { meta: meta("Scatter", "cartesian"), paint: paintScatterChart, computeLayout: computeScatterLayout, computeGeometry: asPoints(computeScatterPointMarkers) });
+registerChartMark("pie", { meta: meta("Pie", "radial"), paint: paintPieChart, computeLayout: computePieLayout, computeGeometry: asSlices(computePieSliceArcs) });
+registerChartMark("donut", { meta: meta("Donut", "radial"), paint: paintPieChart, computeLayout: computePieLayout, computeGeometry: asSlices(computePieSliceArcs) });
+registerChartMark("waterfall", { meta: meta("Waterfall", "cartesian"), paint: paintWaterfallChart, computeLayout: computeWaterfallLayout, computeGeometry: asBars(computeWaterfallBarRects) });
+registerChartMark("combo", { meta: meta("Combo", "cartesian"), paint: paintComboChart, computeLayout: computeComboLayout, computeGeometry: computeComboHitGeometry });
+registerChartMark("radar", { meta: meta("Radar", "radial"), paint: paintRadarChart, computeLayout: computeRadarLayout, computeGeometry: asPoints(computeRadarPointMarkers) });
+registerChartMark("bubble", { meta: meta("Bubble", "cartesian"), paint: paintBubbleChart, computeLayout: computeBubbleLayout, computeGeometry: asPoints(computeBubblePointMarkers) });
 registerChartMark("histogram", { meta: meta("Histogram", "cartesian"), paint: paintHistogramChart, computeLayout: computeHistogramLayout, computeGeometry: asBars(computeHistogramBarRects) });
-registerChartMark("funnel", { meta: meta("Funnel Chart", "other"), paint: paintFunnelChart, computeLayout: computeFunnelLayout, computeGeometry: asBars(computeFunnelBarRects) });
+registerChartMark("funnel", { meta: meta("Funnel", "other"), paint: paintFunnelChart, computeLayout: computeFunnelLayout, computeGeometry: asBars(computeFunnelBarRects) });
 registerChartMark("treemap", { meta: meta("Treemap", "other"), paint: paintTreemapChart, computeLayout: computeTreemapLayout, computeGeometry: asBars(computeTreemapBarRects) });
-registerChartMark("stock", { meta: meta("Stock (OHLC)", "cartesian"), paint: paintStockChart, computeLayout: computeStockLayout, computeGeometry: asBars(computeStockBarRects) });
+registerChartMark("stock", { meta: meta("Stock", "cartesian"), paint: paintStockChart, computeLayout: computeStockLayout, computeGeometry: asBars(computeStockBarRects) });
 registerChartMark("boxPlot", { meta: meta("Box & Whisker", "cartesian"), paint: paintBoxPlotChart, computeLayout: computeBoxPlotLayout, computeGeometry: asBars(computeBoxPlotBarRects) });
 registerChartMark("sunburst", { meta: meta("Sunburst", "radial"), paint: paintSunburstChart, computeLayout: computeSunburstLayout, computeGeometry: asBars(computeSunburstBarRects) });
 registerChartMark("pareto", { meta: meta("Pareto", "cartesian"), paint: paintParetoChart, computeLayout: computeParetoLayout, computeGeometry: computeParetoHitGeometry });
+// Power BI's tile visuals (rendering/visuals/): no axes, a title and nothing else.
+registerChartMark("card", { meta: meta("Card", "other", "titleOnly"), paint: paintCardChart, computeLayout: computeCardLayout, computeGeometry: asBars(computeCardBarRects) });
+registerChartMark("multiRowCard", { meta: meta("Multi-row card", "other", "titleOnly"), paint: paintMultiRowCardChart, computeLayout: computeMultiRowCardLayout, computeGeometry: asBars(computeMultiRowCardBarRects) });
+registerChartMark("kpi", { meta: meta("KPI", "other", "titleOnly"), paint: paintKpiChart, computeLayout: computeKpiLayout, computeGeometry: asPoints(computeKpiPointMarkers) });
+registerChartMark("gauge", { meta: meta("Gauge", "other", "titleOnly"), paint: paintGaugeChart, computeLayout: computeGaugeLayout, computeGeometry: asBars(computeGaugeBarRects) });
 
 // ============================================================================
 // Paint Dispatch
@@ -118,6 +146,16 @@ export function dispatchPaint(
 
   // Paint the primary mark
   paintMark(ctx, data, spec.mark, markSpec, layout, theme);
+
+  // A TITLE-ONLY mark (Card, Multi-row card, KPI, Gauge) draws its own labels
+  // inside its own box and has no other furniture, so the generic stages below
+  // stop here. Without this, a Card whose spec still carried `dataLabels:
+  // {enabled: true}` (a type switch keeps it — updateChartSpec deep-merges)
+  // would get a second label stamped on its callout from the hit rect, and a
+  // stale data table would paint into a box that reserved no band for it.
+  // Layers (rule / text / marker) are placed on a category and a VALUE axis,
+  // which a tile does not have, so they stop here too.
+  if (chartMarkFurniture(spec.mark) === "titleOnly") return;
 
   // Paint error bars (after primary mark, before data labels). The mark list is
   // the painter's own (`markSupportsErrorBars`), not a copy: a local array here

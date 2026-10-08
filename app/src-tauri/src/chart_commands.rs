@@ -31,13 +31,37 @@ pub fn save_chart(
     file_state: State<FileState>,
     entry: ChartEntry,
 ) -> Result<(), String> {
+    save_chart_core(&state, &file_state, entry)
+}
+
+/// [`save_chart`] over borrowed state, for the unit tier.
+pub(crate) fn save_chart_core(
+    state: &AppState,
+    file_state: &FileState,
+    entry: ChartEntry,
+) -> Result<(), String> {
     // allowEditObjects option gate, same as update_chart/delete_chart — this is
     // an UPSERT, so without it "save" was a full bypass of the other two gates.
     crate::protection::check_sheet_action(
-        &state, entry.sheet_index, "editObjects", "edit objects",
+        state, entry.sheet_index, "editObjects", "edit objects",
     )?;
+    // LOCK OBJECTS: an upsert over an EXISTING chart that moves or resizes it
+    // is refused on a locked page, like `update_chart` (an insert -- no prior
+    // entry -- is never a move). Resolved under a read guard, before the effect.
+    let prior = state
+        .charts
+        .read()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .find(|c| c.id == entry.id)
+        .cloned();
+    if let Some(prior) = &prior {
+        if chart_moves(prior, &entry) {
+            crate::sheets::ensure_canvas_objects_unlocked(state, prior.sheet_index, "move or resize a chart")?;
+        }
+    }
     // Gate passed; an upsert always commits.
-    let effect = DocumentEffect::mutates(&file_state);
+    let effect = DocumentEffect::mutates(file_state);
     let previous = {
         let mut charts = state.charts.write(&effect).map_err(|e| e.to_string())?;
         let previous = charts.iter().find(|c| c.id == entry.id).cloned();
@@ -50,7 +74,7 @@ pub fn save_chart(
         previous
     };
     let description = if previous.is_some() { "Edit chart" } else { "Insert chart" };
-    crate::undo_commands::record_chart_undo(&state, entry.id, previous, description);
+    crate::undo_commands::record_chart_undo(state, entry.id, previous, description);
     Ok(())
 }
 
@@ -100,6 +124,13 @@ pub(crate) fn update_chart_core(
             .cloned()
             .ok_or_else(|| format!("Chart with id {} not found", entry.id))?
     };
+    // LOCK OBJECTS (CanvasLayout::objects_locked): a write that MOVES or
+    // RESIZES the chart -- or takes it to another sheet -- is refused on a
+    // locked page, before the effect. One that keeps its placement (a title,
+    // a colour, a new data range) is formatting and goes through.
+    if chart_moves(&previous, &entry) {
+        crate::sheets::ensure_canvas_objects_unlocked(state, previous.sheet_index, "move or resize a chart")?;
+    }
     let effect = DocumentEffect::mutates(file_state);
     {
         let mut charts = state.charts.write(&effect).map_err(|e| e.to_string())?;
@@ -109,6 +140,26 @@ pub(crate) fn update_chart_core(
     }
     crate::undo_commands::record_chart_undo(state, entry.id, Some(previous), "Edit chart");
     Ok(())
+}
+
+/// A chart's PLACEMENT as its stored record spells it: the ChartDefinition's
+/// top-level `x`, `y`, `width`, `height` (logical px). `None` for a record that
+/// is not JSON or carries none of them -- the store treats `spec_json` as
+/// opaque, so a missing placement is a shape to compare, not an error.
+fn chart_placement(spec_json: &str) -> Option<[Option<f64>; 4]> {
+    let v: serde_json::Value = serde_json::from_str(spec_json).ok()?;
+    let at = |k: &str| v.get(k).and_then(serde_json::Value::as_f64);
+    let placement = [at("x"), at("y"), at("width"), at("height")];
+    placement.iter().any(Option::is_some).then_some(placement)
+}
+
+/// Does writing `next` over `previous` MOVE or RESIZE the chart -- or take it
+/// to another sheet? The question Lock Objects asks
+/// (`sheets::ensure_canvas_objects_unlocked`). Everything else a chart write
+/// can say -- its spec, title, colours, data -- is formatting.
+pub(crate) fn chart_moves(previous: &ChartEntry, next: &ChartEntry) -> bool {
+    previous.sheet_index != next.sheet_index
+        || chart_placement(&previous.spec_json) != chart_placement(&next.spec_json)
 }
 
 /// Record the chart store's SHEET-ID STAMP: a chart written before ranges named

@@ -26,7 +26,10 @@
 //              step is NEVER fed through Core's `applySurfaceToMove`: that
 //              snaps to the NEAREST multiple, so a 1 px step would round
 //              straight back to where it started.
-//          Locked objects and ones whose family refuses moves stay put.
+//          Locked objects and ones whose family refuses moves stay put. When
+//          the PAGE's Lock Objects is what holds them (lib/objectsLock.ts), the
+//          keystroke is told why -- once per burst, never once per auto-repeat;
+//          a per-object lock alone stays silent (its padlock already says so).
 //
 //          THE BURST. Each keystroke (and each auto-repeat) PREVIEWS the new
 //          geometry through each family's provider (@api/objectGeometry) --
@@ -51,6 +54,7 @@ import {
 } from "@api/objectGeometry";
 import { getSelectedObjectRegions, objectOwnsKey } from "@api/objectSelection";
 import { boundsOf, isArrangeMovable, type PageSize } from "./arrange";
+import { activeCanvasObjectsLocked, tellObjectsLocked } from "./objectsLock";
 
 /** A nudge direction. */
 export type NudgeDirection = "left" | "right" | "up" | "down";
@@ -247,7 +251,10 @@ export function nudgeSelection(direction: NudgeDirection, mods: NudgeModifiers =
   const movable = selected.filter((r) => !!r.floating && isArrangeMovable(r));
   // A different selection is a different burst: land the old one first.
   if (burst && !sameMembers(burst, movable)) void commitNudgeBurst();
-  if (movable.length === 0) return { dx: 0, dy: 0 };
+  if (movable.length === 0) {
+    if (selected.some((r) => !!r.floating) && activeCanvasObjectsLocked()) tellObjectsLocked();
+    return { dx: 0, dy: 0 };
+  }
 
   const b =
     burst ?? startBurst(movable.map((region) => ({ region, from: { ...region.floating! } })));

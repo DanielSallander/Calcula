@@ -30,6 +30,18 @@ export function applySelectionKeep(
     ...data,
     categories: keptIdx.map((i) => data.categories[i]),
     series: data.series.map((s) => ({ ...s, values: keptIdx.map((i) => s.values[i]) })),
+    // The source text travels with its number (ParsedChartData.displayValues);
+    // the spread above would otherwise keep the UNFILTERED rows beside the
+    // filtered numbers and a card would write another row's text.
+    ...(data.displayValues
+      ? { displayValues: data.displayValues.map((row) => keptIdx.map((i) => row[i] ?? "")) }
+      : {}),
+    // The kinds travel the same way. The source's TOTALS do not survive: they
+    // total rows the chart no longer shows (ParsedChartData.seriesTotals).
+    ...(data.datumKinds
+      ? { datumKinds: data.datumKinds.map((row) => keptIdx.map((i) => row[i] ?? "blank")) }
+      : {}),
+    seriesTotals: undefined,
     // Compose with any prior category filter so the map stays painter→ORIGINAL.
     keptCategoryIndices: keptIdx.map((i) => data.keptCategoryIndices ? data.keptCategoryIndices[i] : i),
   };
@@ -54,6 +66,10 @@ export function applyChartFilters(
 
   let filteredSeries = data.series;
   let filteredCategories = data.categories;
+  // The source text, filtered exactly like the numbers (see applySelectionKeep).
+  let filteredText = data.displayValues;
+  let filteredKinds = data.datumKinds;
+  let filteredTotals = data.seriesTotals;
   // Carry any prior maps through (composition), so the result stays painter→ORIGINAL.
   let keptSeriesIndices = data.keptSeriesIndices;
   let keptCategoryIndices = data.keptCategoryIndices;
@@ -63,6 +79,9 @@ export function applyChartFilters(
     const hiddenSet = new Set(hiddenSeries);
     const survivingS = data.series.map((_, i) => i).filter((i) => !hiddenSet.has(i));
     filteredSeries = survivingS.map((i) => data.series[i]);
+    if (filteredText) filteredText = survivingS.map((i) => filteredText![i] ?? []);
+    if (filteredKinds) filteredKinds = survivingS.map((i) => filteredKinds![i] ?? []);
+    if (filteredTotals) filteredTotals = survivingS.map((i) => filteredTotals![i] ?? null);
     keptSeriesIndices = survivingS.map((i) => data.keptSeriesIndices ? data.keptSeriesIndices[i] : i);
   }
 
@@ -80,6 +99,10 @@ export function applyChartFilters(
       ...s,
       values: visibleCatIndices.map((i) => s.values[i]),
     }));
+    if (filteredText) filteredText = filteredText.map((row) => visibleCatIndices.map((i) => row[i] ?? ""));
+    if (filteredKinds) filteredKinds = filteredKinds.map((row) => visibleCatIndices.map((i) => row[i] ?? "blank"));
+    // A hidden category leaves the source total describing rows not shown.
+    filteredTotals = undefined;
     keptCategoryIndices = visibleCatIndices.map((i) => data.keptCategoryIndices ? data.keptCategoryIndices[i] : i);
   }
 
@@ -89,6 +112,9 @@ export function applyChartFilters(
     ...data,
     categories: filteredCategories,
     series: filteredSeries,
+    ...(filteredText ? { displayValues: filteredText } : {}),
+    ...(filteredKinds ? { datumKinds: filteredKinds } : {}),
+    seriesTotals: filteredTotals,
     keptSeriesIndices,
     keptCategoryIndices,
   };

@@ -345,8 +345,10 @@ fn validate_size_map(
 /// the subscription's alone: a subscribed WORKSHEET stays editable by design
 /// (its edits are tracked by the override ledger), and the frontend offers
 /// the gestures there, so refusing them here would be a UI the backend
-/// contradicts. A canvas LOCK stays a frontend rule (the lock lives in the
-/// canvas layout, and the backend consults it for no family).
+/// contradicts. A per-object canvas LOCK (`CanvasLayout::locked`) stays a
+/// frontend rule; the PAGE-wide Lock Objects (`objects_locked`) is enforced
+/// here too, by `update_floating_range_inner` through
+/// `sheets::ensure_canvas_objects_unlocked`.
 ///
 /// LOCK ORDER: reads `sheet_ids`, `sheet_kinds`, then the provenance snapshot
 /// (`sheet_ids`, `sheet_names`, `subscriptions`), each released before it
@@ -418,6 +420,19 @@ fn patchable_fields_differ(a: &FloatingRange, b: &FloatingRange) -> bool {
         || a.show_title != b.show_title
         || a.show_column_headers != b.show_column_headers
         || a.show_row_headers != b.show_row_headers
+        || a.col_widths != b.col_widths
+        || a.row_heights != b.row_heights
+}
+
+/// Whether two rows differ in POSITION or SIZE -- what a page's Lock Objects
+/// forbids (`CanvasLayout::objects_locked`): the origin, the window's row and
+/// column counts, and the cell sizes that make up the frame. The chrome flags
+/// are deliberately absent: hiding a title strip is formatting.
+fn geometry_differs(a: &FloatingRange, b: &FloatingRange) -> bool {
+    a.x != b.x
+        || a.y != b.y
+        || a.row_count != b.row_count
+        || a.col_count != b.col_count
         || a.col_widths != b.col_widths
         || a.row_heights != b.row_heights
 }
@@ -518,6 +533,18 @@ pub(crate) fn update_floating_range_inner(
         host_index_of(state, &row)?,
         "move or resize a floating range",
     )?;
+    // LOCK OBJECTS on the host page: a patch that MOVES the range or RESIZES
+    // its window (position, row/column count, cell sizes) is refused before
+    // the effect. Its chrome (title, headers) is formatting and goes through.
+    // Decided from the row as the lookup found it; the store lock below then
+    // re-reads the row it writes.
+    if geometry_differs(&row, &patched(&row, &patch)) {
+        crate::sheets::ensure_canvas_objects_unlocked(
+            state,
+            host_index_of(state, &row)?,
+            "move or resize a floating range",
+        )?;
+    }
 
     let (previous, updated) = {
         // Held from the lookup to the write: the row the patch is computed

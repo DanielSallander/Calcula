@@ -11,7 +11,7 @@ import type {
   PivotCellData,
   PivotColumnData,
 } from "@api/pivot";
-import type { ParsedChartData, PivotDataSource, ChartSeries, PivotChartFieldInfo } from "../types";
+import type { ParsedChartData, PivotDataSource, ChartSeries, PivotChartFieldInfo, DatumKind, SeriesTotal } from "../types";
 
 // ============================================================================
 // Public API
@@ -99,7 +99,15 @@ export function extractChartData(
 ): ParsedChartData {
   const { rowLabelColCount, columnHeaderRowCount, filterRowCount } = view;
   const includeSubtotals = source.includeSubtotals ?? false;
-  const includeGrandTotal = source.includeGrandTotal ?? false;
+  // A pivot with NO row fields has no Data rows at all: its one row of numbers
+  // is the GRAND TOTAL (the engine emits a single GrandTotal row). Dropping it
+  // left such a chart with nothing to draw — and a measure-only pivot is
+  // exactly what a Card or a Gauge is pointed at ("Sum of Sales"). So when
+  // there is nothing else to show, the grand total IS the data. With row
+  // fields the opt-in stays as it was. The design-query reader calls this same
+  // function, so a measure-only design query gets the same rule.
+  const hasDataRows = view.rows.some((r) => r.rowType === "Data" && r.visible);
+  const includeGrandTotal = source.includeGrandTotal ?? !hasDataRows;
 
   // Identify data columns (columns after the row label columns)
   const dataColumns = view.columns.filter(
@@ -109,13 +117,32 @@ export function extractChartData(
   // Extract column/series names from the column header rows
   const columnNames = extractColumnNames(view);
 
-  // Build series arrays (one per data column)
-  const seriesMap: Map<number, { name: string; values: number[] }> = new Map();
+  // Build series arrays (one per data column), each with the text the pivot
+  // SHOWS for its cells (ParsedChartData.displayValues: a Card keeps the
+  // pivot's number format, and a text cell is never charted as its 0).
+  const seriesMap: Map<number, { name: string; values: number[]; texts: string[]; kinds: DatumKind[] }> = new Map();
   for (let i = 0; i < dataColumns.length; i++) {
     seriesMap.set(dataColumns[i].viewCol, {
       name: columnNames[i] ?? `Value ${i + 1}`,
       values: [],
+      texts: [],
+      kinds: [],
     });
+  }
+
+  // The source's own total of each series (ParsedChartData.seriesTotals): the
+  // GRAND TOTAL row when it is shown but not charted. A Card over an average
+  // or a distinct count must show this, never the sum of the rows above it.
+  let seriesTotals: Array<SeriesTotal | null> | undefined;
+  if (!includeGrandTotal) {
+    const totalRow = view.rows.find((r) => r.rowType === "GrandTotal" && r.visible);
+    if (totalRow) {
+      seriesTotals = [...seriesMap.keys()].map((viewCol) => {
+        const cell = totalRow.cells[viewCol];
+        if (!cell) return null;
+        return { value: cellKind(cell) === "blank" ? null : cellToNumber(cell), text: cellShownText(cell) };
+      });
+    }
   }
 
   // Extract categories and data values from data rows
@@ -144,20 +171,37 @@ export function extractChartData(
       if (cell) {
         const numValue = cellToNumber(cell);
         seriesData.values.push(numValue);
+        seriesData.texts.push(cellShownText(cell));
+        seriesData.kinds.push(cellKind(cell));
       } else {
         seriesData.values.push(0);
+        seriesData.texts.push("");
+        seriesData.kinds.push("blank");
       }
     }
   }
 
   // Build final series array
-  const series = Array.from(seriesMap.values()).map((s) => ({
+  const all = Array.from(seriesMap.values());
+  const series = all.map((s) => ({
     name: s.name,
     values: s.values,
     color: null as string | null,
   }));
 
-  return { categories, series };
+  // What each datum IS: a pivot's EMPTY measure cell (a value with no rows, or
+  // the backend's blank total) is "blank", which the visuals write "(Blank)"
+  // -- its 0 in `values` is only where a bar chart draws it.
+  const datumKinds = all.map((s) => s.kinds);
+  const extras = {
+    datumKinds,
+    ...(seriesTotals ? { seriesTotals } : {}),
+  };
+  const displayValues = all.map((s) => s.texts);
+  // Nothing to say beyond the numbers: leave the field absent (the design-query
+  // reader, which calls this, follows the same rule).
+  if (displayValues.every((t) => t.every((x) => x === ""))) return { categories, series, ...extras };
+  return { categories, series, displayValues, ...extras };
 }
 
 /**
@@ -173,6 +217,23 @@ function cellDisplayText(cell: PivotCellData): string {
   const v = cell.value;
   if (typeof v === "string") return v;
   if (typeof v === "number") return String(v);
+  if (typeof v === "boolean") return v ? "TRUE" : "FALSE";
+  return "";
+}
+
+/**
+ * The text a pivot VALUE cell is shown as, for `displayValues`, or "" for "use
+ * the number". A formatted measure's `formattedValue` ("$1,234.50") is the
+ * pivot's own answer; a text or boolean value is its text. A PLAIN number with
+ * no format is "" — its String() ("0.333333333333") is not how anything showed
+ * it, and the visual's display units write it better. The model lane's
+ * design-query reader settled the same rule independently (CONTRACT-CANVAS
+ * §4.9), so the two sources cannot disagree about one cell.
+ */
+function cellShownText(cell: PivotCellData): string {
+  if (cell.formattedValue) return cell.formattedValue;
+  const v = cell.value;
+  if (typeof v === "string") return v;
   if (typeof v === "boolean") return v ? "TRUE" : "FALSE";
   return "";
 }
@@ -261,6 +322,14 @@ function extractRowLabel(row: PivotRowData, rowLabelColCount: number): string {
   }
 
   return parts.join(" > ");
+}
+
+/** What a pivot value cell IS (ParsedChartData.datumKinds). */
+function cellKind(cell: PivotCellData): DatumKind {
+  const v = cell.value;
+  if (v === null || v === undefined) return "blank";
+  if (typeof v === "number") return Number.isFinite(v) ? "number" : "blank";
+  return "text";
 }
 
 /**

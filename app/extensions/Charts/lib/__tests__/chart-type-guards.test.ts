@@ -24,6 +24,8 @@ describe("isCartesianChart", () => {
 
   const nonCartesianTypes: ChartType[] = [
     "pie", "donut", "radar", "funnel", "treemap", "sunburst",
+    // The tile visuals have no axes either (rendering/visuals/).
+    "card", "multiRowCard", "kpi", "gauge",
   ];
 
   it.each(cartesianTypes)("returns true for cartesian type '%s'", (type) => {
@@ -37,7 +39,7 @@ describe("isCartesianChart", () => {
   it("covers all ChartType values", () => {
     const allTypes = [...cartesianTypes, ...nonCartesianTypes];
     // Every declared ChartType should be in one of the two lists
-    expect(allTypes.length).toBe(18);
+    expect(allTypes.length).toBe(22);
   });
 });
 

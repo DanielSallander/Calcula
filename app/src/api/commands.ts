@@ -100,7 +100,9 @@ export const CoreCommands = {
   UNHIDE_COLUMNS: "core.format.unhideColumns",
 
   // Sheets (the shell, which owns the sheet tabs). SHEET_TAB_COLOR takes
-  // `{ color: string | null }` (null = No Color).
+  // `{ color: string | null }` (null = No Color). SHEET_INSERT takes
+  // `{ index?, kind?: "worksheet" | "canvas", atEnd?: boolean }`: before the
+  // sheet at `index` (default the active one), or at the end with `atEnd`.
   SHEET_INSERT: "core.sheet.insert",
   SHEET_DELETE: "core.sheet.delete",
   SHEET_RENAME: "core.sheet.rename",

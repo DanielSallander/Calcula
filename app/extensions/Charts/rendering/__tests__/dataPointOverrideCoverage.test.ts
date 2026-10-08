@@ -162,6 +162,17 @@ const MARK_FIXTURES: Record<string, MarkFixture> = {
   // One candle per period; the four series ARE the datum's OHLC components.
   stock: { data: OHLC, target: { seriesIndex: 0, categoryIndex: 1 }, filter: "category" },
 
+  // The tile visuals (rendering/visuals/). A Card's datum is "the card of this
+  // field", (series, 0) — the series filter is the one that moves it. A
+  // Multi-row card paints a datum per (field, row). A KPI's datums are its
+  // trend periods (an overridden period gets a marker on the trend), so the
+  // category filter applies; a Gauge has one datum, (0, 0) in painter space,
+  // which a category filter moves just like a pie slice.
+  card: { data: MULTI, target: { seriesIndex: 0, categoryIndex: 0 }, filter: "series" },
+  multiRowCard: { data: MULTI, target: { seriesIndex: 0, categoryIndex: 1 }, filter: "series" },
+  kpi: { data: SINGLE, target: { seriesIndex: 0, categoryIndex: 1 }, filter: "category" },
+  gauge: { data: SINGLE, target: { seriesIndex: 0, categoryIndex: 0 }, filter: "category" },
+
   histogram: {
     data: SINGLE,
     // A histogram's datums are BINS, not source rows. Bin 0 always holds the

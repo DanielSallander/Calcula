@@ -1684,6 +1684,47 @@ mod tests {
             ),
             // Not at an identifier boundary: this is somebody's defined name.
             ("MY_xlfn.THING+1", "MY_xlfn.THING+1"),
+            // NON-ASCII. The scan walked BYTES and pushed each one as a
+            // Latin-1 char, so `"åäö"` came back as `"Ã¥Ã¤Ã¶"`, and a
+            // non-ASCII char OUTSIDE a literal panicked on a slice inside the
+            // character. sv-SE is the default locale: Swedish sheet names
+            // are ordinary, not exotic.
+            ("LEN(\"åäö\")", "LEN(\"åäö\")"),
+            ("'Försäljning'!A1+1", "'Försäljning'!A1+1"),
+            (
+                "_xlfn.TEXTBEFORE(\"Åke Öberg\",\" \")",
+                "TEXTBEFORE(\"Åke Öberg\",\" \")",
+            ),
+            ("CONCAT(\"日本\",\"😀\")", "CONCAT(\"日本\",\"😀\")"),
+            ("A1&\"x\"&Ä1", "A1&\"x\"&Ä1"),
+            // A non-ASCII LETTER is part of a name too: no boundary after Ö.
+            ("Ö_xlfn.X+1", "Ö_xlfn.X+1"),
+            // A prefix AFTER non-ASCII text is still stripped.
+            (
+                "'Ö'!A1+_xlfn.TEXTBEFORE(A1,\"-\")",
+                "'Ö'!A1+TEXTBEFORE(A1,\"-\")",
+            ),
+            ("LEN(\"åäö\")+_xlfn.STDEV.S(A1:A9)", "LEN(\"åäö\")+STDEV.S(A1:A9)"),
+            // A quoted sheet name is OPAQUE: a sheet may be called
+            // `_xlfn.Data`, and Excel allows `"` in a sheet name, which must
+            // not open a string literal (`''` is the escaped apostrophe).
+            ("'_xlfn.Data'!A1+1", "'_xlfn.Data'!A1+1"),
+            (
+                "'Say \"hi'!A1+_xlfn.STDEV.S(A1:A9)",
+                "'Say \"hi'!A1+STDEV.S(A1:A9)",
+            ),
+            (
+                "'Bob''s _xlfn.X'!A1+_xlfn.XOR(TRUE)",
+                "'Bob''s _xlfn.X'!A1+XOR(TRUE)",
+            ),
+            // Inside a structured reference `'` is an ESCAPE, not a quote,
+            // and a column may legitimately be named with the prefix.
+            (
+                "SUM(T[Price'[USD']])+_xlfn.XOR(TRUE)",
+                "SUM(T[Price'[USD']])+XOR(TRUE)",
+            ),
+            ("SUM(T[_xlfn.Col])", "SUM(T[_xlfn.Col])"),
+            ("SUM(T[It''s])+_xlfn.XOR(1)", "SUM(T[It''s])+XOR(1)"),
         ] {
             assert_eq!(
                 strip_future_function_prefixes(stored),
@@ -1692,6 +1733,97 @@ mod tests {
                 stored
             );
         }
+    }
+
+    /// A real .xlsx with a SWEDISH sheet name, non-ASCII string literals and
+    /// an Excel-shaped `_xlfn.LAMBDA` defined name must open, unchanged.
+    ///
+    /// `='Försäljning'!B1+1` PANICKED the importer (a byte slice inside `ö`),
+    /// so any workbook that referenced a Swedish sheet could not be opened at
+    /// all; `"åäö"` came back as mojibake; and a defined name kept its
+    /// `_xlfn.`/`_xlpm.` storage prefixes, so every imported named LAMBDA was
+    /// `#NAME?`. This goes through the public `load_xlsx`, the path `open_file`
+    /// takes, so the panic itself is pinned and not only the helper.
+    #[test]
+    fn a_non_ascii_sheet_name_and_literal_and_a_prefixed_defined_name_import_intact() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("svenska.xlsx");
+        {
+            let mut zw = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+            let o = zip::write::SimpleFileOptions::default();
+            zw.start_file("[Content_Types].xml", o).unwrap();
+            zw.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"#).unwrap();
+            zw.start_file("_rels/.rels", o).unwrap();
+            zw.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#).unwrap();
+            zw.start_file("xl/workbook.xml", o).unwrap();
+            zw.write_all(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheets><sheet name="Försäljning" sheetId="1" r:id="rId1"/></sheets>
+<definedNames><definedName name="PADLEFT">_xlfn.LAMBDA(_xlpm.t,_xlpm.n,_xlpm.c,RIGHT(REPT(_xlpm.c,_xlpm.n)&amp;_xlpm.t,_xlpm.n))</definedName><definedName name="Kvot">'Försäljning'!$B$1/2</definedName></definedNames>
+</workbook>"#.as_bytes()).unwrap();
+            zw.start_file("xl/_rels/workbook.xml.rels", o).unwrap();
+            zw.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>"#).unwrap();
+            zw.start_file("xl/worksheets/sheet1.xml", o).unwrap();
+            zw.write_all(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1">
+<c r="A1"><f>'Försäljning'!B1+1</f><v>42</v></c>
+<c r="B1"><v>41</v></c>
+<c r="C1" t="str"><f>LEN("åäö")</f><v>3</v></c>
+<c r="D1" t="str"><f>_xlfn.TEXTBEFORE("Åke Öberg"," ")</f><v>Åke</v></c>
+<c r="E1" t="str"><f>CONCAT("日本","😀")</f><v>日本😀</v></c>
+</row></sheetData></worksheet>"#.as_bytes()).unwrap();
+            zw.finish().unwrap();
+        }
+
+        let loaded = crate::xlsx_reader::load_xlsx(&path)
+            .expect("an .xlsx with a Swedish sheet name must open");
+        let s = &loaded.sheets[0];
+        assert_eq!(s.name, "Försäljning");
+        for (col, expected) in [
+            (0u32, "='Försäljning'!B1+1"),
+            (2, "=LEN(\"åäö\")"),
+            (3, "=TEXTBEFORE(\"Åke Öberg\",\" \")"),
+            (4, "=CONCAT(\"日本\",\"😀\")"),
+        ] {
+            let got = s
+                .cells
+                .get(&(0, col))
+                .unwrap_or_else(|| panic!("cell at column {} was dropped", col))
+                .formula
+                .as_deref()
+                .unwrap_or_else(|| panic!("cell at column {} lost its formula", col));
+            assert_eq!(got, expected, "formula at column {} changed on import", col);
+        }
+
+        let name = |n: &str| {
+            loaded
+                .named_ranges
+                .iter()
+                .find(|r| r.name == n)
+                .unwrap_or_else(|| panic!("defined name {} was not imported", n))
+                .refers_to
+                .clone()
+        };
+        assert_eq!(
+            name("PADLEFT"),
+            "=LAMBDA(t,n,c,RIGHT(REPT(c,n)&t,n))",
+            "a defined name must lose its _xlfn./_xlpm. storage prefixes like a cell formula"
+        );
+        assert_eq!(name("Kvot"), "='Försäljning'!$B$1/2");
     }
 
     /// Every Excel error literal must survive an .xlsx import as ITSELF.

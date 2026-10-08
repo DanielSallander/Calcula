@@ -9,15 +9,15 @@ Design spike for the architecture audit's deepest seam: the Rust backend is a
 Re-audited against source. The **design is intact and shipped**; the counts had drifted and one
 resolved-asymmetry paragraph named two symbols that no longer exist.
 
-| Figure | 2026-08-16 | 08-27 | 08-29 | 09-01 | 09-03 | 09-05 | 09-07 | 09-10 | 09-25 | 09-30 | 09-30 (anchor) | 09-30 (M6 seal) | 10-01 (M6 door) | 10-01 (owner B trail) | 10-01 (owner B all-or-nothing) | 10-01 (review of M6b) | 10-01 (M8 command allowlist) | Recounted (2026-10-04/05, Home tab) | How counted |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| Commands in `generate_handler!` | 761 | 773 | 783 | 788 | 787 | 792 | 800 | 806 | 809 | 812 | 813 | 815 | 817 | 819 | 821 | 821 | 822 | **829** | bracket-matched parse of `lib.rs`, comments stripped LINE-WISE (all unique) |
-| `#[tauri::command]` attributes | 798 | 815 | 822 | 827 | 826 | 831 | 839 | 845 | 849 | 853 | 854 | 856 | 858 | 860 | 862 | 862 | 863 | **871** | `#[tauri::command]` occurrences under `app/src-tauri/src` |
-| Privileged (denylisted) commands | ~30 | 94 | 100 | 101 | 101 | 101 | 102 | 108 | 107 | 107 | 108 | 109 | 111 | 111 | 111 | 114 | 115 | **115** | unique quoted names inside `PRIVILEGED_BACKEND_COMMANDS` (`app/src/api/backendCommands.ts`), comments stripped line-wise |
-| Feature-open commands | 667 | 673 | 683 | 687 | 686 | 691 | 698 | 698 | 702 | 705 | 705 | 706 | 706 | 708 | 710 | 707 | 707 | **714** | 829 − 115 |
-| Typed wrappers in `backend.ts` | ~229 | 327 | 338 | 338 | 338 | 338 | 339 | 339 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | **340** | exported functions/consts in `backend.ts` (lines starting `export async function` / `export function` / `export const`) |
+| Figure | 2026-08-16 | 08-27 | 08-29 | 09-01 | 09-03 | 09-05 | 09-07 | 09-10 | 09-25 | 09-30 | 09-30 (anchor) | 09-30 (M6 seal) | 10-01 (M6 door) | 10-01 (owner B trail) | 10-01 (owner B all-or-nothing) | 10-01 (review of M6b) | 10-01 (M8 command allowlist) | 10-04/05 (Home tab) | Recounted (2026-10-08, Canvas = Power BI) | How counted |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| Commands in `generate_handler!` | 761 | 773 | 783 | 788 | 787 | 792 | 800 | 806 | 809 | 812 | 813 | 815 | 817 | 819 | 821 | 821 | 822 | 829 | **829** | bracket-matched parse of `lib.rs`, comments stripped LINE-WISE (all unique) |
+| `#[tauri::command]` attributes | 798 | 815 | 822 | 827 | 826 | 831 | 839 | 845 | 849 | 853 | 854 | 856 | 858 | 860 | 862 | 862 | 863 | 871 | **872** | `#[tauri::command]` occurrences under `app/src-tauri/src` |
+| Privileged (denylisted) commands | ~30 | 94 | 100 | 101 | 101 | 101 | 102 | 108 | 107 | 107 | 108 | 109 | 111 | 111 | 111 | 114 | 115 | 115 | **115** | unique quoted names inside `PRIVILEGED_BACKEND_COMMANDS` (`app/src/api/backendCommands.ts`), comments stripped line-wise |
+| Feature-open commands | 667 | 673 | 683 | 687 | 686 | 691 | 698 | 698 | 702 | 705 | 705 | 706 | 706 | 708 | 710 | 707 | 707 | 714 | **714** | 829 − 115 |
+| Typed wrappers in `backend.ts` | ~229 | 327 | 338 | 338 | 338 | 338 | 339 | 339 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | **340** | exported functions/consts in `backend.ts` (lines starting `export async function` / `export function` / `export const`) |
 
-The "Recounted (2026-10-04/05, Home tab)" column is the Excel 365 Home-tab programme (`docs/design/open-items.md`
+The "10-04/05 (Home tab)" column is the Excel 365 Home-tab programme (`docs/design/open-items.md`
 §2.ai). SIX new commands, all FEATURE-OPEN beside the families they extend (privileged stays **115**,
 feature-open **713**): `commands::apply_border_preset_to_sheets` (a border preset on grouped sheets, the twin of
 `apply_formatting_to_sheets`) and `commands::adjust_number_format_decimals` (Increase/Decrease Decimal on the
@@ -32,6 +32,17 @@ runs, beside `set_row_height` / `set_column_width`). All five figures re-run tog
 attribute count rose by EIGHT for six commands: it counts occurrences, and new prose in the tree spells the
 attribute too (`commands/structure_cells.rs:796` is one; git was unavailable to find the other). CLAUDE.md's sentence was updated to **828** in the same
 pass. The app has not been LINKED with the six new commands (no `tauri` build or E2E launch in the programme).
+
+The "Recounted (2026-10-08, Canvas = Power BI)" column is the programme that rebuilt the Canvas tab as Power BI's
+report authoring (`docs/design/open-items.md` §2.aj). It added NO command: Lock Objects, the wallpaper and the
+Tooltip / 16:9 size presets ride the existing `set_canvas_layout` (validated in `CanvasLayoutPatch`), measure-only
+design queries and page filters ride `run_design_query` / `compute_design_query_view`, and button actions are
+ordinary control properties. All five figures were re-run together, line-wise (bracket-matched `generate_handler!`,
+comments stripped per line, then split; the denylist read as the `PRIVILEGED_BACKEND_COMMANDS` record): 829 / 872 /
+115 / 714 / 340, all 829 unique, and every function carrying a bare `#[tauri::command]` line is registered. The
+attribute figure reads one above the 10-04/05 column because that column was not re-run after `sheet_is_blank`
+landed (its 871 is the six-command figure); 827 of the 872 are attribute lines and 45 are prose or test text that
+spells the attribute. The app WAS linked and launched for this programme (E2E 2026-10-08, `canvas-powerbi.spec.ts`).
 
 **Re-run 2026-10-02, at the end of M8 (its docs task): unchanged.** The rest of M8 -- the TypeScript half of the
 command allowlist, the promotion code summary (carried by the existing `calp_promotion_impact`), the keyboard into

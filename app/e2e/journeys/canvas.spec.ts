@@ -57,6 +57,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, expect } from "../fixtures";
 import { readGridGeometry } from "../helpers/grid";
+import { clickCanvasControl, clickCanvasMenuRow } from "../helpers/canvas-live";
 import { samplePixelGrids, diffCount, type PixelClip } from "../viewportSample";
 
 const SAVED_DOC = path.join(os.tmpdir(), "calcula-canvas-journey.cala");
@@ -918,8 +919,7 @@ test.describe.serial("canvas sheets, live", () => {
       await clickAt(ARRANGE_BOX.x + ARRANGE_BOX.width - 30, ARRANGE_BOX.y + ARRANGE_BOX.height - 30);
       await eventually(primaryType, (t) => t === "pivot-visual", "a click on the box alone did not select it");
       const [beforeFront] = await samplePixelGrids(page, [clip]);
-      await page.locator('[data-testid="canvas-arrange-forward"]').click();
-      await page.locator('[data-testid="canvas-arrange-bring-to-front"]').click();
+      await clickCanvasMenuRow(page, "canvas-arrange-forward", "canvas-arrange-bring-to-front");
       await eventually(
         () => sheetsResult(page),
         (r) => ((r.sheets.find((s) => s.index === canvas.index)?.canvasLayout as { zOrder?: unknown[] } | undefined)?.zOrder?.length ?? 0) >= 2,
@@ -952,8 +952,7 @@ test.describe.serial("canvas sheets, live", () => {
       await eventually(primaryType, (t) => t === "pivot-visual", "after reopening, the box was no longer on top");
 
       // Send to Back: the chart is on top again, for paint and for clicks.
-      await page.locator('[data-testid="canvas-arrange-backward"]').click();
-      await page.locator('[data-testid="canvas-arrange-send-to-back"]').click();
+      await clickCanvasMenuRow(page, "canvas-arrange-backward", "canvas-arrange-send-to-back");
       // ONE click, then poll: re-clicking inside the poll can land two clicks
       // inside the double-click interval, which is a different gesture on a chart.
       await clickAt(20, 20);
@@ -975,8 +974,7 @@ test.describe.serial("canvas sheets, live", () => {
         (n) => n === 2,
         "the marquee did not select both objects",
       );
-      await page.locator('[data-testid="canvas-arrange-align"]').click();
-      await page.locator('[data-testid="canvas-arrange-align-left"]').click();
+      await clickCanvasMenuRow(page, "canvas-arrange-align", "canvas-arrange-align-left");
       const pivotFrame = async () =>
         (await invoke<Array<{ pivotId: string; canvasFrame?: { x: number; y: number } }>>(page, "get_pivot_regions_for_sheet")).find(
           (x) => String(x.pivotId) === pivotId,
@@ -1021,13 +1019,9 @@ test.describe.serial("canvas sheets, live", () => {
   }) => {
     try {
       const canvas = await addCanvasViaContextRoute(page);
-      // The nine Insert heroes fold into an "Insert" launcher when the band is
-      // short of room; open it first when they are not on the band itself.
-      const insertItem = page.locator('[data-testid="canvas-insert-floatingGrid"]');
-      if (!(await insertItem.isVisible())) {
-        await page.locator('[data-ribbon-content]').getByRole('button', { name: /^Insert/ }).first().click();
-      }
-      await insertItem.click();
+      // Elements > Floating Grid (the group folds into its launcher when the
+      // band is short of room; the helper opens it then).
+      await clickCanvasControl(page, "canvas-insert-floatingGrid");
       const listFrs = () =>
         invoke<Array<{ id: string; x: number; y: number; hostSheetIndex: number }>>(page, "list_floating_ranges");
       const frs = await eventually(listFrs, (r) => r.some((f) => f.hostSheetIndex === canvas.index), "no floating grid was inserted");
@@ -1179,12 +1173,8 @@ test.describe.serial("canvas sheets, live", () => {
       const canvasPivotB = await categoryPivot(canvas.index, { canvasFrame: { x: 400, y: 48, width: 320, height: 240, frozenHeaders: true } });
       expect(await shownCategories(canvasPivotA)).toEqual(ALL);
 
-      // ---- Insert > Slicer on the canvas offers the MODEL (the owner's screenshot said it could not).
-      const insertItem = page.locator('[data-testid="canvas-insert-slicer"]');
-      if (!(await insertItem.isVisible())) {
-        await page.locator("[data-ribbon-content]").getByRole("button", { name: /^Insert/ }).first().click();
-      }
-      await insertItem.click();
+      // ---- Visuals > Slicer on the canvas offers the MODEL (the owner's screenshot said it could not).
+      await clickCanvasControl(page, "canvas-insert-slicer");
       const dialog = page.locator("h2", { hasText: "Insert Slicers" }).locator("xpath=../..");
       await expect(dialog).toBeVisible();
       await expect(dialog.getByText("No Tables or PivotTables found")).toHaveCount(0);

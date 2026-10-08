@@ -3402,8 +3402,10 @@ declare interface ScriptCanvasLayout {
   gridSizePx: number;
   /** Whether the snap grid is drawn on the page. */
   showGrid: boolean;
-  /** "16:9" (1280 x 720), "4:3" (960 x 720), "letter" (816 x 1056) or
-   *  "custom" (pageWidth / pageHeight are authoritative). */
+  /** A named page size -- "16:9" (1280 x 720), "16:9-fhd" (1920 x 1080),
+   *  "16:9-qhd" (2560 x 1440), "16:9-4k" (3840 x 2160), "4:3" (960 x 720),
+   *  "letter" (816 x 1056) or "tooltip" (320 x 240) -- or "custom"
+   *  (pageWidth / pageHeight are authoritative). */
   pagePreset: string;
   /** Page width, a whole number from 100 to 10000 px. */
   pageWidth: number;
@@ -3411,6 +3413,12 @@ declare interface ScriptCanvasLayout {
   pageHeight: number;
   /** The page colour as "#rgb" / "#rrggbb", or "" for the theme default. */
   background: string;
+  /** The colour OUTSIDE the page (Power BI's wallpaper) as "#rgb" /
+   *  "#rrggbb", or "" for the theme default (absent when ""). */
+  wallpaper?: string;
+  /** Lock Objects: while true no object on the page may be moved or
+   *  resized -- by a script either. READ-ONLY to scripts (absent when off). */
+  objectsLocked?: boolean;
   /** Paint order, bottom first (absent when empty). READ-ONLY to scripts. */
   zOrder?: ScriptCanvasObjectRef[];
   /** Objects locked against move/resize (absent when empty). READ-ONLY to
@@ -3420,8 +3428,8 @@ declare interface ScriptCanvasLayout {
 
 /**
  * What `api.setCanvasLayout()` accepts: any subset of the settable layout
- * keys. Any other key — including `zOrder` and `locked` — is refused by name,
- * never silently dropped.
+ * keys. Any other key — including `zOrder`, `locked` and `objectsLocked` —
+ * is refused by name, never silently dropped.
  */
 declare interface ScriptCanvasLayoutPatch {
   snapToGrid?: boolean;
@@ -3431,6 +3439,7 @@ declare interface ScriptCanvasLayoutPatch {
   pageWidth?: number;
   pageHeight?: number;
   background?: string;
+  wallpaper?: string;
 }
 
 /**

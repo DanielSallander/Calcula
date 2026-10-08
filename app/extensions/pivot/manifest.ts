@@ -217,6 +217,9 @@ function CreatePivotDialogWrapper(props: DialogProps): React.ReactElement {
     // while a floating grid owns the selection: Core's selection is then a
     // cell hidden under it), so nothing is detected from it.
     suppressAutoRange: props.data?.suppressAutoRange === true,
+    // An opener's preset (@api/pivotPresets): the Canvas tab's Table visual
+    // hands { layout: "tabular", noColumnFields: true }; the dialog validates it.
+    preset: props.data?.preset,
   });
 }
 

@@ -22,7 +22,10 @@ export interface ValueFieldCaption {
 const JOINER = " - ";
 
 function captionOf(field: ValueFieldCaption): string {
-  return field.customName && field.customName.trim() !== "" ? field.customName : field.measureName;
+  const caption = field.customName && field.customName.trim() !== "" ? field.customName : field.measureName;
+  // The reader writes an un-aliased measure without the compiler's brackets
+  // ("[Revenue]" -> "Revenue", designQueryChartDataReader withMeasureCaptions).
+  return caption === `[${field.measureName}]` ? field.measureName : caption;
 }
 
 /**

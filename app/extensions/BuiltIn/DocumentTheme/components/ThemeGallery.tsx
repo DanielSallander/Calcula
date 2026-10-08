@@ -11,6 +11,10 @@
 //!          theme was edited — e.g. its fonts swapped — still shows what it
 //!          really uses). The dots are colour DATA, not chrome, so they carry
 //!          `data-colour-data`.
+//!
+//!          The rows are ThemeGalleryMenu, shared with the gallery index.ts
+//!          registers on the theme-gallery seam (@api/themeGallery), which
+//!          other tabs host.
 
 import React, { useCallback, useEffect, useState } from "react";
 import type { ThemeDefinitionData } from "@api";
@@ -18,10 +22,8 @@ import { listBuiltinThemes, setDocumentTheme, getDocumentTheme } from "@api/them
 import { onAppEvent, AppEvents } from "@api/events";
 import { CommandButton, HERO_ICON_SIZE, Menu, MenuItem, Popover } from "@api/layout";
 import { RibbonIcon } from "@api/ribbonIcons";
-import { THEME_ACCENT_KEYS, themeRowTestId } from "../lib/themeChoices";
+import { GALLERY_HEADING, GALLERY_WIDTH, THEME_ACCENT_KEYS, themeRowTestId } from "../lib/themeChoices";
 
-/** Card width: six dots, a theme name and the check column side by side. */
-const GALLERY_WIDTH = 260;
 
 /** Six accent dots — categorical colour DATA, so exempt from the token rule. */
 function AccentDots({ colors }: { colors: ThemeDefinitionData["colors"] }): React.ReactElement {
@@ -47,19 +49,30 @@ function AccentDots({ colors }: { colors: ThemeDefinitionData["colors"] }): Reac
   );
 }
 
-export function ThemeGallery(): React.ReactElement {
-  const [isOpen, setIsOpen] = useState(false);
+/**
+ * The gallery itself: the built-in themes as radio rows, the live document
+ * theme checked and previewed in its own (possibly edited) colours. ONE body
+ * for both doors -- the Page Layout hero's card below, and the gallery other
+ * tabs host through @api/themeGallery (index.ts registers it there) -- so the
+ * two can never show different galleries.
+ * `onClose` is called after a pick has been applied.
+ */
+export function ThemeGalleryMenu({ onClose }: { onClose: () => void }): React.ReactElement {
   const [themes, setThemes] = useState<ThemeDefinitionData[]>([]);
   // The live document theme: its name decides the checked row, its colours
   // are what that row previews.
   const [liveTheme, setLiveTheme] = useState<ThemeDefinitionData | null>(null);
-  const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     let alive = true;
     getDocumentTheme()
       .then((t) => {
         if (alive) setLiveTheme(t);
+      })
+      .catch(console.error);
+    listBuiltinThemes()
+      .then((list) => {
+        if (alive) setThemes(list);
       })
       .catch(console.error);
     const unsub = onAppEvent(AppEvents.THEME_CHANGED, (detail: { theme?: ThemeDefinitionData }) => {
@@ -71,20 +84,43 @@ export function ThemeGallery(): React.ReactElement {
     };
   }, []);
 
-  useEffect(() => {
-    if (isOpen && themes.length === 0) {
-      listBuiltinThemes().then(setThemes).catch(console.error);
-    }
-  }, [isOpen, themes.length]);
-
-  const close = useCallback(() => setIsOpen(false), []);
-
   const handleApply = async (theme: ThemeDefinitionData) => {
     await setDocumentTheme(theme);
-    setIsOpen(false);
+    onClose();
   };
 
   const activeName = liveTheme?.name ?? "Office";
+
+  return (
+    <Menu ariaLabel="Built-in Themes">
+      {themes.map((theme) => {
+        const active = theme.name === activeName;
+        const colors = active && liveTheme ? liveTheme.colors : theme.colors;
+        return (
+          <MenuItem
+            key={theme.name}
+            role="menuitemradio"
+            checked={active}
+            onSelect={() => void handleApply(theme)}
+            title={theme.name}
+            testId={themeRowTestId(theme.name)}
+          >
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 9, minWidth: 0 }}>
+              <AccentDots colors={colors} />
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{theme.name}</span>
+            </span>
+          </MenuItem>
+        );
+      })}
+    </Menu>
+  );
+}
+
+export function ThemeGallery(): React.ReactElement {
+  const [isOpen, setIsOpen] = useState(false);
+  const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
+
+  const close = useCallback(() => setIsOpen(false), []);
 
   return (
     <>
@@ -105,30 +141,10 @@ export function ThemeGallery(): React.ReactElement {
         open={isOpen}
         onClose={close}
         card
-        heading="Built-in Themes"
+        heading={GALLERY_HEADING}
         width={GALLERY_WIDTH}
       >
-        <Menu ariaLabel="Built-in Themes">
-          {themes.map((theme) => {
-            const active = theme.name === activeName;
-            const colors = active && liveTheme ? liveTheme.colors : theme.colors;
-            return (
-              <MenuItem
-                key={theme.name}
-                role="menuitemradio"
-                checked={active}
-                onSelect={() => void handleApply(theme)}
-                title={theme.name}
-                testId={themeRowTestId(theme.name)}
-              >
-                <span style={{ display: "inline-flex", alignItems: "center", gap: 9, minWidth: 0 }}>
-                  <AccentDots colors={colors} />
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{theme.name}</span>
-                </span>
-              </MenuItem>
-            );
-          })}
-        </Menu>
+        {isOpen && <ThemeGalleryMenu onClose={close} />}
       </Popover>
     </>
   );

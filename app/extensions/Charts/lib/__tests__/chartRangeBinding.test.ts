@@ -22,6 +22,7 @@ import {
   RANGE_FORMAT_MESSAGE,
   canvasSourceMessage,
   unknownSheetMessage,
+  looksLikeDefinedName,
   type RangeBindingContext,
 } from "../chartRangeBinding";
 import type { SheetInfo } from "@api/lib";
@@ -103,8 +104,29 @@ describe("format and emptiness", () => {
   });
 
   it("a malformed range says how to write one", () => {
-    expect(bindRangeText("Sheet1!A1", onWorksheet)).toEqual({ ok: false, message: RANGE_FORMAT_MESSAGE });
+    expect(bindRangeText("Sheet1!A1:", onWorksheet)).toEqual({ ok: false, message: RANGE_FORMAT_MESSAGE });
+    expect(bindRangeText("Sheet1!A", onWorksheet)).toEqual({ ok: false, message: RANGE_FORMAT_MESSAGE });
     expect(bindRangeText("banana", onWorksheet)).toEqual({ ok: false, message: RANGE_FORMAT_MESSAGE });
+  });
+
+  // A Card or a Gauge is pointed at ONE value (contract 4.1). "Sheet1!A1" used
+  // to be refused as malformed; it is now the one-cell range A1:A1.
+  it("a single cell is a one-cell range", () => {
+    const b = bindRangeText("Sheet1!$B$2", onCanvas);
+    expect(b).toEqual({
+      ok: true,
+      ref: { sheetIndex: 0, sheetId: "id-0", startRow: 1, startCol: 1, endRow: 1, endCol: 1 },
+      sheet: SHEETS[0],
+    });
+  });
+});
+
+describe("looksLikeDefinedName", () => {
+  it("accepts Excel-style names and refuses cell references and booleans", () => {
+    for (const ok of ["TotalSales", "_net", "Sales.Q1", "\path", "Target2026"]) expect(looksLikeDefinedName(ok), ok).toBe(true);
+    for (const no of ["A1", "xfd1048576", "R1C1", "R", "C", "TRUE", "1abc", "Sheet1!A1", "A1:B2", "", "my name"]) {
+      expect(looksLikeDefinedName(no), no).toBe(false);
+    }
   });
 });
 

@@ -86,7 +86,6 @@ import {
 import { publishNew, push, subscribe, workingCopy, type PublishResult, type PullResult } from "../helpers/calp-collab";
 import {
   cellAt,
-  clickRibbonTestId,
   configurePivot,
   createRangePivot,
   escapeRe,
@@ -96,7 +95,7 @@ import {
   viewText,
   writeTable,
 } from "../helpers/pivot-live";
-import { humanClick, objects } from "../helpers/canvas-live";
+import { clickCanvasControl, humanClick, objects } from "../helpers/canvas-live";
 
 const RUN = Date.now().toString(36);
 const WORK = path.join(os.tmpdir(), "calcula-owner-followups");
@@ -1363,7 +1362,7 @@ test.describe("owner follow-ups, live: the timeline's range drag (BUG-0258 phase
         "a click on the canvas timeline's frame did not select it",
       );
       await openCanvasTab(page);
-      await clickRibbonTestId(page, "canvas-arrange-lock");
+      await clickCanvasControl(page, "canvas-arrange-lock");
       await eventually(() => lockedRefs(page, ci), (refs) => !!picked?.refKey && refs.includes(picked.refKey), `Arrange > Lock did not lock the timeline (${picked?.refKey})`);
 
       // Unselect it again, so the tile drag is a first press on an unselected, LOCKED timeline.

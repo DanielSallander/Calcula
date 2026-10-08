@@ -9,7 +9,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { GridRegion } from "../gridOverlays";
 import { registerObjectGeometryProvider, resetObjectGeometryProviders } from "../objectGeometry";
-import { registerLayoutSurfaceProvider, type LayoutSurface } from "../layoutSurface";
+import { isRegionLocked, registerLayoutSurfaceProvider, type LayoutSurface } from "../layoutSurface";
 import { setDesignMode } from "../designMode";
 import {
   SIZE_AND_POSITION_COMMAND,
@@ -113,6 +113,28 @@ describe("sizeAndPositionAvailability: Core's drag rule, in order", () => {
     expect(sizeAndPositionAvailability(button)).toMatchObject({ provided: true, move: false, reason: SIZE_POSITION_DESIGN_MODE });
     setDesignMode(true);
     expect(sizeAndPositionAvailability(button).reason).toBe(SIZE_POSITION_IMMOVABLE);
+  });
+
+  // Review finding (2026-10-08): a PAGE-wide lock (a canvas's Lock Objects)
+  // made every object answer locked, and Size & Position then told the user
+  // "This object is locked. Unlock it" -- about an object with no lock of its
+  // own, whose per-object button reads "Lock". The surface now names a page
+  // lock and its own sentence, and that sentence is the reason.
+  it("a PAGE-locked surface: nothing may change, and the reason is the page's own sentence", () => {
+    const note = "The objects on this page are locked by the page.";
+    surface = canvas({ pageLockedReason: note });
+    expect(sizeAndPositionAvailability(region("slicer"))).toMatchObject({ move: false, resize: false, reason: note });
+    // The page lock wins over a per-object lock: it is the one to change first.
+    surface = canvas({ pageLockedReason: note, isLocked: () => true });
+    expect(sizeAndPositionAvailability(region("slicer")).reason).toBe(note);
+    // Without it, a per-object lock still says "unlock it".
+    surface = canvas({ pageLockedReason: "", isLocked: () => true });
+    expect(sizeAndPositionAvailability(region("slicer")).reason).toBe(SIZE_POSITION_LOCKED);
+  });
+
+  it("a PAGE-locked surface locks every object for Core too, isLocked or not", () => {
+    expect(isRegionLocked(canvas({ pageLockedReason: "locked" }), region("slicer"))).toBe(true);
+    expect(isRegionLocked(canvas({ pageLockedReason: "" }), region("slicer"))).toBe(false);
   });
 
   it("subscribed is said before locked, and locked before movable: the first thing to change", () => {

@@ -176,6 +176,7 @@ import {
   visibleChartCues,
 } from "@api/chartCues";
 import { cueAtDatum } from "./rendering/cuePainter";
+import { cuesShownOn } from "./lib/tileCues";
 import { overlayStepDelta } from "./lib/overlayKeys";
 import { onOverlayStyleChanged } from "@api/insightStyle";
 import { hitTestCommentBoxes, hitTestCueStepper } from "./rendering/cueChrome";
@@ -296,6 +297,7 @@ import {
   isDesignQueryDataSource,
 } from "./types";
 import { registerChartQueryProvider } from "./lib/chartQueryProvider";
+import { installHiddenLinesWatch, resetHiddenLinesWatch } from "./lib/hiddenLinesWatch";
 import type { PivotChartFieldButton } from "./types";
 import { PivotEvents } from "../_shared/lib/pivotEvents";
 
@@ -1235,6 +1237,17 @@ function activate(context: ExtensionContext): void {
   // through the SHARED query-object refresh service (one debounce/targeting/
   // coalescing brain for reports + charts) — register this family's provider.
   cleanupFunctions.push(registerChartQueryProvider());
+  // A range chart leaves its source's HIDDEN rows out (an AutoFilter, and so a
+  // table slicer, filters it by hiding them). Nothing that hides rows speaks
+  // to Charts, so on every repaint request the watch asks the source sheets
+  // again and re-reads only the charts whose hidden lines moved.
+  cleanupFunctions.push(
+    installHiddenLinesWatch((chartIds) => {
+      for (const id of chartIds) invalidateChartCache(id);
+      context.events.emit(AppEvents.GRID_REFRESH);
+    }),
+  );
+  cleanupFunctions.push(() => resetHiddenLinesWatch());
 
   cleanupFunctions.push(
     context.events.on(PivotEvents.PIVOT_REGIONS_UPDATED, handlePivotChanged),
@@ -1720,7 +1733,7 @@ function activate(context: ExtensionContext): void {
     // behaviour to match the old sentence breaks two live journeys.
     if (getChartOverlay(click.chartId).cues.length > 0) {
       const datumHit = hitTestGeometry(local.localX, local.localY, cachedData.hitGeometry, cachedData.layout);
-      const cue = isDatumHit(datumHit) ? cueAtDatum(visibleChartCues(click.chartId), datumHit) : null;
+      const cue = isDatumHit(datumHit) ? cueAtDatum(cuesShownOn(getChartById(click.chartId)?.spec.mark ?? "", visibleChartCues(click.chartId)), datumHit) : null;
       setSelectedChartCue(click.chartId, cue ? cue.cueId : null);
       requestOverlayRedraw();
     }

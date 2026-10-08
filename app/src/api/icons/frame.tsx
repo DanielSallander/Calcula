@@ -135,6 +135,17 @@ export const PIXEL_GRID = 1.2;
 export const PIXEL_STROKE = 2.4;
 
 /**
+ * A number as an SVG path coordinate, rounded to a thousandth. A drawing that
+ * builds its path from arithmetic on the 1.2 grid (a helper that places one
+ * shape at several positions) would otherwise print binary noise:
+ * 3.6 + 1.6 is 5.2000000000000002. Internal to the icon folder (the barrel
+ * does not re-export it): an extension draws with written-out coordinates.
+ */
+export function coord(value: number): string {
+  return String(Math.round(value * 1000) / 1000);
+}
+
+/**
  * Props for a stroked (not filled) path in one channel: round caps and joins,
  * no fill. Width defaults to 3, the grid's standard line; never pass less than
  * MIN_STROKE, except PIXEL_STROKE on a pixel-aligned horizontal/vertical path.

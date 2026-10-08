@@ -106,6 +106,7 @@ import {
   type FrInfo,
 } from "../helpers/edit-harness";
 import { clickHomeMenuRow, closeHomeFlyouts } from "../helpers/homeTab";
+import { clickCanvasControl } from "../helpers/canvas-live";
 
 /** The one sentence a floating grid's claim answers every refused door with. */
 const FR_REFUSAL = /is not available for a floating range's cells yet\. Nothing was changed\./;
@@ -2553,11 +2554,7 @@ test.describe("undo: script batches, the paste step, refusals; Space on a checkb
       });
 
       // Insert Slicers on the canvas, from the model (the canvas journey's recipe).
-      const insertItem = page.locator('[data-testid="canvas-insert-slicer"]');
-      if (!(await insertItem.isVisible())) {
-        await page.locator("[data-ribbon-content]").getByRole("button", { name: /^Insert/ }).first().click();
-      }
-      await insertItem.click();
+      await clickCanvasControl(page, "canvas-insert-slicer");
       const dialog = page.locator("h2", { hasText: "Insert Slicers" }).locator("xpath=../..");
       await expect(dialog).toBeVisible();
       const modelOption = await eventually(

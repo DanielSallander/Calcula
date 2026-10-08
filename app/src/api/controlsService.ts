@@ -109,6 +109,27 @@ export interface ShapeCatalogEntry {
   defaultHeight: number;
   /** A line/connector: stroked, never filled. */
   isLine: boolean;
+  /**
+   * A picture of the shape for a menu row or a gallery tile (Canvas contract
+   * §4.3): its OWN normalized geometry -- the path the renderer scales to the
+   * shape's box -- as an SVG path `d` in the 0..1 unit square (four decimals),
+   * and the `viewBox` that frames all of it, overhangs included (a callout's
+   * tail, a bracket's lip), with a small margin for the stroke.
+   *
+   * Draw it as `<svg viewBox={viewBox}><path d={d} /></svg>`, filled unless
+   * `isLine`, with a stroke width near 0.04 (the unit square is 1 wide) and
+   * `vector-effect="non-scaling-stroke"` if a pixel-exact line is wanted. The
+   * path is the shape at a SQUARE box; the shape's own proportions are
+   * `defaultWidth` x `defaultHeight` (set `preserveAspectRatio="none"` on a
+   * box of that ratio to see them).
+   *
+   * Why it travels on the seam: the insert gallery's drawings are Controls-
+   * internal (`ShapeGalleryOverlay`, `shapePathToSvgD`) and a host such as the
+   * Canvas tab may not import them (Facade Rule) -- and a copied drawing is a
+   * second source of truth. Optional in the type so a provider that cannot
+   * draw one is still a provider; Controls fills it for every shape.
+   */
+  thumbnail?: { viewBox: string; d: string };
 }
 
 // ============================================================================

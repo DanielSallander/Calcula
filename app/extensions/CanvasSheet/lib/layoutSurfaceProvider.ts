@@ -23,12 +23,18 @@
 //
 //          LOCKED. An object whose ref is in the layout's `locked` list is
 //          selectable but neither movable nor resizable (lib/canvasLocks.ts);
-//          Core asks through `isLocked`.
+//          Core asks through `isLocked`. With the page's Lock Objects on,
+//          EVERY object answers locked, and the surface also names that page
+//          lock (`pageLockedReason`, the lock notice's own sentence) so a
+//          reason shown to the user -- Size & Position's -- says the PAGE is
+//          locked, not "unlock this object".
 
 import type { LayoutSurface, LayoutSurfaceProvider } from "@api/layoutSurface";
 import type { GridRegion } from "@api/gridOverlays";
 import { canvasAt, isSubscribedCanvas } from "./canvasSheetStore";
-import { isLockedOnLayout } from "./canvasLocks";
+import { isFixedOnLayout } from "./canvasLocks";
+import { canvasObjectsLocked } from "@api/canvasSheet";
+import { OBJECTS_LOCKED_NOTE } from "./objectsLock";
 
 /** The layout surface of sheet `index`, or null for a worksheet. Pure over the store. */
 export function canvasLayoutSurface(index: number): LayoutSurface | null {
@@ -41,7 +47,8 @@ export function canvasLayoutSurface(index: number): LayoutSurface | null {
     showGrid: layout.showGrid,
     page: { width: layout.pageWidth, height: layout.pageHeight },
     editable: !isSubscribedCanvas(index),
-    isLocked: (region: GridRegion) => isLockedOnLayout(layout, region),
+    isLocked: (region: GridRegion) => isFixedOnLayout(layout, region),
+    ...(canvasObjectsLocked(layout) ? { pageLockedReason: OBJECTS_LOCKED_NOTE } : {}),
   };
 }
 

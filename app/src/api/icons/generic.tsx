@@ -5,7 +5,8 @@
 //          with (see ./frame.tsx for the channels and the drawing rules).
 //          Settings, Check, Close, MoreHorizontal, Group, More, Model and Panel
 //          are the approved mockup's drawings; the rest are drawn in the same
-//          language.
+//          language. The Canvas tab's Elements, Arrange and View pictures
+//          (2026-10-08) are at the end, before the export.
 //
 //          Pixel grid (2026-09-24 sharpen pass): horizontal and vertical edges
 //          sit on a multiple of PIXEL_GRID (1.2 units, one device pixel at the
@@ -61,6 +62,7 @@ import {
   ACCENT,
   DANGER,
   PIXEL_STROKE,
+  coord,
   line,
   type RibbonIconProps,
 } from "./frame";
@@ -83,6 +85,19 @@ function Group({ size }: RibbonIconProps): React.ReactElement {
   );
 }
 
+/** The filled plus with round ends that More draws in its fourth slot, as
+ *  ONE path: arms 3.6 wide (r 1.8 ends) centred on (cx, cy), reaching `half`
+ *  from the centre each way. More's is half 4.8; New Page's (data.tsx) is the
+ *  same plus at half 4.2, so the two can only differ in length. Centred on an
+ *  odd multiple of 0.6 (17.4 in both), both arm edges land on whole pixels. */
+export function roundedPlus(cx: number, cy: number, half: number): string {
+  const run = coord(half - 3.6);
+  return (
+    `M${coord(cx)} ${coord(cy - half)}a1.8 1.8 0 0 1 1.8 1.8v${run}h${run}a1.8 1.8 0 0 1 0 3.6h-${run}` +
+    `v${run}a1.8 1.8 0 0 1-3.6 0v-${run}h-${run}a1.8 1.8 0 0 1 0-3.6h${run}v-${run}a1.8 1.8 0 0 1 1.8-1.8z`
+  );
+}
+
 /** "More of these": three soft tiles and an accent plus in the fourth slot.
  *  Tiles 8.4 square with a 2.4 gap; the plus's arms are 3.6 wide, centred
  *  on its slot's centre 17.4 (an odd multiple of 0.6, so both arm edges land
@@ -93,10 +108,7 @@ function More({ size }: RibbonIconProps): React.ReactElement {
       <rect x="2.4" y="2.4" width="8.4" height="8.4" rx="2.6" fill={SOFT} />
       <rect x="13.2" y="2.4" width="8.4" height="8.4" rx="2.6" fill={SOFT} />
       <rect x="2.4" y="13.2" width="8.4" height="8.4" rx="2.6" fill={SOFT} />
-      <path
-        d="M17.4 12.6a1.8 1.8 0 0 1 1.8 1.8v1.2h1.2a1.8 1.8 0 0 1 0 3.6h-1.2v1.2a1.8 1.8 0 0 1-3.6 0v-1.2h-1.2a1.8 1.8 0 0 1 0-3.6h1.2v-1.2a1.8 1.8 0 0 1 1.8-1.8z"
-        fill={ACCENT}
-      />
+      <path d={roundedPlus(17.4, 17.4, 4.8)} fill={ACCENT} />
     </IconFrame>
   );
 }
@@ -880,6 +892,235 @@ function DistributeVertical({ size }: RibbonIconProps): React.ReactElement {
 }
 
 // ============================================================================
+// The Canvas tab: Power BI's report authoring (2026-10-08)
+// ============================================================================
+//
+// Elements (Shapes, Button), the Back button, Arrange's Size & Position, and
+// View's grid toggles and Design Mode. Power BI's compositions where it has a
+// picture (its blue is ACCENT, its grey SOFT, its dark outline STRONG and
+// filled); Office's where it has none (Size's dimension arrows, Design Mode's
+// set square and pencil). Until 2026-10-08 the Canvas tab borrowed pictures
+// that meant something else -- Layout drew Shape, Controls drew Button, Resize
+// drew both Size & Position and Fit to Window, chart Gridlines drew Snap to
+// Grid, Pencil drew Design Mode -- and each of these replaces one of them.
+// No transform anywhere; every key measures 0 accent contact.
+
+/** Shapes (the Elements menu's face): Power BI's square, circle and
+ *  triangle, kept apart: a STRONG triangle on top ((12,3) (17.4,11.4)
+ *  (6.6,11.4), a 1.2 same-channel stroke rounding its corners, base edge on
+ *  12), a SOFT square 2.4..10.8 x 13.2..21.6 lower left and the ACCENT circle
+ *  (17.4, 17.4) r 4.2 lower right. Square to circle 2.4, triangle to circle at
+ *  least 1.2, triangle to square 1.2. Power BI overlaps outlined shapes;
+ *  filled shapes that overlap need a soft-under-strong knot or a bite round
+ *  the accent, and both overlapping versions read worse at 20px than the
+ *  three apart. The circle is the accent because it is the one shape with no
+ *  straight edge, so the channel split falls on the most different
+ *  silhouette. */
+function Shapes({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <path
+        d="M12 3L17.4 11.4L6.6 11.4Z"
+        fill={STRONG}
+        stroke={STRONG}
+        strokeWidth={1.2}
+        strokeLinejoin="round"
+      />
+      <rect x="2.4" y="13.2" width="8.4" height="8.4" rx="1.6" fill={SOFT} />
+      <circle cx="17.4" cy="17.4" r="4.2" fill={ACCENT} />
+    </IconFrame>
+  );
+}
+
+/** Button (the Buttons menu's face and its Blank row): Power BI's rounded
+ *  button with the arrow cursor on it. The button itself is the ACCENT (Power
+ *  BI's blue outline IS the button), 2.4..21.6 x 2.4..13.2, rx 3; the cursor
+ *  is Pointer's silhouette at 0.66 about its tip, written out with the tip at
+ *  (10.2, 9.6) and a 1.2 same-channel rounding stroke (ribbonIcons.test.tsx
+ *  fails if Pointer is redrawn and this is not). The button is NOTCHED round
+ *  the cursor with 1.2 of background: the pointer's wedge offset by 1.8 (0.6
+ *  of ink plus the gap), left side on x 8.4, an r 1.8 arc round the tip, the
+ *  right side parallel to the pointer's edge down to y 13.2. The tip sits left
+ *  of centre because at x 12 the notch left a 2 px sliver of button. A SOFT
+ *  button with an ACCENT label (the survey's sketch) touched the accent over
+ *  14.8 units and read as Controls. */
+function ButtonControl({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <path
+        d="M5.4 2.4H18.6a3 3 0 0 1 3 3V10.2a3 3 0 0 1-3 3H17.11L11.378 8.239A1.8 1.8 0 0 0 8.4 9.6V13.2H5.4a3 3 0 0 1-3-3V5.4a3 3 0 0 1 3-3z"
+        fill={ACCENT}
+      />
+      <path
+        d="M10.2 9.6L10.2 19.368L12.708 17.19L14.424 21.018L16.404 20.16L14.688 16.398L18.054 16.398Z"
+        fill={STRONG}
+        stroke={STRONG}
+        strokeWidth={1.2}
+        strokeLinejoin="round"
+      />
+    </IconFrame>
+  );
+}
+
+/** Back (the Buttons menu's Back row): Power BI's left arrow in a circle. A
+ *  SOFT disc (12, 12) r 9.6 with the ACCENT arrow cut out of it as a
+ *  reverse-wound HOLE grown 1.2 round the arrow (Search's and Lock's
+ *  technique, no mask), so the green borders background only. The shaft is a
+ *  PIXEL_STROKE run on y 12 from 8.4 to 16.8 (whole pixels 10.8..13.2); the
+ *  head is a 2.8 chevron. The hole is the head's two arms as capsules r 2.7
+ *  (1.4 + 1.3) and the shaft as a 9.6..14.4 band with an r 2.4 end; the ring
+ *  left is 2.4-3 wide all round. Power BI's arrow is dark in an outlined
+ *  circle. An arrow pointing back at a soft page touched the accent and read
+ *  as Indent. */
+function NavigateBack({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <path
+        d="M12 2.4A9.6 9.6 0 1 0 12 21.6A9.6 9.6 0 1 0 12 2.4ZM5.891 10.091L9.791 6.191A2.7 2.7 0 0 1 13.945 9.6H16.8A2.4 2.4 0 0 1 16.8 14.4H13.945A2.7 2.7 0 0 1 9.791 17.809L5.891 13.909A2.7 2.7 0 0 1 5.891 10.091Z"
+        fill={SOFT}
+      />
+      <path d="M8.4 12H16.8" {...line(ACCENT, PIXEL_STROKE)} />
+      <path d="M11.7 8.1L7.8 12l3.9 3.9" {...line(ACCENT, 2.8)} />
+    </IconFrame>
+  );
+}
+
+/** Size & Position (Arrange): a dimensioned object, Office's "Size" picture:
+ *  a SOFT object 2.4..13.2 square (rx 2.4) with its width measured below by
+ *  an ACCENT double arrow (y 14.4..21.6, 1.2 under the object) and its height
+ *  beside it by the same arrow turned, STRONG (x 14.4..21.6), since one icon
+ *  has one accent and the width is the commoner edit. The arrows are
+ *  ColumnWidth's measuring arrow shortened: 45-degree heads 3.6 long and 7.2
+ *  across on a 2.4 shaft, every vertex on the 1.2 grid; their nearest corners
+ *  are 1.2 apart on both axes. Resize, which drew this button until
+ *  2026-10-08, is ONE diagonal arrow pulling a corner out; this is two
+ *  straight measuring arrows, a different shape. Power BI has no ribbon
+ *  picture for it (it lives in the Format pane). */
+function SizePosition({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <rect x="2.4" y="2.4" width="10.8" height="10.8" rx="2.4" fill={SOFT} />
+      <path d="M2.4 18L6 14.4V16.8H9.6V14.4L13.2 18L9.6 21.6V19.2H6V21.6Z" fill={ACCENT} />
+      <path d="M18 2.4L21.6 6H19.2V9.6H21.6L18 13.2L14.4 9.6H16.8V6H14.4Z" fill={STRONG} />
+    </IconFrame>
+  );
+}
+
+/** A lattice of 2 px square dots (2.4 units, rx 0: the Borders family's
+ *  mark, which any radius paints as a plus sign at 150%), one per (x, y) in
+ *  `xs` x `ys`, row by row, leaving out the positions `skip` names. */
+function squareDots(
+  xs: readonly number[],
+  ys: readonly number[],
+  fill: string,
+  skip: (x: number, y: number) => boolean = () => false,
+): React.ReactElement {
+  return (
+    <>
+      {ys.flatMap((y) =>
+        xs
+          .filter((x) => !skip(x, y))
+          .map((x) => <rect key={`${x}-${y}`} x={x} y={y} width="2.4" height="2.4" rx="0" fill={fill} />),
+      )}
+    </>
+  );
+}
+
+/** The canvas dot grid: dots at pitch 4.8 starting 3.6, so the 4 x 4 lattice
+ *  spans 3.6..20.4, centred. */
+const LATTICE = [3.6, 8.4, 13.2, 18] as const;
+
+/** Snap to Grid: the canvas dot grid with an object snapped onto it -- the
+ *  SOFT 4 x 4 lattice with the four dots under the object left out, and an
+ *  ACCENT object 8.4..15.6 square (rx 1.4) whose edges ARE the covered dots'
+ *  outer edges, so it visibly spans exactly two lattice cells each way, with
+ *  2.4 of background to every dot left. The dots are under the 4.3 dot floor
+ *  on purpose: they are the TEXTURE of the grid, as in Borders (ICONS.md 2.3).
+ *  Chart Gridlines, which drew this toggle until 2026-10-08, is two solid
+ *  rules across a slab; BorderNone is dots on LINES round an empty middle.
+ *  An object filling the lower right (an L of dots left) read as a block with
+ *  a dotted border. */
+function SnapToGrid({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      {squareDots(LATTICE, LATTICE, SOFT, (x, y) => x > 3.6 && x < 18 && y > 3.6 && y < 18)}
+      <rect x="8.4" y="8.4" width="7.2" height="7.2" rx="1.4" fill={ACCENT} />
+    </IconFrame>
+  );
+}
+
+/** Show Grid (View > Gridlines, Power BI's "Gridlines" checkbox): a page
+ *  showing its grid. A SOFT page frame 2.4..21.6 square (rx 2.4) with a HOLE
+ *  4.8..19.2 (rx 1.2), walls 2.4; inside it a 3 x 3 lattice of ACCENT dots at
+ *  6 / 10.8 / 15.6 (Snap to Grid's pitch), each 1.2 clear of the frame. Here
+ *  the grid itself is the accent and there is no object; Snap to Grid has
+ *  grey dots round a green object. */
+function ShowGrid({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <path
+        d="M4.8 2.4H19.2A2.4 2.4 0 0 1 21.6 4.8V19.2A2.4 2.4 0 0 1 19.2 21.6H4.8A2.4 2.4 0 0 1 2.4 19.2V4.8A2.4 2.4 0 0 1 4.8 2.4ZM6 4.8A1.2 1.2 0 0 0 4.8 6V18A1.2 1.2 0 0 0 6 19.2H18A1.2 1.2 0 0 0 19.2 18V6A1.2 1.2 0 0 0 18 4.8Z"
+        fill={SOFT}
+      />
+      {squareDots([6, 10.8, 15.6], [6, 10.8, 15.6], ACCENT)}
+    </IconFrame>
+  );
+}
+
+/** Lock Objects (View; Power BI's "Lock objects" checkbox: nothing on the
+ *  page can be moved): the objects on the page, locked -- two SOFT objects in
+ *  Shapes' language, a square 2.4..10.8 (rx 1.6, Shapes' square) and a circle
+ *  (6.6, 17.4) r 4.2 (Shapes' circle), and an all-ACCENT padlock in the free
+ *  corner: body 12..21.6 x 14.4..21.6 (rx 1.8) with a 2.4 square keyhole
+ *  HOLE, and a 2.6 shackle. The padlock is one channel, so unlike Lock (an
+ *  accent shackle meeting a STRONG body, allowlisted) it has no contact at
+ *  all: circle to body exactly 1.2, square to shackle about 2.3. Arrange's
+ *  Lock on the same tab is a full-size STRONG padlock alone, a different
+ *  silhouette. One wide object over a centred padlock lost the objects.
+ *
+ *  The padlock body's outline is Home's ProtectSheet's (only the keyhole
+ *  differs); ribbonIcons.test.tsx pins the copy, so a padlock redraw must
+ *  follow. Until both reviews of 2026-10-08 the objects were two grey
+ *  rounded blocks top and left -- ProtectSheet's layout with other cells,
+ *  "one icon used twice" at 20px. A square and a circle are objects no sheet
+ *  cell is. Review 1 proposed a circle over the old lower block; the square
+ *  and circle measured fewer half-covered pixels (52 against 58) and say
+ *  "shapes" the way the Shapes key does. */
+function LockObjects({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <rect x="2.4" y="2.4" width="8.4" height="8.4" rx="1.6" fill={SOFT} />
+      <circle cx="6.6" cy="17.4" r="4.2" fill={SOFT} />
+      <path d="M14.4 14.4V12A2.4 2.4 0 0 1 19.2 12V14.4" {...line(ACCENT, 2.6)} />
+      <path
+        d="M13.8 14.4H19.8A1.8 1.8 0 0 1 21.6 16.2V19.8A1.8 1.8 0 0 1 19.8 21.6H13.8A1.8 1.8 0 0 1 12 19.8V16.2A1.8 1.8 0 0 1 13.8 14.4ZM15.6 16.8V19.2H18V16.8Z"
+        fill={ACCENT}
+      />
+    </IconFrame>
+  );
+}
+
+/** Design Mode (View hero): Excel's metaphor, a set square with a pencil
+ *  drawing on it (the menu bar's IconDesignMode says the same in the old
+ *  stroke set). A SOFT right triangle (2.4,7.2) (2.4,21.6) (16.8,21.6) with a
+ *  triangular HOLE (4.8,14.4) (9.6,19.2) (4.8,19.2) -- walls 2.4 on the legs,
+ *  3.4 on the hypotenuse -- and an ACCENT pencil on the frame's other
+ *  diagonal (x + y = 24), perpendicular to the hypotenuse, its point 1.5
+ *  short of the hypotenuse's midpoint (4.4 thick, 4.6 point, 8.4 body),
+ *  written out in frame coordinates. Diagonals antialias, unavoidably for both
+ *  shapes. Pencil (which drew this button until 2026-10-08, and is also Edit
+ *  Chart) is a lone pencil. A pencil laid along the hypotenuse left the top
+ *  right empty and the ink 1.8 off centre. */
+function DesignMode({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <path d="M2.4 7.2V21.6H16.8ZM4.8 14.4L9.6 19.2H4.8Z" fill={SOFT} />
+      <path d="M10.66 13.34L15.47 11.64L21.41 5.7L18.3 2.59L12.36 8.53Z" fill={ACCENT} />
+    </IconFrame>
+  );
+}
+
+// ============================================================================
 // Group export
 // ============================================================================
 
@@ -944,6 +1185,15 @@ export const GENERIC_ICONS = {
   AlignObjects,
   DistributeHorizontal,
   DistributeVertical,
+  // ---- the Canvas tab: Power BI's report authoring (2026-10-08) -------------
+  Shapes,
+  ButtonControl,
+  NavigateBack,
+  SizePosition,
+  SnapToGrid,
+  ShowGrid,
+  LockObjects,
+  DesignMode,
 } as const;
 /* eslint-enable @typescript-eslint/naming-convention */
 

@@ -9,7 +9,7 @@
  *
  * Nothing in here asserts. It reads and it acts; the spec decides.
  */
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -67,6 +67,8 @@ export interface SheetRow {
     pageWidth: number;
     pageHeight: number;
     background: string;
+    wallpaper?: string;
+    objectsLocked?: boolean;
     zOrder?: Array<{ kind: string; id: string }>;
     locked?: Array<{ kind: string; id: string }>;
   };
@@ -238,6 +240,125 @@ export async function ribbonTabs(page: Page): Promise<Array<{ label: string; act
 
 export async function hasRibbonTab(page: Page, label: string): Promise<boolean> {
   return (await ribbonTabs(page)).some((t) => t.label === label);
+}
+
+// ---------------------------------------------------------------------------
+// The Canvas tab (Power BI report authoring, 2026-10-08): six groups that fold
+// into launchers when the band is short of room -- View first, Pages last.
+// ---------------------------------------------------------------------------
+
+/** The Canvas tab's groups, left to right (section ids `canvas-tab.<id>`). */
+export const CANVAS_GROUPS = ["pages", "visuals", "elements", "arrange", "page", "view"] as const;
+export type CanvasGroup = (typeof CANVAS_GROUPS)[number];
+
+/** The group a Canvas-tab control lives in, from its test id. */
+export function canvasGroupOf(testId: string): CanvasGroup | null {
+  if (testId.startsWith("canvas-new-page")) return "pages";
+  if (/^canvas-(visual-|all-visuals|insert-pivot$|insert-slicer$)/.test(testId)) return "visuals";
+  if (/^canvas-(insert-(textBox|button|shape|picture|floatingGrid)|buttons|shapes)/.test(testId)) return "elements";
+  if (testId.startsWith("canvas-arrange-")) return "arrange";
+  if (/^canvas-(page-size|page-background|page-wallpaper|page-width|page-height|themes)/.test(testId)) return "page";
+  if (/^canvas-(page-view|show-grid|snap-to-grid|lock-objects|grid-size|design-mode)/.test(testId)) return "view";
+  return null;
+}
+
+/** Whether the Canvas tab's own controls (inline or folded) are in the band. */
+async function canvasTabShowing(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const band = document.querySelector("[data-ribbon-content]");
+    if (!band) return false;
+    return (
+      band.querySelector('[data-testid="canvas-new-page"], [data-testid="canvas-all-visuals"], [data-testid="canvas-arrange-lock"]') !== null ||
+      band.querySelector('[data-testid^="section-launcher-canvas-tab."]') !== null
+    );
+  });
+}
+
+/**
+ * Make the Canvas contextual tab the one on screen. Clicks the tab only when it
+ * is not already showing: clicking the ACTIVE tab collapses the ribbon.
+ */
+export async function ensureCanvasTab(page: Page): Promise<void> {
+  if (await canvasTabShowing(page)) return;
+  const strip = page.locator("[data-ribbon-content]").locator("xpath=..");
+  await strip.locator("button", { hasText: /^Canvas$/ }).first().click();
+  for (let i = 0; i < 40; i++) {
+    if (await canvasTabShowing(page)) return;
+    await page.waitForTimeout(100);
+  }
+  throw new Error("ensureCanvasTab: the Canvas tab's controls never appeared in the ribbon band (is a canvas the active sheet?)");
+}
+
+/** The Canvas groups folded into launchers right now, in band order. */
+export async function collapsedCanvasGroups(page: Page): Promise<string[]> {
+  await ensureCanvasTab(page);
+  const ids = await page
+    .locator('[data-ribbon-content] [data-testid^="section-launcher-canvas-tab."]')
+    .evaluateAll((nodes) => nodes.map((n) => n.getAttribute("data-testid") ?? ""));
+  return ids.map((id) => id.replace(/^section-launcher-canvas-tab\./, ""));
+}
+
+/** Close every open Canvas group flyout by toggling its launcher. */
+export async function closeCanvasFlyouts(page: Page): Promise<void> {
+  const open = page.locator('[data-testid^="section-launcher-canvas-tab."][aria-expanded="true"]');
+  for (let i = 0; i < 8; i++) {
+    if ((await open.count()) === 0) return;
+    await open.first().click();
+    await page.waitForTimeout(100);
+  }
+}
+
+/**
+ * The Canvas-tab control with this test id, wherever the ribbon has put it:
+ * inline in the band, or inside its folded group's flyout (opened when needed).
+ */
+export async function canvasControl(page: Page, testId: string): Promise<Locator> {
+  await ensureCanvasTab(page);
+  const visible = page.locator(`[data-testid="${testId}"]`).filter({ visible: true });
+  if ((await visible.count()) > 0) return visible.first();
+  const collapsed = await collapsedCanvasGroups(page);
+  const hint = canvasGroupOf(testId);
+  const order = [...(hint && collapsed.includes(hint) ? [hint] : []), ...collapsed.filter((g) => g !== hint)];
+  for (const group of order) {
+    const launcher = page.locator(`[data-testid="section-launcher-canvas-tab.${group}"]`).first();
+    if ((await launcher.getAttribute("aria-expanded")) !== "true") await launcher.click();
+    const flyout = page.locator("[data-section-flyout]").filter({ visible: true });
+    await flyout.first().waitFor({ state: "visible", timeout: 5_000 }).catch(() => undefined);
+    const inside = flyout.locator(`[data-testid="${testId}"]`).filter({ visible: true });
+    for (let i = 0; i < 10; i++) {
+      if ((await inside.count()) > 0) return inside.first();
+      await page.waitForTimeout(100);
+    }
+    await closeCanvasFlyouts(page);
+  }
+  if ((await visible.count()) > 0) return visible.first();
+  throw new Error(
+    `canvasControl: no visible [data-testid="${testId}"] on the Canvas tab -- not inline, and not in any folded group ` +
+      `(folded: ${collapsed.join(", ") || "none"}; its group: ${hint ?? "unknown"})`,
+  );
+}
+
+/** Click a Canvas-tab control wherever it is (see `canvasControl`). */
+export async function clickCanvasControl(page: Page, testId: string): Promise<void> {
+  await (await canvasControl(page, testId)).click();
+  await page.waitForTimeout(200);
+}
+
+/**
+ * Open the menu a Canvas-tab control opens (a menu button or a split's chevron)
+ * and return the row with `rowTestId` (rows are body portals: looked up page-wide).
+ */
+export async function canvasMenuRow(page: Page, triggerTestId: string, rowTestId: string): Promise<Locator> {
+  const row = page.locator(`[data-testid="${rowTestId}"]`).filter({ visible: true }).first();
+  if ((await row.count()) === 0) await (await canvasControl(page, triggerTestId)).click();
+  await row.waitFor({ state: "visible", timeout: 5_000 });
+  return row;
+}
+
+/** Open a Canvas-tab menu and click one of its rows. */
+export async function clickCanvasMenuRow(page: Page, triggerTestId: string, rowTestId: string): Promise<void> {
+  await (await canvasMenuRow(page, triggerTestId, rowTestId)).click();
+  await page.waitForTimeout(250);
 }
 
 /** Hand the keyboard to the grid container (the canvas bindings require it). */

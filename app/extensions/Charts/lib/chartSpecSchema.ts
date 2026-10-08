@@ -27,7 +27,7 @@ const CUSTOM_ORDER_PROPERTY = {
  * replaces an ambiguous `oneOf` — minimal options like `{ borderRadius: 4 }`
  * match several branches, which the JSON language service reports as invalid.
  */
-const MARK_OPTION_NARROWING = [
+const MARK_OPTION_DEFINITIONS: ReadonlyArray<{ marks: string[]; def: string }> = [
   { marks: ["bar", "horizontalBar"], def: "BarMarkOptions" },
   { marks: ["line"], def: "LineMarkOptions" },
   { marks: ["area"], def: "AreaMarkOptions" },
@@ -44,7 +44,21 @@ const MARK_OPTION_NARROWING = [
   { marks: ["boxPlot"], def: "BoxPlotMarkOptions" },
   { marks: ["sunburst"], def: "SunburstMarkOptions" },
   { marks: ["pareto"], def: "ParetoMarkOptions" },
-].map(({ marks, def }) => ({
+  { marks: ["card"], def: "CardMarkOptions" },
+  { marks: ["multiRowCard"], def: "MultiRowCardMarkOptions" },
+  { marks: ["kpi"], def: "KpiMarkOptions" },
+  { marks: ["gauge"], def: "GaugeMarkOptions" },
+];
+
+/**
+ * The name of the *MarkOptions definition that narrows `mark`'s options, or
+ * null for a mark the schema does not narrow (a registered custom mark).
+ */
+export function markOptionsDefinitionFor(mark: string): string | null {
+  return MARK_OPTION_DEFINITIONS.find((d) => d.marks.includes(mark))?.def ?? null;
+}
+
+const MARK_OPTION_NARROWING = MARK_OPTION_DEFINITIONS.map(({ marks, def }) => ({
   if: { properties: { mark: { enum: marks } }, required: ["mark"] },
   then: { properties: { markOptions: { $ref: `#/definitions/${def}` } } },
 }));
@@ -61,7 +75,7 @@ export const chartSpecJsonSchema: object = {
       type: "string",
       // `examples` (not `enum`) so Monaco autocompletes the built-ins while a
       // registered custom mark id is still valid (not flagged as an error).
-      examples: ["bar", "horizontalBar", "line", "area", "scatter", "pie", "donut", "waterfall", "combo", "radar", "bubble", "histogram", "funnel", "treemap", "stock", "boxPlot", "sunburst", "pareto"],
+      examples: ["bar", "horizontalBar", "line", "area", "scatter", "pie", "donut", "waterfall", "combo", "radar", "bubble", "histogram", "funnel", "treemap", "stock", "boxPlot", "sunburst", "pareto", "card", "multiRowCard", "kpi", "gauge"],
       pattern: "^[A-Za-z_][A-Za-z0-9_]*$",
       description: "Chart type. Built-in marks (bar, line, pie, ...) autocomplete; a registered custom mark id is also valid.",
     },
@@ -182,6 +196,10 @@ export const chartSpecJsonSchema: object = {
       type: "array",
       items: { $ref: "#/definitions/ParamSpec" },
       description: "Named parameters referenceable from filter/calculate expressions as [Name]. Value is a literal or a live single-cell reference.",
+    },
+    plotHiddenCells: {
+      type: "boolean",
+      description: "Plot the source range's hidden rows and columns too (Excel's \"Show data in hidden rows and columns\"). Default false: hidden rows (an AutoFilter, a table slicer) are left out. Range sources only.",
     },
   },
   // Narrow markOptions to the matching definition based on the chart type.
@@ -613,8 +631,85 @@ export const chartSpecJsonSchema: object = {
           $ref: "#/definitions/AxisSpec",
           description: "Secondary Y axis configuration.",
         },
+        stackMode: {
+          type: "string",
+          // No percentStacked: the line series share the value axis with the
+          // columns, so a 100% column stack would put them on two scales at once.
+          enum: ["none", "stacked"],
+          description: "How the bar series sit in a category: \"none\" = side by side (line and clustered column), \"stacked\" = on top of each other (line and stacked column). Lines and areas are never stacked. Default: \"none\".",
+        },
       },
       additionalProperties: false,
+    },
+    CardMarkOptions: {
+      type: "object",
+      description: "Options for the Card visual: one callout value per series with the series name under it.",
+      properties: {
+        displayUnits: { $ref: "#/definitions/VisualDisplayUnits" },
+        decimals: { type: "integer", minimum: 0, maximum: 10, description: "Decimal places. Default: automatic (0 at ten or more of a unit, else 1)." },
+        aggregate: { $ref: "#/definitions/VisualAggregate" },
+        showCategoryLabel: { type: "boolean", description: "Show the series name under the callout. Default: true." },
+        calloutFontSize: { type: "number", minimum: 8, maximum: 200, description: "Callout font size (px). Default: fitted to the card." },
+      },
+      additionalProperties: false,
+    },
+    MultiRowCardMarkOptions: {
+      type: "object",
+      description: "Options for the Multi-row card: one row per category, one value/label pair per series.",
+      properties: {
+        displayUnits: { $ref: "#/definitions/VisualDisplayUnits" },
+        decimals: { type: "integer", minimum: 0, maximum: 10, description: "Decimal places. Default: automatic." },
+        showAccentBar: { type: "boolean", description: "Coloured accent bar on each row's left edge. Default: true." },
+        showRowTitle: { type: "boolean", description: "Show the category as the row title. Default: true." },
+      },
+      additionalProperties: false,
+    },
+    KpiMarkOptions: {
+      type: "object",
+      description: "Options for the KPI visual. Categories = trend axis (sorted ascending), series 0 = indicator, series 1 = goal. Shows the latest period.",
+      properties: {
+        direction: { type: "string", enum: ["higherIsBetter", "lowerIsBetter"], description: "Which direction is good. Default: \"higherIsBetter\"." },
+        goal: { type: "number", description: "A fixed goal, used when the data has no goal series." },
+        showTrend: { type: "boolean", description: "Draw the trend area. Default: true." },
+        showGoal: { type: "boolean", description: "Show the goal line of text. Default: true." },
+        showDistance: { type: "boolean", description: "Show the distance to goal. Default: true." },
+        goodColor: { type: "string", description: "Colour when on the good side of the goal. Default: \"#2E9E4F\"." },
+        badColor: { type: "string", description: "Colour when on the bad side. Default: \"#D13438\"." },
+        neutralColor: { type: "string", description: "Colour with no goal. Default: \"#8A8886\"." },
+        displayUnits: { $ref: "#/definitions/VisualDisplayUnits" },
+        decimals: { type: "integer", minimum: 0, maximum: 10, description: "Decimal places. Default: automatic." },
+      },
+      additionalProperties: false,
+    },
+    GaugeMarkOptions: {
+      type: "object",
+      description: "Options for the Gauge visual: a 180-degree arc filled to the value, a needle at the target. Defaults: min 0, max twice the value.",
+      properties: {
+        min: { type: "number", description: "Fixed minimum. Default: the min series, else 0." },
+        max: { type: "number", description: "Fixed maximum. Default: the max series, else twice the value." },
+        target: { type: "number", description: "Fixed target. Default: the target series." },
+        targetSeriesIndex: { type: "integer", minimum: -1, description: "Series feeding the target (-1 = none). Default: 1 when there are two or more series." },
+        minSeriesIndex: { type: "integer", minimum: 0, description: "Series feeding the minimum." },
+        maxSeriesIndex: { type: "integer", minimum: 0, description: "Series feeding the maximum." },
+        aggregate: { $ref: "#/definitions/VisualAggregate" },
+        displayUnits: { $ref: "#/definitions/VisualDisplayUnits" },
+        decimals: { type: "integer", minimum: 0, maximum: 10, description: "Decimal places. Default: automatic." },
+        trackColor: { type: "string", description: "Colour of the unfilled track. Default: \"#E1E1E1\"." },
+        targetColor: { type: "string", description: "Colour of the target needle. Default: the title colour." },
+        showMinMax: { type: "boolean", description: "Show min and max at the arc's ends. Default: true." },
+        showTargetLabel: { type: "boolean", description: "Show the target value by the needle. Default: true." },
+      },
+      additionalProperties: false,
+    },
+    VisualDisplayUnits: {
+      type: "string",
+      enum: ["auto", "none", "thousands", "millions", "billions", "trillions"],
+      description: "Power BI display units. \"auto\" picks K/M/bn/T (11,732 -> 12K); \"none\" shows the value as the source formatted it. Default: \"auto\".",
+    },
+    VisualAggregate: {
+      type: "string",
+      enum: ["auto", "first", "last", "sum", "average", "min", "max", "count"],
+      description: "How a many-row series becomes one value. \"auto\": one datum as it is, numbers summed, text shows its first value. Default: \"auto\".",
     },
     RadarMarkOptions: {
       type: "object",
@@ -1570,6 +1665,7 @@ export function generateSpecReference(): string {
   lines.push("| secondaryYAxis | boolean | false | Enable right Y axis |");
   lines.push("| secondaryAxisSeries | number[] | [] | Series using secondary axis |");
   lines.push("| secondaryAxis | AxisSpec | - | Secondary axis config |");
+  lines.push("| stackMode | string | \"none\" | none (line and clustered column) or stacked (line and stacked column) |");
   lines.push("");
 
   lines.push("### radar");
@@ -1663,6 +1759,55 @@ export function generateSpecReference(): string {
   lines.push("| showMarkers | boolean | true | Show markers on line |");
   lines.push("| markerRadius | number | 4 | Marker radius (px) |");
   lines.push("| show80PercentLine | boolean | true | Show 80% reference line |");
+  lines.push("");
+
+  lines.push("### card");
+  lines.push("Power BI's card: one callout value per series, the series name under it. A text value is shown as its text.");
+  lines.push("| Property | Type | Default | Description |");
+  lines.push("|----------|------|---------|-------------|");
+  lines.push("| displayUnits | string | \"auto\" | auto (K/M/bn/T), none (as the source shows it), thousands, millions, billions, trillions |");
+  lines.push("| decimals | integer | auto | Decimal places |");
+  lines.push("| aggregate | string | \"auto\" | auto, first, last, sum, average, min, max, count |");
+  lines.push("| showCategoryLabel | boolean | true | Series name under the callout |");
+  lines.push("| calloutFontSize | number | fitted | Callout size (px) |");
+  lines.push("");
+
+  lines.push("### multiRowCard");
+  lines.push("One row per category (its title), one value-over-label pair per series, an accent bar.");
+  lines.push("| Property | Type | Default | Description |");
+  lines.push("|----------|------|---------|-------------|");
+  lines.push("| displayUnits | string | \"auto\" | As for card |");
+  lines.push("| decimals | integer | auto | Decimal places |");
+  lines.push("| showAccentBar | boolean | true | Accent bar on each row |");
+  lines.push("| showRowTitle | boolean | true | Category as the row title |");
+  lines.push("");
+
+  lines.push("### kpi");
+  lines.push("Categories = trend axis (sorted ascending), series 0 = indicator, series 1 = goal. Shows the latest period, a trend area and the distance to goal.");
+  lines.push("| Property | Type | Default | Description |");
+  lines.push("|----------|------|---------|-------------|");
+  lines.push("| direction | string | \"higherIsBetter\" | higherIsBetter or lowerIsBetter |");
+  lines.push("| goal | number | - | Fixed goal when there is no goal series |");
+  lines.push("| showTrend | boolean | true | Trend area |");
+  lines.push("| showGoal | boolean | true | Goal line |");
+  lines.push("| showDistance | boolean | true | Distance to goal |");
+  lines.push("| goodColor / badColor / neutralColor | string | green / red / grey | Status colours |");
+  lines.push("| displayUnits / decimals | | auto | As for card |");
+  lines.push("");
+
+  lines.push("### gauge");
+  lines.push("A 180-degree arc filled from min to the value, a needle at the target. Defaults: min 0, max twice the value; target = series 1.");
+  lines.push("| Property | Type | Default | Description |");
+  lines.push("|----------|------|---------|-------------|");
+  lines.push("| min / max / target | number | - | Fixed values (win over series) |");
+  lines.push("| targetSeriesIndex | integer | 1 | Series feeding the target (-1 = none) |");
+  lines.push("| minSeriesIndex / maxSeriesIndex | integer | - | Series feeding min / max |");
+  lines.push("| aggregate | string | \"auto\" | As for card |");
+  lines.push("| displayUnits / decimals | | auto | As for card |");
+  lines.push("| trackColor | string | \"#E1E1E1\" | Unfilled track |");
+  lines.push("| targetColor | string | title colour | Needle |");
+  lines.push("| showMinMax | boolean | true | Min / max labels |");
+  lines.push("| showTargetLabel | boolean | true | Target value by the needle |");
   lines.push("");
 
   lines.push("### rule (reference line)");

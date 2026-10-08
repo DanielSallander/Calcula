@@ -17,6 +17,9 @@ import { resolveControlProperties } from "../lib/controlApi";
 import { beginControlGeometryRead, controlGeometryWritesInFlight } from "../lib/geometryWriteOrder";
 import { isFloatingControlSelected } from "./floatingSelection";
 import { isFloatingButtonPressed } from "../lib/buttonPress";
+import { getFloatingControl } from "../lib/floatingStore";
+import { getGridStateSnapshot } from "@api/grid";
+import { actionGlyphMetrics, actionGlyphOf, drawActionGlyph, isCurrentPageButton } from "./actionGlyph";
 
 /** How dark a PRESSED run-mode button's face goes (a black wash, 0..1). */
 export const BUTTON_PRESSED_SHADE = 0.12;
@@ -155,6 +158,14 @@ export function renderFloatingButton(overlayCtx: OverlayRenderContext): void {
   // caption one pixel down and right -- until the release runs it or the
   // pointer slides off.
   const pressed = isFloatingButtonPressed(controlId);
+  // A button's DECLARATIVE action (Canvas contract §4.4, Button/actionGlyph.ts):
+  // a navigation button to the page on screen is drawn SELECTED -- the pressed
+  // face, held -- as a Power BI page navigator marks the current page; Back
+  // and Clear all slicers draw their picture before the caption.
+  const buttonAction = getFloatingControl(controlId)?.buttonAction;
+  const currentPage =
+    !pressed && isCurrentPageButton(buttonAction, getGridStateSnapshot()?.sheetContext?.activeSheetName);
+  const glyph = actionGlyphOf(buttonAction);
 
   // 1. Draw button background
   ctx.beginPath();
@@ -162,8 +173,9 @@ export function renderFloatingButton(overlayCtx: OverlayRenderContext): void {
   ctx.fillStyle = data.fill;
   ctx.fill();
 
-  if (pressed) {
-    // 2'. Pressed: a 12% black wash over the face instead of the highlight.
+  if (pressed || currentPage) {
+    // 2'. Pressed (or the current page's navigator button): a 12% black wash
+    //     over the face instead of the highlight.
     ctx.beginPath();
     ctx.roundRect(canvasX, canvasY, btnWidth, btnHeight, borderRadius);
     ctx.fillStyle = "#000000";
@@ -201,7 +213,20 @@ export function renderFloatingButton(overlayCtx: OverlayRenderContext): void {
   ctx.beginPath();
   ctx.rect(canvasX + 4, canvasY, btnWidth - 8, btnHeight);
   ctx.clip();
-  ctx.fillText(data.text, centerX, centerY);
+  if (glyph) {
+    // The glyph and the caption are centred TOGETHER, glyph first.
+    const { size, gap } = actionGlyphMetrics(data.fontSize);
+    const textWidth = data.text ? ctx.measureText(data.text).width : 0;
+    const total = size + (textWidth > 0 ? gap + textWidth : 0);
+    const left = centerX - total / 2;
+    drawActionGlyph(ctx, glyph, left, centerY - size / 2, size, data.color);
+    if (textWidth > 0) {
+      ctx.textAlign = "left";
+      ctx.fillText(data.text, left + size + gap, centerY);
+    }
+  } else {
+    ctx.fillText(data.text, centerX, centerY);
+  }
   ctx.restore();
 
   // 5. Design Mode: an UNSELECTED button shows a dotted border (it can be

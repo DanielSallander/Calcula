@@ -907,7 +907,7 @@ renamed or removed, so a token that resolves today resolves in every later build
 example add-in's `"Percent"` (`docs/examples/addin-tax-tools/tax-tools.js`) is one of the 34 keys
 frozen since before this redesign.
 
-### 8.3 The token vocabulary (243 keys, 2026-10-04)
+### 8.3 The token vocabulary (270 keys, 2026-10-08)
 
 Authoritative list and drawing rules: `docs/design/ICONS.md` §4. By family:
 
@@ -935,7 +935,10 @@ Authoritative list and drawing rules: `docs/design/ICONS.md` §4. By family:
 | **Status** | Info, Warn, Error, Success |
 | **Structure** | Group, More, MoreHorizontal, Close, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Sidebar, Ribbon, Panel, Layout, Resize |
 | **Things** | Settings, Text, Pointer, Keyboard, Image, Lock, Eye, Calendar, Clock, Script, Model, Controls, Database, Folder, AddIn |
-| **Arrange** | BringForward, SendBackward, BringToFront, SendToBack, AlignObjects, DistributeHorizontal, DistributeVertical, ObjectAlignLeft, ObjectAlignCenter, ObjectAlignRight, ObjectAlignTop, ObjectAlignMiddle, ObjectAlignBottom |
+| **Arrange** | BringForward, SendBackward, BringToFront, SendToBack, AlignObjects, DistributeHorizontal, DistributeVertical, ObjectAlignLeft, ObjectAlignCenter, ObjectAlignRight, ObjectAlignTop, ObjectAlignMiddle, ObjectAlignBottom, SizePosition |
+| **Report visuals** (Power BI's pane, 2026-10-08) | ChartBarStacked, ChartBarStacked100, ChartAreaStacked, ChartAreaStacked100, ChartComboStacked, ChartCard, ChartMultiRowCard, ChartKpi, ChartGauge, Matrix, AllVisuals |
+| **Report page** (2026-10-08) | NewPage, PageNavigator, NavigateBack, ClearSlicers, FloatingGrid, Shapes, ButtonControl, Wallpaper |
+| **Page view and grid** (2026-10-08) | FitToPage, FitToWidth, ActualSize, ShowGrid, SnapToGrid, LockObjects, DesignMode |
 
 Tokens are case-sensitive PascalCase: `"Refresh"` resolves, `"refresh"` falls back to the generic
 glyph. Pick the icon for what the button DOES (a verb) or the object it acts on, and prefer a verb
@@ -951,6 +954,18 @@ DeleteRow and DeleteColumn were redrawn in Excel's metaphor with the same meanin
 day's icon review redrew RemoveHyperlinks (now Excel's whole chain with a red X in the corner,
 not a broken chain), the 45-degree Orientation pictures, DeleteCells, GoTo and several Paste
 options, all with the same meaning.
+
+**Redrawn 2026-10-08:** Stacked (stacked columns) now draws its two columns at clearly different
+heights, so it no longer reads as Stacked100 beside it; same meaning. The Canvas tab stopped
+borrowing pictures that mean something else, and an add-in should follow it: use Shapes (not
+Layout) for "insert a shape", ButtonControl (not Controls, which is form controls) for "insert a
+button", SizePosition (not Resize) for an object's size and position, FitToPage (not Resize) for
+fitting a page to the window, ActualSize (not Search, which is Find) for 100% zoom, SnapToGrid
+(not Gridlines, which is the CHART's gridlines) for snapping, and DesignMode (not Pencil, which is
+Edit) for design mode. The same day's icon review redrew ChartComboStacked, ChartCard, Matrix,
+PageNavigator, LockObjects, ChartBarStacked, ChartAreaStacked and AllVisuals, all with the same
+meaning. AllVisuals is drawn for a 30px hero button only; at 20px it is busy and soft, so an add-in
+should not use it as a small button.
 
 ### 8.4 A trusted (built-in) extension, for comparison
 

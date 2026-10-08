@@ -119,6 +119,7 @@ import {
   ChartStyleSection,
   ChartDataSection,
   ChartActionsSection,
+  ChartVisualSection,
   buildChartDesignSections,
 } from "../ChartDesignSections";
 import { ChartJsonPane, CHART_JSON_PANE_ID } from "../ChartJsonPane";
@@ -391,6 +392,19 @@ describe("Type", () => {
     expect(byTestId("chart-type-line", container).getAttribute("aria-checked")).toBe("true");
   });
 
+  it("a type switch keeps only the options the new type understands (a stacked column's stackMode never rides into a pie)", async () => {
+    await seed(fixtureSpec({ markOptions: { stackMode: "stacked", borderRadius: 2 } } as Partial<ChartSpec>));
+    await render(<ChartTypeSection placement="ribbon" />);
+
+    await click(byTestId("chart-type-pie", container));
+
+    expect(liveSpec().mark).toBe("pie");
+    const opts = (liveSpec().markOptions ?? {}) as Record<string, unknown>;
+    expect(opts.stackMode).toBeUndefined();
+    expect(opts.borderRadius).toBeUndefined();
+    expect(JSON.parse(JSON.stringify(liveSpec())).markOptions ?? {}).toEqual({});
+  });
+
   it("More opens every type as a gallery and marks itself when the type lives there", async () => {
     await seed(fixtureSpec());
     await render(<ChartTypeSection placement="ribbon" />);
@@ -503,10 +517,93 @@ describe("Elements", () => {
 });
 
 // ============================================================================
+// Tile visuals: title-only furniture + the Visual cluster (contract 4.2)
+// ============================================================================
+
+describe("Tile visuals (Card, Multi-row card, KPI, Gauge)", () => {
+  it("a Card's Elements cluster offers the title and nothing it would not draw", async () => {
+    await seed(fixtureSpec({ mark: "card" } as Partial<ChartSpec>));
+    await render(<ChartElementsSection placement="ribbon" />);
+    expect(container.querySelector('[data-testid="chart-elem-title"]')).not.toBeNull();
+    for (const gone of ["legend", "dataLabels", "gridlines", "axisLabels"]) {
+      expect(container.querySelector(`[data-testid="chart-elem-${gone}"]`), gone).toBeNull();
+    }
+  });
+
+  it("the section list swaps Layout for Visual on a tile, and back", async () => {
+    await seed(fixtureSpec({ mark: "kpi" } as Partial<ChartSpec>));
+    const ids = buildChartDesignSections().map((s) => s.id);
+    expect(ids).toContain("chart-design.visual");
+    expect(ids).not.toContain("chart-design.layout");
+    await seed(fixtureSpec());
+    const bar = buildChartDesignSections().map((s) => s.id);
+    expect(bar).not.toContain("chart-design.visual");
+    expect(bar).toContain("chart-design.layout");
+  });
+
+  it("Visual on a card: display units are written to markOptions", async () => {
+    await seed(fixtureSpec({ mark: "card" } as Partial<ChartSpec>));
+    await render(<ChartVisualSection placement="ribbon" />);
+    await click(byTestId("chart-visual", container));
+    expect(findHardcodedColours(openFlyout())).toEqual([]);
+    expect(openFlyout().querySelector("select")).toBeNull();
+    await click(byTestId("chart-visual-units-millions"));
+    expect(liveSpec().markOptions).toMatchObject({ displayUnits: "millions" });
+  });
+
+  it("Visual on a KPI: the direction writes markOptions.direction", async () => {
+    await seed(fixtureSpec({ mark: "kpi" } as Partial<ChartSpec>));
+    await render(<ChartVisualSection placement="ribbon" />);
+    await click(byTestId("chart-visual", container));
+    await click(byTestId("chart-visual-direction-lowerIsBetter"));
+    expect(liveSpec().markOptions).toMatchObject({ direction: "lowerIsBetter" });
+  });
+
+  it("Visual on a Gauge: a typed maximum is a number, an emptied one is gone", async () => {
+    await seed(fixtureSpec({ mark: "gauge", markOptions: { max: 10 } } as Partial<ChartSpec>));
+    await render(<ChartVisualSection placement="ribbon" />);
+    await click(byTestId("chart-visual", container));
+    const input = byTestId("chart-visual-gauge-max") as HTMLInputElement;
+    const type = async (v: string): Promise<void> => {
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+        setter?.call(input, v);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    };
+    await type("300");
+    expect(liveSpec().markOptions).toMatchObject({ max: 300 });
+    await type("");
+    expect((liveSpec().markOptions as Record<string, unknown>).max).toBeUndefined();
+  });
+
+  it("renders on both surfaces with no <select>, nothing fixed, no literals", async () => {
+    for (const [surface, layout] of SURFACES) {
+      await seed(fixtureSpec({ mark: "gauge" } as Partial<ChartSpec>));
+      await render(<ChartVisualSection placement={surface === "band" ? "ribbon" : "sidebar"} />, layout());
+      expect(container.childElementCount).toBeGreaterThan(0);
+      expect(container.querySelector("select")).toBeNull();
+      expect(fixedElements(container)).toEqual([]);
+      expect(findHardcodedColours(container)).toEqual([]);
+      await unmount();
+    }
+  });
+});
+
+// ============================================================================
 // Layout
 // ============================================================================
 
 describe("Layout", () => {
+  it("a combo stacks its columns (Line and stacked column) but has no 100%", async () => {
+    await seed(fixtureSpec({ mark: "combo" } as Partial<ChartSpec>));
+    await render(<ChartLayoutSection placement="ribbon" />);
+    expect((byTestId("chart-stacking-percentStacked", container) as HTMLButtonElement).disabled).toBe(true);
+    expect((byTestId("chart-stacking-stacked", container) as HTMLButtonElement).disabled).toBe(false);
+    await click(byTestId("chart-stacking-stacked", container));
+    expect(liveSpec().markOptions).toMatchObject({ stackMode: "stacked" });
+  });
+
   it("the stacking pill writes the stack mode", async () => {
     await seed(fixtureSpec());
     await render(<ChartLayoutSection placement="ribbon" />);
@@ -800,9 +897,9 @@ describe("buildChartDesignSections", () => {
 });
 
 describe("chartTypeCatalog", () => {
-  it("lists all 18 built-in types, six quick, every icon a real RibbonIcon key", () => {
-    expect(CHART_TYPES).toHaveLength(18);
-    expect(new Set(CHART_TYPES.map((t) => t.value)).size).toBe(18);
+  it("lists all 22 built-in types, six quick, every icon a real RibbonIcon key", () => {
+    expect(CHART_TYPES).toHaveLength(22);
+    expect(new Set(CHART_TYPES.map((t) => t.value)).size).toBe(22);
     expect(QUICK_CHART_TYPES.map((t) => [t.value, t.label])).toEqual([
       ["bar", "Column"],
       ["horizontalBar", "Bar"],

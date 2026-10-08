@@ -29,7 +29,7 @@ import { clampMoveToPage, type LayoutRect } from "@api/layoutSurface";
 import { canMoveObject, commitObjectGeometry, type ObjectGeometryChange } from "@api/objectGeometry";
 import { getSelectedObjectRegions } from "@api/objectSelection";
 import { getCanvasSheetSnapshot } from "./canvasSheetStore";
-import { isLockedOnActiveCanvas } from "./canvasLocks";
+import { isFixedOnActiveCanvas } from "./canvasLocks";
 
 /** An alignment edge (or centre line). */
 export type AlignEdge = "left" | "center" | "right" | "top" | "middle" | "bottom";
@@ -197,12 +197,13 @@ export function distributeItems(
  * Whether the object behind `region` may be moved by an arrange command: a
  * floating object some family can move through the geometry seam, whose
  * family does not refuse moves (`data.movable === false`) and which the
- * active canvas does not lock.
+ * active canvas does not lock -- by its own Lock, or by the page's Lock
+ * Objects (lib/canvasLocks.ts `isFixedOnLayout`).
  */
 export function isArrangeMovable(region: GridRegion): boolean {
   if (!region.floating || !canMoveObject(region)) return false;
   if (region.data?.movable === false) return false;
-  return !isLockedOnActiveCanvas(region);
+  return !isFixedOnActiveCanvas(region);
 }
 
 /** The selection as arrange items (floating regions only). */

@@ -37,9 +37,10 @@ describe("chartSpecJsonSchema", () => {
     expect(required).toContain("palette");
   });
 
-  it("mark lists all 18 built-ins as examples and is open to custom marks", () => {
+  it("mark lists all 22 built-ins as examples and is open to custom marks", () => {
     const examples: string[] = schema.properties.mark.examples;
-    expect(examples).toHaveLength(18);
+    expect(examples).toHaveLength(22);
+    expect(examples).toEqual(expect.arrayContaining(["card", "multiRowCard", "kpi", "gauge"]));
     expect(examples).toContain("bar");
     expect(examples).toContain("sunburst");
     expect(examples).toContain("pareto");
@@ -211,12 +212,13 @@ const CHART_SPEC_KEYS: Array<keyof ChartSpec> = [
   "title", "xAxis", "yAxis", "legend", "palette", "markOptions", "layers",
   "transform", "config", "tooltip", "trendlines", "dataLabels", "dataTable",
   "seriesRefs", "filters", "dataPointOverrides", "encoding", "repeat", "facet", "concat", "params",
+  "plotHiddenCells",
 ];
 
 const ALL_CHART_TYPES: ChartType[] = [
   "bar", "horizontalBar", "line", "area", "scatter", "pie", "donut", "waterfall",
   "combo", "radar", "bubble", "histogram", "funnel", "treemap", "stock", "boxPlot",
-  "sunburst", "pareto",
+  "sunburst", "pareto", "card", "multiRowCard", "kpi", "gauge",
 ];
 
 describe("chartSpecJsonSchema drift guard", () => {
@@ -278,6 +280,41 @@ describe("chartSpecJsonSchema drift guard", () => {
     // seriesOverlap is a bar-only option; invalid under a line chart.
     const spec = { ...buildDefaultSpec(dataRange, true, autoDetected, "line"), markOptions: { seriesOverlap: 5 } as any };
     expect(schemaViolations(spec, SCHEMA).length).toBeGreaterThan(0);
+  });
+
+  describe("tile visuals (Card, Multi-row card, KPI, Gauge) and the stacked combo", () => {
+    const spec = (mark: ChartType, markOptions: unknown) =>
+      ({ ...buildDefaultSpec(dataRange, true, autoDetected, mark), markOptions }) as any;
+
+    it("accepts each visual's own options", () => {
+      expect(schemaViolations(spec("card", { displayUnits: "auto", decimals: 1, aggregate: "sum", showCategoryLabel: false, calloutFontSize: 30 }), SCHEMA)).toEqual([]);
+      expect(schemaViolations(spec("multiRowCard", { displayUnits: "none", showAccentBar: false, showRowTitle: true }), SCHEMA)).toEqual([]);
+      expect(schemaViolations(spec("kpi", { direction: "lowerIsBetter", goal: 100, showTrend: true, goodColor: "#00AA00" }), SCHEMA)).toEqual([]);
+      expect(schemaViolations(spec("gauge", { min: 0, max: 200, target: 150, targetSeriesIndex: 1, showMinMax: false }), SCHEMA)).toEqual([]);
+    });
+
+    it("refuses a key the visual does not have (additionalProperties false: no smuggling)", () => {
+      expect(schemaViolations(spec("card", { displayUnits: "auto", onClick: "alert(1)" }), SCHEMA).length).toBeGreaterThan(0);
+      expect(schemaViolations(spec("gauge", { needle: "red" }), SCHEMA).length).toBeGreaterThan(0);
+      expect(schemaViolations(spec("kpi", { direction: "sideways" }), SCHEMA).length).toBeGreaterThan(0);
+      expect(schemaViolations(spec("card", { displayUnits: "lakhs" }), SCHEMA).length).toBeGreaterThan(0);
+    });
+
+    it("a bar option on a card is refused (narrowing per mark)", () => {
+      expect(schemaViolations(spec("card", { gapWidth: 100 }), SCHEMA).length).toBeGreaterThan(0);
+    });
+
+    it("combo takes stackMode none / stacked, and refuses a percent stack", () => {
+      expect(schemaViolations(spec("combo", { stackMode: "stacked" }), SCHEMA)).toEqual([]);
+      expect(schemaViolations(spec("combo", { stackMode: "none", secondaryYAxis: true }), SCHEMA)).toEqual([]);
+      expect(schemaViolations(spec("combo", { stackMode: "percentStacked" }), SCHEMA).length).toBeGreaterThan(0);
+    });
+
+    it("documents every visual in the spec reference", () => {
+      const ref = generateSpecReference();
+      for (const h of ["### card", "### multiRowCard", "### kpi", "### gauge"]) expect(ref).toContain(h);
+      expect(ref).toMatch(/stackMode .*stacked/);
+    });
   });
 
   it("accepts a custom (registered) mark with arbitrary markOptions", () => {

@@ -226,6 +226,29 @@ describe("the page painter", () => {
     expect(calls[1].fill).toBe("#123456");
   });
 
+  it("the WALLPAPER (Power BI's colour outside the page) paints the surround when set; the theme's otherwise", async () => {
+    gridSnapshot = { surface: "canvas", sheetContext: { activeSheetIndex: 1 }, zoom: 1 };
+    getSheets.mockResolvedValueOnce({
+      activeIndex: 1,
+      sheets: [{ index: 1, name: "D", visibility: "visible", sheetId: "cv-1", kind: "canvas", canvasLayout: layout({ wallpaper: "#204060", background: "#fafafa" }) }],
+    });
+    await refreshCanvasSheets();
+    let m = mockCtx();
+    paintCanvasPage(layerContext(m.ctx), PALETTE, 1);
+    expect(m.calls[0]).toEqual({ fill: "#204060", rect: [0, 0, 400, 300] });
+    // The page itself keeps its own background -- the wallpaper is only around it.
+    expect(m.calls[1].fill).toBe("#fafafa");
+
+    getSheets.mockResolvedValueOnce({
+      activeIndex: 1,
+      sheets: [{ index: 1, name: "D", visibility: "visible", sheetId: "cv-1", kind: "canvas", canvasLayout: layout({ wallpaper: "" }) }],
+    });
+    await refreshCanvasSheets();
+    m = mockCtx();
+    paintCanvasPage(layerContext(m.ctx), PALETTE, 1);
+    expect(m.calls[0].fill).toBe("#o");
+  });
+
   it("gridLinesInView clips to the page and the viewport", () => {
     expect(gridLinesInView(100, 0, 1000, 25)).toEqual([0, 25, 50, 75, 100]);
     expect(gridLinesInView(1000, 30, 60, 25)).toEqual([50, 75]);

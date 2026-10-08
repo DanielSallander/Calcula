@@ -22,6 +22,14 @@
 //          Rename override uses that to rename the right-clicked tab through
 //          the one rename prompt (renameSheetPrompt.ts).
 //
+//          INSERT also takes `{ kind: "worksheet" | "canvas" }` (default a
+//          worksheet) and `{ atEnd: true }` (append, the strip's own "+",
+//          instead of inserting before the anchor). That is the PUBLIC door for
+//          adding a canvas page: the Canvas tab's New Page and the tab menu's
+//          Insert Canvas both run it, so neither reaches into the strip's
+//          private `sheet:requestAdd` event and every sheet insert shares one
+//          set of refusals (review finding 2026-10-08).
+//
 //          REFUSALS that can be answered synchronously from the strip's
 //          snapshot are registered with the command-refusal registry
 //          (@api/commandRefusals), so every door -- the ribbon, the keyboard,
@@ -40,7 +48,7 @@ import { CommandRegistry, CoreCommands } from "@api/commands";
 import { addCommandRefusal } from "@api/commandRefusals";
 import { showToast } from "@api/notifications";
 import { DialogExtensions } from "@api/ui";
-import type { SheetInfo } from "../../core/lib/tauri-api";
+import type { SheetInfo, SheetKindName } from "../../core/lib/tauri-api";
 import { promptForSheetName } from "./renameSheetPrompt";
 import {
   MoveOrCopySheetDialog,
@@ -67,8 +75,11 @@ export interface SheetTabsSnapshot {
 /** The strip's own handlers, by what they do. Every index is a TRUE index. */
 export interface SheetTabsController {
   snapshot(): SheetTabsSnapshot;
-  /** A new worksheet immediately before `beforeIndex`, made active. */
-  insertSheetBefore(beforeIndex: number): Promise<void>;
+  /** A new sheet (a worksheet unless `kind` says otherwise) immediately
+   *  before `beforeIndex`, made active. */
+  insertSheetBefore(beforeIndex: number, kind?: SheetKindName): Promise<void>;
+  /** A new sheet at the END (the strip's "+"), made active. */
+  appendSheet(kind?: SheetKindName): Promise<void>;
   /** Delete; the strip asks first when the sheet holds anything (Excel). */
   deleteSheet(index: number): Promise<void>;
   renameSheet(index: number, newName: string): Promise<void>;
@@ -182,12 +193,34 @@ function parseTabColor(args: unknown): string | null {
   return null;
 }
 
+/** The kinds of sheet core.sheet.insert can add. */
+const SHEET_INSERT_KINDS: readonly SheetKindName[] = ["worksheet", "canvas"];
+
+/** `args.kind`: undefined (a worksheet), a known kind, or null when it names
+ *  something else (refused by name, never guessed into a worksheet). */
+function insertKind(args: unknown): SheetKindName | undefined | null {
+  const kind = (args as { kind?: unknown } | null | undefined)?.kind;
+  if (kind === undefined) return undefined;
+  if (typeof kind === "string" && (SHEET_INSERT_KINDS as readonly string[]).includes(kind)) {
+    return kind as SheetKindName;
+  }
+  refuse(`There is no kind of sheet called "${String(kind).slice(0, 40)}" (use "worksheet" or "canvas").`);
+  return null;
+}
+
 async function insertSheet(args: unknown): Promise<void> {
   const controller = controllerFor(CoreCommands.SHEET_INSERT);
   if (!controller) return;
+  const kind = insertKind(args);
+  if (kind === null) return;
+  if ((args as { atEnd?: unknown } | null | undefined)?.atEnd === true) {
+    await controller.appendSheet(kind);
+    return;
+  }
   const anchor = targetSheet(controller, args);
   if (!anchor) return;
-  await controller.insertSheetBefore(anchor.index);
+  if (kind === undefined) await controller.insertSheetBefore(anchor.index);
+  else await controller.insertSheetBefore(anchor.index, kind);
 }
 
 async function deleteSheet(args: unknown): Promise<void> {

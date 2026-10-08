@@ -21,7 +21,7 @@ Common uses include creating simple in-cell bar charts using repeated characters
 
 - If number_times is 0, REPT returns an empty string.
 - If number_times is negative, REPT returns a #VALUE! error.
-- The result of REPT is limited to 32,767 characters. If the repeated string would exceed this limit, REPT returns a #VALUE! error.
+- Calcula limits the result of REPT to 1,048,576 bytes (1 MiB) of text and returns a #LIMIT! error beyond that. Plain English text is one byte per character; accented letters such as å, ä and ö take two bytes and most other scripts two to four. This is deliberately larger than Excel, which limits REPT to 32,767 characters and returns #VALUE!, so that long text built inside a formula keeps working.
 - Decimal values for number_times are truncated (not rounded) to the nearest integer.
 
 ## Example

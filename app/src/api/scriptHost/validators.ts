@@ -6,6 +6,7 @@
 //          state, so they are safe to run for any caller.
 
 import { SCRIPT_OBJECT_KINDS } from "./objectInventory";
+import { BUTTON_ACTION_PROPERTY_KEYS } from "../buttonControlService";
 import {
   PIVOT_AGGREGATIONS,
   PIVOT_AREAS,
@@ -5329,6 +5330,27 @@ const SCRIPT_SHAPE_PROPERTY_KEY_SET: ReadonlySet<string> = new Set(SCRIPT_SHAPE_
 export const SCRIPT_REFUSED_SHAPE_PROPERTY_KEYS: readonly string[] = ["onSelect", "macroRef", "heldOnSelect", "heldMacroRef", "heldFrom"];
 
 /**
+ * A button's DECLARATIVE action slots (Canvas contract §3/§4.4): `action`,
+ * `actionTarget`, `actionTargetName` -- go to a page, go back, clear the
+ * page's slicers. Refused to a script, by the spellings @api/buttonControlService
+ * defines (imported, never re-typed).
+ *
+ * NOT CODE, so deliberately NOT in `SCRIPT_REFUSED_SHAPE_PROPERTY_KEYS`: that
+ * list is pinned by controls.rs to Rust's EXECUTABLE + HELD lists exactly, and
+ * the executable list is what a pull STRIPS from a subscriber's buttons -- a
+ * report's Back button must arrive working. Refused all the same, because an
+ * action is the AUTHOR's decision about where every reader's click goes, and a
+ * sandboxed script that could re-aim it would redirect those clicks with no
+ * author in the loop; without this the custom-key tail would admit all three.
+ *
+ * The cost, said plainly: a script that declared a CUSTOM property named
+ * "action" on a shape can no longer write it through this door. The contract
+ * fixed the spelling; a script keeps every other name.
+ */
+export const SCRIPT_REFUSED_BUTTON_ACTION_KEYS: readonly string[] = BUTTON_ACTION_PROPERTY_KEYS;
+const SCRIPT_REFUSED_BUTTON_ACTION_KEY_SET: ReadonlySet<string> = new Set(SCRIPT_REFUSED_BUTTON_ACTION_KEYS);
+
+/**
  * Cell-type params a SCRIPT may not write, on any cell type (BUG-0260).
  *
  * Both are written by the application admission in Rust and nothing else
@@ -5460,6 +5482,12 @@ export function checkShapeSetProperty(aspectArgs: unknown): true | string {
       `"${name}" holds an ACTION, not an appearance, and a script may not write it. ` +
       `Set a button's click action in the Properties pane, or link a recorded macro ` +
       `from the Macro Library.`
+    );
+  }
+  if (SCRIPT_REFUSED_BUTTON_ACTION_KEY_SET.has(name)) {
+    return (
+      `"${name}" is a button's action -- where a click takes the reader -- and a script ` +
+      `may not write it. The author sets it in the button's Properties pane (Action).`
     );
   }
   // The picture slot: a handle to media ALREADY inside this document, or "" to
@@ -6220,8 +6248,17 @@ export const vAddSheet: Validator = ([name, position, kind]) => {
  *
  * `zOrder` and `locked` are layout fields too, but deliberately NOT settable
  * from a script in this milestone: they name OTHER objects by kind and id, so a
- * patch could reorder or unlock something the script never created. They stay
- * readable through api.getCanvasLayout.
+ * patch could reorder or unlock something the script never created. Neither
+ * is `objectsLocked` (Lock Objects): the backend holds a SCRIPT to the page
+ * lock too, so a script that could turn it off could undo the very lock that
+ * binds it. All three stay readable through api.getCanvasLayout.
+ * `wallpaper` is cosmetic, exactly like `background`, and is settable.
+ *
+ * Every field of the Rust `CanvasLayout` is in exactly ONE of this map and
+ * CANVAS_LAYOUT_READ_ONLY_KEYS -- a census in canvasSheetScriptRows.test.ts
+ * reads the Rust struct, so a new field cannot arrive unclassified (before
+ * 2026-10-08 wallpaper and objectsLocked were in neither, refused as
+ * "unknown" and unsettable only by omission).
  */
 export const CANVAS_LAYOUT_SCRIPT_KEYS: Readonly<Record<string, "boolean" | "number" | "string">> = {
   snapToGrid: "boolean",
@@ -6231,10 +6268,20 @@ export const CANVAS_LAYOUT_SCRIPT_KEYS: Readonly<Record<string, "boolean" | "num
   pageWidth: "number",
   pageHeight: "number",
   background: "string",
+  wallpaper: "string",
+};
+
+/** Why each read-only layout key cannot be set from a script (see above). */
+const CANVAS_LAYOUT_READ_ONLY_REASONS: Readonly<Record<string, string>> = {
+  zOrder: "it names other objects on the canvas",
+  locked: "it names other objects on the canvas",
+  objectsLocked:
+    "Lock Objects holds scripts to the page lock too, so a script may not turn it off; " +
+    "the user turns it on and off from Canvas > View > Lock Objects",
 };
 
 /** Layout keys that exist but are read-only to scripts (see above). */
-const CANVAS_LAYOUT_READ_ONLY_KEYS = new Set(["zOrder", "locked"]);
+export const CANVAS_LAYOUT_READ_ONLY_KEYS: ReadonlySet<string> = new Set(Object.keys(CANVAS_LAYOUT_READ_ONLY_REASONS));
 
 /** api.getCanvasLayout args: [sheet?]. Omitted = the active sheet. Whether the
  *  sheet IS a canvas is a question about live state, answered host-side. */
@@ -6257,8 +6304,8 @@ export const vCanvasLayout: Validator = ([patch, sheet]) => {
   for (const k of keys) {
     if (CANVAS_LAYOUT_READ_ONLY_KEYS.has(k)) {
       return (
-        `canvas layout key "${k}" cannot be set from a script (it names other objects ` +
-        `on the canvas); settable keys: ${allowed.join(", ")}`
+        `canvas layout key "${k}" cannot be set from a script (${CANVAS_LAYOUT_READ_ONLY_REASONS[k]}); ` +
+        `settable keys: ${allowed.join(", ")}`
       );
     }
     if (!Object.prototype.hasOwnProperty.call(CANVAS_LAYOUT_SCRIPT_KEYS, k)) {

@@ -133,12 +133,19 @@ fn a_lock_toggle_is_one_undo_step() {
 
     wb.patch(CanvasLayoutPatch { locked: Some(vec![obj("chart", "c1")]), ..Default::default() }).unwrap();
     assert_eq!(wb.depth().0, depth + 1, "a lock must be exactly ONE undo step");
-    assert_eq!(wb.state.undo_stack.lock().unwrap().undo_description(), Some("Lock objects"));
+    // NOT "Lock objects": that is the page-level View > Lock Objects toggle,
+    // which is deliberately NOT undoable, so after toggling it "Undo Lock
+    // objects" would undo this earlier per-object lock instead.
+    assert_eq!(wb.state.undo_stack.lock().unwrap().undo_description(), Some("Lock selected objects"));
 
     wb.undo();
     assert!(wb.layout().locked.is_empty(), "Ctrl+Z unlocks the chart again");
     wb.redo();
     assert_eq!(wb.layout().locked, vec![obj("chart", "c1")], "Ctrl+Y locks it again");
+
+    // Unlocking names itself as an unlock.
+    wb.patch(CanvasLayoutPatch { locked: Some(Vec::new()), ..Default::default() }).unwrap();
+    assert_eq!(wb.state.undo_stack.lock().unwrap().undo_description(), Some("Unlock selected objects"));
 }
 
 #[test]

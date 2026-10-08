@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 399 | Open: 40 | Triaged: 0 | Fixed: 359 | Other: 0
+Total: 452 | Open: 50 | Triaged: 0 | Fixed: 402 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -4256,3 +4256,523 @@ A SPLIT BUTTON OR COLOUR SPLIT DISABLED WHILE FOCUS IS IN ITS MENU/PALETTE DROPS
 THE insertCellsRange / deleteCellsRange WRAPPER'S WHOLE-LINE BRANCH HAS NO SHEET-SIZE BOUND of its own (the backend push-off refusal now covers it; defence in depth only).
 
 **Repro:** A script calls the @api wrapper over every column.
+
+## BUG-0400 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** xlsx-import-non-ascii-panic
+
+XLSX IMPORT GARBLED NON-ASCII FORMULA TEXT AND PANICKED ON A NON-ASCII NAME: strip_future_function_prefixes walked BYTES, pushed each UTF-8 byte as a Latin-1 char inside string literals, and sliced formula[i..] inside a character outside them.
+
+**Repro:** Import an .xlsx with =LEN("åäö") (comes back as LEN("Ã¥Ã¤Ã¶")) or ='Försäljning'!A1+1 (load_xlsx panics: byte index 3 is not a char boundary, xlsx_reader.rs:81). Any Swedish sheet name in a cross-sheet reference aborted the open.
+**Fix:** fixed
+
+## BUG-0401 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** xlsx-defined-name-xlfn-prefix
+
+XLSX IMPORT KEPT _xlfn./_xlpm. PREFIXES ON DEFINED NAMES, so every imported named LAMBDA evaluated to #NAME?: the defined-name loop only added '=' and never ran the prefix strip.
+
+**Repro:** Excel workbook with <definedName name="LPAD">_xlfn.LAMBDA(_xlpm.t,...)</definedName>: imported refers_to keeps the prefixes.
+**Fix:** fixed
+
+## BUG-0402 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** lpad-rpad-shadow-user-lambdas
+
+THE NEW LPAD/RPAD BUILTINS SILENTLY TOOK OVER USER LAMBDAS OF THE SAME NAME (LET-bound, LAMBDA parameter, defined name, imported Excel name): named-LAMBDA resolution only looked at BuiltinFunction::Custom.
+
+**Repro:** =LET(lpad, LAMBDA(t,n,c, RIGHT(REPT(c,n)&t,n)), lpad("abcdef",3,"0")) gave "abc" (the builtin's left cut) where the user's lambda says "def"; a defined name LPAD never ran.
+**Fix:** fixed
+
+## BUG-0403 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** design-query-grouped-slicer-sum-rollup
+
+MODEL SLICERS FED GROUPED DESIGN-QUERY CHARTS INTO THE HOST-SIDE SUM ROLL-UP: page filters were appended to the query's FILTERS, which the grouped path puts in GROUP BY and the pivot engine re-adds with SUM, so AVERAGE / DISTINCTCOUNT / ratio measures under a slicer keeping 2+ items were silently wrong (and a high-cardinality slicer column multiplied every query).
+
+**Repro:** Column chart AvgAmount by Year on a canvas, model slicer keeping East and West: Y1 showed 30 (10 + 20) instead of 15; the measure-only Card on the same page showed the exact value.
+**Fix:** fixed
+
+## BUG-0404 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** measure-only-float64-filter-no-match
+
+A PAGE OR DSL FILTER ON A FLOAT64 MODEL COLUMN MATCHED NOTHING IN THE ENGINE: the slicer lists "2024" (f64 Display) but the engine's IN-list matches a Float64 column only as "2024.0", so every measure-only Card/KPI/Gauge went blank with no error.
+
+**Repro:** Model with Float64 Year; model slicer on Year, click 2024: the Card on the page answers NULL while a grouped chart on the same page still filters.
+**Fix:** fixed
+
+## BUG-0405 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** measure-only-reset-share-refused-under-slicer
+
+A SHARE / %-OF-TOTAL MEASURE (RESET or CLEAR inside a compound expression) ON A CARD ERRORED AS SOON AS A PAGE SLICER HAD A SELECTION: the engine's typed refusal 'a measure clears request filter ...' surfaced as the visual's error.
+
+**Repro:** Share = DIVIDE(SUM(Sales[amount]), SUM(Sales[amount], RESET())) on a Card, model slicer region = East: Invalid query error.
+**Fix:** fixed
+
+## BUG-0406 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** visual-blank-shows-zero
+
+A BLANK VALUE SHOWED "0", NEVER "(Blank)": the measure-only grand total over nothing was 0 in Rust, and once Rust sent Empty the readers turned it (and range blank cells, pivot Empty cells) back into 0; aggregates counted blanks; the KPI's blank latest period showed a red 0 and 'Goal: X (-100%)'.
+
+**Repro:** Card over an empty cell, or a measure-only Card whose model slicer keeps nothing: '0'.
+**Fix:** fixed
+
+## BUG-0407 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** range-tiles-reparse-display-text
+
+RANGE-SOURCED CARD/KPI/GAUGE NUMBERS CAME FROM RE-PARSING DISPLAY TEXT: in sv-SE "1 234,50 kr" showed as "123K kr" (100x) and an ISO date as "2K"; parseDisplayNumber tested the decimal comma before stripping the unit and ended in a parseFloat prefix read.
+
+**Repro:** sv-SE workbook, cell 1234.5 formatted currency kr, Visuals > Card over it: '123K kr'. A date cell: '2K'.
+**Fix:** fixed
+
+## BUG-0408 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** card-gauge-sum-rows-not-total
+
+CARD/GAUGE OVER A PIVOT OR GROUPED DESIGN QUERY SUMMED THE ROWS INSTEAD OF USING THE SOURCE'S TOTAL: wrong for AVERAGE, DISTINCTCOUNT and ratios, while the pivot already held the right grand total.
+
+**Repro:** Card on a pivot 'Average of Price by Region' (2 regions): shows the sum of the regional averages.
+**Fix:** fixed
+
+## BUG-0409 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** line-stacked-column-clustered-picture
+
+'LINE AND STACKED COLUMN' DREW EXACTLY THE CLUSTERED PICTURE: the combo default made only series 0 a column, so the stack had one member, and no UI could make a second series a column.
+
+**Repro:** All Visuals > Line and stacked column over three numeric columns: identical rects to Line and clustered column.
+**Fix:** fixed
+
+## BUG-0410 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** chart-dialog-type-switch-invalid-spec
+
+CHANGING THE TYPE IN INSERT CHART (OR THE BAND) KEPT THE PREVIOUS TYPE'S markOptions AND SAVED A SCHEMA-INVALID SPEC UNVALIDATED; every later script edit of that chart was then refused and the load canary warned on each open.
+
+**Repro:** Visuals > Stacked column, pick Card in the dialog, Insert: stored card carries stackMode; scripts' updateChartSpec refused.
+**Fix:** fixed
+
+## BUG-0411 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** range-charts-ignore-hidden-rows
+
+RANGE CHARTS AND RANGE CARD/KPI/GAUGE IGNORED TABLE SLICERS AND AUTOFILTER: hidden rows were read, so a table slicer on the same canvas never changed a range Card.
+
+**Repro:** Canvas with a table slicer and a Card over that table: clicking the slicer leaves the total unchanged.
+**Fix:** fixed
+
+## BUG-0412 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** insights-poi-on-tiles
+
+INSIGHTS 'SHOW POINTS OF INTEREST' AND THE SNAPSHOT ACTION WERE OFFERED ON CARD/KPI/GAUGE/MULTI-ROW TILES, where Charts paints no cues, so the toggle did nothing visible.
+
+**Repro:** Right-click a Card: Show points of interest.
+**Fix:** fixed
+
+## BUG-0413 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** chart-schema-bounds-advisory
+
+THE CHART SPEC SCHEMA GATE IGNORED minimum/maximum/pattern, so the new visuals' declared bounds were advisory (calloutFontSize 5000, decimals 99, targetSeriesIndex -9 all passed).
+
+**Repro:** Script updateSpec on a Card with decimals 99: accepted.
+**Fix:** fixed
+
+## BUG-0414 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** visual-secondary-text-loses-format
+
+AGGREGATED VALUES AND THE KPI GOAL / GAUGE MIN-MAX-TARGET LABELS LOST THE SOURCE FORMAT: the sum of 45% and 30% showed '0.75'; the goal read '10K' beside '$12K'.
+
+**Repro:** Card over two percent cells: '0.75'.
+**Fix:** fixed
+
+## BUG-0415 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** design-query-pinned-level-dropped
+
+A PINNED MODEL SLICER (LEVEL >= 2) FILTERED A BI PIVOT AND A DESIGN-QUERY CARD ON THE SAME PAGE DIFFERENTLY: mergePageFilters dropped the level and headless.rs tagged every page filter LEVEL_SLICER.
+
+**Repro:** Pinned Region slicer, % of total measure in a BI pivot and in a Card: two numbers.
+**Fix:** fixed
+
+## BUG-0416 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** design-query-card-caption-brackets
+
+A DESIGN-QUERY CARD'S CAPTION READ "[Revenue]" WITH BRACKETS: the DSL compiler sets customName to the bracketed measure name, which became the engine column header and the series name.
+
+**Repro:** Visuals > Card, design query VALUES: [Revenue]: caption '[Revenue]'.
+**Fix:** fixed
+
+## BUG-0417 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** gauge-default-max-ignores-target
+
+THE GAUGE'S DEFAULT MAX (2x VALUE) IGNORED THE TARGET, so a target above it was drawn pinned at the max end while its label read the real target.
+
+**Repro:** Gauge value 100, target 300: needle at the 200 end, label '300'.
+**Fix:** fixed
+
+## BUG-0418 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** chart-area-stacked-checkbox-no-op
+
+THE CHART DIALOG'S AREA 'STACKED AREAS' CHECKBOX COULD DO NOTHING: it wrote only `stacked` while the painter prefers `stackMode`, so after Grouped it stacked nothing and after 100% unticking left the chart stacked.
+
+**Repro:** Area chart, band > Grouped, dialog > tick Stacked areas: nothing stacks.
+**Fix:** fixed
+
+## BUG-0419 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** chart-dialog-stale-type-between-opens
+
+INSERT CHART KEPT THE PREVIOUS OPEN'S CHART TYPE: the dialog never reset mark/markOptions/legend for a new chart.
+
+**Repro:** Insert a pie, then open Insert Chart again: pie preselected.
+**Fix:** fixed
+
+## BUG-0420 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** chart-type-names-three-lists
+
+THE THREE CHART-TYPE LISTS DISAGREED ON COLUMN vs BAR NAMING (dialog picker, band, registry labels).
+
+**Repro:** Compare the dialog's type list with the Chart Design band.
+**Fix:** fixed
+
+## BUG-0421 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** measure-only-pivot-charts-nothing
+
+A PIVOT (OR DESIGN QUERY) WITH NO ROW FIELDS CHARTED NOTHING: its only row is the grand total, which the reader always dropped.
+
+**Repro:** Pivot with Values only, insert a chart over it: empty chart.
+**Fix:** fixed
+
+## BUG-0422 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** canvas-kept-ids-vanish-in-panel
+
+THE KEPT TEST IDS canvas-insert-slicer / canvas-insert-pivot DISAPPEARED WHENEVER THE VISUALS GROUP WAS NOT IN THE BAND (sidebar or folded launcher), and the live specs' /^Insert/ launcher fallbacks no longer found any group.
+
+**Repro:** Narrow window so Visuals folds; look for canvas-insert-slicer in the flyout: absent.
+**Fix:** fixed
+
+## BUG-0423 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** size-position-says-object-locked-on-page-lock
+
+WITH LOCK OBJECTS ON, SIZE & POSITION (DIALOG, ARRANGE TOOLTIP, GRIP MENU) SAID 'This object is locked. Unlock it' for an object that was not locked; the per-object button read 'Lock'.
+
+**Repro:** Canvas > View > Lock Objects, select an unlocked shape, Arrange > Size & Position.
+**Fix:** fixed
+
+## BUG-0424 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** subscribed-locked-page-wrong-toast
+
+ON A SUBSCRIBED CANVAS THE PUBLISHER LOCKED, A DRAG TOLD THE READER TO 'Turn Lock Objects off' -- a toggle disabled for them.
+
+**Repro:** Subscribe to an application whose canvas has Lock Objects on; drag a chart.
+**Fix:** fixed
+
+## BUG-0425 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** custom-size-keyboard-focus
+
+PAGE SIZE > CUSTOM SIZE... FROM THE KEYBOARD LEFT FOCUS ON THE PAGE SIZE BUTTON; the W/H fields sat in a portalled card Tab could not reach in a sensible order.
+
+**Repro:** Focus Page Size, ArrowDown to Custom Size..., Enter: focus stays on the button.
+**Fix:** fixed
+
+## BUG-0426 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** lock-toast-repeats-on-held-key
+
+HOLDING AN ARROW KEY ON A LOCKED PAGE SHOWED A NEW TOAST EVERY 2 S (3 over a 5 s hold), not one per gesture.
+
+**Repro:** Lock Objects on, select a shape, hold ArrowRight for 5 s.
+**Fix:** fixed
+
+## BUG-0427 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** page-navigator-off-page
+
+A WRAPPED PAGE NAVIGATOR RAN OFF THE BOTTOM OF THE PAGE: only a one-row box was placed and clamped.
+
+**Repro:** Tooltip page (320x240) in a workbook with 10 canvases: Buttons > Page Navigator puts a button's bottom edge at 280.
+**Fix:** fixed
+
+## BUG-0428 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** shape-thumbnails-squashed
+
+SHAPE THUMBNAILS IN THE SHAPES MENU WERE SQUASHED INTO A SQUARE: a 2:1 right arrow looked twice as tall as the arrow inserted.
+
+**Repro:** Elements > Shapes: Right arrow row.
+**Fix:** fixed
+
+## BUG-0429 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** per-object-lock-undo-label-collision
+
+THE PER-OBJECT LOCK'S UNDO STEP WAS NAMED 'Lock objects', the words of the new, NOT undoable page toggle Lock Objects: Undo after the toggle undid an earlier per-object lock under that name.
+
+**Repro:** Arrange > Lock a shape, then View > Lock Objects, then Edit > Undo: 'Undo Lock objects' undoes the per-object lock.
+**Fix:** fixed
+
+## BUG-0430 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** card-inserted-at-chart-size
+
+CARD, MULTI-ROW CARD, KPI AND GAUGE WERE INSERTED AT THE FULL CHART SIZE (480x300).
+
+**Repro:** Visuals > Card on a canvas.
+**Fix:** fixed
+
+## BUG-0431 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** new-page-private-shell-event
+
+CANVAS > NEW PAGE REACHED INTO THE SHELL THROUGH ITS PRIVATE 'sheet:requestAdd' WINDOW EVENT, a string contract with a Shell internal the codebase had deliberately moved away from (Facade Rule).
+
+**Repro:** Read canvasActions.ts: window.dispatchEvent(new CustomEvent('sheet:requestAdd', ...)).
+**Fix:** fixed
+
+## BUG-0432 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** action-button-runs-object-scripts
+
+A BUTTON WITH A DECLARATIVE ACTION STILL RAN THE OBJECT SCRIPTS BOUND TO IT: button:clicked was emitted before the stored-action check, so 'A click performs this action' and 'has no code' were untrue.
+
+**Repro:** Bind an object script's onClick to a button, give the button the Back action, press it in run mode: both run.
+**Fix:** fixed
+
+## BUG-0433 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** canvas-layout-script-keys-unclassified
+
+THE NEW CanvasLayout FIELDS WERE UNCLASSIFIED FOR SCRIPTS: wallpaper and objectsLocked were refused as 'unknown' keys yet returned by getCanvasLayout, no census tied the script lists to the Rust struct, and the d.ts / context shims listed only three page presets.
+
+**Repro:** api.setCanvasLayout({ objectsLocked: false }): 'unknown canvas layout key'.
+**Fix:** fixed
+
+## BUG-0434 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** button-action-keys-pull-unpinned
+
+NOTHING PINNED THAT A PULL KEEPS A BUTTON'S DECLARATIVE ACTION: published Back / Clear / Navigate buttons rest on action keys staying out of EXECUTABLE_CONTROL_PROPERTIES, and adding them there would have arrived every navigation button dead with no test failing.
+
+**Repro:** Add 'action' to EXECUTABLE_CONTROL_PROPERTIES: before the fix nothing failed.
+**Fix:** fixed
+
+## BUG-0435 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** theme-seam-format-menu-item
+
+THE THEME-GALLERY SEAM ADDED A USER-VISIBLE FORMAT > THEMES MENU-BAR ITEM (Excel has Themes only on Page Layout) as a side effect of hosting the gallery on the Canvas tab.
+
+**Repro:** Menu bar > Format: a 'Themes' item appended.
+**Fix:** fixed
+
+## BUG-0436 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** census-not-a-grid-bare-view
+
+THE RECALCULATION CENSUS'S NEW NOT_A_GRID EXEMPTION WAS KEYED ON THE BARE RECEIVER NAME 'view', exempting any future view.cells.get_mut anywhere in app/src-tauri.
+
+**Repro:** Read bulk_rewrite_recalc_tests.rs NOT_A_GRID.
+**Fix:** fixed
+
+## BUG-0437 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** lpad-docs-overclaim
+
+LPAD.md / RPAD.md PROMISED 'the same answer in a cell and in a model query' and 'an emoji is one', and called 32,767 'the most text a cell can hold'; none holds (DataFusion counts graphemes and accepts negatives; REPT allows 1,048,576 bytes).
+
+**Repro:** LPAD("é",3,"0") in a cell gives "0é"; the model's DataFusion lpad gives "00é".
+**Fix:** fixed
+
+## BUG-0438 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** design-view-reference-needs-dimension
+
+functions/pivot/design-view-reference.md STILL SAID A DESIGN QUERY NEEDS A ROWS OR COLUMNS DIMENSION after measure-only queries became legal.
+
+**Repro:** Read design-view-reference.md:475.
+**Fix:** fixed
+
+## BUG-0439 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** rept-doc-stale-limit
+
+functions/REPT.md CLAIMED A 32,767-CHARACTER LIMIT WITH #VALUE!; the code applies 1,048,576 BYTES with #LIMIT! (evaluator.rs fn_rept, budget.rs MAX_TEXT_LEN).
+
+**Repro:** =REPT("a",40000) returns 40,000 characters, not #VALUE!.
+**Fix:** fixed
+
+## BUG-0440 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** fx-cancel-strands-equals-entry
+
+CANCELLING THE INSERT FUNCTION (fx) DIALOG LEFT AN INVISIBLE '=' ENTRY OPEN with focus on <body>: the next click on another cell was read as POINT mode and wrote '=G2' into the cell the user had left, and keystrokes did not reach the grid.
+
+**Repro:** Select G1 with no edit open, press fx, close the dialog (X / Escape / click outside), click G2: G1 now holds =G2.
+**Fix:** fixed
+
+## BUG-0441 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** canvas-tab-folds-at-1920
+
+AT 1920 PX THE CANVAS TAB STILL FOLDED THE VIEW GROUP WITH ABOUT 300 PX OF BAND UNUSED: one-line hero labels made Arrange 467 px and View 434 px (total 1977 > 1920).
+
+**Repro:** 1920 px window, open a canvas: View is a launcher.
+**Fix:** fixed
+
+## BUG-0442 `[fixed]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** control-placement-test-no-size-assert
+
+THE controlPlacement TEST TITLED 'catalog default size' DID NOT ASSERT THE SIZE, so a shape inserted at a fixed 160 x 160 would have passed.
+
+**Repro:** Change createShape to request.width ?? 160: the titled test stays green.
+**Fix:** fixed
+
+## BUG-0443 `[open]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** lock-objects-check-then-write
+
+LOCK OBJECTS IS CHECKED UNDER A READ LOCK RELEASED BEFORE THE GEOMETRY WRITE (ensure_canvas_objects_unlocked, sheets.rs:2181), the check-then-write shape CLAUDE.md forbids for gated commands: a set_canvas_layout { objectsLocked: true } landing between check and write lets ONE move through.
+
+**Repro:** Race a move against the toggle (not reproduced; by reading).
+
+## BUG-0444 `[open]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** engine-compound-reset-fact-group-by
+
+MODEL ENGINE: A COMPOUND RESET MEASURE CANNOT BE GROUPED BY ANY COLUMN OF THE FACT TABLE: DIVIDE(SUM(Sales[amount]), SUM(Sales[amount], RESET())) grouped by a fact column fails 'Schema error: No field named __scalar_sq_1.__clear_scalar. Valid fields are ..., __scalar_sq_2.__clear_scalar'. Grouping by a dimension-table column and the scalar query work.
+
+**Repro:** scratchpad/fixrust/shareprobe (standalone crate): single-table model 'share by region' -> ERR; star model 'share by year' (fact) -> ERR, 'share by name' (dimension) -> OK.
+
+## BUG-0445 `[open]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** combo-second-axis-no-op
+
+THE COMBO '2nd AXIS' SWITCH DOES NOTHING USEFUL: both the band (ChartDesignSections.tsx:903-906) and the dialog (DesignTab.tsx:597-598) write only secondaryYAxis, nothing in the UI writes secondaryAxisSeries, and the layout reserves a 46 px right margin on the flag alone -- an empty strip and no secondary axis.
+
+**Repro:** Line and clustered column chart, Chart Design > 2nd axis on.
+
+## BUG-0446 `[open]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** quick-access-axis-titles-on-pie
+
+THE CHART QUICK-ACCESS ELEMENTS POPUP STILL OFFERS AXIS TITLES AND GRIDLINES ON PIE AND FUNNEL CHARTS (only title-only marks were narrowed).
+
+**Repro:** Select a pie chart, open the quick-access Elements button.
+
+## BUG-0447 `[open]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** tile-visuals-locale-separators
+
+THE TILE VISUALS WRITE '.' DECIMALS AND ',' GROUPING WHATEVER THE LOCALE: an sv-SE Card shows '1.2K kr' beside cells showing '1 234,50 kr', and a percent Card's source text '34,20%' sits beside '$4.5M' on the same page.
+
+**Repro:** sv-SE workbook, Cards over a currency cell and a percent cell (seen live in icons/canvas-powerbi-live-visuals.png).
+
+## BUG-0448 `[open]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** chart-dialog-series-column-letters
+
+THE CREATE CHART DIALOG'S SERIES LIST NAMES SERIES BY COLUMN LETTER (B, C, D) WHILE THE LEGEND SAYS Q1, Q2, Q3.
+
+**Repro:** Insert a column chart over a range with a header row; open the dialog's series list.
+
+## BUG-0449 `[open]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** nav-button-subscriber-renamed-page
+
+A PUBLISHED NAVIGATE BUTTON FAILS ON A SUBSCRIBER WHO ALREADY HAD A SHEET OF THE TARGET PAGE'S NAME: pull remaps the sheet ids, the conflicting page is renamed, and the name fallback finds nothing (a toast says so).
+
+**Repro:** Publish a canvas with a Page Navigator to 'Sales'; subscribe in a workbook that already has a 'Sales' sheet; press the button.
+
+## BUG-0450 `[open]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** report-dry-run-filter-area-count
+
+THE REPORT DRY RUN CAN UNDER-COUNT THE REPORT'S FILTER-AREA ROWS: since the chart route runs the query's own FILTERS inside the engine, the dry run (which goes through run_design_query, headless.rs:180) has up to one filter-area row per FILTERS field fewer than the real report, which keeps them (report.rs:656 compute_design_query_view_for_report).
+
+**Repro:** A grid report with FILTERS: compare the dry run's 'describe the report in words' row count with the report.
+
+## BUG-0451 `[open]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** formula-patterns-date-churn
+
+check:formula-patterns GOES STALE EVERY DAY AFTER A REGENERATION: the generated formulaPatterns.ts records TODAY-based answers (TEXT#1.B4, TODAY#1.B2 and the next entry) although the generator's own comment says volatile patterns carry no recorded results.
+
+**Repro:** Regenerate, wait a day, run npm run check:formula-patterns: stale.
+
+## BUG-0452 `[open]`
+
+**Found:** 2026-10-08 (manual)
+**Oracle:** formula-patterns-randbetween-flaky
+
+THE VERIFIED FORMULA-PATTERN COUNT IS FLAKY: RANDBETWEEN#1.B3 'settles' in about 1 run in 6 (583, 584, 583 ...), ships as {number: 1}, and --check then reports stale against an artifact emitted a minute earlier.
+
+**Repro:** Run node scripts/gen-formula-patterns.mjs --emit six times.

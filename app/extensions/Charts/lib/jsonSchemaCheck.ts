@@ -3,7 +3,14 @@
 //          script/AI-authored ChartSpecs (B8) and the test-time drift/example
 //          guards. Implements only the keywords chartSpecSchema uses: $ref, type,
 //          const, enum, properties + required + additionalProperties:false,
-//          items, oneOf/anyOf, allOf, if/then/else. Pure, no deps.
+//          items, oneOf/anyOf, allOf, if/then/else, and the BOUNDS --
+//          minimum/maximum (+ exclusive), minLength/maxLength, pattern,
+//          minItems/maxItems. Pure, no deps.
+//
+//          THE BOUNDS ARE ENFORCED. They used to be advisory: the checker read
+//          none of them, so a script could store a Card with decimals 99 or a
+//          callout of 5000 px, and a gauge targetSeriesIndex of -9, past the
+//          limits the schema declares and the reference documents.
 // CONTEXT: Promoted out of __tests__/schemaValidate.ts so production code (the
 //          broker chart-write path) can reuse the SAME checker the tests trust.
 
@@ -52,6 +59,24 @@ export function schemaViolations(value: unknown, schema: any): string[] {
     }
     if (s.type !== undefined && value !== undefined && !typeMatches(value, s.type)) {
       out.push(`${path}: expected type ${JSON.stringify(s.type)}`);
+    }
+
+    // Bounds: each applies only to the type it constrains (JSON Schema).
+    if (typeof value === "number") {
+      if (typeof s.minimum === "number" && value < s.minimum) out.push(`${path}: ${value} is below the minimum ${s.minimum}`);
+      if (typeof s.maximum === "number" && value > s.maximum) out.push(`${path}: ${value} is above the maximum ${s.maximum}`);
+      if (typeof s.exclusiveMinimum === "number" && value <= s.exclusiveMinimum) out.push(`${path}: ${value} must be above ${s.exclusiveMinimum}`);
+      if (typeof s.exclusiveMaximum === "number" && value >= s.exclusiveMaximum) out.push(`${path}: ${value} must be below ${s.exclusiveMaximum}`);
+    }
+    if (typeof value === "string") {
+      const length = [...value].length;
+      if (typeof s.minLength === "number" && length < s.minLength) out.push(`${path}: shorter than ${s.minLength} characters`);
+      if (typeof s.maxLength === "number" && length > s.maxLength) out.push(`${path}: longer than ${s.maxLength} characters`);
+      if (typeof s.pattern === "string" && !new RegExp(s.pattern, "u").test(value)) out.push(`${path}: ${JSON.stringify(value)} does not match ${s.pattern}`);
+    }
+    if (Array.isArray(value)) {
+      if (typeof s.minItems === "number" && value.length < s.minItems) out.push(`${path}: fewer than ${s.minItems} items`);
+      if (typeof s.maxItems === "number" && value.length > s.maxItems) out.push(`${path}: more than ${s.maxItems} items`);
     }
 
     // oneOf / anyOf: valid if at least one branch is clean.

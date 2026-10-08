@@ -28,6 +28,7 @@ import {
   type ChartCue,
 } from "@api/chartCues";
 import { cueAtDatum, paintChartCues } from "./cuePainter";
+import { cuesShownOn } from "../lib/tileCues";
 import {
   computeCueStepper,
   drawCueStepper,
@@ -74,6 +75,7 @@ import type {
 } from "../types";
 import { isPivotDataSource } from "../types";
 import { fetchPivotChartFields } from "../lib/pivotChartDataReader";
+import { forgetHiddenSignature } from "../lib/hiddenLinesWatch";
 import {
   computeQuickAccessButtons,
   drawQuickAccessButtons,
@@ -84,6 +86,15 @@ import {
   quickAccessButtonKey,
   type QuickAccessButton,
 } from "./quickAccessButtons";
+
+/**
+ * The insight cues this chart may show: `visibleChartCues` through the tile
+ * rule (lib/tileCues.ts) — a title-only Card/KPI/Gauge shows none. Every cue
+ * path in this file (paint, hover, lens) reads this, never the raw list.
+ */
+function shownCues(chartId: string): ReturnType<typeof visibleChartCues> {
+  return cuesShownOn(getChartById(chartId)?.spec.mark ?? "", visibleChartCues(chartId));
+}
 
 // ============================================================================
 // OffscreenCanvas Cache
@@ -172,6 +183,7 @@ export function removeChartFromCache(chartId: string): void {
   chartDataCache.delete(chartId);
   clearPointSelection(chartId);
   clearWidgetValues(chartId);
+  forgetHiddenSignature(chartId);
   // A deleted chart's cues would otherwise outlive it and reappear on a chart
   // that later reuses the id.
   clearChartCues(chartId);
@@ -422,7 +434,7 @@ export function handleChartMouseMove(canvasX: number, canvasY: number): void {
         // fact's sentence. Tracked beside hoverState so the datum tooltip
         // still knows what it is over.
         const isDatum = hitResult.type === "bar" || hitResult.type === "point" || hitResult.type === "slice";
-        const cueHit = isDatum ? cueAtDatum(visibleChartCues(chartId), hitResult) : null;
+        const cueHit = isDatum ? cueAtDatum(shownCues(chartId), hitResult) : null;
         const nextHovered = cueHit ? { chartId, cue: cueHit } : null;
         // By cue, not by fact: moving from the highest bar to the lowest is a
         // move between two cues of ONE fact, and a fact-keyed compare would
@@ -604,7 +616,7 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
   const cachedData = chartDataCache.get(chartId);
   if (isChartSelected(chartId) && cachedData) {
     paintSelectionChrome(ctx, canvasX, canvasY, cachedData, chart.spec, getSubSelection(), {
-      lensOn: visibleChartCues(chartId).length > 0,
+      lensOn: shownCues(chartId).length > 0,
       textEditing: isOverlayTextEditorOpen(),
     });
   }
@@ -620,7 +632,7 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
   if (cachedData) {
     const overlay = getChartOverlay(chartId);
     if (overlay.cues.length > 0 || overlay.comments.length > 0) {
-      const shown = visibleChartCues(chartId);
+      const shown = shownCues(chartId);
       paintChartCues(ctx, canvasX, canvasY, cachedData.hitGeometry, cachedData.data, shown, overlay.selectedCueId, {
         spec: chart.spec,
         layout: cachedData.layout,

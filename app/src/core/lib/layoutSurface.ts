@@ -53,6 +53,15 @@ export interface LayoutSurface {
    * Asked from inside a press, so it must be cheap and synchronous.
    */
   isLocked?(region: GridRegion): boolean;
+  /**
+   * A PAGE-WIDE lock (a canvas's Lock Objects): when non-empty, EVERY object
+   * on this surface is locked, whatever `isLocked` answers, and this is the
+   * sentence that says why and how to lift it. Kept apart from `isLocked` so
+   * a reason shown to the user names the lock that is actually on: "unlock
+   * this object" is wrong advice for an object whose page is locked.
+   * Optional; absent or "" = no page lock.
+   */
+  pageLockedReason?: string;
 }
 
 /**
@@ -61,6 +70,7 @@ export interface LayoutSurface {
  * to freeze every object on the page.
  */
 export function isRegionLocked(surface: LayoutSurface | null, region: GridRegion): boolean {
+  if (surface?.pageLockedReason) return true;
   if (!surface?.isLocked) return false;
   try {
     return surface.isLocked(region) === true;

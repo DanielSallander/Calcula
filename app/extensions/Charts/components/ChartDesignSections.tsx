@@ -107,8 +107,10 @@ import type {
   DataLabelPosition,
   LineInterpolation,
   SeriesOrientation,
+  VisualDisplayUnits,
+  KpiDirection,
 } from "../types";
-import { isPivotDataSource, isCartesianChart } from "../types";
+import { isPivotDataSource, isCartesianChart, markFurniture } from "../types";
 import { ChartFilterDropdown, summarizeChartFilters } from "./ChartFilterDropdown";
 import { CHART_JSON_PANE_ID } from "./ChartJsonPane";
 import {
@@ -131,7 +133,8 @@ import {
   seriesColorPatch,
 } from "../lib/chartDataReader";
 import { resolveDataSource } from "../lib/dataSourceResolver";
-import { getStackModeFromSpec, setStackModeInOptions, supportsStacking } from "../lib/stackMode";
+import { getStackModeFromSpec, setStackModeInOptions, stackModesFor } from "../lib/stackMode";
+import { markSwitchPatch } from "../lib/markOptionsForMark";
 
 // ============================================================================
 // Layout (tokens only — the band's geometry is the fill rule)
@@ -384,8 +387,11 @@ export function ChartTypeSection(_props: PanelSectionProps): React.ReactElement 
 
   if (!chartId || !spec) return null;
 
+  // A type change keeps only the options the new type understands
+  // (markOptionsForMark): a stacked column's `stackMode` must not ride into a
+  // Card, where the schema refuses it and every later script edit would too.
   const setMark = (mark: ChartType): void => {
-    if (mark !== spec.mark) updateSpec({ mark });
+    if (mark !== spec.mark) updateSpec(markSwitchPatch(spec, mark));
   };
   const current = chartTypeEntry(spec.mark);
   const galleryItems = CHART_TYPES.map((t) => ({
@@ -501,6 +507,11 @@ export function ChartElementsSection(_props: PanelSectionProps): React.ReactElem
   const size = band ? "tall" : "md";
   const iconSize = band ? 28 : ICON_SIZE_SM;
   const cartesian = isCartesianChart(spec.mark);
+  // A title-only tile (Card, Multi-row card, KPI, Gauge) has no legend and no
+  // data labels: its painter draws its own. A toggle for either would write
+  // `legend.visible` / `dataLabels.enabled`, dirty the document and paint
+  // nothing — so they are not offered (contract §4.2).
+  const fullFurniture = markFurniture(spec.mark) === "full";
 
   const titleOn = Boolean(spec.title);
   const gridOn = Boolean(spec.yAxis?.gridLines);
@@ -563,18 +574,20 @@ export function ChartElementsSection(_props: PanelSectionProps): React.ReactElem
             onClick={() => updateSpec({ yAxis: { ...spec.yAxis, gridLines: !gridOn } })}
           />
         )}
-        <IconButton
-          split
-          size={size}
-          icon={<RibbonIcon.Legend size={iconSize} />}
-          label="Legend"
-          pressed={legendOn}
-          data-testid="chart-elem-legend"
-          onClick={() => updateSpec({ legend: { ...spec.legend, visible: !legendOn } })}
-          onChevronClick={openOptions("legend")}
-          chevronLabel="Legend options"
-          chevronProps={chevronProps("legend")}
-        />
+        {fullFurniture && (
+          <IconButton
+            split
+            size={size}
+            icon={<RibbonIcon.Legend size={iconSize} />}
+            label="Legend"
+            pressed={legendOn}
+            data-testid="chart-elem-legend"
+            onClick={() => updateSpec({ legend: { ...spec.legend, visible: !legendOn } })}
+            onChevronClick={openOptions("legend")}
+            chevronLabel="Legend options"
+            chevronProps={chevronProps("legend")}
+          />
+        )}
         {cartesian && (
           <IconButton
             size={size}
@@ -585,20 +598,22 @@ export function ChartElementsSection(_props: PanelSectionProps): React.ReactElem
             onClick={() => updateSpec({ xAxis: { ...spec.xAxis, showLabels: !axisLabelsOn } })}
           />
         )}
-        <IconButton
-          split
-          size={size}
-          icon={<RibbonIcon.DataLabels size={iconSize} />}
-          label="Data labels"
-          pressed={labelsOn}
-          data-testid="chart-elem-dataLabels"
-          onClick={() =>
-            updateSpec({ dataLabels: { ...(dl ?? { enabled: false }), enabled: !labelsOn } })
-          }
-          onChevronClick={openOptions("dataLabels")}
-          chevronLabel="Data label options"
-          chevronProps={chevronProps("dataLabels")}
-        />
+        {fullFurniture && (
+          <IconButton
+            split
+            size={size}
+            icon={<RibbonIcon.DataLabels size={iconSize} />}
+            label="Data labels"
+            pressed={labelsOn}
+            data-testid="chart-elem-dataLabels"
+            onClick={() =>
+              updateSpec({ dataLabels: { ...(dl ?? { enabled: false }), enabled: !labelsOn } })
+            }
+            onChevronClick={openOptions("dataLabels")}
+            chevronLabel="Data label options"
+            chevronProps={chevronProps("dataLabels")}
+          />
+        )}
       </Segmented>
 
       <Popover card anchorEl={anchor} open={openKey === "title"} onClose={close} heading="Chart title" width={240}>
@@ -851,7 +866,9 @@ export function ChartLayoutSection(_props: PanelSectionProps): React.ReactElemen
   if (!isCartesianChart(spec.mark)) return null;
 
   const band = layout.container === "band";
-  const stackable = supportsStacking(spec.mark);
+  // Per MODE, not per mark: a combo stacks its columns (Power BI's "Line and
+  // stacked column") but has no 100% stack, so that one option is disabled.
+  const offered = new Set(stackModesFor(spec.mark));
   const stackMode = getStackModeFromSpec(spec);
   const isCombo = spec.mark === "combo";
   const comboOpts = (isCombo ? spec.markOptions ?? {} : {}) as ComboMarkOptions;
@@ -869,9 +886,13 @@ export function ChartLayoutSection(_props: PanelSectionProps): React.ReactElemen
         value: o.value,
         label: o.label,
         icon: <ChartIcon name={o.icon} size={band ? 28 : ICON_SIZE_SM} />,
-        tooltip: stackable ? o.label : `${o.label} (column, bar, line and area charts)`,
+        tooltip: offered.has(o.value)
+          ? o.label
+          : o.value === "percentStacked"
+            ? `${o.label} (column, bar, line and area charts)`
+            : `${o.label} (column, bar, line, area and combo charts)`,
         testId: `chart-stacking-${o.value}`,
-        disabled: !stackable,
+        disabled: !offered.has(o.value),
       }))}
     />
   );
@@ -931,6 +952,198 @@ export function ChartLayoutSection(_props: PanelSectionProps): React.ReactElemen
       {stacking}
       {marksControl}
       {secondaryAxis}
+    </div>
+  );
+}
+
+// ============================================================================
+// 3b. Visual — the tile visuals' options (Card, Multi-row card, KPI, Gauge)
+// ============================================================================
+
+const VISUAL_UNITS: ReadonlyArray<{ value: VisualDisplayUnits; label: string }> = [
+  { value: "auto", label: "Auto" },
+  { value: "none", label: "None (as the source shows it)" },
+  { value: "thousands", label: "Thousands" },
+  { value: "millions", label: "Millions" },
+  { value: "billions", label: "Billions" },
+  { value: "trillions", label: "Trillions" },
+];
+
+const VISUAL_LABEL: Record<string, string> = {
+  card: "Card",
+  multiRowCard: "Multi-row card",
+  kpi: "KPI",
+  gauge: "Gauge",
+};
+
+/**
+ * The options card of a tile visual: what Power BI's Format pane offers for
+ * the card / KPI / gauge, reduced to what the painters read. Takes the Layout
+ * cluster's place (a tile has no axes to lay out), so the section list still
+ * changes only on a family flip.
+ *
+ * A number left EMPTY removes its key: "no fixed maximum" is the absence of
+ * one, and a 0 written in its place would pin a gauge to 0..0.
+ */
+function VisualControls({
+  spec,
+  updateSpec,
+}: {
+  spec: ChartSpec;
+  updateSpec: (patch: Partial<ChartSpec>) => void;
+}): React.ReactElement {
+  const opts = (spec.markOptions ?? {}) as Record<string, unknown>;
+  const set = (key: string, value: unknown): void => {
+    // A cleared key is written as an explicit `undefined`, never left out:
+    // updateChartSpec MERGES markOptions field by field, so a smaller object
+    // would keep the old value (the seriesColorPatch lesson); JSON drops it.
+    updateSpec({ markOptions: { ...opts, [key]: value } as ChartSpec["markOptions"] });
+  };
+  const numberInput = (key: string, label: string): React.ReactElement => (
+    <Input
+      type="number"
+      value={typeof opts[key] === "number" ? String(opts[key]) : ""}
+      placeholder={`${label} (auto)`}
+      aria-label={label}
+      data-testid={`chart-visual-${spec.mark}-${key}`}
+      onChange={(e) => {
+        const raw = e.target.value;
+        const n = Number(raw);
+        set(key, raw === "" || !Number.isFinite(n) ? undefined : n);
+      }}
+    />
+  );
+  const units = (
+    <Menu ariaLabel="Display units">
+      {VISUAL_UNITS.map((u) => (
+        <MenuItem
+          key={u.value}
+          role="menuitemradio"
+          checked={((opts.displayUnits as string | undefined) ?? "auto") === u.value}
+          testId={`chart-visual-units-${u.value}`}
+          onSelect={() => set("displayUnits", u.value)}
+        >
+          {u.label}
+        </MenuItem>
+      ))}
+    </Menu>
+  );
+
+  return (
+    <>
+      {spec.mark === "kpi" && (
+        <>
+          <SegmentedChoice<KpiDirection>
+            value={(opts.direction as KpiDirection | undefined) ?? "higherIsBetter"}
+            onChange={(direction) => set("direction", direction)}
+            ariaLabel="Direction"
+            testId="chart-visual-direction"
+            options={[
+              { value: "higherIsBetter", label: "High is good", testId: "chart-visual-direction-higherIsBetter" },
+              { value: "lowerIsBetter", label: "Low is good", testId: "chart-visual-direction-lowerIsBetter" },
+            ]}
+          />
+          {numberInput("goal", "Goal")}
+          <Checkbox
+            label="Trend axis"
+            checked={opts.showTrend !== false}
+            testId="chart-visual-kpi-trend"
+            onChange={(on) => set("showTrend", on ? undefined : false)}
+          />
+          <Checkbox
+            label="Goal and distance"
+            checked={opts.showGoal !== false}
+            testId="chart-visual-kpi-goal-line"
+            onChange={(on) => set("showGoal", on ? undefined : false)}
+          />
+        </>
+      )}
+      {spec.mark === "gauge" && (
+        <>
+          {numberInput("min", "Minimum")}
+          {numberInput("max", "Maximum")}
+          {numberInput("target", "Target")}
+          <Checkbox
+            label="Min and max labels"
+            checked={opts.showMinMax !== false}
+            testId="chart-visual-gauge-minmax"
+            onChange={(on) => set("showMinMax", on ? undefined : false)}
+          />
+        </>
+      )}
+      {spec.mark === "card" && (
+        <Checkbox
+          label="Category label"
+          checked={opts.showCategoryLabel !== false}
+          testId="chart-visual-card-label"
+          onChange={(on) => set("showCategoryLabel", on ? undefined : false)}
+        />
+      )}
+      {spec.mark === "multiRowCard" && (
+        <>
+          <Checkbox
+            label="Accent bar"
+            checked={opts.showAccentBar !== false}
+            testId="chart-visual-mrc-accent"
+            onChange={(on) => set("showAccentBar", on ? undefined : false)}
+          />
+          <Checkbox
+            label="Category as row title"
+            checked={opts.showRowTitle !== false}
+            testId="chart-visual-mrc-title"
+            onChange={(on) => set("showRowTitle", on ? undefined : false)}
+          />
+        </>
+      )}
+      <StatusText>Display units</StatusText>
+      {units}
+    </>
+  );
+}
+
+/**
+ * Visual (tile visuals only): one tall hero whose card holds the visual's
+ * options. In a panel the controls are inline.
+ */
+export function ChartVisualSection(_props: PanelSectionProps): React.ReactElement | null {
+  const { chartId, spec, updateSpec } = useChartDesignState();
+  const layout = useSurfaceLayout();
+  const { anchor, setAnchor, open, toggle, close } = useCardPopover<HTMLButtonElement>();
+  const bodyRef = useRef<HTMLDivElement>(null);
+  useFocusOnOpen(open, bodyRef);
+
+  if (!chartId || !spec) return null;
+  if (markFurniture(spec.mark) !== "titleOnly") return null;
+
+  const label = VISUAL_LABEL[spec.mark] ?? "Visual";
+  if (layout.container !== "band") {
+    return (
+      <div className={panelStack} data-testid="chart-visual-card">
+        <VisualControls spec={spec} updateSpec={updateSpec} />
+      </div>
+    );
+  }
+
+  return (
+    <div className={bandRow}>
+      <CommandButton
+        ref={setAnchor}
+        icon={<RibbonIcon.MarkOptions size={HERO_ICON_SIZE} />}
+        label={label}
+        chevron
+        tooltip={`${label} options: display units${spec.mark === "gauge" ? ", minimum, maximum, target" : spec.mark === "kpi" ? ", direction, goal" : ""}`}
+        data-testid="chart-visual"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        onClick={toggle}
+      />
+      <Popover card anchorEl={anchor} open={open} onClose={close} heading={label} width={280}>
+        <SurfaceLayoutProvider value={popoverLayout()}>
+          <div ref={bodyRef} className={cardBody} data-testid="chart-visual-card">
+            <VisualControls spec={spec} updateSpec={updateSpec} />
+          </div>
+        </SurfaceLayoutProvider>
+      </Popover>
     </div>
   );
 }
@@ -1479,6 +1692,19 @@ export function buildChartDesignSections(): PanelSection[] {
       label: "Layout",
       icon: sectionIcon("Stacked"),
       component: ChartLayoutSection,
+      ribbonPresentation: "auto",
+      collapsePriority: 3,
+      flyoutWidth: CHART_FLYOUT_WIDTH,
+    });
+  } else if (spec != null && markFurniture(spec.mark) === "titleOnly") {
+    // A tile visual has no axes to lay out; its options take Layout's slot
+    // (and its collapse priority), so the list still changes only on a
+    // family flip and the selection handler remounts the band only then.
+    sections.push({
+      id: `${CHART_DESIGN_TAB_ID}.visual`,
+      label: "Visual",
+      icon: sectionIcon("MarkOptions"),
+      component: ChartVisualSection,
       ribbonPresentation: "auto",
       collapsePriority: 3,
       flyoutWidth: CHART_FLYOUT_WIDTH,

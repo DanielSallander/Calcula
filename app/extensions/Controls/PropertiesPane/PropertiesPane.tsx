@@ -27,6 +27,8 @@ import { getTemplateCategories, type ShapeTemplate } from "../Shape/shapeTemplat
 import { setScriptFrameInert } from "../../_shared/scriptFrame";
 import { heldInlineVerdict, readHeldButtonCode } from "@api/heldButtonCode";
 import { HeldCodeSection, type HeldAdoptionShown } from "./HeldCodeSection";
+import { ButtonActionSection } from "./ButtonActionSection";
+import { readButtonAction } from "@api/buttonControlService";
 
 // ============================================================================
 // Styles (theme-aware via CSS variables)
@@ -519,6 +521,34 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
     [row, col, sheetIndex],
   );
 
+  // A button's declarative ACTION (Canvas contract §4.4, ButtonActionSection):
+  // its properties written in ONE sequence through the same door as every
+  // other row, then announced so the floating store -- which the run-mode
+  // click reads before the script door -- and the button's paint follow.
+  const writeActionProperties = useCallback(
+    async (entries: Array<[string, string]>) => {
+      if (row < 0 || col < 0) return;
+      let updated: ControlMetadata | null = null;
+      try {
+        for (const [key, value] of entries) {
+          updated = await setControlProperty(sheetIndex, row, col, controlType || "button", key, "static", value);
+        }
+      } catch (err) {
+        showToast(`Could not change the button's action: ${String(err)}`, { type: "error" });
+        if (mountedRef.current) setReloadTrigger((prev) => prev + 1);
+        return;
+      } finally {
+        if (updated) {
+          window.dispatchEvent(new CustomEvent("controls:action-changed", {
+            detail: { sheetIndex, row, col, properties: updated.properties },
+          }));
+        }
+      }
+      if (mountedRef.current && updated) setMetadata(updated);
+    },
+    [row, col, sheetIndex, controlType],
+  );
+
   // Compute control instance ID for script-declared properties
   const instanceId = row >= 0 && col >= 0 ? `control-${sheetIndex}-${row}-${col}` : undefined;
 
@@ -542,9 +572,15 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
     ? heldInlineVerdict(controlType || metadata?.controlType || "", metadata?.properties)
     : null;
   const showHeldCode = heldCode !== null && !replacingHeld;
+  // A button with a declarative action has no code to edit: one button, one
+  // thing (ButtonActionSection removed the code when the action was chosen).
+  const isButton = (controlType || metadata?.controlType) === "button";
+  const hasButtonAction = isButton && readButtonAction(metadata?.properties) !== null;
   const propDefs = allPropDefs.filter(
     (def) =>
-      !(isEmbeddedControl && def.key === "pinToGrid") && !(showHeldCode && def.key === "onSelect"),
+      !(isEmbeddedControl && def.key === "pinToGrid") &&
+      !(showHeldCode && def.key === "onSelect") &&
+      !(hasButtonAction && def.key === "onSelect"),
   );
 
   // Must be before early returns (Rules of Hooks)
@@ -671,6 +707,16 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
                 {renderGroupProperties(defs, metadata, scripts, handlePropertyChange)}
               </CollapsibleSection>
             ))
+          )}
+          {isButton && !isEmbeddedControl && (
+            <CollapsibleSection title="Action" defaultExpanded>
+              <ButtonActionSection
+                sheetIndex={sheetIndex}
+                properties={metadata?.properties}
+                heldCode={heldCode !== null}
+                writeProperties={writeActionProperties}
+              />
+            </CollapsibleSection>
           )}
           {heldCode && showHeldCode && (
             <CollapsibleSection title="Application code (held)" defaultExpanded>

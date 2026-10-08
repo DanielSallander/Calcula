@@ -9,6 +9,7 @@ import type { OverlayProps } from "@api/uiTypes";
 import { emitAppEvent, AppEvents } from "@api/events";
 
 import type { ChartSpec, ChartFilters } from "../types";
+import { markFurniture } from "../types";
 import { getChartById, updateChartSpec, syncChartRegions } from "../lib/chartStore";
 import { invalidateChartCache, getCachedChartData } from "../rendering/chartRenderer";
 import { closePopup } from "../rendering/quickAccessButtons";
@@ -244,15 +245,30 @@ function ElementsPanel({
   spec: ChartSpec;
   updateSpec: (u: Partial<ChartSpec>) => void;
 }): React.ReactElement {
+  const titleRow = (
+    <div className={styles.item} onClick={() => updateSpec({ title: spec.title ? null : "Chart" })}>
+      <input type="checkbox" checked={spec.title !== null} onChange={() => {}} />
+      <label>Chart Title</label>
+    </div>
+  );
+  // A title-only tile (Card, KPI, ...) has a title and nothing else; every
+  // other row here would write a setting its painter never reads (§4.2).
+  if (markFurniture(spec.mark) === "titleOnly") {
+    return (
+      <>
+        <div className={styles.section}>
+          <div className={styles.sectionTitle}>Chart Elements</div>
+        </div>
+        {titleRow}
+      </>
+    );
+  }
   return (
     <>
       <div className={styles.section}>
         <div className={styles.sectionTitle}>Chart Elements</div>
       </div>
-      <div className={styles.item} onClick={() => updateSpec({ title: spec.title ? null : "Chart" })}>
-        <input type="checkbox" checked={spec.title !== null} onChange={() => {}} />
-        <label>Chart Title</label>
-      </div>
+      {titleRow}
       <div className={styles.item} onClick={() => updateSpec({ xAxis: { ...spec.xAxis, title: spec.xAxis.title ? null : "X Axis" } })}>
         <input type="checkbox" checked={spec.xAxis.title !== null} onChange={() => {}} />
         <label>X Axis Title</label>

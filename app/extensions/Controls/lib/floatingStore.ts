@@ -11,6 +11,7 @@ import {
 import { getDesignMode } from "./designMode";
 import { announceFloatingControlRegions } from "./regionPublication";
 import { noteControlGeometryChanged } from "./geometryWriteOrder";
+import type { ButtonAction } from "@api/buttonControlService";
 
 // ============================================================================
 // Types
@@ -55,6 +56,16 @@ export interface FloatingControl {
   height: number;
   /** Control type (e.g., "button") */
   controlType: string;
+  /**
+   * A BUTTON's declarative action (go to a page, back, clear the page's
+   * slicers; @api/buttonControlService), or absent. Kept here, like
+   * `pinToGrid`, so the run-mode click can decide SYNCHRONOUSLY -- before,
+   * and instead of, the script door (lib/buttonActions.ts). Every door a
+   * button enters the store by sets it from the metadata
+   * (`buttonActionOfControl`), and the Properties pane's change event keeps
+   * it in step.
+   */
+  buttonAction?: ButtonAction;
 }
 
 export interface ControlGroup {
