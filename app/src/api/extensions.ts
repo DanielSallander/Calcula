@@ -125,6 +125,14 @@ export interface GridContextMenuItem {
   order?: number;
   /** Whether the item is disabled */
   disabled?: boolean | ((context: GridMenuContext) => boolean);
+  /**
+   * Why the item is disabled, told to the user on the greyed row (its tooltip
+   * and accessible description), so a refusal is never a silent dead row. A
+   * function answers per context (null = no reason). Read only while the item
+   * resolves as disabled; the registry resolves it to a string (or nothing)
+   * for items AND their children, like `label` and `disabled`.
+   */
+  disabledReason?: string | ((context: GridMenuContext) => string | null);
   /** Whether the item is visible */
   visible?: boolean | ((context: GridMenuContext) => boolean);
   /** Whether to show a separator after this item */

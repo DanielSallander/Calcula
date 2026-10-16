@@ -573,6 +573,50 @@ const SELECTION_OWNERS: SelectionOwner[] = [
 ];
 
 /**
+ * A TASK-PANE-ONLY context key: it lists a side pane under View > Show and
+ * drives no contextual ribbon tab, so the invariant walk's tab label does not
+ * apply. Its object can still be deleted out from under it, so it still needs
+ * a reconciliation that takes the key (and the pane) down -- the same
+ * `unreconciledSelections` check, the same teeth.
+ */
+type PaneContextOwner = Omit<SelectionOwner, "walkTabLabel">;
+
+const PANE_CONTEXT_OWNERS: PaneContextOwner[] = [
+  {
+    contextKey: "object",
+    kind: "FloatingControl",
+    file: "app/extensions/BuiltIn/ObjectPane/lib/objectPanePolicy.ts",
+    reconcile: "syncObjectPaneToSelection",
+    trigger: { file: "app/extensions/BuiltIn/ObjectPane/lib/objectPanePolicy.ts", symbol: "installObjectPanePolicy" },
+    reconcileDomain: null,
+    reconcileDomainWhy:
+      "Every family's delete deselects through its provider and notifies @api/objectSelection; the policy's " +
+      "selection listener IS the reconciliation",
+    why:
+      "The object pane (WP-C D-PANE) follows the PRIMARY selected object of any family. A deleted object leaves " +
+      "the selection, the selection change runs syncObjectPaneToSelection, and with no primary left it closes the " +
+      "pane and removes the \"object\" key -- so View > Show never lists a pane for an object that is gone.",
+  },
+  {
+    contextKey: "properties",
+    kind: "FloatingControl",
+    file: "app/extensions/Controls/index.ts",
+    reconcile: "closePropertiesIfOpen",
+    trigger: { file: "app/extensions/Controls/index.ts", symbol: "handleSelectionChange" },
+    reconcileDomain: null,
+    reconcileDomainWhy:
+      "The key is an IN-CELL button's Properties pane (control-properties): every selection change runs " +
+      "handleSelectionChange, which closes it when the selection is no longer that button, and a control's " +
+      "delete closes it through the same reconciliation",
+    why:
+      "WP-C D-PANE: a floating control's Properties are a tab of the object pane; only an EMBEDDED button still " +
+      "opens control-properties, and it adds the \"properties\" key when it does. closePropertiesIfOpen closes " +
+      "the pane AND removes the key, so View > Show never lists Properties for a button that is gone or no " +
+      "longer selected.",
+  },
+];
+
+/**
  * Contextual context keys that are NOT a cascade-deleted workbook object, with
  * the reason. Keeps the scan below honest without turning it into a checklist.
  */
@@ -656,7 +700,7 @@ export function unannouncedReconciliations(
 
 /** Which selection owners fail to reconcile, given a reader. */
 export function unreconciledSelections(
-  owners: SelectionOwner[],
+  owners: ReadonlyArray<SelectionOwner | PaneContextOwner>,
   readFile: (rel: string) => string,
 ): string[] {
   const out: string[] = [];
@@ -861,7 +905,10 @@ describe("cascade announcement census — the frontend half of §3bt's seventh c
       "the matrix no longer cascade-deletes a slicer — the parse is stale",
     ).toBe(true);
 
-    const declared = new Map(SELECTION_OWNERS.map((o) => [o.contextKey, o]));
+    const declared = new Map<string, SelectionOwner | PaneContextOwner>([
+      ...SELECTION_OWNERS.map((o) => [o.contextKey, o] as const),
+      ...PANE_CONTEXT_OWNERS.map((o) => [o.contextKey, o] as const),
+    ]);
     const missing: string[] = [];
     for (const [key, files] of contextKeysInExtensions()) {
       if (declared.has(key)) continue;
@@ -890,6 +937,45 @@ describe("cascade announcement census — the frontend half of §3bt's seventh c
         "BUG-0026: three actions (table.create, slicer.create, table.delete) " +
         "left the Slicer tab on a workbook with zero slicers.",
     ).toEqual([]);
+  });
+
+  it("every task-pane-only context key's reconciliation exists, takes the key down, and is reachable", () => {
+    expect(
+      unreconciledSelections(PANE_CONTEXT_OWNERS, read),
+      "a task pane's context key can outlive the object it addresses: View > Show " +
+        "would list a pane for an object that is gone.",
+    ).toEqual([]);
+    // NON-VACUITY: the object pane's key is really added somewhere the scan sees.
+    expect(contextKeysInExtensions().has("object"), "the extension scan lost the \"object\" pane key").toBe(true);
+    expect(contextKeysInExtensions().has("properties"), "the extension scan lost the \"properties\" pane key").toBe(true);
+  });
+
+  it("a planted pane-only owner whose reconciliation never removes the key is reported -- teeth", () => {
+    const planted: PaneContextOwner = {
+      contextKey: "thing-pane",
+      kind: "Thing",
+      file: "synthetic.ts",
+      reconcile: "syncThingPaneToSelection",
+      trigger: { file: "synthetic.ts", symbol: "installThingPane" },
+      reconcileDomain: null,
+      reconcileDomainWhy: "planted",
+      why: "planted",
+    };
+    const noop = `
+      export function syncThingPaneToSelection(): void {
+        if (!getPrimaryObjectRegion()) closeThingPane();
+      }
+    `;
+    expect(unreconciledSelections([planted], () => noop)).toEqual([
+      "thing-pane: syncThingPaneToSelection never unregisters the contextual panel",
+    ]);
+    // ...and the real shape is accepted, so the rule discriminates.
+    const real = `
+      export function syncThingPaneToSelection(): void {
+        if (!getPrimaryObjectRegion()) { closeThingPane(); removeTaskPaneContextKey("thing-pane"); }
+      }
+    `;
+    expect(unreconciledSelections([planted], () => real)).toEqual([]);
   });
 
   it("a reconciliation driven by an announcement is actually announced — BUG-0051", () => {

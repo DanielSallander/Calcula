@@ -298,6 +298,13 @@ class CellWindowCache {
   private rows = new Map<number, PivotRowData>();
   /** Start rows of windows currently being fetched. */
   pending = new Set<number>();
+  /**
+   * The callbacks waiting for each in-flight window, one list per FETCH: a
+   * caller that asks for a window another caller is already fetching is told
+   * when THAT fetch lands, instead of never (the formula bar of a canvas
+   * pivot's active cell waits on the renderer's fetch of the same rows).
+   */
+  waiters = new Map<number, Array<() => void>>();
   /** Version of the PivotView these windows belong to. */
   version = 0;
 
@@ -328,6 +335,9 @@ class CellWindowCache {
   invalidate(): void {
     this.rows.clear();
     this.pending.clear();
+    // Waiters of the old view's fetches: that view is gone (its own update
+    // announces the new one).
+    this.waiters.clear();
   }
 
   /** Check if a fetch is already in flight for this window start. */
@@ -396,20 +406,37 @@ export function ensureCellWindow(
 
   // Align to window boundaries for efficient fetching
   const windowStart = Math.floor(startRow / WINDOW_FETCH_SIZE) * WINDOW_FETCH_SIZE;
-  if (cache.isPending(windowStart)) return;
+  if (cache.isPending(windowStart)) {
+    // Someone is already fetching this window: be told when it lands.
+    cache.waiters.get(windowStart)?.push(onLoaded);
+    return;
+  }
 
   cache.markPending(windowStart);
+  const waiters: Array<() => void> = [onLoaded];
+  cache.waiters.set(windowStart, waiters);
+  const release = () => {
+    if (cache.waiters.get(windowStart) === waiters) cache.waiters.delete(windowStart);
+  };
   fetchFn(pivotId, windowStart, WINDOW_FETCH_SIZE)
     .then((resp: PivotCellWindowResponse) => {
+      release();
       // Discard stale responses
       if (resp.version !== version) {
         cache.clearPending(windowStart);
         return;
       }
       cache.setWindow(resp.startRow, resp.rows);
-      onLoaded();
+      for (const waiter of waiters) {
+        try {
+          waiter();
+        } catch (err) {
+          console.error("[pivot] a cell window waiter threw:", err);
+        }
+      }
     })
     .catch((err) => {
+      release();
       console.warn(`[pivot] cell window fetch failed: ${err}`);
       cache.pending.delete(windowStart);
     });

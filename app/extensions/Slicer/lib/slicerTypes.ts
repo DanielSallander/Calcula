@@ -2,6 +2,7 @@
 // PURPOSE: TypeScript interfaces mirroring Rust slicer types.
 
 import type { PivotFilterGestureResponse } from "@api/pivotTypes";
+import type { VisualContainerFormat } from "@api/visualContainer";
 
 /** "biConnection" = a MODEL slicer: items come straight from a Calcula model
  * connection (cacheSourceId = the connection id, fieldName = "Table.Column",
@@ -59,6 +60,9 @@ export interface Slicer {
    * data-source id the slicer re-binds by after reload / re-pull. Stamped by
    * the backend; absent otherwise. */
   dataSourceId?: string | null;
+  /** The visual container (D-FORMAT). Title text / visibility stay
+   *  `headerText` / `showHeader`. Absent = the family defaults. */
+  container?: VisualContainerFormat;
 }
 
 export interface SlicerItem {
@@ -107,6 +111,8 @@ export interface UpdateSlicerParams {
   connectedSources?: SlicerConnection[];
   /** New filter level (1 = ordinary, 2-9 = pinned). */
   filterLevel?: number;
+  /** The visual container: absent = keep, null = clear, a value = set. */
+  container?: VisualContainerFormat | null;
 }
 
 // ============================================================================

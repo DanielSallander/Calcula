@@ -20,7 +20,8 @@ function stringLiteral(text: string): string {
 
 /**
  * The GETPIVOTDATA text for a pick on (`row`, `col`) of the sheet the grid
- * SHOWS, or null to insert the plain reference.
+ * SHOWS, or null to insert the plain reference. Its pivot_table argument is
+ * the pivot's anchor (Excel parity), whichever cell of the pivot was picked.
  *
  * THE CACHE IS ONLY A SHORTCUT, AND ONLY ON THE EDIT'S OWN SHEET. The cached
  * pivot regions belong to the sheet the edit lives on: a point-mode switch to
@@ -41,12 +42,21 @@ export async function getPivotDataPick(row: number, col: number): Promise<Formul
   // before storing it (";" on a Swedish workbook).
   const locale = await getLocaleSettings();
   const sep = locale.listSeparator;
-  const cellRef = "$" + columnToLetter(col) + "$" + (row + 1);
+  // The pivot_table argument is the pivot's ANCHOR (its top-left cell,
+  // definition.destination), never the cell that was clicked -- Excel's own
+  // spelling, on a worksheet and on a canvas alike. Any cell of the pivot would
+  // resolve today, but only the anchor stays inside it when the pivot shrinks.
+  const anchorRow = result.pivotAnchorRow;
+  const anchorCol = result.pivotAnchorCol;
+  const cellRef = "$" + columnToLetter(anchorCol) + "$" + (anchorRow + 1);
   let formula = `GETPIVOTDATA(${stringLiteral(result.dataField)}${sep}${cellRef}`;
   for (const [fieldName, itemValue] of result.fieldItemPairs) {
     formula += `${sep}${stringLiteral(fieldName)}${sep}${stringLiteral(itemValue)}`;
   }
   formula += ")";
 
-  return { text: formula, highlightRow: row, highlightCol: col };
+  // The highlight is the reference the TEXT carries (the anchor): Core finds
+  // that token to qualify it with the sheet the pick was made on
+  // (qualifyInterceptedCellRef).
+  return { text: formula, highlightRow: anchorRow, highlightCol: anchorCol };
 }

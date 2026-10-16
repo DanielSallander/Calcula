@@ -183,6 +183,7 @@ import { test, expect } from "../fixtures";
 // private copy of the identical twenty lines — the same one-fact-many-spellings
 // shape as the product defects this wave fixed.
 import { diffCount, samplePixels as pixels, type PixelClip } from "../viewportSample";
+import { showVisualSectionIfPresent } from "../helpers/object-pane";
 import * as os from "os";
 import * as path from "path";
 
@@ -218,7 +219,7 @@ const CAT_COL = "AH"; // column index 33
 const VAL_COL = "AI"; // column index 34
 const CAT_COL_INDEX = 33;
 const VAL_COL_INDEX = 34;
-/** The cell a cell-linked title points at. Outside the plotted range on purpose. */
+/** The cell a cell-bound title reads (an object property binding). Outside the plotted range on purpose. */
 const LINK_CELL = "AK1";
 const LINK_ROW = 0;
 const LINK_COL = 36;
@@ -488,8 +489,9 @@ async function ladder(page: Page): Promise<Record<string, unknown>> {
 /**
  * The RAW stored spec — `getChartById(id).spec`, never a resolved render spec.
  *
- * The distinction is the whole point of the cell-linked-title case below: the
- * resolved spec holds the cell's TEXT where the raw one holds `=AK1`.
+ * The distinction is the whole point of the cell-bound-title case below: the
+ * painted spec holds the cell's TEXT (the binding's value laid over it) where
+ * the raw one keeps the LITERAL title underneath.
  */
 async function rawSpec(page: Page, chartId: string): Promise<ReadableSpec> {
   return page.evaluate(
@@ -848,9 +850,15 @@ async function formatRowLabel(page: Page): Promise<string> {
 /**
  * Take the menu's "Format ..." row, which for a data point lands in the Format
  * TASK PANE (the modal box was retired; `DataPointFormatDialog` is a redirector).
+ *
+ * WP-C (D-PANE): that pane is now the ONE object pane's Format tab, and the
+ * element card (`chart-format-pane`, selectors unchanged) sits in its VISUAL
+ * section. The section a reader last picked is remembered per object type, so
+ * an earlier General pick would hide the card: put Visual on screen first.
  */
 async function openFormatPaneFromMenu(page: Page): Promise<void> {
   await page.locator(`${CHART_MENU} [data-chart-menu-item="formatElement"]`).click();
+  await showVisualSectionIfPresent(page);
   await expect(page.locator('[data-testid="chart-format-pane"]'), "the Format pane must open").toBeVisible({
     timeout: 10_000,
   });
@@ -1124,8 +1132,15 @@ test.describe("Chart interaction, live", () => {
   // ------------------------------------------------------------------------
   // 3 — the data-destroying trap
   // ------------------------------------------------------------------------
+  //
+  // WP-D (2026-10-15): a title follows a cell only as an object property
+  // BINDING (@api/objectBindings, evaluated by Rust). The in-spec "=AK1"
+  // spelling this case used to seed is deleted -- a literal "=AK1" is TEXT now
+  // and old files are migrated into bindings on load. The trap is the same one:
+  // the editor must open on the binding's FORMULA (never the painted value), and
+  // committing it unchanged must write nothing, so the link survives.
 
-  test("a CELL-LINKED title survives being opened for editing: the editor shows =AK1, Escape keeps the link, the cell still drives it", async ({
+  test("a CELL-BOUND title survives being opened for editing: the editor shows its formula, Escape writes nothing, the cell still drives it", async ({
     appPage,
     grid,
   }) => {
@@ -1135,48 +1150,86 @@ test.describe("Chart interaction, live", () => {
     await grid.setCellValueDirect(LINK_CELL, "Linked A");
     await appPage.waitForTimeout(400);
 
+    const LITERAL_TITLE = "Literal title text";
     const chartId = await makeChart(
       appPage,
-      baseSpec("bar", { title: `=${LINK_CELL}`, xAxis: { title: "Month" }, yAxis: { title: "Units" } }),
+      baseSpec("bar", { title: LITERAL_TITLE, xAxis: { title: "Month" }, yAxis: { title: "Units" } }),
       "CellLinkedTitleJourney",
     );
+    // A binding names a chart the BACKEND holds: land the debounced save first.
+    await flushChartSaves(appPage);
+    const literalRect = await elementRect(appPage, chartId, "title");
+    expect(literalRect, "the literal title must be drawn before it is bound").not.toBeNull();
 
+    // Bind the title to the cell (the seam's own door; =AK1 has no separator, so
+    // the invariant spelling is the user's too). Rust qualifies the reference.
+    const bound = await appPage.evaluate(
+      async ({ mod, chartId, formula }) => {
+        const seam = (await (window as unknown as AppWindow).__appImport!(mod)) as {
+          setBinding: (o: { kind: string; id: string }, p: string, f: string, opts?: { invariant?: boolean }) => Promise<{ formula: string; displayFormula: string }>;
+        };
+        const info = await seam.setBinding({ kind: "chart", id: chartId }, "/spec/title", formula, { invariant: true });
+        return { formula: info.formula, displayFormula: info.displayFormula };
+      },
+      { mod: "/src/api/objectBindings/index.ts", chartId, formula: `=${LINK_CELL}` },
+    );
+    expect(bound.formula, "the binding does not read the link cell").toMatch(new RegExp(`!${LINK_CELL}$`));
+    const bindingNow = async () =>
+      appPage.evaluate(
+        async ({ mod, chartId }) => {
+          const seam = (await (window as unknown as AppWindow).__appImport!(mod)) as {
+            getBinding: (o: { kind: string; id: string }, p: string) => { formula: string } | null;
+          };
+          return seam.getBinding({ kind: "chart", id: chartId }, "/spec/title")?.formula ?? null;
+        },
+        { mod: "/src/api/objectBindings/index.ts", chartId },
+      );
+
+    // The painted title becomes the CELL's text ("Linked A", shorter than the literal).
+    await expect
+      .poll(
+        async () => {
+          const r = await elementRect(appPage, chartId, "title");
+          return r === null ? 0 : Math.round(r.width);
+        },
+        { timeout: 20_000, message: "the bound title never painted the cell's text" },
+      )
+      .toBeLessThan(Math.round(literalRect!.width) - 10);
+    await settleGrid(appPage);
     const box = await chartClientBox(appPage, chartId);
     const before = await elementRect(appPage, chartId, "title");
-    expect(before, "a cell-linked title must be drawn like any other").not.toBeNull();
+    expect(before, "a cell-bound title must be drawn like any other").not.toBeNull();
     const band: Clip = { x: box.x, y: box.y + before!.y - 8, width: box.width, height: before!.height + 16 };
     const paintedLinkedA = await pixels(appPage, band);
 
-    // THE WHOLE POINT OF THIS CASE. The editor's TEXT comes from the RAW spec
-    // and its RECT from the RESOLVED layout. Seeded from the resolved spec it
-    // would open showing "Linked A" and commit the literal string — silently
-    // replacing the link with a frozen copy of what the cell said this morning,
-    // with no error anywhere.
+    // THE WHOLE POINT OF THIS CASE. The editor's TEXT comes from the BINDING (its
+    // formula, in the user's locale) and its RECT from the painted layout. Seeded
+    // from the painted spec it would open showing "Linked A" and commit the
+    // literal string -- silently replacing the link with a frozen copy of what the
+    // cell said this morning, with no error anywhere.
     const at = { x: box.x + before!.x + before!.width / 2, y: box.y + before!.y + before!.height / 2 };
     await appPage.mouse.dblclick(at.x, at.y);
     const editor = appPage.locator("[data-overlay-text-editor]");
     await expect(editor).toBeVisible({ timeout: 5_000 });
     expect(
       await editor.inputValue(),
-      "THE TRAP: the editor must be seeded from the RAW spec (=AK1), never from the resolved title text",
-    ).toBe(`=${LINK_CELL}`);
+      "THE TRAP: the editor must be seeded from the BINDING's formula, never from the painted title text",
+    ).toBe(bound.displayFormula);
 
     // Escape on a chart title COMMITS what is in the box (Excel's rule — there
-    // is no cancelling key for `enterInserts`). Committing the unchanged raw
-    // text must write NOTHING: `commitChartText` compares against the stored
-    // value first.
+    // is no cancelling key for `enterInserts`). Committing the unchanged
+    // formula must write NOTHING: `planChartTextCommit` compares it with the
+    // stored binding first.
     await appPage.keyboard.press("Escape");
     await expect(editor, "Escape must close the editor").toHaveCount(0, { timeout: 5_000 });
     await appPage.waitForTimeout(600);
-    expect((await rawSpec(appPage, chartId)).title, "the link must still be a link after the editor closed").toBe(
-      `=${LINK_CELL}`,
-    );
+    expect(await bindingNow(), "the link must still be a link after the editor closed").toBe(bound.formula);
+    expect((await rawSpec(appPage, chartId)).title, "the editor wrote the literal title").toBe(LITERAL_TITLE);
 
-    // NOW CHANGE THE CELL. A cell-ref title always intersects a data change
-    // (`chartIntersectsChanges`), so the chart re-resolves and repaints. The
-    // user's own edit emits `app:cells-updated` WITH the changed cells;
-    // `setCellValueDirect` writes through `update_cell` and does not, so the
-    // event the product listens to is emitted here.
+    // NOW CHANGE THE CELL. `setCellValueDirect` writes through `update_cell`
+    // and announces nothing; the user's own edit emits `app:cells-updated`
+    // WITH the changed cells, which is what re-evaluates bindings, so that
+    // event is emitted here.
     await grid.setCellValueDirect(LINK_CELL, "Much Longer Linked Title B");
     await appPage.evaluate(
       ({ row, col }) => {
@@ -1205,9 +1258,8 @@ test.describe("Chart interaction, live", () => {
       diffCount(paintedLinkedA, await pixels(appPage, band)),
       "POSITIVE CONTROL: the title band must repaint with the cell's new text",
     ).toBeGreaterThan(20);
-    expect((await rawSpec(appPage, chartId)).title, "and the spec still holds the REFERENCE, not a copy of the text").toBe(
-      `=${LINK_CELL}`,
-    );
+    expect(await bindingNow(), "and the title is still BOUND to the reference, not a copy of the text").toBe(bound.formula);
+    expect((await rawSpec(appPage, chartId)).title, "and the literal underneath is untouched").toBe(LITERAL_TITLE);
 
     await removeChart(appPage, chartId);
   });
@@ -1983,7 +2035,12 @@ test.describe("Chart interaction, live", () => {
       "a CLICK must push EXACTLY ONE undo entry — one debounced save, one update_chart, one record_chart_undo",
     ).toHaveLength(1);
     expect(undoAfter[undoAfter.length - 1], "and it must be the one on top").toBe(added[0]);
-    expect(await undoTop(), "described as a chart edit").toBe("Edit chart");
+    // "Format Chart" since WP-C S9a: the swatch lives on the object pane's
+    // element card, whose `applySpecPatch` lands the debounced `update_chart`
+    // INSIDE one `runInUndoTransaction(CHART_ELEMENT_FORMAT_UNDO_LABEL)`
+    // (`Charts/components/ChartFormatPane.tsx`), so the step carries the card's
+    // label instead of the bare store save's "Edit chart". Still ONE step (above).
+    expect(await undoTop(), "described as a chart format edit").toBe("Format Chart");
     await refreshTitle();
     expect(await titleStar(), "and the title bar must show the asterisk").toBe(true);
 

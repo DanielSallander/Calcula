@@ -32,6 +32,7 @@ describe("Controls owns the button-control seam", () => {
     expect(controlsIndex).toMatch(/registerButtonControlProvider\(\{/);
     expect(controlsIndex).toMatch(/createButton:\s*createButtonControlAt/);
     expect(controlsIndex).toMatch(/removeButton:\s*removeButtonControlAt/);
+    expect(controlsIndex).toMatch(/createPageNavigator:\s*createPageNavigatorAt/);
   });
 
   it("pushes the unregister onto the cleanup list", () => {

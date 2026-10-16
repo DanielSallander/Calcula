@@ -62,6 +62,7 @@ import {
   dragObject,
   ensureCanvasTab,
   eventually,
+  freeCanvasRect,
   gridBox,
   humanClick,
   installAppImport,
@@ -78,6 +79,8 @@ import {
   type PersistedChart,
   type SheetRow,
 } from "../helpers/canvas-live";
+import { cachedData, recordedTexts, startTextRecorder, type CachedData } from "../helpers/chart-paint";
+import { closeObjectPaneForGood } from "../helpers/object-pane";
 import { samplePixelGrids, diffCount, type PixelClip } from "../viewportSample";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -190,53 +193,9 @@ async function dropStar(page: Page, conn: { connectionId: string; dir: string } 
 // ---------------------------------------------------------------------------
 // Instruments
 // ---------------------------------------------------------------------------
-
-/**
- * Record every string a 2D context WRITES from now on (on- and off-screen
- * canvases). A chart paints into an off-screen bitmap once and is then blitted,
- * so the recorder must be in place BEFORE the insert: what it sees is what the
- * painter wrote, which is what the user reads.
- */
-async function startTextRecorder(page: Page): Promise<void> {
-  await page.evaluate(() => {
-    const w = window as unknown as { __e2eTexts?: string[] };
-    w.__e2eTexts = [];
-    const protos: Array<{ fillText: (...a: unknown[]) => void; __e2eWrapped?: boolean } | null> = [
-      CanvasRenderingContext2D.prototype as unknown as { fillText: (...a: unknown[]) => void; __e2eWrapped?: boolean },
-      typeof OffscreenCanvasRenderingContext2D !== "undefined"
-        ? (OffscreenCanvasRenderingContext2D.prototype as unknown as { fillText: (...a: unknown[]) => void; __e2eWrapped?: boolean })
-        : null,
-    ];
-    for (const p of protos) {
-      if (!p || p.__e2eWrapped) continue;
-      const original = p.fillText;
-      p.fillText = function (this: unknown, ...args: unknown[]) {
-        const list = (window as unknown as { __e2eTexts?: string[] }).__e2eTexts;
-        if (list) {
-          list.push(String(args[0]));
-          if (list.length > 20_000) list.splice(0, 10_000);
-        }
-        return original.apply(this, args);
-      };
-      p.__e2eWrapped = true;
-    }
-  });
-}
-
-async function recordedTexts(page: Page): Promise<string[]> {
-  return page.evaluate(() => [...((window as unknown as { __e2eTexts?: string[] }).__e2eTexts ?? [])]);
-}
-
-interface CachedData {
-  categories: string[];
-  series: Array<{ name: string; values: number[] }>;
-  displayValues?: string[][];
-}
-
-async function cachedData(page: Page, chartId: string): Promise<CachedData | null> {
-  const d = await callModule<{ data?: CachedData } | null>(page, MOD.CHART_RENDERER, "getCachedChartData", [chartId]);
-  return d?.data ?? null;
-}
+//
+// `startTextRecorder` / `recordedTexts` / `cachedData` live in
+// helpers/chart-paint.ts (shared with object-bindings.spec.ts, never copied).
 
 /** A chart's box in PAGE pixels (it must be on screen). */
 async function chartClip(page: Page, c: { x: number; y: number; width: number; height: number }, inset = 6): Promise<PixelClip> {
@@ -354,6 +313,10 @@ test.describe("Canvas tab = Power BI report authoring, live", () => {
 
   test.beforeEach(async ({ appPage }) => {
     await installAppImport(appPage);
+    // WP-C: a canvas click opens the object pane at release and narrows the
+    // grid. This journey predates it and asserts nothing about it: close the
+    // pane AS IF BY HAND, per test (the fixture's store reset clears the mark).
+    await closeObjectPaneForGood(appPage);
     await newFile(appPage);
   });
 
@@ -673,33 +636,60 @@ test.describe("Canvas tab = Power BI report authoring, live", () => {
     }
   });
 
-  test("P7 Buttons: Page Navigator is one undo step of one button per page and switches pages; Back returns to the previous page", async ({ appPage: page }) => {
+  test("P7 Buttons: Page Navigator inserts ONE live pageNavigator control in one undo step and a run-mode press on an item switches pages; Back returns to the previous page", async ({ appPage: page }) => {
     try {
       const c1 = await addCanvas(page);
       const c2 = await addCanvas(page);
       await clickSheetTab(page, c1.index);
       await eventually(() => activeIndex(page), (i) => i === c1.index, "precondition: the first canvas is not active");
 
+      // ONE control of its own type (D-NAV, 2026-10-15): the items are derived
+      // live from the page list, never stored as one button per page.
       await clickCanvasMenuRow(page, "canvas-buttons", "canvas-buttons-pageNavigator");
-      const nav = await eventually(
+      const controls = await eventually(
         () => controlsWithProps(page, c1.index),
-        (cs) => cs.filter((c) => prop(c.props, "action") === "navigate").length === 2,
-        "Page Navigator did not insert one button per canvas page",
+        (cs) => cs.some((c) => c.type === "pageNavigator"),
+        "Page Navigator inserted no pageNavigator control",
       );
-      expect(nav.map((c) => prop(c.props, "actionTargetName")).sort(), "one button per canvas, named by page").toEqual([c1.name, c2.name].sort());
+      const navs = controls.filter((c) => c.type === "pageNavigator");
+      expect(navs, "Page Navigator is ONE control").toHaveLength(1);
+      expect(controls.filter((c) => c.type === "button"), "Page Navigator still inserts one button per page").toEqual([]);
       expect((await undoState(page)).undoDescription, "Page Navigator is ONE undo step").toBe("Insert Page Navigator");
+      const nav = navs[0];
+      expect(prop(nav.props, "action"), "a navigator stores no action target").toBe("");
 
-      // Run mode: press the button that goes to the second canvas.
-      await clickEmpty(page, 4, 4);
-      const toC2 = nav.find((c) => prop(c.props, "actionTargetName") === c2.name)!;
-      await clickControlCentre(page, toC2.props);
-      await eventually(() => activeIndex(page), (i) => i === c2.index, "the navigator button did not switch to its page");
+      // Its box: the seam's natural size for the two visible, non-Tooltip canvases, clamped to the page.
+      const natural = await callModule<{ width: number; height: number }>(page, MOD.BUTTON_SERVICE, "pageNavigatorNaturalSize", [2]);
+      const layout = await layoutOf(page, c1.index);
+      expect(
+        { w: Number(prop(nav.props, "width")), h: Number(prop(nav.props, "height")) },
+        "the navigator's box is not the natural size of two pages (clamped to the page)",
+      ).toEqual({ w: Math.min(natural.width, layout.pageWidth), h: Math.min(natural.height, layout.pageHeight) });
+
+      // Run mode: press the item of the second canvas (where describe -- the
+      // painter's own read -- says it is).
+      const navId = await callModule<string>(page, MOD.CONTROLS_FLOATING_STORE, "makeFloatingControlId", [c1.index, nav.row, nav.col]);
+      type NavItem = { sheetId: string; caption: string; current: boolean; rect: { x: number; y: number; width: number; height: number } };
+      const described = await eventually(
+        () => callModule<{ items: NavItem[] } | null>(page, MOD.NAV_DESCRIBE, "describePageNavigator", [navId]),
+        (d) => !!d && d.items.length === 2,
+        "the navigator does not describe one item per canvas",
+      );
+      expect(described!.items.map((i) => i.caption), "one item per canvas, named by page, in tab order").toEqual([c1.name, c2.name]);
+      expect(described!.items.map((i) => i.current), "the first canvas's item is the current page").toEqual([true, false]);
+      const spot = await freeCanvasRect(page, { width: 8, height: 8 });
+      await clickEmpty(page, spot.x + 4, spot.y + 4);
+      const toC2 = described!.items[1];
+      const at = await sheetPointToPage(page, toC2.rect.x + toC2.rect.width / 2, toC2.rect.y + toC2.rect.height / 2);
+      await humanClick(page, at.x, at.y);
+      await eventually(() => activeIndex(page), (i) => i === c2.index, "the navigator's item did not switch to its page");
 
       // On the second page: Buttons > Back, then press it.
       await clickCanvasMenuRow(page, "canvas-buttons", "canvas-buttons-back");
       const back = (await eventually(() => controlsWithProps(page, c2.index), (cs) => cs.some((c) => prop(c.props, "action") === "back"), "Back inserted no action button"))
         .find((c) => prop(c.props, "action") === "back")!;
-      await clickEmpty(page, 4, 4);
+      const backSpot = await freeCanvasRect(page, { width: 8, height: 8 });
+      await clickEmpty(page, backSpot.x + 4, backSpot.y + 4);
       await clickControlCentre(page, back.props);
       await eventually(() => activeIndex(page), (i) => i === c1.index, "Back did not return to the page the user came from");
     } finally {

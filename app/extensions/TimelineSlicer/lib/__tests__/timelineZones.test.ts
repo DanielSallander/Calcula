@@ -46,6 +46,7 @@ import {
   type TimelineZonePart,
 } from "../timelineZones";
 import type { TimelineLevel } from "../timelineSlicerTypes";
+import { resolveTimelineContainer } from "../timelineObjectFormat";
 
 const BOUNDS = { x: 100, y: 50, width: 420, height: 140 };
 
@@ -65,6 +66,9 @@ function load(f: Fixture): void {
     id: "t1",
     name: "Date",
     sheetIndex: 0,
+    // The container's default 1 px border insets the content by 1 px (WP-C
+    // D-FORMAT); off here, so this file's geometry is the content box's own.
+    container: { border: { show: false } },
     x: 0,
     y: 0,
     width: BOUNDS.width,
@@ -382,5 +386,56 @@ describe("a LOCKED timeline on a SUBSCRIBED page still filters (owner decision)"
 
     useSurface({ isLocked: () => false });
     expect(resolveFloatingZone(ctx(40, 10))).toMatchObject({ kind: "frame", cursor: "move", canMove: true });
+  });
+});
+
+describe("the visual container (WP-C S11): the zones are measured on the content box", () => {
+  // Padding 12 over the default 1 px border, and an 18 pt title: the content
+  // starts 13 px in, and the header grows to max(28, 23 + 12) = 35.
+  const INSET = 13;
+  const HEADER = 35;
+
+  function loadPadded(): void {
+    load(FIXTURES[0]);
+    const tl = h.timelines.get("t1")!;
+    tl.container = { padding: { top: 12, right: 12, bottom: 12, left: 12 }, title: { fontSize: 18 } };
+  }
+
+  function containerCtx(relX: number, relY: number): OverlayHitTestContext {
+    const region = { ...REGION, container: resolveTimelineContainer(h.timelines.get("t1") as never) };
+    return { ...ctx(relX, relY), region };
+  }
+
+  it("the first period is hit at the CONTENT origin (after the bigger header and the year strip)", () => {
+    loadPadded();
+    const tileTop = INSET + HEADER + 18; // + the year strip
+    expect(timelineZoneOf(ctx(INSET + 10, tileTop + 10))).toMatchObject({ part: "period", periodIndex: 0 });
+    // 45 px into the content is still period 0 (45 px from the OUTER edge it would be period 1 ...
+    expect(timelineZoneOf(ctx(INSET + 45, tileTop + 10))).toMatchObject({ part: "period", periodIndex: 0 });
+    // ... and 3 px above the tile row is the year strip, not a tile.
+    expect(partAt(INSET + 10, tileTop - 3)).toBe("yearStrip");
+    // One period (50 px at months) further right is period 1.
+    expect(timelineZoneOf(ctx(INSET + 60, tileTop + 10))).toMatchObject({ part: "period", periodIndex: 1 });
+  });
+
+  it("the header follows the title font: 35 px tall at 18 pt", () => {
+    loadPadded();
+    // 30 px into the content: the header at 18 pt; the year strip at the default 11 pt (28 px).
+    expect(partAt(INSET + 40, INSET + 30)).toBe("header");
+    h.timelines.get("t1")!.container = { padding: { top: 12, right: 12, bottom: 12, left: 12 } };
+    expect(partAt(INSET + 40, INSET + 30)).toBe("yearStrip");
+  });
+
+  it("the padding band is FRAME: Core answers it before the timeline is asked", () => {
+    loadPadded();
+    expect(resolveFloatingZone(containerCtx(5, 80))).toMatchObject({ kind: "frame", part: "container", cursor: "move" });
+    // The timeline itself calls it empty frame -- never a period.
+    expect(partAt(5, 80)).toBe("empty");
+    expect(partAt(BOUNDS.width - 5, 80)).toBe("empty");
+  });
+
+  it("the clear button sits at the CONTENT's right edge", () => {
+    loadPadded();
+    expect(partAt(BOUNDS.width - INSET - 10, INSET + 15)).toBe("clearButton");
   });
 });

@@ -1099,6 +1099,8 @@ pub(crate) fn shift_cells_impl(
     shift_cell_maps_in_band(state, &effect, &mut undo_stack, active_sheet, &band);
     shift_misc_stores_in_band(state, &effect, &mut undo_stack, active_sheet, &band);
     let names_rewritten = shift_named_ranges_in_band(state, &effect, &mut undo_stack, active_sheet, &edited_sheet_name, &band);
+    // Object property BINDING formulas that read the band (WP-D).
+    crate::object_bindings::cascade::shift_object_bindings_in_band(state, &effect, &mut undo_stack, &edited_sheet_name, &band);
     shift_range_strings_in_band(state, &effect, &mut undo_stack, active_sheet, &edited_sheet_name, &band);
     shift_controls_in_band(state, &effect, &mut undo_stack, active_sheet, &band);
     shift_rule_ranges_in_band(state, &effect, &mut undo_stack, active_sheet, &band);

@@ -20,7 +20,6 @@ import { createLinearScale, createBandScale, createPointScale, createScaleFromSp
 import type { LinearScale } from "./scales";
 import {
   computeCartesianLayout,
-  drawChartBackground,
   drawPlotBackground,
   drawHorizontalGridLines,
   drawTitle,
@@ -301,7 +300,6 @@ export function paintComboChart(
   const { lineSeries, areaSeries, yScale, yScaleSecondary, xBandScale, xPointScale, getYScale } = frame;
 
   // 1. Background
-  drawChartBackground(ctx, layout, theme);
 
   // 2. Plot area background
   drawPlotBackground(ctx, plotArea, theme);
@@ -475,9 +473,7 @@ export function paintComboChart(
   ctx.restore();
 
   // 6. Title
-  if (spec.title) {
-    drawTitle(ctx, spec.title, layout, theme);
-  }
+  drawTitle(ctx, spec.title, layout, theme);
 
   // 7. Legend
   if (spec.legend.visible && data.series.length > 0) {

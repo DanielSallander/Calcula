@@ -440,6 +440,24 @@ fn jstr(v: &serde_json::Value, keys: &[&str]) -> Option<String> {
     jget(v, keys).and_then(|x| x.as_str()).map(str::to_string)
 }
 
+/// The title the Inspector shows for one `charts.json` row. The row's `spec` is
+/// the ChartDefinition envelope EMBEDDED as a JSON object (`.cala` v10; it was
+/// the `specJson` string before, which a string read of an object would now
+/// silently miss). The title is the ChartSpec's: the envelope's inner `spec`
+/// when that is an object (the chart store's own rule), else a bare spec.
+/// A plain string title or a `{ text }` object; empty means none.
+fn inspector_chart_title(row: &serde_json::Value) -> Option<String> {
+    let spec = row.get("spec")?;
+    let chart_spec = match spec.get("spec") {
+        Some(inner) if inner.is_object() => inner,
+        _ => spec,
+    };
+    chart_spec
+        .get("title")
+        .and_then(|t| t.as_str().map(str::to_string).or_else(|| jstr(t, &["text"])))
+        .filter(|t| !t.is_empty())
+}
+
 fn jarr<'a>(v: &'a serde_json::Value, keys: &[&str]) -> Option<&'a Vec<serde_json::Value>> {
     jget(v, keys).and_then(|x| x.as_array())
 }
@@ -1025,17 +1043,7 @@ pub fn calp_inspector_overview(
             .unwrap_or_default()
             .iter()
             .map(|v| {
-                let title = jstr(v, &["specJson", "spec_json"])
-                    .and_then(|spec| serde_json::from_str::<serde_json::Value>(&spec).ok())
-                    .and_then(|spec| {
-                        spec.get("title")
-                            .and_then(|t| {
-                                t.as_str()
-                                    .map(str::to_string)
-                                    .or_else(|| jstr(t, &["text"]))
-                            })
-                            .filter(|t| !t.is_empty())
-                    });
+                let title = inspector_chart_title(v);
                 InspectorChartInfo {
                     id: jstr(v, &["id"]).unwrap_or_default(),
                     sheet_name: sheet_name_for(
@@ -2410,6 +2418,42 @@ pub fn calp_inspector_verify_artifacts(
         unlisted,
         all_ok,
     })
+}
+
+#[cfg(test)]
+mod chart_title_tests {
+    use super::inspector_chart_title;
+    use serde_json::json;
+
+    /// charts.json rows carry `spec` as an embedded OBJECT since `.cala` v10.
+    /// The Inspector reads the title out of it -- from the envelope's inner
+    /// ChartSpec, or from a bare spec -- and an absent/empty title is None.
+    ///
+    /// SABOTAGE: read `jstr(v, &["specJson"])` and parse it (the pre-v10 shape)
+    /// -- every title below comes back None.
+    #[test]
+    fn chart_titles_are_read_from_a_spec_object_charts_json() {
+        let envelope = json!({
+            "id": "c1", "sheetId": "s1",
+            "spec": { "chartId": "c1", "name": "Chart 1", "spec": { "mark": "bar", "title": "Revenue" } }
+        });
+        assert_eq!(inspector_chart_title(&envelope).as_deref(), Some("Revenue"));
+        let object_title = json!({
+            "id": "c2", "sheetId": "s1",
+            "spec": { "spec": { "mark": "bar", "title": { "text": "Margin" } } }
+        });
+        assert_eq!(inspector_chart_title(&object_title).as_deref(), Some("Margin"));
+        let bare = json!({ "id": "c3", "sheetId": "s1", "spec": { "mark": "line", "title": "Bare" } });
+        assert_eq!(inspector_chart_title(&bare).as_deref(), Some("Bare"));
+        for none in [
+            json!({ "id": "c4", "sheetId": "s1", "spec": { "spec": { "mark": "bar", "title": "" } } }),
+            json!({ "id": "c5", "sheetId": "s1", "spec": { "spec": { "mark": "bar" } } }),
+            json!({ "id": "c6", "sheetId": "s1", "spec": "{not json" }),
+            json!({ "id": "c7", "sheetId": "s1" }),
+        ] {
+            assert_eq!(inspector_chart_title(&none), None, "{none}");
+        }
+    }
 }
 
 #[cfg(test)]

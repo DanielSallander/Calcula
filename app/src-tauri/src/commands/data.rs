@@ -9031,6 +9031,14 @@ mod canvas_sheet_tests;
 #[path = "canvas_objects_lock_tests.rs"]
 mod canvas_objects_lock_tests;
 
+/// WP-C S7 (D-FORMAT): the visual container through each family's own door
+/// (slicer, timeline, floating grid, chart, control appearance batch). A CHILD
+/// module of `data` only to reuse the `cross_sheet_recalc_tests::Workbook`
+/// harness.
+#[cfg(test)]
+#[path = "visual_container_tests.rs"]
+mod visual_container_tests;
+
 /// §2c follow-on — bulk range commands that rewrite cells must seed the ONE
 /// shared cascade, and cycles must be detected across sheet boundaries. Also a
 /// CHILD module of `data` for the same reason as above.

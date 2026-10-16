@@ -1,7 +1,7 @@
 //! FILENAME: core/calp/src/chart_refs.rs
 //! PURPOSE: Find, stamp and remap the sheets a chart's data sources name.
-//! CONTEXT: A chart's `spec_json` is the whole serialized ChartDefinition
-//! envelope (`{chartId, name, sheetIndex, x, y, ..., spec: ChartSpec}`) or, for
+//! CONTEXT: A chart's `spec` is the whole ChartDefinition envelope as JSON
+//! (`SavedChart.spec`, an embedded object since `.cala` v10) (`{chartId, name, sheetIndex, x, y, ..., spec: ChartSpec}`) or, for
 //! a chart written by a script or an older build, a bare ChartSpec. Inside it a
 //! coordinate data source (a DataRangeRef, any object with `startRow`) names its
 //! sheet two ways: `sheetId`, the workbook's stable sheet uuid, which WINS when
@@ -23,19 +23,22 @@
 //! ids), checkout (the application's ids) and refresh, and refresh DISCARDS
 //! pull's fresh ids in favour of the old local ones. Only the host's
 //! materializer knows which local sheet an application sheet finally became, so
-//! only the host may rewrite a spec. The pulled `spec_json` is the publisher's
-//! bytes, verbatim.
+//! only the host may rewrite a spec. The pulled `spec` is the publisher's
+//! value, verbatim.
 //!
-//! WHY `None` WHEN NOTHING CHANGED. `serde_json` is built without
-//! `preserve_order` here, so re-serializing a spec reorders its keys. Returning
-//! `None` for an untouched spec keeps its bytes identical.
+//! THE REWRITERS EDIT IN PLACE AND RETURN WHETHER ANYTHING CHANGED. The spec is
+//! a `serde_json::Value` (built without `preserve_order`, so its object keys
+//! are SORTED and it serialises deterministically): an untouched chart writes
+//! the same bytes whether or not a rewriter visited it, so there is no "keep
+//! the original bytes" path to protect any more. The `bool` exists for the
+//! callers that count or report rewrites.
 //!
-//! A spec that WAS rewritten does not keep them, and a rewrite can be undone:
-//! a checkout renames an application's string sources to this workbook's
-//! names and the push renames them back, so an untouched chart comes home with
-//! its keys sorted. Bytes are therefore not what a version diff compares --
-//! [`comparable_chart_spec`] is: key order and the spelling of a source's sheet
-//! prefix are not edits.
+//! A rewrite can be undone -- a checkout renames an application's string
+//! sources to this workbook's names and the push renames them back -- and the
+//! SPELLING of a sheet prefix may not come home identical ('DATA'!A1 vs
+//! Data!A1). What a version diff compares is therefore
+//! [`comparable_chart_spec`]: the spelling of a source's sheet prefix is not an
+//! edit (and key order never was one for a `Value`).
 
 use std::collections::HashMap;
 
@@ -95,10 +98,11 @@ pub(crate) enum ChartSource {
 
 /// Every pivot table a chart reads (`{type: "pivot", pivotId}` sources in the
 /// four places the module header lists), deduplicated, in walk order. An id that
-/// does not parse names no pivot and is skipped. Malformed JSON yields nothing.
-pub fn chart_spec_pivot_ids(spec_json: &str) -> Vec<EntityId> {
+/// does not parse names no pivot and is skipped. A spec that is not an object
+/// (an unparseable spec kept as a string) yields nothing.
+pub fn chart_spec_pivot_ids(spec: &Value) -> Vec<EntityId> {
     let mut out: Vec<EntityId> = Vec::new();
-    for source in chart_spec_sources(spec_json) {
+    for source in chart_spec_sources(spec) {
         if let ChartSource::Pivot(raw) = source {
             if let Some(id) = EntityId::parse(&raw) {
                 if !out.contains(&id) {
@@ -116,10 +120,11 @@ pub fn chart_spec_pivot_ids(spec_json: &str) -> Vec<EntityId> {
 /// that does not parse names no sheet, exactly as the resolver refuses it rather
 /// than falling back), otherwise its `sheetIndex`. A sheet-qualified A1 string
 /// contributes the sheet's name. Unqualified strings, pivot and design-query
-/// sources name no sheet and contribute nothing. Malformed JSON yields nothing.
-pub fn chart_spec_source_sheets(spec_json: &str) -> Vec<ChartSourceSheet> {
+/// sources name no sheet and contribute nothing. A spec that is not an object
+/// yields nothing.
+pub fn chart_spec_source_sheets(spec: &Value) -> Vec<ChartSourceSheet> {
     let mut out: Vec<ChartSourceSheet> = Vec::new();
-    for source in chart_spec_sources(spec_json) {
+    for source in chart_spec_sources(spec) {
         if let ChartSource::Sheet(sheet) = source {
             if !out.contains(&sheet) {
                 out.push(sheet);
@@ -131,12 +136,9 @@ pub fn chart_spec_source_sheets(spec_json: &str) -> Vec<ChartSourceSheet> {
 
 /// Every data source of a chart, deduplicated, in walk order -- the sheets it
 /// names, the unqualified strings that name none, and the pivot tables it reads.
-pub(crate) fn chart_spec_sources(spec_json: &str) -> Vec<ChartSource> {
-    let Ok(value) = serde_json::from_str::<Value>(spec_json) else {
-        return Vec::new();
-    };
+pub(crate) fn chart_spec_sources(spec: &Value) -> Vec<ChartSource> {
     let mut raw: Vec<&Value> = Vec::new();
-    collect_sources(spec_root(&value), 0, &mut raw);
+    collect_sources(spec_root(spec), 0, &mut raw);
 
     let mut out: Vec<ChartSource> = Vec::new();
     for source in raw {
@@ -182,19 +184,18 @@ pub(crate) fn chart_spec_sources(spec_json: &str) -> Vec<ChartSource> {
 /// honest "source sheet no longer exists" error rather than to some other
 /// sheet's cells.
 ///
-/// Returns `None` when nothing changed (including malformed JSON and an empty
-/// map), so the caller keeps the original bytes. A map entry that sends an id to
+/// Edits `spec` in place; returns `false` when nothing changed (including a
+/// spec that is not an object and an empty map). A map entry that sends an id to
 /// itself AND to the index the ref already carries changes nothing; an identity
 /// id with a DIFFERENT index still rewrites the index.
 pub fn remap_chart_spec_sheet_ids(
-    spec_json: &str,
+    spec: &mut Value,
     map: &HashMap<SheetId, (SheetId, usize)>,
-) -> Option<String> {
+) -> bool {
     if map.is_empty() {
-        return None;
+        return false;
     }
-    let mut value: Value = serde_json::from_str(spec_json).ok()?;
-    let changed = for_each_range_ref_mut(spec_root_mut(&mut value), 0, &mut |r| {
+    for_each_range_ref_mut(spec_root_mut(spec), 0, &mut |r| {
         let Some(id) = r.get("sheetId").and_then(Value::as_str).and_then(SheetId::parse) else {
             return false;
         };
@@ -211,12 +212,7 @@ pub fn remap_chart_spec_sheet_ids(
             touched = true;
         }
         touched
-    });
-    if changed {
-        serde_json::to_string(&value).ok()
-    } else {
-        None
-    }
+    })
 }
 
 /// Rename the sheet prefix of every sheet-qualified STRING source
@@ -226,17 +222,16 @@ pub fn remap_chart_spec_sheet_ids(
 /// chart otherwise reads the SUBSCRIBER's own "Data". DataRangeRefs (bound by
 /// id) and unqualified strings are left alone.
 ///
-/// Returns `None` when nothing changed (including malformed JSON and an empty
-/// rename set), so the caller keeps the original bytes.
+/// Edits `spec` in place; returns `false` when nothing changed (including a
+/// spec that is not an object and an empty rename set).
 pub fn rename_chart_spec_sheet_names(
-    spec_json: &str,
+    spec: &mut Value,
     renames: &crate::sheet_renames::SheetRenames,
-) -> Option<String> {
+) -> bool {
     if renames.is_empty() {
-        return None;
+        return false;
     }
-    let mut value: Value = serde_json::from_str(spec_json).ok()?;
-    let changed = for_each_source_mut(spec_root_mut(&mut value), 0, &mut |source| {
+    for_each_source_mut(spec_root_mut(spec), 0, &mut |source| {
         let Value::String(text) = source else {
             return false;
         };
@@ -247,25 +242,22 @@ pub fn rename_chart_spec_sheet_names(
             }
             None => false,
         }
-    });
-    if changed {
-        serde_json::to_string(&value).ok()
-    } else {
-        None
-    }
+    })
 }
 
-/// A chart spec in the form two spellings of the SAME chart share: parsed
-/// (so key order is gone) with every string source's sheet prefix spelled the
-/// one comparable way (`crate::sheet_renames::comparable_reference`). `None`
-/// for text that is not JSON -- compared as bytes then, like any other string.
+/// A chart spec in the form two spellings of the SAME chart share: every
+/// string source's sheet prefix spelled the one comparable way
+/// (`crate::sheet_renames::comparable_reference`). Key order is already
+/// irrelevant to a `Value`'s equality. A spec that is not an object (an
+/// unparseable spec kept as a string) is returned as it is and compares as
+/// that string.
 ///
 /// The version diff compares charts through this, because a checkout rename
-/// and the push's undo of it re-serialize an untouched spec (see the module
-/// header): byte-wise, every such chart shipped as "modified" and blocked a
-/// merge with a teammate who DID edit it.
-pub fn comparable_chart_spec(spec_json: &str) -> Option<Value> {
-    let mut value: Value = serde_json::from_str(spec_json).ok()?;
+/// and the push's undo of it can change the spelling of an untouched spec's
+/// sheet prefixes (see the module header): compared raw, every such chart
+/// shipped as "modified" and blocked a merge with a teammate who DID edit it.
+pub fn comparable_chart_spec(spec: &Value) -> Value {
+    let mut value = spec.clone();
     for_each_source_mut(spec_root_mut(&mut value), 0, &mut |source| {
         let Value::String(text) = source else {
             return false;
@@ -275,7 +267,7 @@ pub fn comparable_chart_spec(spec_json: &str) -> Option<Value> {
         *text = comparable;
         changed
     });
-    Some(value)
+    value
 }
 
 /// Stamp `sheetId` onto every DataRangeRef that lacks one (absent, not a
@@ -288,10 +280,10 @@ pub fn comparable_chart_spec(spec_json: &str) -> Option<Value> {
 ///
 /// Used where a chart LEAVES the publisher: a ref that carries only the
 /// publisher's index would otherwise be stamped on the subscriber with whatever
-/// sheet sits at that index there. Returns `None` when nothing changed.
-pub fn stamp_chart_spec_sheet_ids(spec_json: &str, sheet_ids: &[SheetId]) -> Option<String> {
-    let mut value: Value = serde_json::from_str(spec_json).ok()?;
-    let changed = for_each_range_ref_mut(spec_root_mut(&mut value), 0, &mut |r| {
+/// sheet sits at that index there. Edits `spec` in place; returns `false`
+/// when nothing changed.
+pub fn stamp_chart_spec_sheet_ids(spec: &mut Value, sheet_ids: &[SheetId]) -> bool {
+    for_each_range_ref_mut(spec_root_mut(spec), 0, &mut |r| {
         let stamped = matches!(r.get("sheetId"), Some(Value::String(s)) if !s.is_empty());
         if stamped {
             return false;
@@ -305,12 +297,7 @@ pub fn stamp_chart_spec_sheet_ids(spec_json: &str, sheet_ids: &[SheetId]) -> Opt
             .unwrap_or(UNRESOLVABLE_SHEET_ID);
         r.insert("sheetId".to_string(), Value::String(id.to_string()));
         true
-    });
-    if changed {
-        serde_json::to_string(&value).ok()
-    } else {
-        None
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -551,12 +538,11 @@ mod tests {
         })
     }
 
-    fn envelope(spec: Value) -> String {
+    fn envelope(spec: Value) -> Value {
         json!({
             "chartId": 7, "name": "Sales", "sheetIndex": 5, "x": 10, "y": 20,
             "spec": spec
         })
-        .to_string()
     }
 
     #[test]
@@ -581,10 +567,7 @@ mod tests {
     fn a_bare_spec_and_an_envelope_walk_the_same() {
         let (a, c, d) = (sid(), sid(), sid());
         let spec = four_path_spec(a, c, d);
-        assert_eq!(
-            chart_spec_source_sheets(&spec.to_string()),
-            chart_spec_source_sheets(&envelope(spec))
-        );
+        assert_eq!(chart_spec_source_sheets(&spec), chart_spec_source_sheets(&envelope(spec.clone())));
         // The ENVELOPE's own `sheetIndex` is the chart's placement, not a data
         // source: an envelope with no spec data names no sheet at all.
         assert!(chart_spec_source_sheets(&envelope(json!({ "mark": "bar" }))).is_empty());
@@ -601,8 +584,7 @@ mod tests {
                 { "data": "!A1:A3" },
                 { "data": "   " }
             ]
-        })
-        .to_string();
+        });
         assert_eq!(
             chart_spec_source_sheets(&spec),
             vec![
@@ -630,8 +612,7 @@ mod tests {
                 { "data": { "sheetIndex": 4, "sheetId": "not-a-uuid", "startRow": 0 } },
                 { "data": { "sheetIndex": 6, "sheetId": null, "startRow": 0 } }
             ]
-        })
-        .to_string();
+        });
         assert_eq!(
             chart_spec_source_sheets(&spec),
             vec![ChartSourceSheet::Index(2), ChartSourceSheet::Index(6)],
@@ -645,8 +626,7 @@ mod tests {
         let spec = json!({
             "data": range_ref(0, Some(a)),
             "layers": [ { "data": range_ref(9, Some(a)) } ]
-        })
-        .to_string();
+        });
         assert_eq!(chart_spec_source_sheets(&spec), vec![ChartSourceSheet::Id(a)]);
     }
 
@@ -658,9 +638,8 @@ mod tests {
         map.insert(a, (la, 10));
         map.insert(c, (lc, 11));
         map.insert(d, (ld, 12));
-        let out = remap_chart_spec_sheet_ids(&envelope(four_path_spec(a, c, d)), &map)
-            .expect("mapped ids must rewrite");
-        let v: Value = serde_json::from_str(&out).unwrap();
+        let mut v = envelope(four_path_spec(a, c, d));
+        assert!(remap_chart_spec_sheet_ids(&mut v, &map), "mapped ids must rewrite");
         let spec = &v["spec"];
         assert_eq!(spec["data"]["sheetId"], la.to_string());
         assert_eq!(spec["data"]["sheetIndex"], 10);
@@ -682,16 +661,14 @@ mod tests {
     fn remap_rewrites_a_layer_and_a_lookup_ref_too() {
         let (a, b) = (sid(), sid());
         let (la, lb) = (sid(), sid());
-        let spec = json!({
+        let mut v = json!({
             "layers": [ { "data": range_ref(0, Some(a)) } ],
             "transform": [ { "type": "lookup", "from": range_ref(1, Some(b)) } ]
-        })
-        .to_string();
+        });
         let mut map = HashMap::new();
         map.insert(a, (la, 4));
         map.insert(b, (lb, 5));
-        let v: Value =
-            serde_json::from_str(&remap_chart_spec_sheet_ids(&spec, &map).unwrap()).unwrap();
+        assert!(remap_chart_spec_sheet_ids(&mut v, &map));
         assert_eq!(v["layers"][0]["data"]["sheetId"], la.to_string());
         assert_eq!(v["layers"][0]["data"]["sheetIndex"], 4);
         assert_eq!(v["transform"][0]["from"]["sheetId"], lb.to_string());
@@ -702,15 +679,13 @@ mod tests {
     fn remap_leaves_unmapped_ids_alone() {
         let (a, stranger) = (sid(), sid());
         let la = sid();
-        let spec = json!({
+        let mut v = json!({
             "data": range_ref(0, Some(a)),
             "layers": [ { "data": range_ref(8, Some(stranger)) } ]
-        })
-        .to_string();
+        });
         let mut map = HashMap::new();
         map.insert(a, (la, 2));
-        let v: Value =
-            serde_json::from_str(&remap_chart_spec_sheet_ids(&spec, &map).unwrap()).unwrap();
+        assert!(remap_chart_spec_sheet_ids(&mut v, &map));
         assert_eq!(v["data"]["sheetId"], la.to_string());
         assert_eq!(
             v["layers"][0]["data"]["sheetId"],
@@ -721,38 +696,41 @@ mod tests {
     }
 
     #[test]
-    fn remap_returns_none_when_nothing_changed() {
+    fn remap_reports_no_change_when_nothing_changed() {
         let a = sid();
         let spec = envelope(json!({ "data": range_ref(3, Some(a)), "mark": "bar" }));
         // An empty map.
-        assert_eq!(remap_chart_spec_sheet_ids(&spec, &HashMap::new()), None);
+        let mut v = spec.clone();
+        assert!(!remap_chart_spec_sheet_ids(&mut v, &HashMap::new()));
+        assert_eq!(v, spec);
         // A map that knows none of the spec's ids.
         let mut other = HashMap::new();
         other.insert(sid(), (sid(), 0));
-        assert_eq!(remap_chart_spec_sheet_ids(&spec, &other), None);
+        assert!(!remap_chart_spec_sheet_ids(&mut v, &other));
+        assert_eq!(v, spec);
         // The identity at the index the ref already carries (a checkout laid out
         // like the publisher's workbook).
         let mut identity = HashMap::new();
         identity.insert(a, (a, 3));
-        assert_eq!(remap_chart_spec_sheet_ids(&spec, &identity), None);
+        assert!(!remap_chart_spec_sheet_ids(&mut v, &identity));
+        assert_eq!(v, spec);
         // ...but the identity at ANOTHER index still moves the index.
         let mut moved = HashMap::new();
         moved.insert(a, (a, 6));
-        let v: Value =
-            serde_json::from_str(&remap_chart_spec_sheet_ids(&spec, &moved).unwrap()).unwrap();
+        assert!(remap_chart_spec_sheet_ids(&mut v, &moved));
         assert_eq!(v["spec"]["data"]["sheetId"], a.to_string());
         assert_eq!(v["spec"]["data"]["sheetIndex"], 6);
         // A spec with no ref at all.
         let mut map = HashMap::new();
         map.insert(a, (sid(), 1));
-        assert_eq!(remap_chart_spec_sheet_ids("{\"kind\":\"bar\"}", &map), None);
+        assert!(!remap_chart_spec_sheet_ids(&mut json!({ "kind": "bar" }), &map));
     }
 
     #[test]
     fn stamp_fills_only_unstamped_refs_from_the_index() {
         let ids = vec![sid(), sid(), sid(), sid()];
         let already = sid();
-        let spec = json!({
+        let mut v = json!({
             "data": range_ref(1, None),
             "layers": [
                 { "data": range_ref(0, Some(already)) },
@@ -761,10 +739,8 @@ mod tests {
             ],
             "transform": [ { "type": "lookup", "from": range_ref(2, None) } ],
             "concat": { "charts": [ { "data": range_ref(0, None) } ] }
-        })
-        .to_string();
-        let v: Value =
-            serde_json::from_str(&stamp_chart_spec_sheet_ids(&spec, &ids).unwrap()).unwrap();
+        });
+        assert!(stamp_chart_spec_sheet_ids(&mut v, &ids));
         assert_eq!(v["data"]["sheetId"], ids[1].to_string());
         assert_eq!(v["layers"][0]["data"]["sheetId"], already.to_string(), "stamped ref untouched");
         assert_eq!(
@@ -782,17 +758,19 @@ mod tests {
     }
 
     #[test]
-    fn stamp_returns_none_when_nothing_changed() {
+    fn stamp_reports_no_change_when_nothing_changed() {
         let a = sid();
         let ids = vec![sid()];
         let stamped = envelope(json!({ "data": range_ref(0, Some(a)) }));
-        assert_eq!(stamp_chart_spec_sheet_ids(&stamped, &ids), None);
-        assert_eq!(stamp_chart_spec_sheet_ids("{\"kind\":\"bar\"}", &ids), None);
-        assert_eq!(stamp_chart_spec_sheet_ids("{\"data\":\"Sheet1!A1:B2\"}", &ids), None);
+        let mut v = stamped.clone();
+        assert!(!stamp_chart_spec_sheet_ids(&mut v, &ids));
+        assert_eq!(v, stamped);
+        assert!(!stamp_chart_spec_sheet_ids(&mut json!({ "kind": "bar" }), &ids));
+        assert!(!stamp_chart_spec_sheet_ids(&mut json!({ "data": "Sheet1!A1:B2" }), &ids));
         // A ref that already carries the unresolvable id is STAMPED: a second
-        // publish leaves it (and its bytes) alone.
-        let unresolvable = json!({ "data": range_ref(5, Some(UNRESOLVABLE_SHEET_ID)) }).to_string();
-        assert_eq!(stamp_chart_spec_sheet_ids(&unresolvable, &ids), None);
+        // publish leaves it alone.
+        let mut unresolvable = json!({ "data": range_ref(5, Some(UNRESOLVABLE_SHEET_ID)) });
+        assert!(!stamp_chart_spec_sheet_ids(&mut unresolvable, &ids));
     }
 
     /// An index-only ref that no publisher sheet answers must not ship
@@ -811,13 +789,15 @@ mod tests {
             json!({ "data": { "sheetIndex": 7, "sheetId": "", "startRow": 0 } }),
             json!({ "data": { "startRow": 0, "startCol": 0 } }),
         ] {
-            let out = stamp_chart_spec_sheet_ids(&spec.to_string(), &ids)
-                .unwrap_or_else(|| panic!("an unanswerable ref must be stamped: {spec}"));
-            let v: Value = serde_json::from_str(&out).unwrap();
+            let mut v = spec.clone();
+            assert!(
+                stamp_chart_spec_sheet_ids(&mut v, &ids),
+                "an unanswerable ref must be stamped: {spec}"
+            );
             assert_eq!(v["data"]["sheetId"], UNRESOLVABLE_SHEET_ID.to_string(), "{spec}");
             // Read back, it names a sheet by id -- one no workbook carries.
             assert_eq!(
-                chart_spec_source_sheets(&out),
+                chart_spec_source_sheets(&v),
                 vec![ChartSourceSheet::Id(UNRESOLVABLE_SHEET_ID)]
             );
             assert!(!ids.contains(&UNRESOLVABLE_SHEET_ID));
@@ -856,18 +836,32 @@ mod tests {
             "the raw id is kept for the warning, even one that names no pivot"
         );
         assert!(chart_spec_source_sheets(&spec).is_empty(), "a pivot source names no sheet");
-        assert!(chart_spec_pivot_ids("not json").is_empty());
+        assert!(chart_spec_pivot_ids(&Value::String("not json".to_string())).is_empty());
     }
 
+    /// A spec that is not an object -- an unparseable spec kept as a STRING
+    /// value, or any other wrong shape -- names nothing and is never rewritten.
     #[test]
-    fn malformed_json_never_panics() {
+    fn a_non_object_spec_never_panics() {
         let mut map = HashMap::new();
         map.insert(sid(), (sid(), 0));
-        for bad in ["", "{", "not json", "[1,2", "42", "null", "[]", "\"Sheet1!A1\"", "{\"spec\":7}"] {
-            assert!(chart_spec_source_sheets(bad).is_empty(), "{bad}");
-            assert!(chart_spec_sources(bad).is_empty(), "{bad}");
-            assert_eq!(remap_chart_spec_sheet_ids(bad, &map), None, "{bad}");
-            assert_eq!(stamp_chart_spec_sheet_ids(bad, &[sid()]), None, "{bad}");
+        for bad in [
+            Value::String(String::new()),
+            Value::String("{".to_string()),
+            Value::String("not json".to_string()),
+            json!(42),
+            Value::Null,
+            json!([]),
+            json!([1, 2]),
+            json!("Sheet1!A1"),
+            json!({ "spec": 7 }),
+        ] {
+            assert!(chart_spec_source_sheets(&bad).is_empty(), "{bad}");
+            assert!(chart_spec_sources(&bad).is_empty(), "{bad}");
+            let mut v = bad.clone();
+            assert!(!remap_chart_spec_sheet_ids(&mut v, &map), "{bad}");
+            assert!(!stamp_chart_spec_sheet_ids(&mut v, &[sid()]), "{bad}");
+            assert_eq!(v, bad, "a non-object spec is never rewritten");
         }
         // Wrong shapes in the right places are skipped, not fatal.
         let odd = json!({
@@ -875,10 +869,9 @@ mod tests {
             "layers": { "not": "an array" },
             "transform": [ 3, { "type": "lookup" }, { "type": "lookup", "from": null } ],
             "concat": { "charts": "nope" }
-        })
-        .to_string();
+        });
         assert!(chart_spec_source_sheets(&odd).is_empty());
-        assert_eq!(stamp_chart_spec_sheet_ids(&odd, &[sid()]), None);
+        assert!(!stamp_chart_spec_sheet_ids(&mut odd.clone(), &[sid()]));
     }
 
     /// BUG-0151: a pull that renames "My Sheet" on arrival renames the chart
@@ -893,8 +886,11 @@ mod tests {
             json!([{ "data": "Other!A1:A2" }, { "data": "A1:A2" }]);
         let renames = crate::sheet_renames::SheetRenames::new([("My Sheet", "My Sheet (2)")]);
 
-        let out = rename_chart_spec_sheet_names(&envelope(spec), &renames)
-            .expect("three string sources name the renamed sheet");
+        let mut out = envelope(spec);
+        assert!(
+            rename_chart_spec_sheet_names(&mut out, &renames),
+            "three string sources name the renamed sheet"
+        );
         let sources = chart_spec_source_sheets(&out);
         let names: Vec<&ChartSourceSheet> = sources
             .iter()
@@ -912,18 +908,19 @@ mod tests {
         // The DataRangeRefs are untouched, and so is the unqualified string.
         assert!(sources.contains(&ChartSourceSheet::Id(a)));
         assert!(sources.contains(&ChartSourceSheet::Index(3)));
-        assert!(!out.contains("My Sheet!") && !out.contains("my sheet"));
-        assert!(out.contains("\"A1:A2\""));
+        let text = out.to_string();
+        assert!(!text.contains("My Sheet!") && !text.contains("my sheet"));
+        assert!(text.contains("\"A1:A2\""));
 
-        // Nothing to rename: the original bytes are kept.
-        assert_eq!(
-            rename_chart_spec_sheet_names(
-                &envelope(four_path_spec(a, c, d)),
-                &crate::sheet_renames::SheetRenames::new([("Nope", "Nope (2)")])
-            ),
-            None
-        );
-        assert_eq!(rename_chart_spec_sheet_names("not json", &renames), None);
+        // Nothing to rename: the spec is left exactly as it was.
+        let original = envelope(four_path_spec(a, c, d));
+        let mut untouched = original.clone();
+        assert!(!rename_chart_spec_sheet_names(
+            &mut untouched,
+            &crate::sheet_renames::SheetRenames::new([("Nope", "Nope (2)")])
+        ));
+        assert_eq!(untouched, original);
+        assert!(!rename_chart_spec_sheet_names(&mut Value::String("not json".to_string()), &renames));
     }
 
     #[test]
@@ -938,37 +935,67 @@ mod tests {
             spec
         }
         let (a, b) = (sid(), sid());
-        let visited = nested(16, range_ref(0, Some(a))).to_string();
+        let visited = nested(16, range_ref(0, Some(a)));
         assert_eq!(chart_spec_source_sheets(&visited), vec![ChartSourceSheet::Id(a)]);
-        let too_deep = nested(17, range_ref(0, Some(b))).to_string();
+        let mut too_deep = nested(17, range_ref(0, Some(b)));
         assert!(chart_spec_source_sheets(&too_deep).is_empty());
         let mut map = HashMap::new();
         map.insert(b, (sid(), 1));
-        assert_eq!(remap_chart_spec_sheet_ids(&too_deep, &map), None);
-        // A pathological depth (beyond serde_json's own parse recursion limit)
-        // neither overflows the stack nor panics: it simply names no sheet.
-        let abyss = nested(300, range_ref(0, Some(a)));
-        let text = serde_json::to_string(&abyss).unwrap_or_default();
-        assert!(chart_spec_source_sheets(&text).is_empty());
-        assert_eq!(stamp_chart_spec_sheet_ids(&text, &[sid()]), None);
+        assert!(!remap_chart_spec_sheet_ids(&mut too_deep, &map));
+        // A pathological depth neither overflows the stack nor panics: the walk
+        // stops at the cap and names no sheet.
+        let mut abyss = nested(300, range_ref(0, Some(a)));
+        assert!(chart_spec_source_sheets(&abyss).is_empty());
+        assert!(!stamp_chart_spec_sheet_ids(&mut abyss, &[sid()]));
+        // serde_json's recursive Drop of a 300-deep value is fine; the walk is
+        // what is capped.
     }
 
     /// The version diff's view of a chart: key order and the SPELLING of a
     /// source's sheet prefix are not edits (a checkout rename and the push's
-    /// undo of it re-serialize an untouched spec with its keys sorted), while
-    /// a different source, sheet or property still is.
+    /// undo of it can change an untouched spec's prefix spelling), while a
+    /// different source, sheet or property still is.
     #[test]
-    fn a_re_serialized_spec_is_the_same_chart_and_an_edit_is_not() {
-        let ts_order = r#"{"chartId":1,"name":"Sales","spec":{"mark":"bar","data":"Data!A1:B5","layers":[{"data":"'My Data'!$a$1:$b$5"}]}}"#;
-        let sorted = r#"{"chartId":1,"name":"Sales","spec":{"data":"'DATA'!A1:B5","layers":[{"data":"'my data'!$A$1:$B$5"}],"mark":"bar"}}"#;
-        assert_eq!(comparable_chart_spec(ts_order), comparable_chart_spec(sorted));
+    fn a_re_spelled_spec_is_the_same_chart_and_an_edit_is_not() {
+        let parse = |s: &str| -> Value { serde_json::from_str(s).unwrap() };
+        let ts_order = parse(r#"{"chartId":1,"name":"Sales","spec":{"mark":"bar","data":"Data!A1:B5","layers":[{"data":"'My Data'!$a$1:$b$5"}]}}"#);
+        let sorted = parse(r#"{"chartId":1,"name":"Sales","spec":{"data":"'DATA'!A1:B5","layers":[{"data":"'my data'!$A$1:$B$5"}],"mark":"bar"}}"#);
+        assert_eq!(comparable_chart_spec(&ts_order), comparable_chart_spec(&sorted));
         for edited in [
             r#"{"chartId":1,"name":"Sales","spec":{"mark":"bar","data":"Data!A1:B6","layers":[{"data":"'My Data'!$a$1:$b$5"}]}}"#,
             r#"{"chartId":1,"name":"Sales","spec":{"mark":"bar","data":"Other!A1:B5","layers":[{"data":"'My Data'!$a$1:$b$5"}]}}"#,
             r#"{"chartId":1,"name":"Sales 2026","spec":{"mark":"bar","data":"Data!A1:B5","layers":[{"data":"'My Data'!$a$1:$b$5"}]}}"#,
         ] {
-            assert_ne!(comparable_chart_spec(ts_order), comparable_chart_spec(edited), "{edited}");
+            assert_ne!(comparable_chart_spec(&ts_order), comparable_chart_spec(&parse(edited)), "{edited}");
         }
-        assert_eq!(comparable_chart_spec("not json"), None);
+        // A spec kept as a string compares as that string.
+        let raw = Value::String("not json".to_string());
+        assert_eq!(comparable_chart_spec(&raw), raw);
+    }
+
+    /// `comparable_chart_spec` is blind to object KEY ORDER at every depth --
+    /// two specs whose keys were inserted in different orders compare equal,
+    /// and the comparable form does not alter the caller's value.
+    ///
+    /// SABOTAGE: compare `to_string()` of a `preserve_order` map (or the raw
+    /// text the old API compared) and the first assertion fails.
+    #[test]
+    fn comparable_chart_spec_is_key_order_blind() {
+        let a: Value = serde_json::from_str(
+            r#"{"name":"S","spec":{"mark":"bar","data":"Data!A1:B5","yAxis":{"title":"t","showGrid":true}}}"#,
+        )
+        .unwrap();
+        let b: Value = serde_json::from_str(
+            r#"{"spec":{"yAxis":{"showGrid":true,"title":"t"},"data":"Data!A1:B5","mark":"bar"},"name":"S"}"#,
+        )
+        .unwrap();
+        assert_eq!(comparable_chart_spec(&a), comparable_chart_spec(&b));
+        let before = a.clone();
+        let _ = comparable_chart_spec(&a);
+        assert_eq!(a, before, "the comparable form is a copy");
+        // And a real edit deep inside still differs.
+        let mut c = b.clone();
+        c["spec"]["yAxis"]["showGrid"] = Value::Bool(false);
+        assert_ne!(comparable_chart_spec(&a), comparable_chart_spec(&c));
     }
 }

@@ -45,7 +45,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Page } from "@playwright/test";
 import { test, expect } from "../fixtures";
-import { parseCellRef, type GridHelper } from "../helpers/grid";
+import { parseCellRef, readGridGeometry, type GridHelper } from "../helpers/grid";
 import { waitForGridStable } from "../helpers/screenshots";
 import { diffCount, samplePixels } from "../viewportSample";
 
@@ -196,9 +196,18 @@ async function captureHeaderBar(grid: GridHelper): Promise<number[]> {
   await waitForGridStable(page);
   const box = await page.locator("canvas").first().boundingBox();
   if (!box) throw new Error("the grid canvas has no bounding box");
+  // SHEET coordinates -> client: the header GUTTERS and the scroll come
+  // first. The clip used to start at the canvas origin, i.e. one row-header
+  // width left of and one column-header height above the slicer, so it covered
+  // only the top ~11 px of a 32 px header bar. That happened to include the
+  // header text until WP-C (2026-10-16) laid the slicer out inside Core's
+  // container border and title band: the text moved down out of the clip and
+  // the two captures differed by 3 pixels while the screenshot plainly showed
+  // the new header. Measured live, not assumed.
+  const geom = await readGridGeometry(page);
   const clip = {
-    x: box.x + SLICER.x,
-    y: box.y + SLICER.y,
+    x: box.x + geom.rowHeaderWidth + SLICER.x - geom.scrollX,
+    y: box.y + geom.colHeaderHeight + SLICER.y - geom.scrollY,
     width: SLICER.width,
     height: 32,
   };

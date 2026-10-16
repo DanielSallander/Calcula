@@ -138,6 +138,9 @@ export interface BiFieldRef {
 export interface BiValueFieldRef {
   measureName: string;
   customName?: string;
+  /** Per-field display format OVERRIDE (mirrors `BiValueFieldRef` in
+   *  @api/pivotTypes). Never an adopted model format. */
+  numberFormat?: string;
 }
 
 /** Request to create a BI model pivot */

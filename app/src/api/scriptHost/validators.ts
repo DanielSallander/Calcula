@@ -6,7 +6,11 @@
 //          state, so they are safe to run for any caller.
 
 import { SCRIPT_OBJECT_KINDS } from "./objectInventory";
-import { BUTTON_ACTION_PROPERTY_KEYS } from "../buttonControlService";
+import {
+  BUTTON_ACTION_PROPERTY_KEYS,
+  PAGE_NAVIGATOR_OVERRIDES_PROPERTY,
+  checkPageNavigatorOverrides,
+} from "../buttonControlService";
 import {
   PIVOT_AGGREGATIONS,
   PIVOT_AREAS,
@@ -61,6 +65,30 @@ import {
 } from "./shapeHitRegionSpec";
 import { checkCanvasLayoutPatch } from "../canvasSheet";
 import type { CanvasLayoutPatch } from "../lib";
+// The bindable-path catalog MIRROR (D §3.4). A cycle: catalog.ts reads
+// SCRIPT_REFUSED_SHAPE_PROPERTY_KEYS from this module, LAZILY, and this module
+// calls catalog functions only at validation time -- neither side reads the
+// other at module scope, so the cycle is safe in both load orders.
+import {
+  CONTAINER_ROOT_POINTER,
+  OBJECT_BINDING_KINDS,
+  isBindablePath,
+  neverBindableControlReason,
+  pointerSegments,
+  unescapePointerSegment,
+  type BindablePathSpec,
+  type BindableValueType,
+} from "../objectBindings/catalog";
+// The visual container's leaf rule (WP-C). visualContainer.ts imports only
+// ../buttonControlService, so this adds no cycle.
+import {
+  CONTROL_CONTAINER_PROPERTY_KEYS,
+  VISUAL_CONTAINER_FIELD_TYPES,
+  checkContainerFieldValue,
+  checkControlContainerValue,
+  containerFieldIdOfPointer,
+  controlContainerKeyField,
+} from "../visualContainer";
 
 export type Validator = (args: unknown[]) => true | string;
 
@@ -206,6 +234,22 @@ export const vSetState: Validator = ([aspect, aspectArgs]) => {
   // multi-megabyte data: URI. See the media section below for the whole rule.
   if (aspect === "shape.setProperty") {
     return checkShapeSetProperty(aspectArgs);
+  }
+  // Property BINDINGS and pointer-addressed literals (D-BIND, D §3.19): the
+  // three aspects behind `bindProperty` / `unbindProperty` / `setProperty` of a
+  // ScriptObjectHandle (`api.object(kind, id)` and `context.self`). Each has its
+  // OWN row -- never the `return true` tail -- because a binding is a second
+  // write door to the same property, and the tail would let a script bind a
+  // button's `onSelect` (code is never bound) or set a picture's `src` to a
+  // data: URI. `setStateAspectRows.test.ts` proves each row by sabotage.
+  if (aspect === "binding.set") {
+    return checkBindingSetAspect(aspectArgs);
+  }
+  if (aspect === "binding.clear") {
+    return checkBindingClearAspect(aspectArgs);
+  }
+  if (aspect === "property.set") {
+    return checkPropertySetAspect(aspectArgs);
   }
   // Cell-type ASSIGNMENT (the two-tier handshake: a script puts an extension's
   // cell type on its own target). Until this row existed the aspect fell through
@@ -5273,10 +5317,12 @@ export const MAX_MEDIA_PIXELS = 40_000_000;
 /**
  * The control properties a script may write through `shape.setProperty`.
  *
- * The union of the three real property sets the Controls extension defines —
+ * The union of the real property sets the Controls extension defines —
  * SHAPE_PROPERTIES (Shape/shapeProperties.ts), IMAGE_PROPERTIES
- * (Image/imageProperties.ts) and the geometry/chrome keys the button seam
- * documents (@api/buttonControlService) — because ONE aspect reaches all three:
+ * (Image/imageProperties.ts), PAGE_NAVIGATOR_PROPERTIES
+ * (PageNavigator/pageNavigatorProperties.ts) plus its per-page overrides, and
+ * the geometry/chrome keys the button seam documents
+ * (@api/buttonControlService) — because ONE aspect reaches all of them:
  * `shape.setProperty` is what a shape context's `setProperty` sends, and
  * `api.objectSetState` aims the same aspect at another instance.
  *
@@ -5295,11 +5341,26 @@ export const SCRIPT_SHAPE_PROPERTY_KEYS: readonly string[] = [
   "x", "y", "width", "height", "pinToGrid", "embedded",
   // -- chrome the button set contributes and a shape may legitimately carry --
   "color", "borderColor", "tooltip",
+  // -- page navigator (PAGE_NAVIGATOR_PROPERTIES + its per-page overrides).
+  //    "fill", "color", "borderColor", "fontSize", "width" and "height" are
+  //    listed above. "pageOverrides" is a JSON array, checked strictly by
+  //    checkPageNavigatorOverrides in checkShapeSetProperty; nothing in it
+  //    can aim a click.
+  "orientation", "gap", "padding", "selectedFill", "selectedColor",
+  "showHiddenPages", "showTooltipPages", PAGE_NAVIGATOR_OVERRIDES_PROPERTY,
   // -- identity. Not a Properties-pane row, but a real stored property: it is
   //    what IControlStoreService.listControls reads back as `name`, and so what
   //    api.listObjects("shape") reports. Listed explicitly rather than left to
   //    the custom-key tail, because a name is not a custom property.
   "name",
+  // -- the VISUAL CONTAINER's flat keys (WP-C D-FORMAT): containerTitleText,
+  //    containerPaddingTop, containerShadowShow, ... -- index for index with
+  //    VISUAL_CONTAINER_FIELD_IDS, imported from @api/visualContainer (policy
+  //    -> policy, never re-typed). A page navigator's container keys
+  //    (containerBackgroundColor, containerBorderShow, ...) are among them.
+  //    The background / border of a shape, a button and a picture are their
+  //    existing fill / stroke / strokeWidth / borderColor keys, listed above.
+  ...CONTROL_CONTAINER_PROPERTY_KEYS,
 ];
 const SCRIPT_SHAPE_PROPERTY_KEY_SET: ReadonlySet<string> = new Set(SCRIPT_SHAPE_PROPERTY_KEYS);
 
@@ -5496,14 +5557,7 @@ export function checkShapeSetProperty(aspectArgs: unknown): true | string {
   // of the code rather than a paragraph in a design document.
   if (name === "src") {
     if (value === "") return true;
-    if (!isMediaRef(value)) {
-      return (
-        `src must be a media handle — "media:" followed by 64 hex characters — or "" to clear it. ` +
-        `A data: URI, a file path and a URL are all refused: a picture enters the document ` +
-        `through the picker (caps.file.importImage), which validates the file, caps it at ` +
-        `${MAX_MEDIA_BYTES} bytes and stores the bytes host-side, and hands back the handle.`
-      );
-    }
+    if (!isMediaRef(value)) return mediaSlotRefusal("src");
     return true;
   }
   if (!SCRIPT_SHAPE_PROPERTY_KEY_SET.has(name) && !CUSTOM_SHAPE_PROPERTY_KEY_RE.test(name)) {
@@ -5519,6 +5573,485 @@ export function checkShapeSetProperty(aspectArgs: unknown): true | string {
       `Large content belongs somewhere that can hold it: HTML in render.setHtml, ` +
       `a picture in the document's media store (a media: handle).`
     );
+  }
+  // A Page Navigator's per-page overrides: AFTER the cap above (a huge value is
+  // refused by size first), then strictly -- unknown fields, bad colours, a
+  // non-boolean hidden, an over-long caption or too many entries are refused
+  // with the seam's sentence, where the paint's tolerant parse would silently
+  // drop them. Spelled by the seam, never re-typed.
+  if (name === PAGE_NAVIGATOR_OVERRIDES_PROPERTY) {
+    const why = checkPageNavigatorOverrides(value);
+    if (why) return why;
+  }
+  // A VISUAL CONTAINER key (WP-C D-FORMAT: containerTitleColor,
+  // containerPaddingTop, containerShadowPosition, ...): the value is checked by
+  // the container's own leaf rule -- a #rgb / #rrggbb / #rrggbbaa colour or "",
+  // a plain decimal within VISUAL_CONTAINER_LIMITS, an enum member, true/false,
+  // a title or subtitle of at most 1024 characters -- with the sentence Rust's
+  // `visual_format::check_control_container_value` gives at
+  // `set_control_property_core`, which re-checks it. AFTER the cap above, so a
+  // huge value is refused by size first. "" clears to the family default.
+  const containerWhy = checkControlContainerValue(name, value);
+  if (containerWhy !== null) return containerWhy;
+  return true;
+}
+
+/**
+ * The refusal for anything but a media handle (or "") in a picture slot. ONE
+ * sentence for every door that writes such a slot: `shape.setProperty("src")`,
+ * `property.set("/properties/src")` and a `binding.set` whose formula carries
+ * inline bytes.
+ */
+function mediaSlotRefusal(slot: string): string {
+  return (
+    `${slot} must be a media handle — "media:" followed by 64 hex characters — or "" to clear it. ` +
+    `A data: URI, a file path and a URL are all refused: a picture enters the document ` +
+    `through the picker (caps.file.importImage), which validates the file, caps it at ` +
+    `${MAX_MEDIA_BYTES} bytes and stores the bytes host-side, and hands back the handle.`
+  );
+}
+
+// ============================================================================
+// Property bindings + pointer-addressed literals (D-BIND, D §3.19)
+// ============================================================================
+//
+// Three aspects reach a bindable object's properties BY JSON POINTER (the
+// paths the object's AI-visible JSON uses: `/spec/title`, `/properties/text`,
+// `/headerText`, ...): `binding.set` (bindProperty), `binding.clear`
+// (unbindProperty) and `property.set` (setProperty, a LITERAL). Both setState
+// doors reach them -- `object.setState` (restricted, the script's own object)
+// and `api.objectSetState` (unlocked, any object) -- so these rows are the
+// stateless gate for both, exactly like `shape.setProperty` above.
+//
+// The rows are checked against the bindable-path CATALOG MIRROR
+// (@api/objectBindings/catalog.ts, drift-tested against Rust's catalog.rs). A
+// validator never reads state, so it does not know the object's KIND; it
+// accepts a path some kind's catalog row accepts, and the executor then holds
+// the call to the real kind (and Rust holds it again at its own door). Rust is
+// the authority for every rule here -- these rows exist so that a refusal
+// arrives before the tier check, with a sentence, and so that NO path reaches
+// the `return true` tail of vSetState.
+
+/** Longest binding formula a script may send (the sandbox's cap; Rust stores
+ *  the normalised text, which is never longer in practice). */
+export const MAX_BINDING_FORMULA_CHARS = 8_192;
+/** Longest model key `bindProperty(..., { model })` may name. */
+export const MAX_BINDING_MODEL_CHARS = 128;
+/** Longest literal `setProperty(path, value)` may write as text: the same 8 KiB
+ *  sandbox ceiling as a control property (MAX_SHAPE_PROPERTY_CHARS). */
+export const MAX_PROPERTY_LITERAL_CHARS = MAX_SHAPE_PROPERTY_CHARS;
+/** The keys `bindProperty`'s options object may carry. */
+export const BINDING_OPTION_KEYS: readonly string[] = ["model"];
+
+/**
+ * Number ranges for slots whose meaning bounds them, beyond the catalog's
+ * "a number". Rust accepts any finite number for a `Number` slot; this row may
+ * be STRICTER than Rust (a door may refuse more than the authority does), never
+ * laxer. A font size uses the cell rule of this file (1-409 points, the
+ * `fontSize` row of checkFormatObject); an opacity is a 0-1 fraction (the
+ * picture renderer clamps to it).
+ */
+function numericRangeRefusal(path: string, key: string, value: unknown): string | null {
+  if (typeof value !== "number") return null;
+  if (/fontsize$/i.test(key) && (value < 1 || value > 409)) {
+    return `'${path}' is a font size in points, from 1 to 409; ${value} is out of range.`;
+  }
+  if (key === "opacity" && (value < 0 || value > 1)) {
+    return `'${path}' is an opacity from 0 (invisible) to 1 (solid); ${value} is out of range.`;
+  }
+  return null;
+}
+
+/**
+ * The UNESCAPED segments of a property path after the syntactic check (Rust
+ * `pointer_segments`), or the refusal. A `/properties/<key>` path is a
+ * CONTROL's (no other kind has a `properties` member), so its key gets the
+ * never-bindable rule here (D §3.4 step 2): code, held code, a button's action
+ * wiring, placement and identity are never written through these doors, and the
+ * sentence says why ("'onSelect' is code; code is never bound.").
+ */
+function bindingPathSegments(path: unknown): string[] | string {
+  if (typeof path !== "string") {
+    return "a property path must be a string: a JSON Pointer such as /spec/title or /properties/text";
+  }
+  const parsed = pointerSegments(path);
+  if (!parsed.ok) return parsed.error;
+  const segments = parsed.segments.map((s) => unescapePointerSegment(s) ?? "");
+  if (segments.length >= 2 && segments[0] === "properties") {
+    const reason = neverBindableControlReason(segments[1]);
+    if (reason !== null) return reason;
+  }
+  return segments;
+}
+
+/** Every catalog row, of any kind, that accepts `path` (D §3.4 step 3). */
+function catalogRowsForPath(path: string): BindablePathSpec[] {
+  const rows: BindablePathSpec[] = [];
+  for (const kind of OBJECT_BINDING_KINDS) {
+    const row = isBindablePath(kind, path);
+    if (row) rows.push(row);
+  }
+  return rows;
+}
+
+function notInCatalogRefusal(path: string): string {
+  return (
+    `'${path}' is not a property any kind of object lets a script bind or set. ` +
+    `getLiteral("") returns an object's whole JSON, which shows where its properties live.`
+  );
+}
+
+/** How a sentence names a value's JSON type (Rust `coerce_literal`'s `kind_of`). */
+function jsonKindOf(value: unknown): string {
+  if (value === null || value === undefined) return "nothing";
+  if (typeof value === "boolean") return "TRUE/FALSE";
+  if (typeof value === "number") return "a number";
+  if (typeof value === "string") return "text";
+  if (Array.isArray(value)) return "a list";
+  return "an object";
+}
+
+/**
+ * A colour as Rust `eval::is_binding_color` accepts one: `#RRGGBB`,
+ * `#RRGGBBAA`, `rgb(r, g, b)` or `rgba(r, g, b, a)` with channels 0-255 and an
+ * alpha 0-1. (Channel digits only -- no sign -- which is stricter than Rust's
+ * integer parse and so never laxer.)
+ */
+export function isBindingColor(raw: string): boolean {
+  const s = raw.trim();
+  if (s.startsWith("#")) return /^#(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(s);
+  const lower = s.toLowerCase();
+  let body: string;
+  let want: number;
+  if (lower.startsWith("rgba(")) {
+    body = lower.slice(5);
+    want = 4;
+  } else if (lower.startsWith("rgb(")) {
+    body = lower.slice(4);
+    want = 3;
+  } else {
+    return false;
+  }
+  if (!body.endsWith(")")) return false;
+  const parts = body.slice(0, -1).split(",").map((p) => p.trim());
+  if (parts.length !== want) return false;
+  for (const p of parts.slice(0, 3)) {
+    if (!/^\d{1,3}$/.test(p) || Number(p) > 255) return false;
+  }
+  if (want === 4) {
+    const a = parts[3];
+    if (!/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(a)) return false;
+    const n = Number(a);
+    return n >= 0 && n <= 1;
+  }
+  return true;
+}
+
+/**
+ * Is `value` a literal the catalog's value type takes? The SHAPE rules of Rust
+ * `literal::coerce_literal`, sentence for sentence where they meet; the media
+ * row also refuses inline bytes BY NAME (the "reference media, never introduce
+ * bytes" rule), before Rust's existence check.
+ */
+function checkCatalogLiteral(valueType: BindableValueType, value: unknown, path: string): true | string {
+  const takes = (what: string) => `'${path}' takes ${what}, not ${jsonKindOf(value)}.`;
+  if (typeof valueType === "object") {
+    const members = valueType.enum;
+    if (typeof value !== "string") return takes(`one of ${members.join(", ")}`);
+    const wanted = value.trim().toLowerCase();
+    return members.some((m) => m.toLowerCase() === wanted)
+      ? true
+      : `'${value}' is not one of: ${members.join(", ")} (the values '${path}' takes).`;
+  }
+  switch (valueType) {
+    case "text":
+      return value === null || typeof value === "string" ? true : takes("text");
+    case "number":
+      return typeof value === "number" && Number.isFinite(value) ? true : takes("a number");
+    case "integer":
+      if (typeof value !== "number" || !Number.isFinite(value)) return takes("a whole number");
+      return Number.isInteger(value) && Math.abs(value) < 9e15 ? true : `'${path}' takes a whole number.`;
+    case "boolean":
+      return typeof value === "boolean" ? true : takes("TRUE or FALSE");
+    case "color":
+      if (typeof value !== "string") return takes("a colour");
+      if (value.trim() === "" || isBindingColor(value)) return true;
+      return `'${value}' is not a colour: write #RRGGBB, #RRGGBBAA or rgb(r, g, b), or "" for the default.`;
+    case "media":
+      if (typeof value !== "string") return takes("a media handle");
+      return value === "" || isMediaRef(value) ? true : mediaSlotRefusal(`'${path}'`);
+    case "scalar":
+      return typeof value === "number" || typeof value === "boolean" || typeof value === "string"
+        ? true
+        : takes("a number, text or TRUE/FALSE");
+    default:
+      return `'${path}' has a value type this build does not know, so a script may not write it.`;
+  }
+}
+
+/** A control property is stored as TEXT: the string a literal becomes there
+ *  (Rust `literal::control_property_string`). */
+function controlPropertyString(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "boolean") return value ? "true" : "false";
+  return String(value);
+}
+
+/**
+ * `rgb(r, g, b)` -> `#rrggbb`, `rgba(r, g, b, a)` -> `#rrggbbaa`, or null:
+ * the TS twin of Rust `page_overrides::navigator_colour` for the rgb forms,
+ * which the Rust literal door applies to a container colour
+ * (`container_literal::normalize_container_colour`) after `coerce_literal`.
+ * Never laxer: every value it converts already passed `isBindingColor`.
+ */
+function rgbColourToHex(raw: string): string | null {
+  const lower = raw.trim().toLowerCase();
+  let body: string;
+  let want: number;
+  if (lower.startsWith("rgba(")) {
+    body = lower.slice(5);
+    want = 4;
+  } else if (lower.startsWith("rgb(")) {
+    body = lower.slice(4);
+    want = 3;
+  } else {
+    return null;
+  }
+  if (!body.endsWith(")")) return null;
+  const parts = body.slice(0, -1).split(",").map((p) => p.trim());
+  if (parts.length !== want) return null;
+  let out = "#";
+  for (const p of parts.slice(0, 3)) {
+    if (!/^\d{1,3}$/.test(p) || Number(p) > 255) return null;
+    out += Number(p).toString(16).padStart(2, "0");
+  }
+  if (want === 4) {
+    const a = parts[3];
+    if (!/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(a)) return null;
+    const n = Number(a);
+    if (!(n >= 0 && n <= 1)) return null;
+    out += Math.round(n * 255).toString(16).padStart(2, "0");
+  }
+  return out;
+}
+
+/**
+ * The TEXT a pointer literal is stored as on a control property: Rust
+ * `literal::coerce_literal` + `normalize_if_container_colour` +
+ * `control_property_string`. For a control's flat VISUAL CONTAINER key the
+ * literal door canonicalises first -- a colour trimmed and an `rgb()` /
+ * `rgba()` converted to hex, an enum member matched without case and stored
+ * in its canonical spelling -- so the key's leaf rule must judge THAT text,
+ * not the script's spelling (else this row would refuse `"TOPLEFT"` and
+ * `rgb(0, 128, 255)`, which Rust stores as `topLeft` and `#0080ff`). Any
+ * other key: the plain string.
+ */
+function controlLiteralText(key: string, value: unknown): string {
+  const id = controlContainerKeyField(key);
+  if (id === null || typeof value !== "string") return controlPropertyString(value);
+  const type = VISUAL_CONTAINER_FIELD_TYPES[id];
+  if (type === "color") {
+    const s = value.trim();
+    if (s === "" || s.startsWith("#")) return s;
+    return rgbColourToHex(s) ?? value;
+  }
+  if (typeof type === "object") {
+    const wanted = value.trim().toLowerCase();
+    return type.enum.find((m) => m.toLowerCase() === wanted) ?? value;
+  }
+  return value;
+}
+
+/**
+ * A control's flat VISUAL CONTAINER key written by POINTER
+ * (`setProperty("/properties/containerTitleColor", v)`): the key's leaf rule,
+ * with the SAME sentence `shape.setProperty("containerTitleColor", v)` gets
+ * (`checkShapeSetProperty` -> `checkControlContainerValue`), so a script sees
+ * one refusal for one fact whichever of the two doors it used (WP-C S14).
+ *
+ * Only when the value is of the field's own JSON kind -- a string for a
+ * colour / text / enum, a number for a number, a boolean for a boolean. A
+ * value of the WRONG kind (`true` for a font size) is the catalog's to name
+ * ("takes a number, not TRUE/FALSE"), which says more. `null` clears.
+ * Returns null when there is nothing to refuse here; the catalog type check
+ * still runs after (so `#abc`, which the binding colour type does not take,
+ * is refused on this door exactly as Rust's `coerce_literal` refuses it).
+ */
+function controlContainerKeyRefusal(key: string, value: unknown): string | null {
+  const id = controlContainerKeyField(key);
+  if (id === null || value === null) return null;
+  const type = VISUAL_CONTAINER_FIELD_TYPES[id];
+  const ownKind =
+    type === "number" || type === "integer"
+      ? typeof value === "number"
+      : type === "boolean"
+        ? typeof value === "boolean"
+        : typeof value === "string";
+  if (!ownKind) return null;
+  return checkControlContainerValue(key, controlLiteralText(key, value));
+}
+
+/**
+ * `binding.set` aspect args: `[path, formula, options?]` -- bindProperty().
+ *
+ * Stateless rows, in order: pointer syntax; the never-bindable control key;
+ * a path some kind's catalog accepts; a formula string starting `=` of at most
+ * MAX_BINDING_FORMULA_CHARS (scripts always send it INVARIANT -- `,`
+ * separators, `.` decimals -- which the executor states to Rust); no inline
+ * data: bytes in a formula aimed at a picture slot; options `{ model?: string }`
+ * and nothing else. What needs state -- the object's real kind, the sheets the
+ * formula reads, a measure's `bi.query` -- is the executor's (host.ts
+ * `executeBindingSetAspect`), and Rust re-checks everything at its door.
+ */
+export function checkBindingSetAspect(aspectArgs: unknown): true | string {
+  const args = Array.isArray(aspectArgs) ? aspectArgs : [];
+  if (args.length < 2 || args.length > 3) return "expected [path, formula, options?]";
+  const [path, formula, opts] = args;
+  const segments = bindingPathSegments(path);
+  if (typeof segments === "string") return segments;
+  const rows = catalogRowsForPath(path as string);
+  if (rows.length === 0) return notInCatalogRefusal(path as string);
+  if (typeof formula !== "string") {
+    return `a binding formula must be text starting with "=", not ${jsonKindOf(formula)}`;
+  }
+  if (formula.length > MAX_BINDING_FORMULA_CHARS) {
+    return `a binding formula is at most ${MAX_BINDING_FORMULA_CHARS} characters; this one has ${formula.length}`;
+  }
+  const trimmed = formula.trim();
+  if (!trimmed.startsWith("=") || trimmed.length < 2) {
+    return (
+      `a binding formula starts with "=" -- e.g. "=Sheet1!B2" or "=[Revenue]"; ` +
+      `to write a fixed value use setProperty(path, value)`
+    );
+  }
+  if (rows.some((r) => r.valueType === "media") && INLINE_DATA_URI_RE.test(formula)) {
+    return mediaSlotRefusal(`a formula bound to '${path as string}'`);
+  }
+  if (opts !== undefined && opts !== null) {
+    if (typeof opts !== "object" || Array.isArray(opts)) {
+      return 'binding options must be an object such as { model: "Sales" }';
+    }
+    for (const key of Object.keys(opts)) {
+      if (!BINDING_OPTION_KEYS.includes(key)) {
+        return `unknown binding option "${key}" (allowed: ${BINDING_OPTION_KEYS.join(", ")})`;
+      }
+    }
+    const model = (opts as { model?: unknown }).model;
+    if (model !== undefined && model !== null) {
+      if (typeof model !== "string" || model.trim().length === 0) {
+        return "model must be a non-empty model key (omit it to use the page's own model)";
+      }
+      if (model.length > MAX_BINDING_MODEL_CHARS) {
+        return `model is at most ${MAX_BINDING_MODEL_CHARS} characters`;
+      }
+    }
+  }
+  return true;
+}
+
+/**
+ * `binding.clear` aspect args: `[path]` -- unbindProperty().
+ *
+ * Pointer syntax and the never-bindable control key only. NOT the catalog: a
+ * binding the catalog no longer lists (or one whose object is gone) must stay
+ * removable, which is Rust's own rule for Clear.
+ */
+export function checkBindingClearAspect(aspectArgs: unknown): true | string {
+  const args = Array.isArray(aspectArgs) ? aspectArgs : [];
+  if (args.length !== 1) return "expected [path]";
+  const segments = bindingPathSegments(args[0]);
+  return typeof segments === "string" ? segments : true;
+}
+
+/**
+ * The visual container's leaf rule for a literal that already passed its
+ * catalog type (Rust `write_container_literal`: `coerce_literal`, then
+ * `VisualContainerFormat::with_field`), or null when it passes. Same sentences
+ * as Rust (`border.radius must be a number from 0 to 100.`). Two value types
+ * need nothing more: a COLOUR the catalog type accepted is `#RRGGBB`,
+ * `#RRGGBBAA`, `rgb()` or `""`, and the Rust literal door converts `rgb()` to
+ * hex before the leaf check; an ENUM is matched case-insensitively and
+ * canonicalised by Rust first. `null` clears the leaf.
+ */
+function containerLiteralRefusal(row: BindablePathSpec, value: unknown, path: string): string | null {
+  const root = CONTAINER_ROOT_POINTER[row.kind];
+  const id = root !== null && path.startsWith(`${root}/`) ? containerFieldIdOfPointer(path.slice(root.length)) : null;
+  if (id === null) return `'${path}' is not a field of the object's format container.`;
+  if (value === null) return null;
+  const type = VISUAL_CONTAINER_FIELD_TYPES[id];
+  if (type === "color" || typeof type === "object") return null;
+  return checkContainerFieldValue(id, value);
+}
+
+/**
+ * `property.set` aspect args: `[path, value]` -- setProperty(), a LITERAL.
+ *
+ * NEVER LAXER THAN THE KEY-BASED DOOR for the same fact. The value is a JSON
+ * scalar of at most MAX_PROPERTY_LITERAL_CHARS, and the path a catalog row
+ * accepts; then, by the row:
+ *   (a) a FORMAT-CONTAINER row (WP-C) is checked, after its catalog type, by
+ *       the container's own leaf rule (`checkContainerFieldValue`, the TS twin
+ *       of `visual_format`'s `with_field` check Rust's
+ *       `write_container_literal` applies) -- see `containerLiteralRefusal`;
+ *   (b0) a control's flat VISUAL CONTAINER key (`/properties/container*`) is
+ *       checked FIRST by the key's leaf rule, so a bad value gets the very
+ *       sentence `shape.setProperty` gives it (`controlContainerKeyRefusal`);
+ *   (b) a control `/properties/<key>` is checked by `checkShapeSetProperty`,
+ *       the per-key function `shape.setProperty` uses (the media rule for
+ *       `src` included), on the TEXT the literal is stored as (Rust's
+ *       canonical spelling, `controlLiteralText`) -- after the catalog's value
+ *       type;
+ *   (c) any other row by its catalog value type (number / boolean / colour /
+ *       enum / ...), plus the font-size and opacity ranges.
+ */
+export function checkPropertySetAspect(aspectArgs: unknown): true | string {
+  const args = Array.isArray(aspectArgs) ? aspectArgs : [];
+  if (args.length !== 2) return "expected [path, value]";
+  const [path, value] = args;
+  const segments = bindingPathSegments(path);
+  if (typeof segments === "string") return segments;
+  const p = path as string;
+  if (typeof value === "string") {
+    if (value.length > MAX_PROPERTY_LITERAL_CHARS) {
+      return `'${p}' is ${value.length} characters (max ${MAX_PROPERTY_LITERAL_CHARS})`;
+    }
+  } else if (
+    !(value === null || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value)))
+  ) {
+    return (
+      `a property value is ONE JSON value -- text, a finite number, true/false or null -- ` +
+      `not ${jsonKindOf(value)}`
+    );
+  }
+  const rows = catalogRowsForPath(p);
+  if (rows.length === 0) return notInCatalogRefusal(p);
+  // (b0) A control's flat container key: its leaf rule speaks first, with the
+  // shape.setProperty sentence (one fact, one refusal, whichever door).
+  if (segments.length === 2 && segments[0] === "properties") {
+    const contained = controlContainerKeyRefusal(segments[1], value);
+    if (contained !== null) return contained;
+  }
+  for (const row of rows) {
+    // (a) A switch, not `=== "container"`: a catalog row's origin is not a
+    // TRUST origin, but scriptOriginForgery.test.ts cannot tell the two
+    // spellings apart, and it is right to forbid the trust one everywhere.
+    const typed = checkCatalogLiteral(row.valueType, value, p);
+    if (typed !== true) return typed;
+    switch (row.origin) {
+      case "container": {
+        const contained = containerLiteralRefusal(row, value, p);
+        if (contained !== null) return contained;
+        break;
+      }
+      case "family":
+        break;
+    }
+  }
+  const range = numericRangeRefusal(p, segments[segments.length - 1], value);
+  if (range !== null) return range;
+  if (segments.length === 2 && segments[0] === "properties") {
+    const keyed = checkShapeSetProperty([segments[1], controlLiteralText(segments[1], value)]);
+    if (keyed !== true) return keyed;
   }
   return true;
 }

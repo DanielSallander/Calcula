@@ -214,6 +214,36 @@ function normalizeForProfile(
       }
       return { ...sheet, cells };
     });
+
+    // A chart's `specJson` is TEXT in memory and a JSON VALUE on disk (.cala
+    // v10: `saved_chart_spec_from_text` embeds the ChartDefinition envelope as
+    // a `serde_json::Value`, whose map is sorted). A reload therefore hands back
+    // the same definition with its keys in alphabetical order instead of the
+    // order the chart store wrote them -- a different STRING for identical
+    // state. MEASURED LIVE 2026-10-16 (invariant seed 1792146459645, minimised
+    // to the single action `chart.create`): the one digest difference was
+    // `charts.<id>.specJson`, and parsing both sides showed them deep-equal.
+    // Key order is not workbook state, so compare the parsed value; walkDiff
+    // then reports a REAL change at its own path (`...specJson.spec.title`).
+    // A spec that is not JSON stays a string and is still compared as text.
+    const charts = digest.charts;
+    if (isPlainObject(charts)) {
+      const parsed: Record<string, unknown> = {};
+      for (const [id, entry] of Object.entries(charts)) {
+        if (isPlainObject(entry) && typeof entry.specJson === "string") {
+          let spec: unknown = entry.specJson;
+          try {
+            spec = JSON.parse(entry.specJson);
+          } catch {
+            // not JSON: keep the text
+          }
+          parsed[id] = { ...entry, specJson: spec };
+        } else {
+          parsed[id] = entry;
+        }
+      }
+      out.charts = parsed;
+    }
   }
 
   return out;

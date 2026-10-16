@@ -1135,6 +1135,7 @@ mod tests {
             ("sheet_protection", "workbook.sheet_protections"),
             ("workbook_protection", "workbook.workbook_protection"),
             ("model_writeback", "user_files/model_writeback_values.json"),
+            ("object_bindings", "bindings.json (.cala v10) -- a property following a formula"),
         ];
 
         let mut ungated: Vec<String> = Vec::new();
@@ -1248,7 +1249,9 @@ mod tests {
         out
     }
 
-    /// The published 107 / 65 / 40 / 2 split, pinned.
+    /// The published 109 / 66 / 41 / 2 split, pinned. (107 / 65 / 40 / 2 until
+    /// WP-D S2 added `object_bindings` (Persisted) and `object_binding_runtime`
+    /// (a bare Mutex: a derived cache, never saved).)
     ///
     /// WHY A TEST AND NOT A DOC LINE. This count has been published wrong four
     /// times (36, 51, 59, and a 2026-08-17 miscount reading 39 bare + 3 unlocked
@@ -1278,9 +1281,9 @@ mod tests {
             .map(|(n, _)| n)
             .collect();
 
-        assert_eq!(decls.len(), 107, "AppState field count changed");
-        assert_eq!(persisted.len(), 65, "Persisted<T> count changed");
-        assert_eq!(bare.len(), 40, "bare Mutex/RwLock count changed");
+        assert_eq!(decls.len(), 109, "AppState field count changed");
+        assert_eq!(persisted.len(), 66, "Persisted<T> count changed");
+        assert_eq!(bare.len(), 41, "bare Mutex/RwLock count changed");
         assert_eq!(
             neither,
             ["undo_stack", "calc_cancel"],

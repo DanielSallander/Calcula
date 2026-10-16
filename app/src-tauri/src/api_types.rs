@@ -1598,6 +1598,23 @@ pub struct TraceResult {
     pub cross_sheet_refs: Vec<TraceCrossSheetRef>,
     /// Whether the source cell itself is in error
     pub source_is_error: bool,
+    /// Trace Dependents only: the object properties BOUND to a formula that
+    /// reads the traced cell (WP-D). Always empty for Trace Precedents.
+    #[serde(default)]
+    pub bound_objects: Vec<TraceBoundObject>,
+}
+
+/// An object property whose binding formula reads a traced cell
+/// (`TraceResult::bound_objects`). The TS mirror is `TraceBoundObject` in
+/// `app/src/api/types.ts`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceBoundObject {
+    pub object: ObjectBindingRef,
+    /// The bound property's JSON Pointer.
+    pub path: String,
+    /// The stored (invariant) binding formula.
+    pub formula: String,
 }
 
 // ============================================================================
@@ -2589,6 +2606,28 @@ pub struct ControlGeometryChange {
     pub offset_y: Option<f64>,
 }
 
+/// One control's APPEARANCE writes in a `set_control_appearance` batch (the
+/// Format pane, D-FORMAT): the control is named by its anchor, and every
+/// write is an ordinary appearance key (`fill`, `stroke`, `textColor`, a
+/// `container*` key...) -- never code, never geometry, never identity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlAppearanceChange {
+    pub sheet_index: usize,
+    pub row: u32,
+    pub col: u32,
+    pub properties: Vec<ControlAppearanceWrite>,
+}
+
+/// One `key = value` of a [`ControlAppearanceChange`], written as a `"static"`
+/// property.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlAppearanceWrite {
+    pub key: String,
+    pub value: String,
+}
+
 // ============================================================================
 // Sparkline Entry (opaque JSON persistence)
 // ============================================================================
@@ -2659,10 +2698,29 @@ pub struct FloatingRange {
     pub show_column_headers: bool,
     #[serde(default = "default_true")]
     pub show_row_headers: bool,
+    /// The visual container (D-FORMAT, WP-C): padding, title style,
+    /// background, border, shadow. The title TEXT / visibility stay the
+    /// object's name (`sheet_names[backing]`) and `show_title` -- one spelling
+    /// per fact. Padding grows the frame the frontend derives, exactly as the
+    /// chrome flags do, so it is formatting (Lock Objects lets it through).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<visual_format::VisualContainerFormat>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// Deserialize `Option<Option<T>>` from JSON: missing -> None (keep), null ->
+/// Some(None) (clear), value -> Some(Some(value)) (set). Without it JSON null
+/// maps to outer-None and a clear is silently impossible (the twin of the
+/// helper in slicer/types.rs).
+fn deserialize_double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::deserialize(deserializer)?))
 }
 
 /// What the frontend needs to render/address a floating range: the persisted
@@ -2711,6 +2769,11 @@ pub struct FloatingRangePatch {
     pub show_column_headers: Option<bool>,
     #[serde(default)]
     pub show_row_headers: Option<bool>,
+    /// The visual container: absent = keep, null = clear, value = set
+    /// (validated before the effect; formatting, so a locked page lets it
+    /// through, like the chrome flags).
+    #[serde(default, deserialize_with = "deserialize_double_option", skip_serializing_if = "Option::is_none")]
+    pub container: Option<Option<visual_format::VisualContainerFormat>>,
 }
 
 /// Default row height and column width for the workbook.
@@ -2872,6 +2935,254 @@ pub struct SheetDisplayFlagsPatch {
     pub show_formulas: Option<bool>,
     pub view_mode: Option<String>,
     pub display_headings: Option<bool>,
+}
+
+// ============================================================================
+// Object property bindings (object_bindings command)
+// ============================================================================
+//
+// A BINDING is an overlay row in ONE workbook store (`AppState.object_bindings`,
+// persisted as `bindings.json`, .cala v10): a property of an object, addressed
+// by a JSON Pointer into the object's AI-visible JSON, whose value is a formula.
+// The literal stays in the object's own record. See
+// `app/src-tauri/src/object_bindings/` and the TS mirror in
+// `app/src/api/types.ts` (section "Object property bindings").
+
+/// The kinds of object a property binding can belong to. The wire names
+/// ("chart", "control", "slicer", "timelineSlicer", "pivot", "floatingRange",
+/// "canvasPage") are also the `kind` strings of `persistence::SavedObjectRef`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ObjectBindingKind {
+    Chart,
+    Control,
+    Slicer,
+    TimelineSlicer,
+    Pivot,
+    FloatingRange,
+    CanvasPage,
+}
+
+/// The object a binding belongs to: its kind and its STABLE id (chart / slicer
+/// / timeline / pivot / floating-range EntityId, control `uid`, canvas page
+/// SheetId) -- never an index, a name or an anchor cell.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObjectBindingRef {
+    pub kind: ObjectBindingKind,
+    pub id: String,
+}
+
+/// The current value of one binding. TRANSIENT: never saved, never undone,
+/// never dirties the document.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedBinding {
+    pub object: ObjectBindingRef,
+    pub path: String,
+    /// Typed per the catalog row (number, string, bool); Null on error/pending.
+    pub value: serde_json::Value,
+    /// What a text slot shows ("#REF!", "(Refused)", "(model not connected)" on error).
+    pub display: String,
+    /// A full sentence when the binding cannot produce a value of its type.
+    pub error: Option<String>,
+    /// True while a measure this binding reads has not been fetched yet.
+    pub pending: bool,
+}
+
+/// One binding as the frontend, scripts and AI see it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObjectBindingInfo {
+    pub object: ObjectBindingRef,
+    pub path: String,
+    /// As stored: INVARIANT (en-US `,` separators, `.` decimals). What scripts,
+    /// MCP/AI, the .cala and the .calp see.
+    pub formula: String,
+    /// `formula` localised with the workbook locale (`engine::localize_formula`):
+    /// what user-facing editors and the Bound Properties view show.
+    pub display_formula: String,
+    pub model: Option<String>,
+    pub resolved: Option<ResolvedBinding>,
+}
+
+/// Who asked for a binding edit. Renderer-supplied, so it labels (audit) and
+/// re-checks as defence in depth; it is never a security boundary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum BindingEditSource {
+    User,
+    Script { script_id: String, unlocked: bool },
+    Ai { tool: String },
+}
+
+/// A cell the frontend saw change (the `CellsChanged` trigger).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangedCellRef {
+    pub sheet_index: usize,
+    pub row: u32,
+    pub col: u32,
+}
+
+/// One page filter mirrored from `@api/pageFilters` (frontend-owned).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageFilterWire {
+    pub field: String,
+    pub included_items: Vec<String>,
+    pub filter_level: u8,
+}
+
+/// Every page filter of one (page, connection), mirrored to Rust.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageFilterPageWire {
+    pub sheet_index: usize,
+    pub connection_id: String,
+    pub filters: Vec<PageFilterWire>,
+}
+
+/// What a binding formula reads and how it would be stored.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BindingFormulaAnalysis {
+    /// The formula as it would be stored (invariant, sheet-qualified, canonical sheet case).
+    pub normalized: String,
+    /// `normalized` localised for display (see `ObjectBindingInfo::display_formula`).
+    pub display_normalized: String,
+    /// Sheet INDICES the formula reads cells on (after normalisation).
+    pub sheets: Vec<usize>,
+    pub uses_names: bool,
+    /// `Table[Col]` (a table name present).
+    pub uses_table_refs: bool,
+    /// INDIRECT / OFFSET-with-text / GET.CONTROLVALUE / GETPIVOTDATA.
+    pub uses_indirect: bool,
+    pub uses_cube: bool,
+    /// Table-less `[Name]` refs: measures of the binding's model.
+    pub measure_refs: Vec<String>,
+    /// The model key it would bind to.
+    pub model: Option<String>,
+    /// Refusal sentence (parse, ambiguity, unknown measure...).
+    pub error: Option<String>,
+    /// A sentence the UI shows beside an ACCEPTED formula when an unqualified
+    /// reference was pointed at a fallback sheet (an object on a canvas page,
+    /// which has no cells: "A1 means Sheet1!A1").
+    pub warning: Option<String>,
+}
+
+/// The measures of one model a binding on a page could read.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BindingModelMeasures {
+    pub model_key: String,
+    pub connection_id: String,
+    pub name: String,
+    pub measures: Vec<String>,
+    pub is_default: bool,
+}
+
+/// The ONE `object_bindings` command's request (an op enum, so the binding
+/// surface costs one entry in `generate_handler!`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum ObjectBindingsRequest {
+    List {
+        object: Option<ObjectBindingRef>,
+    },
+    /// `invariant`: false (the default) = `formula` is in the user's locale and
+    /// is delocalised before normalisation (the `update_cell` rule); true =
+    /// already invariant (scripts, MCP, AI).
+    Set {
+        object: ObjectBindingRef,
+        path: String,
+        formula: String,
+        model: Option<String>,
+        invariant: Option<bool>,
+        source: Option<BindingEditSource>,
+    },
+    Clear {
+        object: ObjectBindingRef,
+        path: String,
+        source: Option<BindingEditSource>,
+    },
+    SetLiteral {
+        object: ObjectBindingRef,
+        path: String,
+        value: serde_json::Value,
+        source: Option<BindingEditSource>,
+    },
+    ResolveAll,
+    CellsChanged {
+        cells: Option<Vec<ChangedCellRef>>,
+    },
+    SetPageFilters {
+        pages: Vec<PageFilterPageWire>,
+    },
+    RefreshMeasures {
+        sheet_index: Option<usize>,
+    },
+    Analyze {
+        object: ObjectBindingRef,
+        formula: String,
+        invariant: Option<bool>,
+        /// The model `Set` would be given (`None` = the page's own). Without
+        /// it, an analysis of `[Measure]` on a page with several models is a
+        /// refusal that the `Set` naming its model would not be -- and the
+        /// script executor gates on the analysis (D §3.19).
+        model: Option<String>,
+    },
+    ObjectJson {
+        object: ObjectBindingRef,
+    },
+    Measures {
+        object: ObjectBindingRef,
+    },
+    /// Where each object is and what a person calls it (the Bound Properties
+    /// view's Object column and its Go to). Objects that do not exist are
+    /// left out of the answer.
+    Locate {
+        objects: Vec<ObjectBindingRef>,
+    },
+}
+
+/// Where a bound object is: its sheet and the name a person recognises it by.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObjectBindingPlace {
+    pub object: ObjectBindingRef,
+    /// The object's own display name ("Revenue chart", "Region", a canvas page's tab name).
+    pub name: String,
+    pub sheet_index: usize,
+    pub sheet_name: String,
+}
+
+/// The `object_bindings` command's answer, tagged by `kind`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum ObjectBindingsResponse {
+    Bindings { bindings: Vec<ObjectBindingInfo> },
+    Binding { binding: ObjectBindingInfo },
+    Cleared { removed: bool },
+    /// MutationDomain wire names the frontend must refresh.
+    LiteralSet { domains: Vec<String> },
+    Resolved { values: Vec<ResolvedBinding> },
+    Ack,
+    Analysis { analysis: BindingFormulaAnalysis },
+    ObjectJson { json: serde_json::Value },
+    Measures { models: Vec<BindingModelMeasures> },
+    Located { places: Vec<ObjectBindingPlace> },
+}
+
+/// Payload of the ONE event `object-bindings:changed`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObjectBindingsChangedPayload {
+    /// Resolved values that CHANGED (diffed against the runtime cache).
+    pub values: Vec<ResolvedBinding>,
+    /// True when the binding SET changed (create/clear/undo/cascade/load/rename):
+    /// the seam re-lists. Values may be empty then.
+    pub reload: bool,
 }
 
 #[cfg(test)]

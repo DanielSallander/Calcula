@@ -1,7 +1,8 @@
 //! FILENAME: app/extensions/Charts/components/DataPointFormatDialog.tsx
 // PURPOSE: RETIRED. The modal "Format Data Point" box is gone; this is the
 //          redirector that keeps its dialog id working and sends the reader to
-//          the Format task pane instead.
+//          the object pane's Format tab instead (its "Chart elements" card;
+//          WP-C D-PANE).
 // CONTEXT: WHY IT WAS RETIRED, and why a redirector rather than a deletion.
 //
 //          Excel has no modal for formatting a data point. It has ONE task pane
@@ -43,15 +44,15 @@
 
 import React, { useEffect } from "react";
 import type { DialogProps } from "@api";
-import { openTaskPane } from "@api";
 
-import { CHART_FORMAT_PANE_ID } from "./ChartFormatPane";
+import { publishCurrentChartSelection } from "./ChartFormatPane";
+import { openChartFormatPane } from "../lib/chartObjectPane";
 
 export function DataPointFormatDialog({ onClose, data }: DialogProps): React.ReactElement | null {
   const openCount = data?.__openCount;
 
   useEffect(() => {
-    openTaskPane(CHART_FORMAT_PANE_ID);
+    openChartFormatPane(publishCurrentChartSelection, (data?.chartId as string | undefined) ?? null);
     onClose();
     // `openCount` is the dependency that makes a repeat show observable; see
     // the header. `onClose` is stable per dialog instance.

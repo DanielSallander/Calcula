@@ -2171,6 +2171,7 @@ mod tests {
                 show_title: true,
                 show_column_headers: true,
                 show_row_headers: true,
+                container: None,
             }];
             wb.pivot_definitions = vec![pivot.clone()];
             wb.timeline_slicers = if with_timeline {
@@ -2194,6 +2195,7 @@ mod tests {
                     show_scrollbar: true,
                     style_preset: "TimelineStyleLight1".to_string(),
                     connected_pivot_ids: Vec::new(),
+                    container: None,
                 }]
             } else {
                 Vec::new()

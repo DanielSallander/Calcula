@@ -8,6 +8,22 @@
 //          ACTS ON RELEASE over the same piece of chrome (BUG-0258 design
 //          phase 4, D5): the press only starts `beginPivotChromePress`
 //          (pivotChromePress.ts); sliding off cancels.
+//          While a formula picks a reference (D-PICK) the box answers
+//          `referenceAt` -- the hidden-grid cell under the point -- and Core
+//          turns the press into the pick before anything selects; a pick
+//          drag across the box is painted dashed here.
+//          The box's CELLS are content (D-CELLS): a press selects them
+//          (pivotCellPress.ts, the store in pivotVisualCellSelection.ts) and
+//          the selection is painted here; the box moves by its 4px border
+//          band, blank area past the content, Core's hover grip, or -- in
+//          Design Mode -- its whole body.
+//          THE CONTAINER (WP-C D-FORMAT): Core paints the box's visual
+//          container (shadow, background, title bands, border) around this
+//          render; the cells are laid out, painted, scrolled and hit-tested
+//          inside its CONTENT rect (`visualContentRectFor`, the one Core's
+//          zone band and paint use -- paint == hit), clipped by
+//          `withContainerContentClip`. The box paints no fill or outline of
+//          its own: one owner of the box background (review R1-8).
 // CONTEXT: Snap, the page clamp and consume mode (a subscribed canvas) are
 //          applied by the Core through @api/layoutSurface before any of the
 //          move/resize events below are dispatched -- nothing here
@@ -17,6 +33,7 @@
 
 import { showToast } from "@api";
 import {
+  getFloatingReferencePickPreview,
   getGridRegions,
   overlayGetColumnWidth,
   overlayGetRowHeight,
@@ -25,14 +42,20 @@ import {
   topFloatingRegionAtClient,
   type GridRegion,
   type OverlayHitTestContext,
+  type OverlayReferencePick,
   type OverlayRegistration,
   type OverlayRenderContext,
   type OverlayZone,
 } from "@api/gridOverlays";
 import { getGridStateSnapshot } from "@api/grid";
+import { isFormulaReferencePickActive } from "@api/editing";
 import { drawObjectScriptBadgeIfPresent } from "@api/objectScriptBadge";
+import { visualContentRectFor, withContainerContentClip, type ContainerRegion } from "@api/visualContainerPaint";
 import type { DimensionOverrides } from "@api/types";
 import { registerObjectWheelTarget } from "../../_shared/lib/objectWheelScroll";
+import { paintInnerSelection, paintPickPreview, type PaintRect } from "../../_shared/lib/innerSelectionPaint";
+import { PivotEvents } from "../../_shared/lib/pivotEvents";
+import { onDesignModeChange } from "@api/designMode";
 import type { PivotViewResponse } from "./pivot-api";
 import { deletePivotTable, getPivotCellWindow, updatePivotProperties } from "./pivot-api";
 import { joinUndoTransaction, registerObjectGeometryProvider } from "@api/objectGeometry";
@@ -54,7 +77,9 @@ import {
   buildPivotVisualGeometry,
   clampVisualScroll,
   paintPivotVisual,
-  paintPivotVisualFrame,
+  selectionPiecesInBox,
+  viewColCount,
+  viewRowCount,
   type PivotVisualBox,
   type PivotVisualGeometry,
 } from "../rendering/pivotVisualRenderer";
@@ -67,7 +92,17 @@ import {
   pivotIdOfVisual,
   setLiveFrame,
   commitLiveFrame,
+  effectiveFrame,
+  republishVisualRegions,
 } from "./pivotVisualRegions";
+import {
+  clampPivotCellSelection,
+  getPivotCellSelection,
+  onPivotCellSelectionChanged,
+  pivotCellRect,
+  setPivotCellSheetSource,
+} from "./pivotVisualCellSelection";
+import { beginPivotCellPress, cancelPivotCellPress } from "./pivotCellPress";
 import {
   getPivotVisualRecord,
   getPivotVisualHover,
@@ -167,6 +202,74 @@ function geometryFor(oc: OverlayRenderContext, region: GridRegion, view: PivotVi
 // Paint
 // ============================================================================
 
+/**
+ * A reference pick dragging across THIS box (D-PICK): Core's pick session
+ * publishes the hidden-grid rectangle it covers (`getFloatingReferencePickPreview`,
+ * re-painted on every change), and the box draws it dashed over the cells it
+ * names -- the same pieces a press there would name, clipped to the box.
+ */
+function paintPivotPickPreview(
+  ctx: CanvasRenderingContext2D,
+  region: GridRegion,
+  box: PivotVisualBox,
+  geometry: PivotVisualGeometry,
+  scroll: { left: number; top: number },
+): void {
+  const preview = getFloatingReferencePickPreview();
+  if (!preview || preview.regionId !== region.id || preview.range.space !== "sheet") return;
+  const range = preview.range;
+  const pieces = selectionPiecesInBox(geometry, scroll, box.width, box.height, {
+    startRow: range.startRow - region.startRow,
+    startCol: range.startCol - region.startCol,
+    endRow: range.endRow - region.startRow,
+    endCol: range.endCol - region.startCol,
+  });
+  if (pieces.length === 0) return;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(box.x, box.y, box.width, box.height);
+  ctx.clip();
+  paintPickPreview(
+    ctx,
+    pieces.map((p) => ({ x: box.x + p.x, y: box.y + p.y, width: p.width, height: p.height })),
+  );
+  ctx.restore();
+}
+
+/**
+ * The box's INNER cell selection (D-CELLS), when it is this pivot's: the
+ * rectangle's pieces (one per frozen quadrant it touches, the same arithmetic a
+ * press there inverts) filled except the ACTIVE cell (the anchor), bordered,
+ * clipped to the box -- the one inner-selection ink a floating grid's cells
+ * use too (_shared/lib/innerSelectionPaint.ts).
+ */
+function paintPivotCellSelection(
+  ctx: CanvasRenderingContext2D,
+  pivotId: string,
+  box: PivotVisualBox,
+  geometry: PivotVisualGeometry,
+  scroll: { left: number; top: number },
+): void {
+  const sel = getPivotCellSelection();
+  if (!sel || sel.pivotId !== pivotId) return;
+  const toCanvas = (p: PaintRect): PaintRect => ({ x: box.x + p.x, y: box.y + p.y, width: p.width, height: p.height });
+  const pieces = selectionPiecesInBox(geometry, scroll, box.width, box.height, pivotCellRect(sel)).map(toCanvas);
+  if (pieces.length === 0) return;
+  const activePieces = selectionPiecesInBox(geometry, scroll, box.width, box.height, {
+    startRow: sel.anchorRow,
+    startCol: sel.anchorCol,
+    endRow: sel.anchorRow,
+    endCol: sel.anchorCol,
+  });
+  const active = activePieces.length === 1 ? toCanvas(activePieces[0]) : null;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(box.x, box.y, box.width, box.height);
+  ctx.clip();
+  paintInnerSelection(ctx, pieces, active);
+  ctx.restore();
+}
+
 /** Paint one `pivot-visual` region. Exported for tests. */
 export function renderPivotVisualRegion(oc: OverlayRenderContext, deps: PivotVisualDeps): void {
   const region = oc.region;
@@ -176,16 +279,27 @@ export function renderPivotVisualRegion(oc: OverlayRenderContext, deps: PivotVis
 
   // Whole pixels: the renderer's 0.5px line snapping stays crisp at any zoom.
   const origin = overlaySheetToCanvas(oc, f.x, f.y);
-  const box: PivotVisualBox = {
+  const outer: PivotVisualBox = {
     x: Math.round(origin.canvasX),
     y: Math.round(origin.canvasY),
     width: Math.max(0, Math.round(f.width)),
     height: Math.max(0, Math.round(f.height)),
   };
+  // The CONTENT rect inside the container (padding, border, Core's title
+  // bands): the box the cells live in. Sheet px from the one layout Core
+  // painted, mapped to the canvas by the outer box's own offset.
+  const content = visualContentRectFor(region.id, f, (region as ContainerRegion).container);
+  const box: PivotVisualBox = {
+    x: outer.x + Math.round(content.x - f.x),
+    y: outer.y + Math.round(content.y - f.y),
+    width: Math.max(0, Math.round(content.width)),
+    height: Math.max(0, Math.round(content.height)),
+  };
 
   const record: PivotVisualRecord = {
     pivotId,
     box,
+    outer,
     bounds: null,
     cancel: null,
     geometry: null,
@@ -210,47 +324,48 @@ export function renderPivotVisualRegion(oc: OverlayRenderContext, deps: PivotVis
   const isEmpty = region.data?.isEmpty === true;
   const view = isEmpty ? undefined : getCachedPivotView(pivotId);
 
-  if (view) {
-    const frozenHeaders = region.data?.frozenHeaders === true;
-    const geometry = geometryFor(oc, region, view, frozenHeaders);
-    const scroll = clampVisualScroll(geometry, box.width, box.height, getPivotVisualScroll(pivotId));
-    setPivotVisualScroll(pivotId, scroll);
+  withContainerContentClip(ctx, region as ContainerRegion, outer, box, () => {
+    if (view) {
+      const frozenHeaders = region.data?.frozenHeaders === true;
+      const geometry = geometryFor(oc, region, view, frozenHeaders);
+      const scroll = clampVisualScroll(geometry, box.width, box.height, getPivotVisualScroll(pivotId));
+      setPivotVisualScroll(pivotId, scroll);
 
-    const windowed = view.isWindowed === true;
-    const cache = windowed ? getCellWindowCache(pivotId) : undefined;
-    const { bounds } = paintPivotVisual({
-      ctx,
-      view,
-      geometry,
-      box,
-      scroll,
-      theme: deps.getTheme(pivotId),
-      getRow: windowed ? (i) => cache?.getRow(i) ?? null : undefined,
-      onMissingRows: windowed
-        ? (first, last) =>
-            ensureCellWindow(pivotId, view.version, first, last - first + 1, getPivotCellWindow, () =>
-              requestOverlayRedraw(),
-            )
-        : undefined,
-      hover: getPivotVisualHover(pivotId),
-    });
-    record.bounds = bounds;
-    record.geometry = geometry;
-    record.scroll = scroll;
-  } else {
-    // Empty pivot (or its view is still on its way): an opaque box, and for an
-    // empty one the "Click in this area" hint Excel shows.
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(box.x, box.y, box.width, box.height);
-    ctx.clip();
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(box.x, box.y, box.width, box.height);
-    if (isEmpty) {
+      const windowed = view.isWindowed === true;
+      const cache = windowed ? getCellWindowCache(pivotId) : undefined;
+      const { bounds } = paintPivotVisual({
+        ctx,
+        view,
+        geometry,
+        box,
+        scroll,
+        theme: deps.getTheme(pivotId),
+        getRow: windowed ? (i) => cache?.getRow(i) ?? null : undefined,
+        onMissingRows: windowed
+          ? (first, last) =>
+              ensureCellWindow(pivotId, view.version, first, last - first + 1, getPivotCellWindow, () =>
+                requestOverlayRedraw(),
+              )
+          : undefined,
+        hover: getPivotVisualHover(pivotId),
+      });
+      record.bounds = bounds;
+      record.geometry = geometry;
+      record.scroll = scroll;
+      paintPivotCellSelection(ctx, pivotId, box, geometry, scroll);
+      paintPivotPickPreview(ctx, region, box, geometry, scroll);
+    } else if (isEmpty) {
+      // Empty pivot: the "Click in this area" hint Excel shows, on the
+      // container's background (Core paints it; the box paints no fill of its
+      // own). A view still on its way shows just the background.
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(box.x, box.y, box.width, box.height);
+      ctx.clip();
       paintPivotPlaceholderContent(ctx, box, String(region.data?.name ?? ""));
+      ctx.restore();
     }
-    ctx.restore();
-  }
+  });
 
   const loading = isLoading(pivotId) ? getLoadingState(pivotId) : undefined;
   if (loading) {
@@ -267,11 +382,11 @@ export function renderPivotVisualRegion(oc: OverlayRenderContext, deps: PivotVis
   }
 
   setPivotVisualRecord(record);
-  // The box's grey outline. Selected: Core paints the selection outline and
-  // the handles over it (floatingObjectChrome.ts, BUG-0258 phase 3).
-  paintPivotVisualFrame(ctx, box);
+  // The box's outline is its container's border (Core paints it, default a
+  // 1 px #c8c8c8). Selected: Core paints the selection outline and the
+  // handles over it (floatingObjectChrome.ts, BUG-0258 phase 3).
   // Transparency: badge a pivot that has a script attached (design mode).
-  drawObjectScriptBadgeIfPresent(ctx, "pivot", pivotId, box.x, box.y, box.width);
+  drawObjectScriptBadgeIfPresent(ctx, "pivot", pivotId, outer.x, outer.y, outer.width);
 }
 
 // ============================================================================
@@ -295,37 +410,136 @@ export function hitTestPivotVisual(hitCtx: OverlayHitTestContext): boolean {
   );
 }
 
+/** The band inside the box's edge that MOVES the box (its cells are content, D-CELLS). */
+export const PIVOT_BOX_BORDER_BAND = 4;
+
 /**
  * The box's ONE zone answer (BUG-0258 design phase 2), from which Core derives
- * the press, the pointer and the meaning of Ctrl/Shift. The CHROME (a +/-, a
- * report-filter combo, a Row/Column Labels button, the loading indicator's
- * Cancel) is content with a hand: Core hands the press to
- * `floatingObject:bodyDragStart` (a button press, never the start of a move),
- * also on a locked box and a subscribed page, and the chrome acts when that
- * press is RELEASED over the same piece of chrome (pivotChromePress.ts; phase
- * 4, D5) -- a drag that starts on a +/- neither moves the box nor toggles.
- * The cells are frame (null): the box moves by them, as it always did.
+ * the press, the pointer and the meaning of Ctrl/Shift. In order:
+ *
+ *   the CHROME (a +/-, a report-filter combo, a Row/Column Labels button, the
+ *     loading indicator's Cancel)     content, a hand, part = the chrome kind
+ *   outside the box                   null (frame)
+ *   the 4px band inside its edge      frame, part "border" (moves the box)
+ *   anywhere else, in DESIGN MODE     frame, part "bodyGrab" (the whole body
+ *                                     moves it -- the Charts/Controls/
+ *                                     FloatingRange convention; the chrome
+ *                                     above still acts)
+ *   a CELL of the view                content, cursor "cell", part "cell"
+ *                                     (D-CELLS: it selects cells,
+ *                                     pivotCellPress.ts)
+ *   blank area past the content       frame, part "blank" (moves the box)
+ *
+ * Content presses go to `floatingObject:bodyDragStart` and never move the
+ * box -- also on a locked box and a subscribed page (reading the report is
+ * not editing it). The chrome acts when its press is RELEASED over the same
+ * piece of chrome (pivotChromePress.ts; phase 4, D5). The box also moves by
+ * Core's six-dot grip, published on hover (`grip: "hover"`, pivotVisualRegions.ts).
  *
  * PURE, which the old `getCursor` was not -- it wrote the hover highlight as a
  * side effect of being asked. The highlight is `updatePivotVisualHoverAt`'s.
  */
 export function pivotVisualZoneAt(hitCtx: OverlayHitTestContext): OverlayZone | null {
   const record = recordFor(hitCtx);
-  const hit = record ? hitPivotVisualChrome(record, hitCtx.canvasX, hitCtx.canvasY) : null;
-  return hit ? { kind: "content", cursor: "pointer", part: hit.kind } : null;
+  const x = hitCtx.canvasX;
+  const y = hitCtx.canvasY;
+  const hit = record ? hitPivotVisualChrome(record, x, y) : null;
+  if (hit) return { kind: "content", cursor: "pointer", part: hit.kind };
+
+  const box = hitCtx.floatingCanvasBounds ?? record?.box ?? null;
+  if (!box || x < box.x || y < box.y || x > box.x + box.width || y > box.y + box.height) return null;
+
+  const band = PIVOT_BOX_BORDER_BAND;
+  if (x < box.x + band || y < box.y + band || x > box.x + box.width - band || y > box.y + box.height - band) {
+    return { kind: "frame", part: "border" };
+  }
+  // Outside the CONTENT rect (the container's padding, border and Core's
+  // title bands): frame too -- Core answers that band itself before asking,
+  // so this only keeps a direct caller (the double-click) on the same rule.
+  if (record && !isInsidePivotVisualBox(record, x, y)) return { kind: "frame", part: "border" };
+  if (hitCtx.region.data?.bodyGrab === true) return { kind: "frame", part: "bodyGrab" };
+
+  const at = record ? viewCellAtCanvasPoint(record, x, y) : null;
+  if (at) return { kind: "content", cursor: "cell", part: "cell" };
+  return { kind: "frame", part: "blank" };
+}
+
+/**
+ * The CELL a reference pick names at a point of the box (D-PICK,
+ * `OverlayRegistration.referenceAt`): the view cell under the point, mapped to
+ * the canvas's hidden-grid cell it was written to (`startRow/startCol` + the
+ * view offset, so a box in column block 1 answers from column 1024 on). The
+ * answer is a `sheet` pick -- the hidden grid IS the shown sheet's grid -- so
+ * Core routes it exactly as a worksheet pivot pick: GETPIVOTDATA through the
+ * formula-reference interceptor for a single value cell, a plain
+ * `Canvas1!B5` otherwise, a range for a drag. Over the chrome (+/-, a filter
+ * button) the answer is the cell beneath it: during a pick the chrome does not
+ * act. Blank area past the content, an empty pivot and a view not painted yet
+ * answer null (the press is inert).
+ *
+ * PURE, the `zoneAt` contract: reads the painted record only; no hover, no
+ * selection, no dispatch.
+ */
+export function pivotVisualReferenceAt(hitCtx: OverlayHitTestContext): OverlayReferencePick | null {
+  const record = recordFor(hitCtx);
+  if (!record) return null;
+  const at = viewCellAtCanvasPoint(record, hitCtx.canvasX, hitCtx.canvasY);
+  if (!at) return null;
+  return { space: "sheet", row: record.startRow + at.viewRow, col: record.startCol + at.viewCol };
+}
+
+/**
+ * Where view cell (`viewRow`, `viewCol`) of `pivotId`'s box is SHOWN, in SHEET
+ * px (the frame's page coordinates plus the box-local offset at the box's
+ * last-painted geometry and scroll): only its visible part, clipped to the
+ * box and its frozen quadrant; null when the cell is scrolled out of view,
+ * hidden, outside the view, or the box has not been painted. For journeys
+ * (`__CALCULA_PIVOT__.cellSheetRect`): the centre of the answer is a point a
+ * press names that very cell at.
+ */
+export function pivotCellSheetRect(
+  pivotId: string,
+  viewRow: number,
+  viewCol: number,
+): { x: number; y: number; width: number; height: number } | null {
+  const record = getPivotVisualRecord(pivotId);
+  const frame = effectiveFrame(pivotId);
+  if (!record?.geometry || !frame) return null;
+  const g = record.geometry;
+  if (!Number.isInteger(viewRow) || !Number.isInteger(viewCol)) return null;
+  if (viewRow < 0 || viewCol < 0 || viewRow >= g.rowCount || viewCol >= g.colCount) return null;
+  const pieces = selectionPiecesInBox(g, record.scroll, record.box.width, record.box.height, {
+    startRow: viewRow,
+    startCol: viewCol,
+    endRow: viewRow,
+    endCol: viewCol,
+  });
+  const p = pieces[0];
+  if (!p) return null;
+  // Box-local pieces sit in the CONTENT rect: add its offset inside the frame.
+  const dx = record.outer ? record.box.x - record.outer.x : 0;
+  const dy = record.outer ? record.box.y - record.outer.y : 0;
+  return { x: frame.x + dx + p.x, y: frame.y + dy + p.y, width: p.width, height: p.height };
 }
 
 /**
  * A double-click inside the box. On chrome it is swallowed (the two presses
  * already acted); on a cell it maps view cell -> hidden-grid cell and runs the
- * same toggle / drill-through as a worksheet pivot. Always true inside the box:
- * a canvas has no cell editor to fall through to.
+ * same toggle / drill-through as a worksheet pivot. It acts only where a press
+ * would select a CELL (`pivotVisualZoneAt` answers content "cell"): on the 4px
+ * border band, on blank area and on the Design-Mode body grab -- the places
+ * whose press MOVES the box -- it is inert, so a double-click aimed at the
+ * frame never drills a cell the user did not aim at. Always true inside the
+ * box: a canvas has no cell editor to fall through to.
  */
 export function pivotVisualDoubleClick(hitCtx: OverlayHitTestContext): boolean {
   const record = recordFor(hitCtx);
   if (!record) return false;
   if (!isInsidePivotVisualBox(record, hitCtx.canvasX, hitCtx.canvasY)) return false;
   if (hitPivotVisualChrome(record, hitCtx.canvasX, hitCtx.canvasY)) return true;
+
+  const zone = pivotVisualZoneAt(hitCtx);
+  if (zone?.kind !== "content" || zone.part !== "cell") return true;
 
   const at = viewCellAtCanvasPoint(record, hitCtx.canvasX, hitCtx.canvasY);
   if (!at) return true;
@@ -444,6 +658,12 @@ export function handlePivotVisualPress(
  */
 export function updatePivotVisualHoverAt(clientX: number, clientY: number, target?: EventTarget | null): void {
   if (!anyPivotVisualHover() && pivotVisualRecordCount() === 0) return;
+  // While a formula picks a reference the chrome does not act (a press names
+  // the cell beneath it, D-PICK), so it must not light up as if it would.
+  if (isFormulaReferencePickActive()) {
+    if (setPivotVisualHover(null, {})) requestOverlayRedraw();
+    return;
+  }
   const area = document.querySelector("[data-grid-area]") as HTMLElement | null;
   const overGrid = !!area && (!(target instanceof Node) || area.contains(target));
   const top = overGrid ? topFloatingRegionAtClient(clientX, clientY) : null;
@@ -487,6 +707,7 @@ export function createPivotVisualOverlay(deps: PivotVisualDeps): OverlayRegistra
     render: (oc) => renderPivotVisualRegion(oc, deps),
     hitTest: hitTestPivotVisual,
     zoneAt: pivotVisualZoneAt,
+    referenceAt: pivotVisualReferenceAt,
     onDoubleClick: pivotVisualDoubleClick,
   };
 }
@@ -505,6 +726,10 @@ interface FloatingDetail {
   height?: number;
   canvasX?: number;
   canvasY?: number;
+  /** The zone part Core resolved for a content press (`pivotVisualZoneAt`). */
+  part?: string;
+  /** The RAW Shift of a content press (Shift+click extends the cell selection). */
+  shiftKey?: boolean;
 }
 
 function detailOf(e: Event): FloatingDetail {
@@ -549,9 +774,20 @@ export function installPivotVisual(
   const cleanups: Array<() => void> = [];
   forgetChromeReleases();
   // A chrome press of an earlier installation acts on nothing now; nor does
-  // one still live when this installation is torn down.
+  // one still live when this installation is torn down. The same for a cell
+  // press (its drag ends; the cells it selected stay).
   cancelPivotChromePress();
-  cleanups.push(cancelPivotChromePress);
+  cancelPivotCellPress();
+  cleanups.push(cancelPivotChromePress, cancelPivotCellPress);
+
+  // The cell selection (D-CELLS): made on the ACTIVE sheet (so a detail-less
+  // SHEET_CHANGED on the same canvas keeps it), repainted on every change, and
+  // clamped to each new view of its pivot (a refilter, a collapse).
+  cleanups.push(setPivotCellSheetSource(() => getGridStateSnapshot()?.sheetContext?.activeSheetIndex));
+  cleanups.push(onPivotCellSelectionChanged(() => requestOverlayRedraw()));
+  // Design Mode turns the whole body into the box's move handle (`bodyGrab`,
+  // published with the region): re-publish when it flips.
+  cleanups.push(onDesignModeChange(() => republishVisualRegions()));
 
   cleanups.push(registerOverlay(createPivotVisualOverlay(deps)));
   cleanups.push(
@@ -586,28 +822,53 @@ export function installPivotVisual(
     closePivotBoxMenu();
   });
 
-  // A press on ANY floating object: ours selects the box (and opens the field
-  // list, as clicking into a worksheet pivot does); anything else deselects it.
+  // A press on ANY floating object: ours selects the box; anything else
+  // deselects it. The box opens NO pane of its own (WP-C D-PANE): the ONE
+  // object pane opens at the release of a press that did not move, by its
+  // own policy (BuiltIn/ObjectPane), on the box's Fields tab.
   listen("floatingObject:selected", (e) => {
     const d = detailOf(e);
     const pivotId = visualPivotIdOf(d);
-    if (pivotId) selectPivotVisual(pivotId, { openPane: true });
+    if (pivotId) selectPivotVisual(pivotId);
     else deselectPivotVisual();
   });
 
-  // A press Core handed over because `zoneAt` said "chrome" (content). It
-  // acts at its RELEASE over the same chrome, never here (D5).
+  // A press Core handed over because `zoneAt` said "content": on a CELL it
+  // selects cells (anchor, Shift extends, the drag extends -- D-CELLS); on the
+  // chrome it acts at its RELEASE over the same chrome, never here (D5).
   listen("floatingObject:bodyDragStart", (e) => {
     const d = detailOf(e);
     const pivotId = visualPivotIdOf(d);
     if (!pivotId || typeof d.canvasX !== "number" || typeof d.canvasY !== "number") return;
+    const regionId = typeof d.regionId === "string" ? d.regionId : undefined;
+    if (d.part === "cell") {
+      beginPivotCellPress({
+        pivotId,
+        regionId,
+        canvasX: d.canvasX,
+        canvasY: d.canvasY,
+        shiftKey: d.shiftKey === true,
+        clientToCanvas: canvasPointOf,
+      });
+      return;
+    }
     beginPivotChromePress({
       pivotId,
-      regionId: typeof d.regionId === "string" ? d.regionId : undefined,
+      regionId,
       canvasX: d.canvasX,
       canvasY: d.canvasY,
       clientToCanvas: canvasPointOf,
     });
+  });
+
+  // A new view of a pivot: its cell selection is clamped into it (cleared
+  // when the active cell no longer exists).
+  listen(PivotEvents.PIVOT_VIEW_UPDATED, (e) => {
+    const pivotId = ((e as CustomEvent).detail as { pivotId?: unknown } | undefined)?.pivotId;
+    if (typeof pivotId !== "string") return;
+    const view = getCachedPivotView(pivotId);
+    if (!view) return;
+    clampPivotCellSelection(pivotId, viewRowCount(view), viewColCount(view));
   });
 
   // Move / resize: previews patch the live frame (the box follows the pointer);

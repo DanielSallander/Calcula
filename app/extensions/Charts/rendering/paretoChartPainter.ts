@@ -13,7 +13,6 @@ import { strokeDatumBorderRect } from "./barChartPainter";
 import { createLinearScale, createBandScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
-  drawChartBackground,
   drawPlotBackground,
   drawHorizontalGridLines,
   drawCartesianAxes,
@@ -147,13 +146,11 @@ export function paintParetoChart(
   const show80Line = opts.show80PercentLine ?? true;
 
   if (data.series.length === 0 || data.categories.length === 0) {
-    drawChartBackground(ctx, layout, theme);
     return;
   }
 
   const pareto = prepareParetoData(data);
   if (pareto.values.length === 0) {
-    drawChartBackground(ctx, layout, theme);
     return;
   }
 
@@ -181,7 +178,6 @@ export function paintParetoChart(
   );
 
   // 1. Background
-  drawChartBackground(ctx, layout, theme);
 
   // 2. Plot area background
   drawPlotBackground(ctx, plotArea, theme);
@@ -300,9 +296,7 @@ export function paintParetoChart(
   }
 
   // 10. Title
-  if (spec.title) {
-    drawTitle(ctx, spec.title, layout, theme);
-  }
+  drawTitle(ctx, spec.title, layout, theme);
 
   // 11. Legend
   if (spec.legend.visible) {

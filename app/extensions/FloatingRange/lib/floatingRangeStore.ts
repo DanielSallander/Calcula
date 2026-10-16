@@ -27,6 +27,8 @@ import {
 import { isObjectInSelection, onObjectSelectionChanged } from "@api/objectSelection";
 import { showToast } from "@api/notifications";
 import { frameWidth, frameHeight } from "./frDimensions";
+import { frContainerOf, frShowsTitle, resetFrContainers, withoutIdentityLeaves } from "./frObjectFormat";
+import type { VisualContainerFormat } from "@api/visualContainer";
 import { clearFrScroll, resetFrScrolls } from "./frScroll";
 import { isFloatingRangeSelected } from "./frSelection";
 import { getFrEditingRange, onFrEditingRangeChanged } from "./frEditingRange";
@@ -69,6 +71,14 @@ export interface FloatingRangeEntry {
   showTitle: boolean;
   showColumnHeaders: boolean;
   showRowHeaders: boolean;
+  /**
+   * The range's visual container (D-FORMAT; padding, border, background,
+   * shadow, the title bar's style), WITHOUT the identity leaves: its title
+   * text is `name` and its visibility `showTitle`. Absent = the defaults. The
+   * RESOLVED container (bindings and a Format-pane preview laid over it) is
+   * lib/frObjectFormat.ts `frContainerOf`.
+   */
+  container?: VisualContainerFormat;
 }
 
 /** Overlay region type — matches the registerGridOverlay registration. */
@@ -135,6 +145,12 @@ export function fromInfo(info: FloatingRangeInfo): FloatingRangeEntry {
     showTitle: info.showTitle !== false,
     showColumnHeaders: info.showColumnHeaders !== false,
     showRowHeaders: info.showRowHeaders !== false,
+    // A container object, or none. Rust validated it on its way in; the
+    // identity leaves are never the container's (name / showTitle are).
+    container:
+      info.container && typeof info.container === "object" && !Array.isArray(info.container)
+        ? withoutIdentityLeaves(info.container)
+        : undefined,
   };
 }
 
@@ -155,6 +171,7 @@ export function toInfo(entry: FloatingRangeEntry): FloatingRangeInfo {
     showTitle: entry.showTitle,
     showColumnHeaders: entry.showColumnHeaders,
     showRowHeaders: entry.showRowHeaders,
+    ...(entry.container ? { container: JSON.parse(JSON.stringify(entry.container)) as VisualContainerFormat } : {}),
     name: entry.name,
     backingSheetIndex: entry.backingSheetIndex,
     hostSheetIndex: entry.sheetIndex,
@@ -396,6 +413,8 @@ export function resetFloatingRangeStore(): void {
   entries = [];
   activeSheetIndex = 0;
   resetFrScrolls();
+  // A Format-pane preview and every cached resolution go with the document.
+  resetFrContainers();
   removeGridRegionsByType(FLOATING_RANGE_REGION_TYPE);
 }
 
@@ -422,6 +441,10 @@ function baseRegionOf(entry: FloatingRangeEntry): GridRegion {
       width: frameWidth(entry),
       height: frameHeight(entry),
     },
+    // The RESOLVED container: Core paints its shadow, background and border
+    // around the grid and answers its padding band as the frame; the grid lays
+    // out inside the content rect (frDimensions `frInsets`).
+    container: frContainerOf(entry),
     data: {
       frId: entry.id,
       name: entry.name,
@@ -443,8 +466,8 @@ function geometryEditableFor(entry: FloatingRangeEntry, region: GridRegion): boo
 
 /**
  * THE one per-range geometry answer: the published `movable` flag, the menu's
- * Add/Delete Row/Column items, the Properties dialog's size and chrome
- * controls, the edge-handle cell scaling and the script provider's `resize`
+ * Add/Delete Row/Column items, the object pane's Properties tab (its row
+ * and column counts), the edge-handle cell scaling and the script provider's `resize`
  * all read it. False for an unknown id.
  */
 export function frGeometryEditable(id: string): boolean {
@@ -514,7 +537,7 @@ export function syncFloatingRangeRegions(): void {
       movable: geometry,
       resizable:
         geometry && frRangeInSelection(entry.id, region) && getFrEditingRange() !== entry.id,
-      bodyGrab: geometry && designing && !entry.showTitle,
+      bodyGrab: geometry && designing && !frShowsTitle(entry),
       // On a canvas the frame's POSITION snaps to the layout grid like every
       // object's, but its SIZE is whole rows and columns (quantised by this
       // extension on resize): a second, pixel-grid snap on top would make most
@@ -530,7 +553,7 @@ export function syncFloatingRangeRegions(): void {
       // 'border') to be moved by: Core shows its six-dot grip while it is
       // hovered or selected (@api/gridOverlays, BUG-0258 design phase 5). The
       // band stays.
-      ...(entry.showTitle ? {} : { grip: "hover" }),
+      ...(frShowsTitle(entry) ? {} : { grip: "hover" }),
     };
     return region;
   });

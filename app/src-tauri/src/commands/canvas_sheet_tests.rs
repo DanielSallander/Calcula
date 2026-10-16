@@ -436,7 +436,7 @@ fn a_stale_pivot_destination_never_redirects_onto_another_worksheet() {
     // nothing anywhere: not into the canvas, not over Sheet1's source data.
     let effect = crate::document_effect::test_seed_effect();
     let refused = crate::pivot::operations::update_pivot_in_grid(
-        &wb.state, &effect, pivot_id, resolved, (3, 3), &one_cell_view(pivot_id), false,
+        &wb.state, &effect, pivot_id, resolved, (3, 3), &one_cell_view(pivot_id), false, None,
     );
     assert_refused_as_canvas(refused, "update_pivot_in_grid");
     assert_eq!(cell_count(&wb, canvas), 0, "the canvas grid stays empty");
@@ -539,12 +539,12 @@ fn a_grid_pivot_never_materializes_into_a_canvas() {
     let view = one_cell_view(pivot_id);
     let effect = crate::document_effect::test_seed_effect();
 
-    crate::pivot::operations::update_pivot_in_grid(&wb.state, &effect, pivot_id, 0, (3, 3), &view, false)
+    crate::pivot::operations::update_pivot_in_grid(&wb.state, &effect, pivot_id, 0, (3, 3), &view, false, None)
         .expect("positive control: a worksheet destination is written");
     assert!(cell_count(&wb, 0) > 0, "positive control: the view writes into a worksheet");
 
     assert_refused_as_canvas(
-        crate::pivot::operations::update_pivot_in_grid(&wb.state, &effect, pivot_id, canvas, (3, 3), &view, false),
+        crate::pivot::operations::update_pivot_in_grid(&wb.state, &effect, pivot_id, canvas, (3, 3), &view, false, None),
         "update_pivot_in_grid",
     );
     assert_eq!(cell_count(&wb, canvas), 0, "the canvas grid stays empty");
@@ -829,7 +829,7 @@ fn a_framed_refreshed_pivot_is_adopted_and_re_anchored_off_a_taken_block() {
 // ---------------------------------------------------------------------------
 
 fn test_frame() -> pivot_engine::CanvasFrame {
-    pivot_engine::CanvasFrame { x: 40.0, y: 60.0, width: 320.0, height: 200.0, frozen_headers: false }
+    pivot_engine::CanvasFrame { x: 40.0, y: 60.0, width: 320.0, height: 200.0, frozen_headers: false, container: None }
 }
 
 fn test_frame_config() -> crate::pivot::types::CanvasFrameConfig {
@@ -1090,7 +1090,7 @@ fn the_write_funnel_refuses_a_framed_pivot_off_a_canvas_and_one_wider_than_its_b
     let id = new_pivot_id();
 
     assert_refused_as_canvas(
-        update_pivot_in_grid(&wb.state, &effect, id, 0, (0, 0), &one_cell_view(id), true),
+        update_pivot_in_grid(&wb.state, &effect, id, 0, (0, 0), &one_cell_view(id), true, None),
         "update_pivot_in_grid (framed, worksheet)",
     );
     assert_eq!(cell_count(&wb, 0), 0, "nothing was written into the worksheet");
@@ -1098,7 +1098,7 @@ fn the_write_funnel_refuses_a_framed_pivot_off_a_canvas_and_one_wider_than_its_b
     let mut wide = pivot_engine::PivotView::new(id);
     let too_wide = CANVAS_PIVOT_BLOCK_COLS as usize + 1;
     wide.add_row((0..too_wide).map(|_| pivot_engine::PivotViewCell::data(1.0)).collect(), data_row(0));
-    let refusal = update_pivot_in_grid(&wb.state, &effect, id, canvas, (0, 0), &wide, true)
+    let refusal = update_pivot_in_grid(&wb.state, &effect, id, canvas, (0, 0), &wide, true, None)
         .expect_err("a view wider than its block is refused");
     assert!(refusal.contains("1025 columns wide") && refusal.contains("1024"), "{refusal}");
     assert_eq!(cell_count(&wb, canvas), 0, "the refusal wrote nothing -- not even the part that fits");
@@ -1111,7 +1111,7 @@ fn the_write_funnel_refuses_a_framed_pivot_off_a_canvas_and_one_wider_than_its_b
     assert!(ensure_canvas_pivot_fits_block(id, (0, 1), &exact).is_err(), "an anchor off the block start leaves less room");
 
     // Positive control: a framed pivot that fits IS written into the canvas.
-    update_pivot_in_grid(&wb.state, &effect, id, canvas, (0, 0), &one_cell_view(id), true)
+    update_pivot_in_grid(&wb.state, &effect, id, canvas, (0, 0), &one_cell_view(id), true, None)
         .expect("a framed pivot that fits is written into its canvas");
     assert_eq!(cell_value(&wb, canvas, 0, 0), Some(engine::CellValue::Number(42.0)));
 }
@@ -1308,6 +1308,7 @@ fn a_canvas_pivot_frame_moves_undoably_and_a_worksheet_pivot_refuses_one() {
         refresh_on_open: None,
         use_custom_sort_lists: None,
         canvas_frame: Some(frame),
+        style: None,
     };
     let update = |r| crate::pivot::commands::update_pivot_properties_core(&wb.state, &wb.file, &wb.pivots, r);
     crate::document_effect::mark_saved(&wb.file);
@@ -1323,14 +1324,14 @@ fn a_canvas_pivot_frame_moves_undoably_and_a_worksheet_pivot_refuses_one() {
     assert!(!wb.file.is_dirty(), "the refusals left the document clean");
     assert_eq!(depth(), depth_before, "and recorded nothing");
 
-    let moved = pivot_engine::CanvasFrame { x: 200.0, y: 10.0, width: 500.0, height: 260.0, frozen_headers: true };
-    update(request(framed, moved.into())).expect("a canvas pivot's frame moves");
-    assert_eq!(stored_definition(&wb, framed).canvas_frame, Some(moved));
+    let moved = pivot_engine::CanvasFrame { x: 200.0, y: 10.0, width: 500.0, height: 260.0, frozen_headers: true, container: None };
+    update(request(framed, moved.clone().into())).expect("a canvas pivot's frame moves");
+    assert_eq!(stored_definition(&wb, framed).canvas_frame, Some(moved.clone()));
     assert!(wb.file.is_dirty(), "moving the box is a document change");
     assert_eq!(wb.state.undo_stack.lock().unwrap().undo_description(), Some("Move pivot"));
 
     // Saving the SAME frame again adds no Ctrl+Z step.
-    update(request(framed, moved.into())).unwrap();
+    update(request(framed, moved.clone().into())).unwrap();
     assert_eq!(depth(), depth_before + 1, "a no-op frame save records nothing");
 
     // Ctrl+Z puts the box back, through the real restore.
@@ -1357,6 +1358,7 @@ fn frame_request(
         refresh_on_open: None,
         use_custom_sort_lists: None,
         canvas_frame: Some(frame.into()),
+        style: None,
     }
 }
 
@@ -1410,6 +1412,7 @@ fn canvas_timeline(sheet_index: usize) -> crate::timeline_slicer::TimelineSlicer
         show_scrollbar: true,
         style_preset: "TimelineStyleLight1".to_string(),
         connected_pivot_ids: vec![],
+        container: None,
     }
 }
 
@@ -1440,7 +1443,7 @@ fn canvas_shape() -> crate::controls::ControlMetadata {
             crate::controls::ControlPropertyValue { value_type: "static".to_string(), value: value.to_string() },
         );
     }
-    crate::controls::ControlMetadata { control_type: "shape".to_string(), properties }
+    crate::controls::ControlMetadata { control_type: "shape".to_string(), uid: String::new(), properties }
 }
 
 /// THE M8 CONTRACT. An arrange (Align Left here) moves a slicer, a timeline, a
@@ -1611,7 +1614,9 @@ fn the_canvas_frame_wire_shape_is_camel_case_and_optional() {
         end_row: 1,
         end_col: 1,
         is_empty: false,
+        is_model: false,
         canvas_frame: frame,
+        style: None,
     };
     let bare = serde_json::to_value(region(None)).unwrap();
     assert!(bare.get("canvasFrame").is_none(), "a worksheet pivot's region has no canvasFrame key: {bare}");
@@ -1621,6 +1626,234 @@ fn the_canvas_frame_wire_shape_is_camel_case_and_optional() {
     let request: crate::pivot::types::CreatePivotRequest =
         serde_json::from_str(r#"{"sourceRange":"A1:B4","destinationCell":"A1"}"#).unwrap();
     assert!(request.canvas_frame.is_none(), "an old request without canvasFrame still deserializes");
+}
+
+// ---------------------------------------------------------------------------
+// WP-A S1: GETPIVOTDATA names the pivot by its ANCHOR (Excel parity), and the
+// text a pick builds round-trips on a canvas pivot -- from a worksheet and from
+// a floating grid's cell.
+// ---------------------------------------------------------------------------
+
+/// The text the frontend pick builds (`getPivotDataPick.ts`): quoted field and
+/// item strings (an embedded quote doubled), `;` -- the harness locale's list
+/// separator -- and the anchor as `$COL$ROW` on the qualifying sheet.
+fn getpivotdata_text(
+    result: &crate::pivot::types::GetPivotDataFormulaResult,
+    sheet: &str,
+    anchor: (u32, u32),
+) -> String {
+    let lit = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+    let mut text = format!(
+        "=GETPIVOTDATA({};'{}'!${}${}",
+        lit(&result.data_field),
+        sheet,
+        crate::column_index_to_letter(anchor.1),
+        anchor.0 + 1
+    );
+    for (field, item) in &result.field_item_pairs {
+        text.push_str(&format!(";{};{}", lit(field), lit(item)));
+    }
+    text.push(')');
+    text
+}
+
+/// A Region | Revenue source on the ACTIVE sheet: ten times Sheet1's sales, so
+/// no number of it equals one of Sheet1's (North 150, South 200).
+fn seed_revenue(wb: &Workbook) {
+    for (r, c, v) in [
+        (0, 0, "Region"),
+        (0, 1, "Revenue"),
+        (1, 0, "North"),
+        (1, 1, "100"),
+        (2, 0, "South"),
+        (2, 1, "200"),
+        (3, 0, "North"),
+        (3, 1, "50"),
+    ] {
+        wb.set(r, c, v);
+    }
+}
+
+/// Two canvas pivots in two blocks, each with its own value field NAME and its
+/// own numbers, so neither can answer for the other: `lookup_pivot_data` picks
+/// the pivot whose rectangle holds the referenced cell and matches the value
+/// field by name. The pick's anchor is each pivot's destination, and the text
+/// built on it answers that pivot's exact number on a worksheet AND in a
+/// floating grid. Built on pivot A's anchor instead, pivot B's text does NOT
+/// answer B's number -- the anchor is what selects the pivot.
+#[test]
+fn getpivotdata_built_on_the_anchor_answers_the_picked_value() {
+    let wb = Workbook::new(2);
+    seed_sales(&wb); // Sheet1: Region | Sales, North 15, South 20
+    wb.switch_to(1);
+    seed_revenue(&wb); // Sheet2: Region | Revenue, North 150, South 200
+    let canvas = add_canvas(&wb).active_index;
+    let canvas_name = wb.state.sheet_names.read().unwrap()[canvas].clone();
+
+    let a = create(&wb, create_request(canvas, Some(0), Some(test_frame_config())))
+        .expect("pivot A over Sheet1")
+        .pivot_id;
+    let b = crate::pivot::commands::create_pivot_core(
+        &wb.state,
+        &wb.file,
+        &wb.pivots,
+        recalc_states(&wb),
+        create_request(canvas, Some(1), Some(test_frame_config())),
+        vec!["Region".to_string()],
+        vec![("Revenue".to_string(), pivot_engine::AggregationType::Sum)],
+    )
+    .expect("pivot B over Sheet2")
+    .pivot_id;
+    let anchor_a = stored_definition(&wb, a).destination;
+    let anchor_b = stored_definition(&wb, b).destination;
+    assert_eq!(anchor_a, (0, 0), "fixture: A in block 0");
+    assert_eq!(
+        anchor_b,
+        (0, crate::pivot::operations::CANVAS_PIVOT_BLOCK_COLS),
+        "fixture: B in block 1"
+    );
+
+    // The North value cell of each: view row 1, view column 1.
+    let pick = |anchor: (u32, u32)| {
+        crate::pivot::commands::pivot_data_formula_at(&wb.state, &wb.pivots, canvas, anchor.0 + 1, anchor.1 + 1)
+            .expect("a data cell resolves")
+    };
+    let pick_a = pick(anchor_a);
+    let pick_b = pick(anchor_b);
+    assert_eq!((pick_a.pivot_anchor_row, pick_a.pivot_anchor_col), anchor_a, "A's pick carries A's anchor");
+    assert_eq!((pick_b.pivot_anchor_row, pick_b.pivot_anchor_col), anchor_b, "B's pick carries B's anchor");
+    assert_eq!(pick_a.data_field, "Sum of Sales");
+    assert_eq!(pick_b.data_field, "Sum of Revenue");
+    assert_eq!(pick_b.field_item_pairs, vec![("Region".to_string(), "North".to_string())]);
+
+    let text_a = getpivotdata_text(&pick_a, &canvas_name, (pick_a.pivot_anchor_row, pick_a.pivot_anchor_col));
+    let text_b = getpivotdata_text(&pick_b, &canvas_name, (pick_b.pivot_anchor_row, pick_b.pivot_anchor_col));
+    let (value_a, value_b) = (15.0, 150.0);
+    assert_ne!(value_a, value_b, "fixture: the two pivots' answers differ");
+
+    // On a worksheet.
+    wb.switch_to(0);
+    wb.set(10, 0, &text_a);
+    wb.set(11, 0, &text_b);
+    assert_eq!(wb.value(0, 10, 0), engine::CellValue::Number(value_a), "A's pick on Sheet1: {text_a}");
+    assert_eq!(wb.value(0, 11, 0), engine::CellValue::Number(value_b), "B's pick on Sheet1: {text_b}");
+
+    // In a floating grid's cell, through its real write door.
+    let fr = crate::floating_range::create_floating_range_inner(&wb.state, &wb.file, Some("Float1".to_string()), 0.0, 0.0)
+        .expect("create a floating grid");
+    crate::floating_range::update_floating_range_inner(
+        &wb.state,
+        &wb.file,
+        fr.range.id,
+        crate::api_types::FloatingRangePatch { row_count: Some(2), col_count: Some(1), ..Default::default() },
+    )
+    .expect("grow the floating grid to two rows");
+    for (row, text) in [(0, &text_a), (1, &text_b)] {
+        crate::floating_range::update_floating_range_cell_inner(
+            &wb.state,
+            &wb.file,
+            &wb.files,
+            &wb.pivots,
+            &wb.pane,
+            &wb.filters,
+            fr.range.id,
+            row,
+            0,
+            text.clone(),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("floating grid cell ({row},0): {e}"));
+    }
+    assert_eq!(wb.value(fr.backing_sheet_index, 0, 0), engine::CellValue::Number(value_a), "A's pick in Float1");
+    assert_eq!(wb.value(fr.backing_sheet_index, 1, 0), engine::CellValue::Number(value_b), "B's pick in Float1");
+
+    // The anchor has teeth: B's arguments on A's anchor do not answer B's
+    // number (A has no "Sum of Revenue").
+    let wrong = getpivotdata_text(&pick_b, &canvas_name, anchor_a);
+    wb.set(12, 0, &wrong);
+    assert_ne!(
+        wb.value(0, 12, 0),
+        engine::CellValue::Number(value_b),
+        "B's arguments answered B's value on A's anchor -- the anchor is not what names the pivot: {wrong}"
+    );
+}
+
+/// The engine half of the live AdventureWorks proof: a definition spelled the
+/// way a data-model pivot spells it (`[Revenue]` for the measure,
+/// `BI.dim_territory.territorygroup` for the row field) resolves to a pick
+/// whose GETPIVOTDATA text answers the picked cell's number, through the
+/// formula path and through `lookup_pivot_data` directly.
+#[test]
+fn getpivotdata_round_trips_on_a_model_shaped_definition() {
+    let wb = Workbook::new(1);
+    for (r, c, v) in [
+        (0, 0, "territorygroup"),
+        (0, 1, "Revenue"),
+        (1, 0, "Europe"),
+        (1, 1, "100"),
+        (2, 0, "Pacific"),
+        (2, 1, "40"),
+        (3, 0, "Europe"),
+        (3, 1, "25"),
+    ] {
+        wb.set(r, c, v);
+    }
+    let canvas = add_canvas(&wb).active_index;
+    let canvas_name = wb.state.sheet_names.read().unwrap()[canvas].clone();
+    let id = crate::pivot::commands::create_pivot_core(
+        &wb.state,
+        &wb.file,
+        &wb.pivots,
+        recalc_states(&wb),
+        create_request(canvas, Some(0), Some(test_frame_config())),
+        vec!["territorygroup".to_string()],
+        vec![("Revenue".to_string(), pivot_engine::AggregationType::Sum)],
+    )
+    .expect("a canvas pivot")
+    .pivot_id;
+
+    // Respell the definition as a model pivot's and re-render the stored view.
+    {
+        let mut tables = wb.pivots.pivot_tables.write(&crate::document_effect::test_seed_effect()).unwrap();
+        let (def, cache) = tables.get_mut(&id).unwrap();
+        def.row_fields[0].name = "BI.dim_territory.territorygroup".to_string();
+        def.value_fields[0].name = "[Revenue]".to_string();
+        let view = crate::pivot::operations::safe_calculate_pivot(def, cache);
+        wb.pivots.views.lock().unwrap().insert(id, view);
+    }
+    let anchor = stored_definition(&wb, id).destination;
+
+    // Europe's value cell: view row 1, view column 1.
+    let pick = crate::pivot::commands::pivot_data_formula_at(&wb.state, &wb.pivots, canvas, anchor.0 + 1, anchor.1 + 1)
+        .expect("Europe's value cell resolves");
+    assert_eq!(pick.data_field, "[Revenue]");
+    assert_eq!(
+        pick.field_item_pairs,
+        vec![("BI.dim_territory.territorygroup".to_string(), "Europe".to_string())]
+    );
+    assert_eq!((pick.pivot_anchor_row, pick.pivot_anchor_col), anchor);
+
+    let direct = {
+        let tables = wb.pivots.pivot_tables.read().unwrap();
+        let views = wb.pivots.views.lock().unwrap();
+        let pairs: Vec<(&str, &str)> =
+            pick.field_item_pairs.iter().map(|(f, i)| (f.as_str(), i.as_str())).collect();
+        crate::pivot::operations::lookup_pivot_data(
+            &tables,
+            &views,
+            &pick.data_field,
+            Some(&canvas_name),
+            pick.pivot_anchor_row,
+            pick.pivot_anchor_col,
+            &pairs,
+        )
+    };
+    assert_eq!(direct, Some(125.0), "Europe = 100 + 25, looked up with the pick's own arguments");
+
+    let text = getpivotdata_text(&pick, &canvas_name, anchor);
+    wb.switch_to(0);
+    wb.set(10, 0, &text);
+    assert_eq!(wb.value(0, 10, 0), engine::CellValue::Number(125.0), "the pick's text on Sheet1: {text}");
 }
 
 // ---------------------------------------------------------------------------
@@ -2283,4 +2516,350 @@ fn the_wiring_census_detects_a_misordered_or_commented_gate() {
     // No terminator at all: loud, never a silent widening.
     let r = std::panic::catch_unwind(|| body_of("pub fn door() {\n    x();", "pub fn door("));
     assert!(r.is_err(), "an unbounded body must panic");
+}
+
+// ---------------------------------------------------------------------------
+// WP-C (D-FORMAT): a canvas pivot box's VISUAL CONTAINER and every pivot's
+// persisted STYLE, both through `update_pivot_properties`
+// ---------------------------------------------------------------------------
+
+fn style_request(
+    id: pivot_engine::PivotId,
+    style: Option<Option<crate::pivot::types::PivotStyleConfig>>,
+) -> crate::pivot::types::UpdatePivotPropertiesRequest {
+    crate::pivot::types::UpdatePivotPropertiesRequest {
+        pivot_id: id,
+        name: None,
+        allow_multiple_filters_per_field: None,
+        enable_data_value_editing: None,
+        refresh_on_open: None,
+        use_custom_sort_lists: None,
+        canvas_frame: None,
+        style,
+    }
+}
+
+fn lock_page(wb: &Workbook, index: usize, on: bool) {
+    let patch = crate::api_types::CanvasLayoutPatch { objects_locked: Some(on), ..Default::default() };
+    crate::sheets::set_canvas_layout_inner(&wb.state, &wb.file, Some(index), &patch).expect("toggle Lock Objects");
+}
+
+/// Ctrl+Z through the real restore path.
+fn undo_once(wb: &Workbook) {
+    let transaction = wb.state.undo_stack.lock().unwrap().pop_undo().expect("an undo step");
+    crate::undo_commands::apply_changes(
+        &wb.state, &wb.file, &wb.files, &wb.pivots, &wb.slicer, &wb.filters, &wb.pane, &wb.timelines, transaction, true,
+    );
+}
+
+fn box_container() -> visual_format::VisualContainerFormat {
+    serde_json::from_value(serde_json::json!({
+        "border": {"show": true, "color": "#336699", "radius": 8},
+        "background": {"color": "#fff4e5"},
+        "title": {"show": true, "text": "Sales by region"}
+    }))
+    .unwrap()
+}
+
+/// A container-only change is FORMATTING: one "Format pivot" step, and a page
+/// with Lock Objects on lets it through -- while a geometry change on the same
+/// page is still refused, and a bad container is refused before the effect.
+/// Ctrl+Z puts the box's old container back.
+///
+/// SABOTAGE: compare the whole frame (not `geometry_differs`) in the lock gate
+/// -> the locked format write is refused.
+#[test]
+fn a_canvas_pivot_container_formats_undoably_and_a_locked_page_lets_it_through() {
+    let wb = Workbook::new(1);
+    let canvas = add_canvas(&wb).active_index;
+    let canvas_name = wb.state.sheet_names.read().unwrap()[canvas].clone();
+    let framed = insert_pivot(&wb, &canvas_name, (0, 0), Some(test_frame()));
+    lock_page(&wb, canvas, true);
+    let update = |r| crate::pivot::commands::update_pivot_properties_core(&wb.state, &wb.file, &wb.pivots, r);
+    crate::document_effect::mark_saved(&wb.file);
+    let depth_before = undo_depth(&wb);
+
+    let formatted = pivot_engine::CanvasFrame { container: Some(box_container()), ..test_frame() };
+    update(frame_request(framed, formatted.clone())).expect("a container is formatting: a locked page lets it through");
+    assert_eq!(stored_definition(&wb, framed).canvas_frame, Some(formatted.clone()));
+    assert!(wb.file.is_dirty(), "formatting the box is a document change");
+    assert_eq!(undo_depth(&wb), depth_before + 1);
+    assert_eq!(wb.state.undo_stack.lock().unwrap().undo_description(), Some("Format pivot"));
+
+    // The same container again: no step.
+    update(frame_request(framed, formatted.clone())).unwrap();
+    assert_eq!(undo_depth(&wb), depth_before + 1, "an unchanged container records nothing");
+
+    // A geometry change on the locked page is still refused, cleanly.
+    crate::document_effect::mark_saved(&wb.file);
+    let moved = update(frame_request(framed, pivot_engine::CanvasFrame { x: 300.0, ..formatted.clone() }));
+    assert!(moved.is_err_and(|e| e.contains("Lock Objects")), "a move is still refused on a locked page");
+    assert!(!wb.file.is_dirty(), "the refused move left the document clean");
+
+    // A bad container is refused before the effect, naming the leaf.
+    let mut bad = box_container();
+    bad.border.as_mut().unwrap().radius = Some(101.0);
+    let refused = update(frame_request(framed, pivot_engine::CanvasFrame { container: Some(bad), ..test_frame() }));
+    assert_eq!(refused.unwrap_err(), "border.radius must be a number from 0 to 100.");
+    assert!(!wb.file.is_dirty(), "the refused container left the document clean");
+    assert_eq!(undo_depth(&wb), depth_before + 1);
+    assert_eq!(stored_definition(&wb, framed).canvas_frame, Some(formatted));
+
+    undo_once(&wb);
+    assert_eq!(stored_definition(&wb, framed).canvas_frame, Some(test_frame()), "undo takes the container away");
+}
+
+/// REVIEW R1-12: a STYLE-ONLY request on a WORKSHEET pivot (no frame -- every
+/// worksheet gallery click) records ONE "PivotTable Style" step whose undo
+/// restores the previous style. Set, clear and no-op; the region carries the
+/// style to the renderer; a bad style is refused before the effect.
+///
+/// SABOTAGE: take the `before` snapshot only when `canvas_frame` is present
+/// (the pre-WP-C shape) -> no step is recorded for a style-only request.
+#[test]
+fn a_worksheet_pivot_style_is_one_undoable_step_and_rides_its_region() {
+    let wb = Workbook::new(2);
+    seed_sales(&wb);
+    let id = create(&wb, create_request(1, Some(0), None).with_destination("A1"))
+        .expect("a worksheet pivot on Sheet2 over Sheet1's data")
+        .pivot_id;
+    let region_sheet = crate::pivot::operations::get_pivot_region(&wb.state, id).unwrap().sheet_index;
+    let update = |r| crate::pivot::commands::update_pivot_properties_core(&wb.state, &wb.file, &wb.pivots, r);
+    let region_style = || {
+        crate::pivot::commands::pivot_regions_for_sheet(&wb.state, &wb.pivots, region_sheet)
+            .into_iter()
+            .find(|r| r.pivot_id == id)
+            .expect("the pivot's region")
+            .style
+    };
+    assert_eq!(stored_definition(&wb, id).style, None, "a new pivot wears the default style");
+    assert_eq!(region_style(), None);
+    crate::document_effect::mark_saved(&wb.file);
+    let depth_before = undo_depth(&wb);
+
+    let medium = crate::pivot::types::PivotStyleConfig {
+        style_id: "PivotStyleMedium9".to_string(),
+        theme_overrides: std::collections::BTreeMap::from([("headerBackground".to_string(), "#112233".to_string())]),
+    };
+    update(style_request(id, Some(Some(medium.clone())))).expect("a style is set");
+    assert_eq!(stored_definition(&wb, id).style, Some(medium.clone().into()));
+    assert!(wb.file.is_dirty());
+    assert_eq!(undo_depth(&wb), depth_before + 1, "ONE step for a style-only request");
+    assert_eq!(wb.state.undo_stack.lock().unwrap().undo_description(), Some("PivotTable Style"));
+    assert_eq!(region_style(), Some(medium.clone()), "the region carries the style to the renderer");
+
+    update(style_request(id, Some(Some(medium.clone())))).unwrap();
+    assert_eq!(undo_depth(&wb), depth_before + 1, "the same style again records nothing");
+    update(style_request(id, None)).unwrap();
+    assert_eq!(undo_depth(&wb), depth_before + 1, "a request without a style keeps it and records nothing");
+    assert_eq!(stored_definition(&wb, id).style, Some(medium.clone().into()));
+
+    // Refused before the effect: an unknown override key, a colour that is not one.
+    for bad in [
+        crate::pivot::types::PivotStyleConfig {
+            style_id: "PivotStyleMedium9".to_string(),
+            theme_overrides: std::collections::BTreeMap::from([("fontFamily".to_string(), "#000000".to_string())]),
+        },
+        crate::pivot::types::PivotStyleConfig {
+            style_id: "PivotStyleMedium9".to_string(),
+            theme_overrides: std::collections::BTreeMap::from([("headerText".to_string(), "red".to_string())]),
+        },
+    ] {
+        crate::document_effect::mark_saved(&wb.file);
+        assert!(update(style_request(id, Some(Some(bad)))).is_err());
+        assert!(!wb.file.is_dirty(), "a refused style leaves the document clean");
+        assert_eq!(undo_depth(&wb), depth_before + 1);
+        assert_eq!(stored_definition(&wb, id).style, Some(medium.clone().into()));
+    }
+
+    // Clear = back to the default style, one step.
+    update(style_request(id, Some(None))).expect("a style is cleared");
+    assert_eq!(stored_definition(&wb, id).style, None);
+    assert_eq!(undo_depth(&wb), depth_before + 2);
+
+    undo_once(&wb);
+    assert_eq!(stored_definition(&wb, id).style, Some(medium.into()), "undo brings the cleared style back");
+    undo_once(&wb);
+    assert_eq!(stored_definition(&wb, id).style, None, "undo of the first set restores the default style");
+
+    // Persisted: the style rides the opaque definition JSON, snake_case.
+    update(style_request(id, Some(Some(crate::pivot::types::PivotStyleConfig {
+        style_id: "PivotStyleDark2".to_string(),
+        theme_overrides: Default::default(),
+    }))))
+    .unwrap();
+    let mut saved = ::persistence::Workbook::new();
+    crate::persistence::collect_pivot_definitions(&wb.pivots, &wb.state, &mut saved);
+    let entry = saved.pivot_definitions.iter().find(|p| p.id == id).expect("the pivot is saved");
+    assert_eq!(entry.definition["style"], serde_json::json!({"style_id": "PivotStyleDark2"}));
+}
+
+/// RULING R3 (WP-C S10b): the HIDDEN GRID wears the pivot's persisted style --
+/// the colours the box paints, read from the one preset file both sides share
+/// (`pivot/grid_theme.rs`) -- so a copy of the cells carries them. A style
+/// change rewrites the cells in the new colours without touching a value, and
+/// its undo (the definition restore, through `finalize_pivot_update`) puts the
+/// default style's colours back; redo brings the chosen ones again.
+///
+/// SABOTAGE (confirmed): drop the `restyle_pivot_cells` call in
+/// `update_pivot_properties_core` -> the header stays the default style's fill;
+/// drop the `restyle_pivot_cells` call in `apply_pivot_definition_restore`'s
+/// presentation-only branch -> the undo leg fails;
+/// drop the extent guard in `restyle_pivot_in_grid` -> the last leg fails.
+#[test]
+fn a_pivot_style_restyles_the_hidden_grid_and_undo_puts_the_default_back() {
+    use crate::pivot::grid_theme::PivotGridTheme;
+    use pivot_engine::{BackgroundStyle, PivotCellType};
+
+    let wb = Workbook::new(2);
+    seed_sales(&wb);
+    let id = create(&wb, create_request(1, Some(0), None).with_destination("A1"))
+        .expect("a worksheet pivot on Sheet2 over Sheet1's data")
+        .pivot_id;
+    let region = crate::pivot::operations::get_pivot_region(&wb.state, id).expect("the region");
+    let sheet = region.sheet_index;
+    let view = wb.pivots.views.lock().unwrap().get(&id).cloned().expect("the stored view");
+
+    // Where the header, a value and the grand total sit in the hidden grid.
+    let find = |want: &dyn Fn(&pivot_engine::PivotViewCell) -> bool, what: &str| -> (u32, u32) {
+        for (r, descriptor) in view.rows.iter().enumerate() {
+            if !descriptor.visible {
+                continue;
+            }
+            for (c, cell) in view.cells[r].iter().enumerate() {
+                if want(cell) {
+                    return (region.start_row + descriptor.view_row as u32, region.start_col + c as u32);
+                }
+            }
+        }
+        panic!("the view has no {} cell", what)
+    };
+    let header = find(&|c| c.background_style == BackgroundStyle::Header, "header");
+    let value = find(
+        &|c| c.cell_type == PivotCellType::Data && c.background_style == BackgroundStyle::Normal,
+        "value",
+    );
+    let grand = find(&|c| c.background_style == BackgroundStyle::GrandTotal, "grand total");
+
+    let look = |at: (u32, u32)| -> (engine::Fill, engine::ThemeColor, bool) {
+        let active = *wb.state.active_sheet.read().unwrap();
+        let index = if sheet == active {
+            wb.state.grid.read().unwrap().get_cell(at.0, at.1).map(|c| c.style_index)
+        } else {
+            wb.state.grids.read().unwrap()[sheet].get_cell(at.0, at.1).map(|c| c.style_index)
+        }
+        .unwrap_or_else(|| panic!("no pivot cell at {:?}", at));
+        let styles = wb.state.style_registry.read().unwrap();
+        let style = styles.get(index);
+        (style.fill.clone(), style.font.color.clone(), style.font.bold)
+    };
+    let solid = |c: engine::Color| engine::Fill::Solid { color: engine::ThemeColor::Absolute(c) };
+    let abs = |c: engine::Color| engine::ThemeColor::Absolute(c);
+    let values = || [header, value, grand].map(|(r, c)| cell_value(&wb, sheet, r, c));
+    let values_before = values();
+
+    // A new pivot wears the default style.
+    let light = PivotGridTheme::default_style();
+    assert_eq!(look(header), (solid(light.header_background), abs(light.header_text), true));
+    assert_eq!(look(value).0, solid(light.value_background));
+    assert_eq!(look(grand).0, solid(light.grand_total_background));
+
+    // Dark 1 with one override: the cells follow, the values do not move.
+    let update = |r| crate::pivot::commands::update_pivot_properties_core(&wb.state, &wb.file, &wb.pivots, r);
+    let dark = crate::pivot::types::PivotStyleConfig {
+        style_id: "PivotStyleDark1".to_string(),
+        theme_overrides: std::collections::BTreeMap::from([("grandTotalBackground".to_string(), "#112233".to_string())]),
+    };
+    update(style_request(id, Some(Some(dark.clone())))).expect("the style is set");
+    let dark_theme = PivotGridTheme::for_choice(Some(&dark.clone().into()));
+    assert_ne!(dark_theme.header_background, light.header_background, "precondition: Dark 1 is not the default look");
+    assert_eq!(look(header), (solid(dark_theme.header_background), abs(dark_theme.header_text), true), "the header follows the style");
+    assert_eq!(look(value).0, solid(dark_theme.value_background), "a value cell follows the style");
+    assert_eq!(look(value).1, abs(dark_theme.value_text));
+    assert_eq!(look(grand).0, solid(engine::Color::from_hex("#112233").unwrap()), "the override wins");
+    assert_eq!(values(), values_before, "a restyle changes no value");
+
+    // Undo: the default colours are back. Redo: Dark 1 again.
+    undo_once(&wb);
+    assert_eq!(stored_definition(&wb, id).style, None);
+    assert_eq!(look(header).0, solid(light.header_background), "undo puts the default style's header back");
+    assert_eq!(look(value).0, solid(light.value_background));
+    let redo = wb.state.undo_stack.lock().unwrap().pop_redo().expect("a redo step");
+    crate::undo_commands::apply_changes(
+        &wb.state, &wb.file, &wb.files, &wb.pivots, &wb.slicer, &wb.filters, &wb.pane, &wb.timelines, redo, false,
+    );
+    assert_eq!(stored_definition(&wb, id).style, Some(dark.into()));
+    assert_eq!(look(header).0, solid(dark_theme.header_background), "redo re-renders in the chosen style");
+    assert_eq!(values(), values_before);
+
+    // A stored view that does not cover the written block (a `.calp` refresh
+    // writes without storing one) restyles NOTHING: the style is saved, no
+    // cell -- and above all no value -- is touched. The restyle never writes
+    // values in any case.
+    wb.pivots.views.lock().unwrap().insert(id, one_cell_view(id));
+    let light2 = crate::pivot::types::PivotStyleConfig { style_id: "PivotStyleLight2".to_string(), theme_overrides: Default::default() };
+    update(style_request(id, Some(Some(light2.clone())))).expect("the style is saved");
+    assert_eq!(stored_definition(&wb, id).style, Some(light2.into()));
+    assert_eq!(look(header).0, solid(dark_theme.header_background), "a mismatched stored view restyled the block");
+    assert_eq!(values(), values_before, "a restyle changed a value");
+}
+
+/// A BI pivot reloaded from a file has an EMPTY cache and no stored view until
+/// its first refresh (`persistence.rs` load path). Choosing a PivotTable Style
+/// leaves its cells alone (`restyle_pivot_cells` finds no view) and records a
+/// "PivotTable Style" step -- and its undo used to RE-RENDER over the empty
+/// cache: `finalize_pivot_update` cleared the saved output block. The undo and
+/// the redo now put the definition back without re-rendering, as the forward
+/// edit did, so every value survives both.
+///
+/// SABOTAGE (confirmed): make `pivot_differs_only_in_presentation` return
+/// false -> the undo re-renders over the empty cache and the values vanish.
+#[test]
+fn undoing_a_style_on_an_unrefreshed_bi_pivot_keeps_its_cells() {
+    let wb = Workbook::new(2);
+    seed_sales(&wb);
+    let id = create(&wb, create_request(1, Some(0), None).with_destination("A1"))
+        .expect("a worksheet pivot on Sheet2 over Sheet1's data")
+        .pivot_id;
+    let region = crate::pivot::operations::get_pivot_region(&wb.state, id).expect("the region");
+    let sheet = region.sheet_index;
+    let block = || -> Vec<Option<engine::CellValue>> {
+        let mut out = Vec::new();
+        for r in region.start_row..=region.end_row {
+            for c in region.start_col..=region.end_col {
+                out.push(cell_value(&wb, sheet, r, c));
+            }
+        }
+        out
+    };
+    let saved_output = block();
+    assert!(
+        saved_output.iter().flatten().any(|v| matches!(v, engine::CellValue::Number(_))),
+        "precondition: the pivot wrote numbers"
+    );
+
+    // As the load path leaves a BI pivot: an empty cache, no stored view.
+    {
+        let mut tables = wb.pivots.pivot_tables.write(&crate::document_effect::test_seed_effect()).unwrap();
+        let entry = tables.get_mut(&id).expect("the pivot");
+        entry.1 = pivot_engine::PivotCache::new(id, 0);
+    }
+    wb.pivots.views.lock().unwrap().remove(&id);
+
+    let update = |r| crate::pivot::commands::update_pivot_properties_core(&wb.state, &wb.file, &wb.pivots, r);
+    let dark = crate::pivot::types::PivotStyleConfig { style_id: "PivotStyleDark1".to_string(), theme_overrides: Default::default() };
+    update(style_request(id, Some(Some(dark.clone())))).expect("the style is saved");
+    assert_eq!(wb.state.undo_stack.lock().unwrap().undo_description(), Some("PivotTable Style"));
+    assert_eq!(block(), saved_output, "the forward style change touches no value");
+
+    undo_once(&wb);
+    assert_eq!(stored_definition(&wb, id).style, None, "undo restores the default style");
+    assert_eq!(block(), saved_output, "undo must not clear an unrefreshed pivot's saved output");
+
+    let redo = wb.state.undo_stack.lock().unwrap().pop_redo().expect("a redo step");
+    crate::undo_commands::apply_changes(
+        &wb.state, &wb.file, &wb.files, &wb.pivots, &wb.slicer, &wb.filters, &wb.pane, &wb.timelines, redo, false,
+    );
+    assert_eq!(stored_definition(&wb, id).style, Some(dark.into()), "redo brings the style back");
+    assert_eq!(block(), saved_output, "redo must not clear it either");
 }

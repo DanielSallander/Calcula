@@ -64,6 +64,7 @@ import { onAppEvent, AppEvents } from "./events";
 export {
   getSelectionOwner,
   isSelectionOwned,
+  selectionOwnerReceivesTyping,
   selectionRefusalFor,
   refuseIfSelectionOwned,
   defaultSelectionRefusal,

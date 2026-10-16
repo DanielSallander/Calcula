@@ -452,6 +452,81 @@ fn advanced_filter_hidden_rows_do_not_survive_the_document_they_belong_to() {
     );
 }
 
+/// Object property BINDINGS are a save source (`bindings.json`). Left resident,
+/// workbook A's bindings would be written into workbook B's next save -- and
+/// where an id collides, overlay B's object with A's formula. Their derived
+/// runtime (dependency maps, resolved values, the page-filter mirror) describes
+/// the same document and must go with it.
+#[test]
+fn reset_clears_bindings_and_runtime() {
+    use crate::api_types::{ObjectBindingKind, ObjectBindingRef, PageFilterWire, ResolvedBinding};
+    use crate::object_bindings::store::{BindingKey, StoredBinding};
+
+    let s = Stores::new();
+    let key = BindingKey {
+        object: ObjectBindingRef {
+            kind: ObjectBindingKind::Chart,
+            id: identity::EntityId::from_bytes(identity::generate_uuid_v7()).to_string(),
+        },
+        path: "/spec/title".to_string(),
+    };
+    let generation_before = {
+        let mut store = s.state.object_bindings.write(&seed()).unwrap();
+        store.bindings.insert(key.clone(), StoredBinding { formula: "=LEAK!A1".to_string(), model: None });
+        store.bump_generation();
+        store.generation
+    };
+    {
+        let mut runtime = s.state.object_binding_runtime.lock().unwrap();
+        runtime.resolved.insert(
+            key.clone(),
+            ResolvedBinding {
+                object: key.object.clone(),
+                path: key.path.clone(),
+                value: serde_json::Value::String("LEAK".to_string()),
+                display: "LEAK".to_string(),
+                error: None,
+                pending: false,
+            },
+        );
+        runtime.page_filters.insert(
+            (identity::SheetId::from_bytes(identity::generate_uuid_v7()), "conn".to_string()),
+            vec![PageFilterWire { field: "T.C".to_string(), included_items: vec!["x".to_string()], filter_level: 1 }],
+        );
+        // The measure pass's caches (WP-D S4): workbook A's measure values, its
+        // model resolution and its CUBE results must not answer in workbook B.
+        let page = identity::SheetId::from_bytes(identity::generate_uuid_v7());
+        runtime.measure_cache.insert(
+            (page, "conn".to_string(), "REVENUE".to_string(), 0),
+            crate::object_bindings::eval::MeasureOutcome::Number(1.0, "LEAK".to_string()),
+        );
+        runtime.measure_models.insert("model".to_string(), Some("conn".to_string()));
+        let mut cube = engine::CubePrefetch::default();
+        cube.results.insert("CUBEVALUE".to_string(), engine::CubeCallResult::Number(1.0));
+        runtime.cube_prefetch = std::sync::Arc::new(cube);
+        runtime.built_for_generation = generation_before;
+    }
+    assert_eq!(s.state.object_bindings.read().unwrap().bindings.len(), 1, "precondition: a binding exists");
+
+    s.reset();
+
+    let store = s.state.object_bindings.read().unwrap();
+    assert!(store.bindings.is_empty(), "workbook A's bindings would be saved into workbook B");
+    assert!(
+        store.generation > generation_before,
+        "the reset is a write of the store: it must bump the generation so no runtime \
+         built for the old set can look current"
+    );
+    drop(store);
+    let runtime = s.state.object_binding_runtime.lock().unwrap();
+    assert!(runtime.resolved.is_empty(), "workbook A's resolved values would paint in workbook B");
+    assert!(runtime.page_filters.is_empty(), "workbook A's page-filter mirror would filter workbook B's measures");
+    assert!(runtime.measure_cache.is_empty(), "workbook A's measure values would answer workbook B's bindings");
+    assert!(runtime.measure_models.is_empty(), "workbook A's model resolution would be reused in workbook B");
+    assert!(runtime.cube_prefetch.results.is_empty(), "workbook A's CUBE results would answer workbook B");
+    assert_eq!(runtime.built_for_generation, 0);
+}
+
 // ===========================================================================
 // The class sweep: the stores named alongside the three
 // ===========================================================================

@@ -126,12 +126,14 @@ describe("property definitions parameterized", () => {
     },
   );
 
-  // Verify color defaults are valid hex-ish
+  // Verify color defaults are valid hex-ish -- or "none", the one non-colour a
+  // paint key may hold: a picture has no background and no outline until the
+  // user gives it one (WP-C D-FORMAT, IMAGE_PROPERTIES fill / stroke).
   const colorProps = propTestCases.filter((p) => p.inputType === "color");
   it.each(colorProps)(
-    "$controlType.$key color default '$defaultValue' starts with #",
+    "$controlType.$key color default '$defaultValue' starts with # (or is \"none\")",
     ({ defaultValue }) => {
-      expect(defaultValue.startsWith("#")).toBe(true);
+      expect(defaultValue.startsWith("#") || defaultValue === "none").toBe(true);
     },
   );
 });

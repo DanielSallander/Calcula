@@ -7,18 +7,34 @@
 
 import { pivot } from "@api/pivot";
 import { openTaskPane, clearTaskPaneManuallyClosed } from "@api";
+import { getGridStateSnapshot } from "@api/grid";
 import { PIVOT_PANE_ID } from "../manifest";
 import type { SourceField, PivotEditorViewData } from "../types";
 import { setJustCreatedPivot, ensureDesignTabRegistered } from "./selectionHandler";
 
+/** Whether the ACTIVE sheet is a canvas page (a pivot made there is a box). */
+export function isCanvasSurface(): boolean {
+  return getGridStateSnapshot()?.surface === "canvas";
+}
+
 /**
  * Handle the pivot:created event.
- * Loads source fields and opens the pivot editor pane.
+ * Loads source fields and opens the pivot editor pane -- on a WORKSHEET. A
+ * pivot made on a CANVAS is a box whose field list lives in the ONE object
+ * pane (WP-C D-PANE): it opens on the box's Fields tab once the box is
+ * published (lib/pivotVisualSelection.ts `adoptCreatedCanvasPivot`), never as
+ * a stacked `pivot-editor` pane.
  */
 export async function handlePivotCreated(detail: { pivotId: string }): Promise<void> {
   const { pivotId } = detail;
 
   console.log("[Pivot Extension] Pivot created:", pivotId);
+
+  if (isCanvasSurface()) {
+    // The Design ribbon tab still shows at once; the pane is the object pane's.
+    ensureDesignTabRegistered();
+    return;
+  }
 
   // Clear manually closed state for pivot pane when a new pivot is created
   clearTaskPaneManuallyClosed(PIVOT_PANE_ID);

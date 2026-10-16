@@ -12,7 +12,7 @@
 
 import type { ChartSpec, ChartLayout, ParsedChartData } from "../../types";
 import type { ChartRenderTheme } from "../chartTheme";
-import { computeRadialLayout, drawTitle, drawChartBackground } from "../chartPainterUtils";
+import { computeRadialLayout, drawTitle } from "../chartPainterUtils";
 
 type Ctx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 
@@ -32,10 +32,9 @@ export function computeVisualLayout(
   return computeRadialLayout(width, height, tileLayoutSpec(spec), data, theme);
 }
 
-/** Background, then the title when there is one — the frame every tile shares. */
+/** The title block when there is one — the frame every tile shares (the background is the container's, painted under the raster). */
 export function drawVisualFrame(ctx: Ctx, spec: ChartSpec, layout: ChartLayout, theme: ChartRenderTheme): void {
-  drawChartBackground(ctx, layout, theme);
-  if (spec.title) drawTitle(ctx, spec.title, layout, theme);
+  drawTitle(ctx, spec.title, layout, theme);
 }
 
 /**

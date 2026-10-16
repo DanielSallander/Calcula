@@ -104,6 +104,11 @@ pub struct TimelineSlicer {
     /// Connected pivot table IDs (for report connections)
     #[serde(default)]
     pub connected_pivot_ids: Vec<identity::EntityId>,
+    /// The visual container (D-FORMAT, WP-C): padding, title style,
+    /// background, border, shadow. The title TEXT / visibility stay
+    /// `header_text` / `show_header` (one spelling per fact).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<visual_format::VisualContainerFormat>,
 }
 
 // ============================================================================
@@ -211,6 +216,10 @@ pub struct UpdateTimelineParams {
     pub show_scrollbar: Option<bool>,
     pub level: Option<TimelineLevel>,
     pub style_preset: Option<String>,
+    /// The visual container: absent = keep, null = clear, value = set
+    /// (validated before the effect).
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub container: Option<Option<visual_format::VisualContainerFormat>>,
 }
 
 /// Parameters for updating the timeline selection range.

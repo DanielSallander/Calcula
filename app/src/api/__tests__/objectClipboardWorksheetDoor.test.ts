@@ -136,6 +136,23 @@ describe("a worksheet with a floating control selected", () => {
     expect(clipboardDoorCommand("copy")).toBe(CoreCommands.COPY);
     expect(clipboardDoorCommand("paste")).toBe(CoreCommands.PASTE);
   });
+
+  it("an INNER selection that names its own Copy / Paste (innerClipboardCommand) wins over Controls' door", () => {
+    registerCommands(["test.inner.copy", "test.inner.paste"]);
+    cleanups.push(
+      registerObjectSelectionProvider({
+        types: ["test-inner-named"],
+        isSelected: () => false,
+        select: () => {},
+        deselectAll: () => {},
+        ownsKey: (key: ObjectSelectionKey) => key === "Clipboard",
+        innerClipboardCommand: (action) => (action === "copy" ? "test.inner.copy" : "test.inner.paste"),
+      }),
+    );
+    putOnObjectClipboard(CONTROL_TYPE, [{ copied: true }]);
+    expect(clipboardDoorCommand("copy")).toBe("test.inner.copy");
+    expect(clipboardDoorCommand("paste")).toBe("test.inner.paste");
+  });
 });
 
 describe("the worksheet branch stands aside", () => {

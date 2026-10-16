@@ -14,6 +14,8 @@ zip = { version = "2.4", default-features = false, features = ["deflate"] }
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# The visual container slicers, timelines and floating grids persist (WP-C).
+visual-format = { path = "../visual-format" }
 
 [dev-dependencies]
 tempfile = "3.10"

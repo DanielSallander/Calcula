@@ -17,7 +17,15 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 }));
 
 import { newFile, saveFile, saveFileAs } from "../file-api";
-import { addSheet, calculateSheet, copySheet, deleteSheet, renameSheet } from "../tauri-api";
+import {
+  addSheet,
+  calculateSheet,
+  copySheet,
+  deleteSheet,
+  hideSheet,
+  renameSheet,
+  unhideSheet,
+} from "../tauri-api";
 import { AppEvents, onAppEvent } from "../events";
 import {
   registerLifecycleCancelReporter,
@@ -231,6 +239,140 @@ describe("sheet CRUD announcements", () => {
     await expect(deleteSheet(3)).resolves.toBeDefined();
     expect(deleted.events).toEqual([{ sheetIndex: 3, sheetName: "" }]);
     deleted.off();
+  });
+});
+
+// ============================================================================
+// Hide / unhide: the sheet COLLECTION's visibility changed (WP-B S1)
+// ============================================================================
+
+describe("hideSheet / unhideSheet announce the sheets domain", () => {
+  const sheet = (index: number, name: string, visibility = "visible") => ({
+    index,
+    name,
+    visibility,
+  });
+  const SHEETS_COMMIT = { domains: ["sheets"], source: "commit" };
+
+  /** Answers get_active_sheet and the visibility command SEPARATELY, and
+   *  records the order in which the invokes and the announcement happened. */
+  function backend(opts: {
+    activeBefore: number;
+    command: "hide_sheet" | "unhide_sheet";
+    activeAfter: number;
+    reject?: boolean;
+    order: string[];
+  }): void {
+    invoke.mockImplementation(async (cmd: string) => {
+      opts.order.push(`invoke:${cmd}`);
+      if (cmd === "get_active_sheet") return opts.activeBefore;
+      if (cmd === opts.command) {
+        if (opts.reject) throw new Error("Cannot hide the last visible sheet");
+        return {
+          sheets: [sheet(0, "Page 1"), sheet(1, "Page 2", opts.command === "hide_sheet" ? "hidden" : "visible")],
+          activeIndex: opts.activeAfter,
+        };
+      }
+      throw new Error(`unexpected invoke ${cmd}`);
+    });
+  }
+
+  function captureRefresh(order: string[]): { events: unknown[]; off: () => void } {
+    const events: unknown[] = [];
+    const off = onAppEvent(AppEvents.MUTATION_REFRESH, (d) => {
+      order.push("announce");
+      events.push(d);
+    });
+    return { events, off };
+  }
+
+  it("(a) hiding a NON-active sheet announces exactly one sheets refresh, after hide_sheet", async () => {
+    const order: string[] = [];
+    backend({ activeBefore: 0, command: "hide_sheet", activeAfter: 0, order });
+    const refresh = captureRefresh(order);
+
+    const result = await hideSheet(1);
+    refresh.off();
+
+    expect(result.activeIndex).toBe(0);
+    expect(refresh.events).toEqual([SHEETS_COMMIT]);
+    expect(order.indexOf("announce")).toBeGreaterThan(order.indexOf("invoke:hide_sheet"));
+  });
+
+  it("passes the hide level through unchanged", async () => {
+    const order: string[] = [];
+    backend({ activeBefore: 0, command: "hide_sheet", activeAfter: 0, order });
+    await hideSheet(1, "veryHidden");
+    expect(invoke).toHaveBeenCalledWith("hide_sheet", { index: 1, level: "veryHidden" });
+    await hideSheet(1);
+    expect(invoke).toHaveBeenCalledWith("hide_sheet", { index: 1, level: null });
+  });
+
+  it("(b) unhiding a sheet announces exactly one sheets refresh, after unhide_sheet", async () => {
+    const order: string[] = [];
+    backend({ activeBefore: 0, command: "unhide_sheet", activeAfter: 0, order });
+    const refresh = captureRefresh(order);
+
+    await unhideSheet(1);
+    refresh.off();
+
+    expect(invoke).toHaveBeenCalledWith("unhide_sheet", { index: 1 });
+    expect(refresh.events).toEqual([SHEETS_COMMIT]);
+    expect(order.indexOf("announce")).toBeGreaterThan(order.indexOf("invoke:unhide_sheet"));
+  });
+
+  it("(c) a REFUSED hide announces nothing and still rejects", async () => {
+    const order: string[] = [];
+    backend({ activeBefore: 0, command: "hide_sheet", activeAfter: 0, reject: true, order });
+    const refresh = captureRefresh(order);
+
+    await expect(hideSheet(1)).rejects.toThrow("last visible sheet");
+    refresh.off();
+
+    expect(refresh.events).toEqual([]);
+  });
+
+  it("(c') a REFUSED unhide announces nothing and still rejects", async () => {
+    const order: string[] = [];
+    backend({ activeBefore: 0, command: "unhide_sheet", activeAfter: 0, reject: true, order });
+    const refresh = captureRefresh(order);
+
+    await expect(unhideSheet(1)).rejects.toThrow();
+    refresh.off();
+
+    expect(refresh.events).toEqual([]);
+  });
+
+  it("(d) hiding the ACTIVE sheet announces NOTHING (the frontend switch announces it)", async () => {
+    // The backend moved the active sheet inside hide_sheet. SheetTabs applies
+    // that switch only after hideSheet resolves and announces SHEET_CHANGED with
+    // its detail; a detail-less announcement here would run every cache keyed
+    // on the backend's active sheet BEFORE the grid switched.
+    const order: string[] = [];
+    backend({ activeBefore: 1, command: "hide_sheet", activeAfter: 0, order });
+    const refresh = captureRefresh(order);
+
+    const result = await hideSheet(1);
+    refresh.off();
+
+    expect(result.activeIndex).toBe(0);
+    expect(refresh.events).toEqual([]);
+  });
+
+  it("(e) a failing active-sheet pre-read never fails the hide, and announces nothing", async () => {
+    const order: string[] = [];
+    invoke.mockImplementation(async (cmd: string) => {
+      order.push(`invoke:${cmd}`);
+      if (cmd === "get_active_sheet") throw new Error("backend busy");
+      return { sheets: [sheet(0, "Page 1"), sheet(1, "Page 2", "hidden")], activeIndex: 0 };
+    });
+    const refresh = captureRefresh(order);
+
+    await expect(hideSheet(1)).resolves.toBeDefined();
+    refresh.off();
+
+    expect(order).toContain("invoke:hide_sheet");
+    expect(refresh.events).toEqual([]);
   });
 });
 

@@ -1,6 +1,10 @@
 //! FILENAME: app/extensions/Controls/PropertiesPane/PropertiesPane.tsx
 // PURPOSE: Properties Pane task pane component for editing control properties.
-// CONTEXT: Shows when a control is selected in design mode. Supports static and formula values.
+// CONTEXT: Shows when a control is selected in design mode. A row writes the
+//          property's static LITERAL; a property that follows a formula is a
+//          BINDING (D-BIND), written through the row's fx switch
+//          (`BindableField`, `@api/objectBindings`). The control's binding id
+//          is its `uid`, read from the metadata the BACKEND returns.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import type { TaskPaneViewProps } from "@api";
@@ -28,7 +32,18 @@ import { setScriptFrameInert } from "../../_shared/scriptFrame";
 import { heldInlineVerdict, readHeldButtonCode } from "@api/heldButtonCode";
 import { HeldCodeSection, type HeldAdoptionShown } from "./HeldCodeSection";
 import { ButtonActionSection } from "./ButtonActionSection";
-import { readButtonAction } from "@api/buttonControlService";
+import {
+  PAGE_NAVIGATOR_CONTROL_TYPE,
+  PAGE_NAVIGATOR_OVERRIDES_PROPERTY,
+  checkPageNavigatorOverrides,
+  readButtonAction,
+  serializePageNavigatorOverrides,
+  type PageNavigatorOverride,
+} from "@api/buttonControlService";
+import { controlKindLabel } from "../lib/controlKinds";
+import { PageNavigatorButtonsSection } from "./PageNavigatorButtonsSection";
+import { onBindingsChanged, type ObjectBindingRef } from "@api/objectBindings";
+import { controlBindingRefOf } from "../lib/controlBindings";
 
 // ============================================================================
 // Styles (theme-aware via CSS variables)
@@ -211,7 +226,8 @@ function renderGroupProperties(
   defs: PropertyDefinition[],
   metadata: ControlMetadata | null,
   scripts: ScriptPickerEntry[],
-  handlePropertyChange: (key: string, valueType: "static" | "formula", value: string) => void,
+  handlePropertyChange: (key: string, value: string) => void,
+  bindingRef: ObjectBindingRef | null,
 ): React.ReactNode[] {
   const elements: React.ReactNode[] = [];
   let i = 0;
@@ -230,6 +246,7 @@ function renderGroupProperties(
               value={metadata?.properties[def.key]}
               scripts={scripts}
               onChange={handlePropertyChange}
+              bindingRef={bindingRef}
             />
           </div>
           <div style={inlineItemStyle}>
@@ -238,6 +255,7 @@ function renderGroupProperties(
               value={metadata?.properties[nextDef.key]}
               scripts={scripts}
               onChange={handlePropertyChange}
+              bindingRef={bindingRef}
             />
           </div>
         </div>,
@@ -251,6 +269,7 @@ function renderGroupProperties(
           value={metadata?.properties[def.key]}
           scripts={scripts}
           onChange={handlePropertyChange}
+          bindingRef={bindingRef}
         />,
       );
       i += 1;
@@ -406,9 +425,27 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
     };
   }, [row, col, sheetIndex, reloadTrigger]);
 
-  // Handle property change
+  // The control's binding ref, from the uid in the metadata the BACKEND
+  // returned (a local copy of a pasted control's metadata would carry its
+  // source's uid; this read never does).
+  const bindingRef = controlBindingRefOf(metadata);
+  const bindingRefId = bindingRef?.id ?? null;
+
+  // A binding of THIS control changed elsewhere (a script, the AI, an undo):
+  // re-render so a row whose fx switch depends on "already bound" follows.
+  const [, setBindingsVersion] = useState(0);
+  useEffect(() => {
+    if (!bindingRefId) return;
+    return onBindingsChanged((change) => {
+      if (change.reload || change.objects.some((o) => o.kind === "control" && o.id === bindingRefId)) {
+        setBindingsVersion((n) => n + 1);
+      }
+    });
+  }, [bindingRefId]);
+
+  // Handle property change: a row writes the LITERAL, always static.
   const handlePropertyChange = useCallback(
-    async (key: string, valueType: "static" | "formula", value: string) => {
+    async (key: string, value: string) => {
       if (row < 0 || col < 0) return;
 
       // Capture old value before the change (for shape script notifications)
@@ -421,7 +458,7 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
           col,
           controlType,
           key,
-          valueType,
+          "static",
           value,
         );
         if (mountedRef.current) {
@@ -431,7 +468,10 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
         // For visual properties, invalidate the floating cache and trigger redraw
         if (["text", "fill", "color", "borderColor", "fontSize",
              "stroke", "strokeWidth", "textColor", "fontBold", "fontItalic",
-             "textAlign", "opacity", "rotation", "shapeType", "src"].includes(key)) {
+             "textAlign", "opacity", "rotation", "shapeType", "src",
+             // A Page Navigator's container settings (WP-B, D-NAV).
+             "gap", "padding", "orientation", "selectedFill", "selectedColor",
+             "showHiddenPages", "showTooltipPages"].includes(key)) {
           window.dispatchEvent(new CustomEvent("controls:invalidate-cache", {
             detail: { sheetIndex, row, col },
           }));
@@ -549,6 +589,44 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
     [row, col, sheetIndex, controlType],
   );
 
+  // A Page Navigator's per-page button settings (the "Buttons" section,
+  // PageNavigatorButtonsSection): the twin of writeActionProperties for the ONE
+  // `pageOverrides` property. The strict check runs first (a refusal is a
+  // toast, never a backend error), the value is the canonical serialisation,
+  // and the navigator's paint cache is invalidated for the anchor.
+  const writeNavigatorOverrides = useCallback(
+    async (list: readonly PageNavigatorOverride[]) => {
+      if (row < 0 || col < 0) return;
+      const value = serializePageNavigatorOverrides(list);
+      const why = checkPageNavigatorOverrides(value);
+      if (why) {
+        showToast(why, { type: "error" });
+        return;
+      }
+      let updated: ControlMetadata;
+      try {
+        updated = await setControlProperty(
+          sheetIndex,
+          row,
+          col,
+          PAGE_NAVIGATOR_CONTROL_TYPE,
+          PAGE_NAVIGATOR_OVERRIDES_PROPERTY,
+          "static",
+          value,
+        );
+      } catch (err) {
+        showToast(`Could not change the page buttons: ${String(err)}`, { type: "error" });
+        if (mountedRef.current) setReloadTrigger((prev) => prev + 1);
+        return;
+      }
+      window.dispatchEvent(new CustomEvent("controls:invalidate-cache", {
+        detail: { sheetIndex, row, col },
+      }));
+      if (mountedRef.current) setMetadata(updated);
+    },
+    [row, col, sheetIndex],
+  );
+
   // Compute control instance ID for script-declared properties
   const instanceId = row >= 0 && col >= 0 ? `control-${sheetIndex}-${row}-${col}` : undefined;
 
@@ -622,8 +700,13 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
       }
       return "Shape";
     }
-    return controlType || metadata?.controlType || "Control";
+    // A Page Navigator, and any type this list does not name, take the
+    // generic kind word (lib/controlKinds.ts): "Page navigator", "Control".
+    if (controlType === PAGE_NAVIGATOR_CONTROL_TYPE) return controlKindLabel(controlType);
+    return controlKindLabel(controlType || metadata?.controlType || "");
   })();
+
+  const isPageNavigator = (controlType || metadata?.controlType) === PAGE_NAVIGATOR_CONTROL_TYPE;
 
   const isShape = controlType === "shape";
 
@@ -704,7 +787,7 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
           ) : (
             Array.from(groups.entries()).map(([groupName, defs]) => (
               <CollapsibleSection key={groupName} title={groupName} defaultExpanded>
-                {renderGroupProperties(defs, metadata, scripts, handlePropertyChange)}
+                {renderGroupProperties(defs, metadata, scripts, handlePropertyChange, bindingRef)}
               </CollapsibleSection>
             ))
           )}
@@ -716,6 +799,19 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
                 heldCode={heldCode !== null}
                 writeProperties={writeActionProperties}
               />
+            </CollapsibleSection>
+          )}
+          {isPageNavigator && instanceId && (
+            <CollapsibleSection title="Buttons" defaultExpanded>
+              <div data-testid="nav-buttons-section">
+                <PageNavigatorButtonsSection
+                  controlId={instanceId}
+                  properties={metadata?.properties}
+                  readOnly={metadata === null}
+                  onWrite={writeNavigatorOverrides}
+                  bindingRef={bindingRef}
+                />
+              </div>
             </CollapsibleSection>
           )}
           {heldCode && showHeldCode && (

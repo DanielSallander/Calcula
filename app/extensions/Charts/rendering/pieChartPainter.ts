@@ -10,7 +10,6 @@ import { applyFillStyle } from "./gradientFill";
 import { valuesToAngles } from "./scales";
 import {
   computeRadialLayout,
-  drawChartBackground,
   drawTitle,
   drawRadialLegend,
   formatTickValue,
@@ -74,7 +73,6 @@ export function paintPieChart(
   const labelFormat = pieOpts.labelFormat ?? "percent";
 
   // 1. Background (full chart)
-  drawChartBackground(ctx, layout, theme);
 
   // 2. Draw slices
   for (let i = 0; i < angles.length; i++) {
@@ -182,9 +180,7 @@ export function paintPieChart(
   }
 
   // 4. Title
-  if (spec.title) {
-    drawTitle(ctx, spec.title, layout, theme);
-  }
+  drawTitle(ctx, spec.title, layout, theme);
 
   // 5. Legend (using category names, not series names)
   if (spec.legend.visible && data.categories.length > 0) {

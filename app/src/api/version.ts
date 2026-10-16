@@ -16,7 +16,7 @@
  * whenever @api gains a member, and list it in API_CHANGELOG below
  * (src/api/__tests__/apiVersion.test.ts checks that every listed name exists).
  */
-export const API_VERSION = "1.3.0";
+export const API_VERSION = "1.4.0";
 
 /** One @api addition: a runtime export of `module` (a member of it when the
  *  name is dotted), or a TYPE-only member declared in `declaredIn`. */
@@ -45,9 +45,103 @@ export interface ApiChangelogEntry {
  * programme (2026-10-04): Excel's Home tab built through @api, so everything
  * the ribbon needed and did not have -- the command ids, the kit's submenus /
  * hero splits / registered menus / colour splits, the dialog launcher, the
- * state seams -- is now there for any extension.
+ * state seams -- is now there for any extension. 1.4.0 is the canvas owner
+ * findings programme (2026-10-15): ONE entry for the whole programme, each
+ * work package adding its own block (WP-A's reference picks and canvas pivot
+ * cells first); docs/EXTENSION_GUIDE.md "New in API v1.4.0" mirrors it.
  */
 export const API_CHANGELOG: readonly ApiChangelogEntry[] = [
+  {
+    version: "1.4.0",
+    added: [
+      // ---- WP-A: reference picks on floating objects (D-PICK) ----------------
+      // A floating family names the CELL a formula's reference pick takes at a
+      // point of its object; Core decides the press once, before anything
+      // selects, and every family without an answer is inert during a pick.
+      {
+        name: "OverlayRegistration.referenceAt",
+        declaredIn: "src/api/gridOverlays.ts",
+        pattern: "referenceAt\\?: OverlayReferenceAtFn;",
+      },
+      {
+        name: "OverlayReferencePick",
+        declaredIn: "src/api/gridOverlays.ts",
+        pattern: "export type OverlayReferencePick =",
+      },
+      {
+        name: "OverlayReferenceAtFn",
+        declaredIn: "src/api/gridOverlays.ts",
+        pattern: "export type OverlayReferenceAtFn = \\(context: OverlayHitTestContext\\) => OverlayReferencePick \\| null;",
+      },
+      { name: "referenceAtPoint", module: "@api/gridOverlays" },
+      // The live pick drag's dashed preview, for the owning family to paint.
+      { name: "getFloatingReferencePickPreview", module: "@api/gridOverlays" },
+      { name: "onFloatingReferencePickPreviewChanged", module: "@api/gridOverlays" },
+      {
+        name: "FloatingReferencePickRange",
+        declaredIn: "src/api/gridOverlays.ts",
+        pattern: "export type FloatingReferencePickRange =",
+      },
+      {
+        name: "FloatingReferencePickPreview",
+        declaredIn: "src/api/gridOverlays.ts",
+        pattern: "export interface FloatingReferencePickPreview \\{",
+      },
+      // THE one "is a formula picking a reference right now?" predicate.
+      { name: "isFormulaReferencePickActive", module: "@api/editing" },
+      // ---- WP-A: canvas pivot cells as content (D-CELLS) ---------------------
+      // Copy a rectangle of the active sheet's grid (an object's inner
+      // selection) exactly as Core's Copy does, and say why when it does not.
+      { name: "copyCellRange", module: "@api/cellClipboard" },
+      {
+        name: "CellRangeCopyRequest",
+        declaredIn: "src/core/hooks/useClipboard.ts",
+        pattern: "export interface CellRangeCopyRequest \\{",
+      },
+      {
+        name: "CellRangeCopyResult",
+        declaredIn: "src/core/hooks/useClipboard.ts",
+        pattern: "export type CellRangeCopyResult =",
+      },
+      // An object's INNER selection answers the Copy / Paste doors itself.
+      {
+        name: "ObjectSelectionProvider.innerClipboardCommand",
+        declaredIn: "src/api/objectSelection.ts",
+        pattern: 'innerClipboardCommand\\?\\(action: "copy" \\| "paste"\\): string \\| null;',
+      },
+      { name: "innerSelectionClipboardCommand", module: "@api/objectSelection" },
+      // The cells the status bar aggregates instead of Core's selection.
+      { name: "publishStatusBarRange", module: "@api/statusBarRange" },
+      { name: "getStatusBarRange", module: "@api/statusBarRange" },
+      { name: "subscribeStatusBarRange", module: "@api/statusBarRange" },
+      {
+        name: "StatusBarRange",
+        declaredIn: "src/api/statusBarRange.ts",
+        pattern: "export interface StatusBarRange \\{",
+      },
+      // The keybinding dispatcher's own "the browser holds a text selection" rule.
+      { name: "hasDomTextSelection", module: "@api/keybindings" },
+      // Why a greyed grid context-menu item is greyed (title + aria-description).
+      {
+        name: "GridContextMenuItem.disabledReason",
+        declaredIn: "src/api/extensions.ts",
+        pattern: "disabledReason\\?: string \\| \\(\\(context: GridMenuContext\\) => string \\| null\\);",
+      },
+    ],
+    changed: [
+      "Core's floating-object press: while a formula picks a reference (isFormulaReferencePickActive), a press on ANY " +
+        "floating object is decided by Core before anything selects -- where the family's referenceAt answers, the press " +
+        "(or a drag) inserts the reference; everywhere else, and on every family without referenceAt, it is INERT. A pick " +
+        "press never calls noteObjectPress and never dispatches floatingObject:selected / floatingObject:bodyDragStart, " +
+        "and the second press and the dblclick of a double-click that started as a pick are swallowed too, so a family " +
+        "no longer sees presses during a pick at all",
+      "clipboardDoorCommand (Home > Copy / Paste, Edit > Copy / Paste) answers an INNER selection's own command first: " +
+        "the innerClipboardCommand of a provider that owns \"Clipboard\" right now, when that command is registered; " +
+        "otherwise the rule is unchanged",
+      "A grid context-menu item's disabledReason is resolved only while the item resolves as disabled, and shown as the " +
+        "row's title and aria-description (sub-menu triggers too); the shell's GridContextMenuItem is the @api type",
+    ],
+  },
   {
     version: "1.3.0",
     added: [

@@ -1,88 +1,26 @@
 //! FILENAME: app/extensions/Slicer/components/SlicerSettingsDialog.tsx
 // PURPOSE: Settings dialog for slicer selection and layout options.
 // CONTEXT: Opened from the slicer right-click context menu "Slicer Settings..."
-//          Inspired by Power BI's slicer settings panel.
+//          Inspired by Power BI's slicer settings panel. The fields are
+//          SlicerSettingsBody.tsx's -- the object pane's Settings tab renders
+//          the same body (WP-C D-PANE) -- and OK commits through its
+//          `commitSlicerSettings` (ONE "Slicer Settings" step).
 
 import React, { useState, useEffect } from "react";
 import type { DialogProps } from "@api";
-import {
-  DialogBody,
-  DialogPane,
-  DialogFieldGrid,
-  DialogFieldSpan,
-  dialogWidth,
-  dialogHeight,
-} from "@api/dialogLayout";
+import { dialogWidth, dialogHeight } from "@api/dialogLayout";
 import { useDialogWindow } from "@api/dialogWindow";
-import { getSlicerById, updateSlicerAsync } from "../lib/slicerStore";
-import { applySlicerFilter } from "../lib/slicerFilterBridge";
-import { requestOverlayRedraw } from "@api/gridOverlays";
-import { runStepThenConfirmOverwrite } from "@api/pivotOverwrite";
-import type { SlicerSelectionMode, SlicerArrangement } from "../lib/slicerTypes";
+import { getSlicerById } from "../lib/slicerStore";
 import { getSlicerComputedAttributes } from "../lib/slicer-api";
 import { useJsonToggle, JsonToggleButton, JsonToggleEditor } from "../../_shared/components/jsonToggle";
-
-// ============================================================================
-// Toggle Switch Component
-// ============================================================================
-
-function Toggle({
-  checked,
-  onChange,
-  disabled,
-}: {
-  checked: boolean;
-  onChange: (checked: boolean) => void;
-  disabled?: boolean;
-}) {
-  return (
-    <button
-      style={{
-        ...s.toggle,
-        backgroundColor: checked ? "#0e639c" : "#555555",
-        opacity: disabled ? 0.4 : 1,
-        cursor: disabled ? "default" : "pointer",
-      }}
-      onClick={() => !disabled && onChange(!checked)}
-      type="button"
-    >
-      <span
-        style={{
-          ...s.toggleThumb,
-          transform: checked ? "translateX(16px)" : "translateX(2px)",
-        }}
-      />
-    </button>
-  );
-}
-
-// ============================================================================
-// Collapsible Section Component
-// ============================================================================
-
-function Section({
-  title,
-  children,
-  defaultOpen = true,
-}: {
-  title: string;
-  children: React.ReactNode;
-  defaultOpen?: boolean;
-}) {
-  const [open, setOpen] = useState(defaultOpen);
-
-  return (
-    <div style={s.section}>
-      <button style={s.sectionHeader} onClick={() => setOpen(!open)} type="button">
-        <span style={{ ...s.sectionArrow, transform: open ? "rotate(90deg)" : "rotate(0deg)" }}>
-          {"\u25B6"}
-        </span>
-        <span style={s.sectionTitle}>{title}</span>
-      </button>
-      {open && <div style={s.sectionContent}>{children}</div>}
-    </div>
-  );
-}
+import {
+  DEFAULT_SLICER_SETTINGS,
+  SlicerSettingsBody,
+  commitSlicerSettings,
+  slicerSettingsParams,
+  slicerSettingsValuesOf,
+  type SlicerSettingsValues,
+} from "./SlicerSettingsBody";
 
 // ============================================================================
 // Component
@@ -100,27 +38,7 @@ export function SlicerSettingsDialog({
   // every screen, so the user gets the last word on its size.
   const win = useDialogWindow({ minWidth: 520, minHeight: 380 });
 
-  // Selection settings
-  const [singleSelect, setSingleSelect] = useState(false);
-  const [forceSelection, setForceSelection] = useState(false);
-  const [showSelectAll, setShowSelectAll] = useState(false);
-
-  // Filtering settings
-  const [filterLevel, setFilterLevel] = useState(1);
-
-  // Data display settings
-  const [hideNoData, setHideNoData] = useState(false);
-  const [indicateNoData, setIndicateNoData] = useState(true);
-  const [sortNoDataLast, setSortNoDataLast] = useState(true);
-
-  // Layout settings
-  const [arrangement, setArrangement] = useState<SlicerArrangement>("vertical");
-  const [rows, setRows] = useState(3);
-  const [columns, setColumns] = useState(1);
-  const [autogrid, setAutogrid] = useState(true);
-  const [itemGap, setItemGap] = useState(4);
-  const [itemPadding, setItemPadding] = useState(0);
-  const [buttonRadius, setButtonRadius] = useState(2);
+  const [values, setValues] = useState<SlicerSettingsValues>({ ...DEFAULT_SLICER_SETTINGS });
 
   // JSON toggle (Phase C)
   const jsonToggle = useJsonToggle(
@@ -130,8 +48,6 @@ export function SlicerSettingsDialog({
 
   // Computed attributes (attributes controlled by formulas)
   const [computedAttrs, setComputedAttrs] = useState<Set<string>>(new Set());
-  const isComputed = (attr: string) => computedAttrs.has(attr);
-  const computedTitle = "Controlled via computed properties";
 
   // Load current settings when dialog opens
   useEffect(() => {
@@ -140,22 +56,7 @@ export function SlicerSettingsDialog({
       // slicer has nothing to say about the next one.
       win.reset();
       const slicer = getSlicerById(slicerId);
-      if (slicer) {
-        setSingleSelect(slicer.selectionMode === "single");
-        setForceSelection(slicer.forceSelection);
-        setShowSelectAll(slicer.showSelectAll);
-        setFilterLevel(slicer.filterLevel ?? 1);
-        setHideNoData(slicer.hideNoData);
-        setIndicateNoData(slicer.indicateNoData);
-        setSortNoDataLast(slicer.sortNoDataLast);
-        setArrangement(slicer.arrangement);
-        setRows(slicer.rows || 3);
-        setColumns(slicer.columns);
-        setAutogrid(slicer.autogrid);
-        setItemGap(slicer.itemGap);
-        setItemPadding(slicer.itemPadding);
-        setButtonRadius(slicer.buttonRadius);
-      }
+      if (slicer) setValues(slicerSettingsValuesOf(slicer));
       // Fetch which attributes are computed
       getSlicerComputedAttributes(slicerId).then((attrs) => {
         setComputedAttrs(new Set(attrs));
@@ -169,65 +70,16 @@ export function SlicerSettingsDialog({
 
   const handleOk = async () => {
     if (slicerId == null) return;
-
-    const selectionMode: SlicerSelectionMode = singleSelect ? "single" : "standard";
-    const levelChanged = getSlicerById(slicerId)?.filterLevel !== filterLevel;
-
-    // The settings AND the re-routed filter are ONE undo step: moving a
-    // filter into or out of the pivot's query re-queries the pivot, which
-    // records its definition -- joining this step -- so one Ctrl+Z puts the
-    // slicer and its pivots back together. A re-routed filter that grows a
-    // pivot over the user's cells is asked about ONCE after the step commits;
-    // a decline takes back the whole step (settings included). Inside someone
-    // else's open transaction (a script batch) it never asks.
-    await runStepThenConfirmOverwrite("Slicer Settings", async (overwrites) => {
-      await updateSlicerAsync(slicerId, {
-        selectionMode,
-        forceSelection,
-        showSelectAll,
-        filterLevel,
-        hideNoData,
-        indicateNoData,
-        sortNoDataLast,
-        arrangement,
-        rows,
-        columns,
-        autogrid,
-        itemGap,
-        itemPadding,
-        buttonRadius,
-      });
-      // A level change moves an ACTIVE selection between the host-side mask
-      // and the engine-routed (pinned) filter — re-apply so the connected
-      // pivots pick up the new routing.
-      if (levelChanged) {
-        const fresh = getSlicerById(slicerId);
-        if (fresh && fresh.selectedItems !== null) {
-          await applySlicerFilter(fresh, { overwrites });
-        }
-      }
-    });
-    requestOverlayRedraw();
+    // The settings AND the re-routed filter are ONE undo step, asked about a
+    // pivot overwrite once after it commits (SlicerSettingsBody.tsx
+    // `commitSlicerSettings`). The dialog sends every setting, as it always did.
+    await commitSlicerSettings(slicerId, slicerSettingsParams(values));
     handleClose();
   };
 
   const handleReset = async () => {
     if (slicerId == null) return;
-
-    setSingleSelect(false);
-    setForceSelection(false);
-    setShowSelectAll(false);
-    setFilterLevel(1);
-    setHideNoData(false);
-    setIndicateNoData(true);
-    setSortNoDataLast(true);
-    setArrangement("vertical");
-    setRows(3);
-    setColumns(1);
-    setAutogrid(true);
-    setItemGap(4);
-    setItemPadding(0);
-    setButtonRadius(2);
+    setValues({ ...DEFAULT_SLICER_SETTINGS });
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -291,191 +143,12 @@ export function SlicerSettingsDialog({
           </div>
         ) : (
         <>
-        {/* Scrollable content, in TWO panes. Fourteen controls stacked in one
-            340px column came to ~1100px of settings behind a scrollbar, so the
-            two most-used groups were off screen at open. Every dependency stays
-            inside one pane — hideNoData with the two toggles it disables on the
-            left, arrangement with the rows/columns it chooses on the right — so
-            nothing reads across the divider. */}
-        <DialogBody>
-          {/* padding 0: the Sections already carry their own 20px side padding */}
-          <DialogPane padding="8px 0" data-testid="slicer-settings-pane-left">
-          {/* Selection Section */}
-          <Section title="Selection">
-            <ToggleRow label="Single select" checked={singleSelect} onChange={setSingleSelect} />
-            <ToggleRow label="Force selection" checked={forceSelection} onChange={setForceSelection} />
-            <ToggleRow
-              label={'Show "Select all" option'}
-              checked={showSelectAll}
-              onChange={setShowSelectAll}
-            />
-          </Section>
-
-          {/* Filtering Section */}
-          <Section title="Filtering">
-            <SelectRow
-              label="Filter level"
-              value={String(filterLevel)}
-              options={[
-                { value: "1", label: "1 — ordinary" },
-                { value: "2", label: "2 — pinned" },
-                { value: "3", label: "3 — pinned" },
-                { value: "4", label: "4 — pinned" },
-                { value: "5", label: "5 — pinned" },
-                { value: "6", label: "6 — pinned" },
-                { value: "7", label: "7 — pinned" },
-                { value: "8", label: "8 — pinned" },
-                { value: "9", label: "9 — pinned" },
-              ]}
-              onChange={(v) => setFilterLevel(Number(v))}
-            />
-            <div style={{ fontSize: 11, opacity: 0.75, padding: "2px 4px 4px" }}>
-              A pinned slicer (level 2+) keeps filtering even when a measure
-              uses CLEAR or RESET — only an explicit CLEAR(…, LEVEL n) at or
-              above its level removes it.
-            </div>
-          </Section>
-
-          {/* Data Display Section */}
-          <Section title="Data display">
-            <ToggleRow
-              label="Hide items with no data"
-              checked={hideNoData}
-              onChange={setHideNoData}
-              disabled={isComputed("hideNoData")}
-              title={isComputed("hideNoData") ? computedTitle : undefined}
-            />
-            <ToggleRow
-              label="Visually indicate items with no data"
-              checked={indicateNoData}
-              onChange={setIndicateNoData}
-              disabled={hideNoData || isComputed("indicateNoData")}
-              title={isComputed("indicateNoData") ? computedTitle : undefined}
-            />
-            <ToggleRow
-              label="Show items with no data last"
-              checked={sortNoDataLast}
-              onChange={setSortNoDataLast}
-              disabled={hideNoData || isComputed("sortNoDataLast")}
-              title={isComputed("sortNoDataLast") ? computedTitle : undefined}
-            />
-          </Section>
-          </DialogPane>
-
-          {/* The divider is hard-coded #3a3a3a, matching this dialog's own
-              Section rules — DialogSidePane paints from var(--border-default),
-              which does not belong to this palette. */}
-          <DialogPane
-            padding="8px 0"
-            style={{ borderLeft: "1px solid #3a3a3a" }}
-            data-testid="slicer-settings-pane-right"
-          >
-          {/* Multi-button Layout Section */}
-          <Section title="Multi-button layout">
-            {/* Layout sub-section — the narrow numeric fields flow into two
-                columns instead of one row each; Arrangement spans both because
-                it decides which of the others appear. */}
-            <Section title="Layout">
-              <DialogFieldGrid minColumnWidth={120} maxColumns={2} columnGap={16}>
-                <DialogFieldSpan>
-                  <SelectRow
-                    label="Arrangement"
-                    value={arrangement}
-                    options={[
-                      { value: "vertical", label: "Vertical" },
-                      { value: "horizontal", label: "Horizontal" },
-                      { value: "grid", label: "Grid" },
-                    ]}
-                    onChange={(v) => setArrangement(v as SlicerArrangement)}
-                  />
-                </DialogFieldSpan>
-                {arrangement === "grid" && (
-                  <>
-                    <NumberRow
-                      label="Rows"
-                      value={rows}
-                      onChange={setRows}
-                      min={1}
-                      max={20}
-                      disabled={autogrid}
-                    />
-                    <NumberRow
-                      label="Columns"
-                      value={columns}
-                      onChange={setColumns}
-                      min={1}
-                      max={10}
-                      disabled={autogrid || isComputed("columns")}
-                      title={isComputed("columns") ? computedTitle : undefined}
-                    />
-                    <ToggleRow label="Autogrid" checked={autogrid} onChange={setAutogrid} />
-                  </>
-                )}
-                {arrangement === "horizontal" && (
-                  <NumberRow
-                    label="Columns"
-                    value={columns}
-                    onChange={setColumns}
-                    min={1}
-                    max={20}
-                    disabled={isComputed("columns")}
-                    title={isComputed("columns") ? computedTitle : undefined}
-                  />
-                )}
-                {arrangement === "vertical" && (
-                  <NumberRow
-                    label="Rows visible"
-                    value={rows}
-                    onChange={setRows}
-                    min={1}
-                    max={50}
-                  />
-                )}
-              </DialogFieldGrid>
-            </Section>
-
-            {/* Spacing sub-section */}
-            <Section title="Spacing">
-              <DialogFieldGrid minColumnWidth={120} maxColumns={2} columnGap={16}>
-                <NumberRow
-                  label="Gap between items"
-                  value={itemGap}
-                  onChange={setItemGap}
-                  min={0}
-                  max={50}
-                  suffix="px"
-                  disabled={isComputed("itemGap")}
-                  title={isComputed("itemGap") ? computedTitle : undefined}
-                />
-                <NumberRow
-                  label="Inner padding"
-                  value={itemPadding}
-                  onChange={setItemPadding}
-                  min={0}
-                  max={30}
-                  suffix="px"
-                  disabled={isComputed("itemPadding")}
-                  title={isComputed("itemPadding") ? computedTitle : undefined}
-                />
-              </DialogFieldGrid>
-            </Section>
-
-            {/* Appearance sub-section */}
-            <Section title="Appearance">
-              <NumberRow
-                label="Button corner radius"
-                value={buttonRadius}
-                onChange={setButtonRadius}
-                min={0}
-                max={20}
-                suffix="px"
-                disabled={isComputed("buttonRadius")}
-                title={isComputed("buttonRadius") ? computedTitle : undefined}
-              />
-            </Section>
-          </Section>
-          </DialogPane>
-        </DialogBody>
+        <SlicerSettingsBody
+          variant="dialog"
+          values={values}
+          onChange={(patch) => setValues((v) => ({ ...v, ...patch }))}
+          computedAttrs={computedAttrs}
+        />
 
         {/* Footer — "Reset to default" sits beside the buttons it undoes. It
             used to be the last row INSIDE the scroll region, i.e. a control you
@@ -496,97 +169,6 @@ export function SlicerSettingsDialog({
         </>
         )}
         {win.resizeHandles}
-      </div>
-    </div>
-  );
-}
-
-// ============================================================================
-// Row Components
-// ============================================================================
-
-function ToggleRow({
-  label,
-  checked,
-  onChange,
-  disabled,
-  title,
-}: {
-  label: string;
-  checked: boolean;
-  onChange: (v: boolean) => void;
-  disabled?: boolean;
-  title?: string;
-}) {
-  return (
-    <div style={{ ...s.row, ...(disabled ? s.disabled : {}) }} title={title}>
-      <span style={s.rowLabel}>{label}</span>
-      <Toggle checked={checked} onChange={onChange} disabled={disabled} />
-    </div>
-  );
-}
-
-function SelectRow({
-  label,
-  value,
-  options,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  options: { value: string; label: string }[];
-  onChange: (v: string) => void;
-}) {
-  return (
-    <div style={s.fieldGroup}>
-      <span style={s.fieldLabel}>{label}</span>
-      <select style={s.select} value={value} onChange={(e) => onChange(e.target.value)}>
-        {options.map((opt) => (
-          <option key={opt.value} value={opt.value}>
-            {opt.label}
-          </option>
-        ))}
-      </select>
-    </div>
-  );
-}
-
-function NumberRow({
-  label,
-  value,
-  onChange,
-  min,
-  max,
-  disabled,
-  suffix,
-  title,
-}: {
-  label: string;
-  value: number;
-  onChange: (v: number) => void;
-  min?: number;
-  max?: number;
-  disabled?: boolean;
-  suffix?: string;
-  title?: string;
-}) {
-  return (
-    <div style={{ ...s.fieldGroup, ...(disabled ? s.disabled : {}) }} title={title}>
-      <span style={s.fieldLabel}>{label}</span>
-      <div style={s.numberInputWrapper}>
-        <input
-          style={s.numberInput}
-          type="number"
-          value={value}
-          onChange={(e) => {
-            const v = parseInt(e.target.value, 10);
-            if (!isNaN(v)) onChange(Math.max(min ?? 0, Math.min(max ?? 999, v)));
-          }}
-          min={min}
-          max={max}
-          disabled={disabled}
-        />
-        {suffix && <span style={s.suffix}>{suffix}</span>}
       </div>
     </div>
   );
@@ -645,107 +227,6 @@ const s: Record<string, React.CSSProperties> = {
     padding: "4px 8px",
     borderRadius: "4px",
     lineHeight: 1,
-  },
-  section: {
-    borderBottom: "1px solid #3a3a3a",
-  },
-  sectionHeader: {
-    display: "flex",
-    alignItems: "center",
-    gap: "6px",
-    width: "100%",
-    padding: "10px 20px",
-    background: "transparent",
-    border: "none",
-    color: "#e0e0e0",
-    fontSize: "13px",
-    fontWeight: 600,
-    cursor: "pointer",
-    textAlign: "left",
-  },
-  sectionArrow: {
-    fontSize: "8px",
-    color: "#999",
-    transition: "transform 0.15s ease",
-    display: "inline-block",
-  },
-  sectionTitle: {},
-  sectionContent: {
-    padding: "0 20px 12px 20px",
-  },
-  row: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: "12px",
-    padding: "5px 0",
-  },
-  rowLabel: {
-    fontSize: "13px",
-    color: "#cccccc",
-    flex: 1,
-  },
-  toggle: {
-    position: "relative" as const,
-    width: "36px",
-    height: "20px",
-    borderRadius: "10px",
-    border: "none",
-    padding: 0,
-    flexShrink: 0,
-    transition: "background-color 0.15s ease",
-  },
-  toggleThumb: {
-    position: "absolute" as const,
-    top: "2px",
-    left: "0px",
-    width: "16px",
-    height: "16px",
-    borderRadius: "50%",
-    backgroundColor: "#ffffff",
-    transition: "transform 0.15s ease",
-    boxShadow: "0 1px 3px rgba(0,0,0,0.3)",
-  },
-  fieldGroup: {
-    display: "flex",
-    flexDirection: "column" as const,
-    gap: "4px",
-    padding: "5px 0",
-  },
-  fieldLabel: {
-    fontSize: "12px",
-    color: "#999999",
-  },
-  select: {
-    padding: "6px 8px",
-    backgroundColor: "#3a3a3a",
-    border: "1px solid #555555",
-    borderRadius: "4px",
-    color: "#e0e0e0",
-    fontSize: "13px",
-    cursor: "pointer",
-  },
-  numberInputWrapper: {
-    display: "flex",
-    alignItems: "center",
-    gap: "4px",
-  },
-  numberInput: {
-    padding: "6px 8px",
-    backgroundColor: "#3a3a3a",
-    border: "1px solid #555555",
-    borderRadius: "4px",
-    color: "#e0e0e0",
-    fontSize: "13px",
-    width: "80px",
-  },
-  suffix: {
-    fontSize: "12px",
-    color: "#999999",
-  },
-  disabled: {
-    opacity: 0.4,
-    pointerEvents: "none" as const,
   },
   resetButton: {
     display: "flex",

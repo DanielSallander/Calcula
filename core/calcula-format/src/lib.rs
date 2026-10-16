@@ -35,14 +35,19 @@ pub mod ai;
 // at the file-picker ingress and at legacy-data-URL migration; `calp` calls it
 // on the bytes a published package carries. One gate, three doors.
 pub mod media;
+// Public: the Page Navigator's wire spellings and its `pageOverrides` value,
+// parsed and re-serialised byte-identically to the frontend by BOTH the host
+// (sheet-id remap on pull) and `calp` (sheet-name rewrite on pull and push).
+pub mod page_navigator;
 
 pub use error::FormatError;
 pub use manifest::{
     stamp_feature_format_version, Manifest, SheetEntry, CALA_BASE_FORMAT_VERSION,
     CALA_MAX_SUPPORTED_FORMAT_VERSION, CANVAS_OBJECTS_LOCKED_FEATURE, CANVAS_SHEET_MIN_FORMAT_VERSION,
-    CANVAS_WALLPAPER_FEATURE, PENDING_RECALC_MIN_FORMAT_VERSION, PINNED_FILTER_MIN_FORMAT_VERSION,
-    SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION, SHEET_VIEW_MIN_FORMAT_VERSION,
-    SPILL_EXTENT_MIN_FORMAT_VERSION, USER_HIDDEN_MIN_FORMAT_VERSION,
+    CANVAS_WALLPAPER_FEATURE, CHART_SPEC_OBJECT_MIN_FORMAT_VERSION, OBJECT_BINDINGS_FEATURE,
+    OBJECT_BINDINGS_MIN_FORMAT_VERSION, PAGE_NAVIGATOR_FEATURE, PENDING_RECALC_MIN_FORMAT_VERSION, PINNED_FILTER_MIN_FORMAT_VERSION,
+    PIVOT_STYLE_FEATURE, SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION, SHEET_VIEW_MIN_FORMAT_VERSION,
+    SPILL_EXTENT_MIN_FORMAT_VERSION, USER_HIDDEN_MIN_FORMAT_VERSION, VISUAL_CONTAINER_FEATURE,
 };
 // Re-export so the host can build/parse the ZIP bytes directly when needed.
 pub use zip_io::{read_calcula_bytes, read_calcula_manifest, write_calcula_bytes};

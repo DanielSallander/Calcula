@@ -13,8 +13,9 @@ import {
   hitTestOverlays,
   registerPostHeaderOverlay,
   getPostHeaderOverlayRenderers,
+  referenceAtPoint,
 } from "../gridOverlays";
-import type { GridRegion, OverlayRegistration } from "../gridOverlays";
+import type { GridRegion, OverlayRegistration, OverlayReferencePick } from "../gridOverlays";
 
 describe("gridOverlays - interactions", () => {
   beforeEach(() => {
@@ -426,6 +427,43 @@ describe("gridOverlays - interactions", () => {
         getCursor: () => "pointer",
       };
       expect([claim.type, floatingCursor.type]).toEqual(["ext-a", "ext-b"]);
+    });
+
+    it("referenceAt is a field of the registration (D-PICK), and referenceAtPoint answers through it", () => {
+      // A positive TYPE pin: removing `referenceAt` from OverlayRegistration
+      // fails the type check here; its answer type is the pick union.
+      const sheetPick: OverlayReferencePick = { space: "sheet", row: 4, col: 1 };
+      const withPick: OverlayRegistration = {
+        type: "ext-c",
+        render: () => {},
+        zoneAt: () => null,
+        referenceAt: () => sheetPick,
+      };
+      registerGridOverlay(withPick);
+      const region: GridRegion = {
+        id: "c1",
+        type: "ext-c",
+        startRow: 0,
+        startCol: 0,
+        endRow: 0,
+        endCol: 0,
+        floating: { x: 0, y: 0, width: 10, height: 10 },
+      };
+      expect(referenceAtPoint({ region, canvasX: 1, canvasY: 1, row: 0, col: 0 })).toEqual(sheetPick);
+      // A type without referenceAt, and a malformed answer, are inert (null).
+      expect(referenceAtPoint({ region: { ...region, type: "ext-b" }, canvasX: 1, canvasY: 1, row: 0, col: 0 })).toBeNull();
+      registerGridOverlay({
+        type: "ext-c",
+        render: () => {},
+        referenceAt: () => ({ space: "object", name: "", row: 0, col: 0 }),
+      });
+      expect(referenceAtPoint({ region, canvasX: 1, canvasY: 1, row: 0, col: 0 })).toBeNull();
+      registerGridOverlay({
+        type: "ext-c",
+        render: () => {},
+        referenceAt: () => ({ space: "sheet", row: -1, col: 0 }),
+      });
+      expect(referenceAtPoint({ region, canvasX: 1, canvasY: 1, row: 0, col: 0 })).toBeNull();
     });
 
     it("hitTest receives region data for interaction decisions", () => {

@@ -93,6 +93,7 @@ import { noteObjectGripMenuOpen, resetObjectPosition } from "@api/objectPosition
 import type { GridCellPress } from "@api/cellClickInterceptors";
 import {
   installSelectedObjectKeys,
+  objectDeleteApplies,
   OBJECT_DELETE_SELECTION_COMMAND,
   OBJECT_DESELECT_COMMAND,
   SELECTED_OBJECT_OWNER_ID,
@@ -793,6 +794,57 @@ describe("T16 the claim admits the object-insert doors, and only them (owner cal
     for (const action of ["Edit Cell", "Clear Contents", "Insert Table"]) {
       expect(selectionRefusalFor(action), `${action} passed the claim`).toBe(selectedObjectRefusal(action));
     }
+  });
+});
+
+// ============================================================================
+// T17: a canvas pivot box's selected CELLS (D-CELLS) -- the DELETE HAZARD
+// ============================================================================
+
+describe("T17 canvas: a pivot box with selected CELLS -- Delete never deletes the PivotTable (Pivot's REAL provider)", () => {
+  // For a pivot box the generic object Delete deletes the WHOLE PivotTable.
+  // While the box's cells are selected the provider owns Delete, so this
+  // binding stands down (the pivot's own refusal keys answer:
+  // Pivot/lib/__tests__/pivotCanvasCellKeys.test.ts).
+  it("with the box selected and no cells the box is deleted; with cells selected Delete deletes nothing", async () => {
+    const { registerPivotVisualSelection } = await import("../../../Pivot/lib/pivotVisualSelection");
+    const { selectPivotVisual, resetSelectionHandlerState: resetPivotSelection } = await import(
+      "../../../Pivot/handlers/selectionHandler"
+    );
+    const { setPivotCellAnchor, resetPivotCellSelection } = await import(
+      "../../../Pivot/lib/pivotVisualCellSelection"
+    );
+    const deletePivot = vi.fn(async () => {});
+    const box: GridRegion = {
+      ...region("pivot-visual-p1", "pivot-visual", 60),
+      data: { pivotId: "p1", name: "PivotTable1" },
+    };
+    cleanups.push(
+      registerGridOverlay({ type: "pivot-visual", render: () => {}, priority: 12 }),
+      registerPivotVisualSelection({ deletePivot }),
+      () => {
+        resetPivotCellSelection();
+        resetPivotSelection();
+      },
+    );
+    setGridRegions([s1, t1, chartRegion, box]);
+    install();
+    surface = "canvas";
+
+    selectPivotVisual("p1", { openPane: false });
+    expect(getSelectedObjectRegions().map((r) => r.id), "fixture: the box is selected").toEqual(["pivot-visual-p1"]);
+    setPivotCellAnchor("p1", 1, 1);
+    expect(objectDeleteApplies(), "Delete on the box's cells would delete the whole PivotTable").toBe(false);
+    press("Delete");
+    await settle();
+    expect(deletePivot, "Delete with the box's CELLS selected deleted the PivotTable").not.toHaveBeenCalled();
+
+    // Control: the cells cleared, the same Delete deletes the selected box.
+    resetPivotCellSelection();
+    expect(objectDeleteApplies()).toBe(true);
+    press("Delete");
+    await settle();
+    expect(deletePivot).toHaveBeenCalledWith("p1");
   });
 });
 

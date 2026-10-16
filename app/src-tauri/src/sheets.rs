@@ -1284,20 +1284,22 @@ fn rename_typed_payload<T: Serialize + serde::de::DeserializeOwned>(
 
 /// Rename the sheet references inside the RULE stores a sheet rename must
 /// carry besides cells, names and overrides: every conditional-formatting
-/// formula, every custom data-validation formula, and every formula property
-/// of a cell-anchored control (wave-B fix-up).
+/// formula, every custom data-validation formula, and every object property
+/// BINDING formula (wave-B fix-up; bindings since WP-D).
 ///
 /// Each names sheets by NAME exactly as a cell formula does, and a rename left
 /// them alone: a CF rule `=A1>Data!$B$1` kept reading "Data" after Data became
 /// Facts -- the formula named a sheet that no longer existed, so the highlight
-/// silently vanished -- and a custom validation or a button's text formula read
-/// a missing sheet the same way. Excel carries all of them through a rename.
+/// silently vanished -- and a custom validation or a button's bound caption
+/// read a missing sheet the same way. Excel carries all of them through a
+/// rename.
 ///
 /// Goes through the SAME per-payload walkers a `.calp` pull's collision rename
 /// does (`calp::sheet_renames`), so a user's rename and a pull cannot disagree
 /// about which strings are formulas -- a CF expression with or without its
-/// `=`, a cell-value bound or a control property only with one (the host reads
-/// the rest as literals). Each store is taken alone, after every sheet guard.
+/// `=`, a cell-value bound only with one (the host reads the rest as
+/// literals), every binding's formula. Each store is taken alone, after every
+/// sheet guard.
 fn rename_rule_references(
     state: &AppState,
     effect: &crate::document_effect::DocumentEffect,
@@ -1310,11 +1312,15 @@ fn rename_rule_references(
 }
 
 /// Run every formula slot of the three RULE stores -- conditional formats,
-/// data validations, cell-anchored controls -- through `rewrite` (`None` =
+/// data validations, object property bindings -- through `rewrite` (`None` =
 /// leave the slot as it is). The slots are the ones the `.calp` payload
 /// visitors reach (`calp::sheet_renames::visit_*_formulas`), the one
 /// definition of which strings are formulas that a rename, a pull and a delete
 /// share. Each store is taken alone.
+///
+/// A cell-anchored control holds no formula of its own any more (WP-D): a
+/// property that follows a formula is a binding row, so the controls arm this
+/// function had is the bindings arm now (`object_bindings::cascade`).
 fn rewrite_rule_formulas(
     state: &AppState,
     effect: &crate::document_effect::DocumentEffect,
@@ -1337,29 +1343,14 @@ fn rewrite_rule_formulas(
             rename_typed_payload(ranges, |json| calp::sheet_renames::visit_validation_formulas(json, &mut slot));
         }
     }
-    if let Ok(mut store) = state.controls.write(effect) {
-        for (&(_, row, col), meta) in store.iter_mut() {
-            // The walker reads the `.calp` shape (`Vec<SavedControlEntry>`).
-            let mut entries = vec![crate::controls::SavedControlEntry {
-                row,
-                col,
-                control_type: meta.control_type.clone(),
-                properties: meta.properties.clone(),
-            }];
-            if rename_typed_payload(&mut entries, |json| {
-                calp::sheet_renames::visit_control_formulas(json, &mut slot)
-            }) {
-                if let Some(entry) = entries.pop() {
-                    meta.properties = entry.properties;
-                }
-            }
-        }
-    }
+    // Every binding formula is a formula (stored with its `=`, sheet-qualified)
+    // -- the slot `calp::sheet_renames::visit_binding_formulas` visits.
+    crate::object_bindings::cascade::rewrite_binding_formulas(state, effect, rewrite);
 }
 
 /// The DELETE twin of [`rename_rule_references`], plus the override layer
 /// (wave C, W10/W11): every reference to the deleted sheet in a conditional
-/// format, a custom validation, a control's formula property, a pane
+/// format, a custom validation, an object property binding, a pane
 /// dropdown's range source and a `.calp` override record becomes `#REF!` --
 /// except a 3D reference that loses one endpoint, which keeps the rest of its
 /// range exactly as a cell's does (below).
@@ -3197,6 +3188,27 @@ pub(crate) fn delete_sheet_impl(
             "delete_sheet cascaded through its objects: {}",
             source_cascade.describe()
         );
+    }
+    // OBJECT PROPERTY BINDINGS (WP-D, D §3.12) of everything that went with the
+    // sheet: the canvas page itself, the charts, controls, slicers, timelines,
+    // pivots and floating ranges on it, and the slicers and timelines its
+    // tables and pivots took with them. Asked AFTER every cascade above, so
+    // the answer is exactly the bound objects that no longer exist; with every
+    // guard released (the live-object walk reads the object stores; the store
+    // is a leaf). No restore is recorded: the undo history ends just below
+    // (BUG-0005), so no Ctrl+Z could ever bring one of them back to its
+    // bindings. Bindings of SURVIVING objects that read the deleted sheet were
+    // repaired to `#REF!` by `delete_rule_references` above, like every other
+    // formula.
+    {
+        let stores = crate::object_bindings::object_json::ObjectStores {
+            state,
+            slicers: slicer_state,
+            timelines: timeline_state,
+            pivots: pivot_state,
+        };
+        let vanished = crate::object_bindings::cascade::vanished_bound_objects(&stores);
+        crate::object_bindings::cascade::drop_bindings_for_objects(state, &effect, &vanished);
     }
     // No undo is recorded, deliberately: Excel does not let a sheet delete be
     // undone and neither does this command, so a cascade that recorded restores

@@ -52,8 +52,16 @@ import {
   updateCachedTimelineBounds,
   refreshCacheAndReconcile,
   isTimelineGestureLanding,
+  syncTimelineRegions,
+  updateTimelineOrThrow,
   type TimelineGeometryWrite,
 } from "./lib/timelineSlicerStore";
+import { installTimelineBindings } from "./lib/timelineBindings";
+import { registerObjectFormatProvider } from "@api/objectFormat";
+import { registerObjectPaneProvider } from "@api/objectPane";
+import { createTimelineObjectFormatProvider } from "./lib/timelineObjectFormat";
+import { createTimelineObjectPaneProvider } from "./lib/timelineObjectPane";
+import { TIMELINE_FORMAT_CARDS } from "./components/TimelineFormatCards";
 import {
   coMovedMemberRect,
   refuseUndoWhileAGestureLands,
@@ -178,6 +186,39 @@ function activate(context: ExtensionContext): void {
   // Tab cycling selects timelines through this, never through the mouse route
   // below, which arms a pending click the next mouseup anywhere would complete.
   cleanupFunctions.push(registerTimelineObjectSelection());
+
+  // BOUND properties (@api/objectBindings, D-BIND): the timelineSlicer kind's
+  // registration (header text, show header) and the repaint when a
+  // timeline's bound value changes -- the grip follows a bound show-header,
+  // and the overlay redraws (never GRID_REFRESH: the seam's feedback-loop rule).
+  cleanupFunctions.push(
+    installTimelineBindings({
+      timelineExists: (id) => getTimelineById(id) !== undefined,
+      resyncRegions: syncTimelineRegions,
+      redraw: requestOverlayRedraw,
+    }),
+  );
+
+  // The ONE object pane (WP-C D-PANE / D-FORMAT): the timeline's Settings tab
+  // and its Format provider -- the visual container (padding, the header as
+  // the title, background, border, shadow) read from and written to the
+  // timeline's own record in ONE update_timeline_slicer, with the style
+  // gallery as its visual card. A container binding's change is re-published
+  // by installTimelineBindings above (it re-syncs the regions on any timeline
+  // binding change, and the region carries the resolved container).
+  cleanupFunctions.push(
+    registerObjectFormatProvider(
+      createTimelineObjectFormatProvider({
+        getTimeline: getTimelineById,
+        update: async (id, params) => {
+          await updateTimelineOrThrow(id, params);
+        },
+        resync: syncTimelineRegions,
+        visualCards: TIMELINE_FORMAT_CARDS,
+      }),
+    ),
+  );
+  cleanupFunctions.push(registerObjectPaneProvider(createTimelineObjectPaneProvider({ getTimeline: getTimelineById })));
 
   // The keyboard INSIDE a selected timeline (M8 S8, lib/timelineKeys.ts):
   // Enter goes in, Left / Right move a focus ring between the periods,

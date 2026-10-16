@@ -11,7 +11,6 @@ import { resolveDatumStyle, specHasDatumOverrides } from "../lib/dataPointOverri
 import { markerReachesDatum, paintDatumMarker } from "./markerPainter";
 import {
   computeRadialLayout,
-  drawChartBackground,
   drawTitle,
   drawLegend,
 } from "./chartPainterUtils";
@@ -51,7 +50,6 @@ export function paintRadarChart(
 
   const n = data.categories.length;
   if (n < 3) {
-    drawChartBackground(ctx, layout, theme);
     ctx.fillStyle = "#999";
     ctx.font = `12px ${theme.fontFamily}`;
     ctx.textAlign = "center";
@@ -74,7 +72,6 @@ export function paintRadarChart(
   const angleStep = (Math.PI * 2) / n;
 
   // 1. Background
-  drawChartBackground(ctx, layout, theme);
 
   // 2. Draw grid rings (concentric polygons)
   const ringCount = 4;
@@ -218,9 +215,7 @@ export function paintRadarChart(
   }
 
   // 7. Title
-  if (spec.title) {
-    drawTitle(ctx, spec.title, layout, theme);
-  }
+  drawTitle(ctx, spec.title, layout, theme);
 
   // 8. Legend
   if (spec.legend.visible && data.series.length > 0) {

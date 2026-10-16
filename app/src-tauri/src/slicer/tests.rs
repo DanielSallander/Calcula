@@ -105,6 +105,7 @@ mod tests {
                 source_type: SlicerSourceType::Table,
                 source_id: table_id,
             }],
+            container: None,
         };
 
         state.slicers.write(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default())).unwrap().insert(slicer_id, slicer);
@@ -178,6 +179,7 @@ mod tests {
             filter_level: 1,
             data_source_id: None,
             connected_sources: vec![],
+            container: None,
         };
 
         let json = serde_json::to_string(&slicer).unwrap();
@@ -326,6 +328,7 @@ mod restore_tests {
                 formula: "=DA1".to_string(),
             }],
             connected_sources: Vec::new(),
+            container: None,
         }];
         wb
     }

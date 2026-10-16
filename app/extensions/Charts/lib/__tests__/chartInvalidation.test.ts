@@ -50,8 +50,17 @@ describe("chartIntersectsChanges (S7d)", () => {
     expect(chartIntersectsChanges(s, [{ row: 999, col: 999 }], 0, 0)).toBe(true);
   });
 
-  it("conservatively always intersects with a =cell-ref title (read by spec resolution)", () => {
-    expect(chartIntersectsChanges(spec({ title: "=Z1" }), [{ row: 999, col: 999 }], 0, 0)).toBe(true);
+  // D-BIND (S8b): a title that follows a cell is a BINDING, repainted by the
+  // binding seam when its value changes. A literal "=Z1" is text: it reads
+  // nothing, so it must not make every edit anywhere re-read the chart.
+  it("a literal '=Z1' title / axis title / series name is text: no unbounded re-read", () => {
+    const s = spec({
+      title: "=Z1",
+      xAxis: { ...baseAxis, title: "=Z2" },
+      yAxis: { ...baseAxis, title: "=Sheet9!Z3" },
+      series: [{ name: "=Z4", sourceIndex: 1, color: null }],
+    });
+    expect(chartIntersectsChanges(s, [{ row: 999, col: 999 }], 0, 0)).toBe(false);
   });
 
   it("conservatively always intersects for a concat container (children have their own ranges)", () => {

@@ -1,25 +1,23 @@
 //! FILENAME: app/extensions/Charts/components/tabs/DataTab.tsx
 // PURPOSE: Data tab of the chart dialog. Source range, series orientation,
 //          category axis, and series selection.
+// CONTEXT: The range half (the range field down to the series list) is
+//          data/RangeSourceEditor, shared with the object pane's range Data tab
+//          (WP-C S9c); this tab adds the source-mode radio and the design-query
+//          editor around it.
 
 import React from "react";
 import type { ConnectionInfo } from "@api";
 import type { ChartSpec, ChartSeries, SeriesOrientation } from "../../types";
-import { getSeriesColor } from "../../rendering/chartTheme";
-import { readSeriesColor, seriesColorPatch } from "../../lib/chartDataReader";
 import { DesignQueryEditor } from "../DesignQueryEditor";
+import { RangeSourceEditor } from "../data/RangeSourceEditor";
 import {
   FieldGroup,
   Label,
-  Input,
   Select,
   Button,
-  CheckboxLabel,
   RadioGroup,
   RadioLabel,
-  SeriesList,
-  SeriesItem,
-  ColorSwatch,
   DesignGrid,
   GridSpan,
 } from "../CreateChartDialog.styles";
@@ -101,50 +99,6 @@ export function DataTab({
   onInspectData,
   inspectDisabled,
 }: DataTabProps): React.ReactElement {
-  const handleSeriesToggle = (sourceIndex: number, checked: boolean) => {
-    if (checked) {
-      // Add series back
-      const axisLabel = availableAxes.find((a) => a.index === sourceIndex);
-      const newSeries: ChartSeries = {
-        name: axisLabel?.label ?? `Series ${sourceIndex}`,
-        sourceIndex,
-        color: null,
-      };
-      onSeriesChange([...series, newSeries].sort((a, b) => a.sourceIndex - b.sourceIndex));
-    } else {
-      // Remove series
-      onSeriesChange(series.filter((s) => s.sourceIndex !== sourceIndex));
-    }
-  };
-
-  /**
-   * Set the colour of a series — through the ONE spelling (OB-1).
-   *
-   * This used to write `spec.series[i].color`, which is the BASE that
-   * `applySeriesColorOverrides` overwrites from `spec.seriesColors[name]`. So a
-   * series that had ever been coloured from the Format pane or the Design tab
-   * ignored this swatch, and the swatch went on showing the colour it had
-   * written rather than the one the chart was drawn with. It now reads and
-   * writes the same name-keyed field every other surface does, through
-   * `readSeriesColor` / `seriesColorPatch`.
-   *
-   * The patch goes to `onSpecChange` rather than `onSeriesChange` because
-   * `seriesColors` is not one of the dialog's managed fields; the dialog keeps
-   * it in the spec overlay, which REPLACES a key — the form the shared writer
-   * already builds for.
-   */
-  const handleSeriesColorChange = (seriesName: string, color: string) => {
-    const patch = seriesColorPatch(spec ?? {}, seriesName, color);
-    if (patch !== null) onSpecChange(patch);
-  };
-
-  // Build all possible series indices (all axes except the category axis)
-  const allSeriesIndices = availableAxes
-    .filter((a) => a.index !== categoryIndex)
-    .map((a) => a.index);
-
-  const activeSources = new Set(series.map((s) => s.sourceIndex));
-
   return (
     <DesignGrid>
       {/* Source mode: cell range vs design query (BI model). Spans both columns
@@ -232,126 +186,23 @@ export function DataTab({
           </GridSpan>
         </>
       ) : (
-        <>
-          {/* Left column: what the data IS. */}
-          <div>
-            <FieldGroup>
-              <Label>Data Range</Label>
-              <Input
-                type="text"
-                value={sourceRange}
-                onChange={(e) => onSourceRangeChange(e.target.value)}
-                placeholder="e.g., Sheet1!A1:D10"
-                aria-invalid={sourceRangeError ? true : undefined}
-              />
-              {sourceRangeError && (
-                <span
-                  data-testid="chart-range-error"
-                  aria-live="polite"
-                  style={{ fontSize: "11px", color: "var(--text-error, #c42b1c)", marginTop: "4px", display: "block" }}
-                >
-                  {sourceRangeError}
-                </span>
-              )}
-            </FieldGroup>
-
-            <FieldGroup>
-              <Label>Series in</Label>
-              <RadioGroup>
-                <RadioLabel>
-                  <input
-                    type="radio"
-                    name="orientation"
-                    checked={orientation === "columns"}
-                    onChange={() => onOrientationChange("columns")}
-                  />
-                  Columns
-                </RadioLabel>
-                <RadioLabel>
-                  <input
-                    type="radio"
-                    name="orientation"
-                    checked={orientation === "rows"}
-                    onChange={() => onOrientationChange("rows")}
-                  />
-                  Rows
-                </RadioLabel>
-              </RadioGroup>
-              <CheckboxLabel>
-                <input
-                  type="checkbox"
-                  checked={hasHeaders}
-                  onChange={(e) => onHasHeadersChange(e.target.checked)}
-                />
-                First row contains headers
-              </CheckboxLabel>
-            </FieldGroup>
-
-            {availableAxes.length > 0 && (
-              <FieldGroup>
-                <Label>Category axis ({orientation === "columns" ? "column" : "row"})</Label>
-                <Select
-                  value={categoryIndex}
-                  onChange={(e) => onCategoryIndexChange(parseInt(e.target.value, 10))}
-                  style={{ width: "100%" }}
-                >
-                  {availableAxes.map((axis) => (
-                    <option key={axis.index} value={axis.index}>
-                      {axis.label}
-                    </option>
-                  ))}
-                </Select>
-              </FieldGroup>
-            )}
-          </div>
-
-          {/* Right column: which of it gets PLOTTED. The series list is the one
-              control here that grows with the data, so it gets its own column
-              instead of being the thing that pushes everything else off screen. */}
-          <div>
-            <FieldGroup>
-              <Label>Series</Label>
-              <SeriesList>
-                {allSeriesIndices.map((idx) => {
-                  const axisLabel = availableAxes.find((a) => a.index === idx)?.label ?? `Column ${idx}`;
-                  const seriesDef = series.find((s) => s.sourceIndex === idx);
-                  const isActive = activeSources.has(idx);
-                  const colorIndex = series.findIndex((s) => s.sourceIndex === idx);
-
-                  return (
-                    <SeriesItem key={idx}>
-                      <input
-                        type="checkbox"
-                        checked={isActive}
-                        onChange={(e) => handleSeriesToggle(idx, e.target.checked)}
-                      />
-                      <span style={{ flex: 1 }}>{axisLabel}</span>
-                      {isActive && seriesDef && (
-                        <ColorSwatch
-                          type="color"
-                          value={
-                            readSeriesColor(spec ?? {}, seriesDef.name)
-                            ?? seriesDef.color
-                            ?? getSeriesColor(palette, colorIndex, null)
-                          }
-                          onChange={(e) => handleSeriesColorChange(seriesDef.name, e.target.value)}
-                          title="Series color"
-                        />
-                      )}
-                    </SeriesItem>
-                  );
-                })}
-                {allSeriesIndices.length === 0 && (
-                  <SeriesItem>
-                    <span style={{ color: "var(--text-secondary)", fontStyle: "italic" }}>
-                      No series available. Select a data range with multiple columns.
-                    </span>
-                  </SeriesItem>
-                )}
-              </SeriesList>
-            </FieldGroup>
-          </div>
-        </>
+        <RangeSourceEditor
+          sourceRange={sourceRange}
+          onSourceRangeChange={onSourceRangeChange}
+          sourceRangeError={sourceRangeError}
+          hasHeaders={hasHeaders}
+          onHasHeadersChange={onHasHeadersChange}
+          orientation={orientation}
+          onOrientationChange={onOrientationChange}
+          categoryIndex={categoryIndex}
+          onCategoryIndexChange={onCategoryIndexChange}
+          series={series}
+          onSeriesChange={onSeriesChange}
+          spec={spec}
+          onSpecChange={onSpecChange}
+          availableAxes={availableAxes}
+          palette={palette}
+        />
       )}
     </DesignGrid>
   );

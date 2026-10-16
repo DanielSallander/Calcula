@@ -24,7 +24,7 @@ import type { ChartRenderTheme } from "../chartTheme";
 import { getSeriesColor } from "../chartTheme";
 import { resolveDatumStyle } from "../../lib/dataPointOverrides";
 import { drawRoundedRect, truncateText } from "../chartPainterUtils";
-import { datumValue, formatVisualValue } from "./visualValues";
+import { datumValue, formatVisualValue, visualFormatFor } from "./visualValues";
 import { computeVisualLayout, drawVisualFrame, fitFontSize } from "./visualLayout";
 
 const ROW_GAP = 6;
@@ -123,7 +123,7 @@ export function paintMultiRowCardChart(
     for (let si = 0; si < data.series.length; si++) {
       const cell = cellBox(layout, g, data.series.length, si, ci, showTitle);
       // A blank cell is "(Blank)", never the 0 the reader wrote for it.
-      const text = formatVisualValue(datumValue(data, si, ci), opts);
+      const text = formatVisualValue(datumValue(data, si, ci), visualFormatFor(spec, opts, data.series[si]?.name));
       const style = resolveDatumStyle(spec, data, si, ci, { fill: theme.titleColor });
 
       if (style.opacity != null) {

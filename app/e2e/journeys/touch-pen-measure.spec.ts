@@ -147,6 +147,7 @@ import type { Page } from "@playwright/test";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, expect } from "../fixtures";
+import { closeObjectPaneForGood } from "../helpers/object-pane";
 import type { GridHelper } from "../helpers/grid";
 import { readGridGeometry } from "../helpers/grid";
 import {
@@ -1095,6 +1096,15 @@ async function publish(rows: MeasureRow[], env: TouchEnvironment | null): Promis
     console.log(`[touch-pen] could not write the rows of "${info.title}": ${String(e)}`);
   }
 }
+
+// WP-C (D-PANE): on a canvas a click opens the ONE object pane at its release,
+// and a docked pane narrows the grid. This journey predates the pane and asserts
+// nothing about it, so every test starts with the pane closed AS IF BY HAND
+// (helpers/object-pane.ts). Per test, not once: the fixture's per-test task-pane
+// reset clears the "closed by hand" mark, and Playwright runs this hook after it.
+test.beforeEach(async ({ appPage }) => {
+  await closeObjectPaneForGood(appPage);
+});
 
 test.afterAll(() => {
   try {

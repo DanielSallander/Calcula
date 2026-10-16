@@ -270,6 +270,25 @@ import type {
   TotalsRowFunction as BackendTotalsRowFunction,
 } from "../backend";
 import type { IStyleOverride } from "../styleInterceptors";
+// Property bindings (D-BIND): the ONE seam every door uses -- the script
+// handle's executors reach Rust through it, never through invokeBackend.
+import {
+  BindingRefusal,
+  OBJECT_BINDING_KINDS,
+  analyzeBindingFormula,
+  bindingRefForInstance,
+  clearBinding,
+  getBinding,
+  getObjectJson,
+  isObjectBindingKind,
+  matchBindablePath,
+  overlayResolved,
+  parsePointer,
+  pointerSegments,
+  setBinding,
+  setLiteral,
+} from "../objectBindings";
+import type { ObjectBindingRef } from "../types";
 
 type CleanupFn = () => void;
 
@@ -4875,6 +4894,62 @@ async function maybeRequestCapabilityGrant(
   // be granted capabilities by a prompt in the moment, instead of only through
   // package consent — a deliberately higher bar. See scriptOrigin.ts.
   if (!mayJitPromptForCapability(handle) || cap === "ui.html") return;
+  await jitGrantCapability(mw, cap, args);
+}
+
+/**
+ * Require a capability INSIDE an executor -- for a call whose need for one
+ * depends on its arguments as the host reads them, which the ALLOWLIST row
+ * (one capability per method, decided before the executor runs) cannot say.
+ * `bindProperty` is the case: a binding that reads a model `[Measure]` or a
+ * CUBE function reaches the BI engine and needs `bi.query`; one that reads a
+ * cell needs nothing.
+ *
+ * THE SAME ORDER AND THE SAME WORDS AS THE BROKER (brokerPolicy.ts
+ * `decidePolicy`), so a capability is never easier to reach through an
+ * executor than through its own method:
+ *   1. the DECLARED CEILING (R19) first -- an undeclared capability is
+ *      `PermissionDenied`, and nobody is prompted for it;
+ *   2. then the GRANT -- a LOCAL script may be JIT-prompted (the exact path
+ *      `maybeRequestCapabilityGrant` takes; a distributed one never is);
+ *   3. still not granted -> `CapabilityRequired`.
+ * `what` names the call in the sentence ("bindProperty").
+ */
+export async function requireExecutorCapability(
+  mw: Pick<MountedWorker, "handle" | "definition">,
+  cap: CapabilityId,
+  what: string,
+): Promise<void> {
+  const { handle } = mw;
+  if (!handle.declaredCapabilities.has(cap)) {
+    throw new BrokerError(
+      "PermissionDenied",
+      `${what} requires the '${cap}' capability, which this script did not declare`,
+      cap,
+    );
+  }
+  if (handle.grants.has(cap)) return;
+  if (mayJitPromptForCapability(handle)) {
+    await jitGrantCapability(mw, cap, []);
+  }
+  if (!handle.grants.has(cap)) {
+    throw new BrokerError("CapabilityRequired", `${what} requires the '${cap}' capability`, cap);
+  }
+}
+
+/**
+ * The JIT prompt itself, for a LOCAL script (the caller has asked
+ * `mayJitPromptForCapability` already). Shared by `maybeRequestCapabilityGrant`
+ * (a method whose ALLOWLIST row names the capability) and
+ * `requireExecutorCapability` (an executor that needs one for these arguments),
+ * so the two can never prompt differently.
+ */
+async function jitGrantCapability(
+  mw: Pick<MountedWorker, "handle" | "definition">,
+  cap: CapabilityId,
+  args: unknown[],
+): Promise<void> {
+  const { handle } = mw;
   // R19: only JIT-prompt for capabilities the script actually DECLARED. An
   // undeclared cap is above the ceiling — the broker denies it (PermissionDenied)
   // and the user is never asked to grant something the script never declared.
@@ -6617,12 +6692,12 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       // Cross-instance READ. The aspect executors are the SAME ones the
       // own-object door uses — only the instance id differs, and only the
       // unlocked tier can supply it (the allowlist row enforces that).
-      const [, targetId, aspect, aspectArgs] = args as [string, string, string, unknown[]];
-      return executeGetState(targetId, aspect, aspectArgs ?? []);
+      const [objectType, targetId, aspect, aspectArgs] = args as [string, string, string, unknown[]];
+      return executeGetState(targetId, aspect, aspectArgs ?? [], { objectType, door: "api" });
     }
     case "api.objectSetState": {
-      const [, targetId, aspect, aspectArgs] = args as [string, string, string, unknown[]];
-      return executeSetState(mw, targetId, aspect, aspectArgs ?? []);
+      const [objectType, targetId, aspect, aspectArgs] = args as [string, string, string, unknown[]];
+      return executeSetState(mw, targetId, aspect, aspectArgs ?? [], { objectType, door: "api" });
     }
 
     // ---- sheet scope ----
@@ -6788,7 +6863,10 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
     }
     case "object.getState": {
       const [aspect, aspectArgs] = args as [string, unknown[]];
-      return executeGetState(instanceId, aspect, aspectArgs);
+      return executeGetState(instanceId, aspect, aspectArgs, {
+        objectType: definition.objectType,
+        door: "own",
+      });
     }
 
     // ---- render ----
@@ -7692,9 +7770,23 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
  * would make `chart.getSpec()` start returning a stranger's spec. Hence
  * `isOwnInstance` gates every mirror push and the shapeProps cache below.
  */
-async function executeSetState(mw: MountedWorker, instanceId: string, aspect: string, args: unknown[]): Promise<unknown> {
+async function executeSetState(
+  mw: MountedWorker,
+  instanceId: string,
+  aspect: string,
+  args: unknown[],
+  target: BindingAspectTarget = { objectType: mw.definition.objectType, door: "own" },
+): Promise<unknown> {
   const isOwnInstance = instanceId === (mw.definition.instanceId || "");
   switch (aspect) {
+    // ---- property BINDINGS + pointer literals (D-BIND, D §3.19) ----
+    // Addressed by JSON Pointer through a ScriptObjectHandle (`context.self`
+    // on this door, `api.object(kind, id)` on api.objectSetState). The
+    // stateless rows are vSetState's; the stateful gates live in the executor.
+    case "binding.set":
+    case "binding.clear":
+    case "property.set":
+      return executeBindingSetAspect(mw, { ...target, instanceId }, aspect, args);
     case "slicer.setSelectedItems": {
       const [items] = args as [string[] | null];
       const store = getSlicerStoreService();
@@ -8070,8 +8162,18 @@ async function executeSetState(mw: MountedWorker, instanceId: string, aspect: st
   }
 }
 
-async function executeGetState(instanceId: string, aspect: string, args: unknown[]): Promise<unknown> {
+async function executeGetState(
+  instanceId: string,
+  aspect: string,
+  args: unknown[],
+  target: BindingAspectTarget,
+): Promise<unknown> {
   switch (aspect) {
+    // ---- property reads by JSON Pointer (D-BIND, D §3.19) ----
+    case "binding.get":
+    case "property.get":
+    case "literal.get":
+      return executeBindingGetAspect({ ...target, instanceId }, aspect, args);
     // ---- cross-instance READS (B3) ----
     // A script's OWN object is read from a worker-local mirror (sync getters);
     // another object has no mirror, so these aspects are the async read path
@@ -8181,6 +8283,225 @@ async function executeGetState(instanceId: string, aspect: string, args: unknown
     }
     default:
       throw new BrokerError("ValidationError", `Unknown getState aspect: ${aspect}`);
+  }
+}
+
+// ============================================================================
+// Property bindings + pointer-addressed literals (D-BIND, D §3.19)
+// ============================================================================
+// A ScriptObjectHandle (`context.self`, `api.object(kind, id)`) reads and
+// writes ONE property of a bindable object by JSON Pointer, through the
+// @api/objectBindings seam -- the same door the Format pane, the Properties
+// pane and the AI use, so Rust applies the family's own gates (protection,
+// Lock Objects, a subscribed sheet), records the undo step and the audit row.
+//
+// THE GATE IS HERE. `BindingEditSource` is sent from the renderer, so the
+// restricted-tier clamp and the `bi.query` requirement are decided in this
+// executor, where the script's tier, its declared capabilities and its grants
+// are known. Rust re-checks a call LABELLED as a restricted script, which is
+// defence in depth against a host bug -- never the boundary (D §3.9).
+
+/** How a binding aspect addressed its object. */
+export interface BindingAspectTarget {
+  /**
+   * The object type the call named: the mount's own objectType on the
+   * own-object door, or the first argument of api.objectSetState /
+   * api.objectGetState -- for `api.object(kind, id)` that is a BINDING KIND.
+   */
+  objectType: string;
+  /** `own` = object.setState / object.getState; `api` = the unlocked target door. */
+  door: "own" | "api";
+}
+
+/** A binding aspect's target with its instance id. */
+export type ResolvedBindingAspectTarget = BindingAspectTarget & { instanceId: string };
+
+/**
+ * The binding ref a script call addresses.
+ *
+ * `api.object(kind, id)` names a BINDING ref directly (a binding kind and the
+ * object's binding id -- a control's `uid`, a chart's id, a canvas page's
+ * sheet id); Rust refuses an id that names nothing. Every other address is a
+ * SCRIPT INSTANCE (objectType + instanceId: the own-object door, or
+ * `api.object("shape", "control-0-5-2")`), mapped by the family that owns the
+ * kind through `bindingRefForInstance`. A kind whose script type and binding
+ * kind are spelled alike (chart, slicer, pivot) and whose family registered no
+ * mapping falls back to the instance id itself, which for those families IS
+ * the object's id. Anything else is a ValidationError naming the kinds.
+ */
+async function bindingRefForScriptTarget(target: ResolvedBindingAspectTarget): Promise<ObjectBindingRef> {
+  const { objectType, instanceId, door } = target;
+  if (door === "api" && isObjectBindingKind(objectType)) {
+    return { kind: objectType, id: instanceId };
+  }
+  const mapped = instanceId ? await bindingRefForInstance(objectType, instanceId) : null;
+  if (mapped) return mapped;
+  if (instanceId && isObjectBindingKind(objectType)) {
+    return { kind: objectType, id: instanceId };
+  }
+  throw new BrokerError(
+    "ValidationError",
+    door === "own"
+      ? `This script's ${objectType} has no bindable properties. Objects with bindable properties are: ` +
+        `${OBJECT_BINDING_KINDS.join(", ")}.`
+      : `'${objectType}' '${instanceId}' is not an object with bindable properties. ` +
+        `api.object(kind, id) takes one of: ${OBJECT_BINDING_KINDS.join(", ")}.`,
+  );
+}
+
+/** A refusal from the seam (Rust's own sentence) as the broker's error. */
+function bindingRefusalToBroker(err: unknown): never {
+  if (err instanceof BrokerError) throw err;
+  if (err instanceof BindingRefusal) throw new BrokerError("ValidationError", err.sentence);
+  throw err;
+}
+
+/** The sentence a restricted script's out-of-reach binding gets -- Rust's
+ *  `RESTRICTED_BINDING_CLAMP_MESSAGE`, word for word, because the two doors
+ *  must refuse the same fact the same way. */
+export const RESTRICTED_BINDING_CLAMP_MESSAGE =
+  `${RESTRICTED_SHEET_CLAMP_MESSAGE} -- a restricted script may bind only to cells on the sheet in front of the user.`;
+
+/** Read the value at `path` of `json` ("" = the whole object); null when absent. */
+function readAtPointer(json: unknown, path: string): unknown {
+  if (path === "") return json ?? null;
+  const segments = parsePointer(path);
+  if (segments === null) {
+    const parsed = pointerSegments(path);
+    throw new BrokerError("ValidationError", parsed.ok ? `'${path}' is not a property path` : parsed.error);
+  }
+  let cursor: unknown = json;
+  for (const seg of segments) {
+    if (Array.isArray(cursor)) {
+      if (!/^[0-9]+$/.test(seg)) return null;
+      cursor = cursor[Number(seg)];
+    } else if (cursor !== null && typeof cursor === "object") {
+      cursor = Object.prototype.hasOwnProperty.call(cursor, seg)
+        ? (cursor as Record<string, unknown>)[seg]
+        : undefined;
+    } else {
+      return null;
+    }
+    if (cursor === undefined) return null;
+  }
+  return cursor ?? null;
+}
+
+/**
+ * `binding.set` / `binding.clear` / `property.set` -- bindProperty /
+ * unbindProperty / setProperty of a ScriptObjectHandle. Exported for the unit
+ * tier; reached only through `executeSetState` (both setState doors).
+ *
+ * `binding.set`, in order:
+ *   1. the object (`bindingRefForScriptTarget`);
+ *   2. `analyzeBindingFormula` (INVARIANT -- scripts write `,` separators and
+ *      `.` decimals whatever the user's locale); a refused formula is refused;
+ *   3. a `[Measure]` ref or a CUBE function reaches the BI engine, so the
+ *      script needs `bi.query` (declared ceiling, then grant, then the JIT
+ *      prompt for a local script) -- `requireExecutorCapability`;
+ *   4. a RESTRICTED script may read only cells of the sheet in front of the
+ *      user: no other sheet, no defined name, no table, nothing indirect;
+ *   5. `setBinding` with `source: script` (Rust audits it and re-checks 4).
+ */
+export async function executeBindingSetAspect(
+  mw: Pick<MountedWorker, "handle" | "definition">,
+  target: ResolvedBindingAspectTarget,
+  aspect: string,
+  args: unknown[],
+): Promise<undefined> {
+  const { handle } = mw;
+  const ref = await bindingRefForScriptTarget(target);
+  const source = { kind: "script" as const, scriptId: handle.scriptId, unlocked: handle.tier === "unlocked" };
+  try {
+    switch (aspect) {
+      case "binding.set": {
+        const [path, formula, opts] = args as [string, string, { model?: string | null } | null | undefined];
+        const matched = matchBindablePath(ref.kind, path);
+        if (!matched.ok) throw new BrokerError("ValidationError", matched.error);
+        // With the model the Set will name, so the gates below see what the
+        // Set will do (a page with two models refuses an unnamed [Measure]).
+        const analysis = await analyzeBindingFormula(ref, formula, { invariant: true, model: opts?.model ?? null });
+        if (analysis.error) throw new BrokerError("ValidationError", analysis.error);
+        if (analysis.measureRefs.length > 0 || analysis.usesCube) {
+          await requireExecutorCapability(mw, "bi.query", "bindProperty");
+        }
+        if (handle.tier !== "unlocked") {
+          const lib = await getLib();
+          const active = await lib.getActiveSheet();
+          const offSheet = analysis.sheets.some((s) => s !== active);
+          if (offSheet || analysis.usesNames || analysis.usesTableRefs || analysis.usesIndirect) {
+            throw new BrokerError("PermissionDenied", RESTRICTED_BINDING_CLAMP_MESSAGE);
+          }
+        }
+        await setBinding(ref, path, formula, {
+          model: opts?.model ?? undefined,
+          invariant: true,
+          source,
+        });
+        return undefined;
+      }
+      case "binding.clear": {
+        const [path] = args as [string];
+        await clearBinding(ref, path, { source });
+        return undefined;
+      }
+      case "property.set": {
+        const [path, value] = args as [string, unknown];
+        const matched = matchBindablePath(ref.kind, path);
+        if (!matched.ok) throw new BrokerError("ValidationError", matched.error);
+        await setLiteral(ref, path, value, { source });
+        return undefined;
+      }
+      default:
+        throw new BrokerError("ValidationError", `Unknown setState aspect: ${aspect}`);
+    }
+  } catch (err) {
+    return bindingRefusalToBroker(err);
+  }
+}
+
+/**
+ * `binding.get` / `property.get` / `literal.get` -- getBinding / getProperty /
+ * getLiteral of a ScriptObjectHandle. Exported for the unit tier.
+ *
+ *   - `literal.get`: the object's own record at `path` (Rust's AI-visible
+ *     JSON, the same paths a binding addresses); "" = the whole object.
+ *   - `property.get`: the same, with every resolved binding applied by the
+ *     seam's PAINT rules (`overlayResolved`): a pending measure keeps the
+ *     literal, an error keeps it on a non-text slot, a text slot shows the
+ *     display. So a script reads what the user sees.
+ *   - `binding.get`: `{ formula, model }` -- the INVARIANT formula a script
+ *     would pass back to bindProperty -- or null when the path is unbound.
+ */
+export async function executeBindingGetAspect(
+  target: ResolvedBindingAspectTarget,
+  aspect: string,
+  args: unknown[],
+): Promise<unknown> {
+  const ref = await bindingRefForScriptTarget(target);
+  const [path] = args as [unknown];
+  if (typeof path !== "string") {
+    throw new BrokerError("ValidationError", "a property path must be a string (a JSON Pointer such as /spec/title)");
+  }
+  if (path !== "") {
+    const parsed = pointerSegments(path);
+    if (!parsed.ok) throw new BrokerError("ValidationError", parsed.error);
+  }
+  try {
+    switch (aspect) {
+      case "binding.get": {
+        const info = getBinding(ref, path);
+        return info ? { formula: info.formula, model: info.model ?? null } : null;
+      }
+      case "literal.get":
+        return readAtPointer(await getObjectJson(ref), path);
+      case "property.get":
+        return readAtPointer(overlayResolved(ref, "", await getObjectJson(ref)), path);
+      default:
+        throw new BrokerError("ValidationError", `Unknown getState aspect: ${aspect}`);
+    }
+  } catch (err) {
+    return bindingRefusalToBroker(err);
   }
 }
 
@@ -12954,8 +13275,12 @@ async function reprotectHeldSheet(
   // fix, which is the worst way to acquire one.
   //
   // The envelope is VBA's own move: make it visible, do the work, put the
-  // visibility back. It is net-zero exactly like the sheet hop around it —
-  // same visibility before and after, nothing repaints in between.
+  // visibility back. It is net-zero in STATE like the sheet hop around it --
+  // same visibility before and after -- but not silent: the unhide and the
+  // re-hide each announce the "sheets" domain (neither moves the active sheet:
+  // the re-hide runs after the hop back), so the tab strip and the report-page
+  // list re-read twice and land exactly where they began. Accepted churn on a
+  // rare path; skipping the envelope would leave the sheet unprotected.
   const sheetsBefore = mustHop ? await lib.getSheets() : null;
   const heldWasHidden =
     sheetsBefore?.sheets?.[hold.sheet]?.visibility &&

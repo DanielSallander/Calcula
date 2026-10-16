@@ -1,7 +1,8 @@
 //! FILENAME: app/extensions/Charts/components/FormatAxisDialog.tsx
 // PURPOSE: RETIRED. The modal "Format Axis" box is gone; this is the redirector
 //          that keeps its dialog id working, points the selection at the axis
-//          the caller named, and sends the reader to the Format task pane.
+//          the caller named, and sends the reader to the object pane's Format
+//          tab (its "Chart elements" card; WP-C D-PANE).
 // CONTEXT: WHY IT WAS RETIRED, and why a redirector rather than a deletion.
 //
 //          Excel has no modal Format Axis. It has ONE task pane that re-targets
@@ -43,10 +44,10 @@
 
 import React, { useEffect } from "react";
 import type { DialogProps } from "@api";
-import { openTaskPane } from "@api";
 
 import { setSubSelection } from "../handlers/selectionHandler";
-import { CHART_FORMAT_PANE_ID, publishCurrentChartSelection } from "./ChartFormatPane";
+import { publishCurrentChartSelection } from "./ChartFormatPane";
+import { openChartFormatPane } from "../lib/chartObjectPane";
 
 export function FormatAxisDialog({ onClose, data }: DialogProps): React.ReactElement | null {
   const chartId = data?.chartId as string | undefined;
@@ -58,7 +59,7 @@ export function FormatAxisDialog({ onClose, data }: DialogProps): React.ReactEle
       setSubSelection(chartId, { level: "axis", axisType });
       publishCurrentChartSelection();
     }
-    openTaskPane(CHART_FORMAT_PANE_ID);
+    openChartFormatPane(publishCurrentChartSelection, chartId);
     onClose();
     // `openCount` is the dependency that makes a repeat show observable; see
     // the header. `onClose` is stable per dialog instance.

@@ -26,6 +26,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, expect } from "../fixtures";
+import { closeObjectPaneForGood } from "../helpers/object-pane";
 import { readGridGeometry } from "../helpers/grid";
 import { startMcp } from "../helpers/calp-mcp";
 import { samplePixelGrids } from "../viewportSample";
@@ -84,6 +85,8 @@ const CHART_RENDERER = "/extensions/Charts/rendering/chartRenderer.ts";
 const PANE_STORE = "/extensions/ControlsPane/lib/controlsPaneStore.ts";
 const PANE_SOURCE = "/extensions/ControlsPane/lib/dropdownCellRangeSource.ts";
 const BUTTONS = "/src/api/buttonControlService.ts";
+/** `@api/objectBindings`: a control property follows a formula only as a BINDING (WP-D). */
+const BINDINGS_SEAM = "/src/api/objectBindings/index.ts";
 
 // ---------------------------------------------------------------------------
 // Fixture builders
@@ -108,8 +111,9 @@ async function ownData(page: Page, a1: string): Promise<void> {
  * collision rename must reach: a chart over the string source "Data!A1:B5", a
  * workbook name `=Data!$A$1`, a conditional format `=A1>Data!$B$1`, one typed
  * without "=" and in another case (`A1 > data!$B$1`), a custom validation
- * `=COUNTIF(Data!A:A,A1)=1`, a button whose text formula is `=Data!A1`, and a
- * pane dropdown on `Data!A1:A5`.
+ * `=COUNTIF(Data!A:A,A1)=1`, a button whose text is BOUND to `=Data!A1` (an
+ * object property binding, `@api/objectBindings`), and a pane dropdown on
+ * `Data!A1:A5`.
  */
 async function buildApp(page: Page, tag: string, rich = false): Promise<RichApp> {
   const app = `fixall-${tag}-${RUN}`;
@@ -141,10 +145,7 @@ async function buildApp(page: Page, tag: string, rich = false): Promise<RichApp>
       },
       { mod: BUTTONS, rep },
     );
-    await invoke(page, "set_control_property", {
-      sheetIndex: rep, row: btn.row, col: btn.col, controlType: "button",
-      propertyName: "text", valueType: "formula", value: "=Data!A1",
-    });
+    await bindButtonText(page, rep, btn.row, btn.col, "=Data!A1");
     const pane = await callModule<{ id: string } | null>(page, PANE_STORE, "createControlAsync", [
       { name: paneName, controlType: "dropdown", config: { type: "dropdown", source: { type: "cellRange", reference: "Data!A1:A5" }, placeholder: null }, order: null },
     ]);
@@ -275,20 +276,38 @@ async function namedRange(page: Page, name: string): Promise<{ refersTo: string;
   return all.find((n) => n.name.toLowerCase() === name.toLowerCase()) ?? null;
 }
 
+/**
+ * Bind a button's text to `formula` through the seam (WP-D: a control property
+ * follows a formula only as a BINDING; `set_control_property` refuses
+ * `valueType: "formula"` since S5a). The control is named by its `uid`, read
+ * from the backend. Invariant spelling: no separators in these formulas anyway.
+ */
+async function bindButtonText(page: Page, sheetIdx: number, row: number, col: number, formula: string): Promise<void> {
+  const meta = await invoke<{ uid?: string } | null>(page, "get_control_metadata", { sheetIndex: sheetIdx, row, col });
+  expect(meta?.uid, "precondition: the button has a uid (a binding names it by uid)").toBeTruthy();
+  await callModule(page, BINDINGS_SEAM, "setBinding", [{ kind: "control", id: meta!.uid }, "/properties/text", formula, { invariant: true }]);
+}
+
+/**
+ * The first button on the sheet whose TEXT is bound: the binding formula as
+ * Rust stores it (the `object_bindings` list op -- the authority the seam's cache
+ * mirrors one async reload later), and what the button shows
+ * (`resolve_control_properties`, which overlays the binding's current value).
+ */
 async function buttonTextFormula(page: Page, sheetIdx: number): Promise<{ formula: string; resolved: string } | null> {
-  const all = await invoke<Array<{ row: number; col: number; controlType?: string; metadata?: { properties: Record<string, { valueType: string; value: string }> } }>>(
-    page,
-    "get_all_controls",
-    { sheetIndex: sheetIdx },
-  );
+  const all = await invoke<Array<{ row: number; col: number }>>(page, "get_all_controls", { sheetIndex: sheetIdx });
   for (const c of all) {
-    const meta = await invoke<{ controlType: string; properties: Record<string, { valueType: string; value: string }> } | null>(page, "get_control_metadata", {
+    const meta = await invoke<{ controlType: string; uid?: string } | null>(page, "get_control_metadata", {
       sheetIndex: sheetIdx, row: c.row, col: c.col,
     });
-    const text = meta?.properties?.text;
-    if (meta?.controlType === "button" && text?.valueType === "formula") {
+    if (meta?.controlType !== "button" || !meta.uid) continue;
+    const listed = await invoke<{ kind: string; bindings?: Array<{ path: string; formula: string }> }>(page, "object_bindings", {
+      request: { op: "list", object: { kind: "control", id: meta.uid } },
+    });
+    const text = (listed.bindings ?? []).find((b) => b.path === "/properties/text");
+    if (text) {
       const resolved = await invoke<Record<string, string>>(page, "resolve_control_properties", { sheetIndex: sheetIdx, row: c.row, col: c.col });
-      return { formula: text.value, resolved: resolved.text ?? "" };
+      return { formula: text.formula, resolved: resolved.text ?? "" };
     }
   }
   return null;
@@ -320,6 +339,15 @@ function publishedArtifacts(app: string, version: string, match: RegExp): string
     return `(could not read: ${String(e)})`;
   }
 }
+
+// WP-C (D-PANE): on a canvas a click opens the ONE object pane at its release,
+// and a docked pane narrows the grid. This journey predates the pane and asserts
+// nothing about it, so every test starts with the pane closed AS IF BY HAND
+// (helpers/object-pane.ts). Per test, not once: the fixture's per-test task-pane
+// reset clears the "closed by hand" mark, and Playwright runs this hook after it.
+test.beforeEach(async ({ appPage }) => {
+  await closeObjectPaneForGood(appPage);
+});
 
 // ===========================================================================
 // COLLABORATION
@@ -404,9 +432,10 @@ test.describe("fix-all live: collaboration (.calp)", () => {
       const dvs = await dvRules(page, rep);
       const custom = dvs.map((d) => (d.validation.rule.custom as { formula?: string } | undefined)?.formula ?? "").filter(Boolean);
       expect(custom, "the custom validation follows").toEqual(["=COUNTIF('Data (2)'!A:A,A1)=1"]);
-      const btn = await buttonTextFormula(page, rep);
-      expect(btn?.formula, "the button's text formula follows").toBe("='Data (2)'!A1");
-      expect(btn?.resolved, "the button shows the PULLED Data!A1").toBe("21");
+      // The pulled binding is evaluated by the seam's ResolveAll after the pull's
+      // reload announcement: the VALUE arrives a moment after the row.
+      const btn = await eventually(() => buttonTextFormula(page, rep), (b) => b?.resolved === "21", "the button does not show the PULLED Data!A1 (21)");
+      expect(btn?.formula, "the button's text binding follows").toBe("='Data (2)'!A1");
       expect(await paneSource(page, paneName), "the pane dropdown follows").toBe("'Data (2)'!A1:A5");
       const items = await callModule<string[]>(page, PANE_SOURCE, "loadCellRangeItems", [(await paneSource(page, paneName))!]);
       expect(items, "the dropdown lists the pulled Data's cells").toEqual(["21", "22", "23", "24", "25"]);
@@ -436,7 +465,7 @@ test.describe("fix-all live: collaboration (.calp)", () => {
       const d = await pushDiff(page, WS, app);
       // One assertion per object domain, so a row in one domain cannot hide the others.
       expect.soft(d.totals.cellsChanged, `R2: a cell row: ${describeDiff(d)}`).toBe(0);
-      for (const domain of ["chart", "namedRange", "conditionalFormat", "dataValidation", "control", "paneControl"]) {
+      for (const domain of ["chart", "namedRange", "conditionalFormat", "dataValidation", "control", "paneControl", "binding"]) {
         expect
           .soft(d.objects.filter((o) => o.domain === domain).map((o) => `${o.name}/${o.change}`), `R2/B4: a ${domain} row in the push preview of an untouched working copy`)
           .toEqual([]);
@@ -845,10 +874,7 @@ async function addButtonWithFormula(page: Page, sheetIdx: number, row: number, c
     },
     { mod: BUTTONS, s: sheetIdx, row, col },
   );
-  await invoke(page, "set_control_property", {
-    sheetIndex: sheetIdx, row: btn.row, col: btn.col, controlType: "button",
-    propertyName: "text", valueType: "formula", value: formula,
-  });
+  await bindButtonText(page, sheetIdx, btn.row, btn.col, formula);
 }
 
 async function addPaneDropdown(page: Page, name: string, reference: string): Promise<void> {
@@ -956,9 +982,8 @@ test.describe("fix-all live: sheet structure", () => {
       expect(await cfFormulas(page, 0), "Manage Rules shows the old name").toEqual(["=A1>Facts!$B$1"]);
       const custom = (await dvRules(page, 0)).map((d) => (d.validation.rule.custom as { formula?: string } | undefined)?.formula ?? "");
       expect(custom, "the validation rule shows the old name").toEqual(["=COUNTIF(Facts!A:A,B1)=1"]);
-      const btn = await buttonTextFormula(page, 0);
+      const btn = await eventually(() => buttonTextFormula(page, 0), (b) => b?.resolved === "a", "the button no longer shows Data!A1's value");
       expect(btn?.formula).toBe("=Facts!A1");
-      expect(btn?.resolved, "the button no longer shows Data!A1's value").toBe("a");
 
       // They still WORK, in both directions.
       await setCells(page, 0, [["A1", "9"]]);

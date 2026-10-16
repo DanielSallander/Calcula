@@ -27,6 +27,7 @@ import * as fs from "node:fs";
 import * as nodeOs from "node:os";
 import * as path from "node:path";
 import { test, expect } from "../fixtures";
+import { closeObjectPaneForGood, openControlPropertiesFromMenu } from "../helpers/object-pane";
 import { readGridGeometry } from "../helpers/grid";
 import {
   MOD,
@@ -282,6 +283,15 @@ async function endClean(page: Page): Promise<void> {
   await page.keyboard.press("Escape").catch(() => {});
   await newFile(page).catch(() => {});
 }
+
+// WP-C (D-PANE): on a canvas a click opens the ONE object pane at its release,
+// and a docked pane narrows the grid. This journey predates the pane and asserts
+// nothing about it, so every test starts with the pane closed AS IF BY HAND
+// (helpers/object-pane.ts). Per test, not once: the fixture's per-test task-pane
+// reset clears the "closed by hand" mark, and Playwright runs this hook after it.
+test.beforeEach(async ({ appPage }) => {
+  await closeObjectPaneForGood(appPage);
+});
 
 // ---------------------------------------------------------------------------
 // V1 / W26 -- Delete acts on the WHOLE canvas selection
@@ -655,7 +665,10 @@ test.describe("fix-all canvas, live", () => {
         const sl = os.find((o) => o.type === "slicer")!;
         const tl = os.find((o) => o.type === "timeline-slicer")!;
         await pick(page, chart);
-        await addPick(page, box, { dx: box.w / 2, dy: box.h / 2 });
+        // The box's cells are CONTENT (D-CELLS): a Ctrl+click on a cell selects
+        // cells, never toggles the box. Its 4px left border band is the frame.
+        // (The box is unselected here, so no resize handle is live on that edge.)
+        await addPick(page, box, { dx: 2, dy: box.h / 2 });
         await addPick(page, sl, HEADER(sl));
         await addPick(page, tl, { dx: tl.w / 2, dy: 8 });
         await eventually(() => selectedObjects(page), (s) => s.length === 4, "precondition: the four objects are not all selected");
@@ -978,7 +991,10 @@ test.describe("fix-all canvas, live", () => {
       await expect(menu, "right-clicking the pivot box opened no pivot menu").toBeVisible();
       const labels = await menu.locator('[role="menuitem"]').evaluateAll((els) => els.map((e) => (e.textContent ?? "").replace(/>$/, "").trim()));
       expect(labels, "the pivot menu offers Refresh").toContain("Refresh");
-      for (const cellItem of ["Cut", "Copy", "Paste", "Insert Row", "Insert Rows", "Delete Row", "Insert"]) {
+      // Copy IS the box menu's own first item on a cell (Excel's pivot cell menu,
+      // D-CELLS): it copies the selected pivot cells. The grid's cell edits stay out.
+      expect(labels, "the pivot box menu offers no Copy on a cell").toContain("Copy");
+      for (const cellItem of ["Cut", "Paste", "Insert Row", "Insert Rows", "Delete Row", "Insert"]) {
         expect(labels, `a grid-cell item (${cellItem}) appeared in the pivot box menu`).not.toContain(cellItem);
       }
       await page.keyboard.press("Escape");
@@ -1021,7 +1037,8 @@ test.describe("fix-all canvas, live", () => {
       ) => {
         const c = await fittedCanvas(page);
         if (narrowPage) {
-          // A shape's click opens the Properties pane, which narrows the grid: keep the page inside what stays visible.
+          // A docked pane narrows the grid (the object pane is closed by hand in
+          // beforeEach, but a door could still open it): keep the page inside what stays visible.
           await patchActiveCanvas(page, { pagePreset: "custom", pageWidth: narrowPage, pageHeight: c.pageHeight });
           c.pageWidth = narrowPage;
         }
@@ -1392,7 +1409,9 @@ test.describe("fix-all canvas, live", () => {
       await createShape(page, { sheetIndex: 0, x: 336, y: 120, width: 128, height: 80 });
       const s = (await eventually(() => objects(page), (o) => o.length === 1, "the shape was not published"))[0];
       await pick(page, s, CENTER(s));
-      // Properties > Pin to grid (the pane opens on the shape's click).
+      // Properties > Pin to grid. On a worksheet a press opens no pane (WP-C):
+      // the shape's own menu "Properties..." opens the object pane on Properties.
+      await openControlPropertiesFromMenu(page, s);
       const pin = paneInput(page, "Pin to grid");
       await expect(pin, "the Properties pane shows no 'Pin to grid' switch").toBeVisible({ timeout: 10_000 });
       await pin.check();
@@ -1407,9 +1426,10 @@ test.describe("fix-all canvas, live", () => {
       expect(copy, "the copy lands +20").toBeTruthy();
       expect(copy.pinToGrid, "the copy of a pinned shape is not pinned").toBe("true");
 
-      // The copy's Properties pane shows it pinned.
+      // The copy's Properties pane shows it pinned (the open pane follows the selection).
       const copyObj = (await objects(page)).find((o) => o.x === 356)!;
       await pick(page, copyObj, CENTER(copyObj));
+      await openControlPropertiesFromMenu(page, copyObj);
       await expect(paneInput(page, "Pin to grid"), "the copy's Properties pane shows it unpinned").toBeChecked({ timeout: 10_000 });
 
       // Save, reopen, resize a column to the right of everything: nothing moves.
@@ -1495,6 +1515,8 @@ test.describe("fix-all canvas, live", () => {
       await createShape(page, { sheetIndex: 0, x: 336, y: 120, width: 128, height: 80, text: "keep" });
       const s = (await eventually(() => objects(page), (o) => o.length === 1, "the shape was not published"))[0];
       await pick(page, s, CENTER(s));
+      // On a worksheet a press opens no pane (WP-C): the shape's menu "Properties..." does.
+      await openControlPropertiesFromMenu(page, s);
       await expect(paneInput(page, "Width"), "the Properties pane shows no Width field").toBeVisible({ timeout: 10_000 });
       await protectActiveSheet(page);
 
@@ -1561,10 +1583,19 @@ test.describe("fix-all canvas, live", () => {
       await callModule(page, MOD.FLOATING_RANGES, "createFloatingRange", [480, 80, "FloatB8"]);
       const fr = await eventually(async () => (await objects(page)).find((o) => o.type === "floating-range"), (o) => !!o, "the floating grid was not published");
       // Its A1 cell: title bar 20px, column header 16px, row header 28px (canvas journey's FR_A1).
-      await clickObject(page, fr!, { at: { dx: 28 + 32, dy: 20 + 16 + 10 } });
-      await eventually(() => grid.nameBox.inputValue(), (v) => v === "FloatB8!A1", "precondition: the floating grid's A1 is not the selected cell");
+      // Each door starts from the floating grid's A1 SELECTED. The Escape that
+      // ends a door is the grid's (a menu command gives the grid the keyboard,
+      // restoreFocusToGrid, WP-C 2026-10-16), and Escape on a floating-grid
+      // cell drops that cell selection by design (FloatingRange handleFrKeyDown)
+      // -- so without re-selecting, the second and third doors ran with no
+      // floating-grid cell selected and proved nothing about B8.
+      const selectFrA1 = async (label: string) => {
+        await clickObject(page, fr!, { at: { dx: 28 + 32, dy: 20 + 16 + 10 } });
+        await eventually(() => grid.nameBox.inputValue(), (v) => v === "FloatB8!A1", `precondition (${label}): the floating grid's A1 is not the selected cell`);
+      };
 
       const tryDoor = async (label: string, open: () => Promise<void>) => {
+        await selectFrA1(label);
         await startToasts(page);
         await open();
         await page.waitForTimeout(1500);

@@ -113,6 +113,7 @@ fn workbook_with_unordered_collections(fixed: &FixedIds) -> Workbook {
         show_title: true,
         show_column_headers: false,
         show_row_headers: true,
+        container: None,
     }];
     wb.pivot_definitions = vec![persistence::SavedPivotDefinition {
         id: fixed.pivot,
@@ -140,6 +141,7 @@ fn workbook_with_unordered_collections(fixed: &FixedIds) -> Workbook {
         show_scrollbar: true,
         style_preset: "TimelineStyleLight1".to_string(),
         connected_pivot_ids: vec![fixed.pivot],
+        container: None,
     }];
     wb
 }

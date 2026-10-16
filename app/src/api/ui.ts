@@ -97,6 +97,10 @@ export interface TaskPaneService {
   addActiveContextKey(key: TaskPaneContextKey): void;
   removeActiveContextKey(key: TaskPaneContextKey): void;
   onRegistryChange(listener: () => void): () => void;
+  /** The view ids of the panes open now (shown or not), in open order. */
+  getOpenPaneIds?(): string[];
+  /** Called after ANY change of the pane state (open/close, active view, manually closed). */
+  onStateChange?(listener: () => void): () => void;
 }
 
 export interface DialogService {
@@ -700,6 +704,25 @@ export function addTaskPaneContextKey(key: TaskPaneContextKey): void {
 
 export function removeTaskPaneContextKey(key: TaskPaneContextKey): void {
   taskPaneService?.removeActiveContextKey(key);
+}
+
+/**
+ * The view ids of the panes open now, read imperatively (the hook twin is
+ * `useTaskPaneOpenPaneIds`). A pane can be closed from the Shell's own header
+ * (its X), so an extension that hosts a pane asks here rather than trusting
+ * its own last open. Empty before the Shell registered its service.
+ */
+export function getOpenTaskPaneIds(): string[] {
+  return taskPaneService?.getOpenPaneIds?.() ?? [];
+}
+
+/**
+ * Subscribe to every change of the task-pane state (a pane opened or closed,
+ * the active view, the container shown or hidden). The listener reads the
+ * state back. Returns the unsubscribe (a no-op before the Shell registered).
+ */
+export function onTaskPaneStateChange(listener: () => void): () => void {
+  return taskPaneService?.onStateChange?.(listener) ?? (() => {});
 }
 
 // React hooks (delegate to registered implementations)

@@ -12,7 +12,6 @@ import { strokeDatumBorderRect } from "./barChartPainter";
 import { createLinearScale, createBandScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
-  drawChartBackground,
   drawPlotBackground,
   drawHorizontalGridLines,
   drawTitle,
@@ -128,7 +127,6 @@ export function paintHistogramChart(
   const bins = computeBins(allValues, binCount);
 
   if (bins.length === 0) {
-    drawChartBackground(ctx, layout, theme);
     return;
   }
 
@@ -150,7 +148,6 @@ export function paintHistogramChart(
   );
 
   // 1. Background
-  drawChartBackground(ctx, layout, theme);
 
   // 2. Plot area background
   drawPlotBackground(ctx, plotArea, theme);
@@ -205,9 +202,7 @@ export function paintHistogramChart(
   ctx.restore();
 
   // 6. Title
-  if (spec.title) {
-    drawTitle(ctx, spec.title, layout, theme);
-  }
+  drawTitle(ctx, spec.title, layout, theme);
 
   // 7. Legend (show series names if multiple input series)
   if (spec.legend.visible && data.series.length > 0) {

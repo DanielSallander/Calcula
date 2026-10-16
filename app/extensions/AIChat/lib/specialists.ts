@@ -57,7 +57,13 @@ const SUBSETS: Record<Intent, readonly string[]> = {
     "analyze_range", "analyze_model", "show_points_of_interest", "get_sheet_summary", "read_cell_range",
     "list_bi_connections", "describe_bi_model",
   ],
-  chart: ["list_charts", "get_chart", "create_chart_from_spec", "show_points_of_interest", "get_sheet_summary", "read_cell_range", "list_tables"],
+  // `list_tables` gave way to the binding pair (WP-D) at the eight-tool cap:
+  // get_sheet_summary already carries the Tables inventory, while "make the
+  // title follow B1" has no other route than set_object_binding.
+  chart: [
+    "list_charts", "get_chart", "create_chart_from_spec", "show_points_of_interest", "get_sheet_summary",
+    "read_cell_range", "list_object_properties", "set_object_binding",
+  ],
   "bi-query": [
     "list_bi_connections", "describe_bi_model", "run_bi_query", "cube_value", "cube_kpi",
     "cube_members", "create_pivot", "analyze_model",
@@ -89,7 +95,9 @@ const ADDENDA: Record<Intent, string> = {
     "When the user wants to SEE where something is on a chart, call show_points_of_interest instead of describing positions.",
   chart:
     "\n\nTHIS REQUEST IS ABOUT A CHART. Read the data it should show, then create or change the " +
-    "chart; do not restate the numbers in prose.",
+    "chart; do not restate the numbers in prose. When a title, axis bound or goal should FOLLOW a " +
+    "cell or a measure, bind it with set_object_binding (paths from list_object_properties) " +
+    "rather than writing today's value into the spec.",
   "bi-query":
     "\n\nTHIS REQUEST IS A REPORT over the semantic model. Describe the model once, then run the " +
     "query or build the pivot the user asked for, following the model's strategy for measures " +

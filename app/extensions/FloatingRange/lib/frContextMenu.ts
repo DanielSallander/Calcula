@@ -22,9 +22,19 @@
 //          (@api/objectPosition; BUG-0258 design phase 5b): the no-drag route
 //          to place the grid. Its Width and Height stay disabled -- a range's
 //          size is its rows and columns, which the four size items change.
+//
+//          "Format..." and "Properties..." open the ONE object pane
+//          (@api/objectPane, WP-C D-PANE) on its Format tab and on the grid's
+//          Properties tab (rows, columns, the header strips); the old
+//          Properties dialog is gone -- its name and title bar moved to the
+//          Format tab's Title card.
 
 import type { GridRegion } from "@api/gridOverlays";
 import { SIZE_AND_POSITION_LABEL, sizeAndPositionMenuEntry } from "@api/objectPosition";
+import { OBJECT_PANE_FORMAT_LABEL, objectPaneMenuEntry } from "@api/objectPane";
+
+/** The object pane tab that hosts the grid's rows / columns / header strips. */
+export const FR_PROPERTIES_TAB = "properties";
 
 /** How many of these menus are mounted (0 or 1 in practice; a count, because
  *  a re-open mounts the new menu before the old one's cleanup runs). */
@@ -71,7 +81,6 @@ export interface FrContextMenuHandlers {
   deleteLastRow(frId: string): void;
   deleteLastColumn(frId: string): void;
   rename(frId: string): void;
-  properties(frId: string): void;
   deleteObject(frId: string): void;
   /** Window size lookup for the shrink-item gating (a 1-row FR cannot lose a row). */
   getCounts(frId: string): { rows: number; cols: number } | null;
@@ -98,6 +107,10 @@ export function buildFrContextMenu(
   const geometry = handlers.canEditGeometry(frId);
   const region = handlers.regionOf(frId);
   const sizePos = region ? sizeAndPositionMenuEntry(region) : null;
+  // The object pane: hidden while it cannot open for the range (not
+  // published, no pane installed), like Size and Position.
+  const format = region ? objectPaneMenuEntry(region) : null;
+  const properties = region ? objectPaneMenuEntry(region, FR_PROPERTIES_TAB) : null;
   return [
     {
       id: "floatingRange.addRow",
@@ -134,6 +147,12 @@ export function buildFrContextMenu(
       run: () => sizePos?.run(),
     },
     {
+      id: "floatingRange.format",
+      label: format?.label ?? OBJECT_PANE_FORMAT_LABEL,
+      enabled: !!format && !format.disabled,
+      run: () => format?.run(),
+    },
+    {
       id: "floatingRange.rename",
       label: "Rename…",
       enabled: true,
@@ -142,9 +161,9 @@ export function buildFrContextMenu(
     {
       id: "floatingRange.properties",
       label: "Properties…",
-      enabled: true,
+      enabled: !!properties && !properties.disabled,
       separatorAfter: true,
-      run: () => handlers.properties(frId),
+      run: () => properties?.run(),
     },
     {
       id: "floatingRange.delete",

@@ -5,6 +5,7 @@
 
 import type { GridConfig, Viewport, Selection, SelectionType, DimensionOverrides, FormulaReference, FreezeConfig } from "../../types";
 import type { ReferenceCorner } from "../../lib/gridRenderer";
+import type { FloatingReferencePickRange } from "../../../api/gridOverlays";
 
 /**
  * Configuration for auto-scroll behavior during drag selection.
@@ -137,6 +138,12 @@ export interface UseMouseSelectionProps {
   onInsertReference?: (row: number, col: number) => void;
   /** Callback to insert arbitrary formula text (e.g., GETPIVOTDATA) with cell highlight */
   onInsertFormulaText?: (text: string, highlightRow: number, highlightCol: number) => void;
+  /**
+   * Callback for a finished REFERENCE PICK on a floating object (D-PICK): a
+   * cell or a dragged rectangle of a canvas pivot's hidden grid ("sheet") or
+   * of a named floating grid ("object").
+   */
+  onFloatingReferencePick?: (range: FloatingReferencePickRange) => void;
   /** Callback to insert a range reference (formula mode) */
   onInsertRangeReference?: (startRow: number, startCol: number, endRow: number, endCol: number) => void;
   /** Callback to insert a column reference (formula mode) */

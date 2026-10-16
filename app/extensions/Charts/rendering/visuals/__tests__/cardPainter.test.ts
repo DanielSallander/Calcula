@@ -38,6 +38,21 @@ describe("card: the callout", () => {
     expect(textsOf(calls)).toContain("$1,234.50");
   });
 
+  it("a Data format the author chose (spec.fieldFormats) is what the card writes when display units were left unset", () => {
+    // Found live (object-pane-format J6, 2026-10-16): #,##0.00 persisted, the
+    // model formatted the row "114,033,992.77", and the card wrote "114M".
+    const spec = visualSpec("card", { fieldFormats: { Revenue: "#,##0.00" } } as never);
+    const { calls } = paintVisual("card", spec, seriesData(["t"], [{ name: "Revenue", values: [114033992.77] }], [["114,033,992.77"]]));
+    expect(textsOf(calls)).toEqual(["114,033,992.77", "Revenue"]);
+  });
+
+  it("display units the author CHOSE still win over a Data format, and a measure with no format keeps Auto", () => {
+    const chosen = visualSpec("card", { fieldFormats: { Revenue: "#,##0.00" }, markOptions: { displayUnits: "auto" } } as never);
+    expect(textsOf(paintVisual("card", chosen, seriesData(["t"], [{ name: "Revenue", values: [114033992.77] }], [["114,033,992.77"]])).calls)).toContain("114M");
+    const other = visualSpec("card", { fieldFormats: { Cost: "#,##0.00" } } as never);
+    expect(textsOf(paintVisual("card", other, seriesData(["t"], [{ name: "Revenue", values: [114033992.77] }], [["114,033,992.77"]])).calls)).toContain("114M");
+  });
+
   it("many rows of numbers are summed (Power BI's default for a numeric field)", () => {
     const { calls } = paintVisual("card", visualSpec("card"), seriesData(["a", "b", "c"], [{ name: "Units", values: [100, 200, 300] }]));
     expect(textsOf(calls)).toContain("600");

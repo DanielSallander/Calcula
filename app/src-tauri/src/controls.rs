@@ -1,15 +1,12 @@
 //! FILENAME: app/src-tauri/src/controls.rs
 // PURPOSE: Control metadata storage and Tauri commands.
-// CONTEXT: Stores per-cell control properties (script references, formula-driven properties).
+// CONTEXT: Stores per-cell control properties (script references, literals).
 //          The button/checkbox bool in CellStyle handles fast rendering checks;
-//          this module stores richer metadata like onSelect scripts and formula properties.
+//          this module stores richer metadata like onSelect scripts. A property
+//          that follows a formula is a BINDING (`object_bindings`, keyed by the
+//          control's stable `uid`), overlaid by `resolve_control_properties`.
 
-use crate::{
-    AppState, format_cell_value_simple, parse_formula, convert_expr, create_multi_sheet_context,
-    ast_has_named_refs, resolve_names_in_ast, ast_has_table_refs, resolve_table_refs_in_ast,
-    TableRefContext,
-};
-use engine::{CellValue, Evaluator};
+use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tauri::State;
@@ -20,13 +17,23 @@ use crate::persistence::FileState;
 // Types
 // ============================================================================
 
-/// A single property value that can be either a static value or a formula.
+/// A single property value.
+///
+/// `value_type` is `"static"` for every property a door writes today. A
+/// property that FOLLOWS a formula is a BINDING (`object_bindings`, WP-D), kept
+/// in the workbook's binding store beside this literal -- never a second,
+/// formula-typed spelling here: the three write doors refuse any other type
+/// (`refuse_formula_value_type`) and the load path migrates old
+/// `"formula"`-typed properties into bindings (`object_bindings::migrate`).
+/// The one exception is a CODE slot (`onSelect`, `macroRef`, the held
+/// compartment), whose value type is the application's and is carried
+/// byte-identical.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ControlPropertyValue {
-    /// "static" or "formula"
+    /// "static" (a code slot may carry its application's own type)
     pub value_type: String,
-    /// The static value or formula string (formulas start with "=")
+    /// The value, as a string
     pub value: String,
 }
 
@@ -36,9 +43,74 @@ pub struct ControlPropertyValue {
 pub struct ControlMetadata {
     /// Control type identifier: "button", "checkbox", etc.
     pub control_type: String,
+    /// The control's STABLE identity: what a property binding names it by
+    /// (`ObjectBindingRef { kind: control, id: uid }`). Its anchor cell is not
+    /// an identity -- a move, an in-cell toggle or a structural shift re-keys
+    /// it -- so the uid is minted once ([`assign_uid`]) and carried unchanged
+    /// by every move, shift, undo and pull. Empty only for a control no door
+    /// has seen yet (the load path mints one for it).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub uid: String,
     /// Map of property name to property value.
     /// Common properties: text, fill, color, borderColor, fontSize, onSelect, tooltip
     pub properties: HashMap<String, ControlPropertyValue>,
+}
+
+/// A fresh control uid (a UUID v7 in its canonical spelling).
+pub fn mint_control_uid() -> String {
+    identity::EntityId::from_bytes(identity::generate_uuid_v7()).to_string()
+}
+
+/// THE ONE place a control's uid is decided (WP-D, D §3.13).
+///
+/// * (a) a NEW key (no control at `key`): keep `incoming` when it is non-empty
+///   and no OTHER control of `store` carries it, else mint. A paste, a
+///   duplicate and a clipboard copy arrive carrying the SOURCE's uid (the
+///   renderer sends the metadata it copied), so they collide and are
+///   re-minted -- a copy is a new object, never a second name for the first.
+/// * (b) a REPLACE at an existing key: the EXISTING control's uid, whatever
+///   arrives. `set_control_metadata` is wholesale replacement, and an empty or
+///   foreign uid in its payload must not orphan the control's bindings.
+///   (An existing control with no uid yet is treated as a new key.)
+/// * (c) load: [`materialize_saved_controls`] keeps a stored uid and mints for
+///   a control that has none (or one that collides inside the workbook).
+pub fn assign_uid(store: &ControlStorage, key: ControlKey, incoming: &str) -> String {
+    if let Some(existing) = store.get(&key) {
+        if !existing.uid.is_empty() {
+            return existing.uid.clone();
+        }
+    }
+    let taken = |uid: &str| store.iter().any(|(k, meta)| *k != key && meta.uid == uid);
+    if !incoming.is_empty() && !taken(incoming) {
+        incoming.to_string()
+    } else {
+        mint_control_uid()
+    }
+}
+
+/// The sentence every control write door answers a formula-typed value with.
+pub const FORMULA_VALUE_TYPE_REFUSAL: &str =
+    "A property formula is a binding now: use Bind (fx) in the Properties pane, or bindProperty() in a script.";
+
+/// Is `key` a CODE slot -- executable, held, or a button's action wiring --
+/// whose value type belongs to its application and is carried byte-identical?
+/// Decided from the constants, never a re-typed list.
+pub fn is_code_slot(key: &str) -> bool {
+    EXECUTABLE_CONTROL_PROPERTIES.contains(&key)
+        || is_held_property(key)
+        || BUTTON_ACTION_PROPERTIES.contains(&key)
+}
+
+/// Refuse a non-`"static"` value type for any property that is not a code
+/// slot ([`is_code_slot`]). A property that follows a formula is a BINDING
+/// (`object_bindings`), and a formula-typed literal written here would be a
+/// second spelling of the same fact that nothing evaluates any more.
+pub fn refuse_formula_value_type(key: &str, value_type: &str) -> Result<(), String> {
+    if value_type == "static" || is_code_slot(key) {
+        Ok(())
+    } else {
+        Err(FORMULA_VALUE_TYPE_REFUSAL.to_string())
+    }
 }
 
 /// Well-known property: is this control PINNED TO THE GRID?
@@ -95,7 +167,7 @@ pub fn moves_with_cells(meta: &ControlMetadata) -> bool {
 }
 
 /// Location key for a control: (sheet_index, row, col)
-type ControlKey = (usize, u32, u32);
+pub type ControlKey = (usize, u32, u32);
 
 /// Storage for all controls: (sheet_index, row, col) -> ControlMetadata
 pub type ControlStorage = HashMap<ControlKey, ControlMetadata>;
@@ -123,6 +195,10 @@ pub struct SavedControlEntry {
     pub row: u32,
     pub col: u32,
     pub control_type: String,
+    /// [`ControlMetadata::uid`]; absent in a file written before uids existed
+    /// (the load path mints one).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub uid: String,
     pub properties: HashMap<String, ControlPropertyValue>,
 }
 
@@ -141,6 +217,7 @@ pub fn collect_controls_for_save(
                 row: *row,
                 col: *col,
                 control_type: meta.control_type.clone(),
+                uid: meta.uid.clone(),
                 properties: meta.properties.clone(),
             });
     }
@@ -195,9 +272,11 @@ pub const MACRO_REF_PROPERTY: &str = "macroRef";
 /// (`SCRIPT_REFUSED_SHAPE_PROPERTY_KEYS`, app/src/api/scriptHost/validators.ts)
 /// and this doc comment are all one edit rather than three that drift.
 ///
-/// NOTE what is NOT here: a `formula`-typed property is evaluated, not executed
-/// (`resolve_control_properties` runs it through the sheet evaluator, which has
-/// no reach outside the grid), and geometry/paint keys cannot run anything at
+/// NOTE what is NOT here: a property that follows a formula is a BINDING
+/// (`object_bindings`), evaluated by the binding evaluator -- which has no reach
+/// outside the grid and the workbook's models -- and never executed; no
+/// formula-typed non-code property exists any more (the doors refuse one, the
+/// load path migrates old ones). Geometry/paint keys cannot run anything at
 /// all. This is the EXECUTION list, not the "publisher-authored" list.
 pub const EXECUTABLE_CONTROL_PROPERTIES: &[&str] = &[ON_SELECT_PROPERTY, MACRO_REF_PROPERTY];
 
@@ -214,6 +293,154 @@ pub const EXECUTABLE_CONTROL_PROPERTIES: &[&str] = &[ON_SELECT_PROPERTY, MACRO_R
 /// it like code" would make every published navigation button arrive dead,
 /// with no error anywhere -- which is why the pin exists.
 pub const BUTTON_ACTION_PROPERTIES: &[&str] = &["action", "actionTarget", "actionTargetName"];
+
+/// Mirrors of `PAGE_NAVIGATOR_CONTROL_TYPE` / `PAGE_NAVIGATOR_OVERRIDES_PROPERTY`
+/// in `app/src/api/buttonControlService.ts` (pinned by `held_button_code_tests`).
+/// The one Rust spelling lives in `calcula_format::page_navigator`, which
+/// `core/calp` reads too.
+pub use calcula_format::page_navigator::{PAGE_NAVIGATOR_CONTROL_TYPE, PAGE_NAVIGATOR_OVERRIDES_PROPERTY};
+
+/// Every Page-Navigator-specific property (D-NAV). DELIBERATELY NOT EXECUTABLE
+/// AND NOT HELD, for the reason [`BUTTON_ACTION_PROPERTIES`] gives: a navigator
+/// names pages to show and how to paint them, runs no code, and a pull keeps
+/// every one of these live -- a published report's navigator must arrive
+/// working. Its items are never stored (they are derived from the workbook's
+/// canvas pages); `pageOverrides` keeps only per-page captions and colours.
+pub const PAGE_NAVIGATOR_PROPERTIES: &[&str] = &[
+    "orientation",
+    "gap",
+    "padding",
+    "fontSize",
+    "color",
+    "fill",
+    "borderColor",
+    "selectedFill",
+    "selectedColor",
+    "showHiddenPages",
+    "showTooltipPages",
+    PAGE_NAVIGATOR_OVERRIDES_PROPERTY,
+];
+
+/// The PAGE-TARGET ID map of one `.calp` pull: application sheet id -> local
+/// sheet id (BUG-0449).
+///
+/// A navigate button's `actionTarget` and a Page Navigator override's
+/// `sheetId` name a page by its STABLE ID, and a subscriber's sheet ids are its
+/// own -- so without this a pulled navigation button resolved its id to
+/// nothing, fell back to the NAME, and after a collision rename ("Detail"
+/// arrives as "Detail (2)") opened the SUBSCRIBER's own "Detail". Built BEFORE
+/// the controls lock (sheet ids, then media, then controls -- the canonical
+/// order). IDS ONLY: page-target NAMES are rewritten by `calp::sheet_renames`
+/// (`visit_control_page_target_names`), the one rename authority every pull
+/// door and the push already run.
+#[derive(Debug, Clone)]
+pub struct PageTargetRemap {
+    /// `SheetId::to_string()` of the application sheet -> the local id string.
+    targets: HashMap<String, String>,
+}
+
+impl PageTargetRemap {
+    /// Nothing changes. ONLY `.cala` load (the user's own workbook: its ids are
+    /// already its own) and unit tests use it; a source scan
+    /// (`calp_materialize_tests::no_pull_door_materializes_controls_with_an_identity_page_remap`)
+    /// pins that no door in calp_commands.rs passes it.
+    pub fn identity() -> Self {
+        PageTargetRemap { targets: HashMap::new() }
+    }
+
+    /// From a pull's application-id -> FINAL local index map and the live
+    /// `sheet_ids` (a read guard the caller holds or has just taken). A
+    /// checkout keeps the application's ids (`core/calp/src/pull.rs`), so on a
+    /// checkout every pair maps an id to itself and the rewrite changes nothing
+    /// -- the door still passes `from_pull`, never `identity()`, so the choice
+    /// is not the door's to get wrong.
+    pub fn from_pull(
+        pkg_to_index: &HashMap<identity::SheetId, usize>,
+        sheet_ids: &[identity::SheetId],
+    ) -> Self {
+        let targets = pkg_to_index
+            .iter()
+            .filter_map(|(pkg, &idx)| sheet_ids.get(idx).map(|local| (pkg.to_string(), local.to_string())))
+            .collect();
+        PageTargetRemap { targets }
+    }
+
+    /// Does every pair map an id to itself (or is the map empty)?
+    pub fn is_identity(&self) -> bool {
+        self.targets.iter().all(|(from, to)| from == to)
+    }
+
+    /// The local id `application_id` maps to, if this pull carries it.
+    fn local(&self, application_id: &str) -> Option<&str> {
+        self.targets.get(application_id).map(String::as_str)
+    }
+}
+
+/// The STATIC value of a property, or `None` for an absent or formula-typed one.
+fn static_value<'a>(props: &'a HashMap<String, ControlPropertyValue>, key: &str) -> Option<&'a str> {
+    props
+        .get(key)
+        .filter(|p| p.value_type == "static")
+        .map(|p| p.value.as_str())
+}
+
+/// Rewrite ONE entry's page-target IDS in place; true when anything changed.
+///
+/// * a navigate BUTTON (`controlType == "button"` and static `action ==
+///   "navigate"`, the frontend's own reading): a static non-empty
+///   `actionTarget` found in the map becomes the local id. Not found: left
+///   alone -- the name fallback is the documented behaviour, and the name
+///   itself is `sheet_renames`'s.
+/// * a PAGE NAVIGATOR: each entry of the static `pageOverrides` whose
+///   `sheetId` is in the map gets the local id. An unparseable value is left
+///   untouched; the value is re-serialised (canonical bytes,
+///   `calcula_format::page_navigator`) ONLY when an id actually changed, so a
+///   no-op pull -- every checkout -- keeps the bytes.
+/// * a `formula`-typed value is never touched.
+pub fn remap_control_page_targets(entry: &mut SavedControlEntry, remap: &PageTargetRemap) -> bool {
+    use calcula_format::page_navigator::{parse_page_overrides, serialize_page_overrides};
+    if remap.targets.is_empty() {
+        return false;
+    }
+    if entry.control_type == "button" {
+        if static_value(&entry.properties, "action") != Some("navigate") {
+            return false;
+        }
+        let Some(target) = static_value(&entry.properties, "actionTarget") else { return false };
+        if target.is_empty() {
+            return false;
+        }
+        let Some(local) = remap.local(target) else { return false };
+        if local == target {
+            return false;
+        }
+        let local = local.to_string();
+        if let Some(prop) = entry.properties.get_mut("actionTarget") {
+            prop.value = local;
+        }
+        return true;
+    }
+    if entry.control_type == PAGE_NAVIGATOR_CONTROL_TYPE {
+        let Some(raw) = static_value(&entry.properties, PAGE_NAVIGATOR_OVERRIDES_PROPERTY) else { return false };
+        let Some(mut overrides) = parse_page_overrides(raw) else { return false };
+        let mut changed = false;
+        for o in overrides.iter_mut() {
+            if let Some(local) = remap.local(&o.sheet_id) {
+                if local != o.sheet_id {
+                    o.sheet_id = local.to_string();
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            if let Some(prop) = entry.properties.get_mut(PAGE_NAVIGATOR_OVERRIDES_PROPERTY) {
+                prop.value = serialize_page_overrides(&overrides);
+            }
+        }
+        return changed;
+    }
+    false
+}
 
 /// THE HELD COMPARTMENT (BUG-0257): where a WORKING COPY keeps the button code
 /// its application shipped, so an untouched push publishes it unchanged.
@@ -308,10 +535,23 @@ pub fn sanitize_distributed_controls(
 /// Materialize persisted per-sheet control payloads into ControlStorage
 /// entries at the sheet indices resolved by `sheet_index_of`. Entries whose
 /// sheet cannot be resolved are skipped. Returns the number of controls added.
+///
+/// `page_targets` is every door's STATED page-target rule (BUG-0449): a pull
+/// passes `PageTargetRemap::from_pull` so navigate buttons and Page Navigator
+/// overrides name the subscriber's own sheet ids; `.cala` load passes
+/// `identity()`. A required parameter, so the compiler lists the doors.
+///
+/// THE UID (WP-D): a stored uid is carried unchanged -- a pull keeps the
+/// application's, so its property bindings still name the control. A control
+/// with none (a file written before uids existed) gets a fresh one, and so
+/// does one whose uid ANOTHER control already carries (two controls answering
+/// to one binding id would make every binding on it ambiguous); see
+/// [`assign_uid`].
 pub fn materialize_saved_controls(
     saved: &[persistence::SavedSheetControls],
     controls: &mut ControlStorage,
     mut sheet_index_of: impl FnMut(identity::SheetId) -> Option<usize>,
+    page_targets: &PageTargetRemap,
 ) -> usize {
     let mut added = 0;
     for sheet_controls in saved {
@@ -323,11 +563,29 @@ pub fn materialize_saved_controls(
         else {
             continue;
         };
-        for entry in entries {
+        for mut entry in entries {
+            remap_control_page_targets(&mut entry, page_targets);
+            let key = (idx, entry.row, entry.col);
+            // A pull REPLACES what sits at the key: whatever was there is not
+            // a competitor for the uid, so it is removed first.
+            controls.remove(&key);
+            let uid = assign_uid(controls, key, &entry.uid);
+            if !entry.uid.is_empty() && uid != entry.uid {
+                crate::log_warn!(
+                    "CONTROLS",
+                    "control uid {} at sheet {} r{}c{} is already another control's; it was given {}",
+                    entry.uid,
+                    idx,
+                    entry.row,
+                    entry.col,
+                    uid
+                );
+            }
             controls.insert(
-                (idx, entry.row, entry.col),
+                key,
                 ControlMetadata {
                     control_type: entry.control_type,
+                    uid,
                     properties: entry.properties,
                 },
             );
@@ -548,6 +806,13 @@ pub(crate) fn set_control_property_with(
         ));
     }
     check_property_value(&property_name, &value)?;
+    // A visual-container key (`containerTitleFontSize`...) carries a valid
+    // value whatever the route -- the Properties pane, `shape.setProperty`, a
+    // binding literal (D-FORMAT): TS checks first, Rust is the authority.
+    visual_format::check_control_container_value(&property_name, &value)?;
+    // A property that follows a formula is a BINDING now (WP-D); only a code
+    // slot keeps its application's value type.
+    refuse_formula_value_type(&property_name, &value_type)?;
 
     // MOVING, RESIZING, PINNING, ROTATING OR FLIPPING a control is an object
     // edit whether it arrives as a geometry batch or as one property at a time
@@ -638,16 +903,25 @@ pub(crate) fn set_control_property_with(
     let previous: Option<Vec<(ControlKey, ControlMetadata)>> =
         executable.then(|| pending.iter().map(|(k, v)| (*k, v.clone())).collect());
 
-    // Control metadata is persisted (`workbook.controls`) -- onSelect wiring and
-    // formula-driven properties -- and written only by the save path.
+    // Control metadata is persisted (`workbook.controls`) -- onSelect wiring,
+    // literals and the uid -- and written only by the save path.
     let effect = DocumentEffect::mutates(&file_state);
     let updated = {
         let mut controls = pending.authorize(&effect);
 
-        let metadata = controls.entry(key).or_insert_with(|| ControlMetadata {
-            control_type: control_type.clone(),
-            properties: HashMap::new(),
-        });
+        // A CREATE mints the control's uid (`assign_uid` rule a, with nothing
+        // incoming); an existing control keeps the one it has.
+        if !controls.contains_key(&key) {
+            let uid = assign_uid(&controls, key, "");
+            controls.insert(
+                key,
+                ControlMetadata { control_type: control_type.clone(), uid, properties: HashMap::new() },
+            );
+        }
+        let metadata = controls.get_mut(&key).expect("present: inserted above when absent");
+        if metadata.uid.is_empty() {
+            metadata.uid = mint_control_uid();
+        }
 
         metadata.properties.insert(
             property_name,
@@ -718,6 +992,9 @@ pub(crate) fn set_control_metadata_core(
     }
     for (name, prop) in &metadata.properties {
         check_property_value(name, &prop.value)?;
+        // A property that follows a formula is a BINDING now (WP-D); only a
+        // code slot keeps its application's value type.
+        refuse_formula_value_type(name, &prop.value_type)?;
     }
     if metadata.control_type.is_empty() {
         return Err("A control must have a controlType.".to_string());
@@ -727,8 +1004,8 @@ pub(crate) fn set_control_metadata_core(
     // allow editing objects is refused, before the effect.
     crate::protection::check_sheet_action(state, sheet_index, "editObjects", "insert or replace a control")?;
 
-    // Control metadata is persisted (`workbook.controls`) -- onSelect wiring and
-    // formula-driven properties -- and written only by the save path.
+    // Control metadata is persisted (`workbook.controls`) -- onSelect wiring,
+    // literals and the uid -- and written only by the save path.
     //
     // UNDO. This is the creation door, so the PRE-mutation store is the undo
     // snapshot; captured under a read guard before `mutates` constructs, and
@@ -757,7 +1034,13 @@ pub(crate) fn set_control_metadata_core(
     let effect = DocumentEffect::mutates(&file_state);
     {
         let mut controls = state.controls.write(&effect).map_err(|e| e.to_string())?;
-        controls.insert((sheet_index, row, col), metadata.clone());
+        // THE UID (WP-D): a replace keeps the existing control's, a create
+        // keeps the incoming one only when no other control carries it (a
+        // paste arrives with its SOURCE's uid and is re-minted). The stored
+        // metadata is returned, so the caller learns the uid it got.
+        let key = (sheet_index, row, col);
+        metadata.uid = assign_uid(&controls, key, &metadata.uid);
+        controls.insert(key, metadata.clone());
     }
     crate::undo_commands::record_controls_undo(&state, previous, "Add control");
     Ok(metadata)
@@ -803,17 +1086,40 @@ pub(crate) fn remove_control_metadata_core(
     // takes its own locks -- and before the effect.
     crate::protection::check_sheet_action(state, sheet_index, "editObjects", "delete a control")?;
 
-    // Control metadata is persisted (`workbook.controls`) -- onSelect wiring and
-    // formula-driven properties -- and written only by the save path.
+    // Control metadata is persisted (`workbook.controls`) -- onSelect wiring,
+    // literals and the uid -- and written only by the save path.
     let effect = DocumentEffect::mutates(file_state);
     let removed = {
         let mut controls = state.controls.write(&effect).unwrap();
-        controls.remove(&(sheet_index, row, col)).is_some()
+        controls.remove(&(sheet_index, row, col))
     };
-    if removed {
-        crate::undo_commands::record_controls_undo(state, previous, "Delete control");
+    let Some(removed) = removed else { return Ok(false) };
+    // WP-D (D §3.12): the control's object property BINDINGS go with it, and
+    // ONE Ctrl+Z brings back the control AND them. The controls recorder opens
+    // its own transaction when none is open, so a second, separate bindings
+    // record would be a SECOND undo step: both restores go to ONE call --
+    // bindings FIRST, so the reverse replay restores them LAST, after the
+    // control exists again (the `delete_chart` cascade ordering).
+    let dropped_bindings = crate::object_bindings::object_json::control_uid(&removed).and_then(|uid| {
+        crate::object_bindings::cascade::drop_bindings_for_objects(
+            state,
+            &effect,
+            &[crate::api_types::ObjectBindingRef {
+                kind: crate::api_types::ObjectBindingKind::Control,
+                id: uid.to_string(),
+            }],
+        )
+    });
+    let mut restores: Vec<(&str, Vec<u8>)> = Vec::new();
+    if let Some(previous_bindings) = dropped_bindings {
+        restores.push((
+            crate::undo_commands::BINDINGS_RESTORE_KIND,
+            crate::undo_commands::bindings_restore_bytes(state, &previous_bindings),
+        ));
     }
-    Ok(removed)
+    restores.push(("obj_controls", crate::undo_commands::controls_snapshot_bytes(previous, Vec::new())));
+    crate::undo_commands::record_restores_joining_open_transaction(state, "Delete control", restores);
+    Ok(true)
 }
 
 /// Move a control to another anchor cell on the same sheet, WITH every property
@@ -874,6 +1180,9 @@ pub(crate) fn move_control_core(
             ));
         }
         check_property_value(name, &prop.value)?;
+        // The overrides are a third write door for property values: a formula
+        // is a BINDING now (WP-D), never a formula-typed literal.
+        refuse_formula_value_type(name, &prop.value_type)?;
     }
     crate::protection::check_sheet_action(state, sheet_index, "editObjects", "move a control")?;
     // LOCK OBJECTS, read before the store is locked (a leaf read). Applied
@@ -912,6 +1221,7 @@ pub(crate) fn move_control_core(
             return Err(crate::sheets::canvas_objects_locked_refusal("move a control"));
         }
     }
+    // A MOVE carries the control's uid (and so its bindings) unchanged.
     let mut moved = existing.clone();
     for (name, prop) in overrides {
         moved.properties.insert(name, prop);
@@ -1381,6 +1691,183 @@ pub(crate) fn set_control_geometry_core(
     Ok(changed.len())
 }
 
+/// The keys a control's APPEARANCE batch may never write: where it sits, how
+/// it follows its cells, what kind of thing it is, and who it is. They have
+/// their own doors (the geometry batch, the in-cell toggle, create, rename).
+pub const CONTROL_STRUCTURAL_PROPERTIES: &[&str] = &[
+    PIN_TO_GRID_PROPERTY,
+    "embedded",
+    "shapeType",
+    "x",
+    "y",
+    "width",
+    "height",
+    "offsetX",
+    "offsetY",
+    "uid",
+    "name",
+];
+
+/// Validate an appearance batch WITHOUT the store: the shape of every entry
+/// and every write. Returns the writes keyed by control, in batch order.
+fn encode_appearance_changes(
+    changes: &[crate::api_types::ControlAppearanceChange],
+) -> Result<Vec<(ControlKey, Vec<(String, String)>)>, String> {
+    let mut seen: HashSet<ControlKey> = HashSet::new();
+    let mut out = Vec::with_capacity(changes.len());
+    for change in changes {
+        let key: ControlKey = (change.sheet_index, change.row, change.col);
+        let at = format!("sheet {} r{}c{}", change.sheet_index, change.row, change.col);
+        if !seen.insert(key) {
+            return Err(format!("Control at {} appears twice in one format batch.", at));
+        }
+        if change.properties.is_empty() {
+            return Err(format!("Control at {}: the format batch entry writes nothing.", at));
+        }
+        let mut writes = Vec::with_capacity(change.properties.len());
+        let mut keys: HashSet<&str> = HashSet::new();
+        for w in &change.properties {
+            let k = w.key.as_str();
+            if k.is_empty() {
+                return Err(format!("Control at {}: a format write names no property.", at));
+            }
+            if !keys.insert(k) {
+                return Err(format!("Control at {}: '{}' is written twice in one batch entry.", at, k));
+            }
+            if EXECUTABLE_CONTROL_PROPERTIES.contains(&k)
+                || is_held_property(k)
+                || BUTTON_ACTION_PROPERTIES.contains(&k)
+            {
+                return Err(format!(
+                    "Control at {}: '{}' is the control's code or action, not its appearance; \
+                     the Format pane cannot write it.",
+                    at, k
+                ));
+            }
+            if CONTROL_STRUCTURAL_PROPERTIES.contains(&k) {
+                return Err(format!(
+                    "Control at {}: '{}' places or identifies the control, not its appearance; \
+                     the Format pane cannot write it.",
+                    at, k
+                ));
+            }
+            check_property_value(k, &w.value)?;
+            visual_format::check_control_container_value(k, &w.value)?;
+            writes.push((w.key.clone(), w.value.clone()));
+        }
+        out.push((key, writes));
+    }
+    Ok(out)
+}
+
+/// Format SEVERAL controls -- several appearance keys each -- as ONE undoable
+/// step (the Format pane, D-FORMAT).
+///
+/// `set_control_property` records undo only for code slots, so a format
+/// change through it was invisible to Ctrl+Z. This batch records ONE
+/// `record_control_props_undo(previous, "Format control")` after the store
+/// guard drops -- only the properties it wrote, never the whole store -- which
+/// JOINS a transaction the caller already has open (the Format pane's commit
+/// is one Ctrl+Z with a real entry).
+///
+/// Refused, BEFORE the effect and with nothing written: an entry that writes
+/// nothing, the same control twice, a code / held / action key, a structural
+/// key ([`CONTROL_STRUCTURAL_PROPERTIES`]), a value over the size cap or an
+/// inline-image hazard ([`check_property_value`]), a `container*` value
+/// `visual_format::check_control_container_value` refuses, a protected sheet
+/// that does not allow editing objects, and any control that does not exist
+/// (the batch never creates one). Every write is stored as `"static"`. Values
+/// already stored exactly are skipped; a batch that changes nothing leaves
+/// the document clean and records nothing. Lock Objects does NOT refuse it:
+/// appearance is formatting.
+///
+/// Returns how many controls actually changed.
+#[tauri::command]
+pub fn set_control_appearance(
+    state: State<AppState>,
+    file_state: State<FileState>,
+    changes: Vec<crate::api_types::ControlAppearanceChange>,
+) -> Result<usize, String> {
+    set_control_appearance_core(&state, &file_state, &changes)
+}
+
+/// [`set_control_appearance`] over plain references, for the unit tier.
+pub(crate) fn set_control_appearance_core(
+    state: &AppState,
+    file_state: &FileState,
+    changes: &[crate::api_types::ControlAppearanceChange],
+) -> Result<usize, String> {
+    let encoded = encode_appearance_changes(changes)?;
+    if encoded.is_empty() {
+        return Ok(0);
+    }
+
+    // `editObjects` on every sheet the batch touches, before any lock or effect.
+    let mut sheets: Vec<usize> = encoded.iter().map(|((sheet, _, _), _)| *sheet).collect();
+    sheets.sort_unstable();
+    sheets.dedup();
+    for sheet in sheets {
+        crate::protection::check_sheet_action(state, sheet, "editObjects", "format a control")?;
+    }
+
+    // Resolve, decide and write under ONE hold of the store.
+    let pending = state.controls.lock_pending().map_err(|e| e.to_string())?;
+    if let Some(((sheet, row, col), _)) = encoded.iter().find(|(key, _)| !pending.contains_key(key)) {
+        return Err(format!(
+            "No control at sheet {} r{}c{}; nothing in the format batch was written.",
+            sheet, row, col
+        ));
+    }
+    let changed: Vec<&(ControlKey, Vec<(String, String)>)> = encoded
+        .iter()
+        .filter(|(key, writes)| {
+            let meta = &pending[key];
+            writes.iter().any(|(name, value)| {
+                meta.properties
+                    .get(name)
+                    .map_or(true, |p| p.value_type != "static" || p.value != *value)
+            })
+        })
+        .collect();
+    if changed.is_empty() {
+        return Ok(0);
+    }
+    // Only the properties this batch writes, each with its value before it --
+    // never the whole store: a whole-store undo also erased every later write
+    // that recorded no undo of its own (a navigator's per-page caption).
+    let previous: Vec<crate::undo_commands::ControlPropRestoreRow> = changed
+        .iter()
+        .flat_map(|(key, writes)| {
+            let meta = &pending[key];
+            writes.iter().map(move |(name, _)| crate::undo_commands::ControlPropRestoreRow {
+                uid: meta.uid.clone(),
+                key: *key,
+                property: name.clone(),
+                previous: meta.properties.get(name).cloned(),
+            })
+        })
+        .collect();
+
+    // Control metadata is persisted (`workbook.controls`).
+    let effect = DocumentEffect::mutates(file_state);
+    {
+        let mut controls = pending.authorize(&effect);
+        for (key, writes) in &changed {
+            if let Some(meta) = controls.get_mut(key) {
+                for (name, value) in writes {
+                    meta.properties.insert(
+                        name.clone(),
+                        ControlPropertyValue { value_type: "static".to_string(), value: value.clone() },
+                    );
+                }
+            }
+        }
+    }
+    // The store guard is dropped before the undo stack is taken (never both).
+    crate::undo_commands::record_control_props_undo(state, previous, "Format control");
+    Ok(changed.len())
+}
+
 /// A button that links a macro, located for a human-readable deletion warning.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1578,7 +2065,7 @@ mod persistence_tests {
         );
         controls.insert(
             (0, 2, 3),
-            ControlMetadata { control_type: "button".to_string(), properties: props },
+            ControlMetadata { control_type: "button".to_string(), uid: String::new(), properties: props },
         );
         controls
     }
@@ -1592,9 +2079,12 @@ mod persistence_tests {
         assert_eq!(saved[0].sheet_id, sheet_ids[0]);
 
         let mut restored: ControlStorage = HashMap::new();
-        let added = materialize_saved_controls(&saved, &mut restored, |sid| {
-            if sid == sheet_ids[0] { Some(5) } else { None }
-        });
+        let added = materialize_saved_controls(
+            &saved,
+            &mut restored,
+            |sid| if sid == sheet_ids[0] { Some(5) } else { None },
+            &PageTargetRemap::identity(),
+        );
         assert_eq!(added, 1);
         let meta = restored.get(&(5, 2, 3)).expect("control restored at remapped sheet");
         assert_eq!(meta.control_type, "button");
@@ -1725,7 +2215,7 @@ mod persistence_tests {
         let sanitized = sanitize_distributed_controls(&saved);
 
         let mut restored: ControlStorage = HashMap::new();
-        materialize_saved_controls(&sanitized, &mut restored, |_| Some(0));
+        materialize_saved_controls(&sanitized, &mut restored, |_| Some(0), &PageTargetRemap::identity());
         restored.get(&(0, 2, 3)).expect("control materialized").clone()
     }
 
@@ -1862,9 +2352,24 @@ mod persistence_tests {
     }
 }
 
-/// Resolve formula-type properties for a control.
-/// Returns a map of property name -> resolved string value.
-/// Static properties are returned as-is; formula properties are evaluated.
+/// A control's properties as its painter shows them: every LITERAL of the
+/// control, with each BOUND `/properties/<key>` replaced by its resolved value
+/// (WP-D, D §3.13). Returns property name -> string.
+///
+/// Nothing is evaluated here any more: the binding evaluator
+/// (`object_bindings::eval::reevaluate`, triggered by the frontend seam) owns
+/// evaluation, and this reads the values it last resolved. A bound property
+/// keeps its literal while its value is PENDING (a measure not fetched yet),
+/// while it has none yet (never evaluated), and -- for every type but text --
+/// while it is in ERROR (a colour or a width that cannot be produced must not
+/// paint as an error string); a TEXT property shows its error display
+/// ("#REF!", "(Refused)"), exactly as a cell would.
+///
+/// A Page Navigator's per-button bindings
+/// (`/properties/pageOverrides/<page>/<field>`, D §3.18a) are patched into its
+/// `pageOverrides` string (`object_bindings::page_overrides::overlay_overrides`)
+/// by the same rules; one whose page is not a live report page is dormant and
+/// changes nothing.
 #[tauri::command]
 pub fn resolve_control_properties(
     state: State<AppState>,
@@ -1872,88 +2377,114 @@ pub fn resolve_control_properties(
     row: u32,
     col: u32,
 ) -> HashMap<String, String> {
-    let controls = state.controls.read().unwrap();
-    let meta = match controls.get(&(sheet_index, row, col)) {
-        Some(m) => m.clone(),
-        None => return HashMap::new(),
+    resolve_control_properties_core(&state, sheet_index, row, col)
+}
+
+/// [`resolve_control_properties`] over a plain reference, for the unit tier.
+///
+/// LOCKS: the control store, released; then the binding store (a leaf) and,
+/// after it, the binding runtime -- the canonical store -> runtime order. No
+/// grid lock is taken.
+pub(crate) fn resolve_control_properties_core(
+    state: &AppState,
+    sheet_index: usize,
+    row: u32,
+    col: u32,
+) -> HashMap<String, String> {
+    use crate::api_types::ObjectBindingKind;
+    use crate::object_bindings::catalog::{self, BindableValueType};
+
+    let meta = match state.controls.read() {
+        Ok(controls) => match controls.get(&(sheet_index, row, col)) {
+            Some(m) => m.clone(),
+            None => return HashMap::new(),
+        },
+        Err(_) => return HashMap::new(),
     };
-    // Release the controls lock before acquiring grids
-    drop(controls);
-
-    let grids = state.grids.read().unwrap();
-    let sheet_names = state.sheet_names.read().unwrap();
-
-    // Build evaluator once for all formulas
-    let evaluator = if sheet_index < grids.len() && sheet_index < sheet_names.len() {
-        let current_grid = &grids[sheet_index];
-        let current_sheet_name = &sheet_names[sheet_index];
-        let context = create_multi_sheet_context(&grids, &sheet_names, current_sheet_name);
-        let mut ev = Evaluator::with_multi_sheet(current_grid, context);
-        crate::eval_budget::apply(&mut ev);
-        Some(ev)
-    } else {
-        None
-    };
-
-    let mut resolved = HashMap::new();
-    for (key, prop) in &meta.properties {
-        if prop.value_type == "formula" && prop.value.starts_with('=') {
-            // Evaluate the formula
-            let display = if let Some(ref ev) = evaluator {
-                match parse_formula(&prop.value) {
-                    Ok(parser_ast) => {
-                        // Resolve named references (AST splicing)
-                        let resolved = if ast_has_named_refs(&parser_ast) {
-                            let named_ranges_map = state.named_ranges.read().unwrap();
-                            let mut visited = HashSet::new();
-                            let r = resolve_names_in_ast(
-                                &parser_ast,
-                                &named_ranges_map,
-                                sheet_index,
-                                &mut visited,
-                            );
-                            drop(named_ranges_map);
-                            r
-                        } else {
-                            parser_ast
-                        };
-
-                        // Resolve structured table references
-                        let resolved = if ast_has_table_refs(&resolved) {
-                            let tables_map = state.tables.read().unwrap();
-                            let table_names_map = state.table_names.read().unwrap();
-                            let ctx = TableRefContext {
-                                tables: &tables_map,
-                                table_names: &table_names_map,
-                                current_sheet_index: sheet_index,
-                                current_row: row,
-                                current_col: col,
-                                sheet_names: &sheet_names,
-                            };
-                            let r = resolve_table_refs_in_ast(&resolved, &ctx);
-                            drop(table_names_map);
-                            drop(tables_map);
-                            r
-                        } else {
-                            resolved
-                        };
-
-                        let engine_ast = convert_expr(&resolved);
-                        let cell_value: CellValue = ev.evaluate(&engine_ast).to_cell_value();
-                        format_cell_value_simple(&cell_value)
-                    }
-                    Err(_) => prop.value.clone(),
-                }
-            } else {
-                prop.value.clone()
-            };
-            resolved.insert(key.clone(), display);
-        } else {
-            resolved.insert(key.clone(), prop.value.clone());
-        }
+    let mut resolved: HashMap<String, String> =
+        meta.properties.iter().map(|(k, p)| (k.clone(), p.value.clone())).collect();
+    if meta.uid.is_empty() {
+        return resolved;
     }
 
+    // The bound paths of THIS control as the store holds them NOW: a binding
+    // an undo just removed is not overlaid, whatever the runtime still caches.
+    let bound: Vec<crate::object_bindings::store::BindingKey> = match state.object_bindings.read() {
+        Ok(store) => store
+            .bindings
+            .keys()
+            .filter(|k| k.object.kind == ObjectBindingKind::Control && k.object.id == meta.uid)
+            .cloned()
+            .collect(),
+        Err(_) => return resolved,
+    };
+    if bound.is_empty() {
+        return resolved;
+    }
+    let values: Vec<(String, crate::api_types::ResolvedBinding)> = match state.object_binding_runtime.lock() {
+        Ok(runtime) => bound
+            .iter()
+            .filter_map(|key| runtime.resolved.get(key).map(|r| (key.path.clone(), r.clone())))
+            .collect(),
+        Err(_) => return resolved,
+    };
+    // A Page Navigator's PER-BUTTON bindings (D §3.18a) are patched into its one
+    // `pageOverrides` string, so the painter keeps reading that one string.
+    let navigator = meta.control_type == PAGE_NAVIGATOR_CONTROL_TYPE;
+    let mut per_button: Vec<(crate::object_bindings::page_overrides::PerButtonPath, crate::api_types::ResolvedBinding)> =
+        Vec::new();
+    for (path, value) in values {
+        if let Some(target) = crate::object_bindings::page_overrides::per_button_path(&path) {
+            if navigator {
+                per_button.push((target, value));
+            }
+            continue;
+        }
+        // Only `/properties/<key>` overlays a property; the key is the
+        // unescaped segment.
+        let Some(key) = path
+            .strip_prefix("/properties/")
+            .filter(|rest| !rest.contains('/'))
+            .and_then(catalog::unescape_segment)
+        else {
+            continue;
+        };
+        let is_text = catalog::match_path(ObjectBindingKind::Control, &path)
+            .is_ok_and(|row| row.value_type == BindableValueType::Text);
+        if let Some(text) = overlay_text(&value, is_text) {
+            resolved.insert(key, text);
+        }
+    }
+    if !per_button.is_empty() {
+        // The live report pages, read after every binding lock is released.
+        let pages = crate::object_bindings::page_overrides::ReportPages::read(state);
+        let raw = meta
+            .properties
+            .get(PAGE_NAVIGATOR_OVERRIDES_PROPERTY)
+            .filter(|p| p.value_type == "static")
+            .map(|p| p.value.as_str())
+            .unwrap_or_default();
+        if let Some(patched) = crate::object_bindings::page_overrides::overlay_overrides(raw, &per_button, &pages) {
+            resolved.insert(PAGE_NAVIGATOR_OVERRIDES_PROPERTY.to_string(), patched);
+        }
+    }
     resolved
+}
+
+/// What a resolved binding paints as in a control's string-valued property, or
+/// `None` to keep the literal (see [`resolve_control_properties`]): a number in
+/// its shortest round-trip spelling, a boolean as true/false.
+fn overlay_text(value: &crate::api_types::ResolvedBinding, is_text: bool) -> Option<String> {
+    if value.pending {
+        return None;
+    }
+    if value.error.is_some() {
+        return is_text.then(|| value.display.clone());
+    }
+    match &value.value {
+        serde_json::Value::Null => None,
+        other => Some(crate::object_bindings::literal::control_property_string(other)),
+    }
 }
 
 #[cfg(test)]
@@ -1968,7 +2499,7 @@ mod placement_tests {
                 ControlPropertyValue { value_type: "static".into(), value: p.into() },
             );
         }
-        ControlMetadata { control_type: "button".into(), properties }
+        ControlMetadata { control_type: "button".into(), uid: String::new(), properties }
     }
 
     #[test]
@@ -2022,7 +2553,7 @@ mod edit_objects_gate_tests {
     fn button() -> ControlMetadata {
         let mut properties = HashMap::new();
         properties.insert("text".to_string(), ControlPropertyValue { value_type: "static".into(), value: "Go".into() });
-        ControlMetadata { control_type: "button".into(), properties }
+        ControlMetadata { control_type: "button".into(), uid: String::new(), properties }
     }
 
     fn has_undo(state: &AppState) -> bool {
@@ -2198,3 +2729,222 @@ mod edit_objects_gate_tests {
         assert_eq!(remove_control_metadata_core(&state, &file, 0, 2, 1), Ok(false), "nothing left to remove");
     }
 }
+
+/// BUG-0449, the ID half: a pull remaps every page-target ID a control carries
+/// from the application's sheet ids to the subscriber's.
+#[cfg(test)]
+mod page_target_tests {
+    use super::*;
+
+    const APP_DETAIL: &str = "0192f6a0-0000-7000-8000-00000000d001";
+    const APP_SALES: &str = "0192f6a0-0000-7000-8000-00000000d002";
+    const LOCAL_DETAIL: &str = "0192f6a0-0000-7000-8000-00000000e001";
+
+    fn sid(s: &str) -> identity::SheetId {
+        identity::SheetId::parse(s).expect("a canonical uuid")
+    }
+
+    fn statik(v: &str) -> ControlPropertyValue {
+        ControlPropertyValue { value_type: "static".into(), value: v.into() }
+    }
+
+    fn entry(control_type: &str, props: &[(&str, ControlPropertyValue)]) -> SavedControlEntry {
+        SavedControlEntry {
+            row: 1,
+            col: 1,
+            control_type: control_type.into(),
+            uid: String::new(),
+            properties: props.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+        }
+    }
+
+    fn navigate_button(target: &str) -> SavedControlEntry {
+        entry(
+            "button",
+            &[
+                ("action", statik("navigate")),
+                ("actionTarget", statik(target)),
+                ("actionTargetName", statik("Detail")),
+            ],
+        )
+    }
+
+    /// The frontend serializer's bytes for one override per id.
+    fn overrides(ids: &[&str]) -> String {
+        calcula_format::page_navigator::serialize_page_overrides(
+            &ids.iter()
+                .map(|id| calcula_format::page_navigator::PageOverrideWire {
+                    sheet_id: id.to_string(),
+                    sheet_name: "Detail".into(),
+                    text: Some("Details".into()),
+                    hidden: None,
+                    fill: Some("#ffcc00".into()),
+                    color: None,
+                    border_color: None,
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn navigator(value: ControlPropertyValue) -> SavedControlEntry {
+        entry(
+            PAGE_NAVIGATOR_CONTROL_TYPE,
+            &[("orientation", statik("horizontal")), (PAGE_NAVIGATOR_OVERRIDES_PROPERTY, value)],
+        )
+    }
+
+    /// The application's Detail (pulled to local index 1) -> local id; Sales
+    /// (index 0) gets an id of its own.
+    fn subscribe_remap() -> PageTargetRemap {
+        let pkg_to_index: HashMap<identity::SheetId, usize> =
+            [(sid(APP_SALES), 0), (sid(APP_DETAIL), 1)].into_iter().collect();
+        let local_sales = identity::SheetId::from_bytes(identity::generate_uuid_v7());
+        PageTargetRemap::from_pull(&pkg_to_index, &[local_sales, sid(LOCAL_DETAIL)])
+    }
+
+    fn override_ids(e: &SavedControlEntry) -> Vec<String> {
+        calcula_format::page_navigator::parse_page_overrides(&e.properties[PAGE_NAVIGATOR_OVERRIDES_PROPERTY].value)
+            .unwrap()
+            .into_iter()
+            .map(|o| o.sheet_id)
+            .collect()
+    }
+
+    /// SABOTAGE: return `false` at the top of `remap_control_page_targets`.
+    #[test]
+    fn page_target_ids_follow_the_local_sheet() {
+        let remap = subscribe_remap();
+        assert!(!remap.is_identity());
+        let mut button = navigate_button(APP_DETAIL);
+        assert!(remap_control_page_targets(&mut button, &remap));
+        assert_eq!(button.properties["actionTarget"].value, LOCAL_DETAIL);
+        assert_eq!(button.properties["actionTargetName"].value, "Detail", "names are sheet_renames's, not this");
+
+        let mut nav = navigator(statik(&overrides(&[APP_DETAIL, ""])));
+        assert!(remap_control_page_targets(&mut nav, &remap));
+        assert_eq!(override_ids(&nav), vec![LOCAL_DETAIL.to_string(), String::new()]);
+        assert_eq!(
+            nav.properties[PAGE_NAVIGATOR_OVERRIDES_PROPERTY].value,
+            overrides(&[LOCAL_DETAIL, ""]),
+            "re-serialised in the frontend's canonical bytes"
+        );
+    }
+
+    /// A checkout keeps the application's ids: every pair maps an id to
+    /// itself, nothing is rewritten and no value is re-serialised.
+    #[test]
+    fn a_checkout_remap_maps_ids_to_themselves_and_keeps_the_bytes() {
+        let pkg_to_index: HashMap<identity::SheetId, usize> = [(sid(APP_DETAIL), 0)].into_iter().collect();
+        let remap = PageTargetRemap::from_pull(&pkg_to_index, &[sid(APP_DETAIL)]);
+        assert!(remap.is_identity());
+        // Non-canonical bytes (spacing, key order, an unknown key): a
+        // re-serialisation would change them, so their survival proves none
+        // happened.
+        let raw = format!(r#"[ {{"sheetName":"Detail","sheetId":"{APP_DETAIL}","future":1}} ]"#);
+        let mut nav = navigator(statik(&raw));
+        assert!(!remap_control_page_targets(&mut nav, &remap));
+        assert_eq!(nav.properties[PAGE_NAVIGATOR_OVERRIDES_PROPERTY].value, raw);
+        let mut button = navigate_button(APP_DETAIL);
+        assert!(!remap_control_page_targets(&mut button, &remap));
+        assert_eq!(button.properties["actionTarget"].value, APP_DETAIL);
+    }
+
+    #[test]
+    fn identity_remap_rewrites_nothing() {
+        let remap = PageTargetRemap::identity();
+        assert!(remap.is_identity());
+        let mut button = navigate_button(APP_DETAIL);
+        let mut nav = navigator(statik(&overrides(&[APP_DETAIL])));
+        let before_target = button.properties["actionTarget"].value.clone();
+        let before_overrides = nav.properties[PAGE_NAVIGATOR_OVERRIDES_PROPERTY].value.clone();
+        assert!(!remap_control_page_targets(&mut button, &remap));
+        assert!(!remap_control_page_targets(&mut nav, &remap));
+        assert_eq!(button.properties["actionTarget"].value, before_target);
+        assert_eq!(nav.properties[PAGE_NAVIGATOR_OVERRIDES_PROPERTY].value, before_overrides);
+    }
+
+    /// A target this pull does not carry (another application's page, a page
+    /// the subscriber authored) is left for the documented name fallback.
+    #[test]
+    fn an_unmapped_target_is_left_for_the_name_fallback() {
+        let remap = subscribe_remap();
+        let elsewhere = "0192f6a0-0000-7000-8000-00000000ffff";
+        let mut button = navigate_button(elsewhere);
+        assert!(!remap_control_page_targets(&mut button, &remap));
+        assert_eq!(button.properties["actionTarget"].value, elsewhere);
+        let mut empty = navigate_button("");
+        assert!(!remap_control_page_targets(&mut empty, &remap));
+        assert_eq!(empty.properties["actionTarget"].value, "");
+        let mut nav = navigator(statik(&overrides(&[elsewhere])));
+        let before = nav.properties[PAGE_NAVIGATOR_OVERRIDES_PROPERTY].value.clone();
+        assert!(!remap_control_page_targets(&mut nav, &remap));
+        assert_eq!(nav.properties[PAGE_NAVIGATOR_OVERRIDES_PROPERTY].value, before);
+    }
+
+    #[test]
+    fn a_malformed_page_overrides_value_is_left_untouched() {
+        let remap = subscribe_remap();
+        for raw in [
+            "not json".to_string(),
+            "{}".to_string(),
+            format!(r#"[{{"sheetId":"{APP_DETAIL}"}}]"#),
+            format!(r#"[{{"sheetId":"{APP_DETAIL}","sheetName":"Detail","hidden":"yes"}}]"#),
+        ] {
+            let mut nav = navigator(statik(&raw));
+            assert!(!remap_control_page_targets(&mut nav, &remap), "{raw}");
+            assert_eq!(nav.properties[PAGE_NAVIGATOR_OVERRIDES_PROPERTY].value, raw);
+        }
+    }
+
+    #[test]
+    fn a_formula_typed_target_is_never_rewritten() {
+        let remap = subscribe_remap();
+        let formula = |v: &str| ControlPropertyValue { value_type: "formula".into(), value: v.into() };
+        let mut button = entry("button", &[("action", statik("navigate")), ("actionTarget", formula(APP_DETAIL))]);
+        assert!(!remap_control_page_targets(&mut button, &remap));
+        assert_eq!(button.properties["actionTarget"].value, APP_DETAIL);
+        let mut formula_action =
+            entry("button", &[("action", formula("navigate")), ("actionTarget", statik(APP_DETAIL))]);
+        assert!(!remap_control_page_targets(&mut formula_action, &remap));
+        assert_eq!(formula_action.properties["actionTarget"].value, APP_DETAIL);
+        let raw = overrides(&[APP_DETAIL]);
+        let mut nav = navigator(formula(&raw));
+        assert!(!remap_control_page_targets(&mut nav, &remap));
+        assert_eq!(nav.properties[PAGE_NAVIGATOR_OVERRIDES_PROPERTY].value, raw);
+    }
+
+    #[test]
+    fn a_non_navigate_buttons_action_target_is_never_rewritten() {
+        let remap = subscribe_remap();
+        for action in ["back", "clearSlicers", ""] {
+            let mut button = entry("button", &[("action", statik(action)), ("actionTarget", statik(APP_DETAIL))]);
+            assert!(!remap_control_page_targets(&mut button, &remap), "{action}");
+            assert_eq!(button.properties["actionTarget"].value, APP_DETAIL);
+        }
+        // Not a button at all: a shape carrying the same keys names no page.
+        let mut shape = entry("shape", &[("action", statik("navigate")), ("actionTarget", statik(APP_DETAIL))]);
+        assert!(!remap_control_page_targets(&mut shape, &remap));
+        assert_eq!(shape.properties["actionTarget"].value, APP_DETAIL);
+    }
+
+    /// The materializer applies the remap to every entry it lands.
+    ///
+    /// SABOTAGE: drop the `remap_control_page_targets` call from
+    /// `materialize_saved_controls`.
+    #[test]
+    fn materialize_applies_the_page_target_remap() {
+        let saved = vec![persistence::SavedSheetControls {
+            sheet_id: sid(APP_SALES),
+            controls: serde_json::to_value(vec![navigate_button(APP_DETAIL)]).unwrap(),
+        }];
+        let mut store: ControlStorage = HashMap::new();
+        assert_eq!(materialize_saved_controls(&saved, &mut store, |_| Some(0), &subscribe_remap()), 1);
+        assert_eq!(store[&(0, 1, 1)].properties["actionTarget"].value, LOCAL_DETAIL);
+    }
+}
+
+/// WP-D S5a: the control uid, the formula refusal at the three doors, and the
+/// `resolve_control_properties` overlay.
+#[cfg(test)]
+#[path = "controls_uid_tests.rs"]
+mod uid_tests;

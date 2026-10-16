@@ -518,7 +518,7 @@ pub async fn build_cube_prefetch(
 // Resolution context (connection + model-metadata caches)
 // ===========================================================================
 
-struct CubeCtx<'a> {
+pub(crate) struct CubeCtx<'a> {
     bi: &'a BiState,
     /// connection name -> id (None = not found).
     conn_ids: HashMap<String, Option<ConnectionId>>,
@@ -529,7 +529,7 @@ struct CubeCtx<'a> {
 }
 
 impl<'a> CubeCtx<'a> {
-    fn new(bi: &'a BiState) -> Self {
+    pub(crate) fn new(bi: &'a BiState) -> Self {
         Self {
             bi,
             conn_ids: HashMap::new(),
@@ -603,7 +603,7 @@ impl CubeResolver for AppCubeResolver<'_> {
 // Object resolution (CUBEMEMBER / CUBESET / CUBERANKEDMEMBER / CUBEKPIMEMBER)
 // ===========================================================================
 
-async fn resolve_object(
+pub(crate) async fn resolve_object(
     ctx: &mut CubeCtx<'_>,
     func: &BuiltinFunction,
     args: &[Expression],
@@ -870,7 +870,7 @@ async fn resolve_cube_kpi_member(
 // Value resolution (CUBEVALUE / CUBESETCOUNT / CUBEMEMBERPROPERTY)
 // ===========================================================================
 
-async fn resolve_value(
+pub(crate) async fn resolve_value(
     ctx: &mut CubeCtx<'_>,
     func: &BuiltinFunction,
     args: &[Expression],
@@ -1488,7 +1488,7 @@ fn arg_num_opt(args: &[Expression], i: usize, resolver: &dyn CubeResolver) -> Op
 // AST walking
 // ===========================================================================
 
-fn is_object_func(func: &BuiltinFunction) -> bool {
+pub(crate) fn is_object_func(func: &BuiltinFunction) -> bool {
     matches!(
         func,
         BuiltinFunction::CubeMember
@@ -1501,7 +1501,7 @@ fn is_object_func(func: &BuiltinFunction) -> bool {
 /// Collect every cube function call in an expression tree (with its arguments).
 /// Recurses into ALL container variants — a missed cube call would be evaluated
 /// by the engine but have no pre-fetched result (silent #N/A).
-fn collect_cube_calls(expr: &Expression, out: &mut Vec<(BuiltinFunction, Vec<Expression>)>) {
+pub(crate) fn collect_cube_calls(expr: &Expression, out: &mut Vec<(BuiltinFunction, Vec<Expression>)>) {
     if let Expression::FunctionCall { func, args, .. } = expr {
         if cube_function_name(func).is_some() {
             out.push((func.clone(), args.clone()));

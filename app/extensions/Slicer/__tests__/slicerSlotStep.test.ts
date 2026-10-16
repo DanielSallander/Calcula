@@ -56,6 +56,9 @@ function load(over: Record<string, unknown>, count: number): Slicer {
     id: "s1",
     name: "Region",
     sheetIndex: 0,
+    // The container's default 1 px border insets the content by 1 px (WP-C
+    // D-FORMAT); off here, so this file's geometry is the content box's own.
+    container: { border: { show: false } },
     x: 0,
     y: 0,
     width: 180,

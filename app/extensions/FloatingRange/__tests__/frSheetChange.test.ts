@@ -189,7 +189,7 @@ vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
 }));
 
 import extension from "../index";
-import { clickInCoreOrder } from "./helpers/frPress";
+import { clickInCoreOrder, pickClickInCoreOrder } from "./helpers/frPress";
 import { registerGridOverlay, type OverlayRegistration } from "@api/gridOverlays";
 import { checkCellClickInterceptors } from "@api/cellClickInterceptors";
 import { registerLayoutSurfaceProvider } from "@api/layoutSurface";
@@ -569,12 +569,10 @@ describe("the bar's content follows writes", () => {
 
 const INFO2 = { ...INFO, id: "fr-two", name: "Float2", backingSheetIndex: 4 } as FloatingRangeInfo;
 
-/** A press and release on local cell (row, col) of range `frId`, in Core's
- *  order (helpers/frPress.ts, the one mirror every FR press test shares).
- *  True when the range owned the press (Core never moved the object). */
-function pressLikeCore(frId: string, row: number, col: number): boolean {
+/** The hit context Core builds for a press on local cell (row, col) of range `frId`. */
+function cellCtx(frId: string, row: number, col: number): never {
   const p = cellPoint(row, col);
-  const ctx = {
+  return {
     region: {
       id: `fr-${frId}`,
       type: FLOATING_RANGE_REGION_TYPE,
@@ -591,7 +589,19 @@ function pressLikeCore(frId: string, row: number, col: number): boolean {
     col: 0,
     floatingCanvasBounds: { x: 0, y: 0, width: 400, height: 300 },
   } as never;
-  return clickInCoreOrder(ctx) === "content";
+}
+
+/** A press and release on local cell (row, col) of range `frId`, in Core's
+ *  order (helpers/frPress.ts, the one mirror every FR press test shares).
+ *  True when the range owned the press (Core never moved the object). */
+function pressLikeCore(frId: string, row: number, col: number): boolean {
+  return clickInCoreOrder(cellCtx(frId, row, col)) === "content";
+}
+
+/** A click on local cell (row, col) of range `frId` while a formula picks: Core
+ *  asks the range's `referenceAt` and inserts the reference itself (D-PICK). */
+function pickLikeCore(frId: string, row: number, col: number): "picked" | "inert" {
+  return pickClickInCoreOrder(cellCtx(frId, row, col));
 }
 
 describe("(6) a reference PICK on a floating cell feeds the edit -- it never commits it", () => {
@@ -599,7 +609,7 @@ describe("(6) a reference PICK on a floating cell feeds the edit -- it never com
     selectA1();
     openFrEditor(FR_ID, 0, 0, null);
     typeInto("=SUM(");
-    expect(pressLikeCore(FR_ID, 0, 1)).toBe(true);
+    expect(pickLikeCore(FR_ID, 0, 1)).toBe("picked");
     await flush();
     expect(isFrEditorOpen()).toBe(true);
     expect(getFrEditorSession()!.getText()).toBe("=SUM(Float1!B1");
@@ -612,7 +622,7 @@ describe("(6) a reference PICK on a floating cell feeds the edit -- it never com
     await flush();
     const session = getExternalCellTarget()!.beginEdit("=SUM(")!;
     expect(session.getView()).toBe("bar");
-    expect(pressLikeCore(FR_ID, 0, 1)).toBe(true);
+    expect(pickLikeCore(FR_ID, 0, 1)).toBe("picked");
     await flush();
     expect(isFrEditorOpen()).toBe(true);
     expect(session.getText()).toBe("=SUM(Float1!B1");
@@ -625,11 +635,37 @@ describe("(6) a reference PICK on a floating cell feeds the edit -- it never com
     selectA1();
     openFrEditor(FR_ID, 0, 0, null);
     typeInto("=SUM(");
-    expect(pressLikeCore("fr-two", 0, 1)).toBe(true);
+    expect(pickLikeCore("fr-two", 0, 1)).toBe("picked");
     await flush();
     expect(getFrEditorSession()!.getText()).toBe("=SUM(Float2!B1");
     expect(updateFloatingRangeCell).not.toHaveBeenCalled();
     expect(getLocalSelection()).toMatchObject({ frId: FR_ID, anchorRow: 0, anchorCol: 0 });
+  });
+
+  it("second line: the OLD press events arriving during a pick neither insert, select nor commit", async () => {
+    // Core dispatches no press event for a pick any more; should one arrive
+    // anyway, the range's handlers refuse on the shared predicate -- the edit
+    // keeps its text, stays open, and the cell selection does not move.
+    selectA1();
+    openFrEditor(FR_ID, 0, 0, null);
+    typeInto("=SUM(");
+    expect(pressLikeCore(FR_ID, 0, 1)).toBe(true);
+    await flush();
+    expect(isFrEditorOpen()).toBe(true);
+    expect(getFrEditorSession()!.getText()).toBe("=SUM(");
+    expect(updateFloatingRangeCell).not.toHaveBeenCalled();
+    expect(getLocalSelection()).toMatchObject({ frId: FR_ID, anchorRow: 0, anchorCol: 0, endRow: 0, endCol: 0 });
+  });
+
+  it("a pick on the title names nothing: inert, the edit unchanged", async () => {
+    selectA1();
+    openFrEditor(FR_ID, 0, 0, null);
+    typeInto("=SUM(");
+    const title = { ...(cellCtx(FR_ID, 0, 1) as object), canvasY: 4 } as never;
+    expect(pickClickInCoreOrder(title)).toBe("inert");
+    await flush();
+    expect(getFrEditorSession()!.getText()).toBe("=SUM(");
+    expect(isFrEditorOpen()).toBe(true);
   });
 
   it("control: a press with NO edit picking selects the pressed cell", async () => {

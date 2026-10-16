@@ -295,6 +295,7 @@ mod tests {
             show_title: true,
             show_column_headers: true,
             show_row_headers: true,
+            container: None,
         }];
         calcula_format::save_calcula(&wb, &source_path).unwrap();
 

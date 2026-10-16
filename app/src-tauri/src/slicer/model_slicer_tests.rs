@@ -235,7 +235,7 @@ impl Fx {
         def.name = Some(format!("Pivot{}", id));
         if is_canvas {
             def.canvas_frame =
-                Some(pivot_engine::CanvasFrame { x: 40.0, y: 60.0, width: 320.0, height: 200.0, frozen_headers: false });
+                Some(pivot_engine::CanvasFrame { x: 40.0, y: 60.0, width: 320.0, height: 200.0, frozen_headers: false, container: None });
             def.destination = crate::pivot::operations::allocate_canvas_pivot_anchor(&self.state, sheet).unwrap();
         } else {
             // Side by side, far apart, so two worksheet pivots never overlap.
@@ -257,7 +257,7 @@ impl Fx {
             pivot_id: pivot,
             row_fields: rows.iter().map(field).collect(),
             column_fields: columns.iter().map(field).collect(),
-            value_fields: vec![BiValueFieldRef { measure_name: "Revenue".into(), custom_name: None }],
+            value_fields: vec![BiValueFieldRef { measure_name: "Revenue".into(), custom_name: None, number_format: None }],
             filter_fields: vec![],
             slicer_fields: None,
             row_hierarchies: vec![],
@@ -1062,6 +1062,7 @@ fn a_pulled_model_slicer_is_stamped_with_its_effective_data_source_id() {
         }],
         filter_level: 1,
         data_source_id: None,
+        container: None,
     };
     crate::calp_commands::materialize_pulled_slicers(&test_seed_effect(), &state, &slicers, &[saved], |_| Some(0))
         .unwrap();
@@ -1182,7 +1183,7 @@ impl Fx {
             pivot_id: pivot,
             row_fields: rows.iter().map(field).collect(),
             column_fields: columns.iter().map(field).collect(),
-            value_fields: vec![BiValueFieldRef { measure_name: "Revenue".into(), custom_name: None }],
+            value_fields: vec![BiValueFieldRef { measure_name: "Revenue".into(), custom_name: None, number_format: None }],
             filter_fields: vec![],
             slicer_fields: None,
             row_hierarchies: vec![],
@@ -1582,7 +1583,7 @@ async fn an_explicit_empty_hidden_list_clears_a_row_filter_and_an_absent_one_kee
             hidden_items: Some(vec![]),
         }],
         column_fields: vec![BiFieldRef { table: "Sales".into(), column: "year".into(), is_lookup: false, hidden_items: None }],
-        value_fields: vec![BiValueFieldRef { measure_name: "Revenue".into(), custom_name: None }],
+        value_fields: vec![BiValueFieldRef { measure_name: "Revenue".into(), custom_name: None, number_format: None }],
         filter_fields: vec![],
         slicer_fields: None,
         row_hierarchies: vec![],
@@ -3266,7 +3267,7 @@ async fn a_pivot_fields_item_lists_include_the_blank_item() {
         pivot_id: pivot,
         row_fields: vec![BiFieldRef { table: "Sales".into(), column: "year".into(), is_lookup: false, hidden_items: None }],
         column_fields: vec![],
-        value_fields: vec![BiValueFieldRef { measure_name: "Revenue".into(), custom_name: None }],
+        value_fields: vec![BiValueFieldRef { measure_name: "Revenue".into(), custom_name: None, number_format: None }],
         filter_fields: vec![region(hidden)],
         slicer_fields: None,
         row_hierarchies: vec![],

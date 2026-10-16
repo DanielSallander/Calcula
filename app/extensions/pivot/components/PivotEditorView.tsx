@@ -5,7 +5,15 @@
 import React from "react";
 import { PivotEditor } from "./PivotEditor";
 import type { TaskPaneViewProps } from "@api";
-import type { PivotId, SourceField, ZoneField, LayoutConfig, BiPivotModelInfo, CalculatedFieldDef } from "./types";
+import type {
+  PivotId,
+  SourceField,
+  ZoneField,
+  LayoutConfig,
+  BiPivotModelInfo,
+  CalculatedFieldDef,
+  ValueColumnRefDef,
+} from "./types";
 
 /**
  * Data structure expected by PivotEditorView.
@@ -19,6 +27,8 @@ export interface PivotEditorViewData {
   initialFilters?: ZoneField[];
   initialLayout?: LayoutConfig;
   initialCalculatedFields?: CalculatedFieldDef[];
+  /** How the value and calculated columns interleave (definition.value_column_order). */
+  initialValueColumnOrder?: ValueColumnRefDef[];
   biModel?: BiPivotModelInfo;
   sourceTableName?: string;
 }
@@ -62,6 +72,7 @@ export function PivotEditorView({
       initialFilters={pivotData.initialFilters}
       initialLayout={pivotData.initialLayout}
       initialCalculatedFields={pivotData.initialCalculatedFields}
+      initialValueColumnOrder={pivotData.initialValueColumnOrder}
       biModel={pivotData.biModel}
       sourceTableName={pivotData.sourceTableName}
       onClose={onClose}

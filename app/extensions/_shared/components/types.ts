@@ -45,6 +45,8 @@ export interface MeasureField {
   table: string;
   sourceColumn: string;
   aggregation: AggregationType;
+  /** The model's display format for this measure, when it defines one. */
+  formatString?: string;
 }
 
 // Drop zone identifiers
@@ -57,6 +59,10 @@ export interface DragField {
   isNumeric: boolean;
   fromZone?: DropZoneType;
   fromIndex?: number;
+  /** The `dropKey` of the zone a pill was dragged FROM, when that zone has
+   *  one (a chart's wells: several wells share one DropZoneType). Absent for
+   *  the pivot editor's four zones and for the field list. */
+  fromKey?: string;
 }
 
 // Field in a drop zone
@@ -68,6 +74,9 @@ export interface ZoneField {
   aggregation?: AggregationType;
   customName?: string;
   numberFormat?: string;
+  /** True when `numberFormat` was ADOPTED from the BI model (not the user's):
+   *  a request carries the format back only when this is false. */
+  numberFormatFromModel?: boolean;
   showValuesAs?: string;
   // For filter fields
   hiddenItems?: string[];

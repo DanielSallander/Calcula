@@ -1899,11 +1899,54 @@ export async function copySheet(sourceIndex: number, newName?: string): Promise<
 }
 
 export async function hideSheet(index: number, level?: "hidden" | "veryHidden"): Promise<SheetsResult> {
-  return invoke<SheetsResult>("hide_sheet", { index, level: level ?? null });
+  const activeBefore = await activeSheetBeforeVisibilityChange();
+  const result = await invoke<SheetsResult>("hide_sheet", { index, level: level ?? null });
+  announceVisibilityChange(activeBefore, result);
+  return result;
 }
 
 export async function unhideSheet(index: number): Promise<SheetsResult> {
-  return invoke<SheetsResult>("unhide_sheet", { index });
+  const activeBefore = await activeSheetBeforeVisibilityChange();
+  const result = await invoke<SheetsResult>("unhide_sheet", { index });
+  announceVisibilityChange(activeBefore, result);
+  return result;
+}
+
+/**
+ * The backend's active sheet BEFORE a hide/unhide, so the announcement below
+ * can tell whether the call moved it. A failing read never fails the hide (the
+ * same rule as `sheetNamesBefore`): it answers null, and an unknown "before"
+ * announces nothing -- exactly the behaviour these wrappers had before they
+ * announced at all, never the out-of-order announcement described below.
+ */
+async function activeSheetBeforeVisibilityChange(): Promise<number | null> {
+  try {
+    return await invoke<number>("get_active_sheet");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The sheet COLLECTION's visibility changed (§3cd): announce the generic
+ * domain moveSheet uses, so every reader of the sheet list (tab strip, report
+ * pages) re-reads -- hiding a NON-active sheet, or unhiding any sheet, used to
+ * announce nothing at all.
+ *
+ * But ONLY when the active sheet stayed put. A hide of the ACTIVE sheet moved
+ * the backend's active sheet; the caller that applies that switch (SheetTabs'
+ * `applySheetsResult`) announces SHEET_CHANGED with its detail AFTER the
+ * frontend switched. Announcing here as well would put a detail-less
+ * SHEET_CHANGED in front of the switch, and every cache keyed on the BACKEND's
+ * active sheet (Controls' `reloadForSheetChange` reads `getActiveSheet()`)
+ * would load the new sheet's objects while the grid still paints the old one.
+ *
+ * Called only after the invoke resolved: a refused hide (last visible sheet,
+ * protected structure) throws first and announces nothing.
+ */
+function announceVisibilityChange(activeBefore: number | null, result: SheetsResult): void {
+  if (activeBefore === null || result?.activeIndex !== activeBefore) return;
+  emitAppEvent(AppEvents.MUTATION_REFRESH, { domains: ["sheets"], source: "commit" });
 }
 
 export async function setTabColor(index: number, color: string): Promise<SheetsResult> {

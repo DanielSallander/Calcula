@@ -5,17 +5,22 @@
 //
 // THE DATA-DESTROYING TRAP, AND WHY THE MOCK CARRIES A RESOLVED SPEC
 // ------------------------------------------------------------------
-// A chart title may be a cell reference. `resolveSpecReferences` returns a NEW
-// spec whose `title` is the RESOLVED STRING, and that resolved spec is what
-// reaches the layout and the painters. So a title stored as `=Sheet1!A1` opens
-// showing "Revenue" if the editor is seeded from the render spec, and clicking
-// away then writes the literal "Revenue" — the link is gone, nothing reports an
-// error, and the chart silently stops tracking the cell.
+// A chart title may be BOUND (D-BIND): a formula in the workbook's binding
+// store, whose resolved value is laid over the spec the chart PAINTS. So a
+// title bound to `=Sheet1!A1` opens showing "Revenue" if the editor is seeded
+// from the painted spec, and clicking away then writes the literal "Revenue" —
+// the link is gone, nothing reports an error, and the chart silently stops
+// tracking the cell.
 //
 // The cached-chart-data double below therefore CARRIES `resolvedSpec` with the
-// resolved strings in it, even though the real `CachedChartData` has no such
+// painted strings in it, even though the real `CachedChartData` has no such
 // field. That is deliberate: the wrong source has to EXIST in the fixture, or
 // "the editor shows the formula" is an assertion that could not have failed.
+//
+// BINDING WRITES. A commit starting with "=" binds the field through the seam
+// (`setBinding`, doubled here); plain text on a bound field unbinds it AND
+// writes the literal inside ONE undo transaction (`runInUndoTransaction`,
+// doubled to record whether each write happened INSIDE it).
 //
 // THE EDITOR IS THE REAL ONE
 // --------------------------
@@ -58,6 +63,13 @@ vi.mock("@core/state/GridContext", () => ({
 const store = vi.hoisted(() => ({
   chart: null as { chartId: string; x: number; y: number; spec: ChartSpec } | null,
   updates: [] as Array<{ chartId: string; patch: Partial<ChartSpec> }>,
+  /** The binding seam's cache, by pointer (only chart "chart-1" has any). */
+  bindings: new Map<string, { formula: string; displayFormula: string }>(),
+  /** Every seam write / literal write / flush, in order, with whether an undo transaction was open. */
+  log: [] as string[],
+  txOpen: false,
+  refuse: null as string | null,
+  toasts: [] as Array<{ message: string; variant?: string }>,
   invalidated: [] as string[],
   /** Where canvas 0,0 sits in chart-local space; moved to simulate a scroll. */
   originX: 200,
@@ -68,7 +80,11 @@ const store = vi.hoisted(() => ({
 vi.mock("../../lib/chartStore", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   getChartById: (id: string) => (store.chart && store.chart.chartId === id ? store.chart : null),
+  flushPendingChartSaves: async () => {
+    store.log.push(`flush tx=${store.txOpen}`);
+  },
   updateChartSpec: (chartId: string, patch: Partial<ChartSpec>) => {
+    store.log.push(`literal tx=${store.txOpen}`);
     store.updates.push({ chartId, patch });
     if (store.chart && store.chart.chartId === chartId) {
       store.chart.spec = { ...store.chart.spec, ...patch } as ChartSpec;
@@ -85,6 +101,66 @@ vi.mock("../../rendering/chartRenderer", async (importOriginal) => ({
       : null,
   invalidateChartCache: (id: string) => {
     store.invalidated.push(id);
+  },
+}));
+
+vi.mock("@api/objectBindings", () => {
+  class BindingRefusal extends Error {
+    readonly sentence: string;
+    constructor(sentence: string) {
+      super(sentence);
+      this.sentence = sentence;
+    }
+  }
+  const info = (path: string) => {
+    const b = store.bindings.get(path)!;
+    return {
+      object: { kind: "chart", id: "chart-1" },
+      path,
+      formula: b.formula,
+      displayFormula: b.displayFormula,
+      model: null,
+      resolved: null,
+    };
+  };
+  return {
+    // eslint-disable-next-line @typescript-eslint/naming-convention -- the doubled module's class export
+    BindingRefusal,
+    // The title editor reads the chart's RESOLVED container (its title style);
+    // no container field of this chart is bound.
+    getResolved: () => null,
+    getBinding: (object: { kind: string; id: string }, path: string) =>
+      object.kind === "chart" && object.id === "chart-1" && store.bindings.has(path) ? info(path) : null,
+    setBinding: async (object: { kind: string; id: string }, path: string, formula: string, opts?: unknown) => {
+      store.log.push(`set ${object.kind}:${object.id} ${path} ${formula} opts=${JSON.stringify(opts ?? null)} tx=${store.txOpen}`);
+      if (store.refuse) throw new BindingRefusal(store.refuse);
+      store.bindings.set(path, { formula, displayFormula: formula });
+      return info(path);
+    },
+    clearBinding: async (object: { kind: string; id: string }, path: string) => {
+      store.log.push(`clear ${object.kind}:${object.id} ${path} tx=${store.txOpen}`);
+      if (store.refuse) throw new BindingRefusal(store.refuse);
+      return store.bindings.delete(path);
+    },
+  };
+});
+
+vi.mock("@api/objectGeometry", () => ({
+  runInUndoTransaction: async <T,>(label: string, fn: () => Promise<T> | T): Promise<T> => {
+    store.log.push(`open "${label}"`);
+    store.txOpen = true;
+    try {
+      return await fn();
+    } finally {
+      store.txOpen = false;
+      store.log.push("commit");
+    }
+  },
+}));
+
+vi.mock("@api/notifications", () => ({
+  showToast: (message: string, options?: { variant?: string }) => {
+    store.toasts.push({ message, variant: options?.variant });
   },
 }));
 
@@ -221,6 +297,11 @@ beforeEach(() => {
   formatEvents.length = 0;
   store.updates.length = 0;
   store.invalidated.length = 0;
+  store.bindings.clear();
+  store.log.length = 0;
+  store.txOpen = false;
+  store.refuse = null;
+  store.toasts.length = 0;
   store.originX = 200;
   store.originY = 100;
   setChart(baseSpec());
@@ -240,40 +321,55 @@ afterEach(() => {
 // THE TRAP: raw spec for the TEXT, resolved layout for the RECT
 // ===========================================================================
 
+/** Bind one field in the doubled seam cache (what a reload would have listed). */
+function bound(path: string, displayFormula: string, formula = displayFormula): void {
+  store.bindings.set(path, { formula, displayFormula });
+}
+
 describe("seeding the editor", () => {
-  it("shows the FORMULA of a cell-linked title, never the resolved value", () => {
-    setChart(baseSpec({ title: "=Sheet1!A1" }), { title: "Revenue" });
+  it("shows the FORMULA of a bound title, never the painted value", () => {
+    bound("/spec/title", "=Sheet1!A1");
+    setChart(baseSpec({ title: "Old literal" }), { title: "Revenue" });
 
     const handle = mod.openChartTextEditor(CHART_ID, "title");
 
     expect(handle).not.toBeNull();
     expect(handle!.getText()).toBe("=Sheet1!A1");
     expect(opened.at(-1)!.initialText).toBe("=Sheet1!A1");
-    // The resolved value is reachable in the fixture, so this is a real refusal.
+    // The painted value is reachable in the fixture, so this is a real refusal.
     expect((store.cached as { resolvedSpec: ChartSpec }).resolvedSpec.title).toBe("Revenue");
   });
 
-  it("committing a cell-linked title untouched writes NOTHING", () => {
-    setChart(baseSpec({ title: "=Sheet1!A1" }), { title: "Revenue" });
+  it("shows the LOCALISED formula (displayFormula), not the stored invariant one", () => {
+    bound("/spec/title", "=ROUND(Sheet1!A1;2)", "=ROUND(Sheet1!A1,2)");
+    expect(mod.openChartTextEditor(CHART_ID, "title")!.getText()).toBe("=ROUND(Sheet1!A1;2)");
+  });
+
+  it("committing a bound title untouched writes NOTHING", async () => {
+    bound("/spec/title", "=Sheet1!A1");
+    setChart(baseSpec({ title: "Old literal" }), { title: "Revenue" });
 
     const handle = mod.openChartTextEditor(CHART_ID, "title")!;
     handle.commit();
+    await mod.chartTextWritesSettled();
 
     expect(store.updates).toEqual([]);
-    expect(store.chart!.spec.title).toBe("=Sheet1!A1");
+    expect(store.log).toEqual([]);
+    expect(store.chart!.spec.title).toBe("Old literal");
   });
 
   it("does the same for BOTH axis titles", () => {
-    setChart(
-      baseSpec({
-        xAxis: { ...baseSpec().xAxis, title: "=Sheet1!B2" },
-        yAxis: { ...baseSpec().yAxis, title: "=Sheet1!C3" },
-      } as Partial<ChartSpec>),
-      { title: "Revenue" },
-    );
+    bound("/spec/xAxis/title", "=Sheet1!B2");
+    bound("/spec/yAxis/title", "=Sheet1!C3");
+    setChart(baseSpec(), { title: "Revenue" });
 
     expect(mod.openChartTextEditor(CHART_ID, "xAxisTitle")!.getText()).toBe("=Sheet1!B2");
     expect(mod.openChartTextEditor(CHART_ID, "yAxisTitle")!.getText()).toBe("=Sheet1!C3");
+  });
+
+  it("an UNBOUND literal that happens to start with '=' is text and opens as typed", () => {
+    setChart(baseSpec({ title: "=A1" }));
+    expect(mod.openChartTextEditor(CHART_ID, "title")!.getText()).toBe("=A1");
   });
 
   it("asks for Excel's chart-title keying and for formula references", () => {
@@ -439,6 +535,157 @@ describe("typing in the editor", () => {
 
     expect(store.updates).toEqual([]);
     expect(handle.isOpen()).toBe(false);
+  });
+});
+
+// ===========================================================================
+// Binding commits (D-BIND S8b)
+// ===========================================================================
+
+describe("committing a formula binds the field", () => {
+  it("'=...' on an unbound title BINDS it through the seam and never writes the literal", async () => {
+    const handle = mod.openChartTextEditor(CHART_ID, "title")!;
+    handle.setText("=Sheet1!B2");
+    handle.commit();
+    await mod.chartTextWritesSettled();
+
+    expect(store.log).toEqual(["set chart:chart-1 /spec/title =Sheet1!B2 opts=null tx=false"]);
+    expect(store.updates).toEqual([]);
+    expect(store.chart!.spec.title).toBe("Revenue by month");
+    expect(store.invalidated).toContain(CHART_ID);
+  });
+
+  it("each axis title binds its OWN pointer", async () => {
+    let handle = mod.openChartTextEditor(CHART_ID, "xAxisTitle")!;
+    handle.setText("=Inputs!A1");
+    handle.commit();
+    handle = mod.openChartTextEditor(CHART_ID, "yAxisTitle")!;
+    handle.setText("  =[Revenue]  ");
+    handle.commit();
+    await mod.chartTextWritesSettled();
+
+    expect(store.log).toEqual([
+      "set chart:chart-1 /spec/xAxis/title =Inputs!A1 opts=null tx=false",
+      "set chart:chart-1 /spec/yAxis/title =[Revenue] opts=null tx=false",
+    ]);
+  });
+
+  it("a CHANGED formula on a bound title re-binds it", async () => {
+    bound("/spec/title", "=Sheet1!A1");
+    const handle = mod.openChartTextEditor(CHART_ID, "title")!;
+    handle.setText("=Sheet1!A2");
+    handle.commit();
+    await mod.chartTextWritesSettled();
+
+    expect(store.log).toEqual(["set chart:chart-1 /spec/title =Sheet1!A2 opts=null tx=false"]);
+  });
+
+  it("a refused bind shows Rust's own sentence and changes nothing", async () => {
+    store.refuse = "There is no sheet named 'NOWHERE'.";
+    const handle = mod.openChartTextEditor(CHART_ID, "title")!;
+    handle.setText("=NOWHERE!A1");
+    handle.commit();
+    await mod.chartTextWritesSettled();
+
+    expect(store.toasts).toEqual([{ message: "There is no sheet named 'NOWHERE'.", variant: "error" }]);
+    expect(store.updates).toEqual([]);
+    expect(store.bindings.has("/spec/title")).toBe(false);
+  });
+});
+
+describe("plain text on a bound field unbinds it and writes the literal in ONE undo step", () => {
+  it("clears the binding and writes the literal, both INSIDE one transaction", async () => {
+    bound("/spec/title", "=Sheet1!A1");
+    const handle = mod.openChartTextEditor(CHART_ID, "title")!;
+    handle.setText("Quarterly revenue");
+    handle.commit();
+    await mod.chartTextWritesSettled();
+
+    expect(store.log).toEqual([
+      'open "Edit chart text"',
+      "clear chart:chart-1 /spec/title tx=true",
+      "literal tx=true",
+      "flush tx=true",
+      "commit",
+    ]);
+    expect(store.updates).toEqual([{ chartId: CHART_ID, patch: { title: "Quarterly revenue" } }]);
+    expect(store.bindings.has("/spec/title")).toBe(false);
+  });
+
+  it("emptying a bound title unbinds it and removes the title (null), in one step", async () => {
+    bound("/spec/xAxis/title", "=Sheet1!A1");
+    const handle = mod.openChartTextEditor(CHART_ID, "xAxisTitle")!;
+    handle.setText("");
+    handle.commit();
+    await mod.chartTextWritesSettled();
+
+    expect(store.log).toEqual([
+      'open "Edit chart text"',
+      "clear chart:chart-1 /spec/xAxis/title tx=true",
+      "literal tx=true",
+      "flush tx=true",
+      "commit",
+    ]);
+    expect((store.updates[0].patch as { xAxis: { title: null } }).xAxis.title).toBeNull();
+  });
+
+  it("plain text equal to the literal still unbinds (the binding going IS the change) without a literal write", async () => {
+    bound("/spec/title", "=Sheet1!A1");
+    const handle = mod.openChartTextEditor(CHART_ID, "title")!;
+    handle.setText("Revenue by month");
+    handle.commit();
+    await mod.chartTextWritesSettled();
+
+    expect(store.log).toEqual(['open "Edit chart text"', "clear chart:chart-1 /spec/title tx=true", "commit"]);
+    expect(store.updates).toEqual([]);
+  });
+
+  it("a refused unbind writes no literal and says why", async () => {
+    bound("/spec/title", "=Sheet1!A1");
+    store.refuse = "The sheet is protected: objects cannot be edited.";
+    const handle = mod.openChartTextEditor(CHART_ID, "title")!;
+    handle.setText("Something else");
+    handle.commit();
+    await mod.chartTextWritesSettled();
+
+    expect(store.updates).toEqual([]);
+    expect(store.toasts).toEqual([{ message: "The sheet is protected: objects cannot be edited.", variant: "error" }]);
+    expect(store.log.at(-1)).toBe("commit");
+  });
+
+  it("Delete over a bound title removes the binding AND the title, in one step", async () => {
+    bound("/spec/title", "=Sheet1!A1");
+    selection.selectChart(CHART_ID);
+    selection.setSubSelection(CHART_ID, { level: "element", elementId: "title" });
+
+    expect(mod.handleChartTextDelete(CHART_ID)).toBe(true);
+    await mod.chartTextWritesSettled();
+
+    expect(store.log).toEqual([
+      'open "Edit chart text"',
+      "clear chart:chart-1 /spec/title tx=true",
+      "literal tx=true",
+      "flush tx=true",
+      "commit",
+    ]);
+    expect(store.updates).toEqual([{ chartId: CHART_ID, patch: { title: null } }]);
+  });
+});
+
+describe("planChartTextCommit (pure)", () => {
+  const binding = (displayFormula: string) =>
+    ({ object: { kind: "chart", id: CHART_ID }, path: "/spec/title", formula: displayFormula, displayFormula, model: null, resolved: null }) as const;
+
+  it("decides bind / unbind / literal / none from the literal, the binding and the text", () => {
+    const spec = baseSpec({ title: "T" });
+    expect(mod.planChartTextCommit(spec, "title", null, "=A1")).toEqual({ kind: "bind", formula: "=A1" });
+    expect(mod.planChartTextCommit(spec, "title", binding("=A1"), "=A1")).toEqual({ kind: "none" });
+    expect(mod.planChartTextCommit(spec, "title", binding("=A1"), "=A2")).toEqual({ kind: "bind", formula: "=A2" });
+    expect(mod.planChartTextCommit(spec, "title", binding("=A1"), "T")).toEqual({ kind: "unbind", value: "T" });
+    expect(mod.planChartTextCommit(spec, "title", binding("=A1"), " ")).toEqual({ kind: "unbind", value: null });
+    expect(mod.planChartTextCommit(spec, "title", null, "T")).toEqual({ kind: "none" });
+    expect(mod.planChartTextCommit(spec, "title", null, "U")).toEqual({ kind: "literal", value: "U" });
+    expect(mod.planChartTextCommit(spec, "title", null, "")).toEqual({ kind: "literal", value: null });
   });
 });
 

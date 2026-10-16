@@ -127,9 +127,10 @@ import { isObjectGripMenuOpen } from "@api/objectPosition";
 import { notifySelectionOwnershipChanged, registerSelectionOwner } from "@api/selectionOwner";
 import { getGridStateSnapshot } from "@api/state";
 import { getCachedTimelineData, getTimelineById, updateTimelineSelectionAsync } from "./timelineSlicerStore";
+import { shownTimeline } from "./timelineBindings";
 import { TimelineSlicerEvents } from "./timelineSlicerEvents";
 import { clientToTimelineCanvas, timelineAtCanvasPoint } from "./timelineCanvasGeometry";
-import { getScrollOffset, liveTimelineZoneInput, setScrollOffset } from "./timelineView";
+import { getScrollOffset, liveTimelineZoneInput, setScrollOffset, shownTimelineShape } from "./timelineView";
 import { showTimelineKeyPreview } from "./timelineGestureView";
 import { commitTimelineSpan } from "./timelineCommit";
 import { isTimelineContentGestureActive } from "./timelineRangeDrag";
@@ -215,10 +216,13 @@ interface TimelineSnapshot {
 }
 
 function snapshotOf(timelineId: string): TimelineSnapshot | null {
-  const timeline = getTimelineById(timelineId);
-  if (!timeline) return null;
+  const stored = getTimelineById(timelineId);
+  if (!stored) return null;
+  // As SHOWN (a bound show-header moves the tiles; the container's padding
+  // narrows them): the renderer's layout, on the content box.
+  const timeline = shownTimeline(stored);
   const periods = getCachedTimelineData(timelineId)?.periods ?? [];
-  return { timeline, periods, layout: computeTimelineLayout(timeline, periods.length) };
+  return { timeline, periods, layout: computeTimelineLayout(shownTimelineShape(stored), periods.length) };
 }
 
 /** A period as a screen reader says it: "Feb 2026", "Q1 2026", "2026", "5 Jan 2026". */

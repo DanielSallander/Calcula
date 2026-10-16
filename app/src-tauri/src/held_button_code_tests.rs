@@ -42,17 +42,20 @@ fn dashboard() -> Workbook {
     sheet
         .cells
         .insert((0, 0), SavedCell::from_cell(&Cell::new_text("Sales".to_string())));
+    // Every control a build publishes carries its stable uid (WP-D S5a), so
+    // the application's controls do too -- an untouched push then republishes
+    // them byte for byte, uid included.
     let controls = serde_json::json!([
-        { "row": 1, "col": 1, "controlType": "button", "properties": {
+        { "row": 1, "col": 1, "controlType": "button", "uid": "app-button-b2", "properties": {
             "onSelect": { "valueType": "static", "value": "Report();" },
             "text": { "valueType": "static", "value": "Run report" },
             "pinToGrid": { "valueType": "static", "value": "false" }
         } },
-        { "row": 2, "col": 2, "controlType": "button", "properties": {
+        { "row": 2, "col": 2, "controlType": "button", "uid": "app-button-c3", "properties": {
             "macroRef": { "valueType": "static", "value": "macro-report" },
             "text": { "valueType": "static", "value": "Macro" }
         } },
-        { "row": 3, "col": 3, "controlType": "button", "properties": {
+        { "row": 3, "col": 3, "controlType": "button", "uid": "app-button-d4", "properties": {
             "onSelect": { "valueType": "static", "value": "" },
             "text": { "valueType": "static", "value": "Empty" }
         } }
@@ -639,7 +642,7 @@ fn held_button() -> ControlMetadata {
     properties.insert(HELD_ON_SELECT_PROPERTY.to_string(), prop("Report();"));
     properties.insert(HELD_MACRO_REF_PROPERTY.to_string(), prop("macro-report"));
     properties.insert(HELD_FROM_PROPERTY.to_string(), prop(&stamp().encode()));
-    ControlMetadata { control_type: "button".into(), properties }
+    ControlMetadata { control_type: "button".into(), uid: String::new(), properties }
 }
 
 fn seeded(meta: ControlMetadata) -> crate::AppState {
@@ -881,7 +884,12 @@ fn a_saved_and_reopened_working_copy_keeps_its_held_code_inert() {
     let reopened = calcula_format::load_calcula(&path).unwrap();
 
     let mut store: crate::controls::ControlStorage = HashMap::new();
-    crate::controls::materialize_saved_controls(&reopened.controls, &mut store, |_| Some(0));
+    crate::controls::materialize_saved_controls(
+        &reopened.controls,
+        &mut store,
+        |_| Some(0),
+        &crate::controls::PageTargetRemap::identity(),
+    );
     let b2 = &store[&(0, 1, 1)];
     assert!(!b2.properties.contains_key(ON_SELECT_PROPERTY), "a reopen armed held code");
     assert_eq!(b2.properties[HELD_ON_SELECT_PROPERTY].value, "Report();");
@@ -1331,7 +1339,7 @@ fn a_formula_typed_held_slot_goes_back_with_its_type() {
 fn an_unchanged_code_write_changes_nothing() {
     let mut properties = HashMap::new();
     properties.insert(ON_SELECT_PROPERTY.to_string(), prop("Mine();"));
-    let state = seeded(ControlMetadata { control_type: "button".into(), properties });
+    let state = seeded(ControlMetadata { control_type: "button".into(), uid: String::new(), properties });
     let file = FileState::default();
     let depth = undo_depth(&state);
     crate::controls::set_control_property_core(
@@ -1374,7 +1382,7 @@ fn the_remove_step_discards_the_held_code_as_one_undoable_step() {
     // unchanged one: nothing happens).
     let mut plain = HashMap::new();
     plain.insert(ON_SELECT_PROPERTY.to_string(), prop(""));
-    let state = seeded(ControlMetadata { control_type: "button".into(), properties: plain });
+    let state = seeded(ControlMetadata { control_type: "button".into(), uid: String::new(), properties: plain });
     let file = FileState::default();
     crate::controls::set_control_property_with(
         &state, &file, 0, 2, 1, "".into(), ON_SELECT_PROPERTY.into(), "static".into(), "".into(), true,
@@ -1470,7 +1478,7 @@ fn list_controls_referencing_macro_reports_kind_caption_and_application() {
         let mut own = HashMap::new();
         own.insert("text".to_string(), prop("Mine"));
         own.insert(MACRO_REF_PROPERTY.to_string(), prop("macro-report"));
-        controls.insert((0, 7, 7), ControlMetadata { control_type: "button".into(), properties: own });
+        controls.insert((0, 7, 7), ControlMetadata { control_type: "button".into(), uid: String::new(), properties: own });
         let mut cells = state.cell_types.write(&test_seed_effect()).unwrap();
         cells.insert((0, 4, 4), crate::cell_types::CellTypeAssignment {
             type_id: crate::button_cells::BUTTON_CELL_TYPE_ID.to_string(),
@@ -2361,6 +2369,120 @@ fn every_admission_door_keeps_a_buttons_action_live() {
     assert_eq!(stripped[0].controls[0]["properties"]["action"]["value"], "navigate");
 }
 
+// ============================================================================
+// The Page Navigator (D-NAV): one live control whose keys are never code
+// ============================================================================
+
+/// A Page Navigator as the Controls recipe writes it: every navigator key,
+/// static, plus an override.
+fn page_navigator_props() -> serde_json::Value {
+    use crate::controls::PAGE_NAVIGATOR_PROPERTIES;
+    let mut props = serde_json::Map::new();
+    for key in PAGE_NAVIGATOR_PROPERTIES {
+        let value = match *key {
+            "pageOverrides" => r#"[{"sheetId":"0192f6a0-0000-7000-8000-000000000002","sheetName":"Detail","text":"Details"}]"#,
+            "orientation" => "horizontal",
+            "showHiddenPages" | "showTooltipPages" => "false",
+            _ => "#123456",
+        };
+        props.insert(key.to_string(), serde_json::json!({ "valueType": "static", "value": value }));
+    }
+    props.insert("pinToGrid".into(), serde_json::json!({ "valueType": "static", "value": "false" }));
+    serde_json::Value::Object(props)
+}
+
+/// The navigator's keys are never CODE and never held: a pull keeps a
+/// published report's navigator working. And the Rust size cap is the one the
+/// seam's `MAX_PAGE_NAVIGATOR_OVERRIDES_CHARS` mirrors, so the frontend's
+/// strict check refuses exactly what the backend door would.
+///
+/// SABOTAGE: add "pageOverrides" to `EXECUTABLE_CONTROL_PROPERTIES`.
+#[test]
+fn page_navigator_keys_match_the_frontend_and_are_never_code() {
+    use crate::controls::{
+        EXECUTABLE_CONTROL_PROPERTIES, MAX_CONTROL_PROPERTY_CHARS, PAGE_NAVIGATOR_CONTROL_TYPE,
+        PAGE_NAVIGATOR_OVERRIDES_PROPERTY, PAGE_NAVIGATOR_PROPERTIES,
+    };
+    assert!(!PAGE_NAVIGATOR_PROPERTIES.is_empty());
+    for key in PAGE_NAVIGATOR_PROPERTIES {
+        assert!(!EXECUTABLE_CONTROL_PROPERTIES.contains(key), "'{key}' is a navigator setting, not code");
+        assert!(!HELD_CONTROL_PROPERTIES.contains(key), "'{key}' is a navigator setting, not a held key");
+    }
+    assert!(PAGE_NAVIGATOR_PROPERTIES.contains(&PAGE_NAVIGATOR_OVERRIDES_PROPERTY));
+    assert_eq!(MAX_CONTROL_PROPERTY_CHARS, 64 * 1024, "the seam mirrors this as `64 * 1024`");
+
+    // The spellings are the seam's own, read at test time.
+    let seam = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/api/buttonControlService.ts"),
+    )
+    .expect("app/src/api/buttonControlService.ts");
+    for decl in [
+        format!("export const PAGE_NAVIGATOR_CONTROL_TYPE = \"{PAGE_NAVIGATOR_CONTROL_TYPE}\";"),
+        format!("export const PAGE_NAVIGATOR_OVERRIDES_PROPERTY = \"{PAGE_NAVIGATOR_OVERRIDES_PROPERTY}\";"),
+        "export const MAX_PAGE_NAVIGATOR_OVERRIDES_CHARS = 64 * 1024;".to_string(),
+    ] {
+        assert!(seam.contains(&decl), "buttonControlService.ts no longer declares `{decl}`");
+    }
+}
+
+/// Every `key: "..."` of the navigator's PropertyDefinitions is a navigator
+/// key or a geometry key -- so the Properties pane can write nothing the
+/// backend would treat as code or strip on a pull. NON-VACUOUS: a parse that
+/// finds nothing (a re-indent, a renamed field) fails rather than passing.
+///
+/// SABOTAGE: re-indent one row of a scratch copy so the parser finds nothing.
+#[test]
+fn page_navigator_property_definitions_are_navigator_or_geometry_keys() {
+    use crate::controls::{GEOMETRY_PROPERTIES, PAGE_NAVIGATOR_PROPERTIES};
+    let ts = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../extensions/Controls/PageNavigator/pageNavigatorProperties.ts"),
+    )
+    .expect("app/extensions/Controls/PageNavigator/pageNavigatorProperties.ts");
+    let keys: Vec<&str> = ts
+        .lines()
+        .filter_map(|l| l.strip_prefix("    key: \""))
+        .filter_map(|rest| rest.split('"').next())
+        .collect();
+    assert!(!keys.is_empty(), "no `    key: \"...\"` row parsed -- the census would pass vacuously");
+    assert!(keys.contains(&"orientation"), "{keys:?}");
+    assert!(keys.contains(&"showTooltipPages"), "{keys:?}");
+    for key in &keys {
+        assert!(
+            PAGE_NAVIGATOR_PROPERTIES.contains(key) || GEOMETRY_PROPERTIES.contains(key),
+            "the navigator's Properties row '{key}' is neither a navigator key nor geometry"
+        );
+    }
+}
+
+/// Every admission door -- a subscriber's strip, a checkout's hold, a
+/// subscriber's link-landing -- keeps every navigator key byte for byte.
+#[test]
+fn every_admission_door_keeps_a_page_navigator_live() {
+    use crate::controls::{PAGE_NAVIGATOR_CONTROL_TYPE, PAGE_NAVIGATOR_PROPERTIES};
+    let sheet = identity::SheetId::from_bytes(identity::generate_uuid_v7());
+    let saved = vec![SavedSheetControls {
+        sheet_id: sheet,
+        controls: serde_json::json!([
+            { "row": 0, "col": 0, "controlType": PAGE_NAVIGATOR_CONTROL_TYPE, "properties": page_navigator_props() }
+        ]),
+    }];
+    for wiring in [
+        DistributedWiring::Strip,
+        DistributedWiring::Hold(stamp()),
+        DistributedWiring::LinkLanded { from: stamp(), landed_macros: HashSet::new(), sheet_names: names(sheet) },
+    ] {
+        let (out, report) = admit_wiring(&saved, &wiring);
+        assert_eq!(out[0].controls[0]["controlType"], PAGE_NAVIGATOR_CONTROL_TYPE);
+        let props = out[0].controls[0]["properties"].as_object().unwrap();
+        for key in PAGE_NAVIGATOR_PROPERTIES {
+            assert_eq!(props.get(*key), page_navigator_props().get(*key), "{wiring:?} did not keep '{key}' live");
+        }
+        assert_eq!(report.stripped, 0, "{wiring:?}: a navigator setting is not code to strip");
+        assert!(!props.contains_key(HELD_FROM_PROPERTY), "{wiring:?}: nothing was held");
+    }
+}
+
 /// End to end: a published report's navigation button arrives at a
 /// subscriber with its action live, through the real publish, pull and
 /// materialize.
@@ -2413,7 +2535,7 @@ fn choosing_an_action_for_a_coded_button_undoes_to_the_code_and_redoes_to_the_ac
     let mut properties = HashMap::new();
     properties.insert("text".to_string(), prop("Go"));
     properties.insert(ON_SELECT_PROPERTY.to_string(), prop("Report();"));
-    let state = seeded(ControlMetadata { control_type: "button".into(), properties });
+    let state = seeded(ControlMetadata { control_type: "button".into(), uid: String::new(), properties });
     let file = FileState::default();
     let write = |key: &str, value: &str| {
         crate::controls::set_control_property_core(

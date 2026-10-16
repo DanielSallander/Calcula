@@ -115,6 +115,11 @@ pub mod formula_eval_plan;
 pub mod consolidate;
 pub mod status_bar;
 pub mod computed_properties;
+/// Object property BINDINGS (D-BIND): a property of a chart, control, slicer,
+/// timeline or canvas page that follows a formula. One persisted store
+/// (`bindings.json`, .cala v10), the bindable-path catalog, the object JSON the
+/// paths point into, and the evaluator.
+pub mod object_bindings;
 pub mod controls;
 /// The held compartment for an application's button code in a working copy
 /// (BUG-0257): checkout holds it inert, a push restores it after matching the
@@ -581,6 +586,21 @@ pub struct AppState {
     pub computed_prop_dependencies: Mutex<computed_properties::ComputedPropDependencies>,
     /// Reverse map: cell -> set of prop_ids that depend on it (for re-evaluation triggers)
     pub computed_prop_dependents: Mutex<computed_properties::ComputedPropDependents>,
+    /// Object property BINDINGS (bindings.json, .cala v10): the persisted overlay
+    /// rows `{object, path, formula, model?}`. Written only by the
+    /// `object_bindings` command, its undo arm, the cascades/repairs in
+    /// `object_bindings::cascade`, and the load path.
+    ///
+    /// LOCK ORDER: a LEAF. `grid` -> `grids` -> (other canonical locks) ->
+    /// `undo_stack` -> `object_bindings` -> `object_binding_runtime`. While
+    /// holding it, take nothing else but the runtime; family stores are read and
+    /// released BEFORE it is taken.
+    pub object_bindings: document_effect::Persisted<object_bindings::store::BindingStore>,
+    /// DERIVED binding state: dependency maps, resolved values, the page-filter
+    /// mirror (and, from S3a/S4, prepared ASTs and the measure cache). Rebuilt
+    /// lazily from the store whenever the store's generation moves; reset on
+    /// New/Open; never saved. A leaf BELOW `object_bindings` (see there).
+    pub object_binding_runtime: Mutex<object_bindings::eval::BindingRuntime>,
     /// Control metadata: (sheet_index, row, col) -> ControlMetadata
     pub controls: document_effect::Persisted<controls::ControlStorage>,
     /// Content-addressed binary media for the open document: sha256 hex -> raw
@@ -910,6 +930,8 @@ pub fn create_app_state() -> AppState {
         next_computed_prop_id: Mutex::new(1),
         computed_prop_dependencies: Mutex::new(HashMap::new()),
         computed_prop_dependents: Mutex::new(HashMap::new()),
+        object_bindings: document_effect::Persisted::new(object_bindings::store::BindingStore::default()),
+        object_binding_runtime: Mutex::new(object_bindings::eval::BindingRuntime::default()),
         controls: document_effect::Persisted::new(HashMap::new()),
         media: document_effect::Persisted::new(HashMap::new()),
         cell_types: document_effect::Persisted::new(HashMap::new()),
@@ -5904,6 +5926,7 @@ pub fn run() {
             controls::set_control_metadata,
             controls::remove_control_metadata,
             controls::set_control_geometry,
+            controls::set_control_appearance,
             controls::move_control,
             // "Make this my own" (phase 4 of BUG-0257): the one way an
             // application's button code becomes the user's own -- shown first,
@@ -5912,6 +5935,9 @@ pub fn run() {
             controls::get_all_controls,
             controls::list_controls_referencing_macro,
             controls::resolve_control_properties,
+            // Object property BINDINGS (WP-D D §3.9): the WHOLE binding
+            // surface is this one command with an op enum.
+            object_bindings::object_bindings,
             media::read_media_file,
             media::resolve_media_ref,
             // Cell-type assignment commands (granular bricks)
@@ -6171,6 +6197,11 @@ pub fn run() {
     // BEFORE `app.run` for the same reason as the dirty flag: a package pull or
     // a startup script can push undo entries during startup.
     undo_history::install_undo_announcer(app.handle().clone());
+
+    // Install the handle the object-binding store announces through
+    // (`object-bindings:changed`). Without it the store and its values still
+    // work but the frontend is never told a binding set or value moved.
+    object_bindings::install_bindings_announcer(app.handle().clone());
 
     app.run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {

@@ -237,6 +237,9 @@ export interface BaseObjectContext {
   /** The current script API version. Scripts can check this for compatibility. */
   readonly apiVersion: string;
 
+  /** This script's OWN object's properties by JSON Pointer (D-BIND §3.19). */
+  readonly self: ScriptObjectHandle;
+
   /**
    * Full extension API access (only available in "unlocked" mode).
    * In "restricted" mode, this is null.
@@ -450,6 +453,37 @@ export interface ScriptShapeHandle {
   setProperty(key: string, value: string): Promise<void>;
   getCellValue(cellRef: string): Promise<string>;
   sendMessage(type: string, data?: unknown): Promise<void>;
+}
+
+/**
+ * A handle on any bindable object's properties, by JSON Pointer (the paths
+ * list_object_properties shows: a chart's `/spec/title`, a control's
+ * `/properties/text`, a slicer's `/headerText`, a canvas page's `/background`).
+ * `context.self` (the script's own object, the restricted own-object door) and
+ * `api.object(kind, id)` (any object, the unlocked target door). D-BIND §3.19.
+ */
+export interface ScriptObjectHandle {
+  /** A binding kind for `api.object(kind, id)`; the script's own object type for `self`. */
+  readonly kind: string;
+  readonly id: string;
+  /** The value shown: the binding's resolved value, else the literal ("" = the whole object). */
+  getProperty(path: string): Promise<unknown>;
+  /** The stored literal, ignoring any binding ("" = the whole object). */
+  getLiteral(path: string): Promise<unknown>;
+  /** The binding's INVARIANT formula and its model, or null when unbound. */
+  getBinding(path: string): Promise<{ formula: string; model: string | null } | null>;
+  /** Write the LITERAL (a JSON scalar of the property's type). */
+  setProperty(path: string, value: unknown): Promise<void>;
+  /**
+   * Bind `path` to a formula. The formula is INVARIANT (`,` separators, `.`
+   * decimals, whatever the user's locale). A formula reading a `[Measure]` or a
+   * CUBE function needs the `bi.query` capability (declared AND granted) -- a
+   * condition the generated policy table cannot express, so it is stated here.
+   * A restricted script may bind only to cells of the sheet in front of the user.
+   */
+  bindProperty(path: string, formula: string, opts?: { model?: string }): Promise<void>;
+  /** Remove the binding; the literal shows again. */
+  unbindProperty(path: string): Promise<void>;
 }
 
 /** A handle on ANOTHER named range (`api.namedRange(name)`). */
@@ -750,6 +784,9 @@ export interface UnlockedAPI {
   shape(shapeId: string): ScriptShapeHandle;
   /** A handle on any named range. */
   namedRange(name: string): ScriptNamedRangeHandle;
+  /** Any bindable object's properties by JSON Pointer: a binding kind and the
+   *  object's binding id (a control's uid). D-BIND §3.19. */
+  object(kind: string, id: string): ScriptObjectHandle;
 }
 
 // ============================================================================

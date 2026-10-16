@@ -15,8 +15,27 @@ import {
   formatVisualNumber,
   formatVisualValue,
   isTextDatum,
+  visualFormatFor,
   BLANK_TEXT,
 } from "../visualValues";
+
+describe("visualFormatFor: a Data format the author chose is honoured unless units were chosen too", () => {
+  it("unset units + a format for the series' measure -> 'none' (the formatted source text is written)", () => {
+    expect(visualFormatFor({ fieldFormats: { Revenue: "#,##0.00" } }, {}, "Revenue").displayUnits).toBe("none");
+    // A column-field series name ("Europe - Revenue") and a bracketed caption name the same measure.
+    expect(visualFormatFor({ fieldFormats: { Revenue: "0.0" } }, {}, "Europe - Revenue").displayUnits).toBe("none");
+    expect(visualFormatFor({ fieldFormats: { Revenue: "0.0" } }, {}, "[Revenue]").displayUnits).toBe("none");
+  });
+
+  it("chosen units win; no format, another measure's format, or an empty code leave Auto (undefined)", () => {
+    expect(visualFormatFor({ fieldFormats: { Revenue: "0.0" } }, { displayUnits: "millions" }, "Revenue").displayUnits).toBe("millions");
+    expect(visualFormatFor({ fieldFormats: { Revenue: "0.0" } }, { displayUnits: "auto" }, "Revenue").displayUnits).toBe("auto");
+    expect(visualFormatFor({}, {}, "Revenue").displayUnits).toBeUndefined();
+    expect(visualFormatFor({ fieldFormats: { Cost: "0.0" } }, {}, "Revenue").displayUnits).toBeUndefined();
+    expect(visualFormatFor({ fieldFormats: { Revenue: "" } }, {}, "Revenue").displayUnits).toBeUndefined();
+    expect(visualFormatFor({ fieldFormats: { Revenue: "0.0" } }, { decimals: 2 }, "Revenue")).toEqual({ displayUnits: "none", decimals: 2 });
+  });
+});
 
 function data(values: number[], displayValues?: string[]): ParsedChartData {
   return {

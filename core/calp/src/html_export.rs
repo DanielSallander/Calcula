@@ -1299,10 +1299,10 @@ mod tests {
         let mut wb = Workbook::default();
         wb.sheets = vec![canvas, data, backing];
         wb.charts = vec![
-            persistence::SavedChart { id: entity(), sheet_id: canvas_id, spec_json: "{}".to_string() },
-            persistence::SavedChart { id: entity(), sheet_id: canvas_id, spec_json: "{}".to_string() },
+            persistence::SavedChart { id: entity(), sheet_id: canvas_id, spec: serde_json::json!({}) },
+            persistence::SavedChart { id: entity(), sheet_id: canvas_id, spec: serde_json::json!({}) },
             // On ANOTHER sheet: not counted on the canvas.
-            persistence::SavedChart { id: entity(), sheet_id: data_id, spec_json: "{}".to_string() },
+            persistence::SavedChart { id: entity(), sheet_id: data_id, spec: serde_json::json!({}) },
         ];
         let pivot = persistence::SavedPivotDefinition {
             id: entity(),
@@ -1331,6 +1331,7 @@ mod tests {
             show_scrollbar: true,
             style_preset: "TimelineStyleLight1".to_string(),
             connected_pivot_ids: Vec::new(),
+            container: None,
         }];
         let control = |row: u32| {
             serde_json::json!({
@@ -1357,6 +1358,7 @@ mod tests {
             show_title: true,
             show_column_headers: true,
             show_row_headers: true,
+            container: None,
         }];
 
         let request = PublishRequest {

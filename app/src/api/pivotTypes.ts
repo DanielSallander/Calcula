@@ -9,6 +9,7 @@
 
 import type { BiHierarchyMeta } from "./backend";
 import type { DesignStrategySummary } from "./designQueryAssist/types";
+import type { VisualContainerFormat } from "./visualContainer";
 
 /** Inline calculated field definition. */
 export interface CalculatedFieldDef {
@@ -113,6 +114,20 @@ export interface CanvasFrameConfig {
   height: number;
   /** Keep the header rows/columns fixed while the body scrolls. */
   frozenHeaders?: boolean;
+  /** The box's visual container (D-FORMAT). Persisted as
+   *  `canvas_frame.container`; absent = the family defaults. */
+  container?: VisualContainerFormat;
+}
+
+/**
+ * The PivotTable style chosen in the Design tab gallery (mirrors Rust
+ * `PivotStyleConfig`): persisted on the definition (`style`) since WP-C.
+ * `styleId` "" = None (a plain pivot). `themeOverrides` maps a `PivotTheme`
+ * colour key (Rust `PIVOT_THEME_OVERRIDE_KEYS`) to "#rrggbb".
+ */
+export interface PivotStyleConfig {
+  styleId: string;
+  themeOverrides?: Record<string, string>;
 }
 
 /** Request to create a new pivot table */
@@ -320,6 +335,9 @@ export interface PivotCellData {
   colSpan?: number;
   /** Group path for drill-down: [fieldIndex, valueId] pairs identifying this cell's data */
   groupPath?: Array<[number, number]>;
+  /** Which value field (index into the definition's value fields, named by
+   *  `PivotViewResponse.valueFieldNames`) a data/total cell shows. Absent on labels. */
+  valueFieldIndex?: number;
 }
 
 /** Row data from the backend */
@@ -417,6 +435,9 @@ export interface PivotViewResponse {
   overwriteToken?: number;
   /** What the user should be told about this response (a refusal, a degradation). */
   notices?: PivotNotice[];
+  /** The value fields' display names in definition order: what a cell's
+   *  `valueFieldIndex` points into. Absent when the pivot has no value fields. */
+  valueFieldNames?: string[];
 }
 
 /** Response for a cell window fetch (scroll-triggered). */
@@ -471,6 +492,9 @@ export interface ZoneFieldInfo {
   customName?: string;
   /** A VALUE field's number format (absent on every other zone). */
   numberFormat?: string;
+  /** True when `numberFormat` was ADOPTED from the BI model rather than chosen
+   *  by the user: an editor sends the format back only when this is false. */
+  numberFormatFromModel?: boolean;
   /** A VALUE field's Show Values As with its base field and item (absent on
    *  every other zone, and for "No Calculation"). The update REPLACES the value
    *  fields, so an editor seeded from this list must carry it back. */
@@ -488,6 +512,10 @@ export interface PivotFieldConfiguration {
   /** Hierarchy configs — which row/column fields belong to hierarchies
    *  so the frontend can reconstitute them as single items. */
   hierarchyConfigs?: HierarchyConfigInfo[];
+  /** How the value and calculated columns interleave (definition.value_column_order).
+   *  Absent = the engine's default: values first, then calculated fields. A headless
+   *  edit that sends the Values zone back must send this order too. */
+  valueColumnOrder?: ValueColumnRefDef[];
 }
 
 /** Hierarchy config info (mirrors HierarchyConfigInfo in pivot/types.rs). */
@@ -617,6 +645,9 @@ export interface BiMeasureFieldInfo {
   table: string;
   sourceColumn: string;
   aggregation: AggregationType;
+  /** The model's display format for this measure (e.g. "#,##0.00"), when it
+   *  defines one -- the Data format card's "source format". */
+  formatString?: string;
 }
 
 /** BI field reference (table + column) */
@@ -643,6 +674,11 @@ export interface BiFieldRef {
 export interface BiValueFieldRef {
   measureName: string;
   customName?: string;
+  /** Per-field display format OVERRIDE (an Excel format code). Absent = the
+   *  model's format (pivots: re-adopted on every query) / none (a design query).
+   *  Never send a format that was ADOPTED from the model
+   *  (`ZoneFieldInfo.numberFormatFromModel`), or it freezes into an override. */
+  numberFormat?: string;
 }
 
 /** Request to create a BI model pivot */
@@ -708,14 +744,23 @@ export interface PivotRegionData {
   endRow: number;
   endCol: number;
   isEmpty: boolean;
+  /** True for a data-model (BI) pivot. Known synchronously from the cached
+   *  region, so a menu never has to guess which items apply. */
+  isModel: boolean;
   /** Present only for a canvas pivot: the box its view is shown in. */
   canvasFrame?: CanvasFrameConfig;
+  /** The pivot's persisted style; absent = the default style. */
+  style?: PivotStyleConfig;
 }
 
 /** Result of resolving a pivot cell into GETPIVOTDATA formula arguments. */
 export interface GetPivotDataFormulaResult {
   dataField: string;
   fieldItemPairs: [string, string][];
+  /** The pivot's anchor (its top-left cell, 0-based): GETPIVOTDATA's
+   *  `pivot_table` argument, as Excel writes it. */
+  pivotAnchorRow: number;
+  pivotAnchorCol: number;
 }
 
 /** Response containing unique values for a field */
@@ -966,6 +1011,9 @@ export interface UpdatePivotPropertiesRequest {
    * a pivot never converts between grid and canvas.
    */
   canvasFrame?: CanvasFrameConfig;
+  /** The PivotTable style: absent = keep, null = clear (the default style),
+   *  a value = set. Undoable ("PivotTable Style"). */
+  style?: PivotStyleConfig | null;
 }
 
 /** Request to change pivot data source range */

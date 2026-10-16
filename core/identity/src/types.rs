@@ -141,14 +141,23 @@ fn format_uuid(bytes: &[u8; 16]) -> String {
 }
 
 /// Parse a 36-char canonical UUID string into 16 bytes.
-/// Returns None on invalid format.
+/// Returns None on invalid format -- never panics, whatever the input.
+///
+/// BUG-0469: this used to check the length in BYTES and then slice the
+/// dash-stripped string by byte index, so a 36-byte string with a multi-byte
+/// character straddling an even offset PANICKED ("byte index 2 is not a char
+/// boundary") -- and the input is renderer-supplied (an object binding's id,
+/// a sheet id from a script's `api.object(kind, id)` or an MCP tool). It also
+/// accepted a `+` inside a hex pair, because `u8::from_str_radix` takes a sign.
+/// Now: ASCII only, and every non-dash character an ASCII hex digit, BEFORE any
+/// slicing.
 fn parse_uuid_str(s: &str) -> Option<RawId> {
-    if s.len() != 36 {
+    if s.len() != 36 || !s.is_ascii() {
         return None;
     }
 
     let bytes_str: String = s.chars().filter(|c| *c != '-').collect();
-    if bytes_str.len() != 32 {
+    if bytes_str.len() != 32 || !bytes_str.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
 
@@ -206,6 +215,43 @@ mod tests {
         assert!(CellId::parse("not-a-uuid").is_none());
         assert!(CellId::parse("01912345-6789-7abc-8def-0123456789a").is_none()); // too short
         assert!(CellId::parse("01912345x6789-7abc-8def-0123456789ab").is_none()); // wrong dash
+    }
+
+    /// BUG-0469: renderer-supplied ids reach this parser (object bindings,
+    /// sheet ids). A 36-BYTE string holding a multi-byte character used to
+    /// panic on a char-boundary slice, and a sign inside a hex pair parsed.
+    #[test]
+    fn parse_refuses_non_ascii_and_signs_without_panicking() {
+        // 36 bytes, 35 chars: 'a', e-acute (2 bytes), then the dashed groups.
+        let straddling = format!(
+            "a\u{e9}{}-{}-{}-{}-{}",
+            "0".repeat(5),
+            "0".repeat(4),
+            "0".repeat(4),
+            "0".repeat(4),
+            "0".repeat(12)
+        );
+        assert_eq!(straddling.len(), 36, "the probe must be 36 BYTES to reach the slice");
+        assert!(SheetId::parse(&straddling).is_none());
+        // A two-byte character in place of every pair of adjacent hex digits of
+        // the canonical form: the dashes keep their byte positions, so the
+        // stripped string is 32 BYTES and the old code sliced it -- cutting the
+        // character whenever it started at an odd offset.
+        let canonical = "00000000-0000-0000-0000-000000000000";
+        for i in 0..canonical.len() - 1 {
+            if &canonical[i..i + 2] != "00" {
+                continue;
+            }
+            let s = format!("{}\u{e9}{}", &canonical[..i], &canonical[i + 2..]);
+            assert_eq!(s.len(), 36);
+            assert!(CellId::parse(&s).is_none(), "{s:?}");
+        }
+        // A sign inside a hex pair is not a hex digit.
+        assert!(SheetId::parse("+0000000-0000-0000-0000-000000000000").is_none());
+        assert!(SheetId::parse("0-000000-0000-0000-0000-000000000000").is_none());
+        // Control: the canonical form, either case, still parses.
+        assert!(SheetId::parse("00000000-0000-0000-0000-000000000000").is_some());
+        assert!(SheetId::parse("0191ABCD-6789-7ABC-8DEF-0123456789AB").is_some());
     }
 
     #[test]

@@ -9,13 +9,39 @@ Design spike for the architecture audit's deepest seam: the Rust backend is a
 Re-audited against source. The **design is intact and shipped**; the counts had drifted and one
 resolved-asymmetry paragraph named two symbols that no longer exist.
 
-| Figure | 2026-08-16 | 08-27 | 08-29 | 09-01 | 09-03 | 09-05 | 09-07 | 09-10 | 09-25 | 09-30 | 09-30 (anchor) | 09-30 (M6 seal) | 10-01 (M6 door) | 10-01 (owner B trail) | 10-01 (owner B all-or-nothing) | 10-01 (review of M6b) | 10-01 (M8 command allowlist) | 10-04/05 (Home tab) | Recounted (2026-10-08, Canvas = Power BI) | How counted |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| Commands in `generate_handler!` | 761 | 773 | 783 | 788 | 787 | 792 | 800 | 806 | 809 | 812 | 813 | 815 | 817 | 819 | 821 | 821 | 822 | 829 | **829** | bracket-matched parse of `lib.rs`, comments stripped LINE-WISE (all unique) |
-| `#[tauri::command]` attributes | 798 | 815 | 822 | 827 | 826 | 831 | 839 | 845 | 849 | 853 | 854 | 856 | 858 | 860 | 862 | 862 | 863 | 871 | **872** | `#[tauri::command]` occurrences under `app/src-tauri/src` |
-| Privileged (denylisted) commands | ~30 | 94 | 100 | 101 | 101 | 101 | 102 | 108 | 107 | 107 | 108 | 109 | 111 | 111 | 111 | 114 | 115 | 115 | **115** | unique quoted names inside `PRIVILEGED_BACKEND_COMMANDS` (`app/src/api/backendCommands.ts`), comments stripped line-wise |
-| Feature-open commands | 667 | 673 | 683 | 687 | 686 | 691 | 698 | 698 | 702 | 705 | 705 | 706 | 706 | 708 | 710 | 707 | 707 | 714 | **714** | 829 − 115 |
-| Typed wrappers in `backend.ts` | ~229 | 327 | 338 | 338 | 338 | 338 | 339 | 339 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | **340** | exported functions/consts in `backend.ts` (lines starting `export async function` / `export function` / `export const`) |
+| Figure | 2026-08-16 | 08-27 | 08-29 | 09-01 | 09-03 | 09-05 | 09-07 | 09-10 | 09-25 | 09-30 | 09-30 (anchor) | 09-30 (M6 seal) | 10-01 (M6 door) | 10-01 (owner B trail) | 10-01 (owner B all-or-nothing) | 10-01 (review of M6b) | 10-01 (M8 command allowlist) | 10-04/05 (Home tab) | 10-08 (Canvas = Power BI) | 10-15 (WP-D bindings) | Recounted (2026-10-15, WP-C S7) | How counted |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| Commands in `generate_handler!` | 761 | 773 | 783 | 788 | 787 | 792 | 800 | 806 | 809 | 812 | 813 | 815 | 817 | 819 | 821 | 821 | 822 | 829 | 829 | 830 | **831** | bracket-matched parse of `lib.rs`, comments stripped LINE-WISE (all unique) |
+| `#[tauri::command]` attributes | 798 | 815 | 822 | 827 | 826 | 831 | 839 | 845 | 849 | 853 | 854 | 856 | 858 | 860 | 862 | 862 | 863 | 871 | 872 | 873 | **874** | `#[tauri::command]` occurrences under `app/src-tauri/src` |
+| Privileged (denylisted) commands | ~30 | 94 | 100 | 101 | 101 | 101 | 102 | 108 | 107 | 107 | 108 | 109 | 111 | 111 | 111 | 114 | 115 | 115 | 115 | 115 | **115** | unique quoted names inside `PRIVILEGED_BACKEND_COMMANDS` (`app/src/api/backendCommands.ts`), comments stripped line-wise |
+| Feature-open commands | 667 | 673 | 683 | 687 | 686 | 691 | 698 | 698 | 702 | 705 | 705 | 706 | 706 | 708 | 710 | 707 | 707 | 714 | 714 | 715 | **716** | 831 − 115 |
+| Typed wrappers in `backend.ts` | ~229 | 327 | 338 | 338 | 338 | 338 | 339 | 339 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | **340** | exported functions/consts in `backend.ts` (lines starting `export async function` / `export function` / `export const`) |
+
+The "Recounted (2026-10-15, WP-C S7)" column is the visual-container step of the object pane / Format pane
+package (`docs/design/open-items.md` §2.ak, WP-C). It added exactly ONE command, `controls::set_control_appearance`,
+FEATURE-OPEN beside `controls::set_control_geometry` (whose shape it copies; neither is in
+`PRIVILEGED_BACKEND_COMMANDS`): the Format pane writes several appearance keys on several controls as ONE undo step
+("Format control") that joins an open transaction -- `set_control_property` records undo only for code slots. Its
+frontend door is the Controls extension (`controlsBackend.invoke`), not a typed wrapper in `backend.ts` (which stays
+at 340). All five figures were re-run together, line-wise (bracket-matched `generate_handler!`, comments stripped per
+line, then split; the denylist read as the `PRIVILEGED_BACKEND_COMMANDS` record): 831 / 874 / 115 / 716 / 340, all
+831 unique and every entry a valid path; 829 of the 874 attribute occurrences are bare attribute lines. The app has
+NOT yet been linked and launched with the 831st command (no `tauri` build in the implementation steps): the 32 MB
+main-thread stack headroom is proved only by the package's live E2E run. Re-run on 2026-10-16 at WP-C S15 (the
+package's census sweep), same parse: 831 / 874 / 115 / 716 / 340, unchanged -- no later WP-C step added a command.
+
+The "10-15 (WP-D bindings)" column (recounted then) is the object-property-bindings package (Rust-owned bindings of
+an object's properties to formulas, `docs/design/canvas-sheets.md` §15, `docs/design/open-items.md` §2.ak). It added
+exactly ONE command, `object_bindings::object_bindings`, FEATURE-OPEN (it is not in `PRIVILEGED_BACKEND_COMMANDS`):
+the whole binding surface -- list / set / clear / setLiteral / resolveAll / cellsChanged / setPageFilters /
+refreshMeasures / analyze / objectJson / measures / locate -- is an op enum on that one command, so it costs one
+dispatch-frame entry. Its frontend door is the `@api/objectBindings` seam, not a typed wrapper in `backend.ts`
+(which stays at 340). The two packages that landed beside it (WP-A picks and pivot cells, WP-B Page Navigator)
+added no command. All five figures were re-run together, line-wise (bracket-matched `generate_handler!`, comments stripped
+per line, then split; the denylist read as the `PRIVILEGED_BACKEND_COMMANDS` record): 830 / 873 / 115 / 715 / 340,
+all 830 unique and every entry a valid path; 828 of the 873 attribute occurrences are bare attribute lines. The app
+has NOT yet been linked and launched with the 830th command (no `tauri` build in the implementation steps): the
+32 MB main-thread stack headroom is proved only by the package's live E2E run.
 
 The "10-04/05 (Home tab)" column is the Excel 365 Home-tab programme (`docs/design/open-items.md`
 §2.ai). SIX new commands, all FEATURE-OPEN beside the families they extend (privileged stays **115**,

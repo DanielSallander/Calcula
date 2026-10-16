@@ -26,9 +26,10 @@ const SEARCH_THRESHOLD = 10;
 
 /**
  * Recursively convert a resolved GridContextMenuItem to a ContextMenuItem.
- * Labels are already resolved to strings by the registry layer.
+ * Labels -- and a disabled item's `disabledReason`, which becomes the row's
+ * `title` -- are already resolved to strings by the registry layer.
  */
-function mapItem(
+export function mapItem(
   item: GridContextMenuItem,
   context: GridMenuContext,
   onClose: () => void,
@@ -39,6 +40,7 @@ function mapItem(
     shortcut: item.shortcut,
     icon: item.icon,
     disabled: !!item.disabled,
+    title: item.disabled && typeof item.disabledReason === "string" ? item.disabledReason : undefined,
     separatorAfter: item.separatorAfter,
     onClick: () => item.onClick(context),
     children: item.children?.map((child) => mapItem(child, context, onClose)),

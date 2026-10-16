@@ -13,8 +13,8 @@
 
 import { getChartById } from "./chartStore";
 import { readChartDataResolved } from "./chartDataReader";
-import { dispatchPaint, dispatchComputeLayout, dispatchComputeGeometry } from "../rendering/chartDispatch";
-import { resolveChartTheme } from "../rendering/chartTheme";
+import { dispatchComputeGeometry } from "../rendering/chartDispatch";
+import { paintChartWithContainer } from "./paintChartWithContainer";
 import { paintChartCues } from "../rendering/cuePainter";
 import { paintChartComments } from "../rendering/cueChrome";
 import { getChartOverlay, visibleChartCues } from "@api/chartCues";
@@ -46,28 +46,28 @@ export async function renderChartPng(chartId: string, options: RasterOptions = {
   const pxWidth = Math.round(logicalWidth * EXPORT_SCALE);
   const pxHeight = Math.round(logicalHeight * EXPORT_SCALE);
 
-  const theme = resolveChartTheme(spec.config);
-  const layout = dispatchComputeLayout(logicalWidth, logicalHeight, spec, data, theme);
-
   const offscreen = new OffscreenCanvas(pxWidth, pxHeight);
   const ctx = offscreen.getContext("2d");
   if (!ctx) throw new Error("Failed to create OffscreenCanvas 2D context");
 
-  ctx.fillStyle = theme.background || "#ffffff";
-  ctx.fillRect(0, 0, pxWidth, pxHeight);
   ctx.scale(EXPORT_SCALE, EXPORT_SCALE);
 
-  dispatchPaint(ctx, data, spec, layout, theme);
+  // ONE look: the chart inside its visual container (shadow, background,
+  // border, padding) exactly as Core paints it on the canvas. The raster's own
+  // painters fill no background any more (D-FORMAT, review R1-3).
+  const painted = paintChartWithContainer(ctx, logicalWidth, logicalHeight, spec, data, chartId);
+  const { theme, layout, content } = painted;
 
-  if (options.withOverlay) {
+  if (options.withOverlay && layout) {
     const overlay = getChartOverlay(chartId);
     if (overlay.cues.length > 0 || overlay.comments.length > 0) {
       // The overlay is drawn at the export layout's own geometry, in logical
-      // pixels (the context is already scaled), chart origin at (0, 0).
+      // pixels (the context is already scaled), chart origin at the CONTENT
+      // origin -- where the chart itself was laid out.
       const geometry = dispatchComputeGeometry(data, spec, layout, theme);
-      paintChartCues(ctx, 0, 0, geometry, data, cuesShownOn(spec.mark, visibleChartCues(chartId)), overlay.selectedCueId, { spec, layout, data });
+      paintChartCues(ctx, content.x, content.y, geometry, data, cuesShownOn(spec.mark, visibleChartCues(chartId)), overlay.selectedCueId, { spec, layout, data });
       const byCue = new Map(overlay.cues.map((c) => [c.cueId, c] as const));
-      paintChartComments(ctx, 0, 0, logicalWidth, logicalHeight, geometry, data, overlay.comments, byCue);
+      paintChartComments(ctx, content.x, content.y, content.width, content.height, geometry, data, overlay.comments, byCue);
     }
   }
 

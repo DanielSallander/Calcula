@@ -9,6 +9,7 @@ import {
   openTaskPane,
   closeTaskPane,
   getTaskPaneManuallyClosed,
+  clearTaskPaneManuallyClosed,
   addTaskPaneContextKey,
   removeTaskPaneContextKey,
   registerPanel,
@@ -16,7 +17,9 @@ import {
   emitAppEvent,
 } from "@api";
 import type { LayoutConfig, AggregationType } from "@api";
-import { requestOverlayRedraw } from "@api/gridOverlays";
+import type { GridRegion } from "@api/gridOverlays";
+import { getGridRegions, requestOverlayRedraw } from "@api/gridOverlays";
+import { openObjectPane } from "@api/objectPane";
 import { getGridStateSnapshot } from "@api/grid";
 import { notifyObjectSelectionChanged } from "@api/objectSelection";
 import {
@@ -30,6 +33,8 @@ import type { SourceField, ZoneField, PivotEditorViewData, PivotRegionData } fro
 import { PivotEvents } from "../../_shared/lib/pivotEvents";
 import { splitBiFieldKey } from "../../_shared/lib/biFieldKey";
 import { showValuesAsFromRule } from "../lib/showAsRule";
+import { clearPivotCellSelection, getPivotCellSelection } from "../lib/pivotVisualCellSelection";
+import { PIVOT_VISUAL_REGION_TYPE, pivotIdOfVisual } from "../lib/pivotVisualRegions";
 
 // ---------------------------------------------------------------------------
 // Module-level state (owned by the pivot extension, not by the shell)
@@ -53,9 +58,6 @@ export function getActivePivotId(): string | null {
  * region -- is what makes a canvas pivot the active one.
  */
 let selectedVisualPivotId: string | null = null;
-
-/** The pivot whose pane the visual route last opened (a repeat press reloads nothing). */
-let paneOpenedForVisual: string | null = null;
 
 /** Flag to prevent closing the pane right after a pivot is created (regions not yet cached). */
 let justCreatedPivot = false;
@@ -123,13 +125,14 @@ export function updateCachedRegions(regions: PivotRegionData[]): void {
 export function deselectPivotContext(): void {
   lastCheckedSelection = null;
   activePivotId = null;
+  // A canvas box's inner cells go with it (D-CELLS): no box, no cells.
+  clearPivotCellSelection();
   const hadVisual = selectedVisualPivotId !== null;
   if (hadVisual) {
     selectedVisualPivotId = null;
     // The selection frame is painted by the box itself.
     requestOverlayRedraw();
   }
-  paneOpenedForVisual = null;
   if (analyzeTabRegistered) {
     unregisterPanel(PIVOT_ANALYZE_TAB_ID);
     analyzeTabRegistered = false;
@@ -208,6 +211,18 @@ export function ensureDesignTabRegistered(): void {
  */
 export function getCachedRegions(): PivotRegionData[] {
   return cachedRegions;
+}
+
+/**
+ * Synchronous: the cached region's `isModel` for this pivot on the ACTIVE
+ * sheet; undefined when no region is cached for it (a pivot on another sheet,
+ * or before the first region sync). Callers treat undefined as "not known ->
+ * hide / disable", never guess. The fact rides the region transport
+ * (`PivotRegionData.isModel`, WP-A S1), so the very first right-click on a
+ * never-selected box already knows it.
+ */
+export function isModelPivot(pivotId: string): boolean | undefined {
+  return cachedRegions.find((r) => r.pivotId === pivotId)?.isModel;
 }
 
 /**
@@ -369,8 +384,8 @@ export function handleSelectionChange(
     lastCheckedSelection = { row, col };
     activePivotId = null;
     selectedVisualPivotId = null;
-    paneOpenedForVisual = null;
-    removeTaskPaneContextKey("pivot");
+    clearPivotCellSelection();
+      removeTaskPaneContextKey("pivot");
     closeTaskPane(PIVOT_PANE_ID);
     // Hide the contextual pivot ribbon panels
     if (analyzeTabRegistered) {
@@ -387,7 +402,7 @@ export function handleSelectionChange(
   // Cell IS in a pivot region - set context key and active pivot ID
   activePivotId = localPivotRegion.pivotId;
   selectedVisualPivotId = null;
-  paneOpenedForVisual = null;
+  clearPivotCellSelection();
   addTaskPaneContextKey("pivot");
   // Show the contextual pivot ribbon panels
   if (!analyzeTabRegistered) {
@@ -581,6 +596,10 @@ export function buildPivotPaneData(pivotInfo: PivotRegionInfo): PivotEditorViewD
     // update REPLACES the value fields, so a setting not seeded here was
     // cleared by the first edit after the editor reopened.
     ...(f.numberFormat ? { numberFormat: f.numberFormat } : {}),
+    // ...and whether that format was ADOPTED from the model (BUG-0478): the
+    // request carries a format back only when it is the user's override, so
+    // an adopted one is never frozen into an override by the next edit.
+    ...(f.numberFormatFromModel ? { numberFormatFromModel: true } : {}),
     ...showValuesAsFromRule(f.showAs),
   }));
 
@@ -612,6 +631,7 @@ export function buildPivotPaneData(pivotInfo: PivotRegionInfo): PivotEditorViewD
     initialFilters,
     initialLayout,
     initialCalculatedFields: config.calculatedFields,
+    initialValueColumnOrder: config.valueColumnOrder,
     biModel: pivotInfo.biModel,
     sourceTableName: pivotInfo.sourceTableName,
   };
@@ -655,16 +675,17 @@ export function getSelectedVisualPivotId(): string | null {
  * inside a worksheet pivot makes it -- a canvas has no cell selection, so
  * `handleSelectionChange` never runs there.
  *
- * `openPane`: a mouse press opens the field-list pane (unless the user closed
- * it by hand, which the cell route honours too); a keyboard selection (Tab on
- * the canvas) does not -- `select` in the object-selection seam means select
- * and nothing else. `force` reloads the pane even when this box already had it.
+ * It opens NO pane (WP-C D-PANE): a canvas box's field list lives in the ONE
+ * object pane (its Fields / Design tabs, pivotObjectPane.ts), which opens by
+ * its own policy at the release of a press, or through a door. The worksheet
+ * `pivot-editor` pane stays the CELL route's (Excel parity). `force` tells
+ * the ribbon tabs the active pivot again even when the box was selected.
  */
-export function selectPivotVisual(
-  pivotId: string,
-  opts: { openPane: boolean; force?: boolean },
-): void {
+export function selectPivotVisual(pivotId: string, opts: { force?: boolean } = {}): void {
   const wasSelected = selectedVisualPivotId === pivotId;
+  // Another box's cells are not this one's (D-CELLS): one inner selection.
+  const cells = getPivotCellSelection();
+  if (cells !== null && cells.pivotId !== pivotId) clearPivotCellSelection();
   selectedVisualPivotId = pivotId;
   activePivotId = pivotId;
   lastCheckedSelection = null;
@@ -676,23 +697,10 @@ export function selectPivotVisual(
     notifyObjectSelectionChanged();
   }
 
-  const manuallyClosed = getTaskPaneManuallyClosed().includes(PIVOT_PANE_ID);
-  // A pane already showing ANOTHER box's fields follows the selection even on
-  // a keyboard step: that is keeping an open pane truthful, not opening one.
-  const paneShowsAnotherBox = paneOpenedForVisual !== null && paneOpenedForVisual !== pivotId;
-  if ((opts.openPane || paneShowsAnotherBox) && !manuallyClosed) {
-    if (paneOpenedForVisual === pivotId && wasSelected && !opts.force) return;
-    const region = cachedRegions.find((r) => r.pivotId === pivotId);
-    if (region) {
-      paneOpenedForVisual = pivotId;
-      void openPaneForVisual(pivotId, region.startRow, region.startCol);
-      return;
-    }
-  }
-
   if (!wasSelected || opts.force) {
-    // Tell the ribbon tabs the active pivot even without the pane (the same
-    // thing the cell route does when the pane was closed by hand).
+    // Tell the ribbon tabs the active pivot (the same thing the cell route
+    // does when its pane was closed by hand); an editor that mounts for the
+    // box broadcasts its full layout itself.
     setTimeout(() => {
       if (selectedVisualPivotId !== pivotId) return;
       emitAppEvent(PivotEvents.PIVOT_LAYOUT_STATE, { pivotId, layout: {} });
@@ -700,30 +708,52 @@ export function selectPivotVisual(
   }
 }
 
-/**
- * Load the pane for a canvas pivot. The backend resolves `getAtCell` on the
- * ACTIVE sheet, which is the canvas, so the hidden-grid anchor addresses it.
- */
-async function openPaneForVisual(pivotId: string, anchorRow: number, anchorCol: number): Promise<void> {
-  try {
-    const pivotInfo = await pivot.getAtCell(anchorRow, anchorCol);
-    // The user may have selected something else while the fetch was in flight.
-    if (selectedVisualPivotId !== pivotId) return;
-    if (pivotInfo) {
-      showPivotPane(pivotInfo);
-    } else {
-      paneOpenedForVisual = null;
-    }
-  } catch (error) {
-    paneOpenedForVisual = null;
-    console.error("[Pivot Extension] Failed to load the canvas pivot's field list:", error);
-  }
+/** The published `pivot-visual` region of `pivotId`'s box, or null (not on this page). */
+export function pivotVisualRegionOf(pivotId: string): GridRegion | null {
+  return getGridRegions().find((r) => r.type === PIVOT_VISUAL_REGION_TYPE && pivotIdOfVisual(r) === pivotId) ?? null;
 }
 
 /** Deselect the canvas pivot box (no-op when none is selected). */
 export function deselectPivotVisual(): void {
   if (selectedVisualPivotId === null) return;
   deselectPivotContext();
+}
+
+/**
+ * Open the pane that hosts this pivot's field list -- and with it the value
+ * field modals (Value Field Settings, Number Format) -- for the pivot on the
+ * ACTIVE sheet. The SINGLE "open the pane that hosts the value-field modals"
+ * hook of the value-field dialog contract (lib/valueFieldDialogRequest.ts):
+ * callers never open a pane themselves.
+ *
+ *   - canvas (WP-C D-PANE, ruling R4): the box is selected and the ONE object
+ *     pane opens on its FIELDS tab as a DOOR (`reason: "command"`), so it
+ *     opens even when the user closed it by hand; no `pivot-editor` flag is
+ *     touched. The lifted PivotEditor in that tab takes the pending dialog
+ *     request when it mounts (and on PIVOT_OPEN_VALUE_FIELD_DIALOG);
+ *   - worksheet: the pivot's info is read at its anchor and the field-list
+ *     pane shown for it -- a pane closed by hand is opened anyway (its
+ *     manually-closed mark is cleared, as Show Field List does).
+ *
+ * Rejects when the pivot is not on this sheet or cannot be read, or when the
+ * object pane cannot be opened.
+ */
+export async function openPivotPaneForPivot(pivotId: string): Promise<void> {
+  const region = cachedRegions.find((r) => r.pivotId === pivotId);
+  if (!region) throw new Error("the PivotTable is not on this sheet");
+  if (getGridStateSnapshot()?.surface === "canvas") {
+    selectPivotVisual(pivotId, { force: true });
+    const box = pivotVisualRegionOf(pivotId);
+    if (!box) throw new Error("the PivotTable box is not on this page");
+    if (!openObjectPane({ region: box, tab: "fields", reason: "command" })) {
+      throw new Error("the object pane could not be opened");
+    }
+    return;
+  }
+  clearTaskPaneManuallyClosed(PIVOT_PANE_ID);
+  const pivotInfo = await pivot.getAtCell(region.startRow, region.startCol);
+  if (!pivotInfo) throw new Error("the PivotTable could not be read");
+  showPivotPane(pivotInfo);
 }
 
 // ---------------------------------------------------------------------------
@@ -760,9 +790,11 @@ export function forceRecheck(): void {
     handleSelectionChange({ endRow: savedSelection.row, endCol: savedSelection.col });
     return;
   }
-  // On a canvas there is no cell to re-check: re-open from the selected box.
+  // On a canvas there is no cell to re-check: the selected box's pane is the
+  // ONE object pane (WP-C D-PANE) -- a door opens it on the box.
   if (selectedVisualPivotId !== null) {
-    selectPivotVisual(selectedVisualPivotId, { openPane: true, force: true });
+    const box = pivotVisualRegionOf(selectedVisualPivotId);
+    openObjectPane({ ...(box ? { region: box } : {}), reason: "command" });
   }
 }
 
@@ -781,7 +813,7 @@ export function resetSelectionHandlerState(): void {
   checkInProgress = false;
   activePivotId = null;
   selectedVisualPivotId = null;
-  paneOpenedForVisual = null;
+  clearPivotCellSelection();
   if (debounceTimer !== null) {
     clearTimeout(debounceTimer);
     debounceTimer = null;

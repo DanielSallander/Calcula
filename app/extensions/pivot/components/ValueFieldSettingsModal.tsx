@@ -14,6 +14,7 @@ import {
   getValueFieldDisplayName,
 } from "./types";
 import { NumberFormatModal } from "../../_shared/components/NumberFormatModal";
+import { SHOW_VALUES_AS_OPTIONS, NEEDS_BASE_FIELD, NEEDS_BASE_ITEM } from "../lib/showValuesAsOptions";
 
 export interface ValueFieldSettings {
   customName: string;
@@ -33,37 +34,8 @@ export interface ValueFieldSettingsModalProps {
   onCancel: () => void;
 }
 
-const SHOW_VALUES_AS_OPTIONS: { value: ShowValuesAs; label: string }[] = [
-  { value: "normal", label: "No Calculation" },
-  { value: "percent_of_total", label: "% of Grand Total" },
-  { value: "percent_of_row", label: "% of Row Total" },
-  { value: "percent_of_column", label: "% of Column Total" },
-  { value: "percent_of_parent_row", label: "% of Parent Row Total" },
-  { value: "percent_of_parent_column", label: "% of Parent Column Total" },
-  { value: "difference", label: "Difference From" },
-  { value: "percent_difference", label: "% Difference From" },
-  { value: "running_total", label: "Running Total In" },
-  { value: "percent_of_running_total", label: "% of Running Total In" },
-  { value: "rank_ascending", label: "Rank Smallest to Largest" },
-  { value: "rank_descending", label: "Rank Largest to Smallest" },
-  { value: "index", label: "Index" },
-];
-
-/** ShowValuesAs options that require a base field selection */
-const NEEDS_BASE_FIELD: ShowValuesAs[] = [
-  "difference",
-  "percent_difference",
-  "running_total",
-  "percent_of_running_total",
-  "rank_ascending",
-  "rank_descending",
-];
-
-/** ShowValuesAs options that require a base item selection */
-const NEEDS_BASE_ITEM: ShowValuesAs[] = [
-  "difference",
-  "percent_difference",
-];
+// The Show Values As choices live in ONE list, shared with the value-cell
+// context menu (lib/showValuesAsOptions.ts).
 
 const modalStyles = {
   overlay: css`

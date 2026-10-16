@@ -7,7 +7,9 @@
 //          - frozen headers stay at the top while the body scrolls;
 //          - a windowed view reads rows through getRow and reports the rows it
 //            had to paint as placeholders;
-//          - viewCellAtLocal inverts the frozen + scroll geometry.
+//          - viewCellAtLocal inverts the frozen + scroll geometry;
+//          - selectionPiecesInBox places a rectangle of view cells in the box,
+//            one piece per frozen quadrant, with the same arithmetic.
 
 import { describe, it, expect, vi } from "vitest";
 import type { PivotViewResponse, PivotRowData, PivotCellData } from "../../lib/pivot-api";
@@ -17,6 +19,7 @@ import {
   clampVisualScroll,
   maxScrollOf,
   paintPivotVisual,
+  selectionPiecesInBox,
   viewCellAtLocal,
   visibleCellRange,
   type PivotVisualBox,
@@ -262,5 +265,87 @@ describe("viewCellAtLocal inverts the frozen + scroll geometry", () => {
 
   it("is null past the content", () => {
     expect(viewCellAtLocal(g, { left: 0, top: 0 }, 5000, 10)).toBeNull();
+  });
+});
+
+describe("selectionPiecesInBox: a rectangle of view cells, one box-local piece per frozen quadrant", () => {
+  const view = makeView();
+
+  it("no freeze: one piece, offset by the scroll", () => {
+    const g = buildPivotVisualGeometry(view, false, sizes);
+    expect(selectionPiecesInBox(g, { left: 0, top: 0 }, BOX.width, BOX.height, { startRow: 2, startCol: 1, endRow: 3, endCol: 2 })).toEqual([
+      { x: 120, y: 48, width: 160, height: 48 },
+    ]);
+    // Scrolled 24px down and 20px right: the same cells, moved up and left.
+    expect(selectionPiecesInBox(g, { left: 20, top: 24 }, BOX.width, BOX.height, { startRow: 2, startCol: 1, endRow: 3, endCol: 2 })).toEqual([
+      { x: 100, y: 24, width: 160, height: 48 },
+    ]);
+  });
+
+  it("frozen rows + columns, scrolled both ways: four pieces, each clipped to its quadrant", () => {
+    const g = buildPivotVisualGeometry(view, true, sizes);
+    const pieces = selectionPiecesInBox(g, { left: 30, top: 120 }, BOX.width, BOX.height, {
+      startRow: 0,
+      startCol: 0,
+      endRow: 10,
+      endCol: 2,
+    });
+    expect(pieces).toEqual([
+      // header row x row-label column: never scrolled
+      { x: 0, y: 0, width: 120, height: 24 },
+      // header row x body columns 1-2 (120..280, scrolled 30 -> 90..250, clipped to start at the frozen 120)
+      { x: 120, y: 0, width: 130, height: 24 },
+      // body rows 1-10 (24..264, scrolled 120 -> -96..144, clipped to start under the frozen 24) x row labels
+      { x: 0, y: 24, width: 120, height: 120 },
+      // body x body
+      { x: 120, y: 24, width: 130, height: 120 },
+    ]);
+  });
+
+  it("a rectangle scrolled fully UNDER the frozen header band yields no piece; one partly under is clipped to the band's edge", () => {
+    const g = buildPivotVisualGeometry(view, true, sizes);
+    // Rows 1-3 sit at 24..96; scrolled 120 they are at -96..-24, under the header.
+    expect(selectionPiecesInBox(g, { left: 0, top: 120 }, BOX.width, BOX.height, { startRow: 1, startCol: 1, endRow: 3, endCol: 1 })).toEqual([]);
+    // Rows 3-6 (72..168) scrolled 120 -> -48..48: only 24..48 shows.
+    expect(selectionPiecesInBox(g, { left: 0, top: 120 }, BOX.width, BOX.height, { startRow: 3, startCol: 1, endRow: 6, endCol: 1 })).toEqual([
+      { x: 120, y: 24, width: 80, height: 24 },
+    ]);
+  });
+
+  it("rows below the box are cut at its bottom; corners in either order are the same rectangle", () => {
+    const g = buildPivotVisualGeometry(view, true, sizes);
+    const down = selectionPiecesInBox(g, { left: 0, top: 0 }, BOX.width, BOX.height, { startRow: 5, startCol: 2, endRow: 40, endCol: 1 });
+    const up = selectionPiecesInBox(g, { left: 0, top: 0 }, BOX.width, BOX.height, { startRow: 40, startCol: 1, endRow: 5, endCol: 2 });
+    expect(down).toEqual(up);
+    expect(down).toEqual([{ x: 120, y: 120, width: 160, height: 80 }]);
+  });
+
+  it("each piece is where viewCellAtLocal finds the cells it covers (paint == hit)", () => {
+    const g = buildPivotVisualGeometry(view, true, sizes);
+    const s = { left: 30, top: 200 };
+    const rect = { startRow: 9, startCol: 1, endRow: 12, endCol: 2 };
+    const pieces = selectionPiecesInBox(g, s, BOX.width, BOX.height, rect);
+    expect(pieces.length).toBe(1);
+    for (const p of pieces) {
+      for (const [dx, dy] of [[1, 1], [p.width - 1, 1], [1, p.height - 1], [p.width - 1, p.height - 1]]) {
+        const at = viewCellAtLocal(g, s, p.x + dx, p.y + dy)!;
+        expect(at.viewRow).toBeGreaterThanOrEqual(rect.startRow);
+        expect(at.viewRow).toBeLessThanOrEqual(rect.endRow);
+        expect(at.viewCol).toBeGreaterThanOrEqual(rect.startCol);
+        expect(at.viewCol).toBeLessThanOrEqual(rect.endCol);
+      }
+    }
+  });
+
+  it("hidden rows (height 0) add no height; an empty geometry or box yields nothing", () => {
+    const hidden = makeView();
+    hidden.rows[3] = { ...hidden.rows[3], visible: false };
+    const g = buildPivotVisualGeometry(hidden, false, sizes);
+    expect(selectionPiecesInBox(g, { left: 0, top: 0 }, BOX.width, BOX.height, { startRow: 2, startCol: 0, endRow: 4, endCol: 0 })).toEqual([
+      { x: 0, y: 48, width: 120, height: 48 },
+    ]);
+    expect(selectionPiecesInBox(g, { left: 0, top: 0 }, 0, BOX.height, { startRow: 2, startCol: 0, endRow: 4, endCol: 0 })).toEqual([]);
+    const none = buildPivotVisualGeometry(makeView(1), false, sizes);
+    expect(selectionPiecesInBox({ ...none, rowCount: 0 }, { left: 0, top: 0 }, BOX.width, BOX.height, { startRow: 0, startCol: 0, endRow: 0, endCol: 0 })).toEqual([]);
   });
 });

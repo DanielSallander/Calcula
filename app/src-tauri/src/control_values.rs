@@ -888,6 +888,7 @@ mod tests {
         }
         ControlMetadata {
             control_type: "checkbox".to_string(),
+            uid: String::new(),
             properties,
         }
     }

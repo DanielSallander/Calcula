@@ -91,3 +91,23 @@ describe("buildPivotPaneData seeds row/column chips WITH their hidden items", ()
     expect(rows.find((f) => f.name === "Geo.Region")!.hiddenItems).toEqual(["West"]);
   });
 });
+
+describe("value fields: an ADOPTED model format is seeded as adopted (BUG-0478)", () => {
+  it("numberFormatFromModel rides the seed, so the editor never sends the adopted format back as an override", () => {
+    const base = info(false);
+    const pane = buildPivotPaneData({
+      ...base,
+      fieldConfiguration: {
+        ...base.fieldConfiguration,
+        valueFields: [
+          { sourceIndex: -1, name: "[Revenue]", isNumeric: true, aggregation: "sum", numberFormat: "#,##0.00", numberFormatFromModel: true },
+          { sourceIndex: -1, name: "[Units]", isNumeric: true, aggregation: "sum", numberFormat: "0" },
+        ],
+      },
+    } as PivotRegionInfo);
+    expect(pane.initialValues.map((v) => [v.numberFormat, v.numberFormatFromModel])).toEqual([
+      ["#,##0.00", true],
+      ["0", undefined],
+    ]);
+  });
+});

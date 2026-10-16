@@ -20,6 +20,13 @@
 //          dialog launcher, the format-painter and AutoFilter state seams, and
 //          the cell-shift / decimal / border-preset wrappers. The checks below
 //          run over EVERY entry, so an older version's list stays honest too.
+//
+//          1.4.0 is the canvas owner findings programme (2026-10-15), one entry
+//          for every work package. WP-A added the reference-pick seam
+//          (OverlayRegistration.referenceAt, isFormulaReferencePickActive, the
+//          pick preview), the copy primitive and inner clipboard door
+//          (copyCellRange, innerClipboardCommand), @api/statusBarRange,
+//          hasDomTextSelection and GridContextMenuItem.disabledReason.
 
 import { describe, it, expect } from "vitest";
 import * as fs from "fs";
@@ -43,8 +50,8 @@ const entry = (v: string) => CHANGELOG?.find((e) => e.version === v);
 const names = (v: string): Set<string> => new Set(entry(v)?.added.map((e) => e.name) ?? []);
 
 describe("API_VERSION", () => {
-  it("is 1.3.0 (the Home tab programme added to @api)", () => {
-    expect(version.API_VERSION).toBe("1.3.0");
+  it("is 1.4.0 (the canvas owner findings programme added to @api)", () => {
+    expect(version.API_VERSION).toBe("1.4.0");
   });
 
   it("carries a changelog whose newest entry IS the current version", () => {
@@ -149,6 +156,45 @@ describe("the 1.3.0 changelog names what the Home tab programme added", () => {
       "Ctrl+G",
     ]) {
       expect(changed, `1.3.0's "changed" says nothing about ${word}`).toContain(word);
+    }
+  });
+});
+
+describe("the 1.4.0 changelog names what WP-A (picks and pivot cells) added", () => {
+  // Every WP-A @api addition, so one dropped from the entry fails here by name.
+  const REQUIRED = [
+    "OverlayRegistration.referenceAt",
+    "OverlayReferencePick",
+    "OverlayReferenceAtFn",
+    "referenceAtPoint",
+    "getFloatingReferencePickPreview",
+    "onFloatingReferencePickPreviewChanged",
+    "FloatingReferencePickRange",
+    "FloatingReferencePickPreview",
+    "isFormulaReferencePickActive",
+    "copyCellRange",
+    "CellRangeCopyRequest",
+    "CellRangeCopyResult",
+    "ObjectSelectionProvider.innerClipboardCommand",
+    "innerSelectionClipboardCommand",
+    "publishStatusBarRange",
+    "getStatusBarRange",
+    "subscribeStatusBarRange",
+    "StatusBarRange",
+    "hasDomTextSelection",
+    "GridContextMenuItem.disabledReason",
+  ];
+
+  it("lists every WP-A addition", () => {
+    const listed = names("1.4.0");
+    expect(entry("1.4.0"), "API_CHANGELOG has no 1.4.0 entry").toBeDefined();
+    for (const n of REQUIRED) expect(listed.has(n), `1.4.0's changelog does not list ${n}`).toBe(true);
+  });
+
+  it("says what CHANGED meaning: the pick press, the clipboard door, the disabled reason", () => {
+    const changed = (entry("1.4.0")?.changed ?? []).join("\n");
+    for (const word of ["isFormulaReferencePickActive", "INERT", "clipboardDoorCommand", "innerClipboardCommand", "disabledReason"]) {
+      expect(changed, `1.4.0's "changed" says nothing about ${word}`).toContain(word);
     }
   });
 });

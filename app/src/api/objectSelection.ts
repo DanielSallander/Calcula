@@ -204,6 +204,12 @@ export interface ObjectSelectionProvider {
    * object, across families, the selection afterwards.
    */
   pasteObjects?(snapshots: ReadonlyArray<unknown>, target: ObjectPasteTarget): Promise<ObjectPasteResult>;
+  /**
+   * The command a Copy / Paste DOOR (Home tab, Edit menu, the family's own menu) runs for this family's INNER
+   * selection while `ownsKey("Clipboard")` is true -- or null to let the cell command answer (a floating grid's
+   * cell, whose refusal lives in its selection owner). The KEY is the family's own guarded binding.
+   */
+  innerClipboardCommand?(action: "copy" | "paste"): string | null;
 }
 
 const providers = new Map<string, ObjectSelectionProvider>();
@@ -397,6 +403,21 @@ export function getSelectedObjectRegion(regions: readonly GridRegion[]): GridReg
 /** Whether any family's inner selection owns `key` right now. */
 export function objectOwnsKey(key: ObjectSelectionKey): boolean {
   return distinctProviders().some((p) => guarded("ownsKey", () => p.ownsKey?.(key) ?? false, false));
+}
+
+/**
+ * The first non-null `innerClipboardCommand` of a provider that owns "Clipboard" right now, or null. A provider
+ * that owns the key WITHOUT the method (a floating grid's cell) answers nothing here: its cells are copied by the
+ * cell command, whose selection owner holds its refusal.
+ */
+export function innerSelectionClipboardCommand(action: "copy" | "paste"): string | null {
+  for (const p of distinctProviders()) {
+    if (!p.innerClipboardCommand) continue;
+    if (!guarded("ownsKey", () => p.ownsKey?.("Clipboard") ?? false, false)) continue;
+    const command = guarded("innerClipboardCommand", () => p.innerClipboardCommand!(action) ?? null, null);
+    if (typeof command === "string" && command !== "") return command;
+  }
+  return null;
 }
 
 /**
@@ -806,6 +827,16 @@ export function notifyObjectSelectionChanged(): void {
 // ============================================================================
 // Press parity (Core calls this on a canvas)
 // ============================================================================
+
+/**
+ * How far (logical px, on either axis) the pointer must travel from a press
+ * on a floating object before the press is a DRAG rather than a click. Core's
+ * own move starts only past it, and a listener that must tell "clicked" from
+ * "dragged" (the object pane opens at the release of a click, never of a drag
+ * -- a drag-select across a pivot's cells has no moveComplete) asks the same
+ * number rather than a second spelling of it.
+ */
+export const OBJECT_DRAG_THRESHOLD_PX = 3;
 
 /** The modifiers of a press, as Core saw them. */
 export interface ObjectPressModifiers {

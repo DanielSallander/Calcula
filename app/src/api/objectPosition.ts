@@ -36,8 +36,8 @@
 //          @api/index.ts; import it as "@api/objectPosition".
 
 import type { GridRegion } from "./gridOverlays";
-import { canMoveObject, canResizeObject } from "./objectGeometry";
-import { getLayoutSurface, isRegionLocked } from "./layoutSurface";
+import { canMoveObject, canResizeObject, type ObjectGeometryChange } from "./objectGeometry";
+import { clampMoveToPage, getLayoutSurface, isRegionLocked } from "./layoutSurface";
 import { getDesignMode } from "./designMode";
 import { getGridStateSnapshot } from "../core/state/GridContext";
 
@@ -144,6 +144,75 @@ export function sizeAndPositionAvailability(region: GridRegion): SizeAndPosition
     sizeReason: resize ? null : SIZE_POSITION_FIXED_SIZE,
     page,
   };
+}
+
+// ============================================================================
+// The one geometry change typed boxes ask for
+// ============================================================================
+
+/**
+ * Typed X / Y / Width / Height boxes (the Size and Position dialog's, the
+ * object pane's Properties card's). `null` is a blank box, or a box the user
+ * did not change.
+ */
+export interface SizePositionFields {
+  x: number | null;
+  y: number | null;
+  width: number | null;
+  height: number | null;
+}
+
+function givenNumber(v: number | null): v is number {
+  return v !== null && Number.isFinite(v);
+}
+
+/**
+ * The ONE geometry change typed boxes ask of the object behind `region`, or
+ * null when they ask for nothing (or the region is not floating). Units are
+ * LOGICAL px, the units of `GridRegion.floating`. Shared by every door that
+ * types a geometry, so a dialog and a pane card cannot disagree. The rules, in
+ * order:
+ *   - a blank or non-finite box keeps the object's current value;
+ *   - width and height only where `resize` is true (else the current size);
+ *   - a CHANGED width or height is at least SIZE_AND_POSITION_MIN_SIZE; an
+ *     unchanged one is kept as it is (moving a small object never resizes it);
+ *   - x and y are at least 0;
+ *   - on a `page` (a canvas) the size is capped to the page and the object is
+ *     kept on it (`clampMoveToPage`), exactly as a drag is;
+ *   - a result equal to where the object already is asks for nothing.
+ */
+export function sizePositionChange(
+  region: GridRegion,
+  fields: SizePositionFields,
+  page: { width: number; height: number } | null,
+  opts: { resize: boolean },
+): ObjectGeometryChange | null {
+  const f = region.floating;
+  if (!f) return null;
+
+  let x = givenNumber(fields.x) ? fields.x : f.x;
+  let y = givenNumber(fields.y) ? fields.y : f.y;
+  let width = f.width;
+  let height = f.height;
+  if (opts.resize) {
+    if (givenNumber(fields.width) && fields.width !== f.width) width = Math.max(SIZE_AND_POSITION_MIN_SIZE, fields.width);
+    if (givenNumber(fields.height) && fields.height !== f.height) height = Math.max(SIZE_AND_POSITION_MIN_SIZE, fields.height);
+  }
+  x = Math.max(0, x);
+  y = Math.max(0, y);
+
+  if (page) {
+    if (opts.resize) {
+      width = Math.min(width, page.width);
+      height = Math.min(height, page.height);
+    }
+    const kept = clampMoveToPage({ x, y, width, height }, page);
+    x = kept.x;
+    y = kept.y;
+  }
+
+  if (x === f.x && y === f.y && width === f.width && height === f.height) return null;
+  return { region, x, y, width, height, from: { x: f.x, y: f.y, width: f.width, height: f.height } };
 }
 
 // ============================================================================

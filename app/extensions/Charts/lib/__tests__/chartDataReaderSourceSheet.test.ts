@@ -11,6 +11,9 @@
 //            - a deleted source sheet is an error, and nothing is read;
 //            - a range over the backend's 100,000-cell cap is read in bands;
 //            - series auto-detection and lookup tables read their own sheet.
+//          D-BIND (S8b): a chart's BOUND properties (title, axis title, series
+//          name, KPI goal, ...) are laid over its spec from the binding seam's
+//          cache for a placed chart; a literal "=B1" is TEXT and reads no cell.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -43,6 +46,8 @@ import {
 } from "../chartDataReader";
 import { SOURCE_SHEET_MISSING_MESSAGE } from "../dataSourceResolver";
 import { resetSheetIdCacheForTests } from "../sheetIdMap";
+import { applyResolvedValues, resetCache } from "@api/objectBindings/cache";
+import type { ResolvedBinding } from "@api/types";
 import type { ChartSpec, DataRangeRef } from "../../types";
 
 type Cell = { row: number; col: number; value: unknown; display: string; formula: null; type: string };
@@ -90,6 +95,7 @@ function spec(data: DataRangeRef, over: Partial<ChartSpec> = {}): ChartSpec {
 
 beforeEach(() => {
   resetSheetIdCacheForTests();
+  resetCache();
   h.getSheets.mockReset();
   h.getRangeCellsTyped.mockReset();
   sheetsAre([
@@ -140,10 +146,73 @@ describe("a chart on canvas sheet 2 whose data is on sheet 0", () => {
     expect(h.getRangeCellsTyped).not.toHaveBeenCalled();
   });
 
-  it("an unqualified =A1 title reads the DATA sheet, not the canvas", async () => {
-    const out = await readChartDataResolved(spec(data, { title: "=B1" }));
-    expect(out.spec.title).toBe("Sales");
-    expect(h.getRangeCellsTyped).toHaveBeenCalledWith(0, 1, 0, 1, 0);
+  it("a literal '=B1' title is TEXT: it paints as typed and reads no cell for it", async () => {
+    const out = await readChartDataResolved(spec(data, { title: "=B1" }), 0, CHART_ID);
+    expect(out.spec.title).toBe("=B1");
+    // Only the data range is read -- the old resolver read B1 (0,1,0,1) here.
+    expect(h.getRangeCellsTyped.mock.calls).toEqual([[0, 0, 3, 1, 0]]);
+  });
+});
+
+const CHART_ID = "chart-bound";
+
+function resolved(path: string, over: Partial<ResolvedBinding>): ResolvedBinding {
+  return { object: { kind: "chart", id: CHART_ID }, path, value: null, display: "", error: null, pending: false, ...over };
+}
+
+describe("a chart's BOUND properties are painted over its literal spec (D-BIND S8b)", () => {
+  const data: DataRangeRef = { sheetIndex: 0, sheetId: "id-0", startRow: 0, startCol: 0, endRow: 3, endCol: 1 };
+
+  function seedBindings(): void {
+    applyResolvedValues([
+      resolved("/spec/title", { value: "Revenue 2026", display: "Revenue 2026" }),
+      resolved("/spec/xAxis/title", { value: "Month", display: "Month" }),
+      resolved("/spec/series/0/name", { value: "Net sales", display: "Net sales" }),
+      resolved("/spec/markOptions/goal", { value: 1200, display: "1,200" }),
+    ]);
+  }
+
+  it("overlays the title, an axis title, a series name and markOptions.goal for a placed chart", async () => {
+    seedBindings();
+    const literal = spec(data, { title: "Literal title", markOptions: { goal: 5 } as ChartSpec["markOptions"] });
+    const out = await readChartDataResolved(literal, 0, CHART_ID);
+    expect(out.spec.title).toBe("Revenue 2026");
+    expect(out.spec.xAxis.title).toBe("Month");
+    expect(out.spec.series[0].name).toBe("Net sales");
+    expect((out.spec.markOptions as { goal?: number }).goal).toBe(1200);
+    // The literal spec is untouched: the overlay lives only in what is painted.
+    expect(literal.title).toBe("Literal title");
+    expect(literal.series[0].name).toBe("Sales");
+    expect((literal.markOptions as { goal?: number }).goal).toBe(5);
+  });
+
+  it("a chart with no chart id (a preview, an export) paints its literals", async () => {
+    seedBindings();
+    const out = await readChartDataResolved(spec(data, { title: "Literal title" }));
+    expect(out.spec.title).toBe("Literal title");
+    expect(out.spec.series[0].name).toBe("Sales");
+  });
+
+  it("another chart's bindings never paint on this one", async () => {
+    seedBindings();
+    const out = await readChartDataResolved(spec(data, { title: "Mine" }), 0, "some-other-chart");
+    expect(out.spec.title).toBe("Mine");
+  });
+
+  it("a pending measure keeps the literal; a text binding in error shows its display", async () => {
+    applyResolvedValues([
+      resolved("/spec/title", { pending: true }),
+      resolved("/spec/xAxis/title", { display: "#REF!", error: "The reference is no longer valid." }),
+      resolved("/spec/markOptions/goal", { display: "#VALUE!", error: "Not a number." }),
+    ]);
+    const out = await readChartDataResolved(
+      spec(data, { title: "Literal title", markOptions: { goal: 5 } as ChartSpec["markOptions"] }),
+      0,
+      CHART_ID,
+    );
+    expect(out.spec.title).toBe("Literal title");
+    expect(out.spec.xAxis.title).toBe("#REF!");
+    expect((out.spec.markOptions as { goal?: number }).goal).toBe(5);
   });
 });
 

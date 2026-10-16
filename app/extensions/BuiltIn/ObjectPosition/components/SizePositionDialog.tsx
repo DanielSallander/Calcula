@@ -29,8 +29,14 @@ import { useDialogWindow } from "@api/dialogWindow";
 import { getGridRegions, type GridRegion } from "@api/gridOverlays";
 import { commitObjectGeometry } from "@api/objectGeometry";
 import { showToast } from "@api/notifications";
-import { SIZE_AND_POSITION_UNDO_LABEL, sizeAndPositionAvailability } from "@api/objectPosition";
+import {
+  SIZE_AND_POSITION_MIN_SIZE,
+  SIZE_AND_POSITION_UNDO_LABEL,
+  sizeAndPositionAvailability,
+} from "@api/objectPosition";
 import { objectLabelOf } from "@api/objectSelection";
+import { readObjectFormat } from "@api/objectFormat";
+import { applyAspectLock } from "@api/aspectLock";
 import { changedFields, initialFields, sizePositionChange, type SizePositionFields } from "../lib/sizePosition";
 
 /** The dialog's id in the dialog registry. */
@@ -42,6 +48,33 @@ export const SIZE_POSITION_GONE = "The object is no longer on this sheet.";
 function findRegion(regionId: string | null): GridRegion | null {
   if (!regionId) return null;
   return getGridRegions().find((r) => r.id === regionId && !!r.floating) ?? null;
+}
+
+/** What the dialog says under the boxes while Lock aspect ratio is on. */
+export const SIZE_POSITION_ASPECT_LOCKED = "Lock aspect ratio is on: width and height change together.";
+
+/**
+ * The boxes after `key` was typed: with the aspect locked, a typed Width sets
+ * the Height by the object's ORIGINAL ratio (the height follows, the top stays)
+ * and a typed Height sets the Width -- `applyAspectLock` with the edge of the
+ * side typed. A blank or non-finite box, or an object without a size, changes
+ * nothing else. Exported for the unit tier.
+ */
+export function lockedFields(
+  fields: SizePositionFields,
+  key: keyof SizePositionFields,
+  initial: SizePositionFields,
+  lockAspect: boolean,
+): SizePositionFields {
+  if (!lockAspect || (key !== "width" && key !== "height")) return fields;
+  const value = fields[key];
+  if (value === null || !Number.isFinite(value) || value <= 0) return fields;
+  if (!initial.width || !initial.height) return fields;
+  const orig = { x: initial.x ?? 0, y: initial.y ?? 0, width: initial.width, height: initial.height };
+  const typed = key === "width" ? { ...orig, width: value } : { ...orig, height: value };
+  const edges = { left: false, top: false, right: key === "width", bottom: key === "height" };
+  const locked = applyAspectLock(orig, typed, edges, SIZE_AND_POSITION_MIN_SIZE);
+  return key === "width" ? { ...fields, height: locked.height } : { ...fields, width: locked.width };
 }
 
 /** Whole and fractional px alike, without float noise ("100", "100.5"). */
@@ -107,8 +140,13 @@ function SizePositionForm({ region, onClose }: { region: GridRegion; onClose: ()
   const canResize = availability.move && availability.resize;
   const name = objectLabelOf(region);
 
+  // Lock aspect ratio (the object's container, @api/objectFormat): a typed
+  // Width sets the Height by the ratio and vice versa, through the SAME rule
+  // Core's resize and the object pane's Properties card use (@api/aspectLock).
+  const lockAspect = readObjectFormat(region)?.resolved.lockAspect === true;
+
   const set = (key: keyof SizePositionFields) => (value: number | null) =>
-    setFields((prev) => ({ ...prev, [key]: value }));
+    setFields((prev) => lockedFields({ ...prev, [key]: value }, key, initial, lockAspect));
 
   const commit = useCallback(async () => {
     if (committing.current) return;
@@ -216,6 +254,11 @@ function SizePositionForm({ region, onClose }: { region: GridRegion; onClose: ()
           {(availability.reason ?? (canMove ? availability.sizeReason : null)) && (
             <div style={styles.note} role="note" data-testid="size-position-reason">
               {availability.reason ?? availability.sizeReason}
+            </div>
+          )}
+          {canResize && lockAspect && (
+            <div style={styles.hint} data-testid="size-position-aspect">
+              {SIZE_POSITION_ASPECT_LOCKED}
             </div>
           )}
           {canMove && page && (

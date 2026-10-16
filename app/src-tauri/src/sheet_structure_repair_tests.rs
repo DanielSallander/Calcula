@@ -7,7 +7,7 @@
 //!   * W9  -- a delete or move remaps a chart's INDEX-ONLY data ranges
 //!            (`sheetIndex`, no `sheetId`) with the sheets; a range whose sheet
 //!            is deleted can no longer resolve to any sheet.
-//!   * W10 -- a delete turns conditional-format, validation, control-formula
+//!   * W10 -- a delete turns conditional-format, validation, object-binding
 //!            and pane-dropdown references to the deleted sheet into `#REF!`,
 //!            as it already did for cell formulas and defined names.
 //!   * W11 -- a delete repairs the `.calp` override layer's formulas the same
@@ -87,6 +87,43 @@ fn control_prop(value_type: &str, value: &str) -> crate::controls::ControlProper
     crate::controls::ControlPropertyValue { value_type: value_type.to_string(), value: value.to_string() }
 }
 
+/// A control at Sheet1!B2 whose `text` is BOUND to `formula` (WP-D: a control
+/// holds no formula of its own; the binding row does) and whose `fill` is the
+/// static literal "Data!A1".
+fn bound_button(state: &AppState, formula: &str) {
+    let seed = test_seed_effect();
+    let mut properties = HashMap::new();
+    properties.insert("text".to_string(), control_prop("static", ""));
+    properties.insert("fill".to_string(), control_prop("static", "Data!A1"));
+    state.controls.write(&seed).unwrap().insert(
+        (0, 1, 1),
+        crate::controls::ControlMetadata { control_type: "button".to_string(), uid: "ctl-1".to_string(), properties },
+    );
+    let mut store = state.object_bindings.write(&seed).unwrap();
+    store.bindings.insert(
+        crate::object_bindings::store::BindingKey {
+            object: crate::api_types::ObjectBindingRef {
+                kind: crate::api_types::ObjectBindingKind::Control,
+                id: "ctl-1".to_string(),
+            },
+            path: "/properties/text".to_string(),
+        },
+        crate::object_bindings::store::StoredBinding { formula: formula.to_string(), model: None },
+    );
+    store.bump_generation();
+}
+
+/// The formula `bound_button`'s caption is bound to now.
+fn bound_caption(state: &AppState) -> String {
+    let store = state.object_bindings.read().unwrap();
+    store
+        .bindings
+        .iter()
+        .find(|(k, _)| k.object.id == "ctl-1" && k.path == "/properties/text")
+        .map(|(_, b)| b.formula.clone())
+        .expect("the caption is still bound")
+}
+
 fn names_ref_not(text: &str, sheet: &str) -> bool {
     let upper = text.to_uppercase();
     upper.contains("#REF!") && !upper.contains(&format!("{}!", sheet.to_uppercase()))
@@ -125,15 +162,7 @@ fn deleting_a_sheet_turns_rule_formulas_naming_it_into_ref() {
             },
         }],
     );
-    {
-        let mut properties = HashMap::new();
-        properties.insert("text".to_string(), control_prop("formula", "=Data!A1"));
-        properties.insert("fill".to_string(), control_prop("static", "Data!A1"));
-        state.controls.write(&seed).unwrap().insert(
-            (0, 1, 1),
-            crate::controls::ControlMetadata { control_type: "button".to_string(), properties },
-        );
-    }
+    bound_button(&state, "=Data!A1");
 
     delete(&state, &file, &crate::pane_control::PaneControlState::new(), 1);
 
@@ -159,13 +188,10 @@ fn deleting_a_sheet_turns_rule_formulas_naming_it_into_ref() {
         }
         other => panic!("{:?}", other),
     }
+    let caption = bound_caption(&state);
+    assert!(names_ref_not(&caption, "Data"), "a control's bound caption still names the deleted sheet: `{}`", caption);
     let controls = state.controls.read().unwrap();
     let props = &controls[&(0, 1, 1)].properties;
-    assert!(
-        names_ref_not(&props["text"].value, "Data"),
-        "a control's formula property still names the deleted sheet: `{}`",
-        props["text"].value
-    );
     assert_eq!(props["fill"].value, "Data!A1", "a STATIC control property is a literal");
 }
 
@@ -358,7 +384,8 @@ fn chart_record(data: usize, layer: usize, lookup: usize, child: usize, dead: us
 
 fn chart_sources(state: &AppState) -> Vec<calp::chart_refs::ChartSourceSheet> {
     let charts = state.charts.read().unwrap();
-    calp::chart_refs::chart_spec_source_sheets(&charts[0].spec_json)
+    let spec: serde_json::Value = serde_json::from_str(&charts[0].spec_json).unwrap();
+    calp::chart_refs::chart_spec_source_sheets(&spec)
 }
 
 fn index_refs(sources: &[calp::chart_refs::ChartSourceSheet]) -> Vec<usize> {
@@ -565,14 +592,7 @@ fn a_3d_reference_losing_an_endpoint_reads_alike_in_the_cell_and_every_store() {
             },
         }],
     );
-    {
-        let mut properties = HashMap::new();
-        properties.insert("text".to_string(), control_prop("formula", "=SUM(Mid:Data!B1)"));
-        state.controls.write(&seed).unwrap().insert(
-            (0, 1, 1),
-            crate::controls::ControlMetadata { control_type: "button".to_string(), properties },
-        );
-    }
+    bound_button(&state, "=SUM(Mid:Data!B1)");
     let sheet1 = state.sheet_ids.read().unwrap()[0];
     state.override_layer.write(&seed).unwrap().overrides.push(override_on(
         sheet1,
@@ -604,8 +624,8 @@ fn a_3d_reference_losing_an_endpoint_reads_alike_in_the_cell_and_every_store() {
         other => panic!("{:?}", other),
     };
     assert!(same(&custom, "=SUM(Last:Last!B1)>A1"), "a custom validation became `{}`", custom);
-    let text = state.controls.read().unwrap()[&(0, 1, 1)].properties["text"].value.clone();
-    assert!(same(&text, "=SUM(Mid:Mid!B1)"), "a control's formula property became `{}`", text);
+    let text = bound_caption(&state);
+    assert!(same(&text, "=SUM(Mid:Mid!B1)"), "a control's bound caption became `{}`", text);
 
     let layer = state.override_layer.read().unwrap();
     let ovr = &layer.overrides[0];

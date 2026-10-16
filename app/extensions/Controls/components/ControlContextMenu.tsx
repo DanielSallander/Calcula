@@ -16,6 +16,8 @@ import type { OverlayProps } from "@api/uiTypes";
 import { getFloatingControl } from "../lib/floatingStore";
 import type { ControlMenuItem } from "../lib/controlContextMenu";
 import { noteControlMenuMounted } from "../lib/controlMenuState";
+// What the user calls this object -- the header the menu is titled with.
+import { controlKindLabel } from "../lib/controlKinds";
 
 const styles = {
   menu: css`
@@ -88,14 +90,6 @@ const styles = {
 const ITEM_H = 29;
 const CHROME_H = 34;
 const MENU_W = 210;
-
-/** What the user calls this object — the header the menu is titled with. */
-function controlKindLabel(controlType: string): string {
-  if (controlType === "shape") return "Shape";
-  if (controlType === "image") return "Picture";
-  if (controlType === "button") return "Button";
-  return controlType;
-}
 
 export function ControlContextMenu({
   onClose,

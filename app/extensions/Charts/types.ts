@@ -4,6 +4,7 @@
 //          The dialog produces it, the renderer reads it, the script editor exposes it.
 
 import { getChartMarkMeta, chartMarkFurniture, type ChartMarkFurniture } from "@api/chartMarks";
+import type { VisualContainerFormat, VisualTitle } from "@api/visualContainer";
 
 // ============================================================================
 // Chart Types
@@ -617,7 +618,7 @@ export interface TextMarkOptions {
   x?: number;
   /** Y position as data value. */
   y?: number;
-  /** Text content to display. Supports cell references like "=A1". */
+  /** Text content to display, shown as typed. */
   text: string;
   /** Font size in pixels. Default: 11 */
   fontSize?: number;
@@ -1225,9 +1226,13 @@ export interface TransformDiagnostic {
 /**
  * Override any property of the built-in chart render theme.
  * All fields are optional — only specified fields override the defaults.
+ *
+ * THE CHART'S OUTER BACKGROUND IS NOT HERE. It moved (WP-C D-FORMAT) to the
+ * visual container, `ChartSpec.container.background` (colour, transparency,
+ * gradient), which Core paints under the chart for every floating family alike.
+ * One spelling per fact: a `background` key here is refused by the schema.
  */
 export interface ThemeOverrides {
-  background?: string;
   plotBackground?: string;
   gridLineColor?: string;
   gridLineWidth?: number;
@@ -1749,7 +1754,32 @@ export interface ChartSpec {
    * edits. Definitions persist; live/interactive values (later) stay ephemeral.
    */
   params?: ParamSpec[];
+
+  /**
+   * The visual container (D-FORMAT): padding, title style, subtitle, divider,
+   * spacing, background, border and shadow around the chart. Title TEXT stays
+   * `title`; title colour/size stay `config.theme.titleColor`/`titleFontSize`;
+   * `container.title` holds only the rest of the title style. Absent = the
+   * chart's defaults (white background, a 1 px #d0d0d0 border).
+   */
+  container?: ChartContainerFormat;
+
+  /**
+   * Design-query charts: measure name (no brackets) -> Excel format code. Sent
+   * as `BiValueFieldRef.numberFormat`, so Rust fills the formatted values.
+   */
+  fieldFormats?: Record<string, string>;
 }
+
+/**
+ * A chart's stored container: the shared `VisualContainerFormat` minus the
+ * three title leaves the chart already spells elsewhere (`spec.title`,
+ * `config.theme.titleColor`, `config.theme.titleFontSize`). Rust refuses them
+ * too (`forbid_chart_title_leaves`), so no route can write a second spelling.
+ */
+export type ChartContainerFormat = Omit<VisualContainerFormat, "title"> & {
+  title?: Omit<VisualTitle, "text" | "color" | "fontSize">;
+};
 
 // ============================================================================
 // Chart Definition (spec + placement)

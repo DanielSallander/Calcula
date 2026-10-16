@@ -188,6 +188,10 @@ export const PivotPaneDefinition: TaskPaneViewDefinition = {
   contextKeys: ["pivot"],
   priority: 100,
   closable: true,
+  // The editor's onUpdate (fields changed): re-fetch the pivot view data AND
+  // repaint ("grid:refresh" alone fetches with triggerRepaint=false). The
+  // Shell's task pane runs this for THIS view only.
+  onUpdate: () => window.dispatchEvent(new CustomEvent("pivot:refresh")),
 };
 
 // ============================================================================

@@ -2,9 +2,10 @@
 // PURPOSE: Floating Range extension — a shape-like object whose content is a
 //          REAL range of cells (hidden backing sheet), referenced like a sheet
 //          (=Float1!A1). Registers the overlay, the floatingObject:* handlers,
-//          the capture-phase keyboard, Insert/context menus, the properties
-//          dialog, the @api/floatingRangeService provider, the overflow-scroll
-//          wheel target (M7: content past the window scrolls; lib/frView.ts),
+//          the capture-phase keyboard, Insert/context menus, its Properties
+//          tab and Format provider in the ONE object pane (@api/objectPane,
+//          @api/objectFormat), the @api/floatingRangeService provider, the
+//          overflow-scroll wheel target (M7: content past the window scrolls; lib/frView.ts),
 //          the formula bar / Name Box view of the selected cell and its edit
 //          (lib/frFormulaBar.ts over @api/externalEdit: one edit session, two
 //          views, surviving a point-mode sheet switch), and the document
@@ -19,7 +20,6 @@ import {
   AppEvents,
   emitAppEvent,
   showToast,
-  showDialog,
   showOverlay,
   registerFloatingRangeProvider,
   registerGridLayer,
@@ -33,6 +33,7 @@ import {
   topFloatingRegionAt,
   isPointModeOnForeignSheet,
   type OverlayHitTestContext,
+  type OverlayReferencePick,
   type OverlayZone,
 } from "@api/gridOverlays";
 import {
@@ -49,9 +50,8 @@ import { getLayoutSurface } from "@api/layoutSurface";
 import { getGridStateSnapshot } from "@api/grid";
 import { registerObjectWheelTarget } from "../_shared/lib/objectWheelScroll";
 import {
-  isGlobalFormulaMode,
+  isFormulaReferencePickActive,
   getGlobalIsEditing,
-  insertTextIntoActiveFormula,
   getExternalFormulaTarget,
 } from "@api/editing";
 import {
@@ -103,7 +103,7 @@ import {
   frameHeight,
   frameSizeForCounts,
   bestCountsForSize,
-  frRowHdrW,
+  frCellsLeft,
   frCellsTop,
   contentWidth,
   contentHeight,
@@ -159,7 +159,6 @@ import {
   isFrEditorOpen,
   destroyFrEditor,
 } from "./editor/frEditor";
-import { buildQualifiedRef } from "./lib/frRefs";
 import {
   installFrKeyRouting,
   frOwnsGridKeys,
@@ -168,12 +167,21 @@ import {
 import { registerFloatingRangeObjectSelection, frIdOf } from "./lib/frObjectSelection";
 import { registerObjectGeometryProvider } from "@api/objectGeometry";
 import { createFloatingRangeGeometryProvider } from "./lib/frGeometry";
+import { registerObjectFormatProvider } from "@api/objectFormat";
+import { registerObjectPaneProvider } from "@api/objectPane";
+import {
+  createFrObjectFormatProvider,
+  frShowsTitle,
+  installFrContainerResync,
+  registerFrBindableProperties,
+} from "./lib/frObjectFormat";
+import { createFrObjectPaneProvider } from "./lib/frObjectPane";
+import { applyFrPatch } from "./lib/frPatch";
 import {
   buildFrContextMenu,
   isFrContextMenuOpen,
   type FrContextMenuHandlers,
 } from "./lib/frContextMenu";
-import { FloatingRangePropertiesDialog } from "./components/FloatingRangePropertiesDialog";
 import { FloatingRangeContextMenu } from "./components/FloatingRangeContextMenu";
 
 // ============================================================================
@@ -182,7 +190,6 @@ import { FloatingRangeContextMenu } from "./components/FloatingRangeContextMenu"
 
 const cleanupFns: (() => void)[] = [];
 
-const FR_PROPERTIES_DIALOG_ID = "floatingRange.properties";
 const FR_CONTEXT_MENU_ID = "floatingRange:contextMenu";
 
 /** Active drag teardown — cell drag-extend OR edge resize (also run on
@@ -210,10 +217,11 @@ function clampedCellFromFramePoint(
   dx: number,
   dy: number,
 ): { row: number; col: number } {
-  const minX = frRowHdrW(entry);
+  // The CELL AREA (the container band and the strips are not cells).
+  const minX = frCellsLeft(entry);
   const minY = frCellsTop(entry);
-  const cx = Math.min(Math.max(dx, minX), frameWidth(entry) - 0.01);
-  const cy = Math.min(Math.max(dy, minY), frameHeight(entry) - 0.01);
+  const cx = Math.min(Math.max(dx, minX), minX + contentWidth(entry) - 0.01);
+  const cy = Math.min(Math.max(dy, minY), minY + contentHeight(entry) - 0.01);
   const hit = localCellFromPoint(entry, cx, cy, getFrView(entry));
   if (hit.zone === "cells") return { row: hit.row, col: hit.col };
   return { row: 0, col: 0 };
@@ -287,7 +295,7 @@ function commitFrEditorBeforeSelect(
  * Refuse a SIZE change the range's editability forbids (`frGeometryEditable`,
  * the one answer): a range on a subscribed canvas, or one its canvas locks.
  * Every geometry door funnels through `resizeFr` / `resizeFrCells`, so the
- * menu, the Properties dialog's path, a script's `resize` and the gestures
+ * menu, the object pane's Properties tab, a script's `resize` and the gestures
  * cannot disagree about it. The message names the reason and the remedy.
  */
 function assertGeometryEditable(frId: string): void {
@@ -779,9 +787,9 @@ export function quantizeCornerResize(
  * press was decided to be BEFORE it selected anything.
  */
 export type FrPressPart =
-  | "referencePick"
   | "edgeHandle"
   | "outside"
+  | "padding"
   | "title"
   | "border"
   | "bodyGrab"
@@ -794,9 +802,9 @@ export type FrPressPart =
  * (@api/gridOverlays), from which Core derives the press, the pointer and the
  * meaning of Ctrl/Shift, so the three can never disagree (BUG-0258):
  *
- *   a formula expects a reference, anywhere   content 'cell'           referencePick
  *   a LIVE edge ball                          content 'ew'/'ns-resize' edgeHandle
  *   a near miss outside the frame             content 'default'        outside
+ *   the container band (border + padding)     frame                    padding
  *   the title bar                             frame                    title
  *   no title: the 4px border band (movable)   frame                    border
  *   no title, Design Mode: the whole body     frame                    bodyGrab
@@ -808,22 +816,20 @@ export type FrPressPart =
  *
  * PURE -- a contract, not a style: Core asks on every hover move, and ONCE per
  * press BEFORE the press selects anything. That is what makes this answer the
- * place for the two facts the press's handlers must never re-derive later:
- *   - the press is a REFERENCE PICK. Re-asked after the insertion it is not:
- *     "=SUM(" became "=SUM(Float1!B1", which no longer EXPECTS a reference, so
- *     the pick also moved the cell selection onto the picked cell, and the
- *     edit-lifetime rule (lib/frFormulaBar.ts) then COMMITTED the half-typed
- *     formula -- the user's next keystroke typed over the cell they had only
- *     meant to reference.
- *   - the edge handles were LIVE. `ctx.region` is the region Core captured
- *     before the press selected the range (its `resizable` says whether the
- *     balls were armed when the user pressed), and the editor is read here,
- *     before the press's commit-before-select closes it: read after it, a
- *     press on an invisible ball of a range being edited would commit the edit
- *     AND start a cell-scale drag.
+ * place for the fact the press's handlers must never re-derive later: the edge
+ * handles were LIVE. `ctx.region` is the region Core captured before the press
+ * selected the range (its `resizable` says whether the balls were armed when
+ * the user pressed), and the editor is read here, before the press's
+ * commit-before-select closes it: read after it, a press on an invisible ball
+ * of a range being edited would commit the edit AND start a cell-scale drag.
  * The press's side effects live in its handlers (setupFloatingObjectEvents):
- * the commit-before-select in `floatingObject:selected`, the reference
- * insertion and the edge-scale drag in `floatingObject:bodyDragStart`.
+ * the commit-before-select in `floatingObject:selected`, the edge-scale drag
+ * and the cell selection in `floatingObject:bodyDragStart`.
+ *
+ * A REFERENCE PICK is not a zone (D-PICK). While a formula expects a reference
+ * Core asks `frReferenceAt` instead and never asks this, so the answer here is
+ * the same whether or not a formula is picking: the press is Core's, it
+ * inserts "<name>!A1" itself, and the range neither selects nor inserts.
  *
  * Exported for the unit tier (frMoveZones.test.ts).
  */
@@ -832,14 +838,6 @@ export function frZoneAt(ctx: OverlayHitTestContext): OverlayZone | null {
   if (!frId || !ctx.floatingCanvasBounds) return null;
   const entry = getFloatingRangeById(frId);
   if (!entry) return null;
-
-  // Formula-reference picking (M7): a press on the range while ANY editor
-  // expects a reference FEEDS that formula -- over a cell it inserts
-  // "Name!A1" -- and never selects or moves the object (accepted, Excel-like),
-  // wherever it lands.
-  if (externalTargetExpecting() || isGlobalFormulaMode()) {
-    return { kind: "content", cursor: "cell", part: "referencePick" };
-  }
 
   const dx = ctx.canvasX - ctx.floatingCanvasBounds.x;
   const dy = ctx.canvasY - ctx.floatingCanvasBounds.y;
@@ -873,6 +871,12 @@ export function frZoneAt(ctx: OverlayHitTestContext): OverlayZone | null {
   // object.
   if (hit.zone === "outside") return { kind: "content", cursor: "default", part: "outside" };
 
+  // The container band around the grid's own frame (its border and padding,
+  // lib/frObjectFormat.ts). Core answers it as the object's frame before it
+  // asks this (the zone band, @api/gridOverlays), so this is the same answer
+  // for a direct caller: the band moves the range like its title bar does.
+  if (hit.zone === "padding") return { kind: "frame", part: "padding" };
+
   // The title bar is the frame in every mode (owner decision 2026-09-27).
   if (hit.zone === "title") return { kind: "frame", part: "title" };
 
@@ -880,7 +884,7 @@ export function frZoneAt(ctx: OverlayHitTestContext): OverlayZone | null {
   // handle (Excel's text box moves by its border). Gated on `movable`, so the
   // band never offers a drag Core would refuse -- on a subscribed canvas or a
   // locked range the band is just the edge cells.
-  if (!entry.showTitle && ctx.region.data?.movable === true && frBorderGrabAt(entry, dx, dy)) {
+  if (!frShowsTitle(entry) && ctx.region.data?.movable === true && frBorderGrabAt(entry, dx, dy)) {
     return { kind: "frame", part: "border" };
   }
 
@@ -895,6 +899,31 @@ export function frZoneAt(ctx: OverlayHitTestContext): OverlayZone | null {
   return { kind: "content", cursor: "cell", part: hit.zone };
 }
 
+/**
+ * The CELL a reference pick names at a point of the range -- its
+ * `OverlayRegistration.referenceAt` (@api/gridOverlays, D-PICK). While a
+ * formula is picking a reference Core asks this, not `frZoneAt`, and inserts
+ * `<name>!A1` (a drag: `<name>!A1:B3`) itself; the range selects nothing and
+ * inserts nothing of its own.
+ *
+ *   a cell (at the range's SCROLL: the scrolled cell, not the window cell)
+ *       -> { space: "object", name: <the range's name>, row, col }
+ *   the title, a row/column header, outside the cells -> null (inert)
+ *
+ * PURE, the `zoneAt` contract: no store writes, no dispatch.
+ */
+export function frReferenceAt(ctx: OverlayHitTestContext): OverlayReferencePick | null {
+  const frId = ctx.region.data?.frId as string | undefined;
+  if (!frId || !ctx.floatingCanvasBounds) return null;
+  const entry = getFloatingRangeById(frId);
+  if (!entry) return null;
+  const dx = ctx.canvasX - ctx.floatingCanvasBounds.x;
+  const dy = ctx.canvasY - ctx.floatingCanvasBounds.y;
+  const hit = localCellFromPoint(entry, dx, dy, getFrView(entry));
+  if (hit.zone !== "cells") return null;
+  return { space: "object", name: entry.name, row: hit.row, col: hit.col };
+}
+
 /** The local cell under a press point, at the range's scroll; null over a header, the title or outside. */
 function cellUnderPress(
   entry: FloatingRangeEntry,
@@ -905,25 +934,6 @@ function cellUnderPress(
   if (!bounds) return null;
   const hit = localCellFromPoint(entry, canvasX - bounds.x, canvasY - bounds.y, getFrView(entry));
   return hit.zone === "cells" ? { row: hit.row, col: hit.col } : null;
-}
-
-/**
- * A reference pick's insertion: "Name!A1" for local cell (row, col). The
- * external target (an open FR editor, the formula bar) wins over the grid
- * editor; self-reference is legal -- cycles are the engine's job.
- */
-function insertReferenceTo(entry: FloatingRangeEntry, row: number, col: number): void {
-  if (externalTargetExpecting()) {
-    getExternalFormulaTarget()?.insertReference({
-      sheetName: entry.name,
-      startRow: row,
-      startCol: col,
-      endRow: row,
-      endCol: col,
-    });
-  } else {
-    insertTextIntoActiveFormula(buildQualifiedRef(entry.name, row, col));
-  }
 }
 
 // ============================================================================
@@ -946,16 +956,18 @@ function insertReferenceTo(entry: FloatingRangeEntry, row: number, col: number):
  * by hand. The browser already knows what a double-click is; ask it.
  *
  * The zone's refusals (`frZoneAt`) are repeated here rather than shared, because a
- * double-click is a different gesture with the same geometry: a reference pick
- * must not open an editor (the first click already inserted the reference), and
- * a title-bar or header double-click has no cell to edit.
+ * double-click is a different gesture with the same geometry: a title-bar or
+ * header double-click has no cell to edit. A reference pick must not open an
+ * editor either (the first click already inserted the reference): Core swallows
+ * a pick's dblclick and its echo before it gets here (D-PICK), and this second
+ * line reads the SAME predicate Core does (`isFormulaReferencePickActive`).
  */
 export function handleFrDoubleClick(ctx: OverlayHitTestContext): boolean {
   const frId = ctx.region.data?.frId as string | undefined;
   if (!frId || !ctx.floatingCanvasBounds) return false;
   const entry = getFloatingRangeById(frId);
   if (!entry) return false;
-  if (isGlobalFormulaMode() || externalTargetExpecting()) return false;
+  if (isFormulaReferencePickActive()) return false;
 
   const dx = ctx.canvasX - ctx.floatingCanvasBounds.x;
   const dy = ctx.canvasY - ctx.floatingCanvasBounds.y;
@@ -984,7 +996,9 @@ function setupFloatingObjectEvents(): void {
   const handleSelected = (e: Event) => {
     const detail = (e as CustomEvent).detail;
     // A ref-pick click must not also select the object (nor drop a selection).
-    if (isGlobalFormulaMode() || externalTargetExpecting()) return;
+    // Core no longer dispatches `selected` for a pick press (D-PICK); this is
+    // the second line, on the one shared predicate.
+    if (isFormulaReferencePickActive()) return;
     if (detail.regionType !== FLOATING_RANGE_REGION_TYPE) {
       // Another object took the press: the range's CELL selection ends (the
       // formula bar and the Name Box stop showing its cell, and an open edit
@@ -1086,8 +1100,9 @@ function setupFloatingObjectEvents(): void {
 
   // --------------------------------------------------------------------------
   // Body drag: the CONTENT press, acting on the part `frZoneAt` decided before
-  // the press -- a reference pick, an edge-ball scale, or the local cell
-  // selection + drag-extend. A near miss outside the frame does nothing.
+  // the press -- an edge-ball scale, or the local cell selection +
+  // drag-extend. A near miss outside the frame does nothing. A reference pick
+  // never arrives here: Core runs it and inserts the reference (D-PICK).
   // --------------------------------------------------------------------------
   const handleBodyDragStart = (e: Event) => {
     const detail = (e as CustomEvent).detail;
@@ -1101,18 +1116,6 @@ function setupFloatingObjectEvents(): void {
     const dy = (detail.canvasY as number) - bounds.y;
     const part = detail.part as FrPressPart | undefined;
 
-    // A REFERENCE PICK: over a cell the reference goes into the formula;
-    // anywhere else the press does nothing. Nothing is selected, and the fact
-    // is the PART, never re-asked: the insertion has just changed the text
-    // ("=SUM(" is now "=SUM(Float1!B1", which no longer expects a reference),
-    // so asking again would select the picked cell and commit the edit it was
-    // feeding.
-    if (part === "referencePick") {
-      const hit = localCellFromPoint(entry, dx, dy, getFrView(entry));
-      if (hit.zone === "cells") insertReferenceTo(entry, hit.row, hit.col);
-      return;
-    }
-
     // An EDGE BALL that was live when the press BEGAN: the part was decided
     // before the press's commit-before-select closed any editor, which is why
     // it is read here and never re-derived.
@@ -1125,11 +1128,11 @@ function setupFloatingObjectEvents(): void {
     // The working surface only: cells and headers.
     if (part !== "cells" && part !== "rowHeader" && part !== "colHeader") return;
     // Second line of defence (the press was decided outside formula mode).
-    if (isGlobalFormulaMode() || externalTargetExpecting()) return;
+    if (isFormulaReferencePickActive()) return;
 
     const view = getFrView(entry);
     const hit = localCellFromPoint(entry, dx, dy, view);
-    if (hit.zone === "outside" || hit.zone === "title") return;
+    if (hit.zone === "outside" || hit.zone === "padding" || hit.zone === "title") return;
 
     // Zone -> initial local selection. A header selects the whole row/column
     // of the CONTENT extent, not just the window's part of it.
@@ -1392,6 +1395,7 @@ function activate(context: ExtensionContext): void {
       render: renderFloatingRange,
       hitTest: hitTestFloatingRange,
       zoneAt: frZoneAt,
+      referenceAt: frReferenceAt,
       onDoubleClick: handleFrDoubleClick,
       priority: 13,
     }),
@@ -1531,9 +1535,6 @@ function activate(context: ExtensionContext): void {
         }
       })();
     },
-    properties: (frId) => {
-      showDialog(FR_PROPERTIES_DIALOG_ID, { frId });
-    },
     deleteObject: (frId) => void confirmAndDeleteFr(frId),
     getCounts: (frId) => {
       const entry = getFloatingRangeById(frId);
@@ -1615,12 +1616,39 @@ function activate(context: ExtensionContext): void {
     window.removeEventListener("contextmenu", handleFrContextMenu, true),
   );
 
-  // 6. Properties dialog.
-  context.ui.dialogs.register({
-    id: FR_PROPERTIES_DIALOG_ID,
-    component: FloatingRangePropertiesDialog,
-  });
-  cleanupFns.push(() => context.ui.dialogs.unregister(FR_PROPERTIES_DIALOG_ID));
+  // 6. The ONE object pane (WP-C D-PANE / D-FORMAT): a Properties tab (rows,
+  //    columns, header strips -- the old Properties dialog, lifted) beside the
+  //    host's Format tab, whose provider maps the title text to a RENAME,
+  //    the title toggle to `showTitle` and every other leaf to the range's
+  //    container (lib/frObjectFormat.ts). The floatingRange kind's ONE WP-D
+  //    bindable-properties registration offers the bindable container fields,
+  //    and a binding change re-publishes the regions (a bound border width or
+  //    title size changes the derived frame).
+  cleanupFns.push(
+    registerObjectFormatProvider(
+      createFrObjectFormatProvider({
+        regionType: FLOATING_RANGE_REGION_TYPE,
+        getEntry: getFloatingRangeById,
+        update: (frId, patch) => applyFrPatch(frId, patch),
+        rename: async (frId, name) => {
+          await renameFr(frId, name);
+        },
+        republish: () => {
+          syncFloatingRangeRegions();
+          requestOverlayRedraw();
+        },
+      }),
+    ),
+  );
+  cleanupFns.push(
+    registerObjectPaneProvider(
+      createFrObjectPaneProvider(FLOATING_RANGE_REGION_TYPE, (frId) => getFloatingRangeById(frId)?.name ?? null),
+    ),
+  );
+  cleanupFns.push(
+    registerFrBindableProperties(FLOATING_RANGE_REGION_TYPE, (frId) => getFloatingRangeById(frId) !== null),
+  );
+  cleanupFns.push(installFrContainerResync(syncFloatingRangeRegions, requestOverlayRedraw));
 
   // 7. Provider seam (@api/floatingRangeService) — the door the script broker
   //    and other extensions use; it keeps store + regions + caches in step so

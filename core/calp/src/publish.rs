@@ -261,6 +261,9 @@ pub struct PublishResult {
     /// Floating ranges whose host AND backing sheet are both published
     /// (`floating_ranges.json`).
     pub floating_ranges_published: usize,
+    /// Object property bindings whose object travels (`bindings.json`,
+    /// [`published_object_bindings`]).
+    pub bindings_published: usize,
     /// Ribbon filters carried by the application (workbook-scoped, Wave A).
     pub ribbon_filters_published: usize,
     /// Saved pivot layouts carried by the application (workbook-scoped, Wave A).
@@ -410,9 +413,11 @@ fn sheet_by_name<'a>(workbook: &'a Workbook, name: &str) -> Option<&'a persisten
 /// A chart's name for a warning: the ChartDefinition envelope's `name`, else
 /// its id.
 fn chart_display_name(chart: &SavedChart) -> String {
-    serde_json::from_str::<serde_json::Value>(&chart.spec_json)
-        .ok()
-        .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(str::to_string))
+    chart
+        .spec
+        .get("name")
+        .and_then(|n| n.as_str())
+        .map(str::to_string)
         .filter(|n| !n.trim().is_empty())
         .unwrap_or_else(|| chart.id.to_string())
 }
@@ -511,7 +516,7 @@ pub fn chart_source_warnings_with(
                 chart_name, host_name
             )
         };
-        for source in chart_spec_sources(&chart.spec_json) {
+        for source in chart_spec_sources(&chart.spec) {
             // (the sheet the source reads, how the source names it)
             let (target, how) = match &source {
                 ChartSource::Sheet(ChartSourceSheet::Id(id)) if *id == UNRESOLVABLE_SHEET_ID => {
@@ -894,7 +899,8 @@ pub fn unshipped_macro_links(
 
 /// Whether the request carries any Wave A/B artifact the publish would
 /// actually write: slicers / timeline slicers / floating ranges / opted-in
-/// comments / scenarios / outlines on the published sheets, a canvas sheet,
+/// comments / scenarios / outlines on the published sheets, object property
+/// bindings of published objects, a canvas sheet,
 /// ribbon filters / saved pivot layouts / extension data
 /// (workbook-scoped), or a non-default document theme. Apps that predate
 /// these artifacts pull such an application "successfully" while silently dropping
@@ -980,6 +986,12 @@ pub fn carries_wave_content(request: &PublishRequest) -> bool {
             .timeline_slicers
             .iter()
             .any(|t| timeline_slicer_travels(t, wb, |id| published_sheet_ids.contains(id)))
+        // An OBJECT PROPERTY BINDING the publish WRITES. An older app drops
+        // `bindings.json` and shows each bound property's frozen literal -- a
+        // KPI goal, a title, a caption that LOOKS live and never moves again,
+        // the lie class `.cala` v10 refuses for the same reason. Asked through
+        // the writer's own predicate.
+        || !published_object_bindings(wb, &request.sheet_indices).is_empty()
 }
 
 /// Whether a floating range travels with a publish: its host AND its backing
@@ -1017,6 +1029,79 @@ pub fn timeline_slicer_travels(
             .pivot_definitions
             .iter()
             .any(|p| p.id == timeline.source_id)
+}
+
+/// The object property BINDINGS a publish of `sheet_indices` writes
+/// (`bindings.json`), sorted by (object, path): every row whose OBJECT the same
+/// publish carries, decided by the predicate each object's own writer uses --
+///
+/// - `chart`, `slicer`: on a published sheet (`charts.json`, `slicers.json`);
+/// - `control`: a control (by its `uid`) in a `controls.json` entry of a
+///   published sheet;
+/// - `timelineSlicer`: [`timeline_slicer_travels`];
+/// - `floatingRange`: [`floating_range_travels`];
+/// - `pivot`: in the carrier's `pivot_definitions` (already pruned to the
+///   selection by the host, and written whole);
+/// - `canvasPage`: a published sheet that IS a canvas.
+///
+/// A row of an unknown kind, or of an object that stays home, does not travel.
+/// ONE rule for the writer, the minimum-app-version stamp
+/// ([`carries_wave_content`]) and the host's transparency report, for the
+/// reason [`floating_range_travels`] gives.
+pub fn published_object_bindings(
+    workbook: &Workbook,
+    sheet_indices: &[usize],
+) -> Vec<persistence::SavedObjectBinding> {
+    if workbook.object_bindings.is_empty() {
+        return Vec::new();
+    }
+    let published: std::collections::HashSet<SheetId> = sheet_indices
+        .iter()
+        .filter_map(|&idx| workbook.sheets.get(idx).map(|s| s.id))
+        .collect();
+    let is_published = |id: &SheetId| published.contains(id);
+    let mut travels: std::collections::HashSet<persistence::SavedObjectRef> =
+        std::collections::HashSet::new();
+    let mut carry = |kind: &str, id: String| {
+        travels.insert(persistence::SavedObjectRef { kind: kind.to_string(), id });
+    };
+    for chart in workbook.charts.iter().filter(|c| is_published(&c.sheet_id)) {
+        carry("chart", chart.id.to_string());
+    }
+    for entry in workbook.controls.iter().filter(|c| is_published(&c.sheet_id)) {
+        for control in entry.controls.as_array().into_iter().flatten() {
+            if let Some(uid) = control.get("uid").and_then(|u| u.as_str()).filter(|u| !u.is_empty()) {
+                carry("control", uid.to_string());
+            }
+        }
+    }
+    for slicer in workbook.slicers.iter().filter(|s| is_published(&s.sheet_id)) {
+        carry("slicer", slicer.id.to_string());
+    }
+    for timeline in workbook
+        .timeline_slicers
+        .iter()
+        .filter(|t| timeline_slicer_travels(t, workbook, is_published))
+    {
+        carry("timelineSlicer", timeline.id.to_string());
+    }
+    for pivot in &workbook.pivot_definitions {
+        carry("pivot", pivot.id.to_string());
+    }
+    for fr in workbook.floating_ranges.iter().filter(|fr| floating_range_travels(fr, is_published)) {
+        carry("floatingRange", fr.id.to_string());
+    }
+    for sheet in workbook.sheets.iter().filter(|s| is_published(&s.id) && s.kind.is_canvas()) {
+        carry("canvasPage", sheet.id.to_string());
+    }
+    let mut rows: Vec<persistence::SavedObjectBinding> = workbook
+        .object_bindings
+        .iter()
+        .filter(|b| travels.contains(&b.object))
+        .cloned()
+        .collect();
+    rows.sort_by(|a, b| (&a.object, &a.path).cmp(&(&b.object, &b.path)));
+    rows
 }
 
 /// Publish selected sheets from a workbook to a local workspace.
@@ -1498,7 +1583,7 @@ pub fn publish(
     // frontend store never re-saved) would otherwise be stamped on the
     // subscriber with whatever sheet sits at that index THERE -- and read the
     // wrong sheet in silence. Here rather than only in the host's assembly so
-    // every publish route gets it; a spec with nothing to stamp keeps its bytes.
+    // every publish route gets it; a spec with nothing to stamp is unchanged.
     let workbook_sheet_ids: Vec<SheetId> =
         request.workbook.sheets.iter().map(|s| s.id).collect();
     let published_charts: Vec<SavedChart> = request
@@ -1508,11 +1593,7 @@ pub fn publish(
         .filter(|c| published_sheet_ids.contains(&c.sheet_id))
         .map(|c| {
             let mut chart = c.clone();
-            if let Some(stamped) =
-                crate::chart_refs::stamp_chart_spec_sheet_ids(&c.spec_json, &workbook_sheet_ids)
-            {
-                chart.spec_json = stamped;
-            }
+            crate::chart_refs::stamp_chart_spec_sheet_ids(&mut chart.spec, &workbook_sheet_ids);
             chart
         })
         .collect();
@@ -1615,6 +1696,14 @@ pub fn publish(
         let mut referenced: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for entry in &published_controls {
             calcula_format::media::visit_media_refs(&entry.controls, &mut |hash| {
+                referenced.insert(hash.to_string());
+            });
+        }
+        // A bound picture's `src` formula names the handles it may show (WP-D,
+        // BUG-0474) -- the SAME walker the `.cala` save sweep keeps them by,
+        // over exactly the bindings this application carries.
+        for binding in published_object_bindings(request.workbook, &request.sheet_indices) {
+            calcula_format::media::visit_media_refs_in_text(&binding.formula, &mut |hash| {
                 referenced.insert(hash.to_string());
             });
         }
@@ -1814,6 +1903,26 @@ pub fn publish(
             pkg, ver,
             "floating_ranges.json",
             serde_json::to_string_pretty(&published_floating_ranges)?.as_bytes(),
+        )?;
+    }
+
+    // Write OBJECT PROPERTY BINDINGS (WP-D): a chart title, a KPI goal, a
+    // button caption... that follows a formula is a row of `bindings.json`, an
+    // overlay on the object's own literal. A row travels exactly when its
+    // OBJECT travels -- asked through the writers' own predicates
+    // (`published_object_bindings`) -- so a subscriber never receives a binding
+    // for an object the application does not carry, and never receives an
+    // object whose bound property arrives frozen at the publisher's last value.
+    // Ids stay APPLICATION ids (a canvas page's id is its sheet id, which the
+    // host remaps on pull, like a chart's). Sorted by (object, path), so
+    // identical content is identical bytes. Written only when non-empty, and
+    // checksummed and signed like every artifact.
+    let published_bindings = published_object_bindings(request.workbook, &request.sheet_indices);
+    if !published_bindings.is_empty() {
+        registry.write_artifact(
+            pkg, ver,
+            "bindings.json",
+            serde_json::to_string_pretty(&published_bindings)?.as_bytes(),
         )?;
     }
 
@@ -2071,6 +2180,7 @@ pub fn publish(
         slicers_published: published_slicers.len(),
         timeline_slicers_published: published_timeline_slicers.len(),
         floating_ranges_published: published_floating_ranges.len(),
+        bindings_published: published_bindings.len(),
         ribbon_filters_published: published_ribbon_filters.len(),
         pivot_layouts_published: request.workbook.pivot_layouts.len(),
         extension_data_published: request.workbook.extension_data.len(),
@@ -3053,6 +3163,7 @@ mod tests {
             show_title: true,
             show_column_headers: false,
             show_row_headers: true,
+            container: None,
         }
     }
 
@@ -3086,6 +3197,7 @@ mod tests {
             show_scrollbar: false,
             style_preset: "TimelineStyleLight1".to_string(),
             connected_pivot_ids: Vec::new(),
+            container: None,
         }
     }
 
@@ -3127,6 +3239,7 @@ mod tests {
             connected_sources: Vec::new(),
             filter_level: 1,
             data_source_id: None,
+            container: None,
         }
     }
 
@@ -3153,14 +3266,13 @@ mod tests {
         }
     }
 
-    /// A chart whose `spec_json` is the ChartDefinition ENVELOPE, as the
+    /// A chart whose `spec` is the ChartDefinition ENVELOPE, as the
     /// frontend store writes it.
     fn chart_with(sheet_id: SheetId, name: &str, spec: serde_json::Value) -> SavedChart {
         SavedChart {
             id: new_entity(),
             sheet_id,
-            spec_json: serde_json::json!({ "chartId": 1, "name": name, "sheetIndex": 0, "spec": spec })
-                .to_string(),
+            spec: serde_json::json!({ "chartId": 1, "name": name, "sheetIndex": 0, "spec": spec }),
         }
     }
 
@@ -3278,7 +3390,7 @@ mod tests {
         let plain = SavedChart {
             id: new_entity(),
             sheet_id: dash,
-            spec_json: "{\"kind\":\"bar\"}".to_string(),
+            spec: serde_json::json!({ "kind": "bar" }),
         };
         wb.charts = vec![indexed.clone(), plain.clone()];
 
@@ -3290,7 +3402,7 @@ mod tests {
         let bytes = reg.read_artifact("stamped", "1.0.0", "charts.json").unwrap().unwrap();
         let shipped: Vec<SavedChart> = serde_json::from_slice(&bytes).unwrap();
         let shipped_indexed = shipped.iter().find(|c| c.id == indexed.id).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&shipped_indexed.spec_json).unwrap();
+        let v = &shipped_indexed.spec;
         assert_eq!(
             v["spec"]["data"]["sheetId"],
             data.to_string(),
@@ -3298,7 +3410,7 @@ mod tests {
         );
         assert_eq!(v["spec"]["data"]["sheetIndex"], 1);
         let shipped_plain = shipped.iter().find(|c| c.id == plain.id).unwrap();
-        assert_eq!(shipped_plain.spec_json, plain.spec_json, "nothing to stamp keeps its bytes");
+        assert_eq!(shipped_plain.spec, plain.spec, "nothing to stamp is left unchanged");
     }
 
     #[test]
@@ -3519,8 +3631,7 @@ mod tests {
         assert_eq!(result.warnings.len(), 2, "{:#?}", result.warnings);
         let bytes = reg.read_artifact("lost", "1.0.0", "charts.json").unwrap().unwrap();
         let shipped: Vec<SavedChart> = serde_json::from_slice(&bytes).unwrap();
-        let v: serde_json::Value =
-            serde_json::from_str(&shipped.iter().find(|c| c.id == lost.id).unwrap().spec_json).unwrap();
+        let v = &shipped.iter().find(|c| c.id == lost.id).unwrap().spec;
         assert_eq!(
             v["spec"]["data"]["sheetId"],
             crate::chart_refs::UNRESOLVABLE_SHEET_ID.to_string(),
@@ -3695,5 +3806,177 @@ mod tests {
         assert_eq!(v["sheets"][0]["kind"], "canvas");
         assert!(v["sheets"][1].get("kind").is_none(), "{}", v["sheets"][1]);
         assert!(ver.sheets[0].extra.is_empty(), "kind must not spill into `extra`");
+    }
+
+    // ---------------------------------------------------------------------
+    // Object property bindings (WP-D S6): `bindings.json`
+    // ---------------------------------------------------------------------
+
+    fn binding(kind: &str, id: &str, path: &str, formula: &str) -> persistence::SavedObjectBinding {
+        persistence::SavedObjectBinding {
+            object: persistence::SavedObjectRef { kind: kind.to_string(), id: id.to_string() },
+            path: path.to_string(),
+            formula: formula.to_string(),
+            model: None,
+        }
+    }
+
+    fn control_entry(sheet_id: SheetId, uid: &str) -> persistence::SavedSheetControls {
+        persistence::SavedSheetControls {
+            sheet_id,
+            controls: serde_json::json!([{
+                "row": 1,
+                "col": 1,
+                "controlType": "button",
+                "uid": uid,
+                "properties": { "text": { "valueType": "static", "value": "" } }
+            }]),
+        }
+    }
+
+    /// "Dashboard" (0, a CANVAS) and "Data" (1, a worksheet), with one bound
+    /// object of every kind on each side of the publish boundary.
+    fn bound_workbook() -> (Workbook, Vec<persistence::SavedObjectBinding>) {
+        let mut wb = make_test_workbook();
+        wb.sheets[0].kind = persistence::SheetKind::new_canvas();
+        let mut float = persistence::Sheet::new("Float".to_string());
+        float.visibility = "object".to_string();
+        wb.sheets.push(float); // 2
+        let (dash, data, backing) = (wb.sheets[0].id, wb.sheets[1].id, wb.sheets[2].id);
+        let chart_home = chart_with(dash, "Home", serde_json::json!({}));
+        let chart_away = chart_with(data, "Away", serde_json::json!({}));
+        wb.charts = vec![chart_home.clone(), chart_away.clone()];
+        wb.controls = vec![control_entry(dash, "uid-home"), control_entry(data, "uid-away")];
+        let fr = floating_range(dash, backing);
+        wb.floating_ranges = vec![fr.clone()];
+        let pivot = pivot_on("Dashboard", "P");
+        wb.pivot_definitions = vec![pivot.clone()];
+        let carried = vec![
+            binding("canvasPage", &dash.to_string(), "/background", "=Data!A1"),
+            binding("chart", &chart_home.id.to_string(), "/spec/title", "=Data!A1"),
+            binding("control", "uid-home", "/properties/text", "=Data!B2"),
+            binding("floatingRange", &fr.id.to_string(), "/x", "=Data!C3"),
+            binding("pivot", &pivot.id.to_string(), "/canvasFrame/x", "=Data!D4"),
+        ];
+        let mut rows = carried.clone();
+        rows.extend([
+            binding("chart", &chart_away.id.to_string(), "/spec/title", "=Data!A1"),
+            binding("control", "uid-away", "/properties/text", "=Data!B2"),
+            // A worksheet is not a canvas page, even when it is published.
+            binding("canvasPage", &data.to_string(), "/background", "=Data!A1"),
+            // An object nothing in the workbook is.
+            binding("chart", &new_entity().to_string(), "/spec/title", "=Data!A1"),
+            binding("aKindFromTheFuture", "x", "/y", "=1"),
+        ]);
+        rows.reverse(); // the writer sorts; the input order must not matter
+        wb.object_bindings = rows;
+        let mut expected = carried;
+        expected.sort_by(|a, b| (&a.object, &a.path).cmp(&(&b.object, &b.path)));
+        (wb, expected)
+    }
+
+    /// A binding travels exactly when its OBJECT travels: a chart, a control
+    /// and a canvas page of the published sheet, the floating range whose
+    /// host AND backing sheet travel, and a carried pivot -- never the
+    /// binding of an object that stays home, a worksheet "page", an orphan or
+    /// a kind this build does not know. Signed like every artifact.
+    ///
+    /// SABOTAGE: return `workbook.object_bindings.clone()` from
+    /// `published_object_bindings` -- the row set assertion fails.
+    #[test]
+    fn publish_writes_bindings_only_for_published_objects() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+        let (wb, expected) = bound_workbook();
+
+        let result = publish(&reg, &object_request(&wb, "bound", vec![0, 2]), prof.path()).unwrap();
+        assert_eq!(result.bindings_published, expected.len());
+
+        let ver = reg.get_version_manifest("bound", "1.0.0").unwrap();
+        assert!(
+            ver.artifact_checksums.contains_key("bindings.json"),
+            "bindings.json must be in the SIGNED checksum map"
+        );
+        let bytes = reg.read_artifact("bound", "1.0.0", "bindings.json").unwrap().unwrap();
+        let rows: Vec<persistence::SavedObjectBinding> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(rows, expected, "exactly the published objects' bindings, sorted");
+        assert_eq!(published_object_bindings(&wb, &[0, 2]), expected, "the writer and its predicate agree");
+    }
+
+    /// BUG-0474: the handles a PUBLISHED binding's formula names ship as media
+    /// artifacts (the subscriber's bound picture can show them); the handle of
+    /// a binding that stays home does not.
+    ///
+    /// SABOTAGE: delete the bindings loop of the media block in `publish` --
+    /// the first assertion fails.
+    #[test]
+    fn a_published_bindings_media_handles_ship() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+        let mut wb = make_test_workbook();
+        let home = chart_with(wb.sheets[0].id, "Home", serde_json::json!({}));
+        let away = chart_with(wb.sheets[1].id, "Away", serde_json::json!({}));
+        let (shipped, withheld) = ("4".repeat(64), "5".repeat(64));
+        wb.object_bindings = vec![
+            binding("chart", &home.id.to_string(), "/spec/title", &format!("=IF(Data!A1>0,\"media:{shipped}\",\"\")")),
+            binding("chart", &away.id.to_string(), "/spec/title", &format!("=\"media:{withheld}\"")),
+        ];
+        wb.charts = vec![home, away];
+        wb.media.insert(shipped.clone(), vec![1, 2, 3]);
+        wb.media.insert(withheld.clone(), vec![4, 5, 6]);
+
+        publish(&reg, &object_request(&wb, "pics", vec![0]), prof.path()).unwrap();
+        assert_eq!(
+            reg.read_artifact("pics", "1.0.0", &format!("media/{shipped}")).unwrap(),
+            Some(vec![1, 2, 3]),
+            "the bound handle of a published object travels"
+        );
+        assert!(
+            reg.read_artifact("pics", "1.0.0", &format!("media/{withheld}")).unwrap().is_none(),
+            "a binding that stays home ships nothing"
+        );
+    }
+
+    /// No binding of a published object -> no artifact at all (a cells-only
+    /// application stays byte-identical to one published before bindings).
+    #[test]
+    fn a_publish_without_travelling_bindings_writes_no_bindings_artifact() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+        // Every object of the bound workbook, with its bindings removed.
+        let (mut plain, _) = bound_workbook();
+        plain.object_bindings.clear();
+        let result = publish(&reg, &object_request(&plain, "plain", vec![0, 1, 2]), prof.path()).unwrap();
+        assert_eq!(result.bindings_published, 0);
+        assert!(reg.read_artifact("plain", "1.0.0", "bindings.json").unwrap().is_none());
+
+        // And a workbook whose bindings all stay home writes none either.
+        let mut home = make_test_workbook();
+        let away = chart_with(home.sheets[1].id, "Away", serde_json::json!({}));
+        home.object_bindings = vec![binding("chart", &away.id.to_string(), "/spec/title", "=Data!A1")];
+        home.charts = vec![away];
+        let result = publish(&reg, &object_request(&home, "home", vec![0]), prof.path()).unwrap();
+        assert_eq!(result.bindings_published, 0);
+        assert!(reg.read_artifact("home", "1.0.0", "bindings.json").unwrap().is_none());
+    }
+
+    /// The minimum-app-version stamp follows the bindings WRITER: an older
+    /// app would drop `bindings.json` and show every bound property's frozen
+    /// literal as if it were live, so a publish that writes one is refused to
+    /// it; a publish whose bindings all stay home is not.
+    ///
+    /// SABOTAGE: delete the bindings clause of `carries_wave_content` -- the
+    /// first assertion fails.
+    #[test]
+    fn the_version_stamp_follows_what_the_bindings_writer_writes() {
+        let mut wb = make_test_workbook(); // two worksheets: nothing else stamps
+        let home = chart_with(wb.sheets[0].id, "Home", serde_json::json!({}));
+        wb.object_bindings = vec![binding("chart", &home.id.to_string(), "/spec/title", "=Data!A1")];
+        wb.charts = vec![home];
+        assert!(carries_wave_content(&object_request(&wb, "a", vec![0])), "a written binding stamps");
+        assert!(!carries_wave_content(&object_request(&wb, "b", vec![1])), "a binding that stays home does not");
     }
 }

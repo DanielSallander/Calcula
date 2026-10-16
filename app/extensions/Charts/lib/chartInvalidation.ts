@@ -2,9 +2,16 @@
 // PURPOSE: Decide whether a chart's read-set intersects a set of changed cells
 //          (C5 S7d scoped invalidation). Conservative SUPERSET: any chart whose
 //          dependency set can't be cheaply bounded (non-coord data range, lookup
-//          transform, or a =cell-ref title/axis/series) always intersects, so a
-//          chart is never wrongly skipped — only safely skipped when provably
-//          clear. Over-invalidation is always safe; under-invalidation is not.
+//          transform, concat) always intersects, so a chart is never wrongly
+//          skipped — only safely skipped when provably clear.
+//          Over-invalidation is always safe; under-invalidation is not.
+//
+//          BOUND PROPERTIES ARE NOT HERE. A title, axis title or series name
+//          that follows a cell is a BINDING (@api/objectBindings): Rust tracks
+//          the cells it reads and the seam announces the chart when its value
+//          changes (lib/chartBindingsRegistration.ts repaints exactly that
+//          chart). A literal that starts with "=" is text and reads nothing, so
+//          it no longer makes a chart re-read on every edit anywhere.
 
 import type { ChartSpec, DataRangeRef } from "../types";
 import { isDataRangeRef } from "../types";
@@ -33,10 +40,6 @@ function hasUnboundedDeps(spec: ChartSpec): boolean {
   if (!isDataRangeRef(spec.data)) return true;
   // A lookup transform reads a secondary range outside the chart's data.
   if (spec.transform?.some((t) => t.type === "lookup")) return true;
-  // A cell-reference (=A1) in a string field is read by resolveSpecReferences.
-  const isRef = (v: string | null | undefined): boolean => typeof v === "string" && v.startsWith("=");
-  if (isRef(spec.title) || isRef(spec.xAxis?.title) || isRef(spec.yAxis?.title)) return true;
-  if (spec.series?.some((s) => isRef(s.name))) return true;
   return false;
 }
 

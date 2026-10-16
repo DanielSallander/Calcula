@@ -5,6 +5,7 @@ import { describe, it, expect } from "vitest";
 import { applyTransforms } from "../chartTransforms";
 import { computeTrendline } from "../trendlineComputation";
 import { resolveChartTheme, DEFAULT_CHART_THEME } from "../../rendering/chartTheme";
+import { chartContainerDefaults } from "../chartObjectFormat";
 import { computeBarRects } from "../../rendering/barChartPainter";
 import { computePieSliceArcs } from "../../rendering/pieChartPainter";
 import type { ParsedChartData, TransformSpec, ChartSpec, ChartLayout } from "../../types";
@@ -251,6 +252,19 @@ describe("theme resolution is deterministic", () => {
     }
   });
 
+  it("the outer background is the CONTAINER's, never a theme key (D-FORMAT)", () => {
+    // A legacy theme.background is ignored: one spelling for the fact.
+    const legacy = resolveChartTheme({ theme: { background: "#111111" } as never });
+    expect(legacy.background).toBe(DEFAULT_CHART_THEME.background);
+    // The resolved container's colour is the derived theme background...
+    const c = chartContainerDefaults(null);
+    const dark = { ...c, background: { ...c.background, color: "#111111" } };
+    expect(resolveChartTheme(undefined, dark).background).toBe("#111111");
+    // ...and a hidden container background reads as the default white.
+    const hidden = { ...c, background: { ...c.background, show: false, color: "#111111" } };
+    expect(resolveChartTheme(undefined, hidden).background).toBe(DEFAULT_CHART_THEME.background);
+  });
+
   it("resolveChartTheme with overrides is deterministic", () => {
     const config = { theme: { background: "#000000", titleFontSize: 20 } };
     const first = resolveChartTheme(config);
@@ -260,9 +274,9 @@ describe("theme resolution is deterministic", () => {
   });
 
   it("overrides merge correctly with defaults", () => {
-    const config = { theme: { background: "#111" } };
+    const config = { theme: { titleColor: "#111" } };
     const resolved = resolveChartTheme(config);
-    expect(resolved.background).toBe("#111");
+    expect(resolved.titleColor).toBe("#111");
     // All other fields should match defaults
     expect(resolved.plotBackground).toBe(DEFAULT_CHART_THEME.plotBackground);
     expect(resolved.gridLineColor).toBe(DEFAULT_CHART_THEME.gridLineColor);

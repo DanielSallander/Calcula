@@ -1088,6 +1088,7 @@ const NOT_DOCUMENT_REPLACING: &[(&str, &str)] = &[
     ("create_report", "adds a report"),
     ("refresh_report", "re-materializes one report"),
     ("script_collaboration", "the sandboxed gateway for the `.calp` script API; every route it reaches is one of the commands already classified here"),
+    ("object_bindings", "the object-property binding command (WP-D): edits ONE binding row or one property's literal through its family's own core, or re-evaluates; holds BiState only to read the models' measure lists and PivotState only to locate a canvas pivot. The document stays"),
 ];
 
 /// NOTHING BECOMES A THIRD DOCUMENT-REPLACING PATH WITHOUT A DECISION.

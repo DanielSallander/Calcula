@@ -12,7 +12,6 @@ import { strokeDatumBorderRect } from "./barChartPainter";
 import { createLinearScale, createBandScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
-  drawChartBackground,
   drawPlotBackground,
   drawHorizontalGridLines,
   drawCartesianAxes,
@@ -83,7 +82,6 @@ export function paintWaterfallChart(
   );
 
   // 1. Background
-  drawChartBackground(ctx, layout, theme);
 
   // 2. Plot area background
   drawPlotBackground(ctx, plotArea, theme);
@@ -158,9 +156,7 @@ export function paintWaterfallChart(
   ctx.restore();
 
   // 6. Title
-  if (spec.title) {
-    drawTitle(ctx, spec.title, layout, theme);
-  }
+  drawTitle(ctx, spec.title, layout, theme);
 
   // 7. Legend (show increase/decrease/total)
   if (spec.legend.visible) {

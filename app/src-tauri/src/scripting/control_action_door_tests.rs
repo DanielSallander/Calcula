@@ -98,7 +98,7 @@ fn held_button(code: &str, application: &str) -> ControlMetadata {
     properties.insert(ON_SELECT_PROPERTY.to_string(), prop(""));
     properties.insert(HELD_ON_SELECT_PROPERTY.to_string(), prop(code));
     properties.insert(HELD_FROM_PROPERTY.to_string(), prop(&stamp_of(application, &[])));
-    ControlMetadata { control_type: "button".into(), properties }
+    ControlMetadata { control_type: "button".into(), uid: String::new(), properties }
 }
 
 /// A button control with inline code of the user's own.
@@ -106,7 +106,7 @@ fn own_button(code: &str) -> ControlMetadata {
     let mut properties = HashMap::new();
     properties.insert("text".to_string(), prop("Mine"));
     properties.insert(ON_SELECT_PROPERTY.to_string(), prop(code));
-    ControlMetadata { control_type: "button".into(), properties }
+    ControlMetadata { control_type: "button".into(), uid: String::new(), properties }
 }
 
 impl Book {

@@ -82,6 +82,7 @@ surfaces (see §9; since done).
 | `bi.query` | Structured, model-scoped BI queries for scripts (measures/groupBy/filters via the cached engine path) | No raw SQL, no DB-wide access; the last deferred Wave 2 capability |
 | `bi.sql` | Higher-trust **raw read-only SQL** as a separate capability | Engine connector-by-index + Rust read-only re-validation |
 | Command results | `CommandRegistry.execute` returns the handler's value; surfaced through the worker proxy + `executeCommand` | Worker command results reach the caller |
+| Bound properties (2026-10-15, after Wave 3) | Object properties that follow a formula; a script handle with three setState aspects, the restricted clamp and `bi.query` for measures | Evaluated, never executed; listed, not inventoried as code; the clamp is a TypeScript gate with a Rust defence-in-depth re-check (§12) |
 
 **Capability vocabulary as Wave 3 shipped it (2026-06-14):** `net.fetch`,
 `bi.query`, `bi.sql`, `storage`, `ui.html`, `formula.udf`. All have real
@@ -1361,3 +1362,80 @@ sabotage-proven: the button-door caller census (`explicitMacroRun.test.ts`);
 `objectScriptRunner.test.ts` (b3) and the others-undone sentence;
 `buttonCellObjectScriptMacro.test.ts` / `controlActionDoor.test.ts` (the
 runner's own sentence said once; a repaint after every button run).
+
+## 12. Bound properties: evaluated, never executed (WP-D, 2026-10-15)
+
+An object property may now follow a formula (a BINDING, `canvas-sheets.md` §15): a chart title, a
+button caption, a slicer header, a page background. This section is what that means for the security
+model.
+
+### 12.1 Not code
+
+A binding is a cell-language formula over a JSON Pointer of one object. Rust parses, analyses, normalises
+and EVALUATES it (`app/src-tauri/src/object_bindings/`), under the transient evaluation budget, exactly as
+it evaluates a cell; it cannot run a macro, call a script, reach the network or write anything (a
+resolved value is transient: it never writes the literal, never dirties, never enters undo). So a binding
+is not in `codeInventory`, does not ask the Script Door, and needs no consent when it arrives in a
+`.calp` -- the same standing as a formula in a cell. What keeps it TRANSPARENT is that every binding is
+listed: Formulas > Bound Properties... (every row, its formula and value), the AI's `get_sheet_summary`
+("Canvas objects", "Bound properties (worksheets)") and `list_object_properties`. Code slots are never
+bindable: `onSelect`, macros and held code, a button's action wiring, position and identity keys are
+refused by name at Rust's door (`catalog::is_never_bindable_control_key`), in the script validator and in
+the UI; the migration of old formula-typed control properties carries every code slot byte-identical, and
+a binding-only push is not a code change (`core/calp/src/code_summary.rs`).
+
+### 12.2 The script doors
+
+Scripts reach properties through a handle (`context.self`, restricted, the script's own object;
+`api.object(kind, id)`, unlocked, any object) over three setState aspects, each with its OWN validator row
+before `vSetState`'s permissive tail (`binding.set`, `binding.clear`, `property.set`;
+`app/src/api/scriptHost/validators.ts`, pinned by `setStateAspectRows.test.ts`, whose sabotage is a path
+with `onSelect`): pointer syntax, a catalog path for the real kind, never-bindable keys refused, a formula
+starting with `=` and at most 8,192 characters, options limited to `{ model }`. `property.set` is never
+laxer than the key-based door for the same fact: a control key goes through `checkShapeSetProperty`, so
+the media rule holds (`src` takes a `media:{sha256}` the document already holds, never bytes; a bound
+media slot is re-checked against `state.media` on every evaluation), and `binding.set` refuses an inline
+`data:` URI in a formula aimed at a media slot.
+
+**The executor is THE gate** (`host.ts`, `requireExecutorCapability` and the clamp beside it):
+
+- `binding.set` first asks Rust to ANALYSE the formula (with the model the Set would use). If it reads a
+  `[Measure]` or a CUBE function it reaches the BI engine, so it requires `bi.query`: the declared
+  ceiling, then the grant, then the just-in-time prompt for a local script -- the same order and wording
+  as `decidePolicy`. Declared but not granted is `CapabilityRequired`; undeclared is `PermissionDenied`.
+- A RESTRICTED script may bind only to cells on the sheet in front of the user: no other sheet, no
+  defined name, no table reference, nothing indirect (INDIRECT, OFFSET over a computed start,
+  GETPIVOTDATA, GET.CONTROLVALUE). The refusal is `RESTRICTED_BINDING_CLAMP_MESSAGE`, word for word
+  Rust's.
+- The call carries `source { kind: "script", scriptId, unlocked }` to Rust.
+
+**Rust re-checks the clamp only as DEFENCE IN DEPTH.** It applies the same rule when a call is labelled
+`Script { unlocked: false }` (`object_bindings/mod.rs`), which catches a host executor that forgot the
+clamp but labelled the call honestly. The label comes from the RENDERER, which may be compromised (the
+reason the direction of `interpreterReachDrift` is Rust -> TypeScript): a caller that omits the source or
+sends `{ kind: "user" }` skips the re-check and the audit row. So the clamp is enforced in TypeScript only,
+and it must not be described as Rust-enforced until the tier comes from a Rust-held authority (open-items
+§2.ak, `#### WP-D bindings`). The object's OWN gates are Rust's, whoever calls: protection ("edit objects")
+and Lock Objects refuse a binding exactly where they refuse the literal (`literal::check_literal_gates`,
+pinned by `a_binding_is_never_a_laxer_door_than_its_literal`).
+
+What a restricted script can READ through a binding is no wider than before: it may read the resolved
+value of a binding the USER set on its own object, as it could read a formula-typed control property
+through `resolve_control_properties` before.
+
+### 12.3 Audit
+
+Every script or AI edit of a binding or a literal through these doors is one audit row
+(`object_bindings/audit.rs`): a script's as `ScriptExecuted` with surface `objectScript`, the script id,
+`unlocked`, the op, the object, the path, the formula and `ok` / the refusal sentence (a refused attempt
+is recorded too); an AI tool's through `record_mcp_tool_action` (surface `mcp`). A person's own edit in
+the Properties pane or the Bound Properties view is an ordinary edit with an undo step and no audit row.
+The AI tools `set_object_property` and `set_object_binding` are Mutate tier; `list_object_properties` is
+read-only. CUBE functions in a binding are prefetched without a script id, so they write no capability
+row -- the workbook evaluates them, as it would in a cell.
+
+**Tests:** `app/src/api/scriptHost/__tests__/setStateAspectRows.test.ts`, `scriptObjectHandleDoor.test.ts`,
+`mediaHandles.test.ts` (the `src` binding cases); `app/src-tauri/src/object_bindings/command_tests.rs`
+(the laxer-door test, the restricted re-check, the audit rows) and `catalog_tests.rs` (never-bindable
+keys); `app/src-tauri/src/mcp/bindings_tests.rs` (one undo step and one audit row per AI edit, refused ones included; the tiers in `mcp/objects.rs`'s `required_tier` tests);
+`app/src/api/__tests__/interpreterReachDrift.test.ts` unchanged (the QuickJS realm gets nothing).

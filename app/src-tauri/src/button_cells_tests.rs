@@ -1124,14 +1124,14 @@ fn audit_button_refusal_reads_a_controls_application_from_storage() {
         let mut held = HashMap::new();
         held.insert(HELD_MACRO_REF_PROPERTY.to_string(), prop("macro-report"));
         held.insert(HELD_FROM_PROPERTY.to_string(), prop(&stamp.encode()));
-        controls.insert((0, 1, 1), ControlMetadata { control_type: "button".into(), properties: held });
+        controls.insert((0, 1, 1), ControlMetadata { control_type: "button".into(), uid: String::new(), properties: held });
         let mut unreadable = HashMap::new();
         unreadable.insert(HELD_MACRO_REF_PROPERTY.to_string(), prop("macro-report"));
         unreadable.insert(HELD_FROM_PROPERTY.to_string(), prop("{not json"));
-        controls.insert((0, 2, 2), ControlMetadata { control_type: "button".into(), properties: unreadable });
+        controls.insert((0, 2, 2), ControlMetadata { control_type: "button".into(), uid: String::new(), properties: unreadable });
         let mut own = HashMap::new();
         own.insert("macroRef".to_string(), prop("macro-mine"));
-        controls.insert((0, 3, 3), ControlMetadata { control_type: "button".into(), properties: own });
+        controls.insert((0, 3, 3), ControlMetadata { control_type: "button".into(), uid: String::new(), properties: own });
     }
     audit_button_refusal_core(&state, MacroLinkKind::Control, 0, 1, 1, "the macro \"Report\"", "refused").expect("a stamped control");
     audit_button_refusal_core(&state, MacroLinkKind::Control, 0, 2, 2, "the macro \"Report\"", "stampUnreadable")
@@ -1189,7 +1189,7 @@ fn a_click_refusal_is_recorded_on_the_buttons_own_sheet_not_the_active_one() {
             .controls
             .write(&test_seed_effect())
             .unwrap()
-            .insert((1, 4, 2), ControlMetadata { control_type: "button".into(), properties: held });
+            .insert((1, 4, 2), ControlMetadata { control_type: "button".into(), uid: String::new(), properties: held });
     }
     assert!(
         audit_button_refusal_core(&state, MacroLinkKind::Control, 0, 4, 2, "x", "refused").is_err(),

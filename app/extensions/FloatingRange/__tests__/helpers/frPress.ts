@@ -23,12 +23,23 @@
 //               the press only selects.
 //          The canvas-only noteObjectPress is not mirrored: these tests press on
 //          a worksheet, where Core skips it.
+//
+//          A REFERENCE PICK (D-PICK) is Core's: while a formula expects a
+//          reference Core asks `referenceAt` before any zone, inserts the
+//          reference itself and dispatches neither press event (pinned by
+//          overlayReferencePick.test.ts). `pressInCoreOrder` deliberately does
+//          NOT mirror that branch: a press driven through it during a pick is
+//          the old order, and what it proves is the range's SECOND line (its
+//          handlers refuse on the shared predicate). The HOVER does mirror it
+//          (`hoverCursorLikeCore`): the pointer is what a user sees.
 
 import {
   resolveFloatingZone,
   contentGestureCursorFor,
+  referenceAtPoint,
   type OverlayHitTestContext,
 } from "@api/gridOverlays";
+import { isFormulaReferencePickActive, getExternalFormulaTarget } from "@api/editing";
 
 /**
  * What Core made of a press:
@@ -111,9 +122,53 @@ export function clickInCoreOrder(
 }
 
 /**
- * The pointer Core shows over `ctx` (useMouseSelection's hover): a live
- * content gesture's held pointer, else the zone's (resolveFloatingZone).
+ * A CLICK during a reference pick, as Core plays it (D-PICK): Core asks the
+ * object's `referenceAt` (never the zone), dispatches neither press event, and
+ * at the release routes the picked cell -- for an object-space pick with an
+ * external editor expecting a reference (a floating grid's cell editor, its
+ * formula-bar view), `insertReference({ sheetName: <object name>, ... })`
+ * (core useSpreadsheetSelection `handleFloatingReferencePick`). 'inert' where
+ * `referenceAt` names nothing.
+ *
+ * Only that route is mirrored -- the one the floating grid's EDIT tests need.
+ * The grid editor's route and the sheet space are Core's own tests
+ * (floatingReferencePickRouting.test.tsx); asking this mirror for them throws
+ * rather than pretending.
+ */
+export function pickClickInCoreOrder(ctx: OverlayHitTestContext): "picked" | "inert" {
+  if (!isFormulaReferencePickActive()) throw new Error("pickClickInCoreOrder: no formula is picking a reference");
+  const pick = referenceAtPoint(ctx);
+  if (!pick) {
+    releaseLikeCore(ctx.canvasX, ctx.canvasY);
+    return "inert";
+  }
+  if (pick.space !== "object") throw new Error("pickClickInCoreOrder mirrors object-space picks only");
+  const target = getExternalFormulaTarget();
+  if (!target?.isExpectingReference()) {
+    throw new Error("pickClickInCoreOrder mirrors the external editor's route only");
+  }
+  // Core's pick session listens to the release in the CAPTURE phase, so the
+  // insertion lands before any family's own window mouseup hears it.
+  target.insertReference({
+    sheetName: pick.name,
+    startRow: pick.row,
+    startCol: pick.col,
+    endRow: pick.row,
+    endCol: pick.col,
+  });
+  releaseLikeCore(ctx.canvasX, ctx.canvasY);
+  return "picked";
+}
+
+/**
+ * The pointer Core shows over `ctx` (overlayMoveHandlers `checkOverlayBody`): a
+ * live content gesture's held pointer; else, during a reference pick, 'cell'
+ * where the object's `referenceAt` names a cell and 'default' where a press
+ * would be inert; else the zone's (resolveFloatingZone).
  */
 export function hoverCursorLikeCore(ctx: OverlayHitTestContext): string {
-  return contentGestureCursorFor(ctx.region.id) ?? resolveFloatingZone(ctx).cursor;
+  const held = contentGestureCursorFor(ctx.region.id);
+  if (held !== null) return held;
+  if (isFormulaReferencePickActive()) return referenceAtPoint(ctx) ? "cell" : "default";
+  return resolveFloatingZone(ctx).cursor;
 }

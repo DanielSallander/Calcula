@@ -76,6 +76,7 @@ fn slicer(name: &str, source_type: SlicerSourceType, cache: EntityId, connected:
             .into_iter()
             .map(|source_id| SlicerConnection { source_type, source_id })
             .collect(),
+            container: None,
     }
 }
 
@@ -100,6 +101,7 @@ fn timeline(name: &str, source: EntityId, connected: Vec<EntityId>) -> TimelineS
         show_scrollbar: true,
         style_preset: "TimelineStyleLight1".to_string(),
         connected_pivot_ids: connected,
+        container: None,
     }
 }
 

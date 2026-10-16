@@ -5,6 +5,7 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   registerFormulaReferenceInterceptor,
   checkFormulaReferenceInterceptors,
+  qualifyInterceptedCellRef,
   type FormulaReferenceInterceptorFn,
   type FormulaReferenceOverride,
 } from "../formulaReferenceInterceptors";
@@ -107,5 +108,30 @@ describe("checkFormulaReferenceInterceptors", () => {
     const result = await checkFormulaReferenceInterceptors(0, 0);
     expect(result).toEqual(override("OK"));
     consoleSpy.mockRestore();
+  });
+});
+
+// The Pivot interceptor's GETPIVOTDATA names the pivot's ANCHOR (its top-left
+// cell), not the picked cell (D-PICK, Excel parity), and its highlight is that
+// anchor -- so the token Core qualifies with the picked-on sheet is the anchor.
+describe("qualifyInterceptedCellRef with the anchor as the highlight", () => {
+  // A pick on E5 of a pivot anchored at D2 (row 1, col 3).
+  const text = 'GETPIVOTDATA("Sum of Sales",$D$2,"Region","North")';
+
+  it("qualifies the anchor token with the sheet the pick was made on", () => {
+    expect(qualifyInterceptedCellRef(text, 1, 3, "Canvas 1")).toBe(
+      `GETPIVOTDATA("Sum of Sales",'Canvas 1'!$D$2,"Region","North")`,
+    );
+    expect(qualifyInterceptedCellRef(text, 1, 3, "Pivots")).toBe('GETPIVOTDATA("Sum of Sales",Pivots!$D$2,"Region","North")');
+  });
+
+  it("the CLICKED cell is not in the text, so a highlight on it finds nothing (the caller would fall back)", () => {
+    expect(qualifyInterceptedCellRef(text, 4, 4, "Pivots")).toBeNull();
+  });
+
+  it("a canvas block-1 anchor (AMK1) is found as a token too", () => {
+    expect(qualifyInterceptedCellRef('GETPIVOTDATA("Sum of Sales",$AMK$1)', 0, 1024, "Canvas1")).toBe(
+      'GETPIVOTDATA("Sum of Sales",Canvas1!$AMK$1)',
+    );
   });
 });

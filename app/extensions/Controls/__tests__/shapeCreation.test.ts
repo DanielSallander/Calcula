@@ -25,6 +25,12 @@ import * as path from "path";
 import { getShapeCategories, getShapeDefinition } from "../Shape/shapeCatalog";
 import { SHAPE_PROPERTIES } from "../Shape/shapeProperties";
 import { makeFloatingControlId, parseFloatingControlId } from "../lib/floatingStore";
+import {
+  DEFAULT_SHAPE_RECIPE_PAINT,
+  TEXT_BOX_RECIPE_PAINT,
+  TEXT_BOX_SHAPE_TYPE,
+  shapeRecipePaint,
+} from "../Shape/shapeRecipe";
 
 const INDEX_SRC = fs.readFileSync(path.resolve(__dirname, "../index.ts"), "utf8");
 
@@ -385,5 +391,44 @@ describe("control id round trip", () => {
     for (const bad of ["", "control", "control-0-0", "control-0-0-0-0", "chart-1", "control-a-b-c", "pane-x"]) {
       expect(parseFloatingControlId(bad), bad).toBeNull();
     }
+  });
+});
+
+// ============================================================================
+// The TEXT BOX recipe (WP-C 2.10.2): an override of the paint / text keys only
+// ============================================================================
+
+describe("a text box is written with no fill, no outline and dark left-aligned text", () => {
+  const body = functionBody("createShapeControlAt");
+
+  it("the text box's paint keys: none / none / \"0\" / #252423 / left", () => {
+    expect(shapeRecipePaint(TEXT_BOX_SHAPE_TYPE)).toEqual({
+      fill: "none",
+      stroke: "none",
+      strokeWidth: "0",
+      textColor: "#252423",
+      textAlign: "left",
+    });
+    expect(getShapeDefinition(TEXT_BOX_SHAPE_TYPE), "the catalog has a textBox shape").not.toBeNull();
+  });
+
+  it("EVERY other shape type's recipe is byte-identical to the one it always had", () => {
+    const today = { fill: "#4472C4", stroke: "#2F528F", strokeWidth: "1", textColor: "#FFFFFF", textAlign: "center" };
+    expect(DEFAULT_SHAPE_RECIPE_PAINT).toEqual(today);
+    const ids = getShapeCategories().flatMap((c) => c.shapes).map((sh) => sh.id);
+    for (const id of ids) {
+      if (id === TEXT_BOX_SHAPE_TYPE) continue;
+      expect(shapeRecipePaint(id), id).toEqual(today);
+    }
+    expect(TEXT_BOX_RECIPE_PAINT).not.toEqual(today);
+  });
+
+  it("the ONE recipe reads its paint keys from shapeRecipePaint(shapeType) -- no colour spelled in it", () => {
+    expect(body).toContain("const paint = shapeRecipePaint(shapeType);");
+    for (const key of ["fill", "stroke", "strokeWidth", "textColor", "textAlign"]) {
+      expect(body, key).toContain(`${key}: { valueType: "static", value: paint.${key} }`);
+    }
+    expect(body).not.toContain("#4472C4");
+    expect(body).not.toContain("#2F528F");
   });
 });

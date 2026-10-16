@@ -130,27 +130,6 @@ exports[`mergeTheme > with undefined overrides returns base unchanged 1`] = `
 }
 `;
 
-exports[`resolveChartTheme > with background override 1`] = `
-{
-  "axisColor": "#999999",
-  "axisLabelColor": "#666666",
-  "axisTitleColor": "#444444",
-  "axisTitleFontSize": 11,
-  "background": "#000000",
-  "barBorderRadius": 2,
-  "barGap": 2,
-  "fontFamily": "'Segoe UI', system-ui, -apple-system, sans-serif",
-  "gridLineColor": "#e8e8e8",
-  "gridLineWidth": 1,
-  "labelFontSize": 10,
-  "legendFontSize": 10,
-  "legendTextColor": "#555555",
-  "plotBackground": "#fafafa",
-  "titleColor": "#333333",
-  "titleFontSize": 14,
-}
-`;
-
 exports[`resolveChartTheme > with empty theme override returns default theme 1`] = `
 {
   "axisColor": "#999999",
@@ -178,7 +157,7 @@ exports[`resolveChartTheme > with multiple overrides 1`] = `
   "axisLabelColor": "#666666",
   "axisTitleColor": "#444444",
   "axisTitleFontSize": 11,
-  "background": "#1a1a2e",
+  "background": "#ffffff",
   "barBorderRadius": 2,
   "barGap": 2,
   "fontFamily": "'Segoe UI', system-ui, -apple-system, sans-serif",

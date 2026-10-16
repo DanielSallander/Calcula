@@ -25,9 +25,13 @@ import {
   checkPivotLayoutAspect, PIVOT_LAYOUT_ASPECTS,
   vDialogMessage, vDialogPrompt, vDialogForm,
   vHtml, normalizeForSchemeScan,
+  checkShapeSetProperty, checkPropertySetAspect, SCRIPT_SHAPE_PROPERTY_KEYS, MAX_SHAPE_PROPERTY_CHARS,
 } from "../validators";
 import { decidePolicy, type PolicyIdentity } from "../brokerPolicy";
 import type { CapabilityId } from "../capabilityIds";
+import { CONTROL_CONTAINER_PROPERTY_KEYS, checkControlContainerValue } from "../../visualContainer";
+import * as nodeFs from "fs";
+import * as nodePath from "path";
 
 describe("vSetState chart spec pre-filter", () => {
   it("passes a well-formed chart.updateSpec patch", () => {
@@ -1161,5 +1165,157 @@ describe("render.setHtml: the validator verdict is the whole decision", () => {
     expect(verdict.admitted).toBe(false);
     if (verdict.admitted) return;
     expect(verdict.code).toBe("ValidationError");
+  });
+});
+
+// ============================================================================
+// WP-C S14 -- the VISUAL CONTAINER's flat control keys through shape.setProperty
+// ============================================================================
+//
+// A control's container lives in flat keys (containerTitleColor,
+// containerPaddingTop, ...), spread into SCRIPT_SHAPE_PROPERTY_KEYS from
+// @api/visualContainer. Admitting the KEY is not enough: the VALUE is checked
+// by the container's own leaf rule, with Rust's sentence
+// (visual_format::check_control_container_value, which set_control_property_core
+// re-applies), before the tier check.
+//
+// SABOTAGE (confirmed 2026-10-16): delete the `checkControlContainerValue`
+// call from checkShapeSetProperty -> "a bad colour", "an over-limit number",
+// "a bad enum" and "a 1025-character title" go red (the key is allowed, so the
+// value reached `return true`), and the key-door half of the parity test in
+// Controls/__tests__/containerKeyScriptDoors.test.ts goes red with them.
+
+describe("shape.setProperty: a control's visual container keys are value-checked (WP-C S14)", () => {
+  const refused: Array<[string, string, string, string]> = [
+    ["a bad colour", "containerTitleColor", "red", "containerTitleColor must be empty or a #rgb, #rrggbb or #rrggbbaa colour."],
+    ["an over-limit number", "containerTitleFontSize", "200", "containerTitleFontSize must be a number from 6 to 96."],
+    [
+      "a bad enum",
+      "containerShadowPosition",
+      "middle",
+      "containerShadowPosition must be one of: bottomRight, bottom, bottomLeft, right, center, left, topRight, top, topLeft.",
+    ],
+    ["a 1025-character title", "containerTitleText", "x".repeat(1025), "containerTitleText must be text of at most 1024 characters."],
+    ["a 1025-character subtitle", "containerSubtitleText", "y".repeat(1025), "containerSubtitleText must be text of at most 1024 characters."],
+    ["a non-boolean", "containerTitleShow", "yes", "containerTitleShow must be true or false."],
+    ["a hex number", "containerPaddingTop", "0x10", "containerPaddingTop must be a number from 0 to 200."],
+    ["Infinity", "containerBorderRadius", "Infinity", "containerBorderRadius must be a number from 0 to 100."],
+    ["a leading space", "containerPaddingLeft", " 12", "containerPaddingLeft must be a number from 0 to 200."],
+    ["a fractional heading level", "containerTitleHeadingLevel", "2.5", "containerTitleHeadingLevel must be a whole number from 0 to 6."],
+    [
+      "a CSS-escaping font family",
+      "containerTitleFontFamily",
+      "Arial; x",
+      "containerTitleFontFamily must be at most 64 letters, digits, spaces, commas, apostrophes or hyphens.",
+    ],
+  ];
+
+  for (const [what, key, value, sentence] of refused) {
+    it(`refuses ${what} with Rust's sentence, on both setState doors`, () => {
+      expect(SCRIPT_SHAPE_PROPERTY_KEYS, "the key itself is admitted").toContain(key);
+      expect(value.length).toBeLessThanOrEqual(MAX_SHAPE_PROPERTY_CHARS);
+      expect(checkShapeSetProperty([key, value])).toBe(sentence);
+      expect(checkControlContainerValue(key, value), "the one rule, from @api/visualContainer").toBe(sentence);
+      expect(vSetState(["shape.setProperty", [key, value]])).toBe(sentence);
+      expect(vObjectAspect(["shape", "control-0-5-2", "shape.setProperty", [key, value]])).not.toBe(true);
+    });
+  }
+
+  it("admits good values, and \"\" (the family default) for every container key", () => {
+    const good: Array<[string, string]> = [
+      ["containerTitleColor", "#336699"],
+      ["containerTitleColor", "#369"],
+      ["containerTitleColor", "#33669980"],
+      ["containerTitleFontSize", "14"],
+      ["containerTitleFontSize", "10.5"],
+      ["containerShadowPosition", "topLeft"],
+      ["containerTitleShow", "true"],
+      ["containerTitleText", "x".repeat(1024)],
+      ["containerPaddingTop", "12"],
+      ["containerTitleHeadingLevel", "2"],
+      ["containerTitleFontFamily", "Segoe UI, sans-serif"],
+      ["containerLockAspect", "false"],
+    ];
+    for (const [key, value] of good) {
+      expect(checkShapeSetProperty([key, value]), `${key}=${value}`).toBe(true);
+    }
+    expect(CONTROL_CONTAINER_PROPERTY_KEYS.length).toBe(51);
+    for (const key of CONTROL_CONTAINER_PROPERTY_KEYS) {
+      expect(checkShapeSetProperty([key, ""]), key).toBe(true);
+    }
+  });
+
+  it("checks the size cap FIRST: an 8 KiB+ title is refused by the sandbox cap, not the 1024 rule", () => {
+    const verdict = checkShapeSetProperty(["containerTitleText", "z".repeat(MAX_SHAPE_PROPERTY_CHARS + 1)]);
+    expect(String(verdict)).toMatch(new RegExp(`max ${MAX_SHAPE_PROPERTY_CHARS}`));
+  });
+
+  it("leaves non-container keys exactly as before (fill takes any text; a custom key is not ours)", () => {
+    expect(checkShapeSetProperty(["fill", "red"])).toBe(true);
+    expect(checkShapeSetProperty(["stroke", "rgb(1,2,3)"])).toBe(true);
+    expect(checkShapeSetProperty(["containerFoo", "anything"]), "a custom key, not a container field").toBe(true);
+  });
+
+  it("the pointer door (property.set) refuses the same fact with the same sentence", () => {
+    // `/properties/<key>` is a Family catalog row of the field's type; the
+    // key's leaf rule speaks first, so a script sees ONE sentence per fact.
+    const asJson: Record<string, unknown> = {
+      containerTitleShow: "yes",
+      containerPaddingTop: 201,
+      containerPaddingLeft: -1,
+      containerBorderRadius: 1000,
+      containerTitleHeadingLevel: 7,
+      containerTitleFontSize: 200,
+    };
+    for (const [, key, value, sentence] of refused) {
+      const literal = key in asJson ? asJson[key] : value;
+      if (typeof literal === "string" && key === "containerTitleShow") continue; // wrong JSON kind: the catalog's
+      expect(checkPropertySetAspect([`/properties/${key}`, literal]), key).toBe(sentence);
+    }
+  });
+
+  it("the pointer door judges Rust's CANONICAL spelling: rgb() and enum case are accepted, as Rust stores them", () => {
+    // Rust's literal door trims a colour, converts rgb()/rgba() to hex and
+    // canonicalises an enum's case BEFORE set_control_property_core's check
+    // (container_literal_tests.rs a_control_container_key_literal_rides_the_control_arm).
+    expect(checkPropertySetAspect(["/properties/containerTitleColor", "rgb(0, 128, 255)"])).toBe(true);
+    expect(checkPropertySetAspect(["/properties/containerShadowColor", "rgba(0,0,0,0.5)"])).toBe(true);
+    expect(checkPropertySetAspect(["/properties/containerTitleColor", " #336699 "])).toBe(true);
+    expect(checkPropertySetAspect(["/properties/containerShadowPosition", "TOPLEFT"])).toBe(true);
+    expect(checkPropertySetAspect(["/properties/containerTitleColor", ""]), "an empty colour clears to the default").toBe(true);
+    expect(checkPropertySetAspect(["/properties/containerTitleFontSize", 14])).toBe(true);
+    expect(checkPropertySetAspect(["/properties/containerTitleShow", true])).toBe(true);
+    // A channel over 255 is no colour on either door.
+    expect(checkPropertySetAspect(["/properties/containerTitleColor", "rgb(300, 0, 0)"])).toBe(
+      "containerTitleColor must be empty or a #rgb, #rrggbb or #rrggbbaa colour.",
+    );
+    // The KEY door has no coercion: rgb() is refused there, as Rust's
+    // check_control_container_value refuses it at set_control_property_core.
+    expect(checkShapeSetProperty(["containerTitleColor", "rgb(0, 128, 255)"])).toBe(
+      "containerTitleColor must be empty or a #rgb, #rrggbb or #rrggbbaa colour.",
+    );
+  });
+
+  it("a value of the wrong JSON kind is named by the catalog type, which says more", () => {
+    expect(checkPropertySetAspect(["/properties/containerTitleFontSize", true])).toMatch(/takes a number, not/);
+    expect(checkPropertySetAspect(["/properties/containerTitleFontSize", "14"])).toMatch(/takes a number, not/);
+    expect(checkPropertySetAspect(["/properties/containerTitleShow", "true"])).toMatch(/takes TRUE or FALSE/);
+    // #rgb is a container colour but not a BINDING colour: the pointer door
+    // refuses it exactly as Rust's coerce_literal does (the key door takes it).
+    expect(checkPropertySetAspect(["/properties/containerTitleColor", "#369"])).toMatch(/is not a colour/);
+    expect(checkShapeSetProperty(["containerTitleColor", "#369"])).toBe(true);
+    // lockAspect is never bound, so it has no pointer row at all.
+    expect(checkPropertySetAspect(["/properties/containerLockAspect", true])).not.toBe(true);
+  });
+
+  it("WP-C adds NO aspect: there is no container.set row, executor or shim", () => {
+    // The withdrawn third door (review R2-4): container fields are reached by
+    // WP-D's property.set / binding.set and by the key-based shape.setProperty.
+    const root = nodePath.resolve(__dirname, "..");
+    for (const file of ["validators.ts", "host.ts", "brokerPolicy.ts", "allowlist.ts", "worker/contextShims.ts"]) {
+      const src = nodeFs.readFileSync(nodePath.join(root, file), "utf8");
+      expect(src, file).not.toMatch(/["'`]container\.(set|get|clear)["'`]/);
+      expect(src, file).not.toMatch(/setContainer\s*\(/);
+    }
   });
 });

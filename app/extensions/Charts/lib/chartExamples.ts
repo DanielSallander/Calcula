@@ -196,9 +196,10 @@ export const CHART_EXAMPLES: ChartExample[] = [
       legend: { visible: false, position: "bottom" },
       palette: "default",
       markOptions: { interpolation: "smooth", lineWidth: 2, showMarkers: false },
+      // The chart's outer background is its visual container's.
+      container: { background: { color: "#1a1a2e" } },
       config: {
         theme: {
-          background: "#1a1a2e",
           plotBackground: "#16213e",
           gridLineColor: "#2a3a5c",
           axisColor: "#4a5a7c",

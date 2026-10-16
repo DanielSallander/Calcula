@@ -6,21 +6,18 @@ import type {
   DragField,
   DropZoneType,
   AggregationType,
-  ShowValuesAs,
   LayoutConfig,
   UpdatePivotFieldsRequest,
-  PivotFieldConfig,
-  ValueFieldConfig,
   CalculatedFieldDef,
   ValueColumnRefDef,
   PivotId,
 } from './types';
-import { getDefaultAggregation, getValueFieldDisplayName } from './types';
+import { getDefaultAggregation } from './types';
 import { emitAppEvent, onAppEvent } from '@api';
 import { PivotEvents } from '../../_shared/lib/pivotEvents';
 import { registerDragOutRemoval } from '../../_shared/components/useDragDrop';
 import type { ValueFieldSettings } from './ValueFieldSettingsModal';
-import { showAsRuleFor } from '../lib/showAsRule';
+import { buildPivotFieldsRequest, mergeCalculatedIntoValues, replaceValueField, type PivotZones } from '../lib/pivotFieldsRequest';
 import {
   diffHiddenItemEdits,
   reconcileChipHiddenItems,
@@ -54,6 +51,9 @@ interface UsePivotEditorStateOptions {
   initialFilters?: ZoneField[];
   initialLayout?: LayoutConfig;
   initialCalculatedFields?: CalculatedFieldDef[];
+  /** How the value and calculated columns interleave (definition.value_column_order);
+   *  absent = values first, then the calculated fields. */
+  initialValueColumnOrder?: ValueColumnRefDef[];
   onUpdate?: (request: UpdatePivotFieldsRequest, hiddenItemEdits: HiddenItemEditBatch) => void;
   /**
    * Read the pivot's row/column/filter fields as its definition holds them
@@ -62,6 +62,14 @@ interface UsePivotEditorStateOptions {
    * the context menu, a slicer or a ribbon filter did to the pivot.
    */
   readPivotFields?: () => Promise<PivotHiddenItemsSnapshot | null>;
+  /**
+   * Read the pivot's four zones as its definition holds them NOW, seeded the
+   * way the editor is (null when it cannot be read). Called when another door
+   * changed the pivot's fields (`PivotEvents.PIVOT_FIELDS_EDITED_ELSEWHERE`:
+   * the value-cell menu, a header's Remove), so the zones are re-seeded and
+   * the next edit here does not send the old fields back (BUG-0466).
+   */
+  readPivotZones?: () => Promise<PivotZones | null>;
 }
 
 /** The zones that carry item filters. */
@@ -76,26 +84,19 @@ export function usePivotEditorState({
   initialFilters = [],
   initialLayout = {},
   initialCalculatedFields,
+  initialValueColumnOrder,
   onUpdate,
   readPivotFields,
+  readPivotZones,
 }: UsePivotEditorStateOptions) {
-  // Merge initial calculated fields into the values array as ZoneField entries
-  const mergedInitialValues = useMemo(() => {
-    const merged = [...initialValues];
-    if (initialCalculatedFields && initialCalculatedFields.length > 0) {
-      for (const cf of initialCalculatedFields) {
-        merged.push({
-          sourceIndex: -2,  // Marker for calculated fields
-          name: cf.name,
-          isNumeric: true,
-          isCalculated: true,
-          customName: cf.name,
-          calculatedFormula: cf.formula,
-        });
-      }
-    }
-    return merged;
-  }, [initialValues, initialCalculatedFields]);
+  // Merge initial calculated fields into the values array as ZoneField entries,
+  // each at its place in the pivot's column order (the ONE recipe the menu's
+  // headless edits use too, lib/pivotFieldsRequest.ts). Appending them moved an
+  // interleaved calculated column to the end on the first edit (BUG-0465).
+  const mergedInitialValues = useMemo(
+    () => mergeCalculatedIntoValues(initialValues, initialCalculatedFields, initialValueColumnOrder),
+    [initialValues, initialCalculatedFields, initialValueColumnOrder],
+  );
 
   const [rows, setRows] = useState<ZoneField[]>(initialRows);
   const [columns, setColumns] = useState<ZoneField[]>(initialColumns);
@@ -110,7 +111,9 @@ export function usePivotEditorState({
   );
 
   // Unified column ordering (value fields + calculated fields interleaved)
-  const valueColumnOrderRef = useRef<ValueColumnRefDef[] | undefined>(undefined);
+  const valueColumnOrderRef = useRef<ValueColumnRefDef[] | undefined>(
+    initialValueColumnOrder && initialValueColumnOrder.length > 0 ? initialValueColumnOrder : undefined
+  );
 
   // Track all unique values per filter field (for smart serialization).
   // Key = field name, Value = all unique values.
@@ -270,6 +273,48 @@ export function usePivotEditorState({
     };
   }, [pivotId, syncHiddenItemsFromPivot]);
 
+  // Another door changed this pivot's FIELDS (the value-cell menu's Remove /
+  // Summarize Values By / Show Values As, a header's Remove): re-seed the
+  // zones from the definition (BUG-0466). The editor seeds its zones once, and
+  // every request it sends REPLACES the pivot's fields, so without this the
+  // next edit in the open pane sent the pre-edit fields back and silently
+  // undid the menu's change. Re-seeding sends nothing (no update is
+  // scheduled); pending item-filter edits stay pending. Only the latest read
+  // is applied, and none after the editor moved to another pivot.
+  const readPivotZonesRef = useRef(readPivotZones);
+  readPivotZonesRef.current = readPivotZones;
+  // The zones of the last re-seed (null until one, and again after a switch to
+  // another pivot): what `resetZones` goes back to after a failed request.
+  const reseededZonesRef = useRef<PivotZones | null>(null);
+  useEffect(() => {
+    reseededZonesRef.current = null;
+    let disposed = false;
+    let latest = 0;
+    const off = onAppEvent<{ pivotId?: PivotId }>(PivotEvents.PIVOT_FIELDS_EDITED_ELSEWHERE, (detail) => {
+      if (detail?.pivotId === undefined || String(detail.pivotId) !== String(pivotId)) return;
+      const read = readPivotZonesRef.current;
+      if (!read) return;
+      const mine = ++latest;
+      read().then(
+        (zones) => {
+          if (disposed || mine !== latest || !zones) return;
+          reseededZonesRef.current = zones;
+          setRows(zones.rows);
+          setColumns(zones.columns);
+          setValues(zones.values);
+          setFilters(zones.filters);
+        },
+        (err) => {
+          console.warn("[PivotEditor] Could not re-read the pivot's fields after an edit made elsewhere:", err);
+        },
+      );
+    });
+    return () => {
+      disposed = true;
+      off();
+    };
+  }, [pivotId]);
+
   // When the pivotId changes (e.g. a new pivot is created after deleting the
   // old one), reset zone state to the new initial values. Without this,
   // useState keeps the previous pivot's field configuration.
@@ -297,93 +342,20 @@ export function usePivotEditorState({
     return used;
   }, [rows, columns, values, filters]);
 
-  // Build the update request from current state.
-  // The values array may contain interleaved regular value fields and calculated
-  // fields (isCalculated=true). We separate them and build the unified ordering.
+  // Build the update request from current state -- through the ONE builder
+  // the menu's headless value-field edits use too (lib/pivotFieldsRequest.ts).
+  // The values array may interleave regular value fields and calculated fields
+  // (isCalculated=true); the builder separates them and builds the ordering.
+  // The chips' hidden items are DISPLAY lists: PivotEditor sends a real
+  // field's list only when it was edited here (biFieldsRequest.ts), and the
+  // chips re-read the pivot's definition after each view change
+  // (syncHiddenItemsFromPivot) so the DSL shows what the pivot hides now.
   const buildUpdateRequest = useCallback((): UpdatePivotFieldsRequest => {
-    // Row/column fields carry hiddenItems too (a placed calculation group's
-    // item subset rides on its chip like a field filter). These are the
-    // chips' DISPLAY lists: PivotEditor sends a real field's list only when
-    // it was edited here -- a model pivot through `buildBiUpdateRequest`, a
-    // RANGE pivot through `rangeRequestWithHiddenItemEdits` (biFieldsRequest.ts;
-    // `update_pivot_fields` keeps an unsent list since BUG-0184). The chips
-    // still re-read the pivot's definition after each view change
-    // (syncHiddenItemsFromPivot) so the DSL shows what the pivot hides now.
-    const rowFields: PivotFieldConfig[] = rows.map((f) => ({
-      sourceIndex: f.sourceIndex,
-      name: f.name,
-      hiddenItems: f.hiddenItems,
-    }));
-
-    const columnFields: PivotFieldConfig[] = columns.map((f) => ({
-      sourceIndex: f.sourceIndex,
-      name: f.name,
-      hiddenItems: f.hiddenItems,
-    }));
-
-    // Separate regular values from calculated fields and build ordering
-    const regularValues: ValueFieldConfig[] = [];
-    const calcFields: CalculatedFieldDef[] = [];
-    const columnOrder: ValueColumnRefDef[] = [];
-
-    for (const f of values) {
-      if (f.isCalculated) {
-        const calcIdx = calcFields.length;
-        calcFields.push({
-          name: f.customName || f.name,
-          formula: f.calculatedFormula || '',
-          numberFormat: f.numberFormat,
-        });
-        columnOrder.push({ type: 'calculated', index: calcIdx });
-      } else {
-        const valIdx = regularValues.length;
-        const aggregation = f.aggregation ?? getDefaultAggregation(f.isNumeric);
-        const isBiField = f.sourceIndex === -1;
-        // For BI fields, keep the original [MeasureName] in `name` so
-        // toBiValueFieldRef can extract the real measure name for the backend.
-        // The custom display name travels separately via `customName`.
-        const displayName = isBiField
-          ? f.name
-          : (f.customName || getValueFieldDisplayName(f.name, aggregation));
-        // A calculation relative to a BASE (Running Total In, Difference
-        // From, % Of, ...) travels as the `showAs` rule: the plain string has
-        // no room for the base, and without one the backend left every value
-        // as it was (e2e fixall-pivot X1).
-        const showAs = showAsRuleFor(f.showValuesAs, f.baseField, f.baseItem);
-        regularValues.push({
-          sourceIndex: f.sourceIndex,
-          name: displayName,
-          aggregation,
-          numberFormat: f.numberFormat,
-          showValuesAs: f.showValuesAs as ShowValuesAs | undefined,
-          ...(showAs ? { showAs } : {}),
-          customName: f.customName || undefined,
-        });
-        columnOrder.push({ type: 'value', index: valIdx });
-      }
-    }
-
-    // Sync the ref so the DesignEditor serializer can access them
-    calculatedFieldsRef.current = calcFields.length > 0 ? calcFields : undefined;
-    valueColumnOrderRef.current = columnOrder.length > 0 ? columnOrder : undefined;
-
-    // Build filter fields with hidden items
-    const filterFields: PivotFieldConfig[] = filters.map((f) => ({
-      sourceIndex: f.sourceIndex,
-      name: f.name,
-      hiddenItems: f.hiddenItems,
-    }));
-
-    return {
-      pivotId: pivotId,
-      rowFields: rowFields,
-      columnFields: columnFields,
-      valueFields: regularValues,
-      filterFields: filterFields,
-      layout,
-      calculatedFields: calcFields.length > 0 ? calcFields : undefined,
-      valueColumnOrder: columnOrder.length > 0 ? columnOrder : undefined,
-    };
+    const built = buildPivotFieldsRequest(pivotId, { rows, columns, values, filters }, layout);
+    // Sync the refs so the DesignEditor serializer can access them
+    calculatedFieldsRef.current = built.calculatedFields;
+    valueColumnOrderRef.current = built.valueColumnOrder;
+    return built.request;
   }, [pivotId, rows, columns, values, filters, layout]);
 
   // Effect to trigger update when zones change (after state is actually updated)
@@ -635,9 +607,9 @@ export function usePivotEditorState({
   // Handle aggregation change for values
   const handleAggregationChange = useCallback(
     (index: number, aggregation: AggregationType) => {
-      setValues((prev) =>
-        prev.map((f, i) => (i === index ? { ...f, aggregation } : f))
-      );
+      // A default name follows the aggregation ("Sum of Units" -> "Max of
+      // Units"); replaceValueField carries the rename into calculated fields.
+      setValues((prev) => (prev[index] ? replaceValueField(prev, index, { ...prev[index], aggregation }) : prev));
       scheduleUpdate();
     },
     [scheduleUpdate]
@@ -646,22 +618,29 @@ export function usePivotEditorState({
   // Handle value field settings change (from modal)
   const handleValueFieldSettings = useCallback(
     (index: number, settings: ValueFieldSettings) => {
+      // A new name (a custom one, or a default that follows the aggregation)
+      // is carried into the calculated fields by replaceValueField.
       setValues((prev) =>
-        prev.map((f, i) =>
-          i === index
-            ? {
-                ...f,
-                aggregation: settings.aggregation,
-                customName: settings.customName,
-                showValuesAs: settings.showValuesAs,
-                numberFormat: settings.numberFormat,
-                // The base the calculation is relative to (kept, and sent as
-                // the showAs rule; it was dropped here, e2e fixall-pivot X1).
-                baseField: settings.baseField,
-                baseItem: settings.baseItem,
-              }
-            : f
-        )
+        prev[index]
+          ? replaceValueField(prev, index, {
+              ...prev[index],
+              aggregation: settings.aggregation,
+              customName: settings.customName,
+              showValuesAs: settings.showValuesAs,
+              numberFormat: settings.numberFormat,
+              // A format the user CHANGED is an override from now on; the
+              // one the model gave (shown unchanged in the modal) stays the
+              // model's, so it is never frozen into an override (BUG-0478).
+              numberFormatFromModel:
+                prev[index].numberFormatFromModel === true && settings.numberFormat === prev[index].numberFormat
+                  ? true
+                  : undefined,
+              // The base the calculation is relative to (kept, and sent as
+              // the showAs rule; it was dropped here, e2e fixall-pivot X1).
+              baseField: settings.baseField,
+              baseItem: settings.baseItem,
+            })
+          : prev
       );
       scheduleUpdate();
     },
@@ -673,7 +652,8 @@ export function usePivotEditorState({
     (index: number, numberFormat: string) => {
       setValues((prev) =>
         prev.map((f, i) =>
-          i === index ? { ...f, numberFormat: numberFormat || undefined } : f
+          // The user chose it: an override, never the model's (BUG-0478).
+          i === index ? { ...f, numberFormat: numberFormat || undefined, numberFormatFromModel: undefined } : f
         )
       );
       scheduleUpdate();
@@ -822,6 +802,7 @@ export function usePivotEditorState({
             field.customName = undefined;
           }
           field.numberFormat = undefined;
+          field.numberFormatFromModel = undefined;
           field.showValuesAs = undefined;
           field.baseField = undefined;
           field.baseItem = undefined;
@@ -896,21 +877,10 @@ export function usePivotEditorState({
     newValueColumnOrder?: ValueColumnRefDef[],
     unresolvedFilters?: ReadonlySet<string>,
   ) => {
-    // Merge calculated fields into the values array as ZoneField entries
-    const mergedValues = [...newValues];
-    if (newCalculatedFields && newCalculatedFields.length > 0) {
-      for (const cf of newCalculatedFields) {
-        mergedValues.push({
-          sourceIndex: -2,
-          name: cf.name,
-          isNumeric: true,
-          isCalculated: true,
-          customName: cf.name,
-          calculatedFormula: cf.formula,
-          numberFormat: cf.numberFormat,
-        });
-      }
-    }
+    // Merge calculated fields into the values array as ZoneField entries, at
+    // their place in the DSL's column order (an inline CALC between two
+    // values stays between them; appending moved it to the end, BUG-0465).
+    const mergedValues = mergeCalculatedIntoValues(newValues, newCalculatedFields, newValueColumnOrder);
     calculatedFieldsRef.current = newCalculatedFields;
     valueColumnOrderRef.current = newValueColumnOrder;
     const before = zonesRef.current;
@@ -943,10 +913,13 @@ export function usePivotEditorState({
     // The edits belonged to the cancelled change; the zones go back to the
     // pivot's own state, so there is nothing left to send.
     hiddenItemEditsRef.current.clear();
-    setRows(initialRows);
-    setColumns(initialColumns);
-    setValues(mergedInitialValues);
-    setFilters(initialFilters);
+    // The pivot's own state is the last re-seed when there was one (a field
+    // edit made elsewhere since mount, BUG-0466), else the mount-time seed.
+    const reseeded = reseededZonesRef.current;
+    setRows(reseeded ? reseeded.rows : initialRows);
+    setColumns(reseeded ? reseeded.columns : initialColumns);
+    setValues(reseeded ? reseeded.values : mergedInitialValues);
+    setFilters(reseeded ? reseeded.filters : initialFilters);
     // Re-arm after React processes the state updates
     setTimeout(() => { isInitialMount.current = false; }, 0);
   }, [initialRows, initialColumns, mergedInitialValues, initialFilters]);

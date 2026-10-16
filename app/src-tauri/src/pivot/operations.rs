@@ -5,10 +5,11 @@ use crate::commands::styles::parse_number_format;
 use crate::pivot::utils::col_index_to_letter;
 use crate::{log_debug, log_warn, AppState, ProtectedRegion};
 use crate::pivot::types::PivotState;
+use crate::pivot::grid_theme::PivotGridTheme;
 use pivot_engine::{calculate_pivot, PivotCache, PivotDefinition, PivotId, PivotView};
 use engine::{
     Cell, CellStyle, CellValue, StyleRegistry,
-    Borders, BorderStyle, BorderLineStyle, Color, Fill, TextAlign, ThemeColor,
+    Borders, BorderStyle, BorderLineStyle, Fill, TextAlign, ThemeColor,
 };
 use arrow::array::{
     Array, BooleanArray, Date32Array, Decimal128Array,
@@ -680,20 +681,23 @@ pub(crate) fn get_pivot_region(state: &AppState, pivot_id: PivotId) -> Option<Pr
 }
 
 // ============================================================================
-// PIVOT THEME COLORS (matches frontend DEFAULT_PIVOT_THEME)
+// PIVOT CELL STYLES -- the persisted PivotTable style (ruling R3, WP-C S10b)
 // ============================================================================
+//
+// The colours come from `PivotGridTheme` (pivot/grid_theme.rs), resolved from
+// the ONE preset data file the box paints with, so the hidden grid -- and so a
+// copy of the box's cells -- wears the style the box shows. There used to be six
+// fixed constants here, a hand-copied echo of the default style only.
 
-const PIVOT_HEADER_BG: Color = Color::new(192, 230, 245);       // #C0E6F5
-const PIVOT_TOTAL_BG: Color = Color::new(232, 232, 232);        // #e8e8e8
-const PIVOT_GRAND_TOTAL_BG: Color = Color::new(192, 230, 245);  // #C0E6F5
-const PIVOT_FILTER_BG: Color = Color::new(192, 230, 245);       // #C0E6F5 (matches header)
-const PIVOT_BORDER_COLOR: Color = Color::new(232, 232, 232);    // #e8e8e8
-const PIVOT_HEADER_BORDER: Color = Color::new(160, 208, 232);   // #a0d0e8
-
-/// Cache key for deduplicating pivot cell styles.
+/// Cache key for deduplicating pivot cell styles within ONE write (the theme
+/// is fixed for the write, so it is not part of the key).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct PivotStyleKey {
     background_style: u8,
+    /// `getThemedBackground`'s label-vs-value split for a Normal cell.
+    label_background: bool,
+    /// `getThemedTextStyle`'s label-vs-value split (includes ColumnHeader).
+    label_text: bool,
     is_bold: bool,
     indent_level: u8,
     text_align: u8,
@@ -701,25 +705,17 @@ struct PivotStyleKey {
     border_key: u8,
 }
 
-/// Build a full CellStyle for a pivot cell based on its metadata.
+/// Build a full CellStyle for a pivot cell based on its metadata and the
+/// pivot's resolved style `theme`.
 fn build_pivot_cell_style(
     pivot_cell: &pivot_engine::PivotViewCell,
     styles: &mut StyleRegistry,
     style_cache: &mut HashMap<PivotStyleKey, usize>,
+    theme: &PivotGridTheme,
 ) -> usize {
     use pivot_engine::{BackgroundStyle, PivotCellType};
 
-    // Determine bold
-    let is_bold = pivot_cell.is_bold
-        || pivot_cell.is_expandable
-        || matches!(
-            pivot_cell.cell_type,
-            PivotCellType::FilterLabel | PivotCellType::RowLabelHeader | PivotCellType::ColumnLabelHeader
-        )
-        || matches!(
-            pivot_cell.background_style,
-            BackgroundStyle::Header | BackgroundStyle::Subtotal | BackgroundStyle::Total | BackgroundStyle::GrandTotal
-        );
+    let is_bold = pivot_cell_is_bold(pivot_cell, theme);
 
     // Determine text alignment
     let text_align = match pivot_cell.cell_type {
@@ -763,6 +759,8 @@ fn build_pivot_cell_style(
 
     let cache_key = PivotStyleKey {
         background_style: bg_key,
+        label_background: PivotGridTheme::label_background_cell(&pivot_cell.cell_type),
+        label_text: PivotGridTheme::label_text_cell(&pivot_cell.cell_type),
         is_bold,
         indent_level: pivot_cell.indent_level,
         text_align: align_key,
@@ -774,38 +772,6 @@ fn build_pivot_cell_style(
         return cached_idx;
     }
 
-    // Build the fill
-    let fill = match pivot_cell.background_style {
-        BackgroundStyle::Header => Fill::Solid { color: ThemeColor::Absolute(PIVOT_HEADER_BG) },
-        BackgroundStyle::Subtotal | BackgroundStyle::Total => Fill::Solid { color: ThemeColor::Absolute(PIVOT_TOTAL_BG) },
-        BackgroundStyle::GrandTotal => Fill::Solid { color: ThemeColor::Absolute(PIVOT_GRAND_TOTAL_BG) },
-        BackgroundStyle::FilterRow => Fill::Solid { color: ThemeColor::Absolute(PIVOT_FILTER_BG) },
-        _ => Fill::Solid { color: ThemeColor::Absolute(Color::white()) },
-    };
-
-    // Build borders
-    let borders = match pivot_cell.background_style {
-        BackgroundStyle::Header => Borders {
-            bottom: BorderStyle { width: 2, color: ThemeColor::Absolute(PIVOT_HEADER_BORDER), style: BorderLineStyle::Solid },
-            ..Borders::default()
-        },
-        BackgroundStyle::Subtotal | BackgroundStyle::Total => Borders {
-            top: BorderStyle { width: 1, color: ThemeColor::Absolute(PIVOT_BORDER_COLOR), style: BorderLineStyle::Solid },
-            bottom: BorderStyle { width: 1, color: ThemeColor::Absolute(PIVOT_BORDER_COLOR), style: BorderLineStyle::Solid },
-            ..Borders::default()
-        },
-        BackgroundStyle::GrandTotal => Borders {
-            top: BorderStyle { width: 2, color: ThemeColor::Absolute(PIVOT_HEADER_BORDER), style: BorderLineStyle::Solid },
-            bottom: BorderStyle { width: 2, color: ThemeColor::Absolute(PIVOT_HEADER_BORDER), style: BorderLineStyle::Solid },
-            ..Borders::default()
-        },
-        BackgroundStyle::FilterRow => Borders {
-            bottom: BorderStyle { width: 1, color: ThemeColor::Absolute(PIVOT_BORDER_COLOR), style: BorderLineStyle::Solid },
-            ..Borders::default()
-        },
-        _ => Borders::default(),
-    };
-
     // Build number format
     let nf = if !nf_key.is_empty() {
         parse_number_format(&nf_key)
@@ -813,23 +779,170 @@ fn build_pivot_cell_style(
         engine::NumberFormat::General
     };
 
-    // Assemble the full style
-    let mut style = CellStyle::new()
-        .with_bold(is_bold)
-        .with_fill(fill)
-        .with_text_align(text_align)
-        .with_number_format(nf);
-    style.borders = borders;
+    // Assemble the full style: the layout parts here, the style's colours,
+    // bold weight and rules from the shared painter.
+    let mut style = CellStyle::new().with_text_align(text_align).with_number_format(nf);
     style.indent = pivot_cell.indent_level;
+    paint_pivot_theme(&mut style, pivot_cell, theme);
 
     let idx = styles.get_or_create(style);
     style_cache.insert(cache_key, idx);
     idx
 }
 
+/// The box's bold rule (`getThemedTextStyle`): these cells are painted in the
+/// style's header font weight, so a style whose header weight is normal
+/// ("400") paints none of them bold.
+fn pivot_cell_is_bold(pivot_cell: &pivot_engine::PivotViewCell, theme: &PivotGridTheme) -> bool {
+    use pivot_engine::{BackgroundStyle, PivotCellType};
+    theme.bold_weight
+        && (pivot_cell.is_bold
+            || pivot_cell.is_expandable
+            || matches!(
+                pivot_cell.cell_type,
+                PivotCellType::FilterLabel | PivotCellType::RowLabelHeader | PivotCellType::ColumnLabelHeader
+            )
+            || matches!(
+                pivot_cell.background_style,
+                BackgroundStyle::Header | BackgroundStyle::Subtotal | BackgroundStyle::Total | BackgroundStyle::GrandTotal
+            ))
+}
+
+/// Paint the pivot STYLE onto `style` for `pivot_cell`: the fill and text
+/// colour (the box's `getThemedBackground` / `getThemedTextStyle`), the bold
+/// weight, and the rules -- the header and grand-total rules in the style's
+/// header border colour, the subtotal and filter-row rules in its border
+/// colour. Everything else on `style` (number format, alignment, indent) is
+/// left alone. THE one painter both a full write and a restyle use.
+fn paint_pivot_theme(style: &mut CellStyle, pivot_cell: &pivot_engine::PivotViewCell, theme: &PivotGridTheme) {
+    use pivot_engine::BackgroundStyle;
+    style.font.bold = pivot_cell_is_bold(pivot_cell, theme);
+    style.font.color = ThemeColor::Absolute(theme.text_for(&pivot_cell.background_style, &pivot_cell.cell_type));
+    style.fill = Fill::Solid {
+        color: ThemeColor::Absolute(theme.background_for(&pivot_cell.background_style, &pivot_cell.cell_type)),
+    };
+    let header_rule = |width: u8| BorderStyle {
+        width,
+        color: ThemeColor::Absolute(theme.header_border_color),
+        style: BorderLineStyle::Solid,
+    };
+    let body_rule = || BorderStyle {
+        width: 1,
+        color: ThemeColor::Absolute(theme.border_color),
+        style: BorderLineStyle::Solid,
+    };
+    style.borders = match pivot_cell.background_style {
+        BackgroundStyle::Header => Borders { bottom: header_rule(2), ..Borders::default() },
+        BackgroundStyle::Subtotal | BackgroundStyle::Total => {
+            Borders { top: body_rule(), bottom: body_rule(), ..Borders::default() }
+        }
+        BackgroundStyle::GrandTotal => Borders { top: header_rule(2), bottom: header_rule(2), ..Borders::default() },
+        BackgroundStyle::FilterRow => Borders { bottom: body_rule(), ..Borders::default() },
+        _ => Borders::default(),
+    };
+}
+
+/// RESTYLE a pivot's written cells IN PLACE in `theme` (ruling R3): each cell
+/// keeps its value, number format, alignment and indent and takes the style's
+/// colours, bold weight and rules -- the style-only re-render a style change
+/// runs (`update_pivot_properties`). It never writes a value, so a stored view
+/// that is older than the cells (a `.calp` refresh writes without storing one)
+/// can at worst mis-colour a cell until the next render, never change data.
+///
+/// `view` is the pivot's stored view; it must cover exactly the pivot's
+/// written block, else nothing is touched and `Err` says why (the next render
+/// writes the persisted style anyway). `Ok(n)` = cells restyled.
+///
+/// LOCKS: `protected_regions` alone first, then `grid` -> `grids` ->
+/// `style_registry` (the canonical order). The caller holds no pivot lock.
+pub(crate) fn restyle_pivot_in_grid(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    pivot_id: PivotId,
+    view: &PivotView,
+    theme: &PivotGridTheme,
+) -> Result<usize, String> {
+    let Some(region) = pivot_written_region(state, pivot_id) else {
+        return Err("the pivot has written no cells".to_string());
+    };
+    let (rows, cols) = pivot_extent(view);
+    if region.end_row + 1 - region.start_row != rows || region.end_col + 1 - region.start_col != cols {
+        return Err(format!(
+            "the stored view ({} x {}) does not cover the written block ({} x {})",
+            rows,
+            cols,
+            region.end_row + 1 - region.start_row,
+            region.end_col + 1 - region.start_col
+        ));
+    }
+
+    let mut active_grid = state.grid.write(effect).unwrap();
+    let mut grids = state.grids.write(effect).unwrap();
+    let mut styles = state.style_registry.write(effect).unwrap();
+    let is_active = region.sheet_index == *state.active_sheet.read().unwrap();
+    let Some(dest_grid) = grids.get_mut(region.sheet_index) else {
+        return Err(format!("sheet {} does not exist", region.sheet_index));
+    };
+
+    // (old style index, the cell's role) -> new style index, within this call.
+    let mut cache: HashMap<(usize, u8, bool, bool, bool, u8), usize> = HashMap::new();
+    let mut restyled = 0usize;
+    for (row_idx, descriptor) in view.rows.iter().enumerate() {
+        if !descriptor.visible || row_idx >= view.cells.len() {
+            continue;
+        }
+        let grid_row = region.start_row + descriptor.view_row as u32;
+        for (col_idx, pivot_cell) in view.cells[row_idx].iter().enumerate() {
+            let grid_col = region.start_col + col_idx as u32;
+            let Some(old_index) = dest_grid.get_cell(grid_row, grid_col).map(|c| c.style_index) else {
+                continue;
+            };
+            let role = (
+                old_index,
+                pivot_cell.background_style as u8,
+                PivotGridTheme::label_background_cell(&pivot_cell.cell_type),
+                PivotGridTheme::label_text_cell(&pivot_cell.cell_type),
+                pivot_cell_is_bold(pivot_cell, theme),
+                match pivot_cell.background_style {
+                    pivot_engine::BackgroundStyle::Header => 1,
+                    pivot_engine::BackgroundStyle::Subtotal | pivot_engine::BackgroundStyle::Total => 2,
+                    pivot_engine::BackgroundStyle::GrandTotal => 3,
+                    pivot_engine::BackgroundStyle::FilterRow => 4,
+                    _ => 0,
+                },
+            );
+            let new_index = match cache.get(&role) {
+                Some(&idx) => idx,
+                None => {
+                    let mut style = styles.get(old_index).clone();
+                    paint_pivot_theme(&mut style, pivot_cell, theme);
+                    let idx = styles.get_or_create(style);
+                    cache.insert(role, idx);
+                    idx
+                }
+            };
+            if new_index == old_index {
+                continue;
+            }
+            if let Some(cell) = dest_grid.get_cell(grid_row, grid_col).cloned() {
+                dest_grid.set_cell(grid_row, grid_col, Cell { style_index: new_index, ..cell });
+            }
+            if is_active {
+                if let Some(cell) = active_grid.get_cell(grid_row, grid_col).cloned() {
+                    active_grid.set_cell(grid_row, grid_col, Cell { style_index: new_index, ..cell });
+                }
+            }
+            restyled += 1;
+        }
+    }
+    Ok(restyled)
+}
+
 /// Writes pivot view cells to the destination grid.
-/// Creates full cell styles (fill, bold, borders, alignment, indent, number format)
-/// so that pivot cells render correctly via the grid renderer without an overlay.
+/// Creates full cell styles (fill, text colour, bold, borders, alignment,
+/// indent, number format) in the pivot's resolved style `theme` -- the one the
+/// box paints with (`PivotGridTheme::for_choice(definition.style.as_ref())`), so
+/// a copy of the cells carries the box's colours.
 /// Returns a list of merge regions for cells with col_span/row_span > 1.
 pub(crate) fn write_pivot_to_grid(
     grid: &mut engine::Grid,
@@ -837,6 +950,7 @@ pub(crate) fn write_pivot_to_grid(
     view: &PivotView,
     destination: (u32, u32),
     styles: &mut StyleRegistry,
+    theme: &PivotGridTheme,
 ) -> Vec<MergedRegion> {
     let (dest_row, dest_col) = destination;
 
@@ -903,7 +1017,7 @@ pub(crate) fn write_pivot_to_grid(
             };
 
             // Build full cell style (fill, bold, borders, alignment, indent, number format)
-            let style_idx = build_pivot_cell_style(pivot_cell, styles, &mut style_cache);
+            let style_idx = build_pivot_cell_style(pivot_cell, styles, &mut style_cache, theme);
 
             // Write to both grids using unchecked insert (bounds set once after loop)
             if let Some(ag) = active_grid.as_deref_mut() {
@@ -1438,6 +1552,18 @@ pub(crate) fn ensure_canvas_destination(
     }
 }
 
+/// The pivot's persisted PivotTable style (`None` = the default style, and
+/// for an unknown pivot), for a grid write (ruling R3).
+///
+/// LOCKS: `pivot_tables` ALONE, released on return, like [`pivot_is_framed`].
+pub(crate) fn pivot_style_choice(pivot_state: &PivotState, pivot_id: PivotId) -> Option<pivot_engine::PivotStyleChoice> {
+    pivot_state
+        .pivot_tables
+        .read()
+        .ok()
+        .and_then(|tables| tables.get(&pivot_id).and_then(|(def, _)| def.style.clone()))
+}
+
 /// Does `pivot_id` carry a canvas frame? `false` for an unknown pivot.
 ///
 /// LOCKS: `pivot_tables` ALONE, released on return. Callers must not hold it
@@ -1514,12 +1640,17 @@ pub(crate) fn ensure_pivot_destination_writable(
 /// the definitions in phase C), and some hold definitions that are not the
 /// stored ones.
 ///
+/// `style` is the pivot's `definition.style`, passed in for the same reason:
+/// the cells are written in that style's colours (ruling R3), so the hidden
+/// grid matches the box.
+///
 /// `Err` -- having written NOTHING -- when the destination is the wrong kind
 /// for the pivot (a grid pivot on a canvas, a canvas pivot on a worksheet) or
 /// when a canvas pivot's view is wider than its block. Every caller must then
 /// skip what follows a successful write: `update_pivot_region` (which would
 /// move the pivot's protection off its real cells), `store_view`, and the undo
 /// record.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn update_pivot_in_grid(
     state: &AppState,
     effect: &crate::document_effect::DocumentEffect,
@@ -1528,6 +1659,7 @@ pub(crate) fn update_pivot_in_grid(
     destination: (u32, u32),
     view: &PivotView,
     framed: bool,
+    style: Option<&pivot_engine::PivotStyleChoice>,
 ) -> Result<(), String> {
     // THE KIND RULE, at the one funnel every pivot write passes. A GRID pivot
     // never materializes into a canvas's hidden grid: its cells would be real
@@ -1557,6 +1689,7 @@ pub(crate) fn update_pivot_in_grid(
     // The block the pivot WROTE before this write -- never a placeholder's,
     // whose cells are the user's (`pivot_written_region`).
     let old_region = pivot_written_region(state, pivot_id);
+    let theme = PivotGridTheme::for_choice(style);
 
     // CANONICAL LOCK ORDER: `grid`, then `grids`, then everything else
     // (the style registry included). The recalculation pass holds both grid
@@ -1596,13 +1729,13 @@ pub(crate) fn update_pivot_in_grid(
             }
 
             // Single-pass write to both grids (eliminates second iteration + clones)
-            let merges = write_pivot_to_grid(dest_grid, Some(&mut active_grid), view, destination, &mut styles);
+            let merges = write_pivot_to_grid(dest_grid, Some(&mut active_grid), view, destination, &mut styles, &theme);
             active_grid.recalculate_bounds();
             log_debug!("PIVOT", "wrote pivot to both grids in single pass (active sheet)");
             merges
         } else {
             // Not the active sheet — write to sheet grid only
-            write_pivot_to_grid(dest_grid, None, view, destination, &mut styles)
+            write_pivot_to_grid(dest_grid, None, view, destination, &mut styles, &theme)
         };
         let (dest_row, dest_col) = destination;
         let new_end_row = dest_row + view.row_count.max(1) as u32 - 1;
@@ -2019,6 +2152,10 @@ pub fn resolve_pivot_data_formula(
     Some(super::types::GetPivotDataFormulaResult {
         data_field,
         field_item_pairs,
+        // GETPIVOTDATA's pivot_table argument is the pivot's anchor on every
+        // surface (worksheet and canvas), as Excel writes it.
+        pivot_anchor_row: dest_row,
+        pivot_anchor_col: dest_col,
     })
 }
 
@@ -2297,8 +2434,9 @@ pub(crate) fn finalize_pivot_update(
     recalc_states: Option<PivotRecalcStates<'_>>,
 ) -> Result<(), String> {
     let framed = pivot_is_framed(pivot_state, pivot_id);
+    let style = pivot_style_choice(pivot_state, pivot_id);
     let old_region = get_pivot_region(state, pivot_id);
-    update_pivot_in_grid(state, effect, pivot_id, dest_sheet_idx, destination, view, framed)?;
+    update_pivot_in_grid(state, effect, pivot_id, dest_sheet_idx, destination, view, framed, style.as_ref())?;
     update_pivot_region(state, pivot_id, dest_sheet_idx, destination, view);
     recalc_after_pivot_write(
         state,
@@ -2475,6 +2613,7 @@ mod dest_sheet_tests {
             width: 300.0,
             height: 200.0,
             frozen_headers: true,
+            container: None,
         });
         def
     }

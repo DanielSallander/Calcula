@@ -45,6 +45,9 @@ pub(crate) fn save_chart_core(
     crate::protection::check_sheet_action(
         state, entry.sheet_index, "editObjects", "edit objects",
     )?;
+    // The spec's visual container / field formats (D-FORMAT): refused before
+    // the effect, so a bad value leaves the document clean.
+    check_entry_spec_formatting(&entry.spec_json)?;
     // LOCK OBJECTS: an upsert over an EXISTING chart that moves or resizes it
     // is refused on a locked page, like `update_chart` (an insert -- no prior
     // entry -- is never a move). Resolved under a read guard, before the effect.
@@ -110,6 +113,10 @@ pub(crate) fn update_chart_core(
     if let Some(origin) = sheet_id_stamp {
         return record_chart_sheet_id_stamp(state, file_state, entry, origin);
     }
+    // The spec's visual container / field formats (D-FORMAT): refused before
+    // the effect, so a bad value -- or a second spelling of the title text,
+    // colour or size inside the container -- leaves the document clean.
+    check_entry_spec_formatting(&entry.spec_json)?;
     // RESOLVE FIRST, THEN DECIDE, THEN MUTATE.
     // `DocumentEffect::mutates` sets the dirty flag in its constructor, and
     // `Persisted::write` will not hand out a mutable guard without one -- so the
@@ -140,6 +147,87 @@ pub(crate) fn update_chart_core(
     }
     crate::undo_commands::record_chart_undo(state, entry.id, Some(previous), "Edit chart");
     Ok(())
+}
+
+/// Longest Excel format code a chart's `fieldFormats` entry may carry.
+pub(crate) const CHART_FIELD_FORMAT_MAX_CHARS: usize = 256;
+
+/// The two parts of a ChartSpec Rust is NOT opaque to (D-FORMAT, WP-C), checked
+/// on every door that writes a spec -- the store (`save_chart` /
+/// `update_chart`) and the AI path (`mcp::tools::validate_chart_spec_core`):
+///
+/// - `container` (the visual container): an object whose every key is a
+///   container field (`visual_format::FIELD_POINTERS`, plus the whole
+///   `background.gradient`), that reads as a `VisualContainerFormat`, passes
+///   `validate()`, and carries no `title.text` / `title.color` /
+///   `title.fontSize` -- a chart's title text is `spec.title` and its colour /
+///   size are `spec.config.theme`, ONE spelling per fact, so no route (pane,
+///   script, MCP, AI) can create the second one here.
+/// - `fieldFormats` (design-query data format overrides): an object of
+///   measure name -> Excel format code, each code at most
+///   [`CHART_FIELD_FORMAT_MAX_CHARS`].
+///
+/// `spec` is the INNER ChartSpec (what `ChartDefinition.spec` holds). Absent or
+/// null keys are fine.
+pub(crate) fn check_chart_spec_formatting(spec: &serde_json::Value) -> Result<(), String> {
+    if let Some(container) = spec.get("container").filter(|v| !v.is_null()) {
+        let obj = container
+            .as_object()
+            .ok_or("spec.container must be an object (the visual container).")?;
+        for (root, value) in obj {
+            let leaf = format!("/{root}");
+            if visual_format::field_type(&leaf).is_some() {
+                continue;
+            }
+            let children = value.as_object().ok_or_else(|| {
+                format!("spec.container.{root} is not a visual container field.")
+            })?;
+            if !visual_format::FIELD_POINTERS.iter().any(|(p, _)| p.starts_with(&format!("{leaf}/"))) {
+                return Err(format!("spec.container.{root} is not a visual container field."));
+            }
+            for key in children.keys() {
+                let pointer = format!("{leaf}/{key}");
+                let is_gradient = pointer == "/background/gradient";
+                if !is_gradient && visual_format::field_type(&pointer).is_none() {
+                    return Err(format!("spec.container.{root}.{key} is not a visual container field."));
+                }
+            }
+        }
+        let parsed: visual_format::VisualContainerFormat = serde_json::from_value(container.clone())
+            .map_err(|e| format!("spec.container could not be read: {e}"))?;
+        parsed.validate()?;
+        parsed.forbid_chart_title_leaves()?;
+    }
+    if let Some(formats) = spec.get("fieldFormats").filter(|v| !v.is_null()) {
+        let obj = formats
+            .as_object()
+            .ok_or("spec.fieldFormats must be an object of measure name -> format code.")?;
+        for (field, code) in obj {
+            let code = code
+                .as_str()
+                .ok_or_else(|| format!("spec.fieldFormats.{field} must be a format code (text)."))?;
+            if code.chars().count() > CHART_FIELD_FORMAT_MAX_CHARS {
+                return Err(format!(
+                    "spec.fieldFormats.{field} must be at most {CHART_FIELD_FORMAT_MAX_CHARS} characters."
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// [`check_chart_spec_formatting`] over a stored record (the ChartDefinition
+/// envelope as JSON text, the spec under `"spec"`). A record that is not JSON,
+/// or carries no spec object, has nothing to check: the store treats
+/// `spec_json` as opaque everywhere else.
+fn check_entry_spec_formatting(spec_json: &str) -> Result<(), String> {
+    let Ok(envelope) = serde_json::from_str::<serde_json::Value>(spec_json) else {
+        return Ok(());
+    };
+    match envelope.get("spec") {
+        Some(spec) if spec.is_object() => check_chart_spec_formatting(spec),
+        _ => Ok(()),
+    }
 }
 
 /// A chart's PLACEMENT as its stored record spells it: the ChartDefinition's
@@ -481,6 +569,14 @@ pub fn delete_chart(
     // transaction opens because it takes the pane-control lock.
     let pruned_controls =
         crate::object_deps::cascade_deleted_charts(&pane_control_state, &[id]);
+    // WP-D: the chart's object property BINDINGS go with it, in the same step.
+    // Dropped before the transaction opens (the store is a leaf; the undo lock
+    // is never held across it).
+    let dropped_bindings = crate::object_bindings::cascade::drop_bindings_for_objects(
+        &state,
+        &effect,
+        &[crate::api_types::ObjectBindingRef { kind: crate::api_types::ObjectBindingKind::Chart, id: id.to_string() }],
+    );
     // ONE transaction for the chart and everything the delete unbound.
     // `record_chart_undo` joins an already-open transaction rather than opening
     // its own, so the cascade entries recorded first restore LAST — after the
@@ -498,6 +594,9 @@ pub fn delete_chart(
         }
         opened
     };
+    if let Some(previous_bindings) = dropped_bindings {
+        crate::undo_commands::record_bindings_undo(&state, previous_bindings, "Delete chart");
+    }
     crate::object_deps::record_pane_control_prune_undo(
         &state,
         &pruned_controls,
@@ -753,11 +852,10 @@ mod sheet_id_stamp_tests {
         wb.charts = vec![persistence::SavedChart {
             id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
             sheet_id: wb.sheets[0].id,
-            spec_json: serde_json::to_string(&json!({
+            spec: json!({
                 "chartId": "c1", "name": "Chart 1", "sheetIndex": 0, "x": 0, "y": 0, "width": 400, "height": 300,
                 "spec": { "mark": "bar", "data": { "sheetIndex": range_sheet, "startRow": 0, "startCol": 0, "endRow": 4, "endCol": 1 } }
-            }))
-            .unwrap(),
+            }),
         }];
         wb
     }
@@ -779,7 +877,7 @@ mod sheet_id_stamp_tests {
         // Nothing but the id was added.
         let mut without = stored.clone();
         without["spec"]["data"].as_object_mut().unwrap().remove("sheetId");
-        let original: serde_json::Value = serde_json::from_str(&wb.charts[0].spec_json).unwrap();
+        let original: serde_json::Value = wb.charts[0].spec.clone();
         assert_eq!(without, original, "the load stamp changed more than the sheet id");
     }
 

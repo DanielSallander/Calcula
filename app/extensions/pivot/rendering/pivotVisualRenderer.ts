@@ -27,6 +27,7 @@ import type { PivotTheme } from "./pivot";
 // (FloatingRange), which scrolls with the same arithmetic.
 import { firstEndingAfter, lastStartingBefore, indexAt } from "../../_shared/lib/offsetSearch";
 import { paintScrollIndicators } from "../../_shared/lib/scrollIndicators";
+import type { PaintRect } from "../../_shared/lib/innerSelectionPaint";
 
 // ============================================================================
 // Geometry
@@ -202,6 +203,87 @@ export function viewCellAtLocal(
   return { viewRow, viewCol };
 }
 
+/** A rectangle of VIEW cells (inclusive; either corner order). */
+export interface PivotViewCellRect {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
+
+/**
+ * Where a rectangle of VIEW cells sits in the box: up to four BOX-LOCAL pieces,
+ * one per frozen quadrant it touches (header rows x row-label columns, header
+ * rows x body, body x row-label columns, body x body), each clipped to the part
+ * of the box that quadrant is shown in -- the same frozen + scroll arithmetic
+ * `viewCellAtLocal` inverts, so what is painted is what a press there names. A
+ * part of the rectangle that is scrolled out of view (or under the frozen band)
+ * yields no piece; hidden rows (height 0) add no height. Pure. Used for an inner
+ * selection and for a reference pick's drag preview; the caller adds the box
+ * origin and clips to the box.
+ */
+export function selectionPiecesInBox(
+  g: PivotVisualGeometry,
+  s: PivotVisualScroll,
+  boxWidth: number,
+  boxHeight: number,
+  rect: PivotViewCellRect,
+): PaintRect[] {
+  if (g.rowCount <= 0 || g.colCount <= 0 || boxWidth <= 0 || boxHeight <= 0) return [];
+  const clampIndex = (v: number, count: number) => Math.min(Math.max(0, Math.floor(v)), count - 1);
+  const r0 = clampIndex(Math.min(rect.startRow, rect.endRow), g.rowCount);
+  const r1 = clampIndex(Math.max(rect.startRow, rect.endRow), g.rowCount);
+  const c0 = clampIndex(Math.min(rect.startCol, rect.endCol), g.colCount);
+  const c1 = clampIndex(Math.max(rect.startCol, rect.endCol), g.colCount);
+  if (![r0, r1, c0, c1].every(Number.isFinite)) return [];
+
+  const { frozenWidth, frozenHeight } = frozenExtent(g);
+
+  /**
+   * One axis' spans: [from, to) in box-local px for the frozen band and the
+   * scrolling body, each clipped to where that band is shown in the box.
+   */
+  const spans = (
+    offsets: Float64Array,
+    frozenCount: number,
+    count: number,
+    first: number,
+    last: number,
+    scroll: number,
+    frozenPx: number,
+    boxPx: number,
+  ): Array<{ from: number; to: number }> => {
+    const out: Array<{ from: number; to: number }> = [];
+    // The frozen band: indexes [0, frozenCount), never scrolled, shown in [0, min(frozenPx, boxPx)).
+    const fa = Math.max(first, 0);
+    const fb = Math.min(last, frozenCount - 1);
+    if (fa <= fb) {
+      const from = Math.max(0, offsets[fa]);
+      const to = Math.min(offsets[fb + 1], frozenPx, boxPx);
+      if (to > from) out.push({ from, to });
+    }
+    // The body: indexes [frozenCount, count), shifted by the scroll, shown in [frozenPx, boxPx).
+    const ba = Math.max(first, frozenCount);
+    const bb = Math.min(last, count - 1);
+    if (ba <= bb) {
+      const from = Math.max(offsets[ba] - scroll, frozenPx);
+      const to = Math.min(offsets[bb + 1] - scroll, boxPx);
+      if (to > from) out.push({ from, to });
+    }
+    return out;
+  };
+
+  const ys = spans(g.rowOffsets, g.frozenRowCount, g.rowCount, r0, r1, s.top, frozenHeight, boxHeight);
+  const xs = spans(g.colOffsets, g.frozenColCount, g.colCount, c0, c1, s.left, frozenWidth, boxWidth);
+  const pieces: PaintRect[] = [];
+  for (const y of ys) {
+    for (const x of xs) {
+      pieces.push({ x: x.from, y: y.from, width: x.to - x.from, height: y.to - y.from });
+    }
+  }
+  return pieces;
+}
+
 // ============================================================================
 // Paint
 // ============================================================================
@@ -241,8 +323,12 @@ export interface PivotVisualPaintResult {
 
 /**
  * Paint the view inside the box: clip to the box, translate to its origin,
- * fill the background, render the frozen/scrolling quadrants, then the scroll
- * indicators. Nothing is drawn outside `box`.
+ * render the frozen/scrolling quadrants, then the scroll indicators. Nothing
+ * is drawn outside `box`. The box itself has NO background of its own any
+ * more (WP-C, review R1-8): each cell paints its own fill, and the box's
+ * visual container -- painted by Core around and under the box -- owns
+ * everything else, so a container background shows below and right of the
+ * last cell.
  */
 export function paintPivotVisual(args: PivotVisualPaintArgs): PivotVisualPaintResult {
   const { ctx, view, geometry: g, box, scroll, theme } = args;
@@ -252,10 +338,6 @@ export function paintPivotVisual(args: PivotVisualPaintArgs): PivotVisualPaintRe
   ctx.rect(box.x, box.y, box.width, box.height);
   ctx.clip();
   ctx.translate(box.x, box.y);
-
-  // The box is opaque: the page must not show through between cells.
-  ctx.fillStyle = theme.valueBackground || "#ffffff";
-  ctx.fillRect(0, 0, box.width, box.height);
 
   const range = visibleCellRange(g, scroll, box.width, box.height);
   const { interactiveBounds } = renderPivotView(
@@ -295,24 +377,4 @@ export function paintPivotVisual(args: PivotVisualPaintArgs): PivotVisualPaintRe
 
   ctx.restore();
   return { bounds: interactiveBounds };
-}
-
-/** Box outline colour (visible on the page even when the view is empty). */
-const BOX_BORDER = "#c8c8c8";
-
-/**
- * The box chrome drawn OUTSIDE the content clip: a thin outline so the box is
- * visible on the page, selected or not. A SELECTED box's outline and its
- * resize handles are Core's (core/lib/gridRenderer/rendering/
- * floatingObjectChrome.ts), painted from the one geometry Core's resize hit
- * test reads -- and not at all in consume mode or on a locked box, where no
- * handle is live (BUG-0258 design phase 3).
- */
-export function paintPivotVisualFrame(ctx: CanvasRenderingContext2D, box: PivotVisualBox): void {
-  ctx.save();
-  ctx.setLineDash([]);
-  ctx.strokeStyle = BOX_BORDER;
-  ctx.lineWidth = 1;
-  ctx.strokeRect(box.x + 0.5, box.y + 0.5, Math.max(0, box.width - 1), Math.max(0, box.height - 1));
-  ctx.restore();
 }

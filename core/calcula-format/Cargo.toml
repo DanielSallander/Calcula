@@ -14,6 +14,8 @@ parser = { path = "../parser" }
 identity = { path = "../identity" }
 persistence = { path = "../persistence" }
 calcula-crypto = { path = "../calcula-crypto" }
+# The visual container a slicer definition carries (SlicerDef.container, WP-C).
+visual-format = { path = "../visual-format" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 zip = { version = "2", default-features = false, features = ["deflate"] }

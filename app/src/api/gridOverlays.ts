@@ -30,6 +30,8 @@ import { resolveHeaderSizes, paintedDisplayHeadings } from "../core/lib/gridRend
 import { isPointModeOnForeignSheet } from "../core/lib/pointModeView";
 import { getLayoutSurface, isRegionLocked } from "../core/lib/layoutSurface";
 import { floatingChromeHitProbe } from "../core/lib/floatingChromeProbe";
+import type { ResolvedVisualContainer } from "./visualContainer";
+import { visualContentRect } from "./visualContainerPaint";
 
 // What the grid SHOWS during cross-sheet point mode (a formula picking a
 // reference on another sheet). A family that must hide DOM it hosts itself
@@ -69,6 +71,18 @@ export interface GridRegion {
    * regions.
    */
   z?: number;
+  /**
+   * The RESOLVED visual container (D-FORMAT) of a FLOATING region: its
+   * padding, title, divider, background, border and shadow, published by the
+   * family beside `floating`. Core paints it around the family's render
+   * (shadow + background under, Core-painted title / divider + border over)
+   * and answers its padding / title band as FRAME before the family's
+   * `zoneAt` is asked -- so the family lays out, paints and hit-tests only
+   * inside `visualContentRect(region)` (@api/visualContainerPaint). Absent =
+   * no container: Core paints nothing extra and the whole box is the
+   * family's. Ignored on cell-anchored regions.
+   */
+  container?: ResolvedVisualContainer;
 }
 
 // ============================================================================
@@ -165,6 +179,38 @@ export type OverlayZone =
  */
 export type OverlayZoneFn = (context: OverlayHitTestContext) => OverlayZone | null;
 
+/**
+ * A CELL a reference pick can name at a point of a floating object (D-PICK).
+ *   sheet   a cell of the SHOWN sheet's own grid (a canvas pivot's hidden-grid
+ *           cell): Core routes it exactly like a grid cell pick -- the formula
+ *           reference interceptors (GETPIVOTDATA) for a single cell,
+ *           sheet-qualified with the active sheet's name.
+ *   object  a cell of a NAMED A1 space that is not the shown sheet (a floating
+ *           grid "Float2"): Core inserts `<name>!A1`; the interceptors are
+ *           NEVER asked (their row/col are the shown sheet's).
+ */
+export type OverlayReferencePick =
+  | { space: "sheet"; row: number; col: number }
+  | { space: "object"; name: string; row: number; col: number };
+
+/**
+ * PURE, the zoneAt contract: no store writes, no dispatch. Asked once per
+ * press BEFORE anything selects, on every move of a pick drag, and on hover
+ * while a pick is live. Null = no referencable cell here (the point is inert).
+ */
+export type OverlayReferenceAtFn = (context: OverlayHitTestContext) => OverlayReferencePick | null;
+
+/** A finished pick: one cell, or the rectangle a drag covered (normalized start <= end). */
+export type FloatingReferencePickRange =
+  | { space: "sheet"; startRow: number; startCol: number; endRow: number; endCol: number }
+  | { space: "object"; name: string; startRow: number; startCol: number; endRow: number; endCol: number };
+
+/** What a pick drag covers right now, for the owning family to paint (dashed). */
+export interface FloatingReferencePickPreview {
+  regionId: string;
+  range: FloatingReferencePickRange;
+}
+
 // ============================================================================
 // Lifecycle Events
 // ============================================================================
@@ -216,6 +262,22 @@ export interface OverlayRegistration {
    * when they pressed -- never from a selection the press itself makes.
    */
   zoneAt?: OverlayZoneFn;
+  /**
+   * Optional: the CELL a reference pick names at a point of this FLOATING
+   * overlay (`OverlayReferencePick`), or null where nothing can be referenced.
+   *
+   * While a formula is picking a reference (`isFormulaReferencePickActive`,
+   * @api/editing), Core decides a press on ANY floating object ONCE, before
+   * anything selects: where this answers, the press (or a drag across the
+   * object) inserts the reference; everywhere else -- and on every object that
+   * registers no `referenceAt` -- the press is inert. A pick press never calls
+   * the object-selection press hook and never dispatches
+   * `floatingObject:selected` / `bodyDragStart`, so a family cannot see it.
+   *
+   * PURE, exactly like `zoneAt`: no store writes, no dispatch, no hover side
+   * effects. A throw is logged and counts as null.
+   */
+  referenceAt?: OverlayReferenceAtFn;
   /**
    * Optional: handle a DOUBLE-CLICK on this overlay. Consulted only when the
    * double-click lands on the overlay (the same body/extended-hit test the
@@ -748,6 +810,26 @@ function zoneOf(ctx: OverlayHitTestContext): OverlayZone | null {
 }
 
 /**
+ * Whether the point lies in the container's padding / title band: inside the
+ * outer box (`floatingCanvasBounds`, logical canvas px) and outside the
+ * content rect translated the same way. False for a region without a
+ * container, without a floating box or without canvas bounds.
+ */
+function isInContainerBand(ctx: OverlayHitTestContext): boolean {
+  const region = ctx.region;
+  const f = region.floating;
+  const b = ctx.floatingCanvasBounds;
+  if (!region.container || !f || !b) return false;
+  const { canvasX: x, canvasY: y } = ctx;
+  if (x < b.x || x > b.x + b.width || y < b.y || y > b.y + b.height) return false;
+  const content = visualContentRect(region);
+  const cx = b.x + (content.x - f.x);
+  const cy = b.y + (content.y - f.y);
+  const inContent = x >= cx && x <= cx + content.width && y >= cy && y <= cy + content.height;
+  return !inContent;
+}
+
+/**
  * THE rule for a point on a floating object -- the only place it lives. Core's
  * press and Core's hover both read it, and a family's test can ask it too:
  *
@@ -760,13 +842,24 @@ function zoneOf(ctx: OverlayHitTestContext): OverlayZone | null {
  *
  * A `zoneAt` that throws counts as null (logged); a type with no `zoneAt` is
  * all frame.
+ *
+ * THE CONTAINER BAND comes first (D-FORMAT, paint == hit): a point inside the
+ * object's outer box but outside its CONTENT rect (`visualContentRect`, the
+ * rect Core painted the padding / title / divider around) is frame, part
+ * 'container', and the family's `zoneAt` is never asked -- the family lays
+ * out only inside the content, so a band point is not its to answer. A point
+ * outside the outer box (an extended hit such as a chart's Quick Access
+ * buttons) still goes to the family.
  */
 export function resolveFloatingZone(ctx: OverlayHitTestContext): ResolvedFloatingZone {
   const region = ctx.region;
-  const zone = zoneOf(ctx);
   const surface = activeSurface();
   const canMove =
     region.data?.movable !== false && !isRegionLocked(surface, region) && (surface?.editable ?? true);
+  if (isInContainerBand(ctx)) {
+    return { kind: "frame", part: "container", cursor: canMove ? "move" : "default", canMove };
+  }
+  const zone = zoneOf(ctx);
   if (zone?.kind === "content") {
     const cursor = typeof zone.cursor === "string" && zone.cursor.length > 0 ? zone.cursor : "default";
     return { kind: "content", part: zone.part ?? null, cursor, canMove };
@@ -779,6 +872,40 @@ export function resolveFloatingZone(ctx: OverlayHitTestContext): ResolvedFloatin
     canMove,
   };
 }
+
+// ============================================================================
+// Reference picks on floating objects (D-PICK)
+// ============================================================================
+
+/**
+ * The registration's `referenceAt` answer for `ctx.region`, guarded the way
+ * `zoneOf` is: a type without one, or one that throws (logged), answers null
+ * -- the point is inert during a pick. A malformed answer is null too.
+ */
+export function referenceAtPoint(ctx: OverlayHitTestContext): OverlayReferencePick | null {
+  const referenceAt = overlayRegistry.get(ctx.region.type)?.referenceAt;
+  if (!referenceAt) return null;
+  try {
+    const pick = referenceAt(ctx);
+    if (!pick) return null;
+    if (!Number.isInteger(pick.row) || !Number.isInteger(pick.col) || pick.row < 0 || pick.col < 0) return null;
+    if (pick.space === "sheet") return pick;
+    if (pick.space === "object" && typeof pick.name === "string" && pick.name.length > 0) return pick;
+    return null;
+  } catch (err) {
+    // The effectiveZ precedent: one broken family must not break the mouse.
+    console.error("[gridOverlays] referenceAt threw; treating the point as inert:", err);
+    return null;
+  }
+}
+
+// The live pick drag's preview, for the family that owns the picked object to
+// paint (dashed), and its change signal. From the LEAF state module: it imports
+// this facade for TYPES only, so the re-export closes no cycle.
+export {
+  getFloatingReferencePickPreview,
+  onFloatingReferencePickPreviewChanged,
+} from "../core/lib/referencePickState";
 
 // A CONTENT gesture (the timeline's range drag) owns the pointer while its
 // button is held: over its own object the pointer is the gesture's, whatever

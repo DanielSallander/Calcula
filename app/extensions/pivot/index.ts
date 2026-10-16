@@ -70,7 +70,7 @@ import {
   PIVOT_HEADER_FILTER_OVERLAY_ID,
 } from "./manifest";
 
-import { handlePivotCreated } from "./handlers/pivotCreatedHandler";
+import { handlePivotCreated, isCanvasSurface } from "./handlers/pivotCreatedHandler";
 import { handleOpenFilterMenu } from "./handlers/filterMenuHandler";
 import { handleOpenHeaderFilterMenu } from "./handlers/headerFilterMenuHandler";
 import { registerPivotContextMenuItems } from "./handlers/pivotContextMenu";
@@ -91,7 +91,7 @@ import {
   getSelectedVisualPivotId,
 } from "./handlers/selectionHandler";
 import type { PivotRegionData, PivotEditorViewData, BiPivotModelInfo } from "./types";
-import { getPivotRegionsForSheet, getPivotAtCell, getPivotView, getPivotCellWindow, getAllPivotTables, refreshPivotCache, relocatePivot, getPivotHierarchies } from "./lib/pivot-api";
+import { getPivotRegionsForSheet, getPivotAtCell, getPivotView, getPivotCellWindow, getAllPivotTables, refreshPivotCache, relocatePivot, getPivotHierarchies, updatePivotProperties } from "./lib/pivot-api";
 import { getPivotViewCell } from "./lib/pivotChromeActions";
 import {
   overlayIconBounds,
@@ -108,19 +108,48 @@ import {
   removePivotVisualRegions,
   resetPivotVisualRegionState,
   currentFrameGeneration,
+  commitFrameContainer,
+  republishVisualRegions,
+  setPreviewContainer,
+  storedFrameContainer,
+  PIVOT_VISUAL_REGION_TYPE,
 } from "./lib/pivotVisualRegions";
+import { registerObjectFormatProvider } from "@api/objectFormat";
+import { registerObjectPaneProvider } from "@api/objectPane";
+import {
+  createPivotObjectFormatProvider,
+  installPivotContainerResync,
+  registerPivotBindableProperties,
+} from "./lib/pivotObjectFormat";
+import { createPivotObjectPaneProvider } from "./lib/pivotObjectPane";
+import { pivotDataFormats, setPivotDataFormat } from "./lib/pivotDataFormats";
+import {
+  PivotLayoutCard,
+  PivotStyleCard,
+  PIVOT_LAYOUT_CARD_ID,
+  PIVOT_STYLE_CARD_ID,
+} from "./components/PivotFormatCards";
 import { prunePivotVisualRecords, resetPivotVisualHits, getPivotVisualRecord } from "./lib/pivotVisualHits";
 import { resetPivotVisualScrolls } from "./lib/pivotVisualScroll";
 import {
   clearPivotVisualHoverUnlessHovered,
   installPivotVisual,
+  pivotCellSheetRect,
   updatePivotVisualHoverAt,
 } from "./lib/pivotVisualOverlay";
+import { installPivotCellFormulaBar } from "./lib/pivotCellFormulaBar";
+import {
+  clearPivotCellSelectionIfSheetChanged,
+  getPivotCellSelection,
+  resetPivotCellSelection,
+} from "./lib/pivotVisualCellSelection";
 import {
   notePivotCreated,
   adoptCreatedCanvasPivot,
   resetCreatedPivotTracking,
 } from "./lib/pivotVisualSelection";
+import { installPivotCanvasCellKeys } from "./lib/pivotCanvasCellKeys";
+import { PIVOT_EDIT_REFUSAL } from "./lib/pivotCanvasCellCommands";
 import {
   paintPivotPlaceholderContent,
   paintPivotLoadingIndicator,
@@ -151,18 +180,17 @@ import {
 } from "./lib/writebackEditing";
 import {
   drawPivotCell,
-  DEFAULT_PIVOT_THEME,
   createPivotTheme,
   measurePivotColumnRequiredWidth,
   DEFAULT_PIVOT_CELL_HEIGHT,
 } from "./rendering/pivot";
 import type { PivotCellDrawResult, PivotTheme, PivotColumnMeasureSource } from "./rendering/pivot";
+import { resolvePivotStyleOverrides, setPivotStylePreview } from "./lib/pivotStyles";
 import {
-  getThemeOverridesForStyle,
-  DEFAULT_PIVOT_STYLE_ID,
-  getPivotStylePreview,
-  setPivotStylePreview,
-} from "./lib/pivotStyles";
+  effectivePivotStyle,
+  resetPersistedPivotStyles,
+  seedPivotStylesFromRegions,
+} from "./lib/pivotStylePersist";
 
 // Re-export cache accessors so existing consumers (e.g., context menu) keep working
 export { cachePivotView, getCachedPivotView };
@@ -171,24 +199,26 @@ export { cachePivotView, getCachedPivotView };
 // Per-Pivot Style Theme Tracking
 // ============================================================================
 
-/** Maps pivotId -> styleId (selected in the Design tab gallery). */
-const pivotStyleMap = new Map<string, string>();
-
-/** Maps styleId -> resolved PivotTheme (cached to avoid recomputing each frame). */
+/** Maps styleId + JSON(overrides) -> resolved PivotTheme (cached to avoid recomputing each frame). */
 const resolvedThemeCache = new Map<string, PivotTheme>();
 
-/** Get the PivotTheme for a given pivot: the style the gallery is HOVERING
- *  (a transient preview that never reaches the backend, the undo stack or the
- *  dirty flag) wins over the pivot's own selected style. */
+/**
+ * Get the PivotTheme for a given pivot: its PERSISTED style
+ * (lib/pivotStylePersist.ts, seeded from every region refresh) with its colour
+ * overrides, resolved by THE rule the backend's hidden grid follows too
+ * (`resolvePivotStyleOverrides`: no style or "" = the default style). The style
+ * the gallery is HOVERING (a transient preview that never reaches the backend,
+ * the undo stack or the dirty flag) wins over the persisted style id; a colour
+ * picker still open on the Format pane's Style card previews its override the
+ * same way.
+ */
 function getThemeForPivot(pivotId: string): PivotTheme {
-  const styleId = getPivotStylePreview(pivotId) ?? (pivotStyleMap.get(pivotId) || DEFAULT_PIVOT_STYLE_ID);
-  if (!styleId) return DEFAULT_PIVOT_THEME;
-
-  let theme = resolvedThemeCache.get(styleId);
+  const { styleId, overrides } = effectivePivotStyle(pivotId);
+  const key = `${styleId}|${JSON.stringify(overrides)}`;
+  let theme = resolvedThemeCache.get(key);
   if (!theme) {
-    const overrides = getThemeOverridesForStyle(styleId);
-    theme = createPivotTheme(overrides);
-    resolvedThemeCache.set(styleId, theme);
+    theme = createPivotTheme(resolvePivotStyleOverrides(styleId, overrides));
+    resolvedThemeCache.set(key, theme);
   }
   return theme;
 }
@@ -944,6 +974,10 @@ async function refreshPivotRegions(triggerRepaint: boolean = false, allowCachedH
     // `pivot-visual` region INSTEAD of the cell-anchored `pivot` one: the Core
     // paints no cell region on a canvas, but would keep its bottom-right
     // resize handle live somewhere on the page.
+    // The persisted PivotTable style rides each region (WP-C): seed before
+    // publishing, so the very paint that shows the regions wears it -- and an
+    // undo of a style change comes back the same way.
+    seedPivotStylesFromRegions(regions);
     const published = publishPivotRegions(regions, frameGenerationAtStart);
     prunePivotVisualRecords(new Set(published.visual.map((r) => String(r.data?.pivotId ?? ""))));
     if (published.cell.length === 0) {
@@ -1155,6 +1189,15 @@ function activate(context: ExtensionContext): void {
       await refreshPivotCache(pivotId);
     },
     openBiPivotEditor(pivotId: string, biModel: BiPivotModelInfo) {
+      // A model pivot made on a CANVAS is a box: its field list opens in the
+      // ONE object pane, on Fields, once the box is published (WP-C D-PANE) --
+      // now, when the regions already carry it, else on their next refresh.
+      if (isCanvasSurface()) {
+        ensureDesignTabRegistered();
+        notePivotCreated(pivotId, { openPane: true });
+        adoptCreatedCanvasPivot(getCachedRegions());
+        return;
+      }
       clearTaskPaneManuallyClosed(PIVOT_PANE_ID);
       addTaskPaneContextKey("pivot");
       ensureDesignTabRegistered();
@@ -1203,7 +1246,7 @@ function activate(context: ExtensionContext): void {
       const region = findPivotRegionAtCell(row, col);
       if (region) {
         if (resolveWritebackCell(region.pivotId, row, col)) return null;
-        return { blocked: true, message: "You can't change this part of the PivotTable." };
+        return { blocked: true, message: PIVOT_EDIT_REFUSAL };
       }
       return null;
     })
@@ -1511,6 +1554,40 @@ function activate(context: ExtensionContext): void {
       context.grid.overlays.register(registration),
     ),
   );
+  // The box in the ONE object pane (WP-C D-PANE / D-FORMAT): its Fields /
+  // Design tabs (the lifted field-list editor), its Format tab's container
+  // (saved with the frame) plus the Style, Layout and Data format cards, the
+  // pivot kind's bindable properties (WP-D registers no pivot), and the
+  // re-publish when a container binding of a pivot changes.
+  cleanupFunctions.push(registerObjectPaneProvider(createPivotObjectPaneProvider(PIVOT_VISUAL_REGION_TYPE)));
+  cleanupFunctions.push(
+    registerObjectFormatProvider(
+      createPivotObjectFormatProvider({
+        regionType: PIVOT_VISUAL_REGION_TYPE,
+        getStoredContainer: storedFrameContainer,
+        commitContainer: (pivotId, container) =>
+          commitFrameContainer(pivotId, container, (frame) => updatePivotProperties({ pivotId, canvasFrame: frame })),
+        previewContainer: setPreviewContainer,
+        dataFormats: pivotDataFormats,
+        setDataFormat: setPivotDataFormat,
+        visualCards: [
+          { id: PIVOT_STYLE_CARD_ID, title: "Style", order: 0, Component: PivotStyleCard },
+          { id: PIVOT_LAYOUT_CARD_ID, title: "Layout", order: 1, Component: PivotLayoutCard },
+        ],
+      }),
+    ),
+  );
+  cleanupFunctions.push(registerPivotBindableProperties(PIVOT_VISUAL_REGION_TYPE));
+  cleanupFunctions.push(installPivotContainerResync(republishVisualRegions, requestOverlayRedraw));
+  // ...and the keyboard of a box's selected CELLS (D-CELLS): arrows and
+  // Shift+arrows move/extend, Escape clears them, Ctrl+A selects the content,
+  // and the edit keys (Delete, Backspace, Ctrl+X, Ctrl+V, Ctrl+D) refuse --
+  // never deleting the PivotTable.
+  cleanupFunctions.push(...installPivotCanvasCellKeys(PivotManifest.id));
+  // A canvas box's selected cells in the formula bar (read-only), the Name Box
+  // and the status bar's aggregates (D-CELLS). After the box: its view-update
+  // clamp of the cells runs before this republishes.
+  cleanupFunctions.push(...installPivotCellFormulaBar());
 
   // Double-click best-fit must size pivot columns/rows for the overlay-drawn
   // content (themed fonts + in-cell chrome), not the underlying grid cells
@@ -1582,10 +1659,12 @@ function activate(context: ExtensionContext): void {
     context.events.on<{ pivotId: string }>(PivotEvents.PIVOT_CREATED, handlePivotCreated)
   );
   // A pivot created on a canvas starts as the SELECTED box (see
-  // adoptCreatedCanvasPivot), so a click on the empty page deselects it.
+  // adoptCreatedCanvasPivot), so a click on the empty page deselects it --
+  // and its field list opens in the ONE object pane, on Fields (WP-C D-PANE;
+  // handlePivotCreated opens no `pivot-editor` pane on a canvas).
   cleanupFunctions.push(
     context.events.on<{ pivotId: string }>(PivotEvents.PIVOT_CREATED, (detail) => {
-      if (detail?.pivotId) notePivotCreated(String(detail.pivotId));
+      if (detail?.pivotId) notePivotCreated(String(detail.pivotId), { openPane: isCanvasSurface() });
     })
   );
 
@@ -1741,11 +1820,22 @@ function activate(context: ExtensionContext): void {
   // Use allowCachedHit=true so returning to a sheet with an already-cached pivot
   // renders instantly instead of waiting for an IPC round-trip.
   cleanupFunctions.push(
-    context.events.on(AppEvents.SHEET_CHANGED, () => {
+    context.events.on<{ sheetIndex?: number } | undefined>(AppEvents.SHEET_CHANGED, (detail) => {
+      // A canvas box's cell selection (D-CELLS) goes when the ACTIVE sheet
+      // changed -- never on a detail-less announcement (a hide/unhide of
+      // another page, a "sheets" refresh) while the user stays on the same
+      // canvas. A switch carries the new index; the grid snapshot is still
+      // the OLD sheet's at this point (it follows the next render), so the
+      // index in the event is read first, the snapshot only without one --
+      // and again once the regions are re-read, when the snapshot has moved.
+      clearPivotCellSelectionIfSheetChanged(typeof detail?.sheetIndex === "number" ? detail.sheetIndex : undefined);
       // THEN re-derive the contextual tabs for the cell the new sheet shows:
       // the selection handler's same-cell skip cannot tell B2 here from B2
       // on the sheet just left.
-      void refreshPivotRegions(false, /* allowCachedHit */ true).then(() => recheckSelectionAfterSheetChange());
+      void refreshPivotRegions(false, /* allowCachedHit */ true).then(() => {
+        clearPivotCellSelectionIfSheetChanged();
+        recheckSelectionAfterSheetChange();
+      });
     })
   );
 
@@ -1763,6 +1853,10 @@ function activate(context: ExtensionContext): void {
     cleanupFunctions.push(
       context.events.on(event, () => {
         resetPivotVisualScrolls();
+        // Pivot ids can repeat across documents: no cell selection survives.
+        resetPivotCellSelection();
+        // ...nor a persisted style of the previous document's pivot 1.
+        resetPersistedPivotStyles();
       })
     );
   }
@@ -1809,32 +1903,9 @@ function activate(context: ExtensionContext): void {
   window.addEventListener("taskpane:requestReopen", handleReopenRequest);
   cleanupFunctions.push(() => window.removeEventListener("taskpane:requestReopen", handleReopenRequest));
 
-  // Track pivot style changes from the Design tab
-  cleanupFunctions.push(
-    context.events.on<{ pivotId: string; layout: { styleId?: string } }>(
-      PivotEvents.PIVOT_LAYOUT_STATE,
-      (detail) => {
-        if (detail.layout.styleId !== undefined) {
-          const prev = pivotStyleMap.get(detail.pivotId);
-          if (prev !== detail.layout.styleId) {
-            pivotStyleMap.set(detail.pivotId, detail.layout.styleId);
-            requestOverlayRedraw();
-          }
-        }
-      }
-    )
-  );
-  cleanupFunctions.push(
-    context.events.on<{ pivotId: string; layout: { styleId?: string } }>(
-      PivotEvents.PIVOT_LAYOUT_CHANGED,
-      (detail) => {
-        if (detail.layout.styleId !== undefined) {
-          pivotStyleMap.set(detail.pivotId, detail.layout.styleId);
-          requestOverlayRedraw();
-        }
-      }
-    )
-  );
+  // The PivotTable style is PERSISTED (WP-C): seeded from each region refresh
+  // and changed only through lib/pivotStylePersist.ts `setPivotStyle` -- it no
+  // longer rides the layout broadcasts.
 
   // Initial region load
   refreshPivotRegions(false);
@@ -1845,16 +1916,24 @@ function activate(context: ExtensionContext): void {
     findPivotRegionAtCell,
     handleSelectionChange,
     // Canvas pivot boxes: what the box last painted (canvas-space box, session
-    // scroll, first body row) -- read-only, for journey assertions.
+    // scroll, first body row) and its inner cell selection (D-CELLS, view
+    // coordinates; null when this box has none) -- read-only, for journey
+    // assertions.
     getVisualState: (pivotId: string) => {
       const record = getPivotVisualRecord(pivotId);
       if (!record) return null;
+      const cells = getPivotCellSelection();
       return {
         box: { ...record.box },
         scroll: { ...record.scroll },
         selected: getSelectedVisualPivotId() === pivotId,
+        cellSelection: cells !== null && cells.pivotId === pivotId ? cells : null,
       };
     },
+    // The visible part of a view cell of a box in SHEET px (null when not
+    // shown): its centre is a point a press names that cell at.
+    cellSheetRect: (pivotId: string, viewRow: number, viewCol: number) =>
+      pivotCellSheetRect(pivotId, viewRow, viewCol),
   };
 
   console.log("[Pivot Extension] Registered successfully");
@@ -1883,7 +1962,7 @@ function deactivate(): void {
   }
 
   // Clear style tracking
-  pivotStyleMap.clear();
+  resetPersistedPivotStyles();
   resolvedThemeCache.clear();
   setPivotStylePreview(null, null);
 
@@ -1893,6 +1972,7 @@ function deactivate(): void {
   resetPivotVisualRegionState();
   resetPivotVisualHits();
   resetPivotVisualScrolls();
+  resetPivotCellSelection();
   resetCreatedPivotTracking();
 
   // Unregister from extension registries

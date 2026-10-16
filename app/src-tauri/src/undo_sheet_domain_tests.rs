@@ -756,6 +756,7 @@ fn button(label: &str) -> crate::controls::ControlMetadata {
     );
     crate::controls::ControlMetadata {
         control_type: "button".to_string(),
+        uid: String::new(),
         properties,
     }
 }
@@ -983,7 +984,7 @@ fn floating_control(pinned: bool) -> crate::controls::ControlMetadata {
             crate::controls::ControlPropertyValue { value_type: "static".to_string(), value: value.to_string() },
         );
     }
-    crate::controls::ControlMetadata { control_type: "shape".to_string(), properties }
+    crate::controls::ControlMetadata { control_type: "shape".to_string(), uid: String::new(), properties }
 }
 
 fn geometry(key: (usize, u32, u32), x: f64, y: f64, w: f64, h: f64) -> crate::api_types::ControlGeometryChange {

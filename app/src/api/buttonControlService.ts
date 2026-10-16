@@ -219,6 +219,365 @@ export function checkCreateButtonAction(
   return null;
 }
 
+// ============================================================================
+// Page Navigator (D-NAV, owner findings 2026-10-15)
+// ============================================================================
+//
+// Power BI's Page navigator is ONE object: a row (or column) of buttons, one
+// per report page, that follows the report as pages are added, renamed,
+// reordered or hidden. Calcula's is one control of type `pageNavigator`, owned
+// by the Controls extension like every other control and created only through
+// this seam (`createPageNavigator`), so no caller re-types its recipe.
+//
+// ITS ITEMS ARE NEVER STORED. Which pages it shows is derived live from
+// @api/reportPages at paint, hit-test and press; a page added after the
+// navigator was inserted simply appears. What IS stored is how it looks
+// (container properties, the Controls extension's defaults table) and, per
+// page, an optional override -- `pageOverrides`, a JSON array of
+// `PageNavigatorOverride`.
+//
+// AN OVERRIDE NAMES ITS PAGE TWICE AND AIMS NOTHING. Like a navigate button's
+// target, it carries the page's stable id and its name: the id is the match,
+// the name is the fallback for a workbook where that id does not exist (a
+// subscriber, whose ids a pull remaps -- app/src-tauri/src/controls.rs). It has
+// NO target field: one item per page is structural, so no stored value can
+// re-aim a reader's click at another page.
+//
+// THE WIRE FORM IS SHARED WITH RUST. A `.calp` pull rewrites the ids and names
+// inside `pageOverrides` (core/calcula-format/src/page_navigator.rs parses and
+// re-serialises it), and a push must give the published bytes back unchanged.
+// So `serializePageNavigatorOverrides` is CANONICAL -- one fixed key order,
+// compact, undefined fields left out -- and a fixture string pinned in both
+// languages' tests proves the two serialisers agree byte for byte.
+
+/** The controlType of a Page Navigator. Pinned against Rust by held_button_code_tests. */
+export const PAGE_NAVIGATOR_CONTROL_TYPE = "pageNavigator";
+
+/** The per-button override property: a JSON array of PageNavigatorOverride. */
+export const PAGE_NAVIGATOR_OVERRIDES_PROPERTY = "pageOverrides";
+
+/** The ways a navigator lays its items out, in the order a menu lists them. */
+export const PAGE_NAVIGATOR_ORIENTATIONS = ["horizontal", "vertical"] as const;
+
+/** One of `PAGE_NAVIGATOR_ORIENTATIONS`. */
+export type PageNavigatorOrientation = (typeof PAGE_NAVIGATOR_ORIENTATIONS)[number];
+
+/** Most overrides one navigator keeps (a parse drops the rest). */
+export const MAX_PAGE_NAVIGATOR_OVERRIDES = 256;
+
+/** Longest override caption, in characters (Unicode scalar values). */
+export const MAX_PAGE_NAVIGATOR_CAPTION = 255;
+
+/**
+ * Longest serialised `pageOverrides` value, in characters (Unicode scalar values, `[...s].length`) --
+ * the MIRROR of Rust's `MAX_CONTROL_PROPERTY_CHARS` (`app/src-tauri/src/controls.rs`, counted with
+ * `.chars().count()`), pinned by `held_button_code_tests`. 256 entries x 255-char captions fit the
+ * per-entry limits but not this one, so the strict check refuses the TOTAL with a sentence instead of
+ * letting the backend door answer with its raw error.
+ */
+export const MAX_PAGE_NAVIGATOR_OVERRIDES_CHARS = 64 * 1024;
+
+/**
+ * THE one source of a navigator's natural size (the provider's default box, the canvas insert's box, the
+ * recipe's default `gap`, the Properties defaults for width/height). Nothing re-types 112 / 32 / 8.
+ */
+export const PAGE_NAVIGATOR_NATURAL_ITEM = { width: 112, height: 32, gap: 8 } as const;
+
+/**
+ * Natural box for `itemCount` items, horizontal: n = max(1, itemCount); width = n*item.width +
+ * (n-1)*gap; height = item.height. Pure. A navigator with no page to show still gets one item's room,
+ * so it never inserts as a box nobody can see or grab.
+ */
+export function pageNavigatorNaturalSize(itemCount: number): { width: number; height: number } {
+  const whole = Number.isFinite(itemCount) ? Math.floor(itemCount) : 1;
+  const n = Math.max(1, whole);
+  const { width, height, gap } = PAGE_NAVIGATOR_NATURAL_ITEM;
+  return { width: n * width + (n - 1) * gap, height };
+}
+
+/** The box a navigator gets when nobody asked for a size and no page list is known: four items
+ *  (472 x 32). */
+export const PAGE_NAVIGATOR_DEFAULT_SIZE: { readonly width: number; readonly height: number } =
+  Object.freeze(pageNavigatorNaturalSize(4));
+
+/**
+ * One page's override. Names the PAGE twice (id first, name as the fallback --
+ * a subscriber's ids are its own) and carries NO target: which page an item
+ * opens is structural (one item per page), so no stored value can re-aim a click.
+ */
+export interface PageNavigatorOverride {
+  /** The page's stable sheet uuid; "" when it had none. */
+  sheetId: string;
+  /** The page's name when the override was written: the fallback match. */
+  sheetName: string;
+  /** Caption; absent = the page name. */
+  text?: string;
+  /** true = this page's button is left out. */
+  hidden?: boolean;
+  /** "#rgb" | "#rrggbb" | "#rrggbbaa"; default state only. */
+  fill?: string;
+  /** Caption colour, default state only. */
+  color?: string;
+  /** Border colour, every state. */
+  borderColor?: string;
+}
+
+/** The colour spellings an override accepts. */
+const PAGE_NAVIGATOR_COLOR = /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+
+/** The colour fields of an override, in canonical order. */
+const PAGE_NAVIGATOR_COLOR_FIELDS = ["fill", "color", "borderColor"] as const;
+
+/** Every field an override may carry, in the canonical (serialised) order. */
+const PAGE_NAVIGATOR_OVERRIDE_FIELDS: readonly string[] = [
+  "sheetId",
+  "sheetName",
+  "text",
+  "hidden",
+  ...PAGE_NAVIGATOR_COLOR_FIELDS,
+];
+
+/** Length in characters as Rust counts them (`.chars().count()`): code points, not UTF-16 units. */
+function charCount(s: string): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const unit = s.charCodeAt(i);
+    if (unit >= 0xd800 && unit <= 0xdbff && i + 1 < s.length) {
+      const next = s.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) i++;
+    }
+    n++;
+  }
+  return n;
+}
+
+/** `s` cut to at most `max` characters, never splitting a surrogate pair. */
+function clipChars(s: string, max: number): string {
+  if (s.length <= max) return s;
+  return [...s].slice(0, max).join("");
+}
+
+function isPlainRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** Tolerant read (paint, zone, pane): bad JSON -> []; entries missing sheetId AND sheetName dropped;
+ *  unknown fields dropped; bad colours dropped field-wise; text clipped to MAX_PAGE_NAVIGATOR_CAPTION;
+ *  at most MAX_PAGE_NAVIGATOR_OVERRIDES entries. Never throws. */
+export function parsePageNavigatorOverrides(value: string | null | undefined): PageNavigatorOverride[] {
+  if (typeof value !== "string" || value.trim() === "") return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const out: PageNavigatorOverride[] = [];
+  for (const raw of parsed) {
+    if (out.length >= MAX_PAGE_NAVIGATOR_OVERRIDES) break;
+    if (!isPlainRecord(raw)) continue;
+    const sheetId = typeof raw.sheetId === "string" ? raw.sheetId : "";
+    const sheetName = typeof raw.sheetName === "string" ? raw.sheetName : "";
+    if (sheetId === "" && sheetName === "") continue;
+    const entry: PageNavigatorOverride = { sheetId, sheetName };
+    if (typeof raw.text === "string") entry.text = clipChars(raw.text, MAX_PAGE_NAVIGATOR_CAPTION);
+    if (typeof raw.hidden === "boolean") entry.hidden = raw.hidden;
+    for (const field of PAGE_NAVIGATOR_COLOR_FIELDS) {
+      const c = raw[field];
+      if (typeof c === "string" && PAGE_NAVIGATOR_COLOR.test(c)) entry[field] = c;
+    }
+    out.push(entry);
+  }
+  return out;
+}
+
+/** "setting 3 (page "Sales")" -- how a refusal names the entry it is about. */
+function describeOverrideEntry(position: number, raw: unknown): string {
+  const name =
+    isPlainRecord(raw) && typeof raw.sheetName === "string" && raw.sheetName !== ""
+      ? raw.sheetName
+      : isPlainRecord(raw) && typeof raw.sheetId === "string" && raw.sheetId !== ""
+        ? raw.sheetId
+        : "";
+  return name ? `Page button setting ${position} (page "${name}")` : `Page button setting ${position}`;
+}
+
+/** Strict check (script validator, pane before write): null when `value` is a valid overrides array,
+ *  else the one-sentence refusal. Checks, in order: total length <= MAX_PAGE_NAVIGATOR_OVERRIDES_CHARS,
+ *  JSON array, <= MAX_PAGE_NAVIGATOR_OVERRIDES entries, then each entry (names its position and page). */
+export function checkPageNavigatorOverrides(value: string): string | null {
+  if (typeof value !== "string") {
+    return "The per-page button settings must be text: a JSON array of page entries.";
+  }
+  const length = charCount(value);
+  if (length > MAX_PAGE_NAVIGATOR_OVERRIDES_CHARS) {
+    return (
+      `The per-page button settings are ${length} characters; the limit is ${MAX_PAGE_NAVIGATOR_OVERRIDES_CHARS}. ` +
+      "Shorten some captions or clear settings you no longer need."
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return "The per-page button settings are not valid JSON; they must be a JSON array of page entries.";
+  }
+  if (!Array.isArray(parsed)) {
+    return "The per-page button settings must be a JSON array of page entries.";
+  }
+  if (parsed.length > MAX_PAGE_NAVIGATOR_OVERRIDES) {
+    return (
+      `The per-page button settings name ${parsed.length} pages; a page navigator keeps at most ` +
+      `${MAX_PAGE_NAVIGATOR_OVERRIDES}.`
+    );
+  }
+  for (let i = 0; i < parsed.length; i++) {
+    const raw: unknown = parsed[i];
+    const which = describeOverrideEntry(i + 1, raw);
+    if (!isPlainRecord(raw)) {
+      return `${which} must be an object with sheetId and sheetName.`;
+    }
+    for (const key of Object.keys(raw)) {
+      if (!PAGE_NAVIGATOR_OVERRIDE_FIELDS.includes(key)) {
+        return `${which} has an unknown field "${key}"; the fields are ${PAGE_NAVIGATOR_OVERRIDE_FIELDS.join(", ")}.`;
+      }
+    }
+    if (typeof raw.sheetId !== "string" || typeof raw.sheetName !== "string") {
+      return `${which} must name its page with a text sheetId and sheetName.`;
+    }
+    if (raw.sheetId === "" && raw.sheetName === "") {
+      return `${which} names no page: give it the page's sheetId or sheetName.`;
+    }
+    if (raw.text !== undefined) {
+      if (typeof raw.text !== "string") return `${which}: the caption (text) must be text.`;
+      const textLength = charCount(raw.text);
+      if (textLength > MAX_PAGE_NAVIGATOR_CAPTION) {
+        return `${which}: the caption is ${textLength} characters; the limit is ${MAX_PAGE_NAVIGATOR_CAPTION}.`;
+      }
+    }
+    if (raw.hidden !== undefined && typeof raw.hidden !== "boolean") {
+      return `${which}: hidden must be true or false.`;
+    }
+    for (const field of PAGE_NAVIGATOR_COLOR_FIELDS) {
+      const c = raw[field];
+      if (c === undefined) continue;
+      if (typeof c !== "string" || !PAGE_NAVIGATOR_COLOR.test(c)) {
+        return `${which}: ${field} ${JSON.stringify(c)} is not a colour; use #rgb, #rrggbb or #rrggbbaa.`;
+      }
+    }
+  }
+  return null;
+}
+
+/** Canonical compact JSON, fixed key order sheetId, sheetName, text, hidden, fill, color, borderColor;
+ *  undefined fields omitted; "[]" for none. Byte-stable for the same list. */
+export function serializePageNavigatorOverrides(list: readonly PageNavigatorOverride[]): string {
+  const canonical = list.map((o) => {
+    const out: Record<string, string | boolean> = { sheetId: o.sheetId, sheetName: o.sheetName };
+    if (o.text !== undefined) out.text = o.text;
+    if (o.hidden !== undefined) out.hidden = o.hidden;
+    for (const field of PAGE_NAVIGATOR_COLOR_FIELDS) {
+      const c = o[field];
+      if (c !== undefined) out[field] = c;
+    }
+    return out;
+  });
+  return JSON.stringify(canonical);
+}
+
+/**
+ * The override that applies to `page` (THE one matching rule):
+ *   1. the override whose sheetId === page.sheetId; else
+ *   2. an override whose sheetId names NO page in `allPages`, whose sheetName === page.name; else
+ *   3. the same, case-folded (toLocaleLowerCase), as sheet names compare.
+ * An override whose id matches some OTHER live page never applies by name.
+ */
+export function matchPageNavigatorOverride(
+  overrides: readonly PageNavigatorOverride[],
+  page: { sheetId?: string; name: string },
+  allPages: ReadonlyArray<{ sheetId?: string }>,
+): PageNavigatorOverride | undefined {
+  const pageId = page.sheetId ?? "";
+  if (pageId !== "") {
+    const byId = overrides.find((o) => o.sheetId === pageId);
+    if (byId) return byId;
+  }
+  const liveIds = new Set<string>();
+  for (const p of allPages) if (p.sheetId) liveIds.add(p.sheetId);
+  const orphans = overrides.filter((o) => o.sheetId === "" || !liveIds.has(o.sheetId));
+  const exact = orphans.find((o) => o.sheetName === page.name);
+  if (exact) return exact;
+  const folded = page.name.toLocaleLowerCase();
+  return orphans.find((o) => o.sheetName.toLocaleLowerCase() === folded);
+}
+
+/** WHERE a navigator goes and what the caller may ask; everything else (colours,
+ *  pin/embed, gap...) is the provider's (Seam Rule). */
+export type CreatePageNavigatorRequest = ButtonControlPlacement & {
+  /** Rendered width in pixels. Omitted = the natural width for the live page list. */
+  width?: number;
+  /** Rendered height in pixels. Omitted = the natural height (one item). */
+  height?: number;
+  /** Default "horizontal". */
+  orientation?: PageNavigatorOrientation;
+};
+
+function isNonNegativeFiniteNumber(n: unknown): boolean {
+  return typeof n === "number" && Number.isFinite(n) && n >= 0;
+}
+
+/** Why a create request cannot be honoured (the provider THROWS this before writing), or null. */
+export function checkCreatePageNavigator(request: CreatePageNavigatorRequest): string | null {
+  if (!isPlainRecord(request)) {
+    return "A page navigator request must say where it goes (sheetIndex plus row/col or x/y).";
+  }
+  const r = request as Record<string, unknown>;
+  if (typeof r.sheetIndex !== "number" || !Number.isSafeInteger(r.sheetIndex) || r.sheetIndex < 0) {
+    return `A page navigator's sheetIndex must be a non-negative whole number; got ${String(r.sheetIndex)}.`;
+  }
+  if (
+    r.orientation !== undefined &&
+    !(PAGE_NAVIGATOR_ORIENTATIONS as readonly unknown[]).includes(r.orientation)
+  ) {
+    return (
+      `Unknown page navigator orientation "${String(r.orientation)}". ` +
+      `A page navigator is one of: ${PAGE_NAVIGATOR_ORIENTATIONS.join(", ")}.`
+    );
+  }
+  const hasX = r.x !== undefined;
+  const hasY = r.y !== undefined;
+  if (hasX !== hasY) {
+    return "A page navigator's position needs both x and y (sheet pixels); only one was given.";
+  }
+  if (hasX && (!isNonNegativeFiniteNumber(r.x) || !isNonNegativeFiniteNumber(r.y))) {
+    return `A page navigator's position must be non-negative, finite sheet pixels; got x=${String(r.x)}, y=${String(r.y)}.`;
+  }
+  const hasRow = r.row !== undefined;
+  const hasCol = r.col !== undefined;
+  if (hasRow !== hasCol) {
+    return "A page navigator's anchor needs both row and col; only one was given. Omit both to have one allocated.";
+  }
+  if (
+    hasRow &&
+    (typeof r.row !== "number" || typeof r.col !== "number" ||
+      !Number.isSafeInteger(r.row) || !Number.isSafeInteger(r.col) || r.row < 0 || r.col < 0)
+  ) {
+    return `A page navigator's anchor must be a non-negative whole row and column; got row=${String(r.row)}, col=${String(r.col)}.`;
+  }
+  if (!hasX && !hasRow) {
+    return "A page navigator needs an anchor cell (row + col) or a position (x + y, sheet pixels); the request gave neither.";
+  }
+  for (const key of ["width", "height"] as const) {
+    const v = r[key];
+    if (v === undefined) continue;
+    if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) {
+      return `A page navigator's ${key} must be a positive number of pixels; got ${String(v)}.`;
+    }
+  }
+  return null;
+}
+
 /** Where a control sits: the anchor cell it is attached to. */
 export interface ButtonControlAnchor {
   sheetIndex: number;
@@ -321,7 +680,7 @@ export interface ButtonControlHandle extends ButtonControlAnchor {
 /**
  * What the Controls extension provides.
  *
- * Both methods are anchor-addressed: one cell holds at most one control, which
+ * Every method is anchor-addressed: one cell holds at most one control, which
  * is the same identity rule the backend's control metadata enforces. A create
  * that gives only a position gets an allocated anchor, returned on the handle.
  */
@@ -333,6 +692,10 @@ export interface ButtonControlProvider {
   /** Delete the control at an anchor cell (no-op when there is none). Used to
    *  roll back a half-made button when the rest of a two-step bind fails. */
   removeButton(anchor: ButtonControlAnchor): Promise<void>;
+  /** Create ONE Page Navigator (controlType "pageNavigator") at an anchor or at x/y, and return its
+   *  handle. Its items are derived from @api/reportPages; nothing about pages is stored. The provider
+   *  THROWS `checkCreatePageNavigator`'s sentence before writing anything. */
+  createPageNavigator(request: CreatePageNavigatorRequest): Promise<ButtonControlHandle>;
 }
 
 let provider: ButtonControlProvider | null = null;

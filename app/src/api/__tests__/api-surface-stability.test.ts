@@ -192,6 +192,125 @@ describe("api/index.ts object geometry + stacking re-exports", () => {
 });
 
 // ============================================================================
+// visualContainer.ts / visualContainerPaint.ts — the VISUAL CONTAINER (WP-C
+// D-FORMAT) is reachable from the BARREL, and the barrel's copy is the module's
+// ============================================================================
+// Core paints the container, every family lays out in its content rect, and
+// the Format pane edits it -- all through these two modules. The layout cache
+// in particular must be ONE cache: a second copy behind the barrel would let
+// Core record a painted layout that a family's hit test never reads.
+
+describe("api/index.ts visual container re-exports", () => {
+  it("every runtime export of both modules is re-exported, as the same binding", async () => {
+    const barrel = (await import("../index")) as Record<string, unknown>;
+    for (const mod of [await import("../visualContainer"), await import("../visualContainerPaint")]) {
+      const exported = Object.entries(mod as Record<string, unknown>);
+      expect(exported.length).toBeGreaterThan(10);
+      for (const [name, value] of exported) {
+        expect(barrel[name], `${name} is not re-exported from @api`).toBe(value);
+      }
+    }
+  });
+
+  it("the barrel carries the schema, the painters and the layout cache", async () => {
+    const mod = (await import("../index")) as Record<string, unknown>;
+    for (const fn of [
+      "validateVisualContainer", "applyVisualContainerPatch", "resolveVisualContainer", "layoutVisualContainer",
+      "controlContainerKey", "paintVisualContainerUnder", "paintVisualContainerOver", "withContainerContentClip",
+      "recordPaintedContainerLayout", "visualContentRectFor", "visualContentRect", "resetPaintedContainerLayouts",
+    ]) {
+      expect(typeof mod[fn], fn).toBe("function");
+    }
+    expect(Array.isArray(mod.VISUAL_CONTAINER_FIELD_IDS)).toBe(true);
+    expect(mod.BASE_CONTAINER_DEFAULTS).toBeDefined();
+  });
+});
+
+// ============================================================================
+// aspectLock.ts — LOCK ASPECT RATIO: Core's resize drag, the Size and Position
+// dialog and the Format pane's W/H rows must run ONE rule
+// ============================================================================
+
+describe("api/index.ts aspect lock re-exports", () => {
+  it("every runtime export of aspectLock.ts is re-exported, as the same binding", async () => {
+    const barrel = (await import("../index")) as Record<string, unknown>;
+    const mod = (await import("../aspectLock")) as Record<string, unknown>;
+    const exported = Object.entries(mod);
+    expect(exported.map(([n]) => n).sort()).toEqual(["applyAspectLock", "aspectLockedEdges"]);
+    for (const [name, value] of exported) {
+      expect(barrel[name], `${name} is not re-exported from @api`).toBe(value);
+    }
+  });
+});
+
+// ============================================================================
+// objectPane.ts — THE OBJECT PANE seam (WP-C D-PANE) is reachable from the
+// BARREL, and the barrel's copy is the module's
+// ============================================================================
+// Families register providers and the host registers itself; every door asks
+// openObjectPane. Two copies of the registry (one behind the barrel) would let
+// a family register into a registry the host never reads -- every door would
+// then answer "not available" with the pane installed.
+
+describe("api/index.ts object pane re-exports", () => {
+  it("every runtime export of objectPane.ts is re-exported, as the same binding", async () => {
+    const barrel = (await import("../index")) as Record<string, unknown>;
+    const mod = (await import("../objectPane")) as Record<string, unknown>;
+    const exported = Object.entries(mod);
+    expect(exported.length).toBeGreaterThan(10);
+    for (const [name, value] of exported) {
+      expect(barrel[name], `${name} is not re-exported from @api`).toBe(value);
+    }
+  });
+
+  it("the barrel carries the registry, the host doors and the menu row", async () => {
+    const mod = (await import("../index")) as Record<string, unknown>;
+    for (const fn of [
+      "registerObjectPaneProvider", "getObjectPaneProvider", "hasObjectPaneProvider", "registerObjectPaneHost",
+      "openObjectPane", "closeObjectPane", "getObjectPaneState", "onObjectPaneStateChanged",
+      "notifyObjectPaneStateChanged", "objectPaneMenuEntry", "resetObjectPane",
+    ]) {
+      expect(typeof mod[fn], fn).toBe("function");
+    }
+    expect(mod.OBJECT_PANE_ID).toBe("object-pane");
+    expect(mod.OBJECT_PANE_FORMAT_TAB).toBe("format");
+  });
+});
+
+// ============================================================================
+// objectFormat.ts — the OBJECT FORMAT seam (WP-C D-FORMAT) is reachable from
+// the BARREL, and the barrel's copy is the module's
+// ============================================================================
+// The provider registry and the open-preview set must be ONE: a second copy
+// behind the barrel would let a family register where the Format pane never
+// looks, and a preview end the pane never reaches.
+
+describe("api/index.ts object format re-exports", () => {
+  it("every runtime export of the module is re-exported, as the same binding", async () => {
+    const barrel = (await import("../index")) as Record<string, unknown>;
+    const mod = (await import("../objectFormat")) as Record<string, unknown>;
+    const exported = Object.entries(mod);
+    expect(exported.length).toBeGreaterThan(10);
+    for (const [name, value] of exported) {
+      expect(barrel[name], `${name} is not re-exported from @api`).toBe(value);
+    }
+  });
+
+  it("the barrel carries the registry, the commit and the binding helpers", async () => {
+    const mod = (await import("../index")) as Record<string, unknown>;
+    for (const fn of [
+      "registerObjectFormatProvider", "getObjectFormatProvider", "hasObjectFormatProvider",
+      "readObjectFormat", "previewObjectFormat", "endObjectFormatPreview", "commitObjectFormat",
+      "resolveContainerForObject", "onContainerBindingsChanged", "containerBindableDescriptors",
+      "resetObjectFormatProviders",
+    ]) {
+      expect(typeof mod[fn], fn).toBe("function");
+    }
+    expect(mod.OBJECT_FORMAT_UNDO_LABEL).toBe("Format Object");
+  });
+});
+
+// ============================================================================
 // objectSelection.ts — the canvas SELECTION SET (M8) the arrange commands use
 // ============================================================================
 
@@ -213,8 +332,25 @@ describe("api/objectSelection.ts selection-set surface", () => {
       "noteObjectPress",
       "noteWorksheetObjectPress",
       "objectLabelOf",
+      // WP-A S7a: the Copy / Paste door asks an INNER selection for its own command.
+      "innerSelectionClipboardCommand",
     ]) {
       expect(typeof mod[fn]).toBe("function");
+    }
+  });
+});
+
+// ============================================================================
+// cellClipboard.ts — the CELL clipboard's rule and its COPY primitive
+// ============================================================================
+
+describe("api/cellClipboard.ts surface", () => {
+  it("re-exports Core's freshness rule and copyCellRange (never a copy of them)", async () => {
+    const mod = (await import("../cellClipboard")) as Record<string, unknown>;
+    const core = (await import("../../core/hooks/useClipboard")) as Record<string, unknown>;
+    for (const fn of ["internalClipboardIsCurrent", "internalClipboardMatchesSystemText", "copyCellRange"]) {
+      expect(typeof mod[fn], `@api/cellClipboard does not export ${fn}`).toBe("function");
+      expect(mod[fn], `@api/cellClipboard's ${fn} is not Core's`).toBe(core[fn]);
     }
   });
 });

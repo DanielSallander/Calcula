@@ -11,6 +11,7 @@
 //          lib.rs at test time: the direction is Rust -> TypeScript.
 
 import type { CanvasLayout, CanvasLayoutPatch, CanvasObjectRef } from "./lib";
+import type { GridRegion } from "./gridOverlays";
 
 /**
  * The `CanvasObjectRef.kind` of every floating-object family -- THE list; no
@@ -148,6 +149,35 @@ export function canvasObjectsLocked(layout: CanvasLayout | null | undefined): bo
  */
 export function canvasWallpaper(layout: CanvasLayout | null | undefined): string {
   return layout?.wallpaper ?? "";
+}
+
+/**
+ * The `GridRegion.type` that names a canvas PAGE itself -- its background and
+ * wallpaper, the page's own bindable properties (@api/objectBindings kind
+ * "canvasPage"). The page is a grid LAYER, not a published region, so no
+ * region of this type is ever painted or hit-tested: a pane that asks about
+ * the page (which properties bind, which binding ref) describes it with
+ * {@link canvasPageRegion} and hands that to `getBindableProperties` /
+ * `bindingRefForRegion`, the way it would hand over a chart's region.
+ */
+export const CANVAS_PAGE_REGION_TYPE = "canvas-page";
+
+/**
+ * A region describing the canvas page at `sheetIndex` (see
+ * {@link CANVAS_PAGE_REGION_TYPE}). `sheetId` is the page's stable SheetId when
+ * the caller knows it; without it the CanvasSheet extension resolves the id
+ * from the sheet index.
+ */
+export function canvasPageRegion(sheetIndex: number, sheetId: string | null = null): GridRegion {
+  return {
+    id: `canvas-page-${sheetId ?? sheetIndex}`,
+    type: CANVAS_PAGE_REGION_TYPE,
+    startRow: 0,
+    startCol: 0,
+    endRow: 0,
+    endCol: 0,
+    data: { sheetIndex, ...(sheetId ? { sheetId } : {}) },
+  };
 }
 
 /** The layout a new canvas starts with (Rust `CanvasLayout::default`). */

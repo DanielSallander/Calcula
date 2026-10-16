@@ -40,6 +40,8 @@ import {
 import { getPivotTableInfo, updatePivotProperties } from '../lib/pivot-api';
 import { usePivotPanelState, updateSharedLayout } from '../lib/pivotPanelStore';
 import { setPivotStylePreview } from '../lib/pivotStyles';
+import { setPivotStyle, usePersistedPivotStyle } from '../lib/pivotStylePersist';
+import { showToast } from '@api';
 import type { ReportLayout, ValuesPosition } from './types';
 import { PivotTableStylesGallery, DEFAULT_PIVOT_STYLE_ID } from './PivotTableStylesGallery';
 
@@ -229,16 +231,29 @@ export function DesignStylesSection(_props: PanelSectionProps): React.ReactEleme
     [pivotId],
   );
 
+  // The style is PERSISTED on the definition (WP-C): the gallery shows what
+  // the pivot has, and a choice is ONE update_pivot_properties (undoable,
+  // "PivotTable Style") -- never a fields update. Clear = the default style.
+  const persisted = usePersistedPivotStyle(pivotId);
+  const commitStyle = useCallback(
+    (styleId: string | null) => {
+      if (!pivotId) return;
+      setPivotStyle(pivotId, styleId).catch((err) =>
+        showToast(`The PivotTable style could not be set: ${err instanceof Error ? err.message : String(err)}`, { type: 'error' }),
+      );
+    },
+    [pivotId],
+  );
+
   if (!layoutState) {
     return null;
   }
-  const { layout } = layoutState;
 
   return (
     <PivotTableStylesGallery
-      selectedStyleId={layout.styleId ?? DEFAULT_PIVOT_STYLE_ID}
-      onStyleSelect={(styleId) => updateSharedLayout({ styleId })}
-      onStyleClear={() => updateSharedLayout({ styleId: '' })}
+      selectedStyleId={persisted?.styleId || DEFAULT_PIVOT_STYLE_ID}
+      onStyleSelect={(styleId) => commitStyle(styleId)}
+      onStyleClear={() => commitStyle(null)}
       onStylePreview={handlePreview}
     />
   );

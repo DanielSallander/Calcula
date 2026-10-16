@@ -16,7 +16,7 @@ import { emitAppEvent } from "@api/events";
 import { requestOverlayRedraw } from "@api/gridOverlays";
 import { PivotEvents } from "../../_shared/lib/pivotEvents";
 import type { PivotViewResponse, PivotRowData, PivotCellData } from "./pivot-api";
-import { getPivotAtCell, togglePivotGroup, cancelPivotOperation } from "./pivot-api";
+import { getPivotAtCell, togglePivotGroup, cancelPivotOperation, getCellDisplayValue } from "./pivot-api";
 import {
   getCachedPivotView,
   getCellWindowCache,
@@ -48,6 +48,83 @@ export function getPivotViewCell(pivotId: string, viewRow: number, viewCol: numb
 }
 
 /**
+ * The item name a pivot cell stands for: its formatted text, or -- when the
+ * backend sent none (a text header whose label IS its value, an unformatted
+ * numeric header such as the year 2013) -- its value as text. Every menu item
+ * and toggle that names an item by its label reads this, so a numeric header
+ * is never named "" (BUG-0454).
+ */
+export function pivotCellLabel(cell: PivotCellData): string {
+  return cell.formattedValue || getCellDisplayValue(cell.value);
+}
+
+/**
+ * The row header that governs view row `viewRow`: the right-most RowHeader
+ * among the row-label columns that names an item (carries a group path).
+ * Attribute columns are RowHeader cells too but name no item, so they never
+ * govern; in a tabular layout the repeated parent labels sit LEFT of the
+ * row's own item, so the right-most one is the row's own. Windowed-aware.
+ * Null when the row is not cached or no header governs it (a subtotal or
+ * grand-total row, a column-header row).
+ */
+export function governingRowHeader(
+  pivotId: string,
+  viewRow: number,
+): { cell: PivotCellData; viewCol: number } | null {
+  const view = getCachedPivotView(pivotId);
+  if (!view) return null;
+  const row = getPivotViewRow(pivotId, view, viewRow);
+  if (!row) return null;
+  const limit = Math.min(view.rowLabelColCount ?? 0, row.cells.length);
+  for (let c = limit - 1; c >= 0; c--) {
+    const cell = row.cells[c];
+    if (cell && cell.cellType === "RowHeader" && (cell.groupPath?.length ?? 0) > 0) {
+      return { cell, viewCol: c };
+    }
+  }
+  return null;
+}
+
+/**
+ * The position of a header's field in its zone (what `togglePivotGroup`'s
+ * `fieldIndex` means). A compact layout states it as the indent; a tabular or
+ * outline layout indents nothing and puts each field in its own column, where
+ * the group path (one entry per level down to the item) states it.
+ */
+function headerZonePosition(header: PivotCellData): number {
+  if ((header.indentLevel ?? 0) > 0) return header.indentLevel!;
+  const depth = (header.groupPath?.length ?? 0) - 1;
+  return depth > 0 ? depth : 0;
+}
+
+/**
+ * Expand (`expand` true) or collapse the item a header names -- ONLY when its
+ * state differs: an item that cannot expand, or is already in that state,
+ * sends nothing and answers false. On a change it toggles the exact item by
+ * its group path (togglePivotGroup), asks for a refresh and answers true. A
+ * backend failure is thrown to the caller (who tells the user).
+ */
+export async function setPivotItemExpandedAt(
+  pivotId: string,
+  header: PivotCellData,
+  isRow: boolean,
+  expand: boolean,
+): Promise<boolean> {
+  if (!header.isExpandable) return false;
+  const collapsed = header.isCollapsed === true;
+  if (expand !== collapsed) return false;
+  await togglePivotGroup({
+    pivotId,
+    isRow,
+    fieldIndex: headerZonePosition(header),
+    value: pivotCellLabel(header),
+    groupPath: header.groupPath,
+  });
+  window.dispatchEvent(new CustomEvent("pivot:refresh"));
+  return true;
+}
+
+/**
  * Toggle the +/- of the header cell at (viewRow, viewCol). Returns false when
  * the cell is not in the cached view (nothing was sent).
  */
@@ -60,7 +137,7 @@ export async function togglePivotHeaderAt(
   const cell = getPivotViewCell(pivotId, viewRow, viewCol);
   if (!cell) return false;
 
-  const itemLabel = cell.formattedValue;
+  const itemLabel = pivotCellLabel(cell);
   // In compact layout, all row headers share col 0 but have different indent levels.
   // Use indentLevel to determine the correct field index.
   // For columns, indentLevel carries the column field depth directly.

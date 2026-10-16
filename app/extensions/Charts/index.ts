@@ -36,9 +36,14 @@ import {
 import { registerSandboxMark } from "./rendering/sandboxMarkShim";
 
 /**
- * Excel's Ctrl+1 on a chart: format whatever is selected. Registered as a
- * command (not just a listener) so the keybinding registry, the command palette
- * and the macro recorder all see the same one door.
+ * "Format the chart's selection": the object pane on its Format tab, with the
+ * ladder's rung published first so the "Chart elements" card shows the element
+ * the reader picked. A command (not just a listener) so the command palette,
+ * the macro recorder and the context menu's "Format <element>..." verb all
+ * reach the same one door. Ctrl+1 itself is the object pane's own binding
+ * (`ext.objectPane.format`, BuiltIn/ObjectPane) -- the chart's binding is gone:
+ * one key, one owner, and the object pane's binding asks the chart provider's
+ * `beforeShowFormat` to publish the rung exactly as this command does.
  *
  * THE ID ITSELF lives in ./types (CHART_FORMAT_SELECTION_COMMAND), because the
  * context menu's "Format <element>..." verb has to invoke this very command and
@@ -94,8 +99,6 @@ import {
   ChartManifest,
   ChartDialogDefinition,
   CHART_DIALOG_ID,
-  ChartFormatPaneDefinition,
-  CHART_FORMAT_PANE_ID,
   ChartJsonPaneDefinition,
   CHART_JSON_PANE_ID,
 } from "./manifest";
@@ -149,18 +152,32 @@ import {
   mergeSpecPreview,
   updateChartPlacement as storeUpdateChartPlacement,
   flushPendingChartSaves,
+  flushPendingChartSavesQuietly,
+  reportChartFailures,
+  getPreviewBaseSpec,
+  previewChartSpec,
+  restoreChartSpecPreview,
   type DeleteChartOptions,
 } from "./lib/chartStore";
 import { chartsBackend } from "./lib/chartsBackend";
+import { installChartBindings } from "./lib/chartBindingsRegistration";
 import { registerChartRenderingApi } from "@api/rendering";
 import { registerChartParamController } from "@api/chartParams";
 import { chartParamController } from "./lib/chartParamController";
 import { registerChartDataProvider, setChartRightClickTarget } from "@api/chartData";
 import {
+  ChartElementFormatCard,
   installChartSelectionPublisher,
   publishCurrentChartSelection,
   runResetToMatchStyleCommand,
 } from "./components/ChartFormatPane";
+import { registerObjectFormatProvider } from "@api/objectFormat";
+import { registerObjectPaneProvider } from "@api/objectPane";
+import { validateVisualGradient, type VisualGradient } from "@api/visualContainer";
+import { createChartObjectFormatProvider, installChartContainerResync } from "./lib/chartObjectFormat";
+import { createChartObjectPaneProvider, openChartFormatPane } from "./lib/chartObjectPane";
+import { designQueryDataFormats } from "./lib/chartDataFormats";
+import { installTaskPaneReopen } from "./lib/chartJsonPaneReopen";
 import { chartDataProvider } from "./lib/chartDataProvider";
 import {
   chartCueSteps,
@@ -806,21 +823,78 @@ function activate(context: ExtensionContext): void {
   cleanupFunctions.push(() => context.ui.dialogs.unregister(FORMAT_AXIS_DIALOG_ID));
 
   // -----------------------------------------------------------------------
-  // The Format task pane — Excel's "Format <element>"
+  // The object pane — Excel's "Format <element>" and Power BI's Format pane
   // -----------------------------------------------------------------------
   //
-  // ONE FORMAT SURFACE, NOT TWO. The two dialog ids registered just above no
-  // longer format anything: `chart:dataPointFormat` and
-  // `chart:formatAxisDialog` are one-effect redirectors into this pane, kept
-  // registered only because ChartContextMenu, ChartDesignSections and
-  // AxisContextMenu still name those ids. They are doorways; the pane is the
-  // room. Nothing is registered twice for the same job.
-  registerTaskPane(ChartFormatPaneDefinition);
+  // ONE FORMAT SURFACE, NOT TWO. A chart is formatted in the ONE object pane
+  // (BuiltIn/ObjectPane, WP-C D-PANE): the chart contributes its build tabs
+  // (@api/objectPane: Fields | Design for a design query, Data otherwise) and
+  // its format provider (@api/objectFormat: the visual container -- padding,
+  // title, effects -- plus the retargeting "Chart elements" card). The two
+  // dialog ids registered just above no longer format anything:
+  // `chart:dataPointFormat` and `chart:formatAxisDialog` are one-effect
+  // redirectors into the object pane's Format tab, kept registered only because
+  // ChartContextMenu, ChartDesignSections and AxisContextMenu still name those
+  // ids. They are doorways; the pane is the room.
+  const repaintChart = (chartId: string): void => {
+    invalidateChartCache(chartId);
+    syncChartRegions();
+    window.dispatchEvent(new Event(ChartEvents.CHART_UPDATED));
+    requestOverlayRedraw();
+  };
+  cleanupFunctions.push(
+    registerObjectFormatProvider(
+      createChartObjectFormatProvider({
+        getStoredSpec: (id) => getPreviewBaseSpec(id),
+        updateSpec: (id, patch) => updateChartSpec(id, patch),
+        previewSpec: (id, patch) => previewChartSpec(id, patch),
+        restorePreview: () => restoreChartSpecPreview(),
+        repaint: repaintChart,
+        flushQuietly: () => flushPendingChartSavesQuietly(),
+        reportOther: (failures) => {
+          void reportChartFailures(failures as Parameters<typeof reportChartFailures>[0]);
+        },
+        dataFormats: designQueryDataFormats,
+        elementCard: ChartElementFormatCard,
+      }),
+    ),
+  );
+  cleanupFunctions.push(
+    registerObjectPaneProvider(
+      createChartObjectPaneProvider({
+        getChart: (id) => getChartById(id),
+        publishSelection: publishCurrentChartSelection,
+        openDataEditor: (chartId) => {
+          const chart = getChartById(chartId);
+          if (!chart) return;
+          if (isPivotDataSource(chart.spec.data)) {
+            showDialog(CHART_DIALOG_ID, { pivotId: chart.spec.data.pivotId, editChartId: chartId, initialTab: "data" });
+          } else {
+            showDialog(CHART_DIALOG_ID, { editChartId: chartId, initialTab: "data" });
+          }
+        },
+      }),
+    ),
+  );
+  // A container field's BINDING changed: the resolved container rides the
+  // published region (Core paints it) and the raster bakes the title block in,
+  // so each named chart's cache drops FIRST and the regions are re-published
+  // (review R2-8). An overlay redraw, never GRID_REFRESH (WP-D's feedback rule).
+  cleanupFunctions.push(
+    installChartContainerResync({
+      invalidate: invalidateChartCache,
+      invalidateAll: invalidateAllChartCaches,
+      sync: syncChartRegions,
+      redraw: requestOverlayRedraw,
+    }),
+  );
   // The Chart JSON pane: what the Chart Design band's JSON hero opens (it
-  // replaced a fixed-position overlay). Same context key, same subject.
+  // replaced a fixed-position overlay). It follows the chart selection.
   registerTaskPane(ChartJsonPaneDefinition);
+  // View > Show "Chart JSON" asks for the pane by id (`taskpane:requestReopen`,
+  // ViewMenu.ts); nothing else would answer that request for this pane.
+  cleanupFunctions.push(installTaskPaneReopen(CHART_JSON_PANE_ID, () => openTaskPane(CHART_JSON_PANE_ID)));
   cleanupFunctions.push(() => {
-    unregisterTaskPane(CHART_FORMAT_PANE_ID);
     unregisterTaskPane(CHART_JSON_PANE_ID);
     // `selectChart` adds the "chart" context key and `deselectChart` removes
     // it, but deactivation goes through `resetSelectionHandlerState`, which
@@ -836,18 +910,18 @@ function activate(context: ExtensionContext): void {
   cleanupFunctions.push(installChartSelectionPublisher());
 
   // A double-click on a non-text chart element asks for the Format surface
-  // (the two title elements open for typing instead and emit nothing). The
-  // event describes the selection the gesture just made, so the pane needs no
-  // payload — it reads the published selection, which is the same fact rather
-  // than a second description of it.
+  // (the two title elements open for typing instead and emit nothing): the
+  // object pane on its Format tab. The event describes the selection the
+  // gesture just made, so the pane needs no payload — the "Chart elements" card
+  // reads the published selection, which is the same fact rather than a second
+  // description of it.
   //
-  // The publish is forced FIRST because the pane mounts inside this very
+  // The publish is forced FIRST because the card mounts inside this very
   // dispatch, while the announcement in the double-click seam above runs
   // after `handleChartDoubleClick` returns — i.e. after this listener.
   cleanupFunctions.push(
     onAppEvent<ChartFormatElementDetail>(CHART_FORMAT_ELEMENT_EVENT, () => {
-      publishCurrentChartSelection();
-      openTaskPane(CHART_FORMAT_PANE_ID);
+      openChartFormatPane(publishCurrentChartSelection, getCurrentChartId());
     }),
   );
 
@@ -1021,8 +1095,20 @@ function activate(context: ExtensionContext): void {
         const theme = { ...(chart.spec.config?.theme ?? {}), plotBackgroundGradient: args.gradient };
         updateChartSpec(args.chartId, { config: { ...(chart.spec.config ?? {}), theme } as any });
       } else if (args.target === "chartBackground") {
-        const theme = { ...(chart.spec.config?.theme ?? {}), backgroundGradient: args.gradient };
-        updateChartSpec(args.chartId, { config: { ...(chart.spec.config ?? {}), theme } as any });
+        // The chart's OUTER background is its visual container's (D-FORMAT):
+        // the gradient is written WHOLE into container.background.gradient (an
+        // absent direction is an explicit clear, so a stale one cannot survive
+        // the store's deep merge), after the container's own gradient check.
+        const invalid = validateVisualGradient(args.gradient);
+        if (invalid) {
+          showToast(`Set Chart Gradient Fill: ${invalid}`, { type: "error" });
+          return;
+        }
+        updateChartSpec(args.chartId, {
+          container: {
+            background: { gradient: { direction: undefined, ...args.gradient } as VisualGradient },
+          },
+        });
       }
 
       invalidateChartCache(args.chartId);
@@ -1130,6 +1216,14 @@ function activate(context: ExtensionContext): void {
       priority: 15, // Above table (5) and pivot (10)
     }),
   );
+
+  // Object property BINDINGS (@api/objectBindings, D-BIND): register which
+  // chart properties the UI offers to bind, and repaint exactly the charts
+  // whose bound values changed -- an overlay redraw, never GRID_REFRESH (the
+  // bridge's feedback-loop rule). A bound title replaces the old in-spec "=A1"
+  // spelling, so the CELLS_UPDATED listener below no longer re-reads a chart
+  // for its title: Rust tracks the cells a binding reads.
+  cleanupFunctions.push(installChartBindings());
 
   // Sync chart regions when charts change
   const handleChartChanged = () => {
@@ -2987,34 +3081,16 @@ function activate(context: ExtensionContext): void {
   document.addEventListener("keydown", handleChartNavKey, true);
   cleanupFunctions.push(() => document.removeEventListener("keydown", handleChartNavKey, true));
 
-  // Ctrl+1 — Excel's universal "format this". It goes through the keybinding
-  // registry rather than the listener above, because the registry's own
-  // capture-phase listener sits on `window` and is installed by the shell long
-  // before any extension activates: it would consume Ctrl+1 for Format Cells
-  // and stopPropagation() before this file's document-level door ever ran.
-  // The `when` predicate is how the two claims are told apart honestly — the
-  // chart owns Ctrl+1 only while a chart is selected, and the cells own it the
-  // rest of the time.
+  // "Format the chart's selection" (the context menu's "Format <element>..."
+  // verb and the command palette). Ctrl+1 is NOT bound here any more: the
+  // object pane owns it (`ext.objectPane.format`, whose `when` -- an object
+  // with a pane is the primary selection and the grid has the keyboard --
+  // decides between it and Format Cells), and its door asks this provider's
+  // `beforeShowFormat` to publish the rung first. One key, one binding.
   CommandRegistry.register(CHART_FORMAT_PANE_COMMAND, () => {
-    publishCurrentChartSelection();
-    openTaskPane(CHART_FORMAT_PANE_ID);
+    openChartFormatPane(publishCurrentChartSelection, getCurrentChartId());
   });
   cleanupFunctions.push(() => CommandRegistry.unregister(CHART_FORMAT_PANE_COMMAND));
-  cleanupFunctions.push(
-    registerKeybinding(
-      {
-        id: "ext.charts.formatSelection",
-        combo: "Ctrl+1",
-        commandId: CHART_FORMAT_PANE_COMMAND,
-        label: "Format Chart Selection",
-        category: "Formatting",
-        context: "not-editing",
-        source: "extension",
-        extensionId: ChartManifest.id,
-      },
-      () => getCurrentChartId() !== null,
-    ),
-  );
 
   // A CHART EDIT MADE INSIDE THE DEBOUNCE WINDOW IS NOT IN THE FILE.
   //

@@ -4,6 +4,11 @@
 //          debounces, and calls the Rust backend for computation.
 //          Includes a circuit breaker to gracefully handle missing backend commands.
 //          Supports multi-selection (Ctrl+Click additional ranges).
+//          The EFFECTIVE selection is the range an object published on
+//          @api/statusBarRange (a canvas pivot's selected cells, which live in
+//          the active sheet's grid without moving Core's selection) while one
+//          is published, else Core's selection. Withdrawing the range falls
+//          back to Core's selection as it stands then.
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
@@ -13,6 +18,7 @@ import {
   getSelectionAggregations,
   type SelectionAggregationResult,
 } from "@api";
+import { getStatusBarRange, subscribeStatusBarRange } from "@api/statusBarRange";
 
 interface SelectionRange {
   startRow: number;
@@ -100,16 +106,43 @@ const IPC_TIMEOUT_MS = 2000;
 const CIRCUIT_BREAKER_THRESHOLD = 3;
 const CIRCUIT_BREAKER_COOLDOWN_MS = 10000;
 
+/**
+ * What the status bar aggregates: the published external range (as a plain
+ * cell block) while one is published, else Core's selection.
+ */
+function effectiveSelection(core: SelectionInfo | null): SelectionInfo | null {
+  const external = getStatusBarRange();
+  if (external) {
+    return {
+      startRow: external.startRow,
+      startCol: external.startCol,
+      endRow: external.endRow,
+      endCol: external.endCol,
+      type: "cells",
+    };
+  }
+  return core;
+}
+
 export function useSelectionAggregation(): SelectionAggregationResult | null {
   const [result, setResult] = useState<SelectionAggregationResult | null>(null);
+  /** Core's selection as last announced (kept while an external range wins, for the fallback). */
+  const coreSelectionRef = useRef<SelectionInfo | null>(null);
+  /** The effective selection the status bar shows. */
   const selectionRef = useRef<SelectionInfo | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /**
+   * Bumped whenever the effective selection changes: an answer for an older
+   * selection that arrives late (the pivot's range was withdrawn while its
+   * aggregate was in flight) is dropped instead of overwriting the newer one.
+   */
+  const generationRef = useRef(0);
 
   // Circuit breaker state
   const failCountRef = useRef(0);
   const circuitOpenUntilRef = useRef(0);
 
-  const fetchAggregations = useCallback(async (sel: SelectionInfo) => {
+  const fetchAggregations = useCallback(async (sel: SelectionInfo, generation: number) => {
     // Circuit breaker: skip calls while open
     const now = Date.now();
     if (failCountRef.current >= CIRCUIT_BREAKER_THRESHOLD) {
@@ -150,6 +183,8 @@ export function useSelectionAggregation(): SelectionAggregationResult | null {
 
       // Success - reset circuit breaker
       failCountRef.current = 0;
+      // The selection moved on while this was in flight: its answer is stale.
+      if (generation !== generationRef.current) return;
       setResult(combined);
     } catch (err) {
       failCountRef.current += 1;
@@ -163,6 +198,7 @@ export function useSelectionAggregation(): SelectionAggregationResult | null {
           "seconds.",
         );
       }
+      if (generation !== generationRef.current) return;
       setResult(null);
     }
   }, []);
@@ -172,25 +208,20 @@ export function useSelectionAggregation(): SelectionAggregationResult | null {
       if (timerRef.current) {
         clearTimeout(timerRef.current);
       }
+      const generation = generationRef.current;
       timerRef.current = setTimeout(() => {
-        fetchAggregations(sel);
+        timerRef.current = null;
+        fetchAggregations(sel, generation);
       }, 150);
     },
     [fetchAggregations],
   );
 
   useEffect(() => {
-    // Subscribe to selection changes
-    const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {
-      // sel is Selection | null - must guard against null before accessing fields
-      const info: SelectionInfo | null = sel ? {
-        startRow: sel.startRow,
-        startCol: sel.startCol,
-        endRow: sel.endRow,
-        endCol: sel.endCol,
-        type: sel.type,
-        additionalRanges: sel.additionalRanges,
-      } : null;
+    /** Re-read the effective selection and show its aggregate (or nothing for a single cell). */
+    const applyEffectiveSelection = (): void => {
+      generationRef.current += 1;
+      const info = effectiveSelection(coreSelectionRef.current);
       selectionRef.current = info;
       if (info && isMultiCellSelection(info)) {
         debouncedFetch(info);
@@ -201,7 +232,29 @@ export function useSelectionAggregation(): SelectionAggregationResult | null {
           timerRef.current = null;
         }
       }
+    };
+
+    // Subscribe to selection changes
+    const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {
+      // sel is Selection | null - must guard against null before accessing fields
+      coreSelectionRef.current = sel ? {
+        startRow: sel.startRow,
+        startCol: sel.startCol,
+        endRow: sel.endRow,
+        endCol: sel.endCol,
+        type: sel.type,
+        additionalRanges: sel.additionalRanges,
+      } : null;
+      applyEffectiveSelection();
     });
+
+    // An object published or withdrew the range the status bar shows instead.
+    const unsubStatusBarRange = subscribeStatusBarRange(applyEffectiveSelection);
+
+    // A range published before this widget mounted wins from the start.
+    if (getStatusBarRange()) {
+      applyEffectiveSelection();
+    }
 
     // Re-fetch when cells are updated (data changed while selection active)
     const unsubCellsUpdated = onAppEvent(AppEvents.CELLS_UPDATED, () => {
@@ -213,6 +266,7 @@ export function useSelectionAggregation(): SelectionAggregationResult | null {
 
     return () => {
       unsubSelection();
+      unsubStatusBarRange();
       unsubCellsUpdated();
       if (timerRef.current) {
         clearTimeout(timerRef.current);

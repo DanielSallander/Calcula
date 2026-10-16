@@ -451,8 +451,9 @@ pub struct CreatePivotRequest {
 /// Wire mirror of `pivot_engine::CanvasFrame`: the designer-sized box a CANVAS
 /// pivot is shown in, in logical px on the canvas page. camelCase on the wire
 /// (`frozenHeaders`), snake_case in the persisted definition -- the same split
-/// as `LayoutConfig` vs `PivotLayout`.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// as `LayoutConfig` vs `PivotLayout`. Not `Copy` since WP-C (it carries the
+/// box's visual container).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CanvasFrameConfig {
     pub x: f64,
@@ -462,6 +463,11 @@ pub struct CanvasFrameConfig {
     /// Keep the header rows/columns fixed while the body scrolls.
     #[serde(default)]
     pub frozen_headers: bool,
+    /// The box's visual container (D-FORMAT). Read STRICTLY here (an edit
+    /// must be told a value was wrong; `CanvasFrame::validate` names the
+    /// leaf); the persisted definition reads it leniently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<visual_format::VisualContainerFormat>,
 }
 
 impl From<CanvasFrameConfig> for pivot_engine::CanvasFrame {
@@ -472,6 +478,7 @@ impl From<CanvasFrameConfig> for pivot_engine::CanvasFrame {
             width: c.width,
             height: c.height,
             frozen_headers: c.frozen_headers,
+            container: c.container,
         }
     }
 }
@@ -484,8 +491,47 @@ impl From<pivot_engine::CanvasFrame> for CanvasFrameConfig {
             width: f.width,
             height: f.height,
             frozen_headers: f.frozen_headers,
+            container: f.container,
         }
     }
+}
+
+/// Wire mirror of `pivot_engine::PivotStyleChoice`: the PivotTable style chosen
+/// in the Design tab gallery (persisted since WP-C; session-only before).
+/// camelCase on the wire, snake_case in the persisted definition.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotStyleConfig {
+    /// "PivotStyleMedium9" etc.; "" = None (a plain pivot).
+    pub style_id: String,
+    /// `PivotTheme` colour key -> "#rrggbb" (keys limited to
+    /// `pivot_engine::PIVOT_THEME_OVERRIDE_KEYS`; refused otherwise).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub theme_overrides: std::collections::BTreeMap<String, String>,
+}
+
+impl From<PivotStyleConfig> for pivot_engine::PivotStyleChoice {
+    fn from(c: PivotStyleConfig) -> Self {
+        pivot_engine::PivotStyleChoice { style_id: c.style_id, theme_overrides: c.theme_overrides }
+    }
+}
+
+impl From<pivot_engine::PivotStyleChoice> for PivotStyleConfig {
+    fn from(c: pivot_engine::PivotStyleChoice) -> Self {
+        PivotStyleConfig { style_id: c.style_id, theme_overrides: c.theme_overrides }
+    }
+}
+
+/// Deserialize `Option<Option<T>>` correctly from JSON (twin of the helper in
+/// slicer/types.rs): missing -> None (keep), null -> Some(None) (clear),
+/// value -> Some(Some(value)) (set). Without it JSON null maps to outer-None
+/// and clearing a pivot's style back to the default is impossible.
+fn deserialize_double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::deserialize(deserializer)?))
 }
 
 /// Field configuration for pivot updates
@@ -945,6 +991,10 @@ pub struct UpdatePivotPropertiesRequest {
     /// pivot: a pivot never converts between grid and canvas.
     #[serde(default)]
     pub canvas_frame: Option<CanvasFrameConfig>,
+    /// The PivotTable style (every pivot): absent = keep, null = clear (back
+    /// to the default style), value = set. Undoable ("PivotTable Style").
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub style: Option<Option<PivotStyleConfig>>,
 }
 
 /// Request to change a pivot table's source data range.
@@ -1069,6 +1119,13 @@ pub struct PivotViewResponse {
     /// the wire bytes are unchanged for every healthy pivot.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notices: Vec<PivotNotice>,
+    /// `definition.value_fields`' display names, in index order: what a
+    /// cell's `value_field_index` points into. Lets the frontend name the
+    /// value field of a value cell (a menu's Remove "<field>") without a
+    /// second round trip. Empty (and absent on the wire) for a pivot with no
+    /// value fields.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub value_field_names: Vec<String>,
 }
 
 /// What a declined "overwrite existing data?" took back
@@ -1167,6 +1224,10 @@ pub struct PivotCellData {
     /// Group path for drill-down: (field_index, value_id) pairs identifying this cell's data.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_path: Vec<(usize, u32)>,
+    /// Which value field (index into `definition.value_fields`) a data or
+    /// total cell shows. Absent on labels and headers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_field_index: Option<usize>,
 }
 
 fn is_false(v: &bool) -> bool { !v }
@@ -1418,6 +1479,12 @@ pub struct ZoneFieldInfo {
     /// A VALUE field's number format (None on every other zone).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub number_format: Option<String>,
+    /// true = `number_format` was ADOPTED from the BI model, not chosen by the
+    /// user (`ValueField::number_format_from_model`). An editor sends a value
+    /// field's format back ONLY when this is false, so the model format is
+    /// re-adopted on every query instead of being frozen into an override.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub number_format_from_model: bool,
     /// A VALUE field's Show Values As, with its base field and base item (None
     /// on every other zone, and for "No Calculation"). The editor seeds its
     /// Values zone from this list and sends the whole list back on its next
@@ -1443,6 +1510,13 @@ pub struct PivotFieldConfiguration {
     /// belong to hierarchies so they can be reconstituted as single items.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hierarchy_configs: Vec<HierarchyConfigInfo>,
+    /// `definition.value_column_order`: how the value and calculated columns
+    /// interleave. Empty (and absent on the wire) = the engine's default,
+    /// values first and then calculated fields. A headless edit that sends the
+    /// Values zone back must send this order too, or the update -- which
+    /// REPLACES the order -- regroups the columns.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub value_column_order: Vec<ValueColumnRefDef>,
 }
 
 /// Serializable hierarchy config info for the frontend.
@@ -1506,9 +1580,16 @@ pub struct PivotRegionData {
     pub end_row: u32,
     pub end_col: u32,
     pub is_empty: bool,
+    /// True for a data-model (BI) pivot: `PivotState.bi_metadata` holds its
+    /// id. Carried on the region so the frontend knows SYNCHRONOUSLY which
+    /// menu items apply (Summarize Values By is a range-pivot item).
+    pub is_model: bool,
     /// Present only for a canvas pivot: the box its view is shown in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canvas_frame: Option<CanvasFrameConfig>,
+    /// The pivot's persisted PivotTable style; absent = the default style.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<PivotStyleConfig>,
 }
 
 /// Response for field unique values query
@@ -1528,6 +1609,12 @@ pub struct GetPivotDataFormulaResult {
     pub data_field: String,
     /// The field/item pairs for filtering (e.g., [("Region", "North"), ("Product", "Apples")]).
     pub field_item_pairs: Vec<(String, String)>,
+    /// The pivot's anchor (`definition.destination`, its top-left cell):
+    /// GETPIVOTDATA's `pivot_table` argument. Excel writes the anchor, not the
+    /// clicked cell, so a formula keeps naming the pivot when the clicked
+    /// cell's row or column later falls outside it.
+    pub pivot_anchor_row: u32,
+    pub pivot_anchor_col: u32,
 }
 
 // ============================================================================
@@ -1861,6 +1948,12 @@ pub struct BiValueFieldRef {
     /// User-provided custom display name override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_name: Option<String>,
+    /// Per-field display format OVERRIDE (an Excel format code). `None` = the
+    /// model's format (pivots: re-adopted on every query) / none (a design
+    /// query). A request never carries an ADOPTED model format -- only what the
+    /// user chose -- so the model format is never frozen into an override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number_format: Option<String>,
 }
 
 /// How a pivot's double-click drill-through behaves. `Builtin` = the default
@@ -2091,6 +2184,10 @@ pub struct MeasureFieldInfo {
     pub table: String,
     pub source_column: String,
     pub aggregation: String,
+    /// The model's display format for this measure (e.g. `"#,##0.00"`), when
+    /// it defines one -- what "Use source format" means in the Data format card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_string: Option<String>,
 }
 
 /// A perspective surfaced to the field list (mirrors engine `Perspective`):

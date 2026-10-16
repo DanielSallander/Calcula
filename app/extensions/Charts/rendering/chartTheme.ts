@@ -8,12 +8,44 @@
 // ============================================================================
 
 import type { GradientFill } from "../types";
+import type { ResolvedVisualContainer, VisualLineStyle, VisualTextAlign } from "@api/visualContainer";
+
+/** The style of one line block of chart title text (the colour and size live beside it). */
+export interface ChartTitleTextStyle {
+  fontFamily: string;
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  /** A band painted behind the text; "" = none. */
+  background: string;
+  align: VisualTextAlign;
+  wrap: boolean;
+}
+
+/**
+ * How the chart paints its title block (D-FORMAT): the title's style beyond its
+ * colour and size (which stay `titleColor` / `titleFontSize`, the chart's one
+ * spelling), the subtitle, the divider under them and the spacing. Derived from
+ * the RESOLVED visual container (`resolveChartTheme(config, container)`); a
+ * theme without it paints the historical title -- 600 weight, centred, one line.
+ */
+export interface ChartTitleStyle {
+  /** The title line(s) are painted (the text is `spec.title`). */
+  show: boolean;
+  title: ChartTitleTextStyle;
+  subtitle: ChartTitleTextStyle & { show: boolean; text: string; color: string; fontSize: number };
+  divider: { show: boolean; color: string; style: VisualLineStyle; width: number; ignorePadding: boolean };
+  spacing: { belowTitle: number; belowSubtitle: number; belowDivider: number };
+}
 
 export interface ChartRenderTheme {
+  /**
+   * DERIVED: the resolved container background colour (default #ffffff). The
+   * chart never paints it -- Core paints the container under the raster -- but
+   * contrast logic (data labels, cues) reads what the chart sits on.
+   */
   background: string;
   plotBackground: string;
-  /** Gradient fill for chart background (overrides background when set). */
-  backgroundGradient?: GradientFill;
   /** Gradient fill for plot area background (overrides plotBackground when set). */
   plotBackgroundGradient?: GradientFill;
   gridLineColor: string;
@@ -30,6 +62,8 @@ export interface ChartRenderTheme {
   legendFontSize: number;
   barBorderRadius: number;
   barGap: number;
+  /** The title block's style; absent = the historical title (see ChartTitleStyle). */
+  titleStyle?: ChartTitleStyle;
 }
 
 export const DEFAULT_CHART_THEME: ChartRenderTheme = {
@@ -64,13 +98,81 @@ export function mergeTheme(
 }
 
 /**
+ * The chart's title block style from a RESOLVED container: everything of
+ * `container.title` except its text, colour and size (the chart spells those
+ * `spec.title` / `theme.titleColor` / `theme.titleFontSize`, already overlaid
+ * by WP-D on the spec the painter reads), plus the subtitle, divider and
+ * spacing.
+ */
+export function chartTitleStyleOf(container: ResolvedVisualContainer): ChartTitleStyle {
+  const t = container.title;
+  const s = container.subtitle;
+  return {
+    show: t.show,
+    title: {
+      fontFamily: t.fontFamily,
+      bold: t.bold,
+      italic: t.italic,
+      underline: t.underline,
+      background: t.background,
+      align: t.align,
+      wrap: t.wrap,
+    },
+    subtitle: {
+      show: s.show && s.text.trim() !== "",
+      text: s.text,
+      color: s.color,
+      fontSize: s.fontSize,
+      fontFamily: s.fontFamily,
+      bold: s.bold,
+      italic: s.italic,
+      underline: s.underline,
+      background: s.background,
+      align: s.align,
+      wrap: s.wrap,
+    },
+    divider: {
+      show: container.divider.show,
+      color: container.divider.color,
+      style: container.divider.style,
+      width: container.divider.width,
+      ignorePadding: container.divider.ignorePadding,
+    },
+    spacing: { ...container.spacing },
+  };
+}
+
+/** Theme keys that are no longer theme fields (moved to the container) and never override. */
+const NOT_THEME_KEYS = ["background", "backgroundGradient"] as const;
+
+/**
  * Resolve the effective theme for a chart spec.
  * Merges spec.config.theme overrides with DEFAULT_CHART_THEME.
+ *
+ * `container` (the chart's RESOLVED visual container) supplies the derived
+ * `background` (its colour while shown, else #ffffff) and the title block's
+ * style. Without one the theme carries the default background and no
+ * `titleStyle` (the historical title). A legacy `background` /
+ * `backgroundGradient` key in `config.theme` is ignored: the outer background
+ * is the container's, one spelling.
  */
 export function resolveChartTheme(
   config: { theme?: Partial<ChartRenderTheme> } | undefined,
+  container?: ResolvedVisualContainer | null,
 ): ChartRenderTheme {
-  return mergeTheme(DEFAULT_CHART_THEME, config?.theme);
+  let overrides = config?.theme;
+  if (overrides && NOT_THEME_KEYS.some((k) => k in overrides!)) {
+    const copy: Record<string, unknown> = { ...overrides };
+    for (const k of NOT_THEME_KEYS) delete copy[k];
+    overrides = copy as Partial<ChartRenderTheme>;
+  }
+  const theme = mergeTheme(DEFAULT_CHART_THEME, overrides);
+  if (!container) return theme;
+  return {
+    ...theme,
+    background: container.background.show && container.background.color ? container.background.color : DEFAULT_CHART_THEME.background,
+    titleStyle: chartTitleStyleOf(container),
+  };
 }
 
 // ============================================================================

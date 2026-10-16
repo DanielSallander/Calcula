@@ -60,8 +60,16 @@ import {
   updateCachedSlicerBounds,
   refreshSlicerItems,
   isSlicerGestureLanding,
+  syncSlicerRegions,
+  updateSlicerOrThrow,
   type SlicerGeometryWrite,
 } from "./lib/slicerStore";
+import { installSlicerBindings } from "./lib/slicerBindings";
+import { registerObjectFormatProvider } from "@api/objectFormat";
+import { registerObjectPaneProvider } from "@api/objectPane";
+import { createSlicerObjectFormatProvider } from "./lib/slicerObjectFormat";
+import { createSlicerObjectPaneProvider } from "./lib/slicerObjectPane";
+import { SLICER_FORMAT_CARDS } from "./components/SlicerFormatCards";
 import {
   coMovedMemberRect,
   refuseUndoWhileAGestureLands,
@@ -208,6 +216,40 @@ function activate(context: ExtensionContext): void {
   // republish what each page's model slicers keep; the chart side re-queries.
   cleanupFunctions.push(installSlicerPageFilterPublisher());
   cleanupFunctions.push(installSlicerClearProvider()); // @api/slicerClearService: a Clear all slicers button
+
+  // BOUND properties (@api/objectBindings, D-BIND): the slicer kind's
+  // registration (header text, show header) and the repaint when a slicer's
+  // bound value changes -- the grip follows a bound show-header, and the
+  // overlay redraws (never GRID_REFRESH: the seam's feedback-loop rule).
+  cleanupFunctions.push(
+    installSlicerBindings({
+      slicerExists: (id) => getSlicerById(id) !== undefined,
+      resyncRegions: syncSlicerRegions,
+      redraw: requestOverlayRedraw,
+    }),
+  );
+
+  // The ONE object pane (WP-C D-PANE / D-FORMAT): the slicer's Settings tab
+  // and its Format provider -- the visual container (padding, the header as
+  // the title, background, border, shadow) read from and written to the
+  // slicer's own record in ONE update_slicer, with the ribbon's Buttons and
+  // Styles sections as its visual cards. A container binding's change is
+  // re-published by installSlicerBindings above (it re-syncs the regions on
+  // any slicer binding change, and the region carries the resolved
+  // container), so no second subscription is needed here.
+  cleanupFunctions.push(
+    registerObjectFormatProvider(
+      createSlicerObjectFormatProvider({
+        getSlicer: getSlicerById,
+        update: async (id, params) => {
+          await updateSlicerOrThrow(id, params);
+        },
+        resync: syncSlicerRegions,
+        visualCards: SLICER_FORMAT_CARDS,
+      }),
+    ),
+  );
+  cleanupFunctions.push(registerObjectPaneProvider(createSlicerObjectPaneProvider({ getSlicer: getSlicerById })));
 
   // The keyboard INSIDE a selected slicer (M8 S7): Enter goes in, the arrows
   // move a focus ring between the items, Space applies, Escape leaves, Alt+C

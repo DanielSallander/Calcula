@@ -200,3 +200,52 @@ describe("reconcileChipHiddenItems: the chips follow the pivot (review3 findings
     expect(reconcileChipHiddenItems(chips, snapshot, new Map())).toBe(chips);
   });
 });
+
+// ============================================================================
+// BUG-0478 (WP-C S10, frontend half): a value field's number format OVERRIDE
+// reaches the model request; a format ADOPTED from the model never does.
+// ============================================================================
+
+describe("buildBiUpdateRequest: the value fields' number format (BUG-0478)", () => {
+  it("a user's OVERRIDE is carried as BiValueFieldRef.numberFormat", () => {
+    const req = buildBiUpdateRequest(
+      { ...zones, valueFields: [{ name: "[Revenue]", customName: "[Revenue]", numberFormat: "#,##0.00" }] },
+      ctx(),
+    );
+    expect(req.valueFields).toEqual([{ measureName: "Revenue", customName: "[Revenue]", numberFormat: "#,##0.00" }]);
+  });
+
+  it("a format ADOPTED from the model is NOT sent (it would freeze into an override), nor is an absent one", () => {
+    const req = buildBiUpdateRequest(
+      {
+        ...zones,
+        valueFields: [
+          { name: "[Revenue]", customName: "[Revenue]", numberFormat: "#,##0.00", numberFormatFromModel: true },
+          { name: "[Units]", customName: "[Units]" },
+        ],
+      },
+      ctx(),
+    );
+    expect(req.valueFields).toEqual([
+      { measureName: "Revenue", customName: "[Revenue]" },
+      { measureName: "Units", customName: "[Units]" },
+    ]);
+    expect(req.valueFields.every((f) => !("numberFormat" in f))).toBe(true);
+  });
+
+  it("through the editor's ONE request builder too: buildPivotFieldsRequest drops an adopted format, keeps an override", async () => {
+    const { buildPivotFieldsRequest } = await import("../../lib/pivotFieldsRequest");
+    const { request } = buildPivotFieldsRequest("pv", {
+      rows: [],
+      columns: [],
+      filters: [],
+      values: [
+        { sourceIndex: -1, name: "[Revenue]", isNumeric: true, customName: "[Revenue]", numberFormat: "#,##0.00", numberFormatFromModel: true },
+        { sourceIndex: -1, name: "[Units]", isNumeric: true, customName: "[Units]", numberFormat: "0.0" },
+      ],
+    });
+    expect(request.valueFields.map((v) => v.numberFormat)).toEqual([undefined, "0.0"]);
+    const bi = buildBiUpdateRequest(request, ctx());
+    expect(bi.valueFields.map((v) => v.numberFormat)).toEqual([undefined, "0.0"]);
+  });
+});

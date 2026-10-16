@@ -380,7 +380,7 @@ describe("grid command bridge — every bridged command is classified for script
 
 describe("MCP tools — every tool is tier-classified and every gate is real", () => {
   const serverRs = readRepo("app/src-tauri/src/mcp/server.rs");
-  const mcpSources = ["tools", "objects", "drafts"].map((f) =>
+  const mcpSources = ["tools", "objects", "drafts", "bindings"].map((f) =>
     readRepo(`app/src-tauri/src/mcp/${f}.rs`),
   );
   const objectsRs = readRepo("app/src-tauri/src/mcp/objects.rs");
@@ -444,6 +444,9 @@ describe("MCP tools — every tool is tier-classified and every gate is real", (
     // nothing is written, and no capability beyond read is reached.
     analyze_range: "read",
     analyze_model: "read",
+    // An object's JSON and its bindings' current values (WP-D). The values it
+    // evaluates on the way are transient: never saved, undone or dirtying.
+    list_object_properties: "read",
     // --- workbook mutations ---
     set_cell_value: "mutate",
     set_cell_range: "mutate",
@@ -468,6 +471,11 @@ describe("MCP tools — every tool is tier-classified and every gate is real", (
     // "mutate" on purpose — gating a DRAFT at "script" would force the user to
     // hand the agent arbitrary-JS rights just to have a macro proposed.
     draft_object_script: "mutate",
+    // A literal write and a binding edit change what an object shows and are
+    // saved (WP-D, mcp/bindings.rs). A binding is EVALUATED by the engine, never
+    // executed, so it is a mutation, not script.
+    set_object_property: "mutate",
+    set_object_binding: "mutate",
     // --- arbitrary agent-authored JS ---
     run_script: "script",
   };

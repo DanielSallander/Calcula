@@ -897,6 +897,8 @@ export {
   useTaskPaneOpenPaneIds,
   useTaskPaneManuallyClosed,
   useTaskPaneActiveContextKeys,
+  getOpenTaskPaneIds,
+  onTaskPaneStateChange,
   // Dialog API
   registerDialog,
   unregisterDialog,
@@ -2402,6 +2404,7 @@ export type {
   ScriptSlicerHandle,
   ScriptShapeHandle,
   ScriptNamedRangeHandle,
+  ScriptObjectHandle,
 } from "./scriptableObjects";
 
 // ============================================================================
@@ -2682,6 +2685,24 @@ export type {
 } from "./componentStoreRegistry";
 
 // ============================================================================
+// Report Pages (the canvas page list, live -- a Page Navigator's items are
+// derived from this snapshot, never stored)
+// ============================================================================
+
+export {
+  startReportPages,
+  getReportPagesSnapshot,
+  onReportPagesChanged,
+  refreshReportPages,
+  reportPagesFrom,
+  selectReportPages,
+  reportPageById,
+  sheetIdAt,
+} from "./reportPages";
+
+export type { ReportPage, ReportPagesSnapshot, ReportPageFilter } from "./reportPages";
+
+// ============================================================================
 // Button Control Service (IoC seam — the Controls extension owns on-grid buttons)
 // ============================================================================
 
@@ -2690,6 +2711,20 @@ export {
   hasButtonControlProvider,
   requireButtonControlProvider,
   resetButtonControlProvider,
+  PAGE_NAVIGATOR_CONTROL_TYPE,
+  PAGE_NAVIGATOR_OVERRIDES_PROPERTY,
+  PAGE_NAVIGATOR_ORIENTATIONS,
+  MAX_PAGE_NAVIGATOR_OVERRIDES,
+  MAX_PAGE_NAVIGATOR_CAPTION,
+  MAX_PAGE_NAVIGATOR_OVERRIDES_CHARS,
+  PAGE_NAVIGATOR_NATURAL_ITEM,
+  PAGE_NAVIGATOR_DEFAULT_SIZE,
+  pageNavigatorNaturalSize,
+  parsePageNavigatorOverrides,
+  serializePageNavigatorOverrides,
+  checkPageNavigatorOverrides,
+  matchPageNavigatorOverride,
+  checkCreatePageNavigator,
 } from "./buttonControlService";
 
 export type {
@@ -2697,6 +2732,9 @@ export type {
   ButtonControlHandle,
   ButtonControlProvider,
   CreateButtonControlRequest,
+  CreatePageNavigatorRequest,
+  PageNavigatorOverride,
+  PageNavigatorOrientation,
 } from "./buttonControlService";
 
 // ============================================================================
@@ -2997,6 +3035,172 @@ export type {
   ObjectGeometryOutcome,
   UndoTransactionHandle,
 } from "./objectGeometry";
+
+// THE VISUAL CONTAINER (D-FORMAT): the padding, title, subtitle, divider,
+// spacing, background, border and shadow every floating object carries around
+// its content -- ONE schema (types, defaults, limits, validation, patching,
+// bound > stored > defaults resolution, layout, JSON schema, the controls'
+// flat-key map; mirrored by the Rust crate core/visual-format) and its
+// painters + the one layout cache that keeps paint == hit.
+export {
+  VISUAL_CONTAINER_LIMITS,
+  VISUAL_CONTAINER_FIELD_IDS,
+  VISUAL_CONTAINER_FIELD_TYPES,
+  VISUAL_CONTAINER_FIELD_RANGES,
+  VISUAL_CONTAINER_DEFAULT_FONT_FAMILY,
+  VISUAL_CONTAINER_JSON_SCHEMA,
+  BASE_CONTAINER_DEFAULTS,
+  CONTROL_CONTAINER_PROPERTY_KEYS,
+  containerFieldRange,
+  headingFontSize,
+  isSafeVisualColor,
+  isSafeFontFamily,
+  checkContainerFieldValue,
+  validateVisualGradient,
+  validateVisualContainer,
+  validateVisualContainerPatch,
+  applyVisualContainerPatch,
+  isEmptyVisualContainer,
+  readContainerField,
+  containerFieldPatch,
+  containerFieldPointer,
+  containerFieldIdOfPointer,
+  resolveVisualContainer,
+  layoutVisualContainer,
+  lineHeightFor,
+  containerBorderInset,
+  controlContainerKey,
+  controlContainerKeyField,
+  checkControlContainerValue,
+} from "./visualContainer";
+
+export type {
+  VisualColor,
+  VisualTextAlign,
+  VisualHeadingLevel,
+  VisualLineStyle,
+  VisualShadowPosition,
+  VisualGradientDirection,
+  VisualPadding,
+  VisualTextStyle,
+  VisualTitle,
+  VisualSubtitle,
+  VisualDivider,
+  VisualSpacing,
+  VisualGradient,
+  VisualBackground,
+  VisualBorder,
+  VisualShadow,
+  VisualContainerFormat,
+  VisualContainerPatch,
+  ContainerFieldId,
+  ContainerFieldType,
+  ContainerPaintSplit,
+  ResolvedVisualText,
+  ResolvedVisualContainer,
+  ContainerRect,
+  VisualContainerLayout,
+} from "./visualContainer";
+
+export {
+  visualColorWithAlpha,
+  visualTextFont,
+  wrapVisualText,
+  shadowOffsetFor,
+  measureVisualContainerLayout,
+  traceContainerOuter,
+  paintVisualContainerUnder,
+  paintVisualContainerOver,
+  withContainerContentClip,
+  containerLayoutSignature,
+  recordPaintedContainerLayout,
+  visualContainerLayoutFor,
+  visualContentRectFor,
+  visualContentRect,
+  resetPaintedContainerLayouts,
+} from "./visualContainerPaint";
+
+export type { ContainerRegion } from "./visualContainerPaint";
+
+// LOCK ASPECT RATIO (container.lockAspect): the ONE ratio-keeping resize rule
+// Core's resize drag, the Size and Position dialog and the Format pane's
+// Properties card share.
+export { applyAspectLock, aspectLockedEdges } from "./aspectLock";
+export type { AspectLockRect, AspectLockEdges, AspectLockOptions } from "./aspectLock";
+
+// THE OBJECT FORMAT seam (D-FORMAT): read / preview / commit the visual
+// container of a floating object of ANY family through its family's provider,
+// as ONE undo step (debounced persists flushed inside it), plus the helpers a
+// family's region publisher and bindable-properties registration use to put
+// WP-D's bindings on top (bound > stored > defaults).
+export {
+  OBJECT_FORMAT_UNDO_LABEL,
+  OBJECT_FORMAT_NO_PROVIDER,
+  OBJECT_FORMAT_BINDING_GROUP,
+  registerObjectFormatProvider,
+  getObjectFormatProvider,
+  hasObjectFormatProvider,
+  resetObjectFormatProviders,
+  resolveContainerForObject,
+  onContainerBindingsChanged,
+  containerFieldLabel,
+  containerBindableDescriptors,
+  appendContainerBindableDescriptors,
+  objectFormatBindingRef,
+  readObjectFormat,
+  previewObjectFormat,
+  endObjectFormatPreview,
+  commitObjectFormat,
+} from "./objectFormat";
+
+export type {
+  ContainerCapabilities,
+  DataFormatField,
+  FormatCardProps,
+  FormatCardContribution,
+  ObjectFormatProvider,
+  ObjectFormatBoundField,
+  ObjectFormatSnapshot,
+  ObjectFormatOutcome,
+} from "./objectFormat";
+
+// THE OBJECT PANE (D-PANE): ONE task pane that follows the primary floating
+// object -- families register their BUILD tabs, the BuiltIn/ObjectPane host
+// registers itself, and every door (Ctrl+1, "Format...", View > Show, the
+// grip's menu) opens it through here without knowing who hosts it.
+export {
+  OBJECT_PANE_ID,
+  OBJECT_PANE_TITLE,
+  OBJECT_PANE_FORMAT_TAB,
+  OBJECT_PANE_FORMAT_LABEL,
+  OBJECT_PANE_COMMAND_FORMAT,
+  OBJECT_PANE_COMMAND_SHOW,
+  OBJECT_PANE_NO_PROVIDER,
+  OBJECT_PANE_NOT_INSTALLED,
+  objectPaneNoTabReason,
+  registerObjectPaneProvider,
+  getObjectPaneProvider,
+  hasObjectPaneProvider,
+  registerObjectPaneHost,
+  openObjectPane,
+  closeObjectPane,
+  getObjectPaneState,
+  onObjectPaneStateChanged,
+  notifyObjectPaneStateChanged,
+  objectPaneMenuEntry,
+  resetObjectPane,
+} from "./objectPane";
+
+export type {
+  ObjectPaneOpenReason,
+  ObjectPaneTabContext,
+  ObjectPaneTab,
+  ObjectPaneProvider,
+  ObjectPaneOpenRequest,
+  ObjectPaneState,
+  ObjectPaneHost,
+  ObjectPaneMenuEntry,
+} from "./objectPane";
 
 // The ONE door for "make sheet N the active sheet" from an extension: the
 // backend switch AWAITED, then Core's sheet context (with the sheet's own

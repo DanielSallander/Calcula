@@ -136,6 +136,15 @@ pub struct PullResult {
     /// backing sheet itself arrives in `sheets` with visibility "object".
     /// Empty for applications published before floating ranges travelled.
     pub floating_ranges: Vec<persistence::SavedFloatingRange>,
+    /// Object property BINDINGS carried by the application (`bindings.json`):
+    /// the bindings of the objects it carries, as publish selected them
+    /// (`publish::published_object_bindings`). Ids stay APPLICATION ids -- a
+    /// canvas page's id is its APPLICATION sheet id, which only the host's
+    /// materializer can map to the local sheet (a refresh keeps the OLD local
+    /// ids). Formulas are renamed with the rest of the pull
+    /// (`SheetRenames::rename_pull`). Empty for applications published before
+    /// bindings travelled.
+    pub object_bindings: Vec<persistence::SavedObjectBinding>,
     /// Ribbon filters carried by the application (Wave A). WORKBOOK-scoped; each
     /// carries the publisher's connection uuid plus its stable application
     /// data-source id — the Tauri layer re-binds connection ids onto the
@@ -859,6 +868,15 @@ pub fn pull_with_options(
             }
             None => Vec::new(),
         };
+    // Object property bindings: a plain list, APPLICATION ids (see the
+    // `PullResult` field). The HOST decides which rows land: only the
+    // bindings of objects its materializer actually placed. Absent in older
+    // applications -> empty.
+    let pulled_object_bindings: Vec<persistence::SavedObjectBinding> =
+        match registry.read_artifact(pkg, ver, "bindings.json")? {
+            Some(bytes) => serde_json::from_slice(&bytes)?,
+            None => Vec::new(),
+        };
     let pulled_ribbon_filters: Vec<SavedRibbonFilter> =
         match registry.read_artifact(pkg, ver, "ribbon_filters.json")? {
             Some(bytes) => serde_json::from_slice(&bytes)?,
@@ -1094,6 +1112,7 @@ pub fn pull_with_options(
         slicers: pulled_slicers,
         timeline_slicers: pulled_timeline_slicers,
         floating_ranges: pulled_floating_ranges,
+        object_bindings: pulled_object_bindings,
         ribbon_filters: pulled_ribbon_filters,
         pivot_layouts: pulled_pivot_layouts,
         theme: pulled_theme,
@@ -1923,6 +1942,7 @@ mod tests {
                 source_type: persistence::SavedSlicerSourceType::Pivot,
                 source_id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
             }],
+            container: None,
         }
     }
 
@@ -2094,6 +2114,52 @@ mod tests {
         pull(reg, &pull_req, &scope_of(dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap()
     }
 
+    /// `bindings.json` travels: the pull carries exactly the rows publish
+    /// wrote, with APPLICATION ids (a canvas page's id is the publisher's sheet
+    /// id -- the host maps it), and a collision rename reaches every binding
+    /// formula through `rename_pull`, counted in `bindings`.
+    ///
+    /// SABOTAGE: drop the `rename_binding_formulas` call from `rename_pull` --
+    /// the renamed-formula assertion fails.
+    #[test]
+    fn pull_carries_bindings_and_a_collision_rename_reaches_their_formulas() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+
+        let mut wb = make_test_workbook(); // "Dashboard"(0), "Data"(1)
+        wb.sheets[0].kind = persistence::SheetKind::new_canvas();
+        let page = wb.sheets[0].id;
+        let chart_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        wb.charts = vec![SavedChart { id: chart_id, sheet_id: page, spec: serde_json::json!({ "spec": {} }) }];
+        let row = |kind: &str, id: String, path: &str, formula: &str| persistence::SavedObjectBinding {
+            object: persistence::SavedObjectRef { kind: kind.to_string(), id },
+            path: path.to_string(),
+            formula: formula.to_string(),
+            model: None,
+        };
+        wb.object_bindings = vec![
+            row("canvasPage", page.to_string(), "/background", "=Data!A1"),
+            row("chart", chart_id.to_string(), "/spec/title", "=Data!B2&\" units\""),
+            row("chart", chart_id.to_string(), "/spec/subtitle", "=Dashboard!A1"),
+        ];
+        publish::publish(&reg, &publish_objects_req(&wb, "bound", vec![0, 1]), prof.path()).unwrap();
+
+        let mut pulled = pull_v1(&reg, &dir, &prof, "bound");
+        assert_eq!(pulled.object_bindings.len(), 3, "every row publish wrote");
+        let page_row = pulled.object_bindings.iter().find(|b| b.object.kind == "canvasPage").unwrap();
+        assert_eq!(page_row.object.id, page.to_string(), "APPLICATION ids: the host maps a page id");
+
+        let counts = crate::sheet_renames::SheetRenames::new([("Data", "Data (2)")]).rename_pull(&mut pulled);
+        assert_eq!(counts.bindings, 2, "{counts:?}");
+        let formula = |path: &str| {
+            pulled.object_bindings.iter().find(|b| b.path == path).map(|b| b.formula.clone()).unwrap()
+        };
+        assert_eq!(formula("/background"), "='Data (2)'!A1");
+        assert_eq!(formula("/spec/title"), "='Data (2)'!B2&\" units\"");
+        assert_eq!(formula("/spec/subtitle"), "=Dashboard!A1", "an unrelated binding keeps its bytes");
+    }
+
     #[test]
     fn pull_carries_floating_ranges_whose_host_and_backing_both_travel() {
         // Before this artifact the BACKING sheet travelled and the object row
@@ -2130,6 +2196,7 @@ mod tests {
             show_title: false,
             show_column_headers: true,
             show_row_headers: false,
+            container: None,
         }];
 
         let result = publish::publish(&reg, &publish_objects_req(&wb, "fr-pkg", vec![0, 2]), prof.path()).unwrap();
@@ -2184,6 +2251,7 @@ mod tests {
             show_title: true,
             show_column_headers: true,
             show_row_headers: true,
+            container: None,
         }];
         let result = publish::publish(&reg, &publish_objects_req(&wb, "fr-half", vec![0]), prof.path()).unwrap();
         assert_eq!(result.floating_ranges_published, 0);
@@ -2229,6 +2297,7 @@ mod tests {
             show_title: true,
             show_column_headers: true,
             show_row_headers: true,
+            container: None,
         };
         let good = row(dashboard, float1);
         let visible_backing = row(dashboard, data);
@@ -2298,6 +2367,7 @@ mod tests {
             show_scrollbar: true,
             style_preset: "TimelineStyleDark1".to_string(),
             connected_pivot_ids: vec![pivot.id],
+            container: None,
         };
         let travelling = timeline("Dates", published_sheet);
         let travelling_id = travelling.id;
@@ -2914,10 +2984,12 @@ mod tests {
         // travelled (or one with no such objects) pulls them empty, no error.
         assert!(reg.read_artifact("test-pkg", "1.0.0", "floating_ranges.json").unwrap().is_none());
         assert!(reg.read_artifact("test-pkg", "1.0.0", "timeline_slicers.json").unwrap().is_none());
+        assert!(reg.read_artifact("test-pkg", "1.0.0", "bindings.json").unwrap().is_none());
 
         let result = pull(&reg, &make_pull_request(), &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert!(result.slicers.is_empty());
         assert!(result.floating_ranges.is_empty());
+        assert!(result.object_bindings.is_empty(), "no bindings.json -> no bindings, no error");
         assert!(result.timeline_slicers.is_empty());
         assert!(result.ribbon_filters.is_empty());
         assert!(result.pivot_layouts.is_empty());
@@ -3340,17 +3412,18 @@ mod tests {
         // this test could not see a remap wrongly added to pull.rs: pull serves
         // subscribe, checkout AND refresh, and refresh throws away the fresh ids
         // pull mints -- so only the host's materializer may rewrite a spec.
-        let spec_json = format!(
+        let spec_text = format!(
             "{{\"chartId\":1,\"name\":\"Revenue\",\"sheetIndex\":0,\"spec\":{{\"kind\":\"bar\",\
              \"data\":{{\"sheetIndex\":0,\"sheetId\":\"{id}\",\"startRow\":0,\"startCol\":0,\"endRow\":4,\"endCol\":1}},\
              \"layers\":[{{\"data\":{{\"sheetIndex\":0,\"sheetId\":\"{id}\",\"startRow\":0,\"startCol\":2,\"endRow\":4,\"endCol\":2}}}}]}}}}",
             id = pkg_sheet_id
         );
+        let spec: serde_json::Value = serde_json::from_str(&spec_text).unwrap();
         let mut wb = persistence::Workbook::default();
         wb.charts.push(SavedChart {
             id: chart_id,
             sheet_id: pkg_sheet_id,
-            spec_json: spec_json.clone(),
+            spec: spec.clone(),
         });
         wb.sheets = vec![sheet];
 
@@ -3392,13 +3465,14 @@ mod tests {
         let local_sheet_id = result.sheets[0].sheet.id;
         assert_eq!(chart.sheet_id, local_sheet_id);
         assert_ne!(chart.sheet_id, pkg_sheet_id);
-        // The spec is the publisher's bytes, VERBATIM: its refs still name the
+        // The spec is the publisher's value, VERBATIM: its refs still name the
         // application sheet, though the chart itself moved to the local one.
-        assert_eq!(chart.spec_json, spec_json, "pull must never rewrite a chart spec");
-        assert!(chart.spec_json.contains(&pkg_sheet_id.to_string()));
-        assert!(!chart.spec_json.contains(&local_sheet_id.to_string()));
+        assert_eq!(chart.spec, spec, "pull must never rewrite a chart spec");
+        let shipped = chart.spec.to_string();
+        assert!(shipped.contains(&pkg_sheet_id.to_string()));
+        assert!(!shipped.contains(&local_sheet_id.to_string()));
         assert_eq!(
-            crate::chart_refs::chart_spec_source_sheets(&chart.spec_json),
+            crate::chart_refs::chart_spec_source_sheets(&chart.spec),
             vec![crate::chart_refs::ChartSourceSheet::Id(pkg_sheet_id)]
         );
     }

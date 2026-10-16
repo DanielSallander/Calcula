@@ -69,6 +69,10 @@ export interface BiZoneFieldLike {
 export interface BiValueFieldLike {
   name: string;
   customName?: string;
+  /** The field's number format. Sent only when it is the USER's override. */
+  numberFormat?: string;
+  /** True when `numberFormat` was ADOPTED from the model: then it is never sent (BUG-0478). */
+  numberFormatFromModel?: boolean;
 }
 
 /** What the editor knows besides the zones. */
@@ -113,12 +117,16 @@ export function toBiFieldRef(name: string, tableNames: readonly string[], isLook
   return { table, column, isLookup };
 }
 
-/** Parse a BI measure field key "[MeasureName]" into a BiValueFieldRef. */
-export function toBiValueFieldRef(name: string, customName?: string): BiValueFieldRef {
+/**
+ * Parse a BI measure field key "[MeasureName]" into a BiValueFieldRef. `numberFormat`
+ * is the field's number format OVERRIDE (never one adopted from the model --
+ * the caller decides): absent = the model's format, re-adopted by the query.
+ */
+export function toBiValueFieldRef(name: string, customName?: string, numberFormat?: string): BiValueFieldRef {
   const measureName = name.startsWith('[') && name.endsWith(']')
     ? name.substring(1, name.length - 1)
     : name;
-  return { measureName, customName };
+  return numberFormat ? { measureName, customName, numberFormat } : { measureName, customName };
 }
 
 /**
@@ -161,7 +169,7 @@ export function buildBiUpdateRequest(
     columnFields: columnFields.filter(isRealBiField).map(toRef),
     valueFields: (src.valueFields ?? [])
       .filter((f) => !isCalcGroupField(f))
-      .map((f) => toBiValueFieldRef(f.name, f.customName)),
+      .map((f) => toBiValueFieldRef(f.name, f.customName, f.numberFormatFromModel ? undefined : f.numberFormat)),
     filterFields: (src.filterFields ?? []).filter(isRealBiField).map(toRef),
     rowHierarchies: rowHierarchies.length > 0 ? rowHierarchies : undefined,
     columnHierarchies: columnHierarchies.length > 0 ? columnHierarchies : undefined,

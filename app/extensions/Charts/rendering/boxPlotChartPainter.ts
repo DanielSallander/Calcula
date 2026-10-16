@@ -12,7 +12,6 @@ import { applyFillStyle } from "./gradientFill";
 import { createLinearScale, createBandScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
-  drawChartBackground,
   drawPlotBackground,
   drawHorizontalGridLines,
   drawCartesianAxes,
@@ -120,7 +119,6 @@ export function paintBoxPlotChart(
   const showMean = opts.showMean ?? false;
 
   if (data.series.length === 0 || data.categories.length === 0) {
-    drawChartBackground(ctx, layout, theme);
     return;
   }
 
@@ -171,7 +169,6 @@ export function paintBoxPlotChart(
   );
 
   // 1. Background
-  drawChartBackground(ctx, layout, theme);
 
   // 2. Plot background
   drawPlotBackground(ctx, plotArea, theme);
@@ -287,9 +284,7 @@ export function paintBoxPlotChart(
   }
 
   // 6. Title
-  if (spec.title) {
-    drawTitle(ctx, spec.title, layout, theme);
-  }
+  drawTitle(ctx, spec.title, layout, theme);
 
   // 7. Legend
   if (spec.legend.visible && data.categories.length > 1) {

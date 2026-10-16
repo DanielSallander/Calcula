@@ -14,31 +14,12 @@ export type { GridCommand } from "../../core/lib/gridCommands";
 import type { GridMenuContext } from "../../core/lib/gridCommands";
 import { alertAsync } from "@api/dialogs";
 
-/** A context menu item for the grid */
-export interface GridContextMenuItem {
-  /** Unique identifier */
-  id: string;
-  /** Display label (static string or function for dynamic labels) */
-  label: string | ((context: GridMenuContext) => string);
-  /** Optional keyboard shortcut hint (display only) */
-  shortcut?: string;
-  /** Optional icon */
-  icon?: React.ReactNode;
-  /** Group for organizing items (items in same group stay together) */
-  group?: string;
-  /** Order within the group (lower = higher in menu) */
-  order?: number;
-  /** Whether the item is disabled */
-  disabled?: boolean | ((context: GridMenuContext) => boolean);
-  /** Whether the item is visible */
-  visible?: boolean | ((context: GridMenuContext) => boolean);
-  /** Whether to show a separator after this item */
-  separatorAfter?: boolean;
-  /** Click handler */
-  onClick: (context: GridMenuContext) => void | Promise<void>;
-  /** Sub-menu items. When present, this item acts as a sub-menu trigger. */
-  children?: GridContextMenuItem[];
-}
+// A context menu item for the grid: @api's type, never a second hand-written
+// copy (the two had identical bodies, and a field added to one -- such as
+// `disabledReason` -- would silently not exist for the other). Pinned by
+// src/api/__tests__/gridMenuContextDrift.test.ts.
+export type { GridContextMenuItem } from "@api/extensions";
+import type { GridContextMenuItem } from "@api/extensions";
 
 /** Groups for organizing menu items */
 export const GridMenuGroups = {
@@ -124,13 +105,23 @@ class GridExtensionRegistry {
   }
 
   /**
-   * Resolve a single item: resolve label, disabled, and recursively process children.
+   * Resolve a single item: resolve label, disabled, the disabled reason, and
+   * recursively process children. The reason is resolved only for an item
+   * that resolved DISABLED (a reason on an enabled row would be a stray
+   * tooltip); it comes out as a string or undefined, never a function or null.
    */
   private resolveItem(item: GridContextMenuItem, context: GridMenuContext): GridContextMenuItem {
+    const disabled = typeof item.disabled === "function" ? item.disabled(context) : item.disabled;
+    let disabledReason: string | undefined;
+    if (disabled) {
+      const reason = typeof item.disabledReason === "function" ? item.disabledReason(context) : item.disabledReason;
+      disabledReason = typeof reason === "string" && reason !== "" ? reason : undefined;
+    }
     return {
       ...item,
       label: typeof item.label === "function" ? item.label(context) : item.label,
-      disabled: typeof item.disabled === "function" ? item.disabled(context) : item.disabled,
+      disabled,
+      disabledReason,
       children: item.children
         ? item.children
             .filter((child) => {

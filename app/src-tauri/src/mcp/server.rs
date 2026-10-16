@@ -34,6 +34,7 @@ use super::tools;
 // The edit half of the object tools, and the script-drafting tools. Aliased so
 // every tool body reads `tools*::<fn>` and it is obvious at the call site which
 // module owns the implementation.
+use super::bindings as tools_bindings;
 use super::drafts as tools_drafts;
 use super::objects as tools_objects;
 
@@ -424,6 +425,49 @@ pub struct DraftObjectScriptParams {
 pub struct GetScriptDraftParams {
     #[schemars(description = "The draft id from draft_object_script / list_script_drafts")]
     pub draft_id: String,
+}
+
+// ---- Object property bindings (WP-D) ----
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ListObjectPropertiesParams {
+    #[schemars(description = "Object kind: chart, control, slicer, timelineSlicer, pivot, floatingRange or canvasPage. Pass together with id for ONE object.")]
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[schemars(description = "The object's id, as get_sheet_summary's \"Canvas objects\" section or list_charts shows it (a control's id is its uid; a canvas page's id is its sheet id).")]
+    #[serde(default)]
+    pub id: Option<String>,
+    #[schemars(description = "0-based sheet index (from list_sheets): list every object on that sheet with its bindings. Used only when kind and id are omitted.")]
+    #[serde(default)]
+    pub sheet_index: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct SetObjectPropertyParams {
+    #[schemars(description = "Object kind: chart, control, slicer, timelineSlicer, pivot, floatingRange or canvasPage")]
+    pub kind: String,
+    #[schemars(description = "The object's id (from get_sheet_summary or list_object_properties)")]
+    pub id: String,
+    #[schemars(description = "A JSON Pointer to the property, exactly as list_object_properties lists it under `bindable`, e.g. /spec/title or /properties/fill")]
+    pub path: String,
+    #[schemars(description = "The new LITERAL value, typed as the property's `type` says (text, number, boolean, color \"#RRGGBB\", one of an enum's values). A text that starts with '=' is stored and shown as TEXT, never evaluated: to make a property follow a formula use set_object_binding.")]
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct SetObjectBindingParams {
+    #[schemars(description = "Object kind: chart, control, slicer, timelineSlicer, pivot, floatingRange or canvasPage")]
+    pub kind: String,
+    #[schemars(description = "The object's id (from get_sheet_summary or list_object_properties)")]
+    pub id: String,
+    #[schemars(description = "A JSON Pointer to the property, exactly as list_object_properties lists it under `bindable`, e.g. /spec/title or /spec/markOptions/goal")]
+    pub path: String,
+    #[schemars(description = "A Calcula formula starting with '=', written INVARIANT (comma argument separators, '.' decimals), e.g. =Inputs!B1 or =\"Region: \"&Data!B1. Qualify cells with their sheet (Sheet!A1). [Measure] reads a measure of the page's model under the page's slicers. Omit, or pass an empty string, to REMOVE the binding so the property shows its literal again.")]
+    #[serde(default)]
+    pub formula: Option<String>,
+    #[schemars(description = "The model a [Measure] reads, when the page offers more than one (a model key from list_object_properties' bindings or the connection id from list_bi_connections). Omit otherwise.")]
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 // ---- BI / cube (read-only) ----
@@ -1198,6 +1242,78 @@ impl CalculaMcpServer {
             Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
             Err(e) => {
                 log_warn!("MCP", "Tool error: get_script_draft: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    // ---- Object property bindings (WP-D) ----
+
+    #[tool(description = "Read an object's properties: with kind + id, ONE object as JSON -- its full AI-visible JSON, every BINDABLE property (JSON Pointer path, type, label) and its current bindings with the value each shows now; with sheet_index, every object on that sheet with its bindings. Read-only. Paths it lists are what set_object_property and set_object_binding take.")]
+    async fn list_object_properties(
+        &self,
+        params: Parameters<ListObjectPropertiesParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!(
+            "MCP",
+            "Tool call: list_object_properties kind={} id={} sheet={:?}",
+            log_summary(p.kind.as_deref().unwrap_or(""), 20),
+            log_summary(p.id.as_deref().unwrap_or(""), 60),
+            p.sheet_index
+        );
+        match tools_bindings::list_object_properties(&self.app_handle, p.kind.as_deref(), p.id.as_deref(), p.sheet_index) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: list_object_properties: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "Set the LITERAL value of one object property (a chart title, a control's fill, a slicer header, a canvas page background...). Pass kind, id and a path from list_object_properties. A text starting with '=' is stored as TEXT: to make the property follow a formula use set_object_binding. While a property is bound, the binding is what it shows. Undoable; the same protection and Lock Objects rules as the app apply.")]
+    async fn set_object_property(
+        &self,
+        params: Parameters<SetObjectPropertyParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!("MCP", "Tool call: set_object_property {} {} {}", p.kind, log_summary(&p.id, 60), log_summary(&p.path, 80));
+        match tools_bindings::set_object_property(&self.app_handle, &p.kind, &p.id, &p.path, p.value) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: set_object_property: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "BIND one object property to a formula so it follows the workbook (a chart title that reads a cell, a Card's goal that reads [Revenue]*1.1, a shape's text built from cells), or remove the binding by omitting formula. Pass kind, id and a path from list_object_properties. The formula is a Calcula formula, INVARIANT (comma separators); [Measure] reads the page's model under the page's slicers. Code and action properties are never bindable. The reply shows the value the property shows now. Undoable.")]
+    async fn set_object_binding(
+        &self,
+        params: Parameters<SetObjectBindingParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!(
+            "MCP",
+            "Tool call: set_object_binding {} {} {} {}",
+            p.kind,
+            log_summary(&p.id, 60),
+            log_summary(&p.path, 80),
+            log_summary(p.formula.as_deref().unwrap_or("(clear)"), 120)
+        );
+        match tools_bindings::set_object_binding(
+            &self.app_handle,
+            &p.kind,
+            &p.id,
+            &p.path,
+            p.formula.as_deref(),
+            p.model.as_deref(),
+        )
+        .await
+        {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: set_object_binding: {}", log_summary(&e, 200));
                 Ok(CallToolResult::error(vec![Content::text(e)]))
             }
         }

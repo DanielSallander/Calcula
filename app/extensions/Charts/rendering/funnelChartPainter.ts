@@ -10,7 +10,6 @@ import { resolveDatumStyle } from "../lib/dataPointOverrides";
 import { applyFillStyle } from "./gradientFill";
 import {
   computeRadialLayout,
-  drawChartBackground,
   drawTitle,
   drawRadialLegend,
   formatTickValue,
@@ -53,7 +52,6 @@ export function paintFunnelChart(
   const values = data.series.length > 0 ? data.series[0].values : [];
   const n = values.length;
   if (n === 0) {
-    drawChartBackground(ctx, layout, theme);
     return;
   }
 
@@ -61,7 +59,6 @@ export function paintFunnelChart(
   const maxVal = Math.max(...values, 1);
 
   // 1. Background
-  drawChartBackground(ctx, layout, theme);
 
   // Compute section geometry
   // Each section is a trapezoid: top width proportional to its value,
@@ -158,9 +155,7 @@ export function paintFunnelChart(
   }
 
   // 4. Title
-  if (spec.title) {
-    drawTitle(ctx, spec.title, layout, theme);
-  }
+  drawTitle(ctx, spec.title, layout, theme);
 
   // 5. Legend (using category names)
   if (spec.legend.visible && data.categories.length > 0) {

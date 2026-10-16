@@ -1,5 +1,7 @@
 //! FILENAME: app/extensions/TimelineSlicer/components/TimelineSlicerSettingsDialog.tsx
 // PURPOSE: Settings dialog for configuring timeline slicer properties.
+// CONTEXT: The fields are TimelineSettingsBody.tsx's -- the object pane's
+//          Settings tab renders the same body (WP-C D-PANE).
 
 import React, { useState, useEffect } from "react";
 import { css } from "@emotion/css";
@@ -10,7 +12,12 @@ import {
   updateTimelineAsync,
 } from "../lib/timelineSlicerStore";
 import { requestOverlayRedraw } from "@api/gridOverlays";
-import { TimelineStylesGallery } from "./TimelineSlicerStylesGallery";
+import {
+  TimelineSettingsBody,
+  timelineSettingsParams,
+  timelineSettingsValuesOf,
+  type TimelineSettingsValues,
+} from "./TimelineSettingsBody";
 
 // ============================================================================
 // Styles
@@ -50,41 +57,6 @@ const styles = {
     display: flex;
     flex-direction: column;
     gap: 14px;
-  `,
-  fieldRow: css`
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  `,
-  fieldLabel: css`
-    min-width: 100px;
-    font-weight: 500;
-    color: #333;
-    font-size: 12px;
-  `,
-  fieldInput: css`
-    flex: 1;
-    padding: 5px 8px;
-    border: 1px solid #ccc;
-    border-radius: 4px;
-    font-size: 13px;
-  `,
-  checkboxRow: css`
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 2px 0;
-    label {
-      cursor: pointer;
-      user-select: none;
-      font-size: 12px;
-    }
-  `,
-  sectionLabel: css`
-    font-weight: 600;
-    color: #333;
-    margin-top: 4px;
-    margin-bottom: 4px;
   `,
   footer: css`
     display: flex;
@@ -132,38 +104,28 @@ export function TimelineSlicerSettingsDialog({
   // Movable + resizable dialog window (shared @api hook)
   const win = useDialogWindow({ minWidth: 320, minHeight: 280 });
 
-  const [name, setName] = useState("");
-  const [headerText, setHeaderText] = useState("");
-  const [showHeader, setShowHeader] = useState(true);
-  const [showLevelSelector, setShowLevelSelector] = useState(true);
-  const [showScrollbar, setShowScrollbar] = useState(true);
-  const [stylePreset, setStylePreset] = useState("TimelineStyleLight1");
+  const [values, setValues] = useState<TimelineSettingsValues>({
+    name: "",
+    headerText: "",
+    showHeader: true,
+    showLevelSelector: true,
+    showScrollbar: true,
+    stylePreset: "TimelineStyleLight1",
+  });
 
   useEffect(() => {
     if (isOpen && timelineId != null) {
       const tl = getTimelineById(timelineId);
-      if (tl) {
-        setName(tl.name);
-        setHeaderText(tl.headerText ?? "");
-        setShowHeader(tl.showHeader);
-        setShowLevelSelector(tl.showLevelSelector);
-        setShowScrollbar(tl.showScrollbar);
-        setStylePreset(tl.stylePreset);
-      }
+      if (tl) setValues(timelineSettingsValuesOf(tl));
     }
   }, [isOpen, timelineId]);
 
   const handleSave = async () => {
     if (timelineId == null) return;
 
-    await updateTimelineAsync(timelineId, {
-      name: name || undefined,
-      headerText: headerText ? headerText : null,
-      showHeader,
-      showLevelSelector,
-      showScrollbar,
-      stylePreset,
-    });
+    // Every field, as the dialog always sent them (an empty name is not sent;
+    // an empty header text clears it back to the name).
+    await updateTimelineAsync(timelineId, timelineSettingsParams(values));
 
     requestOverlayRedraw();
     onClose();
@@ -182,59 +144,10 @@ export function TimelineSlicerSettingsDialog({
         <div className={styles.header} onMouseDown={win.onHeaderMouseDown}>Timeline Settings</div>
 
         <div className={styles.body}>
-          <div className={styles.fieldRow}>
-            <span className={styles.fieldLabel}>Name:</span>
-            <input
-              className={styles.fieldInput}
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-            />
-          </div>
-
-          <div className={styles.fieldRow}>
-            <span className={styles.fieldLabel}>Header Text:</span>
-            <input
-              className={styles.fieldInput}
-              value={headerText}
-              onChange={(e) => setHeaderText(e.target.value)}
-              placeholder="(uses name if empty)"
-            />
-          </div>
-
-          <div className={styles.checkboxRow}>
-            <input
-              type="checkbox"
-              id="tl-show-header"
-              checked={showHeader}
-              onChange={(e) => setShowHeader(e.target.checked)}
-            />
-            <label htmlFor="tl-show-header">Show Header</label>
-          </div>
-
-          <div className={styles.checkboxRow}>
-            <input
-              type="checkbox"
-              id="tl-show-level"
-              checked={showLevelSelector}
-              onChange={(e) => setShowLevelSelector(e.target.checked)}
-            />
-            <label htmlFor="tl-show-level">Show Level Selector</label>
-          </div>
-
-          <div className={styles.checkboxRow}>
-            <input
-              type="checkbox"
-              id="tl-show-scrollbar"
-              checked={showScrollbar}
-              onChange={(e) => setShowScrollbar(e.target.checked)}
-            />
-            <label htmlFor="tl-show-scrollbar">Show Scrollbar</label>
-          </div>
-
-          <div className={styles.sectionLabel}>Style:</div>
-          <TimelineStylesGallery
-            selected={stylePreset}
-            onSelect={setStylePreset}
+          <TimelineSettingsBody
+            variant="dialog"
+            values={values}
+            onChange={(patch) => setValues((v) => ({ ...v, ...patch }))}
           />
         </div>
 

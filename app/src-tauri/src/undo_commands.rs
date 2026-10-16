@@ -2287,6 +2287,12 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
         ("obj_named_ranges", NONE), ("obj_range_strings", NONE),
         ("obj_cross_sheet_formulas", NONE),
         ("obj_controls", MutationDomains::of(Controls)),
+        // Per-PROPERTY control restores (Format control, Set property): only
+        // the keys the step wrote, never the whole store.
+        ("obj_control_props", MutationDomains::of(Controls)),
+        // Object property BINDINGS (WP-D): the store announces its own SET
+        // change (`object-bindings:changed`, reload), so no extra domain.
+        ("obj_bindings", NONE),
         ("obj_style_tiers", NONE), ("obj_workbook_protection", NONE),
         // Floating range geometry/window swaps. The FloatingRanges domain
         // reloads the object store; the base OBJ (grid:refresh) repaints the
@@ -3657,6 +3663,35 @@ fn apply_pivot_definition_restore(
         // definition against records from before the change.
         let current_cache = snapshot.cache.as_ref().map(|_| cache.clone());
 
+        // A PRESENTATION-ONLY step -- a PivotTable Style, or the canvas box's
+        // frame (moved, resized, formatted) -- is undone the way it was DONE:
+        // the definition goes back and, for a style, the written cells are
+        // restyled IN PLACE from the stored view (`restyle_pivot_cells`). The
+        // forward edit never re-renders values, and neither may its undo: a BI
+        // pivot reloaded from a file has an EMPTY cache until its first
+        // refresh, so recomputing its view here wrote an empty block over the
+        // saved output -- one Ctrl+Z cleared the pivot, and a save kept it so.
+        if snapshot.cache.is_none()
+            && snapshot.overwritten_cells.is_empty()
+            && pivot_differs_only_in_presentation(&current_definition, &snapshot.definition)
+        {
+            let style_changed = current_definition.style != snapshot.definition.style;
+            let restored_style = snapshot.definition.style.clone();
+            *definition = snapshot.definition;
+            drop(pivot_tables);
+            let inverse_sheet = current_dest.resolve(state);
+            let inverse_data =
+                encode_pivot_definition_snapshot(pivot_id, current_definition, Vec::new(), inverse_sheet, None);
+            inverse_transaction.add_change(CellChange::CustomRestore {
+                kind: PIVOT_DEFINITION_RESTORE_KIND.to_string(),
+                data: inverse_data,
+            });
+            if style_changed {
+                crate::pivot::commands::restyle_pivot_cells(state, effect, pivot_state, pivot_id, restored_style.as_ref());
+            }
+            return None;
+        }
+
         // Restore the old definition — and the records it was written against,
         // when the action being undone replaced them.
         *definition = snapshot.definition;
@@ -3735,6 +3770,22 @@ fn apply_pivot_definition_restore(
         eprintln!("[undo] Pivot table {} not found for definition restore", pivot_id);
     }
     None
+}
+
+/// Do two pivot definitions differ ONLY in presentation -- the persisted style
+/// and/or the canvas box's frame (both framed, or both not) -- so that nothing
+/// the pivot WRITES (values, layout, extent) can differ between them?
+fn pivot_differs_only_in_presentation(current: &PivotDefinition, restored: &PivotDefinition) -> bool {
+    if current.canvas_frame.is_some() != restored.canvas_frame.is_some() {
+        return false;
+    }
+    let mut aligned = restored.clone();
+    aligned.style = current.style.clone();
+    aligned.canvas_frame = current.canvas_frame.clone();
+    match (serde_json::to_value(current), serde_json::to_value(&aligned)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 /// Undo pivot creation: remove the pivot and clear its grid region.
@@ -5124,6 +5175,61 @@ fn apply_object_swap_restore(
                 script_instance_ids: current_ids,
             });
         }
+        "obj_control_props" => {
+            // ONLY the control properties the step wrote, each put back to its
+            // value before the step (absent = removed). Every other property
+            // and every other control stays as it is NOW, so a later write the
+            // undo stack never saw (a Properties-pane caption, a navigator's
+            // per-page button) is never silently reverted by this undo.
+            let snap: ControlPropsObjSnapshot = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad obj_control_props snapshot: {}", e); return; }
+            };
+            let mut inverse: Vec<ControlPropRestoreRow> = Vec::with_capacity(snap.rows.len());
+            {
+                let mut store = state.controls.write(effect).unwrap();
+                for row in snap.rows {
+                    // The control by its uid (it may have moved since), else by
+                    // the anchor the step wrote it at.
+                    let found = (!row.uid.is_empty())
+                        .then(|| store.iter().find(|(_, m)| m.uid == row.uid).map(|(k, _)| *k))
+                        .flatten()
+                        .or_else(|| store.contains_key(&row.key).then_some(row.key));
+                    let Some(key) = found else {
+                        crate::log_warn!("UNDO", "control {:?} (uid '{}') is gone; its '{}' was not restored", row.key, row.uid, row.property);
+                        continue;
+                    };
+                    let Some(meta) = store.get_mut(&key) else { continue };
+                    let now = match row.previous {
+                        Some(value) => meta.properties.insert(row.property.clone(), value),
+                        None => meta.properties.remove(&row.property),
+                    };
+                    inverse.push(ControlPropRestoreRow { uid: row.uid, key, property: row.property, previous: now });
+                }
+            }
+            inverse.reverse();
+            push_obj_inverse(inverse_transaction, kind, &ControlPropsObjSnapshot { rows: inverse });
+        }
+        "obj_bindings" => {
+            // ONLY the bindings the step changed, each with its value before
+            // the step (`BindingDelta`) -- never the whole store, so a binding
+            // something else changed since (a `.calp` refresh replacing the
+            // application's rows) is never reverted by this undo.
+            let delta: crate::object_bindings::store::BindingDelta = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad obj_bindings delta: {}", e); return; }
+            };
+            let inverse = {
+                let mut store = state.object_bindings.write(effect).unwrap();
+                delta.apply(&mut store)
+            };
+            push_obj_inverse(inverse_transaction, kind, &inverse);
+            // NO rebuild and NO evaluation here: this arm holds no pane/filter
+            // state and may run under the undo machinery's locks (D §3.3 rule
+            // 3). The bump in `BindingDelta::apply` makes the runtime stale;
+            // the seam answers this announcement with List + ResolveAll.
+            crate::object_bindings::announce_reload();
+        }
         "obj_cross_sheet_formulas" => {
             let snap: CrossSheetFormulasObjSnapshot = match serde_json::from_slice(data) {
                 Ok(s) => s,
@@ -6070,6 +6176,8 @@ mod restore_registry_tests {
             ("obj_range_strings", true, OBJ),
             ("obj_cross_sheet_formulas", true, OBJ),
             ("obj_controls", true, obj_plus(Controls)),
+            ("obj_control_props", true, obj_plus(Controls)),
+            ("obj_bindings", true, OBJ),
             ("obj_style_tiers", true, OBJ),
             ("obj_workbook_protection", true, OBJ),
             // FloatingRanges reloads the object row store; the base OBJ
@@ -6740,6 +6848,45 @@ struct ControlsObjSnapshot {
     script_instance_ids: Vec<(String, Option<String>)>,
 }
 
+/// The restore kind of a PER-PROPERTY control step (`record_control_props_undo`).
+pub(crate) const CONTROL_PROPS_RESTORE_KIND: &str = "obj_control_props";
+
+/// One control property a step wrote: the control (its uid, and the anchor it
+/// was written at) and the value the property had BEFORE the step (`None`:
+/// the property was absent).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ControlPropRestoreRow {
+    pub uid: String,
+    pub key: (usize, u32, u32),
+    pub property: String,
+    pub previous: Option<crate::controls::ControlPropertyValue>,
+}
+
+/// Snapshot for the "obj_control_props" CustomRestore: only the properties a
+/// formatting / literal step wrote. A WHOLE-store snapshot ("obj_controls")
+/// restored on Ctrl+Z also erased every later write that recorded no undo of
+/// its own -- a Page Navigator's per-page caption from the Buttons section, any
+/// other non-code Properties-pane row -- with no undo entry naming it.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ControlPropsObjSnapshot {
+    pub rows: Vec<ControlPropRestoreRow>,
+}
+
+/// Record a PER-PROPERTY control step: `rows` carry each written property's
+/// value before the step. Joins an open transaction (the Format pane's commit
+/// is one Ctrl+Z). Called with the control store guard DROPPED.
+pub(crate) fn record_control_props_undo(state: &AppState, rows: Vec<ControlPropRestoreRow>, description: &str) {
+    if rows.is_empty() {
+        return;
+    }
+    record_object_undo(
+        state,
+        CONTROL_PROPS_RESTORE_KIND,
+        serde_json::to_vec(&ControlPropsObjSnapshot { rows }).unwrap_or_default(),
+        description,
+    );
+}
+
 /// Serialized "obj_controls" snapshot bytes (in-open-transaction contract).
 pub(crate) fn controls_snapshot_bytes(
     controls: Vec<((usize, u32, u32), crate::controls::ControlMetadata)>,
@@ -6779,6 +6926,50 @@ pub(crate) fn record_controls_undo(
         "obj_controls",
         controls_snapshot_bytes(previous, Vec::new()),
         description,
+    );
+}
+
+/// The restore kind of the object-property BINDING store (WP-D, D §3.10).
+pub(crate) const BINDINGS_RESTORE_KIND: &str = "obj_bindings";
+
+/// Serialized "obj_bindings" restore bytes: the `BindingDelta` between
+/// `previous` (the store before the step) and the store as it is NOW (after
+/// it) -- only the keys the step changed, so its undo never reverts a binding
+/// another writer changed later. A SEQUENCE (never the map-keyed
+/// `BindingStore`, whose struct key serde_json cannot write --
+/// `unwrap_or_default` would turn that into EMPTY bytes and a silently dead
+/// undo step). For a delete command that records its own restore and the
+/// bindings restore as ONE step through one
+/// [`record_restores_joining_open_transaction`] call.
+///
+/// LOCKS: reads the binding store (a leaf), so the caller must have DROPPED its
+/// own store guard -- every writer releases it before recording.
+pub(crate) fn bindings_restore_bytes(
+    state: &AppState,
+    previous: &crate::object_bindings::store::BindingStoreSnapshot,
+) -> Vec<u8> {
+    let delta = match state.object_bindings.read() {
+        Ok(current) => crate::object_bindings::store::BindingDelta::between(previous, &current),
+        Err(e) => {
+            crate::log_warn!("BINDINGS", "the binding store is unreadable ({}); the undo step restores nothing", e);
+            crate::object_bindings::store::BindingDelta::default()
+        }
+    };
+    serde_json::to_vec(&delta).unwrap_or_default()
+}
+
+/// Record the PRE-edit binding store as one undo step labelled `description`,
+/// joining an open transaction. Called with the store guard already DROPPED
+/// (the store is a leaf below `undo_stack`).
+pub(crate) fn record_bindings_undo(
+    state: &AppState,
+    previous: crate::object_bindings::store::BindingStoreSnapshot,
+    description: &str,
+) {
+    record_restores_joining_open_transaction(
+        state,
+        description,
+        vec![(BINDINGS_RESTORE_KIND, bindings_restore_bytes(state, &previous))],
     );
 }
 

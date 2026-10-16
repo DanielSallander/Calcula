@@ -42,6 +42,7 @@ import { isPointModeOnForeignSheet } from "../../lib/pointModeView";
 import { getGridStateSnapshot } from "../../state/GridContext";
 import { rowHeaderGutter } from "../../lib/gridRenderer/layout/headerVisibility";
 import { clearFloatingHover, setHoveredFloatingRegion } from "../../lib/objectHover";
+import { floatingReferencePickActive } from "../../lib/referencePickState";
 
 // Custom cursor data URLs for Excel-style header selection arrows
 const COLUMN_SELECT_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M12 2 L12 18 M12 18 L8 14 M12 18 L16 14' stroke='black' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") 12 12, pointer`;
@@ -76,6 +77,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     onDragEnd,
     onInsertReference,
     onInsertFormulaText,
+    onFloatingReferencePick,
     onInsertRangeReference,
     onInsertColumnReference,
     onInsertColumnRangeReference,
@@ -284,6 +286,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     setIsOverlayMoving,
     setCursorStyle,
     overlayMoveStateRef,
+    onFloatingReferencePick,
   });
 
   // eslint-disable-next-line react-hooks/refs -- Refs are captured in closures for event-time access, not read during render
@@ -504,6 +507,13 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       // act on. The press is announced as a generic BACKGROUND press so object
       // families (and the canvas marquee) can clear their own selection.
       if (getGridStateSnapshot()?.surface === "canvas") {
+        // DURING A REFERENCE PICK the empty page is inert (D-PICK): no
+        // background press, so no family clears the selection of the object
+        // whose formula is being edited, and the edit keeps its focus.
+        if (floatingReferencePickActive()) {
+          event.preventDefault();
+          return;
+        }
         window.dispatchEvent(
           new CustomEvent("floatingObject:backgroundPointerDown", {
             detail: {

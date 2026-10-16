@@ -20,7 +20,6 @@ import {
 import { createLinearScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
-  drawChartBackground,
   drawPlotBackground,
   drawHorizontalGridLines,
   drawTitle,
@@ -98,7 +97,6 @@ export function paintBubbleChart(
   }
 
   // 1. Background
-  drawChartBackground(ctx, layout, theme);
 
   // 2. Plot area background
   drawPlotBackground(ctx, plotArea, theme);
@@ -162,9 +160,7 @@ export function paintBubbleChart(
   ctx.restore();
 
   // 6. Title
-  if (spec.title) {
-    drawTitle(ctx, spec.title, layout, theme);
-  }
+  drawTitle(ctx, spec.title, layout, theme);
 
   // 7. Legend
   if (spec.legend.visible && valueSeries.length > 1) {

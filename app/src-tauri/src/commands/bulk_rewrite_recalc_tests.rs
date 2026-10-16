@@ -775,6 +775,7 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
         ("commands/data.rs", "reevaluate_formula_cell", "the cascade's per-cell evaluator"),
         ("commands/data.rs", "recalc_walked_cell", "the cross-sheet walk's per-cell step"),
         ("pivot/operations.rs", "recalculate_sheet_formulas", "a whole-sheet evaluation"),
+        ("pivot/operations.rs", "restyle_pivot_in_grid", "STYLE ONLY (ruling R3, a pivot style change): it re-sets the style_index of cells already in the pivot's written block and copies each value back unchanged, so no value moves and no dependent needs evaluating"),
         ("persistence.rs", "open_file", "the load path recalculates the workbook it just read"),
         // -- Rewrites a formula's TEXT without moving any value -------------
         ("named_ranges.rs", "apply_names_to_formulas", "substitutes a defined name for the reference it already denoted: the same cell, so no value moves (it does rebuild the name dependency edges)"),

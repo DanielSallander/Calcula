@@ -60,6 +60,9 @@ function installProvider(): void {
     async removeButton() {
       /* not used by the link model */
     },
+    async createPageNavigator() {
+      throw new Error("not used by the link model");
+    },
   });
 }
 

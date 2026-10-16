@@ -13,7 +13,6 @@ import { createLinearScale, createBandScale, createScaleFromSpec } from "./scale
 import {
   computeCartesianLayout,
   computeCartesianElementRects,
-  drawChartBackground,
   drawPlotBackground,
   drawVerticalGridLines,
   drawHorizontalAxes,
@@ -146,7 +145,6 @@ export function paintHorizontalBarChart(
   );
 
   // 1. Background
-  drawChartBackground(ctx, layout, theme);
 
   // 2. Plot area background
   drawPlotBackground(ctx, plotArea, theme);
@@ -168,9 +166,7 @@ export function paintHorizontalBarChart(
   }
 
   // 6. Title
-  if (spec.title) {
-    drawTitle(ctx, spec.title, layout, theme);
-  }
+  drawTitle(ctx, spec.title, layout, theme);
 
   // 7. Legend
   if (spec.legend.visible && data.series.length > 0) {

@@ -11,6 +11,7 @@ import {
 import { getDesignMode } from "./designMode";
 import { announceFloatingControlRegions } from "./regionPublication";
 import { noteControlGeometryChanged } from "./geometryWriteOrder";
+import { getControlContainer } from "./controlContainer";
 import type { ButtonAction } from "@api/buttonControlService";
 
 // ============================================================================
@@ -798,6 +799,11 @@ export function syncFloatingControlRegions(): void {
       width: ctrl.width,
       height: ctrl.height,
     },
+    // The RESOLVED visual container (WP-C D-FORMAT, lib/controlContainer.ts):
+    // Core paints its shadow, title, divider and -- for a picture or a page
+    // navigator -- its background and border round the control, and answers
+    // its band as frame. Absent until the control's first properties read.
+    container: getControlContainer(ctrl.id),
     data: {
       sheetIndex: ctrl.sheetIndex,
       row: ctrl.row,

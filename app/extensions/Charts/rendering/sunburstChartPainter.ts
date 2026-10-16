@@ -13,7 +13,6 @@ import { resolveDatumStyle } from "../lib/dataPointOverrides";
 import { applyFillStyle } from "./gradientFill";
 import {
   computeRadialLayout,
-  drawChartBackground,
   drawTitle,
   drawRadialLegend,
   formatTickValue,
@@ -198,7 +197,6 @@ export function paintSunburstChart(
   const separator = opts.levelSeparator ?? " > ";
 
   // 1. Background
-  drawChartBackground(ctx, layout, theme);
 
   if (data.series.length === 0 || data.categories.length === 0) return;
 
@@ -339,9 +337,7 @@ export function paintSunburstChart(
   }
 
   // 4. Title
-  if (spec.title) {
-    drawTitle(ctx, spec.title, layout, theme);
-  }
+  drawTitle(ctx, spec.title, layout, theme);
 
   // 5. Legend (top-level categories)
   if (spec.legend.visible && data.categories.length > 0) {

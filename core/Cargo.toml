@@ -10,7 +10,8 @@ members = [
     "calcula-crypto",
     "calp",
     "calcula-sign",
-    "insights"
+    "insights",
+    "visual-format"
 ]
 exclude = ["pivot-bench"]
 resolver = "2"

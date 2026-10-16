@@ -17,7 +17,7 @@
 use serde_json::Value;
 use tauri::AppHandle;
 
-use crate::mcp::{drafts, tools};
+use crate::mcp::{bindings, drafts, tools};
 
 fn arg_u32(input: &Value, key: &str) -> Result<u32, String> {
     input
@@ -163,6 +163,33 @@ pub async fn ai_chat_run_tool(
                 p.has_headers.unwrap_or(true),
                 p.name.as_deref(),
             )
+        }
+        // ---- Object property bindings (WP-D) ----
+        // The same param structs and the same crate::mcp::bindings bodies as the
+        // MCP server: one gate (objects::gate), one audit row (source Ai {tool}),
+        // one undo step per change.
+        "list_object_properties" => {
+            let p: crate::mcp::server::ListObjectPropertiesParams =
+                serde_json::from_value(input.clone()).map_err(|e| e.to_string())?;
+            bindings::list_object_properties(&handle, p.kind.as_deref(), p.id.as_deref(), p.sheet_index)
+        }
+        "set_object_property" => {
+            let p: crate::mcp::server::SetObjectPropertyParams =
+                serde_json::from_value(input.clone()).map_err(|e| e.to_string())?;
+            bindings::set_object_property(&handle, &p.kind, &p.id, &p.path, p.value)
+        }
+        "set_object_binding" => {
+            let p: crate::mcp::server::SetObjectBindingParams =
+                serde_json::from_value(input.clone()).map_err(|e| e.to_string())?;
+            Box::pin(bindings::set_object_binding(
+                &handle,
+                &p.kind,
+                &p.id,
+                &p.path,
+                p.formula.as_deref(),
+                p.model.as_deref(),
+            ))
+            .await
         }
         // Read-only BI / cube tools — async (they await the BI engine lock).
         "list_bi_connections" => tools::list_bi_connections(&handle),

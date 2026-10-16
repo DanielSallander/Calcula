@@ -1,11 +1,20 @@
 //! FILENAME: app/extensions/Controls/PropertiesPane/PropertyRow.tsx
 // PURPOSE: A single property editor row in the Properties Pane.
-// CONTEXT: Auto-detects formula mode when value starts with "=".
-//          Supports "'" escape: typing "'=" stores a literal "=" as static text.
+// CONTEXT: A row edits the property's LITERAL, always as static text: since
+//          D-BIND (WP-D S8a) a property that follows a formula is a BINDING
+//          (`@api/objectBindings`), not a formula-typed value, and the backend
+//          refuses `valueType: "formula"` for every non-code key. A row whose
+//          property the catalog lets you bind (`supportsFormula`, or already
+//          bound by a script or the AI) is wrapped in the shared
+//          `BindableField`: its fx switch writes the binding, the literal
+//          editor below it stays the literal's one door.
+//
+//          Typing `=...` into a LITERAL editor stores that text. The "'"
+//          escape stays for display parity with Excel only: a stored "=x"
+//          shows as "'=x", and committing that display stores "=x".
 
 import React, { useState, useEffect, useCallback } from "react";
 import type { ControlPropertyValue, PropertyDefinition } from "../lib/types";
-import { FormulaPropertyInput } from "./FormulaPropertyInput";
 import { CodePropertyInput } from "./CodePropertyInput";
 import { ToggleSwitch } from "./ToggleSwitch";
 import { SliderInput } from "./SliderInput";
@@ -15,6 +24,9 @@ import {
   scriptPickerLabel,
   type ScriptPickerEntry,
 } from "../../_shared/lib/scriptModuleProvenance";
+import { BindableField } from "../../_shared/components/bindings";
+import { getBinding, isBindablePath, type ObjectBindingRef } from "@api/objectBindings";
+import { controlPropertyPointer } from "../lib/controlBindings";
 
 // ============================================================================
 // Styles (theme-aware via CSS variables)
@@ -122,35 +134,43 @@ function toDisplayValue(val: ControlPropertyValue | undefined, defaultValue: str
 }
 
 /**
- * Determine valueType and stored value from the user's display input.
- * - "'..." -> static, value = rest after "'"
- * - "=..." -> formula
- * - anything else -> static
+ * The STATIC value to store for the user's display input. Always text: a
+ * leading "'" is the display escape and is dropped; `=...` is stored as typed
+ * (a formula is a binding now, written through the row's fx switch).
+ * Exported for the unit tier.
  */
-function fromDisplayValue(
-  displayValue: string,
-  supportsFormula: boolean,
-): { valueType: "static" | "formula"; value: string } {
-  if (displayValue.startsWith("'")) {
-    return { valueType: "static", value: displayValue.slice(1) };
-  }
-  if (supportsFormula && displayValue.startsWith("=")) {
-    return { valueType: "formula", value: displayValue };
-  }
-  return { valueType: "static", value: displayValue };
+export function fromDisplayValue(displayValue: string): string {
+  return displayValue.startsWith("'") ? displayValue.slice(1) : displayValue;
 }
 
 /**
  * Would committing `displayValue` change nothing? True when it is exactly what
  * the row already shows for the stored value (or for its default, when nothing
- * is stored). Exported for the unit tier.
+ * is stored), or when it would store exactly the static value already there.
+ * Exported for the unit tier.
  */
 export function isUnchangedCommit(
   displayValue: string,
   stored: ControlPropertyValue | undefined,
   defaultValue: string,
 ): boolean {
-  return displayValue === toDisplayValue(stored, defaultValue);
+  if (displayValue === toDisplayValue(stored, defaultValue)) return true;
+  const next = fromDisplayValue(displayValue);
+  return stored ? stored.valueType === "static" && stored.value === next : next === defaultValue;
+}
+
+/**
+ * Does this row offer the fx switch? Only for a control the backend has given
+ * a uid, never for a read-only (handle-valued) row, only for a key the
+ * bindable-path catalog accepts -- and then when the row supports formulas, or
+ * when the property is ALREADY bound (a script or the AI may bind a property
+ * whose row does not offer fx; the pane must show that binding, not hide it).
+ */
+export function rowOffersBinding(definition: PropertyDefinition, bindingRef: ObjectBindingRef | null | undefined): boolean {
+  if (!bindingRef || definition.readOnly) return false;
+  const pointer = controlPropertyPointer(definition.key);
+  if (!isBindablePath("control", pointer)) return false;
+  return definition.supportsFormula || getBinding(bindingRef, pointer) !== null;
 }
 
 // ============================================================================
@@ -162,7 +182,14 @@ interface PropertyRowProps {
   value: ControlPropertyValue | undefined;
   /** Every module the workbook lists, WITH its `sourcePackage` stamp. */
   scripts: ScriptPickerEntry[];
-  onChange: (key: string, valueType: "static" | "formula", value: string) => void;
+  /** Write the property's LITERAL (always stored as static text). */
+  onChange: (key: string, value: string) => void;
+  /**
+   * The control's binding ref (`{ kind: "control", id: uid }`, the uid read
+   * from the BACKEND's metadata), or null when it has none yet: the row then
+   * offers no fx switch.
+   */
+  bindingRef?: ObjectBindingRef | null;
 }
 
 // ============================================================================
@@ -174,6 +201,7 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
   value,
   scripts,
   onChange,
+  bindingRef = null,
 }) => {
   const displayValue = toDisplayValue(value, definition.defaultValue);
   const [localValue, setLocalValue] = useState(displayValue);
@@ -185,7 +213,7 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
     setLocalValue(toDisplayValue(value, definition.defaultValue));
   }, [value, definition.defaultValue]);
 
-  // Commit: determine valueType from the display value
+  // Commit the literal (static text; the "'" display escape dropped).
   //
   // AN UNCHANGED VALUE IS NOT A WRITE (BUG-0257). The code field commits on
   // blur, so tabbing THROUGH a row wrote it back -- and on a working copy's
@@ -196,16 +224,12 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
   const handleCommit = useCallback(
     (newValue: string) => {
       if (isUnchangedCommit(newValue, value, definition.defaultValue)) return;
-      const { valueType, value: storedValue } = fromDisplayValue(
-        newValue,
-        definition.supportsFormula,
-      );
-      onChange(definition.key, valueType, storedValue);
+      onChange(definition.key, fromDisplayValue(newValue));
     },
-    [onChange, value, definition.key, definition.supportsFormula, definition.defaultValue],
+    [onChange, value, definition.key, definition.defaultValue],
   );
 
-  // Plain input handlers (for non-formula inputs like boolean, script, plain text/number)
+  // Plain input handlers
   const handleInputChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
       setLocalValue(e.target.value);
@@ -225,6 +249,27 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
       }
     },
     [localValue, handleCommit],
+  );
+
+  // A fixed menu of choices (definition.options). A choice is committed the
+  // moment it is picked, through the same unchanged-is-not-a-write rule.
+  const renderSelect = () => (
+    <select
+      style={scriptSelectStyle}
+      value={localValue}
+      data-control-prop-select={definition.key}
+      onChange={(e) => {
+        const newVal = e.target.value;
+        setLocalValue(newVal);
+        handleCommit(newVal);
+      }}
+    >
+      {(definition.options ?? []).map((o) => (
+        <option key={o.value} value={o.value}>
+          {o.label}
+        </option>
+      ))}
+    </select>
   );
 
   // ---------------------------------------------------------------
@@ -248,71 +293,7 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
       );
     }
 
-    // For properties that support formulas: use the smart FormulaPropertyInput
-    // that auto-activates autocomplete and Point mode when value starts with "=".
-    if (definition.supportsFormula) {
-      const isFormulaLike = localValue.startsWith("=") || localValue.startsWith("'");
-
-      // Slider for number properties with min/max when not in formula mode
-      if (definition.inputType === "number" && definition.min !== undefined && definition.max !== undefined && !isFormulaLike) {
-        return (
-          <SliderInput
-            value={parseFloat(localValue) || 0}
-            min={definition.min}
-            max={definition.max}
-            step={definition.step ?? 1}
-            onChange={(v) => setLocalValue(String(v))}
-            onCommit={(v) => {
-              const s = String(v);
-              setLocalValue(s);
-              handleCommit(s);
-            }}
-          />
-        );
-      }
-
-      // Color properties: show the color swatch alongside when not in formula mode
-      if (definition.inputType === "color" && !isFormulaLike) {
-        return (
-          <div style={colorInputContainerStyle}>
-            <input
-              type="color"
-              style={colorSwatchStyle}
-              value={localValue || "#000000"}
-              onChange={(e) => {
-                setLocalValue(e.target.value);
-                handleCommit(e.target.value);
-              }}
-            />
-            <FormulaPropertyInput
-              value={localValue}
-              onChange={(newVal) => setLocalValue(newVal)}
-              onCommit={(newVal) => {
-                setLocalValue(newVal);
-                handleCommit(newVal);
-              }}
-              inputType={definition.inputType}
-              placeholder={definition.defaultValue}
-            />
-          </div>
-        );
-      }
-
-      return (
-        <FormulaPropertyInput
-          value={localValue}
-          onChange={(newVal) => setLocalValue(newVal)}
-          onCommit={(newVal) => {
-            setLocalValue(newVal);
-            handleCommit(newVal);
-          }}
-          inputType={definition.inputType}
-          placeholder={definition.defaultValue}
-        />
-      );
-    }
-
-    // Non-formula inputs
+    // The LITERAL editor, by input type.
     switch (definition.inputType) {
       case "color":
         return (
@@ -376,6 +357,9 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
           />
         );
 
+      case "select":
+        return renderSelect();
+
       case "boolean":
         return (
           <ToggleSwitch
@@ -383,7 +367,7 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
             onChange={(checked) => {
               const newVal = checked ? "true" : "false";
               setLocalValue(newVal);
-              onChange(definition.key, "static", newVal);
+              onChange(definition.key, newVal);
             }}
             label={localValue === "true" ? "Yes" : "No"}
           />
@@ -416,7 +400,7 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
               onChange={(e) => {
                 const newVal = e.target.value;
                 setLocalValue(newVal);
-                onChange(definition.key, "static", newVal);
+                onChange(definition.key, newVal);
               }}
             >
               <option value="">(None)</option>
@@ -458,6 +442,7 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
 
   return (
     <div
+      data-testid={"control-prop-" + definition.key}
       style={{ ...rowStyle, ...(hovered ? rowHoverStyle : {}) }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
@@ -465,7 +450,16 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
       <div style={labelRowStyle}>
         <span style={labelStyle}>{definition.label}</span>
       </div>
-      {renderInput()}
+      {bindingRef && rowOffersBinding(definition, bindingRef) ? (
+        <BindableField
+          object={bindingRef}
+          path={controlPropertyPointer(definition.key)}
+          label={definition.label}
+          literal={renderInput()}
+        />
+      ) : (
+        renderInput()
+      )}
       {definition.readOnly && definition.readOnlyHint ? (
         <span style={hintStyle}>{definition.readOnlyHint}</span>
       ) : null}

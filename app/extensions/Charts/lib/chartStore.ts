@@ -29,6 +29,9 @@ import {
   stampStoredChartJson,
   type SheetIdForIndex,
 } from "./chartSheetRefs";
+// Pure: the container's read / defaults / resolution. It imports nothing that
+// reads this store (the provider's store-bound half is injected by activate()).
+import { migrateLegacyChartBackground, resolveChartContainer } from "./chartObjectFormat";
 
 // ============================================================================
 // Backend Types
@@ -121,6 +124,11 @@ export function fromEntry(entry: ChartEntry): ChartDefinition {
   if (typeof entry.sheetIndex === "number" && Number.isInteger(entry.sheetIndex)) {
     definition.sheetIndex = entry.sheetIndex;
   }
+  // The outer background moved from `config.theme.background` (+ the untyped
+  // `backgroundGradient`) into the visual container (D-FORMAT). A file written
+  // before the move is read in the one spelling, so the load canary below has
+  // nothing to warn about and the next save writes the new shape.
+  definition.spec = migrateLegacyChartBackground(definition.spec);
   return definition;
 }
 
@@ -1582,6 +1590,12 @@ export function resetChartStore(): void {
  *
  * Charts use the `floating` field on GridRegion for pixel-based positioning.
  * The cell-based fields (startRow etc.) are set to 0 since they're unused.
+ *
+ * Every chart region carries its RESOLVED visual container (`container`,
+ * D-FORMAT): bound > stored > defaults, the WP-D bindings laid over the
+ * literal. Core paints its shadow, background and border around the chart's
+ * raster and answers its padding band as FRAME; the raster is laid out and
+ * hit-tested inside `visualContentRectFor(...)`.
  */
 export function syncChartRegions(): void {
   removeGridRegionsByType("chart");
@@ -1602,6 +1616,7 @@ export function syncChartRegions(): void {
       width: chart.width,
       height: chart.height,
     },
+    container: resolveChartContainer(chart.chartId, chart.spec),
     data: {
       chartId: chart.chartId,
       name: chart.name,

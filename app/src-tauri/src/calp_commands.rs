@@ -134,18 +134,15 @@ pub(crate) fn restore_published_sheet_references(
         }
     }
     for chart in workbook.charts.iter_mut() {
-        if let Some(restored) =
-            calp::chart_refs::rename_chart_spec_sheet_names(&chart.spec_json, &renames)
-        {
-            chart.spec_json = restored;
+        if calp::chart_refs::rename_chart_spec_sheet_names(&mut chart.spec, &renames) {
             counts.charts += 1;
         }
     }
     // The RULE payloads on the published sheets (wave-B B4): a checkout renamed
     // their references with the rest of the pull (`rename_pulled_rules`), so a
     // push must put them back or the application ships "Data (2)" in its
-    // conditional formats, validations and control formulas. Pane controls are
-    // workbook-scoped and published whole.
+    // conditional formats, validations and controls' page targets. Pane
+    // controls are workbook-scoped and published whole.
     let published: std::collections::HashSet<SheetId> =
         sheet_indices.iter().filter_map(|&i| workbook.sheets.get(i).map(|s| s.id)).collect();
     for cf in workbook.conditional_formats.iter_mut().filter(|c| published.contains(&c.sheet_id)) {
@@ -167,6 +164,13 @@ pub(crate) fn restore_published_sheet_references(
     for slicer in workbook.slicers.iter_mut().filter(|s| published.contains(&s.sheet_id)) {
         counts.slicer_formulas += renames.rename_slicer_formulas(std::slice::from_mut(slicer));
     }
+    // Object property BINDINGS (WP-D): a control's or a chart's property that
+    // follows a formula is a binding row, not a formula inside the object, so
+    // the push restores the published name in every binding formula. Every
+    // row, not only the published objects' -- which rows travel is the
+    // publish assembly's decision, and in the package "Data" means the
+    // package's sheet whichever object reads it.
+    counts.bindings += renames.rename_binding_formulas(&mut workbook.object_bindings);
     counts
 }
 
@@ -795,6 +799,23 @@ fn assemble_publish_workbook(
     workbook.pane_controls =
         crate::persistence::collect_pane_controls_for_save(pane_control_state);
 
+    // Object property BINDINGS ride on the carrier the way the `.cala` save
+    // collects them (`collect_bindings_for_save`: the bindings of objects that
+    // exist), so the restore of a collision rename below reaches their formulas
+    // and core publish picks the rows of the objects it carries
+    // (`published_object_bindings`). The live-object walk reads and releases the
+    // family stores before the (leaf) store is read.
+    {
+        let stores = crate::object_bindings::object_json::ObjectStores {
+            state,
+            slicers: slicer_state,
+            timelines: timeline_state,
+            pivots: pivot_state,
+        };
+        let live = crate::object_bindings::object_json::live_object_refs(&stores);
+        workbook.object_bindings = crate::object_bindings::store::collect_bindings_for_save(state, &live);
+    }
+
     for &idx in sheet_indices {
         if idx >= workbook.sheets.len() {
             return Err(format!("Sheet index {} out of range", idx));
@@ -946,11 +967,7 @@ fn assemble_publish_workbook(
     {
         let workbook_sheet_ids: Vec<SheetId> = workbook.sheets.iter().map(|s| s.id).collect();
         for chart in workbook.charts.iter_mut() {
-            if let Some(stamped) =
-                calp::chart_refs::stamp_chart_spec_sheet_ids(&chart.spec_json, &workbook_sheet_ids)
-            {
-                chart.spec_json = stamped;
-            }
+            calp::chart_refs::stamp_chart_spec_sheet_ids(&mut chart.spec, &workbook_sheet_ids);
         }
     }
 
@@ -1407,6 +1424,12 @@ pub(crate) fn compute_publish_report(
     item(&mut included, "controls",
         wb.controls.iter().filter(|c| published_sheet_ids.contains(&c.sheet_id)).count(),
         "sheets with buttons/checkboxes (incl. onSelect wiring)");
+    // Counted by the rule core publish SELECTS them with -- the same function,
+    // so the report cannot name a different number from the one the
+    // application carries.
+    item(&mut included, "objectBindings",
+        calp::publish::published_object_bindings(wb, sheet_indices).len(),
+        "object properties that follow a formula (bindings of the published objects)");
     // Embedded pictures. Counted the same way publish SELECTS them — by scanning
     // the published sheets' control payloads for media: handles — so the report
     // cannot claim a different number from the one the application carries. Media
@@ -1415,6 +1438,15 @@ pub(crate) fn compute_publish_report(
         let mut media_refs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for entry in wb.controls.iter().filter(|c| published_sheet_ids.contains(&c.sheet_id)) {
             calcula_format::media::visit_media_refs(&entry.controls, &mut |hash| {
+                if wb.media.contains_key(hash) {
+                    media_refs.insert(hash.to_string());
+                }
+            });
+        }
+        // ...and the handles a published bound picture's formula names (the
+        // publish writer's own rule, BUG-0474).
+        for binding in calp::publish::published_object_bindings(wb, sheet_indices) {
+            calcula_format::media::visit_media_refs_in_text(&binding.formula, &mut |hash| {
                 if wb.media.contains_key(hash) {
                     media_refs.insert(hash.to_string());
                 }
@@ -4247,11 +4279,15 @@ pub(crate) fn resolve_publish_sheet_indices(
         .map_err(|e| e.to_string())?
         .iter()
         .map(|c| {
+            // The store holds the IPC spec TEXT; the walk reads a value. Text
+            // that is not JSON names no source (Null), as before.
+            let spec: serde_json::Value =
+                serde_json::from_str(&c.spec_json).unwrap_or(serde_json::Value::Null);
             (
                 c.sheet_index,
-                chart_name_for_disclosure(&c.spec_json),
-                calp::chart_refs::chart_spec_source_sheets(&c.spec_json),
-                calp::chart_refs::chart_spec_pivot_ids(&c.spec_json),
+                chart_name_for_disclosure(&spec),
+                calp::chart_refs::chart_spec_source_sheets(&spec),
+                calp::chart_refs::chart_spec_pivot_ids(&spec),
             )
         })
         .collect();
@@ -4532,8 +4568,7 @@ pub(crate) fn resolve_publish_sheet_indices(
 
 /// A chart's name for a disclosure line: the envelope's `name`, else its
 /// `chartId`, else a placeholder. Malformed JSON names nothing.
-fn chart_name_for_disclosure(spec_json: &str) -> String {
-    let value: serde_json::Value = serde_json::from_str(spec_json).unwrap_or_default();
+fn chart_name_for_disclosure(value: &serde_json::Value) -> String {
     ["name", "chartId"]
         .iter()
         .find_map(|key| {
@@ -5331,11 +5366,12 @@ pub(crate) fn apply_refreshed_charts(
             name: String::new(),
             extra: std::collections::HashMap::new(),
         });
+        let mut spec = chart.spec.clone();
+        calp::chart_refs::remap_chart_spec_sheet_ids(&mut spec, &source_to_local);
         charts.push(crate::api_types::ChartEntry {
             id: chart.id,
             sheet_index: idx,
-            spec_json: calp::chart_refs::remap_chart_spec_sheet_ids(&chart.spec_json, &source_to_local)
-                .unwrap_or_else(|| chart.spec_json.clone()),
+            spec_json: crate::persistence::chart_spec_text_from_saved(&spec),
         });
     }
 }
@@ -6184,14 +6220,28 @@ pub(crate) fn materialize_pull_result(
     if counts != calp::sheet_renames::RenameCounts::default() {
         crate::log_info!(
             "CALP",
-            "pull of '{}': {} formula(s), {} name(s) and {} chart(s) follow a sheet renamed \
-             on arrival",
+            "pull of '{}': {} formula(s), {} name(s), {} chart(s) and {} binding(s) follow a \
+             sheet renamed on arrival",
             result.package_name,
             counts.cell_formulas,
             counts.named_ranges,
-            counts.charts
+            counts.charts,
+            counts.bindings
         );
     }
+
+    // The application's object property BINDINGS, captured while the result is
+    // still whole (the materializers below consume its charts and scripts):
+    // canvas-page ids mapped to the pulled sheets' local ids, and the set of
+    // objects the application carries. They LAND at the end, once every object
+    // family has materialized (`land_pulled_bindings`).
+    let pulled_bindings = {
+        let local_of: std::collections::HashMap<SheetId, SheetId> =
+            result.sheets.iter().map(|p| (p.package_sheet_id, p.sheet.id)).collect();
+        crate::object_bindings::carriage::PulledBindings::from_pull(&result, |pkg| {
+            local_of.get(&pkg).copied()
+        })
+    };
 
     // Materialize pulled sheets into the workbook.
     // Each pulled sheet has its own local StyleRegistry; we merge styles into
@@ -6437,8 +6487,7 @@ pub(crate) fn materialize_pull_result(
     // sheet this pull did not bring is left alone and stays honestly broken).
     //
     // A CHECKOUT is skipped outright: it preserves the application's sheet ids,
-    // so the ids already match, and a rewrite would re-serialize the spec with
-    // reordered keys -- a spurious change in the next push's diff.
+    // so the ids already match and there is nothing to rewrite.
     if !result.charts.is_empty() {
         let chart_ref_map: std::collections::HashMap<SheetId, (SheetId, usize)> = result
             .sheets
@@ -6451,14 +6500,11 @@ pub(crate) fn materialize_pull_result(
             if let Some(&sheet_index) = chart_sheet_index.get(&chart.sheet_id) {
                 if !charts.iter().any(|c| c.id == chart.id) {
                     sub_objects.push(sub_object("chart", chart.id.to_string(), String::new()));
-                    let spec_json = match mode {
-                        MaterializeMode::Subscribe => calp::chart_refs::remap_chart_spec_sheet_ids(
-                            &chart.spec_json,
-                            &chart_ref_map,
-                        )
-                        .unwrap_or(chart.spec_json),
-                        MaterializeMode::Checkout => chart.spec_json,
-                    };
+                    let mut spec = chart.spec;
+                    if matches!(mode, MaterializeMode::Subscribe) {
+                        calp::chart_refs::remap_chart_spec_sheet_ids(&mut spec, &chart_ref_map);
+                    }
+                    let spec_json = crate::persistence::chart_spec_text_from_saved(&spec);
                     charts.push(crate::api_types::ChartEntry {
                         id: chart.id,
                         sheet_index,
@@ -6747,6 +6793,16 @@ pub(crate) fn materialize_pull_result(
             .iter()
             .map(|p| (p.package_sheet_id, (p.sheet.id, p.name.clone())))
             .collect();
+        // Page-target IDS follow the local sheets (BUG-0449): a navigate
+        // button's `actionTarget` and a Page Navigator's override `sheetId`
+        // name the APPLICATION's sheet ids, and the subscriber's are its own.
+        // Built from the FINAL index map, with the sheet-id read released
+        // before the media and controls locks (sheets -> media -> controls).
+        // A checkout keeps the application's ids, so there it changes nothing.
+        let page_targets = {
+            let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
+            crate::controls::PageTargetRemap::from_pull(&pkg_to_index, &sheet_ids)
+        };
         // Sanitize AND migrate: an application published before media artifacts
         // existed carries its images base64'd inside the signed controls.json,
         // and materialization writes straight into ControlStorage — so without
@@ -6772,6 +6828,7 @@ pub(crate) fn materialize_pull_result(
             &admitted.controls,
             &mut controls,
             |sid| pkg_to_index.get(&sid).copied(),
+            &page_targets,
         );
         for entry in &result.controls {
             if let Some((local_sid, sheet_name)) = local_sheet_ids.get(&entry.sheet_id) {
@@ -7084,6 +7141,46 @@ pub(crate) fn materialize_pull_result(
             &pulled_indices,
             &embedded_connection_ids,
             &sheet_rename_map,
+        );
+    }
+
+    // THE APPLICATION'S OBJECT PROPERTY BINDINGS (WP-D), after EVERY object
+    // family above has landed -- charts, controls, slicers, timelines, floating
+    // ranges, pivots and the canvas pages themselves -- so each row finds its
+    // object. Only the rows of objects this pull carried AND placed on one of
+    // its sheets are installed: a chart skipped on an id collision must not hand
+    // its bindings to the subscriber's chart of that id. Then the old control
+    // spelling an application published before bindings existed still carries
+    // (a formula-typed control property) becomes a binding, under this door's
+    // own effect, as on a file open. Chart `=B2` titles are literals here.
+    {
+        let stores = crate::object_bindings::object_json::ObjectStores {
+            state,
+            slicers: slicer_state,
+            timelines: timeline_state,
+            pivots: pivot_state,
+        };
+        let landed = crate::object_bindings::carriage::land_pulled_bindings(
+            &stores,
+            effect,
+            &pulled_bindings,
+            &std::collections::HashSet::new(),
+        );
+        if landed.installed > 0 {
+            crate::log_info!(
+                "CALP",
+                "pull of '{}': {} property binding(s) installed",
+                result.package_name,
+                landed.installed
+            );
+        }
+        // Controls only: a pull parses only the embedded-object chart shape, so
+        // every pulled chart -- and every chart the subscriber already had --
+        // comes from a bindings-era writer, whose `=B2` title is a literal.
+        crate::object_bindings::migrate::migrate_legacy_formulas(
+            state,
+            effect,
+            crate::object_bindings::migrate::ChartTextFields::Literals,
         );
     }
 
@@ -10219,6 +10316,45 @@ pub(crate) fn apply_refresh_payloads(
     now: &str,
     window: Option<&tauri::Window>,
 ) -> Result<calp::refresh::RefreshResult, String> {
+    // THE APPLICATIONS' BOUND OBJECTS AS THEY ARE NOW, before anything below
+    // replaces them: each payload's bindings are REPLACED, not merged, at the
+    // end (`land_pulled_bindings`), so a binding the publisher removed -- or one
+    // of an object the new version no longer has -- stops binding. Read with no
+    // lock held; the ledger and the sheet ids are copied out first.
+    let bindings_owned_before: Vec<std::collections::HashSet<crate::api_types::ObjectBindingRef>> = {
+        let per_payload: Vec<(Vec<(String, String)>, std::collections::HashSet<SheetId>)> = {
+            let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
+            payloads
+                .iter()
+                .map(|payload| match subs.subscriptions.get(payload.subscription_index) {
+                    Some(sub) => (
+                        sub.objects.iter().map(|o| (o.kind.clone(), o.id.clone())).collect(),
+                        payload
+                            .pull_result
+                            .sheets
+                            .iter()
+                            .filter(|pulled| !sub.detached_sheets.contains(&pulled.package_sheet_id))
+                            .map(|pulled| refresh_local_sheet_id(sub, pulled))
+                            .collect(),
+                    ),
+                    None => (Vec::new(), std::collections::HashSet::new()),
+                })
+                .collect()
+        };
+        let stores = crate::object_bindings::object_json::ObjectStores {
+            state,
+            slicers: slicer_state,
+            timelines: timeline_slicer_state,
+            pivots: pivot_state,
+        };
+        per_payload
+            .into_iter()
+            .map(|(ledger, sheets)| {
+                crate::object_bindings::carriage::application_objects_before_refresh(&stores, ledger, &sheets)
+            })
+            .collect()
+    };
+
     // Materialize new/updated sheets into grids.
     let active_grid_after_materialize = {
         let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
@@ -10889,10 +11025,16 @@ pub(crate) fn apply_refresh_payloads(
                 // Same admission as first pull: distributed onSelect wiring
                 // (inline script source) never materializes, and a legacy
                 // application's inline base64 arrives as a media handle.
+                // Page-target ids follow the local sheets (BUG-0449), from
+                // the `sheet_ids` guard this block already holds. A refresh
+                // throws the controls away and re-materialises them, so
+                // without this a fixed subscribe would regress on the first
+                // refresh.
                 crate::controls::materialize_saved_controls(
                     sanitized,
                     &mut controls,
                     |sid| pkg_to_index.get(&sid).copied(),
+                    &crate::controls::PageTargetRemap::from_pull(pkg_to_index, &sheet_ids),
                 );
                 let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
                 for entry in &payload.pull_result.controls {
@@ -11433,6 +11575,23 @@ pub(crate) fn apply_refresh_payloads(
         })
         .collect();
 
+    // Each payload's object property BINDINGS, captured before the move:
+    // canvas-page ids mapped through the payload's own map to the LOCAL sheet
+    // they live on (a refreshed page keeps its OLD local id; a detached sheet is
+    // in no map, so nothing lands on it). Aligned with `payloads`.
+    let binding_updates: Vec<crate::object_bindings::carriage::PulledBindings> = {
+        let sheet_ids: Vec<SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
+        payloads
+            .iter()
+            .zip(pkg_maps.iter())
+            .map(|(p, pkg_to_index)| {
+                crate::object_bindings::carriage::PulledBindings::from_pull(&p.pull_result, |pkg| {
+                    pkg_to_index.get(&pkg).and_then(|&idx| sheet_ids.get(idx).copied())
+                })
+            })
+            .collect()
+    };
+
     // Apply refresh: update subscription metadata and rebase overrides.
     let mut subs = state.subscriptions.write(&effect).map_err(|e| e.to_string())?;
     let mut layer = state.override_layer.write(&effect).map_err(|e| e.to_string())?;
@@ -11691,6 +11850,32 @@ pub(crate) fn apply_refresh_payloads(
                 |sid| pkg_to_index.get(&sid).copied(),
             );
         }
+    }
+
+    // THE APPLICATIONS' OBJECT PROPERTY BINDINGS (WP-D), after every object
+    // family has been re-materialized: REPLACE, per payload -- every binding of
+    // the application's objects as they were before this refresh and as they
+    // are now goes, then the new version's rows land on the objects it carried
+    // onto its sheets. The subscriber's own objects keep their bindings. Then
+    // the old CONTROL spelling an application from before bindings still
+    // carries becomes a binding, under this refresh's effect.
+    {
+        let stores = crate::object_bindings::object_json::ObjectStores {
+            state,
+            slicers: slicer_state,
+            timelines: timeline_slicer_state,
+            pivots: pivot_state,
+        };
+        for (pulled, owned_before) in binding_updates.iter().zip(bindings_owned_before.iter()) {
+            crate::object_bindings::carriage::land_pulled_bindings(&stores, effect, pulled, owned_before);
+        }
+        // Controls only, as on a pull: every chart here is from a bindings-era
+        // writer, so its `=B2` title is a literal, never the old spelling.
+        crate::object_bindings::migrate::migrate_legacy_formulas(
+            state,
+            effect,
+            crate::object_bindings::migrate::ChartTextFields::Literals,
+        );
     }
 
     // Complete the provenance ledger with the script kinds recorded above at
@@ -12805,10 +12990,19 @@ fn materialize_dev_controls(
         &crate::held_button_code::DistributedWiring::Strip,
     )?
     .controls;
+    // Page-target ids follow the local sheets (BUG-0449); the sheet-id read is
+    // released before the controls lock (sheets-then-controls order).
+    let page_targets = {
+        let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
+        crate::controls::PageTargetRemap::from_pull(dev_map, &sheet_ids)
+    };
     let mut controls = state.controls.write(effect).map_err(|e| e.to_string())?;
-    crate::controls::materialize_saved_controls(&sanitized, &mut controls, |sid| {
-        dev_map.get(&sid).copied()
-    });
+    crate::controls::materialize_saved_controls(
+        &sanitized,
+        &mut controls,
+        |sid| dev_map.get(&sid).copied(),
+        &page_targets,
+    );
     drop(controls);
     let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
     let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
@@ -20654,7 +20848,7 @@ pub(crate) fn apply_refreshed_pivots(
         }
         // `is_canvas_sheet` was decided in PHASE A from a snapshot; the funnel
         // below re-checks the kind (and a framed pivot's block width) itself.
-        match update_pivot_in_grid(state, effect, p.def.id, p.dest_sheet_idx, p.def.destination, &p.view, p.def.canvas_frame.is_some()) {
+        match update_pivot_in_grid(state, effect, p.def.id, p.dest_sheet_idx, p.def.destination, &p.view, p.def.canvas_frame.is_some(), p.def.style.as_ref()) {
             Ok(()) => update_pivot_region(state, p.def.id, p.dest_sheet_idx, p.def.destination, &p.view),
             Err(refusal) => crate::log_warn!("CALP", "refresh: pivot {} not written: {}", p.def.id, refusal),
         }
@@ -21040,6 +21234,7 @@ pub(crate) fn restore_pulled_pivots(
                 &view,
                 def.destination,
                 &mut shared_styles,
+                &crate::pivot::grid_theme::PivotGridTheme::for_choice(def.style.as_ref()),
             );
             let (row, col) = def.destination;
             let end_row = row + view.row_count.max(1) as u32 - 1;
@@ -23298,6 +23493,7 @@ mod pane_control_pull_tests {
         );
         ControlMetadata {
             control_type: "button".to_string(),
+            uid: String::new(),
             properties,
         }
     }
@@ -23765,6 +23961,13 @@ mod tofu_pin_policy_guard_tests {
 /// WITH the reason it does not need one.
 #[cfg(test)]
 pub(crate) const CALP_PUBLISH_COVERAGE: &[(&str, &str)] = &[
+    (
+        "object_bindings",
+        "CARRIED: bindings.json, the bindings of the objects the publish carries \
+         (published_object_bindings); canvas-page ids mapped to the subscriber's \
+         sheets on pull, rows of objects that did not land dropped, replaced \
+         whole on refresh",
+    ),
     ("sheets", "CARRIED: sheets/{id}/{data,styles,cell_styles,layout,metadata}.json"),
     ("tables", "CARRIED: tables/{id}.json, filtered to published sheets"),
     ("slicers", "CARRIED: slicers.json, filtered to published sheets"),
@@ -23845,13 +24048,17 @@ pub(crate) const CALP_PUBLISH_COVERAGE: &[(&str, &str)] = &[
 mod pull_rename_payload_tests {
     //! Wave-B B4 (BUG-0151 follow-up). A collision rename on pull ('Data'
     //! arrives as 'Data (2)') must reach the RULE payloads too: conditional
-    //! formats, data validations, the formula properties of cell-anchored
-    //! controls and pane-control dropdown sources. `core/calp` walks them as
-    //! opaque JSON (`SheetRenames::rename_pulled_rules`); these tests build each
-    //! payload from the HOST's own typed structs, so a renamed or added
-    //! formula field in a host type turns a test red here instead of silently
-    //! escaping the rename. And the push half puts every one of them back
-    //! (`restore_published_sheet_references`).
+    //! formats, data validations, pane-control dropdown sources and (WP-D)
+    //! object property BINDING formulas. `core/calp` walks them as opaque JSON
+    //! (`SheetRenames::rename_pulled_rules`, `visit_binding_formulas`); these
+    //! tests build each payload from the HOST's own typed structs, so a renamed
+    //! or added formula field in a host type turns a test red here instead of
+    //! silently escaping the rename. And the push half puts every one of them
+    //! back (`restore_published_sheet_references`).
+    //!
+    //! A cell-anchored control holds no formula of its own any more: a property
+    //! that follows a formula is a binding row (D §3.13), and a formula-typed
+    //! control value is a literal the rename leaves alone.
     use crate::conditional_formatting as cf;
     use crate::data_validation as dv;
     use calp::sheet_renames::{PulledRules, SheetRenames};
@@ -23970,7 +24177,7 @@ mod pull_rename_payload_tests {
             "text".to_string(),
             crate::controls::ControlPropertyValue { value_type: "formula".to_string(), value: format!("={}!A1", sheet) },
         );
-        vec![crate::controls::SavedControlEntry { row: 1, col: 1, control_type: "button".to_string(), properties }]
+        vec![crate::controls::SavedControlEntry { row: 1, col: 1, control_type: "button".to_string(), uid: String::new(), properties }]
     }
 
     fn saved_pane(sheet: &str) -> persistence::SavedPaneControl {
@@ -23989,12 +24196,31 @@ mod pull_rename_payload_tests {
         }
     }
 
-    /// The four payloads, deserialized back into the host types, as the
-    /// reference texts they carry (a CF entry per formula).
+    /// Two binding rows as the HOST's store writes them (`store::saved_row`),
+    /// each reading `sheet`.
+    fn binding_rows(sheet: &str) -> Vec<persistence::SavedObjectBinding> {
+        use crate::api_types::{ObjectBindingKind, ObjectBindingRef};
+        use crate::object_bindings::store::{saved_row, BindingKey, StoredBinding};
+        [
+            (ObjectBindingKind::Control, "u-1", "/properties/text"),
+            (ObjectBindingKind::Chart, "c-1", "/spec/title"),
+        ]
+        .into_iter()
+        .map(|(kind, id, path)| {
+            saved_row(
+                &BindingKey { object: ObjectBindingRef { kind, id: id.to_string() }, path: path.to_string() },
+                &StoredBinding { formula: format!("={}!A1", sheet), model: None },
+            )
+        })
+        .collect()
+    }
+
+    /// The payloads, deserialized back into the host types, as the reference
+    /// texts they carry (a CF entry per formula, a binding per row).
     fn typed_references(
         cfs: &persistence::SavedSheetConditionalFormats,
         dvs: &persistence::SavedSheetDataValidations,
-        controls: &persistence::SavedSheetControls,
+        bindings: &[persistence::SavedObjectBinding],
         pane: &persistence::SavedPaneControl,
     ) -> Vec<(String, String)> {
         let mut out = Vec::new();
@@ -24004,8 +24230,9 @@ mod pull_rename_payload_tests {
         if let dv::DataValidationRule::Custom(rule) = &back[0].validation.rule {
             out.push(("data validation".to_string(), rule.formula.clone()));
         }
-        let back: Vec<crate::controls::SavedControlEntry> = serde_json::from_value(controls.controls.clone()).unwrap();
-        out.push(("control property".to_string(), back[0].properties["text"].value.clone()));
+        for binding in bindings {
+            out.push((format!("binding {}", binding.path), binding.formula.clone()));
+        }
         let back: crate::pane_control::PaneControlConfig = serde_json::from_value(pane.config.clone()).unwrap();
         if let crate::pane_control::PaneControlConfig::Dropdown {
             source: crate::pane_control::DropdownSource::CellRange { reference },
@@ -24041,15 +24268,37 @@ mod pull_rename_payload_tests {
         }];
         let mut panes = vec![saved_pane("Data")];
 
-        SheetRenames::new([("Data", "Data (2)")]).rename_pulled_rules(PulledRules {
+        let renames = SheetRenames::new([("Data", "Data (2)")]);
+        renames.rename_pulled_rules(PulledRules {
             conditional_formats: &mut cfs,
             data_validations: &mut dvs,
             controls: &mut controls,
             pane_controls: &mut panes,
         });
+        // The bindings travel as the host's typed rows, renamed through the
+        // ONE visitor (`visit_binding_formulas`) over their JSON.
+        let mut bindings = serde_json::to_value(binding_rows("Data")).unwrap();
+        let renamed = calp::sheet_renames::visit_binding_formulas(&mut bindings, &mut |text| {
+            match renames.rename_formula(text) {
+                Some(new) => {
+                    *text = new;
+                    true
+                }
+                None => false,
+            }
+        });
+        assert_eq!(renamed, 2, "every binding row's formula is visited");
+        let bindings: Vec<persistence::SavedObjectBinding> = serde_json::from_value(bindings).unwrap();
+        let mut typed = binding_rows("Data");
+        assert_eq!(renames.rename_binding_formulas(&mut typed), 2);
+        assert_eq!(typed, bindings, "the typed rename and the JSON visitor agree");
 
-        // 9 CF formulas + 1 validation + 1 control property + 1 dropdown.
-        assert_every_reference_names(&typed_references(&cfs[0], &dvs[0], &controls[0], &panes[0]), "'Data (2)'!", 12);
+        // 9 CF formulas + 1 validation + 2 bindings + 1 dropdown.
+        assert_every_reference_names(&typed_references(&cfs[0], &dvs[0], &bindings, &panes[0]), "'Data (2)'!", 13);
+        // A formula-typed control value is a literal now (a formula is a
+        // binding): the rename leaves it as it was.
+        let back: Vec<crate::controls::SavedControlEntry> = serde_json::from_value(controls[0].controls.clone()).unwrap();
+        assert_eq!(back[0].properties["text"].value, "=Data!A1");
     }
 
     /// The push half: a working copy whose checkout renamed the application's
@@ -24069,17 +24318,18 @@ mod pull_rename_payload_tests {
         wb.controls =
             vec![persistence::SavedSheetControls { sheet_id: report, controls: serde_json::to_value(control_entries(local)).unwrap() }];
         wb.pane_controls = vec![saved_pane(local)];
+        wb.object_bindings = binding_rows(local);
 
         let mut published = std::collections::HashMap::new();
         published.insert("data (2)".to_string(), "Data".to_string());
         let counts = super::restore_published_sheet_references(&mut wb, &[0, 1], &published);
         assert_eq!(
-            (counts.conditional_formats, counts.data_validations, counts.controls, counts.pane_controls),
-            (9, 1, 1, 1),
-            "every rule payload is restored to the published name"
+            (counts.conditional_formats, counts.data_validations, counts.bindings, counts.pane_controls, counts.controls),
+            (9, 1, 2, 1, 0),
+            "every rule payload and every binding is restored to the published name; a control has no formula"
         );
-        let refs = typed_references(&wb.conditional_formats[0], &wb.data_validations[0], &wb.controls[0], &wb.pane_controls[0]);
-        assert_every_reference_names(&refs, "Data!", 12);
+        let refs = typed_references(&wb.conditional_formats[0], &wb.data_validations[0], &wb.object_bindings, &wb.pane_controls[0]);
+        assert_every_reference_names(&refs, "Data!", 13);
         for (what, text) in &refs {
             assert!(!text.contains("Data (2)"), "{what}: the push still ships the local name: `{text}`");
         }

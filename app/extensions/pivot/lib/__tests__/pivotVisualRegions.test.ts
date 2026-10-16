@@ -7,10 +7,14 @@
 //          - a worksheet pivot publishes exactly the region it always did;
 //          - a dragged frame is live until its save returns, a failed save
 //            reverts it, and a region fetch that started before a save cannot
-//            snap the box back to its pre-save frame.
+//            snap the box back to its pre-save frame;
+//          - WP-C: the frame store owns the box's visual CONTAINER too -- each
+//            region carries it resolved, a format commit lands like a geometry
+//            commit, and a later drag carries it (review R1-7).
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { getGridRegions, setGridRegions } from "@api/gridOverlays";
+import { setDesignMode } from "@api/designMode";
 import type { PivotRegionData } from "../../types";
 import {
   partitionPivotRegions,
@@ -20,6 +24,9 @@ import {
   effectiveFrame,
   currentFrameGeneration,
   resetPivotVisualRegionState,
+  commitFrameContainer,
+  setPreviewContainer,
+  storedFrameContainer,
   PIVOT_VISUAL_REGION_TYPE,
 } from "../pivotVisualRegions";
 
@@ -79,6 +86,21 @@ describe("partitionPivotRegions", () => {
         data: { isEmpty: false, pivotId: "grid-1", name: "PivotTable1" },
       },
     ]);
+  });
+
+  it("a box's cells are content (D-CELLS), so it moves by Core's hover grip -- and by its whole body only in Design Mode", () => {
+    setDesignMode(false);
+    expect(partitionPivotRegions([canvasPivot]).visual[0].data).toMatchObject({ grip: "hover", bodyGrab: false });
+    setDesignMode(true);
+    try {
+      expect(partitionPivotRegions([canvasPivot]).visual[0].data).toMatchObject({ grip: "hover", bodyGrab: true });
+    } finally {
+      setDesignMode(false);
+    }
+    // A worksheet pivot's cell region carries neither.
+    const cellData = partitionPivotRegions([sheetPivot]).cell[0].data;
+    expect(cellData?.grip).toBeUndefined();
+    expect(cellData?.bodyGrab).toBeUndefined();
   });
 
   it("frozenHeaders is only on when the frame says so", () => {
@@ -151,5 +173,87 @@ describe("live frames", () => {
     publishPivotRegions([canvasPivot], currentFrameGeneration());
     expect(visualFloating()).toMatchObject({ x: 64, y: 48 });
     expect(effectiveFrame("canvas-1")).toMatchObject({ x: 64, y: 48 });
+  });
+});
+
+// ============================================================================
+// WP-C D-FORMAT: the box's visual container rides the frame (review R1-7)
+// ============================================================================
+
+describe("the box's container (WP-C)", () => {
+  function visualRegion() {
+    return getGridRegions().find((r) => r.type === PIVOT_VISUAL_REGION_TYPE) as
+      | (ReturnType<typeof getGridRegions>[number] & { container?: { background: { color: string }; border: { show: boolean; color: string } } })
+      | undefined;
+  }
+
+  it("every box region carries its RESOLVED container: the box's defaults (white, a 1 px #c8c8c8 border) under the stored one", () => {
+    publishPivotRegions([canvasPivot]);
+    expect(visualRegion()?.container?.border).toMatchObject({ show: true, color: "#c8c8c8" });
+    expect(visualRegion()?.container?.background.color).toBe("#ffffff");
+    publishPivotRegions([
+      { ...canvasPivot, canvasFrame: { ...canvasPivot.canvasFrame!, container: { background: { color: "#FFF4E5" } } } },
+    ]);
+    expect(visualRegion()?.container?.background.color).toBe("#FFF4E5");
+  });
+
+  it("format, THEN move: the saved frame carries the new container -- a drag never reverts it", async () => {
+    publishPivotRegions([canvasPivot]);
+    const saves: unknown[] = [];
+    const save = vi.fn(async (frame: unknown) => {
+      saves.push(frame);
+    });
+    await commitFrameContainer("canvas-1", { background: { color: "#FFF4E5" } }, save);
+    expect(saves[0]).toEqual({ ...canvasPivot.canvasFrame, container: { background: { color: "#FFF4E5" } } });
+    expect(visualRegion()?.container?.background.color).toBe("#FFF4E5");
+
+    // The drag that follows spreads the frame it starts from: the container comes along.
+    setLiveFrame("canvas-1", { x: 120, y: 70 });
+    expect(visualRegion()?.container?.background.color).toBe("#FFF4E5");
+    await commitLiveFrame("canvas-1", save, vi.fn());
+    expect(saves[1]).toEqual({ x: 120, y: 70, width: 300, height: 200, frozenHeaders: true, container: { background: { color: "#FFF4E5" } } });
+  });
+
+  it("a region fetch that started BEFORE the format commit does not revert it; one started after it is honoured", async () => {
+    publishPivotRegions([canvasPivot]);
+    const fetchStartedAt = currentFrameGeneration();
+    await commitFrameContainer("canvas-1", { border: { radius: 8 } }, async () => undefined);
+    publishPivotRegions([canvasPivot], fetchStartedAt);
+    expect(effectiveFrame("canvas-1")?.container).toEqual({ border: { radius: 8 } });
+    // An undo's refresh (started after) brings the backend's frame back.
+    publishPivotRegions([canvasPivot], currentFrameGeneration());
+    expect(effectiveFrame("canvas-1")?.container).toBeUndefined();
+  });
+
+  it("a commit made WHILE the box is dragged is carried by that drag's save", async () => {
+    publishPivotRegions([canvasPivot]);
+    setLiveFrame("canvas-1", { x: 90, y: 50 });
+    await commitFrameContainer("canvas-1", { padding: { top: 6 } }, async () => undefined);
+    const save = vi.fn(async () => undefined);
+    await commitLiveFrame("canvas-1", save, vi.fn());
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({ x: 90, y: 50, container: { padding: { top: 6 } } }));
+  });
+
+  it("a refused commit changes nothing and rethrows the backend's sentence", async () => {
+    publishPivotRegions([canvasPivot]);
+    const before = currentFrameGeneration();
+    await expect(
+      commitFrameContainer("canvas-1", { background: { color: "#000000" } }, async () => {
+        throw new Error("refused");
+      }),
+    ).rejects.toThrow("refused");
+    expect(currentFrameGeneration()).toBe(before);
+    expect(storedFrameContainer("canvas-1")).toBeUndefined();
+    expect(visualRegion()?.container?.background.color).toBe("#ffffff");
+  });
+
+  it("a PREVIEW shows a container without saving it, and ends cleanly", () => {
+    publishPivotRegions([canvasPivot]);
+    setPreviewContainer("canvas-1", { background: { color: "#123456" } });
+    expect(visualRegion()?.container?.background.color).toBe("#123456");
+    expect(storedFrameContainer("canvas-1"), "a preview is never stored").toBeUndefined();
+    setPreviewContainer("canvas-1", null);
+    expect(visualRegion()?.container?.background.color).toBe("#ffffff");
+    expect(storedFrameContainer("no-such-pivot"), "no frame: not a box").toBeNull();
   });
 });

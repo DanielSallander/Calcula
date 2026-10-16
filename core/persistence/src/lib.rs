@@ -223,6 +223,42 @@ pub struct Workbook {
     /// which origin owns them, and the host rebuilds that record by
     /// re-evaluating rather than leaving the array unprotected.
     pub format_version: u32,
+    /// Object property BINDINGS: a property of a chart / control / slicer /
+    /// timeline / pivot / floating range / canvas page whose value is a
+    /// formula. The literal stays on the object's own record; this is the
+    /// overlay. Sorted by (object, path); written to `bindings.json`
+    /// (`.cala` format v10 -- an older reader would show the frozen literal
+    /// of a property that LOOKS live, the lie class).
+    pub object_bindings: Vec<SavedObjectBinding>,
+}
+
+/// The object a binding belongs to, as written in bindings.json. `kind` is the
+/// wire name of the app's `ObjectBindingKind` ("chart", "control", "slicer",
+/// "timelineSlicer", "pivot", "floatingRange", "canvasPage"); `id` is the
+/// object's stable id (chart/slicer/timeline/pivot/floating-range EntityId,
+/// control `uid`, canvas page SheetId). Plain strings: persistence stays
+/// decoupled from the app's enum.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedObjectRef {
+    pub kind: String,
+    pub id: String,
+}
+
+/// One binding: a property of an object whose value is a formula.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedObjectBinding {
+    pub object: SavedObjectRef,
+    /// RFC 6901 JSON Pointer into the object's AI-visible JSON.
+    pub path: String,
+    /// A full Calcula formula (INVARIANT spelling: en-US separators), cell
+    /// refs sheet-qualified, measures as `[Name]`.
+    pub formula: String,
+    /// The STABLE model key (local connection: its saved connection uuid;
+    /// package connection: its package data-source id) -- never a session id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// The un-recalculated remainder of a cancelled recalculation, as persisted.
@@ -450,13 +486,19 @@ pub struct WorkbookProperties {
 }
 
 /// A chart entry persisted in the workbook.
-/// The chart specification is stored as an opaque JSON string.
+///
+/// `spec` is the whole ChartDefinition envelope as JSON -- an embedded OBJECT,
+/// not a string holding JSON (`.cala` format v10, `charts.json`). It stays
+/// opaque to the persistence layer (the app owns the shape); embedding it
+/// makes `charts.json` readable and editable by a person or an AI without a
+/// second decode. A spec that could not be parsed when saved is kept as a
+/// `Value::String` of the raw text rather than dropped.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedChart {
     pub id: EntityId,
     pub sheet_id: SheetId,
-    pub spec_json: String,
+    pub spec: serde_json::Value,
 }
 
 /// A floating range persisted in the workbook: the OBJECT row only. The cells
@@ -510,6 +552,18 @@ pub struct SavedFloatingRange {
     pub show_column_headers: bool,
     #[serde(default = "default_true")]
     pub show_row_headers: bool,
+    /// The visual container (D-FORMAT, WP-C): padding, title style, background,
+    /// border, shadow around the floating grid. The title TEXT/visibility stay `name` / `show_title`
+    /// (one spelling per fact). No key when `None`; read leniently (a damaged
+    /// container is repaired or dropped, never the record). Feature id
+    /// `visual_container`, no format-version link: an older reader drops a
+    /// border or a shadow -- visible, cosmetic loss, never a lie.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "visual_format::deserialize_container_lenient"
+    )]
+    pub container: Option<visual_format::VisualContainerFormat>,
 }
 
 /// Serialize a `u32 -> f64` map in ascending key order, so identical content
@@ -687,6 +741,7 @@ impl Workbook {
             pending_recalc: None,
             // Not read from an archive. See the field doc.
             format_version: 0,
+            object_bindings: Vec::new(),
         }
     }
 
@@ -732,6 +787,7 @@ impl Workbook {
             pending_recalc: None,
             // Not read from an archive. See the field doc.
             format_version: 0,
+            object_bindings: Vec::new(),
         }
     }
 }
@@ -1780,6 +1836,18 @@ pub struct SavedSlicer {
     /// it loses the re-bind visibly (an unbound slicer), it does not lie.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_source_id: Option<String>,
+    /// The visual container (D-FORMAT, WP-C): padding, title style, background,
+    /// border, shadow around the slicer. The title TEXT/visibility stay `header_text` / `show_header`
+    /// (one spelling per fact). No key when `None`; read leniently (a damaged
+    /// container is repaired or dropped, never the record). Feature id
+    /// `visual_container`, no format-version link: an older reader drops a
+    /// border or a shadow -- visible, cosmetic loss, never a lie.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "visual_format::deserialize_container_lenient"
+    )]
+    pub container: Option<visual_format::VisualContainerFormat>,
 }
 
 fn default_filter_level() -> u8 {
@@ -1867,6 +1935,18 @@ pub struct SavedTimelineSlicer {
     pub style_preset: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connected_pivot_ids: Vec<EntityId>,
+    /// The visual container (D-FORMAT, WP-C): padding, title style, background,
+    /// border, shadow around the timeline. The title TEXT/visibility stay `header_text` / `show_header`
+    /// (one spelling per fact). No key when `None`; read leniently (a damaged
+    /// container is repaired or dropped, never the record). Feature id
+    /// `visual_container`, no format-version link: an older reader drops a
+    /// border or a shadow -- visible, cosmetic loss, never a lie.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "visual_format::deserialize_container_lenient"
+    )]
+    pub container: Option<visual_format::VisualContainerFormat>,
 }
 
 fn default_gap() -> f64 {

@@ -30,6 +30,39 @@ export const IMAGE_PROPERTIES: PropertyDefinition[] = [
       "referenced by content hash.",
   },
 
+  // -- Fill & Outline --
+  //
+  // The picture's visual-container BACKGROUND and BORDER (WP-C D-FORMAT,
+  // "control background = fill, border = outline"): painted by Core round the
+  // picture. A new picture has neither ("none" / "0").
+  {
+    key: "fill",
+    label: "Background",
+    inputType: "color",
+    defaultValue: "none",
+    supportsFormula: true,
+    group: "Fill & Outline",
+  },
+  {
+    key: "stroke",
+    label: "Outline",
+    inputType: "color",
+    defaultValue: "none",
+    supportsFormula: true,
+    group: "Fill & Outline",
+  },
+  {
+    key: "strokeWidth",
+    label: "Outline Width",
+    inputType: "number",
+    defaultValue: "0",
+    supportsFormula: true,
+    group: "Fill & Outline",
+    min: 0,
+    max: 20,
+    step: 0.5,
+  },
+
   // -- Transform --
   {
     key: "opacity",

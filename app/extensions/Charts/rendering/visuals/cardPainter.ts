@@ -26,7 +26,7 @@ import type { ChartSpec, ParsedChartData, ChartLayout, BarRect, CardMarkOptions 
 import type { ChartRenderTheme } from "../chartTheme";
 import { resolveDatumStyle } from "../../lib/dataPointOverrides";
 import { truncateText } from "../chartPainterUtils";
-import { aggregateSeries, formatVisualValue } from "./visualValues";
+import { aggregateSeries, formatVisualValue, visualFormatFor } from "./visualValues";
 import { computeVisualLayout, drawVisualFrame, fitFontSize } from "./visualLayout";
 
 /** Gap between two cards, px. */
@@ -70,7 +70,7 @@ export function paintCardChart(
     const box = cardBox(layout, si, count);
     const series = data.series[si];
     const shown = aggregateSeries(data, si, opts.aggregate ?? "auto");
-    const text = formatVisualValue(shown, opts);
+    const text = formatVisualValue(shown, visualFormatFor(spec, opts, series.name));
 
     // The card's datum is (si, 0) in painter space; the resolver translates it.
     const style = resolveDatumStyle(spec, data, si, 0, { fill: series.color ?? theme.titleColor });

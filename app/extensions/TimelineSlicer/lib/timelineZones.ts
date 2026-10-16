@@ -35,6 +35,14 @@
 //
 //          The renderer paints from `computeTimelineLayout`, so the zones are
 //          measured on the geometry that is painted, never on a copy of it.
+//
+//          THE VISUAL CONTAINER (WP-C D-FORMAT). A shape's `width` / `height`
+//          are its CONTENT box's (inside the container's border and padding),
+//          and a zone input carries where that box sits in the object
+//          (`offsetX` / `offsetY`), so every point a caller measures from the
+//          object's OUTER top-left is answered on the content -- a point in the
+//          container's band is plain frame ('empty'). The header's height
+//          follows its title font (`headerHeight`, lib/timelineObjectFormat.ts).
 
 import type { TimelineLevel } from "./timelineSlicerTypes";
 
@@ -66,12 +74,18 @@ const SCROLLBAR_MIN_THUMB_WIDTH = 20;
 
 /** The parts of a timeline's configuration its layout depends on. */
 export interface TimelineShape {
+  /** The CONTENT box's width (the whole object's when it has no container). */
   width: number;
+  /** The CONTENT box's height. */
   height: number;
   showHeader: boolean;
   showLevelSelector: boolean;
   showScrollbar: boolean;
   level: TimelineLevel;
+  /** The header bar's height while it is shown (default TIMELINE_HEADER_HEIGHT; the title font sets it). */
+  headerHeight?: number;
+  /** The space between the header and the year strip (the container's custom spacing; default 0). */
+  headerGap?: number;
 }
 
 /**
@@ -79,6 +93,7 @@ export interface TimelineShape {
  * timeline's own top edge (0 = the top of the object).
  */
 export interface TimelineLayout {
+  /** The header bar's height (0 when hidden). */
   headerH: number;
   groupLabelH: number;
   periodH: number;
@@ -90,7 +105,7 @@ export interface TimelineLayout {
   viewportTop: number;
   needsScroll: boolean;
   totalPeriods: number;
-  /** Top of the year-label strip (= the header's height). */
+  /** Top of the year-label strip (= the header's height plus its spacing). */
   yearStripTop: number;
   /** Top of the month-tile row (the year strip's bottom). */
   tileTop: number;
@@ -121,7 +136,8 @@ export function periodWidthFor(level: TimelineLevel): number {
 }
 
 export function computeTimelineLayout(shape: TimelineShape, periodCount: number): TimelineLayout {
-  const headerH = shape.showHeader ? TIMELINE_HEADER_HEIGHT : 0;
+  const headerH = shape.showHeader ? shape.headerHeight ?? TIMELINE_HEADER_HEIGHT : 0;
+  const headerBand = headerH > 0 ? headerH + Math.max(0, shape.headerGap ?? 0) : 0;
   const groupLabelH = TIMELINE_GROUP_LABEL_HEIGHT;
   const periodH = TIMELINE_PERIOD_HEIGHT;
   const levelSelectorH = shape.showLevelSelector ? TIMELINE_LEVEL_SELECTOR_HEIGHT : 0;
@@ -129,7 +145,7 @@ export function computeTimelineLayout(shape: TimelineShape, periodCount: number)
   const periodWidth = periodWidthFor(shape.level);
   const contentWidth = periodCount * periodWidth;
   const viewportWidth = shape.width;
-  const tileTop = headerH + groupLabelH;
+  const tileTop = headerBand + groupLabelH;
   return {
     headerH,
     groupLabelH,
@@ -139,10 +155,10 @@ export function computeTimelineLayout(shape: TimelineShape, periodCount: number)
     periodWidth,
     contentWidth,
     viewportWidth,
-    viewportTop: headerH,
+    viewportTop: headerBand,
     needsScroll: contentWidth > viewportWidth,
     totalPeriods: periodCount,
-    yearStripTop: headerH,
+    yearStripTop: headerBand,
     tileTop,
     tileBottom: tileTop + periodH,
     periodAreaBottom: shape.height - levelSelectorH - scrollbarH,
@@ -277,6 +293,18 @@ export interface TimelineZoneInput extends TimelineShape {
   filtered: boolean;
   /** The periods' horizontal scroll (clamped here). */
   scrollOffset: number;
+  /**
+   * Where the content box sits, from the object's OUTER top-left (the
+   * container's border and padding); 0 when absent. Every point passed to the
+   * zone functions is measured from the OUTER top-left.
+   */
+  offsetX?: number;
+  offsetY?: number;
+}
+
+/** A point measured from the object's OUTER top-left, re-measured from its CONTENT box's. */
+export function contentPointOf(input: TimelineZoneInput, relX: number, relY: number): { x: number; y: number } {
+  return { x: relX - (input.offsetX ?? 0), y: relY - (input.offsetY ?? 0) };
 }
 
 /**
@@ -299,6 +327,7 @@ export function zoneInputOf(
   periods: readonly { isSelected: boolean }[],
   scrollOffset: number,
   shownSpan: TimelineSpan | null = null,
+  offset: { x: number; y: number } | null = null,
 ): TimelineZoneInput {
   return {
     width: timeline.width,
@@ -307,10 +336,13 @@ export function zoneInputOf(
     showLevelSelector: timeline.showLevelSelector,
     showScrollbar: timeline.showScrollbar,
     level: timeline.level,
+    ...(timeline.headerHeight !== undefined ? { headerHeight: timeline.headerHeight } : {}),
+    ...(timeline.headerGap !== undefined ? { headerGap: timeline.headerGap } : {}),
     periodCount: periods.length,
     selected: shownSpan ?? selectedSpanOf(periods),
     filtered: isTimelineFiltered(timeline),
     scrollOffset,
+    ...(offset ? { offsetX: offset.x, offsetY: offset.y } : {}),
   };
 }
 
@@ -319,15 +351,20 @@ function zone(part: TimelineZonePart, extra: Partial<Pick<TimelineZone, "periodI
 }
 
 /**
- * The zone at a point measured from the timeline's top-left corner. Earlier
- * rows win where they overlap: header, level row, scrollbar, then the period
- * area (year strip, tile row, empty space) -- the order the painter layers them.
+ * The zone at a point measured from the timeline's OUTER top-left corner.
+ * Earlier rows win where they overlap: the container's band (plain frame),
+ * header, level row, scrollbar, then the period area (year strip, tile row,
+ * empty space) -- the order the painter layers them.
  */
-export function timelineZoneAt(input: TimelineZoneInput, relX: number, relY: number): TimelineZone {
+export function timelineZoneAt(input: TimelineZoneInput, outerX: number, outerY: number): TimelineZone {
   const layout = computeTimelineLayout(input, input.periodCount);
   const scroll = clampScroll(layout, input.scrollOffset);
+  const { x: relX, y: relY } = contentPointOf(input, outerX, outerY);
 
-  if (input.showHeader && relY < layout.headerH) {
+  // The container's border and padding are no part of the content: frame.
+  if (relX < 0 || relY < 0 || relX > input.width || relY > input.height) return zone("empty");
+
+  if (layout.headerH > 0 && relY < layout.headerH) {
     // The clear button works only while there is a filter; unfiltered it is
     // painted dimmed and inert, so its corner is the header's (Core's move).
     return input.filtered && relX > input.width - TIMELINE_CLEAR_BUTTON_SIZE - TIMELINE_CLEAR_BUTTON_MARGIN
@@ -349,6 +386,8 @@ export function timelineZoneAt(input: TimelineZoneInput, relX: number, relY: num
     return zone("scrollbar");
   }
 
+  // The custom spacing under the header is frame like the header.
+  if (relY < layout.yearStripTop) return zone("header");
   if (relY < layout.tileTop) return zone("yearStrip");
 
   if (relY < layout.tileBottom && relY < layout.periodAreaBottom) {
@@ -370,15 +409,16 @@ export function timelineZoneAt(input: TimelineZoneInput, relX: number, relY: num
 // ============================================================================
 
 /**
- * The period a range drag is over at `relX` -- any height, and clamped to the
- * VISIBLE periods, so a pointer that has left the timeline sideways holds the
- * first or last one on screen (auto-scroll then brings more). Null when there
- * are no periods.
+ * The period a range drag is over at `outerX` (from the OUTER left edge) --
+ * any height, and clamped to the VISIBLE periods, so a pointer that has left
+ * the timeline sideways holds the first or last one on screen (auto-scroll
+ * then brings more). Null when there are no periods.
  */
-export function periodIndexNear(input: TimelineZoneInput, relX: number): number | null {
+export function periodIndexNear(input: TimelineZoneInput, outerX: number): number | null {
   if (input.periodCount <= 0) return null;
   const layout = computeTimelineLayout(input, input.periodCount);
   const scroll = clampScroll(layout, input.scrollOffset);
+  const relX = outerX - (input.offsetX ?? 0);
   const x = Math.max(0, Math.min(relX, input.width - 1));
   const index = Math.floor((x + scroll) / layout.periodWidth);
   return Math.max(0, Math.min(index, input.periodCount - 1));

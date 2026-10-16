@@ -166,8 +166,15 @@ describe("objectContexts.d.ts is generated, not maintained", () => {
     // kind's two layout rows on UnlockedAPI, `api.getCanvasLayout` and
     // `api.setCanvasLayout`, one declaration each (addSheet's new `kind`
     // parameter changes a signature, not the count).
-    expect(chains.size).toBe(716);
-    expect(entries.length).toBe(773);
+    // 2026-10-15: 716 -> 734 chains and 773 -> 791 entries — D-BIND's
+    // ScriptObjectHandle (D §3.19): `self` on every context and `api.object` on
+    // UnlockedAPI, each with kind/id + six methods (getProperty, getLiteral,
+    // getBinding, setProperty, bindProperty, unbindProperty) — 18 new chains,
+    // one declaration each (ScriptTargetObjectHandle INHERITS its members, so
+    // the api.object.* chains share ScriptObjectHandle's declarations by text
+    // but are entered under their own interface).
+    expect(chains.size).toBe(734);
+    expect(entries.length).toBe(791);
     expect(entries.length).toBeGreaterThan(chains.size);
 
     const policyPairs = new Set(
@@ -186,7 +193,11 @@ describe("objectContexts.d.ts is generated, not maintained", () => {
     // under exactly one interface.
     // 2026-09-25: 958 -> 960, the two canvas layout members above, each
     // probed under exactly one interface (UnlockedAPI).
-    expect(policyPairs.size).toBe(960);
+    // 2026-10-15: 960 -> 995 with D-BIND's object handle: `self` under each of
+    // the 18 context interfaces, its 8 members under ScriptObjectHandle,
+    // `api.object` under UnlockedAPI, and the same 8 members under
+    // ScriptTargetObjectHandle (the unlocked door) -- 18 + 8 + 1 + 8.
+    expect(policyPairs.size).toBe(995);
     expect(entries.length).toBeLessThan(policyPairs.size);
 
     // TOTALITY, which is what makes `entryFor`'s exact match total: every

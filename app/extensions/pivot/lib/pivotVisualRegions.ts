@@ -18,13 +18,24 @@
 //          The region keeps startRow..endCol: they map a view cell to the hidden
 //          grid cell (drill-through, GETPIVOTDATA and the pane's getAtCell all
 //          address cells).
+//
+//          THE CONTAINER (WP-C D-FORMAT). Each box region carries its RESOLVED
+//          visual container (`container`: WP-D bindings > the frame's stored
+//          `container` > the box's defaults, pivotObjectFormat.ts), which Core
+//          paints around the box. The frame store owns the stored container
+//          like the rest of the frame: `commitFrameContainer` saves it, a
+//          later drag carries it (never reverts it, review R1-7), and a
+//          transient Format-pane preview is laid over it without a save.
 
 import {
   replaceGridRegionsByType,
   removeGridRegionsByType,
   type GridRegion,
 } from "@api/gridOverlays";
+import { getDesignMode } from "@api/designMode";
+import type { VisualContainerFormat } from "@api/visualContainer";
 import type { PivotRegionData, CanvasFrameConfig } from "../types";
+import { resolvePivotContainer } from "./pivotObjectFormat";
 
 /** The cell-anchored region type every worksheet pivot publishes. */
 export const PIVOT_CELL_REGION_TYPE = "pivot";
@@ -55,9 +66,22 @@ export function toCellRegion(r: PivotRegionData): GridRegion {
   };
 }
 
-/** A canvas pivot as a floating object positioned by its frame. */
-export function toVisualRegion(r: PivotRegionData, frame: CanvasFrameConfig): GridRegion {
-  return {
+/**
+ * A canvas pivot as a floating object positioned by its frame.
+ *
+ * Its cells are CONTENT (D-CELLS: they select), so the box moves by its 4px
+ * border band and blank area (pivotVisualOverlay.ts `pivotVisualZoneAt`), by
+ * Core's six-dot grip -- shown while the box is hovered or selected
+ * (`grip: "hover"`, @api/gridOverlays) -- and, in DESIGN MODE, by its whole
+ * body (`bodyGrab`, the FloatingRange convention; re-published when Design
+ * Mode flips, `installPivotVisual`).
+ */
+export function toVisualRegion(
+  r: PivotRegionData,
+  frame: CanvasFrameConfig,
+  storedContainer: VisualContainerFormat | undefined = frame.container,
+): GridRegion {
+  const region: GridRegion = {
     id: pivotVisualRegionId(r.pivotId),
     type: PIVOT_VISUAL_REGION_TYPE,
     startRow: r.startRow,
@@ -70,8 +94,12 @@ export function toVisualRegion(r: PivotRegionData, frame: CanvasFrameConfig): Gr
       name: r.name,
       isEmpty: r.isEmpty,
       frozenHeaders: frame.frozenHeaders === true,
+      grip: "hover",
+      bodyGrab: getDesignMode(),
     },
+    container: resolvePivotContainer(r.pivotId, storedContainer, r.name),
   };
+  return region;
 }
 
 /**
@@ -87,7 +115,8 @@ export function partitionPivotRegions(
   for (const r of regions) {
     if (r.canvasFrame != null) {
       const frame = frameFor(r) ?? r.canvasFrame;
-      visual.push(toVisualRegion(r, frame));
+      const stored = previewContainers.has(r.pivotId) ? previewContainers.get(r.pivotId) : frame.container;
+      visual.push(toVisualRegion(r, frame, stored));
     } else {
       cell.push(toCellRegion(r));
     }
@@ -114,6 +143,12 @@ const liveFrames = new Map<string, CanvasFrameConfig>();
  */
 let frameGeneration = 0;
 const savedAtGeneration = new Map<string, number>();
+/**
+ * A container the Format pane is PREVIEWING on a box (transient: no save, no
+ * undo, no dirty flag). Present = shown instead of the frame's own; an
+ * `undefined` value previews "no container" (the defaults).
+ */
+const previewContainers = new Map<string, VisualContainerFormat | undefined>();
 
 /** The generation a region fetch should capture before it awaits. */
 export function currentFrameGeneration(): number {
@@ -223,6 +258,73 @@ export async function commitLiveFrame(
   return ok;
 }
 
+/**
+ * The STORED container of a box's current frame (the live one while dragged),
+ * undefined when it has none, or null when the pivot has no frame (not a box).
+ */
+export function storedFrameContainer(pivotId: string): VisualContainerFormat | undefined | null {
+  const frame = effectiveFrame(pivotId);
+  return frame ? frame.container : null;
+}
+
+/**
+ * Show `container` on a box WITHOUT saving it (the Format pane's preview);
+ * `null` ends the preview. Re-publishes.
+ */
+export function setPreviewContainer(pivotId: string, container: VisualContainerFormat | undefined | null): void {
+  if (container === null) {
+    if (!previewContainers.delete(pivotId)) return;
+  } else {
+    previewContainers.set(pivotId, container);
+  }
+  republishVisualRegions();
+}
+
+/**
+ * Persist a box's CONTAINER (review R1-7): base = the frame shown now
+ * (`effectiveFrame`), next = the same frame with `container` (undefined =
+ * none), saved through `save` (the `update_pivot_properties { canvasFrame }`
+ * call). On success it lands exactly as a geometry commit does -- a new frame
+ * generation (a region fetch that started before it cannot revert it), the
+ * backend frame updated -- and a frame still being dragged carries the new
+ * container too, so neither a later drag nor its save reverts it. On failure
+ * nothing changes and the backend's error is rethrown. Re-publishes either way.
+ */
+export async function commitFrameContainer(
+  pivotId: string,
+  container: VisualContainerFormat | undefined,
+  save: (frame: CanvasFrameConfig) => Promise<unknown>,
+): Promise<void> {
+  const base = effectiveFrame(pivotId);
+  if (!base) throw new Error("The PivotTable box no longer exists.");
+  const next: CanvasFrameConfig = { ...base };
+  if (container === undefined) delete next.container;
+  else next.container = container;
+  try {
+    await save(next);
+  } catch (err) {
+    previewContainers.delete(pivotId);
+    republishVisualRegions();
+    throw err;
+  }
+  previewContainers.delete(pivotId);
+  frameGeneration += 1;
+  savedAtGeneration.set(pivotId, frameGeneration);
+  const backend = backendFrames.get(pivotId);
+  const saved: CanvasFrameConfig = backend ? { ...backend } : { ...next };
+  if (container === undefined) delete saved.container;
+  else saved.container = container;
+  backendFrames.set(pivotId, saved);
+  const live = liveFrames.get(pivotId);
+  if (live) {
+    const carried: CanvasFrameConfig = { ...live };
+    if (container === undefined) delete carried.container;
+    else carried.container = container;
+    liveFrames.set(pivotId, carried);
+  }
+  republishVisualRegions();
+}
+
 /** Remove the visual regions (the cell ones are the caller's). */
 export function removePivotVisualRegions(): void {
   visualSources = [];
@@ -235,4 +337,5 @@ export function resetPivotVisualRegionState(): void {
   backendFrames.clear();
   liveFrames.clear();
   savedAtGeneration.clear();
+  previewContainers.clear();
 }

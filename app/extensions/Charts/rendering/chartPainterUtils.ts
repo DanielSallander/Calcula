@@ -13,7 +13,8 @@ import type {
   AxisSpec,
   TickMarkType,
 } from "../types";
-import type { ChartRenderTheme } from "./chartTheme";
+import type { ChartRenderTheme, ChartTitleStyle, ChartTitleTextStyle } from "./chartTheme";
+import { lineHeightFor, type VisualLineStyle, type VisualTextAlign } from "@api/visualContainer";
 import { getSeriesColor } from "./chartTheme";
 import { seriesPaletteIndex } from "../lib/encodingResolver";
 import type { LinearScale, BandScale } from "./scales";
@@ -342,10 +343,9 @@ export function computeCartesianLayout(
   let bottom = 12;
   let left = 16;
 
-  // Title
-  if (spec.title) {
-    top += theme.titleFontSize + 8;
-  }
+  // Title block (title + subtitle + divider, D-FORMAT): ONE function says
+  // how tall it is, for this layout and for drawTitle alike.
+  top += chartTitleBlock(spec.title, theme, width).band;
 
   // Y-axis labels (estimate max label width from actual data values)
   if (spec.yAxis.showLabels) {
@@ -407,10 +407,9 @@ export function computeRadialLayout(
   let bottom = 12;
   let left = 16;
 
-  // Title
-  if (spec.title) {
-    top += theme.titleFontSize + 8;
-  }
+  // Title block (title + subtitle + divider, D-FORMAT): ONE function says
+  // how tall it is, for this layout and for drawTitle alike.
+  top += chartTitleBlock(spec.title, theme, width).band;
 
   // A radial mark has no axes to collide with, but it can still carry a data
   // table (nothing in the spec forbids it), and the table is painted below the
@@ -469,18 +468,7 @@ function chartAreaRect(layout: ChartLayout): ChartElementRect {
   return { x: 0, y: 0, width: layout.width, height: layout.height };
 }
 
-/**
- * Estimated title rect. `drawTitle` paints the title centered on the canvas at
- * y = 10 with a "top" baseline, ANCHORED TO THE CANVAS TOP EDGE — not to
- * `margin.top` — so this rect is the one thing a later margin change cannot
- * invalidate.
- */
-function estimateTitleRect(layout: ChartLayout, title: string, theme: ChartRenderTheme): ChartElementRect {
-  const w = estimateTextWidth(title, theme.titleFontSize);
-  return { x: layout.width / 2 - w / 2, y: TITLE_TOP_Y, width: w, height: theme.titleFontSize };
-}
-
-/** The y coordinate `drawTitle` paints at (top baseline). */
+/** The y coordinate `drawTitle` paints the title block's first line at (top baseline). */
 const TITLE_TOP_Y = 10;
 
 /**
@@ -639,7 +627,8 @@ export function computeCartesianElementRects(
     measured: [],
   };
 
-  if (spec.title) els.title = estimateTitleRect(layout, spec.title, theme);
+  const titleBlock = chartTitleBlock(spec.title, theme, layout.width);
+  if (titleBlock.title) els.title = { ...titleBlock.title.rect };
 
   // No tick-label band when the data table replaces the labels: nothing is
   // painted there, and a hit-testable band over the table would select an
@@ -723,7 +712,8 @@ export function computeRadialElementRects(
     chartArea: chartAreaRect(layout),
     measured: [],
   };
-  if (spec.title) els.title = estimateTitleRect(layout, spec.title, theme);
+  const titleBlock = chartTitleBlock(spec.title, theme, layout.width);
+  if (titleBlock.title) els.title = { ...titleBlock.title.rect };
   const table = dataTableRect(spec, tableData, layout.plotArea, theme);
   if (table) els.dataTable = table;
   if (spec.legend.visible) {
@@ -856,26 +846,259 @@ export function rectContains(rect: ChartElementRect, x: number, y: number): bool
 // Drawing: Title
 // ============================================================================
 
+//
+// THE TITLE BLOCK (D-FORMAT). A chart's title is painted by the chart itself,
+// inside its raster (the container's paint split says title: "family"): the
+// title line(s), an optional subtitle and an optional divider, each followed by
+// its spacing. ONE function (`chartTitleBlock`) lays the block out, and BOTH
+// the layout's top band (computeCartesianLayout / computeRadialLayout) and
+// `drawTitle` read it, so the band reserved and the band painted cannot drift.
+//
+// Title colour and size stay the theme's (`titleColor` / `titleFontSize`, the
+// chart's one spelling, already overlaid by WP-D on the painted spec); the rest
+// of the style comes from the RESOLVED container (`theme.titleStyle`). A theme
+// without a `titleStyle` paints the historical title: 600 weight, centred, one
+// line, 8 px under it -- so a spec with no container looks exactly as before.
+
+type MeasureCtx = Pick<CanvasRenderingContext2D, "font" | "measureText">;
+
+/** What text measures to when no canvas is at hand (~0.55em per character, the layout estimate). */
+const ESTIMATE_CTX: MeasureCtx = {
+  font: "",
+  measureText(text: string): TextMetrics {
+    const m = /(\d+(?:\.\d+)?)px/.exec(this.font);
+    const size = m ? Number(m[1]) : 10;
+    return { width: estimateTextWidth(text, size) } as TextMetrics;
+  },
+};
+
+let sharedMeasureCtx: MeasureCtx | null | undefined;
+
+/** One measuring context for every layout (an OffscreenCanvas where there is one, else the estimate). */
+function layoutMeasureCtx(): MeasureCtx {
+  if (sharedMeasureCtx === undefined) {
+    try {
+      sharedMeasureCtx =
+        typeof OffscreenCanvas !== "undefined"
+          ? ((new OffscreenCanvas(1, 1).getContext("2d") as unknown as MeasureCtx | null) ?? null)
+          : null;
+    } catch {
+      sharedMeasureCtx = null;
+    }
+  }
+  return sharedMeasureCtx ?? ESTIMATE_CTX;
+}
+
+/** A width that is always a finite number (a doubled context may answer nothing). */
+function textWidth(ctx: MeasureCtx, text: string): number {
+  try {
+    const w = ctx.measureText(text)?.width;
+    if (typeof w === "number" && Number.isFinite(w)) return w;
+  } catch {
+    // fall through to the estimate
+  }
+  ESTIMATE_CTX.font = ctx.font;
+  return ESTIMATE_CTX.measureText(text).width;
+}
+
+/** Greedy word wrap with `ctx`'s current font (a single over-long word stays one line). */
+function wrapTitleLines(ctx: MeasureCtx, text: string, maxWidth: number, wrap: boolean): string[] {
+  if (!wrap) return [text];
+  const out: string[] = [];
+  for (const para of text.split("\n")) {
+    let line = "";
+    for (const word of para.split(/\s+/).filter((w) => w !== "")) {
+      const candidate = line ? `${line} ${word}` : word;
+      if (line && textWidth(ctx, candidate) > maxWidth) {
+        out.push(line);
+        line = word;
+      } else {
+        line = candidate;
+      }
+    }
+    out.push(line);
+  }
+  return out.length > 0 ? out : [text];
+}
+
+/** The historical title style, for a theme that carries none. */
+function legacyTitleStyle(theme: ChartRenderTheme): ChartTitleStyle {
+  const text: ChartTitleTextStyle = {
+    fontFamily: theme.fontFamily, bold: true, italic: false, underline: false,
+    background: "", align: "center", wrap: false,
+  };
+  return {
+    show: true,
+    title: text,
+    subtitle: { ...text, bold: false, show: false, text: "", color: theme.legendTextColor, fontSize: theme.legendFontSize },
+    divider: { show: false, color: theme.gridLineColor, style: "solid", width: 1, ignorePadding: false },
+    spacing: { belowTitle: 8, belowSubtitle: 8, belowDivider: 8 },
+  };
+}
+
+/** The canvas font string for a block of title text. */
+export function chartTitleFont(style: ChartTitleTextStyle, fontSize: number): string {
+  return `${style.italic ? "italic " : ""}${style.bold ? "600" : "400"} ${fontSize}px ${style.fontFamily}`;
+}
+
+/** Side gutter of the title block (the layout's own left/right base margin). */
+const TITLE_SIDE_GUTTER = 16;
+
+/** One laid-out line block of the title (title or subtitle). */
+export interface ChartTitleTextBlock {
+  lines: string[];
+  /** Widths of `lines`, measured with the block's font. */
+  widths: number[];
+  /** Top of the first line (top baseline). */
+  y: number;
+  lineHeight: number;
+  fontSize: number;
+  font: string;
+  color: string;
+  style: ChartTitleTextStyle;
+  /** The painted box (union of the lines). */
+  rect: ChartElementRect;
+}
+
+/** The whole title block of one chart at one width. */
+export interface ChartTitleBlock {
+  title: ChartTitleTextBlock | null;
+  subtitle: ChartTitleTextBlock | null;
+  divider: { y: number; x0: number; x1: number; color: string; width: number; style: VisualLineStyle } | null;
+  /** How much the block adds to the layout's top margin (0 = no block at all). */
+  band: number;
+}
+
+function lineX(align: VisualTextAlign, width: number): number {
+  if (align === "left") return TITLE_SIDE_GUTTER;
+  if (align === "right") return width - TITLE_SIDE_GUTTER;
+  return width / 2;
+}
+
+function textBlock(
+  ctx: MeasureCtx,
+  text: string,
+  style: ChartTitleTextStyle,
+  fontSize: number,
+  color: string,
+  y: number,
+  width: number,
+): ChartTitleTextBlock {
+  const font = chartTitleFont(style, fontSize);
+  ctx.font = font;
+  const lines = wrapTitleLines(ctx, text, Math.max(10, width - 2 * TITLE_SIDE_GUTTER), style.wrap);
+  const widths = lines.map((l) => textWidth(ctx, l));
+  const lineHeight = lineHeightFor(fontSize);
+  const height = fontSize + (lines.length - 1) * lineHeight;
+  const w = Math.max(0, ...widths);
+  const ax = lineX(style.align, width);
+  const x = style.align === "left" ? ax : style.align === "right" ? ax - w : ax - w / 2;
+  return { lines, widths, y, lineHeight, fontSize, font, color, style, rect: { x, y, width: w, height } };
+}
+
+/**
+ * Lay out the chart's title block at `width`: the title (when `title` has
+ * text and the style shows it), the subtitle, the divider, and the band they
+ * take from the top of the chart. `ctx` measures (the painting context in
+ * `drawTitle`; the layouts' one shared measuring context otherwise).
+ */
+export function chartTitleBlock(
+  title: string | null | undefined,
+  theme: ChartRenderTheme,
+  width: number,
+  ctx: MeasureCtx = layoutMeasureCtx(),
+): ChartTitleBlock {
+  const style = theme.titleStyle ?? legacyTitleStyle(theme);
+  let y = TITLE_TOP_Y;
+  let any = false;
+  let titleBlock: ChartTitleTextBlock | null = null;
+  let subtitleBlock: ChartTitleTextBlock | null = null;
+  let divider: ChartTitleBlock["divider"] = null;
+
+  if (style.show && typeof title === "string" && title !== "") {
+    titleBlock = textBlock(ctx, title, style.title, theme.titleFontSize, theme.titleColor, y, width);
+    y += titleBlock.rect.height + style.spacing.belowTitle;
+    any = true;
+  }
+  if (style.subtitle.show && style.subtitle.text !== "") {
+    const sub = style.subtitle;
+    subtitleBlock = textBlock(ctx, sub.text, sub, sub.fontSize, sub.color, y, width);
+    y += subtitleBlock.rect.height + style.spacing.belowSubtitle;
+    any = true;
+  }
+  if (style.divider.show && style.divider.width > 0) {
+    const d = style.divider;
+    const inset = d.ignorePadding ? 0 : TITLE_SIDE_GUTTER;
+    divider = { y: y + d.width / 2, x0: inset, x1: Math.max(inset, width - inset), color: d.color, width: d.width, style: d.style };
+    y += d.width + style.spacing.belowDivider;
+    any = true;
+  }
+  return { title: titleBlock, subtitle: subtitleBlock, divider, band: any ? y - TITLE_TOP_Y : 0 };
+}
+
+function paintTextBlock(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  b: ChartTitleTextBlock,
+  width: number,
+): void {
+  if (b.style.background) {
+    ctx.fillStyle = b.style.background;
+    ctx.fillRect(0, b.y - 2, width, b.rect.height + 4);
+  }
+  ctx.fillStyle = b.color;
+  ctx.font = b.font;
+  ctx.textAlign = b.style.align;
+  ctx.textBaseline = "top";
+  const ax = lineX(b.style.align, width);
+  b.lines.forEach((line, i) => {
+    const ly = b.y + i * b.lineHeight;
+    ctx.fillText(line, ax, ly);
+    if (b.style.underline) {
+      const lw = b.widths[i] ?? 0;
+      const x0 = b.style.align === "left" ? ax : b.style.align === "right" ? ax - lw : ax - lw / 2;
+      const uy = Math.round(ly + b.fontSize + 1) + 0.5;
+      ctx.strokeStyle = b.color;
+      ctx.lineWidth = Math.max(1, Math.round(b.fontSize / 14));
+      ctx.setLineDash?.([]);
+      ctx.beginPath();
+      ctx.moveTo(x0, uy);
+      ctx.lineTo(x0 + lw, uy);
+      ctx.stroke();
+    }
+  });
+}
+
+/**
+ * Paint the chart's title block (title, subtitle, divider) and record the
+ * MEASURED title box. `title` null or empty paints no title line but still
+ * paints a shown subtitle / divider.
+ */
 export function drawTitle(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-  title: string,
+  title: string | null | undefined,
   layout: ChartLayout,
   theme: ChartRenderTheme,
 ): void {
-  ctx.fillStyle = theme.titleColor;
-  ctx.font = `600 ${theme.titleFontSize}px ${theme.fontFamily}`;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "top";
-  ctx.fillText(title, layout.width / 2, TITLE_TOP_Y);
-
-  // Write-back: this is the exact box, not the layout's ~0.55em/char estimate.
-  const w = ctx.measureText(title).width;
-  recordChartElementRect(layout, "title", {
-    x: layout.width / 2 - w / 2,
-    y: TITLE_TOP_Y,
-    width: w,
-    height: theme.titleFontSize,
-  });
+  const block = chartTitleBlock(title, theme, layout.width, ctx);
+  if (block.title) {
+    paintTextBlock(ctx, block.title, layout.width);
+    // Write-back: this is the exact box, not the layout's ~0.55em/char estimate.
+    recordChartElementRect(layout, "title", { ...block.title.rect });
+  }
+  if (block.subtitle) paintTextBlock(ctx, block.subtitle, layout.width);
+  if (block.divider) {
+    const d = block.divider;
+    ctx.save?.();
+    ctx.strokeStyle = d.color;
+    ctx.lineWidth = d.width;
+    ctx.setLineDash?.(d.style === "dashed" ? [4 * d.width, 3 * d.width] : d.style === "dotted" ? [d.width, 2 * d.width] : []);
+    ctx.beginPath();
+    ctx.moveTo(d.x0, d.y);
+    ctx.lineTo(d.x1, d.y);
+    ctx.stroke();
+    ctx.setLineDash?.([]);
+    ctx.restore?.();
+  }
 }
 
 // ============================================================================
@@ -1634,15 +1857,11 @@ export function drawVerticalGridLines(
 // ============================================================================
 // Drawing: Background
 // ============================================================================
-
-export function drawChartBackground(
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-  layout: ChartLayout,
-  theme: ChartRenderTheme,
-): void {
-  applyFillStyle(ctx, theme.background, theme.backgroundGradient, 0, 0, layout.width, layout.height);
-  ctx.fillRect(0, 0, layout.width, layout.height);
-}
+//
+// There is no chart-background painter: the chart's OUTER background is its
+// visual container's (`spec.container.background`), painted by Core under the
+// raster (and by `paintChartWithContainer` for the routes that paint without
+// Core). The raster itself is transparent outside what the marks paint.
 
 export function drawPlotBackground(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
@@ -1730,15 +1949,12 @@ export function drawCartesianChrome(
     0.3,
   );
 
-  drawChartBackground(ctx, layout, theme);
   drawPlotBackground(ctx, plotArea, theme);
   if (spec.yAxis.gridLines) {
     drawHorizontalGridLines(ctx, yScale, plotArea, theme);
   }
   drawCartesianAxes(ctx, xScale, yScale, plotArea, spec, theme, layout);
-  if (spec.title) {
-    drawTitle(ctx, spec.title, layout, theme);
-  }
+  drawTitle(ctx, spec.title, layout, theme);
   if (spec.legend.visible && data.series.length > 0) {
     drawLegend(ctx, data, spec, layout, theme);
   }
@@ -1756,11 +1972,8 @@ export function drawRadialChrome(
   layout: ChartLayout,
   theme: ChartRenderTheme,
 ): void {
-  drawChartBackground(ctx, layout, theme);
   drawPlotBackground(ctx, layout.plotArea, theme);
-  if (spec.title) {
-    drawTitle(ctx, spec.title, layout, theme);
-  }
+  drawTitle(ctx, spec.title, layout, theme);
   if (spec.legend.visible && data.categories.length > 0) {
     drawRadialLegend(ctx, data, spec, layout, theme);
   }

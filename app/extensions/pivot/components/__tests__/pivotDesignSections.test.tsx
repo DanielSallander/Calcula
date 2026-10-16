@@ -55,6 +55,7 @@ import {
   DesignDisplaySection,
 } from "../PivotDesignSections";
 import { getPivotStylePreview, setPivotStylePreview } from "../../lib/pivotStyles";
+import { getPersistedPivotStyle, resetPersistedPivotStyles } from "../../lib/pivotStylePersist";
 
 const SECTION_PROPS = { placement: "ribbon" } as unknown as PanelSectionProps;
 
@@ -258,7 +259,9 @@ describe("Pivot Design sections — behaviour", () => {
     expect(h.updateSharedLayout).toHaveBeenCalledWith({ valuesPosition: "rows" });
   });
 
-  it("the styles gallery commits, clears, and previews transiently on the active pivot", async () => {
+  it("the styles gallery commits (ONE update_pivot_properties, no layout change), clears, and previews transiently on the active pivot", async () => {
+    resetPersistedPivotStyles();
+    h.updatePivotProperties.mockResolvedValue({});
     await render(<DesignStylesSection {...SECTION_PROPS} />);
     // Default style applied and shown selected.
     expect(byTestId("pivot-style-PivotStyleLight16").getAttribute("aria-selected")).toBe("true");
@@ -275,10 +278,24 @@ describe("Pivot Design sections — behaviour", () => {
 
     click(option);
     expect(getPivotStylePreview("p1")).toBeNull();
-    expect(h.updateSharedLayout).toHaveBeenCalledWith({ styleId: id });
+    // The style is PERSISTED through the style door (WP-C): one properties
+    // update, and never a layout change (which schedules a fields update).
+    expect(h.updatePivotProperties).toHaveBeenCalledTimes(1);
+    expect(h.updatePivotProperties).toHaveBeenCalledWith({ pivotId: "p1", style: { styleId: id } });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(getPersistedPivotStyle("p1")).toEqual({ styleId: id });
+    expect(byTestId(`pivot-style-${id}`).getAttribute("aria-selected"), "the gallery shows the persisted choice").toBe("true");
 
     click(byTestId("pivot-style-clear"));
-    expect(h.updateSharedLayout).toHaveBeenLastCalledWith({ styleId: "" });
+    expect(h.updatePivotProperties).toHaveBeenLastCalledWith({ pivotId: "p1", style: null });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(getPersistedPivotStyle("p1")).toBeNull();
+    expect(h.updateSharedLayout).not.toHaveBeenCalled();
+    resetPersistedPivotStyles();
   });
 
   it("a standing preview ends when the section unmounts", async () => {

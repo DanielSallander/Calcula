@@ -132,7 +132,13 @@ describe("priority decides what survives", () => {
     // over 1,800-2,800 the bands are now 1,841-1,852, 1,911-1,922, 1,968-1,979,
     // 2,026-2,037, 2,083-2,094, 2,132-2,143, 2,177-2,215, 2,249-2,308 and
     // 2,342-2,800+, so this sits well inside the last one.
-    const tight = 2_400;
+    // Re-measured 2026-10-15 after D-BIND's `self` (ScriptObjectHandle) joined
+    // every type's OWN members (~49 always-present tokens): over 1,800-3,200
+    // the bands are now 1,812-1,821, 1,855-1,866, 1,920-1,931, 1,990-2,001,
+    // 2,047-2,058, 2,105-2,116, 2,162-2,173, 2,211-2,222, 2,256-2,294,
+    // 2,328-2,387 and 2,421-3,200+; 2,400 fell into the gap, so this moved to
+    // the middle of the last band.
+    const tight = 2_800;
     const without = buildSurfacePrompt({ objectType: "button", budgetTokens: tight });
     const withHint = buildSurfacePrompt({ objectType: "button", budgetTokens: tight, hints: ["storage"] });
     expect(without.includedChains).not.toContain("caps.storage.set");

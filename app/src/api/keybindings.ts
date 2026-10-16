@@ -769,8 +769,12 @@ export function isGridFocused(): boolean {
  * a toast, dialog, or side panel). Grid cells are canvas-drawn and never produce
  * a DOM text selection, so this reliably means the user wants to copy/cut that
  * text — not the active cell — even while the grid still holds focus.
+ *
+ * Exported (WP-A S7b) for the same reason as `isGridFocused`: an extension's
+ * own Copy binding (a canvas pivot box's cells) must yield to the highlighted
+ * text by THIS rule, not by a copy of it.
  */
-function hasDomTextSelection(): boolean {
+export function hasDomTextSelection(): boolean {
   const sel = typeof window !== "undefined" ? window.getSelection() : null;
   return !!sel && sel.rangeCount > 0 && !sel.isCollapsed && sel.toString().trim() !== "";
 }

@@ -12,6 +12,16 @@
 //          The keyboard's slots read it too (`slicerSlotStep`,
 //          `slicerScrollToShow`; lib/slicerKeys.ts), and the focus ring is
 //          painted where `itemCellAt` paints the focused item (M8 S7).
+//
+//          THE VISUAL CONTAINER (WP-C D-FORMAT). Core paints the slicer's
+//          shadow, background and border from the region's container; the
+//          slicer paints its header (the container's TITLE, from the resolved
+//          title style: font, size, colours, alignment) and its items, all
+//          inside the CONTENT box (lib/slicerObjectFormat.ts
+//          `slicerContentBox`: the border inset and the padding), clipped there
+//          by `withContainerContentClip`. `slicerFrameOf` is built on that box,
+//          so the painter and every hit test still read ONE layout, and Core
+//          answers the padding band as frame before `slicerZoneAt` is asked.
 
 import {
   overlaySheetToCanvas,
@@ -24,22 +34,34 @@ import { drawObjectScriptBadgeIfPresent } from "@api/objectScriptBadge";
 import { getSlicerById, getCachedItems } from "../lib/slicerStore";
 // The style DATA module, not the gallery component: the canvas renderer must
 // not pull a React component (and its @api/layout chrome) into the paint path.
-import { SLICER_STYLES_BY_ID } from "../lib/slicerStyles";
+import {
+  LEGACY_SLICER_STYLE_COLORS,
+  SLICER_STYLES_BY_ID,
+  slicerStyleColors,
+  type SlicerThumbColors,
+} from "../lib/slicerStyles";
 import type { Slicer, SlicerItem } from "../lib/slicerTypes";
 import { isSlicerFiltered, selectionShownDuringRun } from "../lib/slicerClickSelection";
 import { getSlicerRunPreview } from "../lib/slicerGestureView";
 import { getSlicerKeyFocus, resolveSlicerFocusSlot } from "../lib/slicerKeyFocus";
 import { getSlicerItemRenderer, getSlicerStyleOverrides } from "./customRenderers";
 import { getSlicerItemBitmap, hasSlicerItemBitmapRenderer } from "@api";
+// The header as SHOWN -- a BOUND header text / show-header (D-BIND) and a
+// Format-tab preview included -- is the RESOLVED container's title, which the
+// content box carries: what is painted and hit is the slicer as SHOWN.
+import { slicerContentBox } from "../lib/slicerObjectFormat";
+import type { ResolvedVisualContainer } from "@api/visualContainer";
+import { withContainerContentClip, type ContainerRegion } from "@api/visualContainerPaint";
+import { drawHeaderTitle } from "../../_shared/lib/headerTitlePaint";
 
 // ============================================================================
 // Style Constants
 // ============================================================================
 
-const HEADER_HEIGHT = 32;
+// The header's height follows its title font (lib/slicerObjectFormat.ts
+// `slicerHeaderHeight`); the corner radius and the outline are the container's.
 const ITEM_HEIGHT = 26;
 const CLEAR_BUTTON_SIZE = 20;
-const BORDER_RADIUS = 3;
 const FONT_FAMILY = "Calibri, Segoe UI, sans-serif";
 const SCROLLBAR_WIDTH = 8;
 const SCROLLBAR_MIN_THUMB = 20;
@@ -66,71 +88,8 @@ export const SLICER_NO_DATA_FILL = "#E8E8E8";
 export const SLICER_FOCUS_RING_DARK = "#000000";
 export const SLICER_FOCUS_RING_LIGHT = "#ffffff";
 
-// Legacy style presets (for backward compatibility with old IDs). A Map, not
-// an object literal: the keys are Excel's stored preset names, which the
-// repo's camelCase naming rule would reject as property names.
-const LEGACY_STYLE_COLORS: ReadonlyMap<string, StyleColors> = new Map([
-  [
-    "SlicerStyleLight1",
-    {
-      bg: "#FFFFFF",
-      headerBg: "#4472C4",
-      headerFg: "#FFFFFF",
-      selectedBg: "#4472C4",
-      selectedFg: "#FFFFFF",
-      itemBg: "#edf2f9",
-      itemFg: "#333333",
-      border: "#8faadc",
-    },
-  ],
-  [
-    "SlicerStyleLight2",
-    {
-      bg: "#FFFFFF",
-      headerBg: "#ED7D31",
-      headerFg: "#FFFFFF",
-      selectedBg: "#ED7D31",
-      selectedFg: "#FFFFFF",
-      itemBg: "#fdf2eb",
-      itemFg: "#333333",
-      border: "#f4b183",
-    },
-  ],
-  [
-    "SlicerStyleDark1",
-    {
-      bg: "#333333",
-      headerBg: "#4472C4",
-      headerFg: "#FFFFFF",
-      selectedBg: "#4472C4",
-      selectedFg: "#FFFFFF",
-      itemBg: "#444444",
-      itemFg: "#EEEEEE",
-      border: "#555555",
-    },
-  ],
-]);
-
-export interface StyleColors {
-  bg: string;
-  headerBg: string;
-  headerFg: string;
-  selectedBg: string;
-  selectedFg: string;
-  itemBg: string;
-  itemFg: string;
-  border: string;
-}
-
-const DEFAULT_COLORS: StyleColors = LEGACY_STYLE_COLORS.get("SlicerStyleLight1")!;
-
-function getStyleColors(preset: string): StyleColors {
-  const galleryStyle = SLICER_STYLES_BY_ID.get(preset);
-  if (galleryStyle) {
-    return galleryStyle.thumb;
-  }
-  return LEGACY_STYLE_COLORS.get(preset) ?? DEFAULT_COLORS;
-}
+/** The eight colours a slicer paints with (the style DATA module's `SlicerThumbColors`). */
+export type StyleColors = SlicerThumbColors;
 
 /**
  * Every preset this renderer can paint a slicer with -- the gallery's and the
@@ -140,7 +99,7 @@ function getStyleColors(preset: string): StyleColors {
 export function slicerPresetColorSets(): Array<{ id: string; colors: StyleColors }> {
   const sets: Array<{ id: string; colors: StyleColors }> = [];
   for (const [id, style] of SLICER_STYLES_BY_ID) sets.push({ id, colors: style.thumb });
-  for (const [id, colors] of LEGACY_STYLE_COLORS) sets.push({ id, colors });
+  for (const [id, colors] of LEGACY_SLICER_STYLE_COLORS) sets.push({ id, colors });
   return sets;
 }
 
@@ -246,13 +205,25 @@ function computeLayout(slicer: Slicer, itemCount: number, viewportW: number, vie
 }
 
 /**
- * A slicer's layout at a size, everything measured from its top-left corner:
- * the header, the item viewport under it, the item grid, the scrollbar and
- * how far the items scroll. THE one layout -- the painter, the hit test, the
- * scroll clamp and the content gesture all read it.
+ * A slicer's layout at a size, everything measured from its OUTER top-left
+ * corner: the content box inside the container (`ox`, `oy`, `cw`, `ch`),
+ * the header at its top, the item viewport under it, the item grid, the
+ * scrollbar and how far the items scroll. THE one layout -- the painter, the
+ * hit test, the scroll clamp and the content gesture all read it.
  */
 interface SlicerFrame {
+  /** The content box's left / top edge, from the slicer's outer left / top. */
+  ox: number;
+  oy: number;
+  /** The content box's width / height. */
+  cw: number;
+  ch: number;
+  /** The resolved container the frame was laid out in (the header is its title). */
+  container: SlicerContainerOf;
+  /** The header bar's height (0 when hidden), at the content's top. */
   headerH: number;
+  /** Where the item viewport starts below the content's top (the header plus its spacing). */
+  itemsTop: number;
   /** The item viewport's height (everything under the header). */
   viewportH: number;
   layout: LayoutInfo;
@@ -267,25 +238,39 @@ interface SlicerFrame {
   maxScroll: number;
 }
 
+/** The resolved container a frame carries (the content box's). */
+type SlicerContainerOf = ResolvedVisualContainer;
+
 function slicerFrameOf(slicer: Slicer, itemCount: number, w: number, h: number): SlicerFrame {
-  const headerH = slicer.showHeader ? HEADER_HEIGHT : 0;
-  const viewportH = h - headerH;
+  // The content box inside the container, with the header as SHOWN (a bound
+  // `showHeader` / header text, a Format-tab preview): every layout reader --
+  // the keyboard's slots, the item drag, the scroll clamp -- comes through
+  // here, so a padding or a hidden header moves the items for all of them.
+  const box = slicerContentBox(slicer, w, h);
+  const cw = box.width;
+  const viewportH = Math.max(0, box.height - box.itemsTop);
   // Two passes: the full width tells whether a vertical scrollbar is needed,
   // then the items are sized in the width left beside it.
-  const preLayout = computeLayout(slicer, itemCount, w, viewportH);
+  const preLayout = computeLayout(slicer, itemCount, cw, viewportH);
   const scrollbarW = preLayout.needsScroll && !preLayout.isHorizontal ? SCROLLBAR_WIDTH : 0;
-  const layout = scrollbarW > 0 ? computeLayout(slicer, itemCount, w - scrollbarW, viewportH) : preLayout;
+  const layout = scrollbarW > 0 ? computeLayout(slicer, itemCount, cw - scrollbarW, viewportH) : preLayout;
   const scrollbarH = layout.needsScroll && layout.isHorizontal ? SCROLLBAR_WIDTH : 0;
   const maxScroll = layout.isHorizontal
-    ? Math.max(0, layout.contentWidth - (w - scrollbarW))
+    ? Math.max(0, layout.contentWidth - (cw - scrollbarW))
     : Math.max(0, layout.contentHeight - viewportH);
   return {
-    headerH,
+    ox: box.x,
+    oy: box.y,
+    cw,
+    ch: box.height,
+    container: box.container,
+    headerH: box.headerH,
+    itemsTop: box.itemsTop,
     viewportH,
     layout,
     scrollbarW,
     scrollbarH,
-    itemAreaW: w - scrollbarW,
+    itemAreaW: cw - scrollbarW,
     itemAreaH: viewportH - scrollbarH,
     maxScroll,
   };
@@ -293,17 +278,18 @@ function slicerFrameOf(slicer: Slicer, itemCount: number, w: number, h: number):
 
 /**
  * Where item slot `vi` sits (0 is "Select all" when it is shown), from the
- * slicer's top-left, with the items scrolled by `scroll`. The painted button
- * is `cellW` wide and `cellH - 2` tall, 1px below `y`.
+ * slicer's OUTER top-left, with the items scrolled by `scroll`. The painted
+ * button is `cellW` wide and `cellH - 2` tall, 1px below `y`.
  */
 function itemCellAt(f: SlicerFrame, vi: number, scroll: number): { x: number; y: number } {
   const L = f.layout;
+  const top = f.oy + f.itemsTop + L.padding;
   if (L.isHorizontal) {
-    return { x: L.padding + vi * (L.cellW + L.gap) - scroll, y: f.headerH + L.padding };
+    return { x: f.ox + L.padding + vi * (L.cellW + L.gap) - scroll, y: top };
   }
   const col = vi % L.cols;
   const row = Math.floor(vi / L.cols);
-  return { x: L.padding + col * (L.cellW + L.gap), y: f.headerH + L.padding + row * (L.cellH + L.gap) - scroll };
+  return { x: f.ox + L.padding + col * (L.cellW + L.gap), y: top + row * (L.cellH + L.gap) - scroll };
 }
 
 /** The scroll offset the slicer is painted (and hit-tested) at: the stored one, clamped. */
@@ -492,14 +478,18 @@ export function renderSlicer(ctx: OverlayRenderContext): void {
 
   const items = getCachedItems(slicerId) ?? [];
   const c = ctx.ctx;
-  const colors = getStyleColors(slicer.stylePreset);
+  const colors = slicerStyleColors(slicer.stylePreset);
 
   const { canvasX, canvasY } = overlaySheetToCanvas(ctx, slicer.x, slicer.y);
   const w = slicer.width;
   const h = slicer.height;
 
+  // THE layout, on the content box inside the container: its header is the
+  // container's title as SHOWN (a bound header text / show-header replaces
+  // the literal here only; the store keeps the literal).
   const frame = slicerFrameOf(slicer, items.length, w, h);
-  const { headerH, viewportH, layout, itemAreaW, itemAreaH } = frame;
+  const { layout, itemAreaW, itemAreaH } = frame;
+  const title = frame.container.title;
   // Clamped (handles mode switches where the old offset is too large).
   const scrollVal = shownScroll(slicerId, frame);
 
@@ -515,205 +505,193 @@ export function renderSlicer(ctx: OverlayRenderContext): void {
     shownSelection === undefined ? item.selected : shownSelection === null || shownSet!.has(item.value);
   const allShownSelected = shownSelection === undefined ? slicer.selectedItems === null : shownSelection === null;
 
-  // Clip to slicer bounds
-  c.save();
-  c.beginPath();
-  c.roundRect(canvasX, canvasY, w, h, BORDER_RADIUS);
-  c.clip();
+  // Core painted the container's shadow, background and border around this
+  // (it does not clip the family). Everything the slicer paints is CONTENT:
+  // clipped to the content box and the rounded outer path.
+  const contentX = canvasX + frame.ox;
+  const contentY = canvasY + frame.oy;
+  const region: ContainerRegion = { ...ctx.region, container: frame.container };
+  withContainerContentClip(
+    c,
+    region,
+    { x: canvasX, y: canvasY, width: w, height: h },
+    { x: contentX, y: contentY, width: frame.cw, height: frame.ch },
+    () => {
+      // Header bar: the container's TITLE, painted by the slicer (paint.title "family").
+      if (frame.headerH > 0) {
+        if (title.background) {
+          c.fillStyle = title.background;
+          c.fillRect(contentX, contentY, frame.cw, frame.headerH);
+        }
 
-  // Background
-  c.fillStyle = colors.bg;
-  c.fillRect(canvasX, canvasY, w, h);
+        // Pin badge for level-2+ slicers: the pin survives measure CLEAR/RESET,
+        // which changes what those measures compute -- it must be visible.
+        const pinned = (slicer.filterLevel ?? 1) >= 2;
+        const midY = contentY + frame.headerH / 2;
+        let textLeft = contentX + 10;
+        if (pinned) {
+          drawPinGlyph(c, textLeft, midY, title.color);
+          textLeft += 14;
+        }
+        const textRight = contentX + frame.cw - CLEAR_BUTTON_SIZE - 14;
+        drawHeaderTitle(c, title, title.text, textLeft, textRight, midY);
 
-  // Header bar
-  if (slicer.showHeader) {
-    c.fillStyle = colors.headerBg;
-    c.fillRect(canvasX, canvasY, w, HEADER_HEIGHT);
+        const btnX = contentX + frame.cw - CLEAR_BUTTON_SIZE - 4;
+        const btnY = contentY + (frame.headerH - CLEAR_BUTTON_SIZE) / 2;
+        drawClearFilterButton(c, btnX, btnY, CLEAR_BUTTON_SIZE, isSlicerFiltered(slicer), title.color);
+      }
 
-    // Pin badge for level-2+ slicers: the pin survives measure CLEAR/RESET,
-    // which changes what those measures compute — it must be visible.
-    const pinned = (slicer.filterLevel ?? 1) >= 2;
-    let textX = canvasX + 10;
-    if (pinned) {
-      drawPinGlyph(c, textX, canvasY + HEADER_HEIGHT / 2, colors.headerFg);
-      textX += 14;
-    }
+      // Item list -- clip to item viewport
+      const btnR = layout.buttonRadius;
+      const itemsTop = frame.oy + frame.itemsTop;
 
-    c.fillStyle = colors.headerFg;
-    c.font = `bold 12px ${FONT_FAMILY}`;
-    c.textAlign = "left";
-    c.textBaseline = "middle";
-    c.fillText(
-      slicer.headerText ?? slicer.name,
-      textX,
-      canvasY + HEADER_HEIGHT / 2,
-      w - CLEAR_BUTTON_SIZE - 24 - (pinned ? 14 : 0),
-    );
-
-    const btnX = canvasX + w - CLEAR_BUTTON_SIZE - 4;
-    const btnY = canvasY + (HEADER_HEIGHT - CLEAR_BUTTON_SIZE) / 2;
-    drawClearFilterButton(c, btnX, btnY, CLEAR_BUTTON_SIZE, isSlicerFiltered(slicer), colors.headerFg);
-  }
-
-  // Item list — clip to item viewport
-  const itemAreaTop = canvasY + headerH;
-  const itemAreaLeft = canvasX;
-  const btnR = layout.buttonRadius;
-
-  c.save();
-  c.beginPath();
-  c.rect(itemAreaLeft, itemAreaTop, itemAreaW, viewportH);
-  c.clip();
-
-  c.font = `11px ${FONT_FAMILY}`;
-  c.textAlign = "left";
-  c.textBaseline = "middle";
-
-  const { cellW, cellH, selectAllOffset } = layout;
-
-  // Render each item (including "Select all" at index 0 if enabled)
-  for (let vi = 0; vi < layout.totalItems; vi++) {
-    const isSelectAll = vi < selectAllOffset;
-    const item: SlicerItem | null = isSelectAll
-      ? null
-      : items[vi - selectAllOffset];
-
-    const cell = itemCellAt(frame, vi, scrollVal);
-
-    // Skip items outside visible area
-    if (layout.isHorizontal) {
-      if (cell.x + cellW < 0) continue;
-      if (cell.x > itemAreaW) break;
-    } else {
-      if (cell.y + cellH < headerH) continue;
-      if (cell.y > headerH + itemAreaH) break;
-    }
-
-    const ix = canvasX + cell.x;
-    const iy = canvasY + cell.y;
-
-    // Check for custom item renderer
-    const customRenderer = getSlicerItemRenderer(slicer.id);
-    const styleOvr = getSlicerStyleOverrides(slicer.id);
-
-    // Apply style overrides to colors
-    const effColors = styleOvr ? {
-      ...colors,
-      ...(styleOvr.itemBackgroundColor && { itemBg: styleOvr.itemBackgroundColor }),
-      ...(styleOvr.itemTextColor && { itemFg: styleOvr.itemTextColor }),
-      ...(styleOvr.selectedBackgroundColor && { selectedBg: styleOvr.selectedBackgroundColor }),
-      ...(styleOvr.selectedTextColor && { selectedFg: styleOvr.selectedTextColor }),
-    } : colors;
-
-    if (isSelectAll) {
-      // "Select all" row
-      c.fillStyle = allShownSelected ? effColors.selectedBg : effColors.itemBg;
+      c.save();
       c.beginPath();
-      c.roundRect(ix, iy + 1, cellW, cellH - 2, btnR);
-      c.fill();
-      c.fillStyle = allShownSelected ? effColors.selectedFg : effColors.itemFg;
-      c.fillText(SELECT_ALL_LABEL, ix + 8, iy + cellH / 2, cellW - 16);
-    } else if (item) {
-      const selected = isShownSelected(item);
-      // Worker-realm scripts provide cached bitmaps instead of functions
-      // (sandbox design §6.2): blit inside a clip so a script can never
-      // paint outside its item region. Missing bitmap = single-flight
-      // request already queued; fall through to default rendering this
-      // frame (graceful degradation).
-      let bitmapDrawn = false;
-      if (hasSlicerItemBitmapRenderer(String(slicer.id))) {
-        const bmp = getSlicerItemBitmap(
-          String(slicer.id),
-          { text: item.value, selected, hasData: item.hasData },
-          cellW,
-          cellH - 2,
-          window.devicePixelRatio || 1,
-        );
-        if (bmp) {
-          c.save();
-          c.beginPath();
-          c.rect(ix, iy + 1, cellW, cellH - 2);
-          c.clip();
-          c.drawImage(bmp, ix, iy + 1, cellW, cellH - 2);
-          c.restore();
-          bitmapDrawn = true;
-        }
-      }
-      if (bitmapDrawn) {
-        // bitmap covers the item
-      } else if (customRenderer) {
-        customRenderer(
-          { text: item.value, selected, hasData: item.hasData, index: vi - selectAllOffset },
-          c,
-          { x: ix, y: iy + 1, width: cellW, height: cellH - 2 },
-        );
-      } else {
-        // Default rendering
-        const showAsNoData = !item.hasData && slicer.indicateNoData;
+      c.rect(contentX, canvasY + itemsTop, itemAreaW, frame.viewportH);
+      c.clip();
 
-        if (selected && !showAsNoData) {
-          c.fillStyle = effColors.selectedBg;
-          c.beginPath();
-          c.roundRect(ix, iy + 1, cellW, cellH - 2, btnR);
-          c.fill();
-          c.fillStyle = effColors.selectedFg;
+      c.font = `11px ${FONT_FAMILY}`;
+      c.textAlign = "left";
+      c.textBaseline = "middle";
+
+      const { cellW, cellH, selectAllOffset } = layout;
+
+      // Render each item (including "Select all" at index 0 if enabled)
+      for (let vi = 0; vi < layout.totalItems; vi++) {
+        const isSelectAll = vi < selectAllOffset;
+        const item: SlicerItem | null = isSelectAll
+          ? null
+          : items[vi - selectAllOffset];
+
+        const cell = itemCellAt(frame, vi, scrollVal);
+
+        // Skip items outside visible area
+        if (layout.isHorizontal) {
+          if (cell.x + cellW < frame.ox) continue;
+          if (cell.x > frame.ox + itemAreaW) break;
         } else {
-          c.fillStyle = showAsNoData ? SLICER_NO_DATA_FILL : effColors.itemBg;
+          if (cell.y + cellH < itemsTop) continue;
+          if (cell.y > itemsTop + itemAreaH) break;
+        }
+
+        const ix = canvasX + cell.x;
+        const iy = canvasY + cell.y;
+
+        // Check for custom item renderer
+        const customRenderer = getSlicerItemRenderer(slicer.id);
+        const styleOvr = getSlicerStyleOverrides(slicer.id);
+
+        // Apply style overrides to colors
+        const effColors = styleOvr ? {
+          ...colors,
+          ...(styleOvr.itemBackgroundColor && { itemBg: styleOvr.itemBackgroundColor }),
+          ...(styleOvr.itemTextColor && { itemFg: styleOvr.itemTextColor }),
+          ...(styleOvr.selectedBackgroundColor && { selectedBg: styleOvr.selectedBackgroundColor }),
+          ...(styleOvr.selectedTextColor && { selectedFg: styleOvr.selectedTextColor }),
+        } : colors;
+
+        if (isSelectAll) {
+          // "Select all" row
+          c.fillStyle = allShownSelected ? effColors.selectedBg : effColors.itemBg;
           c.beginPath();
           c.roundRect(ix, iy + 1, cellW, cellH - 2, btnR);
           c.fill();
-          c.fillStyle = showAsNoData
-            ? "#BBBBBB"
-            : selected
-              ? effColors.selectedFg
-              : effColors.itemFg;
+          c.fillStyle = allShownSelected ? effColors.selectedFg : effColors.itemFg;
+          c.fillText(SELECT_ALL_LABEL, ix + 8, iy + cellH / 2, cellW - 16);
+        } else if (item) {
+          const selected = isShownSelected(item);
+          // Worker-realm scripts provide cached bitmaps instead of functions
+          // (sandbox design section 6.2): blit inside a clip so a script can
+          // never paint outside its item region. Missing bitmap = single-flight
+          // request already queued; fall through to default rendering this
+          // frame (graceful degradation).
+          let bitmapDrawn = false;
+          if (hasSlicerItemBitmapRenderer(String(slicer.id))) {
+            const bmp = getSlicerItemBitmap(
+              String(slicer.id),
+              { text: item.value, selected, hasData: item.hasData },
+              cellW,
+              cellH - 2,
+              window.devicePixelRatio || 1,
+            );
+            if (bmp) {
+              c.save();
+              c.beginPath();
+              c.rect(ix, iy + 1, cellW, cellH - 2);
+              c.clip();
+              c.drawImage(bmp, ix, iy + 1, cellW, cellH - 2);
+              c.restore();
+              bitmapDrawn = true;
+            }
+          }
+          if (bitmapDrawn) {
+            // bitmap covers the item
+          } else if (customRenderer) {
+            customRenderer(
+              { text: item.value, selected, hasData: item.hasData, index: vi - selectAllOffset },
+              c,
+              { x: ix, y: iy + 1, width: cellW, height: cellH - 2 },
+            );
+          } else {
+            // Default rendering
+            const showAsNoData = !item.hasData && slicer.indicateNoData;
+
+            if (selected && !showAsNoData) {
+              c.fillStyle = effColors.selectedBg;
+              c.beginPath();
+              c.roundRect(ix, iy + 1, cellW, cellH - 2, btnR);
+              c.fill();
+              c.fillStyle = effColors.selectedFg;
+            } else {
+              c.fillStyle = showAsNoData ? SLICER_NO_DATA_FILL : effColors.itemBg;
+              c.beginPath();
+              c.roundRect(ix, iy + 1, cellW, cellH - 2, btnR);
+              c.fill();
+              c.fillStyle = showAsNoData
+                ? "#BBBBBB"
+                : selected
+                  ? effColors.selectedFg
+                  : effColors.itemFg;
+            }
+
+            c.fillText(item.value, ix + 8, iy + cellH / 2, cellW - 16);
+          }
         }
-
-        c.fillText(item.value, ix + 8, iy + cellH / 2, cellW - 16);
       }
-    }
-  }
 
-  // The keyboard's focus ring (M8 S7), on the slot the next key acts on
-  // (`resolveSlicerFocusSlot`, which the key handler asks too), placed by
-  // `itemCellAt` like the item itself -- inside the item clip, so a focused
-  // item scrolled out of view shows no ring.
-  const keyFocus = getSlicerKeyFocus();
-  if (keyFocus !== null && keyFocus.slicerId === slicerId) {
-    const at = resolveSlicerFocusSlot(
-      keyFocus,
-      items.map((i) => i.value),
-      selectAllOffset > 0,
-    );
-    if (at !== null) {
-      const cell = itemCellAt(frame, at.slot, scrollVal);
-      drawFocusRing(c, canvasX + cell.x, canvasY + cell.y + 1, cellW, cellH - 2, btnR);
-    }
-  }
+      // The keyboard's focus ring (M8 S7), on the slot the next key acts on
+      // (`resolveSlicerFocusSlot`, which the key handler asks too), placed by
+      // `itemCellAt` like the item itself -- inside the item clip, so a focused
+      // item scrolled out of view shows no ring.
+      const keyFocus = getSlicerKeyFocus();
+      if (keyFocus !== null && keyFocus.slicerId === slicerId) {
+        const at = resolveSlicerFocusSlot(
+          keyFocus,
+          items.map((i) => i.value),
+          selectAllOffset > 0,
+        );
+        if (at !== null) {
+          const cell = itemCellAt(frame, at.slot, scrollVal);
+          drawFocusRing(c, canvasX + cell.x, canvasY + cell.y + 1, cellW, cellH - 2, btnR);
+        }
+      }
 
-  c.restore(); // restore item-area clip
+      c.restore(); // restore item-area clip
 
-  // Scrollbar: the track, and the thumb where the gesture grabs it.
-  const track = scrollTrackOf(frame, w);
-  if (track) {
-    drawScrollbar(c, canvasX, canvasY, track, slicerScrollThumb(track.start, track.length, track.contentExtent, scrollVal));
-  }
+      // Scrollbar: the track, and the thumb where the gesture grabs it.
+      const track = scrollTrackOf(frame);
+      if (track) {
+        drawScrollbar(c, canvasX, canvasY, track, slicerScrollThumb(track.start, track.length, track.contentExtent, scrollVal));
+      }
+    },
+  );
 
-  // Border
-  c.strokeStyle = colors.border;
-  c.lineWidth = 1;
-  c.beginPath();
-  c.roundRect(canvasX, canvasY, w, h, BORDER_RADIUS);
-  c.stroke();
+  // The outline is the container's border, painted by Core over this (the
+  // slicer strokes no border of its own any more). A selected slicer's outline
+  // and resize handles are Core's too (core/lib/gridRenderer/rendering/
+  // floatingObjectChrome.ts, BUG-0258 design phase 3).
 
-  // A selected slicer's outline and resize handles are Core's (core/lib/
-  // gridRenderer/rendering/floatingObjectChrome.ts, BUG-0258 design phase 3):
-  // the half-clipped border this drew is gone, and the handles its corners had
-  // -- live, but never painted -- now are.
-
-  c.restore(); // restore slicer clip
-
-  // T4: script-presence badge (design mode only) — see code on the object.
+  // T4: script-presence badge (design mode only) -- see code on the object.
   drawObjectScriptBadgeIfPresent(c, "slicer", slicerId, canvasX, canvasY, w);
 }
 
@@ -722,9 +700,10 @@ export function renderSlicer(ctx: OverlayRenderContext): void {
 // ============================================================================
 
 /**
- * A slicer's scrollbar track, measured from the slicer's top-left: a vertical
- * bar at the right edge under the header, or a horizontal bar along the
- * bottom of a horizontal arrangement. `start` / `length` run along `axis`.
+ * A slicer's scrollbar track, measured from the slicer's OUTER top-left: a
+ * vertical bar at the content's right edge under the header, or a horizontal
+ * bar along the content's bottom in a horizontal arrangement. `start` /
+ * `length` run along `axis`.
  */
 export interface SlicerScrollTrack {
   axis: "x" | "y";
@@ -738,28 +717,29 @@ export interface SlicerScrollTrack {
   contentExtent: number;
 }
 
-function scrollTrackOf(f: SlicerFrame, w: number): SlicerScrollTrack | null {
+function scrollTrackOf(f: SlicerFrame): SlicerScrollTrack | null {
   const L = f.layout;
   if (!L.needsScroll) return null;
+  const top = f.oy + f.itemsTop;
   if (L.isHorizontal) {
     return {
       axis: "x",
-      x: 0,
-      y: f.headerH + f.viewportH - SCROLLBAR_WIDTH,
+      x: f.ox,
+      y: top + f.viewportH - SCROLLBAR_WIDTH,
       width: f.itemAreaW,
       height: SCROLLBAR_WIDTH,
-      start: 0,
+      start: f.ox,
       length: f.itemAreaW,
       contentExtent: L.contentWidth,
     };
   }
   return {
     axis: "y",
-    x: w - SCROLLBAR_WIDTH,
-    y: f.headerH,
+    x: f.ox + f.cw - SCROLLBAR_WIDTH,
+    y: top,
     width: SCROLLBAR_WIDTH,
     height: f.viewportH,
-    start: f.headerH,
+    start: top,
     length: f.viewportH,
     contentExtent: L.contentHeight,
   };
@@ -771,7 +751,7 @@ export function slicerScrollTrack(
   items: readonly SlicerItem[],
   bounds: { width: number; height: number },
 ): SlicerScrollTrack | null {
-  return scrollTrackOf(slicerFrameOf(slicer, items.length, bounds.width, bounds.height), bounds.width);
+  return scrollTrackOf(slicerFrameOf(slicer, items.length, bounds.width, bounds.height));
 }
 
 /**
@@ -957,18 +937,30 @@ export function getSlicerHitDetail(
   const relX = canvasX - bounds.x;
   const relY = canvasY - bounds.y;
 
+  // Hit as SHOWN, on the painter's frame (paint == hit): the content box
+  // inside the container, and the header as the resolved title shows it -- a
+  // header a binding hides catches no press.
+  const frame = slicerFrameOf(slicer, items.length, bounds.width, bounds.height);
+  // The point, measured from the content box's top-left.
+  const inX = relX - frame.ox;
+  const inY = relY - frame.oy;
+
+  // The container's band (its border and padding) is no part of the slicer's
+  // content: plain frame. Core answers it before asking (resolveFloatingZone).
+  if (inX < 0 || inY < 0 || inX > frame.cw || inY > frame.ch) {
+    return { type: "body" };
+  }
+
   // Header area
-  if (slicer.showHeader && relY < HEADER_HEIGHT) {
-    if (relX > bounds.width - CLEAR_BUTTON_SIZE - 4) {
+  if (frame.headerH > 0 && inY < frame.headerH) {
+    if (inX > frame.cw - CLEAR_BUTTON_SIZE - 4) {
       return { type: "clearButton" };
     }
     return { type: "header" };
   }
 
-  const frame = slicerFrameOf(slicer, items.length, bounds.width, bounds.height);
-
   // Scrollbar: the painted track.
-  const track = scrollTrackOf(frame, bounds.width);
+  const track = scrollTrackOf(frame);
   if (
     track &&
     relX >= track.x &&
@@ -983,11 +975,11 @@ export function getSlicerHitDetail(
   // its items reach the edges, so this is what is left to grab it by (and
   // the gaps between the items).
   if (
-    !slicer.showHeader &&
-    (relX < SLICER_FRAME_BAND ||
-      relY < SLICER_FRAME_BAND ||
-      relX > bounds.width - SLICER_FRAME_BAND ||
-      relY > bounds.height - SLICER_FRAME_BAND)
+    frame.headerH === 0 &&
+    (inX < SLICER_FRAME_BAND ||
+      inY < SLICER_FRAME_BAND ||
+      inX > frame.cw - SLICER_FRAME_BAND ||
+      inY > frame.ch - SLICER_FRAME_BAND)
   ) {
     return { type: "border" };
   }
@@ -1005,14 +997,17 @@ export function getSlicerHitDetail(
 }
 
 /**
- * The item slot whose PAINTED button covers a point (from the slicer's
+ * The item slot whose PAINTED button covers a point (from the slicer's OUTER
  * top-left), or null -- a gap, the padding, empty space, or outside the item
  * area. The painted button is `cellW` wide and `cellH - 2` tall, 1px below
  * its cell's top (renderSlicer).
  */
-function paintedSlotAt(f: SlicerFrame, relX: number, relY: number, scroll: number): number | null {
+function paintedSlotAt(f: SlicerFrame, outerX: number, outerY: number, scroll: number): number | null {
   const L = f.layout;
-  if (relX < 0 || relX >= f.itemAreaW || relY < f.headerH || relY >= f.headerH + f.itemAreaH) return null;
+  // Measured from the item viewport's top-left inside the content box.
+  const relX = outerX - f.ox;
+  const relY = outerY - f.oy - f.itemsTop;
+  if (relX < 0 || relX >= f.itemAreaW || relY < 0 || relY >= f.itemAreaH) return null;
   const pitchX = L.cellW + L.gap;
   const pitchY = L.cellH + L.gap;
   let vi: number;
@@ -1022,12 +1017,12 @@ function paintedSlotAt(f: SlicerFrame, relX: number, relY: number, scroll: numbe
     const px = relX - L.padding + scroll;
     vi = Math.floor(px / pitchX);
     inX = px - vi * pitchX;
-    inY = relY - f.headerH - L.padding;
+    inY = relY - L.padding;
   } else {
     const px = relX - L.padding;
     const col = Math.floor(px / pitchX);
     if (col < 0 || col >= L.cols) return null;
-    const py = relY - f.headerH - L.padding + scroll;
+    const py = relY - L.padding + scroll;
     const row = Math.floor(py / pitchY);
     if (row < 0) return null;
     vi = row * L.cols + col;
@@ -1061,14 +1056,15 @@ export function slicerItemIndexNear(
   const f = slicerFrameOf(slicer, items.length, bounds.width, bounds.height);
   const L = f.layout;
   const scroll = shownScroll(slicer.id, f);
-  const x = Math.max(0, Math.min(relX, f.itemAreaW - 1));
-  const y = Math.max(f.headerH, Math.min(relY, f.headerH + f.itemAreaH - 1));
+  // Measured from the item viewport's top-left inside the content box.
+  const x = Math.max(0, Math.min(relX - f.ox, f.itemAreaW - 1));
+  const y = Math.max(0, Math.min(relY - f.oy - f.itemsTop, f.itemAreaH - 1));
   let vi: number;
   if (L.isHorizontal) {
     vi = Math.floor((x - L.padding + scroll) / (L.cellW + L.gap));
   } else {
     const col = Math.max(0, Math.min(L.cols - 1, Math.floor((x - L.padding) / (L.cellW + L.gap))));
-    const row = Math.max(0, Math.floor((y - f.headerH - L.padding + scroll) / (L.cellH + L.gap)));
+    const row = Math.max(0, Math.floor((y - L.padding + scroll) / (L.cellH + L.gap)));
     vi = row * L.cols + col;
   }
   vi = Math.max(L.selectAllOffset, Math.min(vi, L.totalItems - 1));
@@ -1097,8 +1093,8 @@ export function slicerAutoScrollStep(
   if (f.maxScroll <= 0) return 0;
   const horizontal = f.layout.isHorizontal;
   const pos = horizontal ? relX : relY;
-  const lo = horizontal ? 0 : f.headerH;
-  const hi = horizontal ? f.itemAreaW : f.headerH + f.itemAreaH;
+  const lo = horizontal ? f.ox : f.oy + f.itemsTop;
+  const hi = horizontal ? f.ox + f.itemAreaW : f.oy + f.itemsTop + f.itemAreaH;
   const edge = SLICER_AUTOSCROLL_EDGE;
   if (pos < lo + edge) {
     return -Math.min(AUTOSCROLL_MAX_STEP, AUTOSCROLL_MIN_STEP + Math.round((lo + edge - pos) / 2));

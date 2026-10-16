@@ -259,3 +259,70 @@ describe("the window listeners live only as long as the press", () => {
     }
   });
 });
+
+// A Page Navigator ITEM is pressed by the same rule, with "inside" also meaning
+// "over the SAME item" (WP-B, D-NAV S6). The navigator's client rectangle is
+// the button's; item A is x 100..155, item B x 165..220, the gap between.
+describe("a Page Navigator item: the release must be over the SAME item", () => {
+  const ITEM_A = { x: 120, y: 70 };
+  const ITEM_A_2 = { x: 150, y: 80 };
+  const ITEM_B = { x: 200, y: 70 };
+  const GAP = { x: 160, y: 70 };
+  const itemAt = (x: number, y: number): string | null => {
+    if (y < 50 || y > 90) return null;
+    if (x >= 100 && x <= 155) return "A";
+    if (x >= 165 && x <= 220) return "B";
+    return null;
+  };
+
+  function pressItem(key: string): void {
+    beginFloatingButtonPress({ controlId: BUTTON, regionId: BUTTON, run, itemKey: key, itemAtClient: itemAt });
+  }
+
+  it("released over the same item: runs once", () => {
+    pressItem("A");
+    move(ITEM_A_2);
+    release(ITEM_A_2);
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  // SABOTAGE: drop the item check in `insideAt` -> red.
+  it("SLID from item A onto item B and released there: runs NOTHING (B is inside the region, not inside A)", () => {
+    pressItem("A");
+    move(ITEM_B);
+    expect(isFloatingButtonPressed(BUTTON, "A"), "A still looks pressed with the pointer over B").toBe(false);
+    expect(isFloatingButtonPressed(BUTTON, "B"), "B looks pressed although A was pressed").toBe(false);
+    release(ITEM_B);
+    expect(run, "a slide from A to B opened a page").not.toHaveBeenCalled();
+  });
+
+  it("released over the gap between items: runs nothing", () => {
+    pressItem("A");
+    release(GAP);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("slid onto B and back onto A: pressed again, and the release there runs once", () => {
+    pressItem("A");
+    move(ITEM_B);
+    move(ITEM_A);
+    expect(isFloatingButtonPressed(BUTTON, "A")).toBe(true);
+    release(ITEM_A);
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("isFloatingButtonPressed(id, key) names the pressed item only; without a key it answers for the control", () => {
+    pressItem("B");
+    expect(isFloatingButtonPressed(BUTTON, "B")).toBe(true);
+    expect(isFloatingButtonPressed(BUTTON, "A")).toBe(false);
+    expect(isFloatingButtonPressed(BUTTON)).toBe(true);
+    expect(isFloatingButtonPressed("control-0-9-9", "B")).toBe(false);
+  });
+
+  it("a covering object still wins over the item test (released over item A under a cover: nothing)", () => {
+    h.cover = { left: 90, top: 40, right: 160, bottom: 100 };
+    pressItem("A");
+    release(ITEM_A);
+    expect(run).not.toHaveBeenCalled();
+  });
+});

@@ -43,7 +43,8 @@ import {
   type OverlayHitTestContext,
 } from "@api/gridOverlays";
 import { registerLayoutSurfaceProvider, type LayoutSurface } from "@api/layoutSurface";
-import { SLICER_FRAME_BAND, slicerZoneAt } from "../rendering/slicerRenderer";
+import { SLICER_FRAME_BAND, getSlicerHitDetail, slicerZoneAt } from "../rendering/slicerRenderer";
+import { resolveSlicerContainer } from "../lib/slicerObjectFormat";
 
 /** The slicer at canvas (100, 50), 180 x 240: a 32px header, then 26px items 4px apart. */
 const B = { x: 100, y: 50, width: 180, height: 240 };
@@ -58,6 +59,9 @@ function load(over: Record<string, unknown> = {}, count = 3): void {
     id: "s1",
     name: "Region",
     sheetIndex: 0,
+    // The container's default 1 px border insets the content by 1 px (WP-C
+    // D-FORMAT); off here, so this file's geometry is the content box's own.
+    container: { border: { show: false } },
     x: B.x,
     y: B.y,
     width: B.width,
@@ -253,5 +257,60 @@ describe("index.ts registers it as the slicer's ONE answer", () => {
     expect(block).toMatch(/zoneAt\s*:\s*slicerZoneAt\b/);
     expect(block).not.toMatch(/getCursor\s*:/);
     expect(block).not.toMatch(/claimsBodyDrag\s*:/);
+  });
+});
+
+describe("the visual container (WP-C S11): paint == hit inside the content box", () => {
+  // Padding 12 on every side and an 18 pt title, over the default 1 px border:
+  // the content starts 13 px in, and the header grows to max(32, 23 + 12) = 35.
+  const PAD = { top: 12, right: 12, bottom: 12, left: 12 };
+  const INSET = 13;
+  const HEADER = 35;
+
+  function loadPadded(over: Record<string, unknown> = {}): void {
+    load({ container: { padding: PAD, title: { fontSize: 18 } }, ...over });
+  }
+
+  /** The region as the store publishes it: with its RESOLVED container. */
+  function containerCtx(x: number, y: number): OverlayHitTestContext {
+    const region = { ...REGION, container: resolveSlicerContainer(h.slicers.get("s1") as never) };
+    return { region, canvasX: x, canvasY: y, row: 0, col: 0, floatingCanvasBounds: { ...B } };
+  }
+
+  it("the first item is hit at the CONTENT origin, not at the outer edge", () => {
+    loadPadded();
+    const firstItemTop = B.y + INSET + HEADER; // its painted button starts 1 px lower
+    expect(slicerZoneAt(containerCtx(B.x + INSET + 1, firstItemTop + 2))).toMatchObject({ kind: "content", part: "item" });
+    expect(getSlicerHitDetail(B.x + INSET + 5, firstItemTop + 13, B, "s1")).toMatchObject({
+      type: "item",
+      itemIndex: 0,
+      itemValue: "North",
+    });
+    // The second item is one pitch (26 + 4) lower.
+    expect(getSlicerHitDetail(B.x + INSET + 5, firstItemTop + 30 + 13, B, "s1")).toMatchObject({ itemIndex: 1 });
+  });
+
+  it("the header follows the title font: 35 px tall at 18 pt", () => {
+    loadPadded();
+    // 33 px into the content: the header at 18 pt (35 px), an item at 12 pt (32 px).
+    expect(getSlicerHitDetail(B.x + 60, B.y + INSET + 33, B, "s1")).toEqual({ type: "header" });
+    load({ container: { padding: PAD } });
+    expect(getSlicerHitDetail(B.x + 60, B.y + INSET + 33, B, "s1")).toMatchObject({ type: "item", itemIndex: 0 });
+  });
+
+  it("the padding band is FRAME: Core answers it before the slicer is asked", () => {
+    loadPadded();
+    const band = containerCtx(B.x + 6, B.y + 120);
+    expect(resolveFloatingZone(band)).toMatchObject({ kind: "frame", part: "container", cursor: "move" });
+    // And the slicer itself calls it plain body (never an item).
+    expect(getSlicerHitDetail(B.x + 6, B.y + 120, B, "s1")).toEqual({ type: "body" });
+    expect(getSlicerHitDetail(B.x + 90, B.y + B.height - 6, B, "s1")).toEqual({ type: "body" });
+  });
+
+  it("the clear button sits at the CONTENT's right edge", () => {
+    loadPadded({ selectedItems: ["North"] });
+    expect(getSlicerHitDetail(B.x + B.width - INSET - 8, B.y + INSET + 15, B, "s1")).toEqual({ type: "clearButton" });
+    // In the right padding beside it: the band.
+    expect(getSlicerHitDetail(B.x + B.width - 6, B.y + INSET + 15, B, "s1")).toEqual({ type: "body" });
   });
 });

@@ -7,10 +7,12 @@
 
 import { useCallback, useRef } from "react";
 import { writeText as tauriWriteText, readText as tauriReadText, writeHtml as tauriWriteHtml } from "@tauri-apps/plugin-clipboard-manager";
-import { useGridContext } from "../state/GridContext";
+import { useGridContext, getGridStateSnapshot } from "../state/GridContext";
 import {
   getCell,
   getViewportCells,
+  getAllComments,
+  getAllDataValidations,
   updateCell,
   updateCellsBatch,
   clearCell,
@@ -36,9 +38,14 @@ import {
 } from "../lib/undoTransactionOwnership";
 import { cellEvents } from "../lib/cellEvents";
 import { setClipboard, clearClipboard, setSelection } from "../state/gridActions";
-import type { Selection, CellData, ClipboardMode, Comment, DataValidation } from "../types";
+import type { Selection, CellData, ClipboardMode, Comment, DataValidation, ValidationRange } from "../types";
 import { checkRangeGuards } from "../lib/editGuards";
-import { captureClipboardCells, pasteRowDeltas } from "../lib/clipboardVisibility";
+import {
+  captureClipboardCells,
+  copyableSourceRows,
+  pasteRowDeltas,
+  MAX_CLIPBOARD_CELLS,
+} from "../lib/clipboardVisibility";
 // confirmAsync, never the plugin's raw `ask` (lint-banned outside
 // lib/dialogs.ts): `ask` THROWS when its dialog cannot be shown, and each
 // "replace the destination?" guard below then rejected unobserved instead of
@@ -344,6 +351,289 @@ async function writeToSystemClipboard(text: string, html: string): Promise<void>
 }
 
 /**
+ * Convert cell matrix to plain text (tab-separated values).
+ * For List/Dict cells, uses JSON representation instead of display text.
+ */
+function cellsToText(
+  cells: (CellData | null)[][],
+  collectionTexts?: Map<string, string>,
+): string {
+  return cells
+    .map((row, r) =>
+      row
+        .map((cell, c) => {
+          if (!cell) return "";
+          // Use JSON text for collection cells if available
+          const jsonText = collectionTexts?.get(`${r},${c}`);
+          if (jsonText) return jsonText;
+          // Use formula if present, otherwise display value
+          return cell.formula || cell.display || "";
+        })
+        .join("\t")
+    )
+    .join("\n");
+}
+
+// ============================================================================
+// copyCellRange -- the COPY primitive, outside React
+// ============================================================================
+//
+// The hook's Copy (Ctrl+C on the grid, Home > Copy, Edit > Copy) is a copy of
+// Core's selection. A floating object whose cells live in the active sheet's
+// grid -- a canvas pivot box, whose hidden grid holds the rendered pivot --
+// selects its OWN cells, which Core's selection never sees, and must still
+// copy them the way Copy copies cells: the same internal clipboard (so Paste,
+// Paste Special and Paste Link read it), the same system clipboard text and
+// HTML. One primitive, called by both; the hook adds what belongs to Core's
+// selection only (the marching ants, the cut source).
+
+/** What {@link copyCellRange} copies. Coordinates are absolute sheet cells of the ACTIVE sheet. */
+export interface CellRangeCopyRequest {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  /** Rows left out of a COPY (a filtered range's hidden rows; a pivot's zero-height rows). */
+  skipRows?: ReadonlySet<number>;
+  /**
+   * Read the rectangle in batched `getViewportCells` calls (<= 10,000 cells each)
+   * instead of one `getCell` IPC per cell (`captureClipboardCells` awaits one
+   * read per cell, in series). Comments and validations are then read with one
+   * call each for the whole sheet instead of one per cell. Core's own Copy keeps
+   * the per-cell read (unchanged behaviour); the pivot copy passes true.
+   */
+  batchRead?: boolean;
+  /** Cap on cells read; defaults to MAX_CLIPBOARD_CELLS (5,000,000). The pivot copy passes 200,000. */
+  maxCells?: number;
+}
+
+/** What {@link copyCellRange} did. A refusal never touches the clipboard that was there. */
+export type CellRangeCopyResult =
+  | { copied: true; rows: number; cols: number }
+  | { copied: false; reason: "empty" | "tooLarge" | "failed" };
+
+/** Largest rectangle one batched read asks the backend for. */
+const BATCH_READ_MAX_CELLS = 10_000;
+
+/**
+ * Read the copyable `rows` (ascending) of columns `minCol..maxCol` in
+ * rectangles of at most {@link BATCH_READ_MAX_CELLS} cells, into a map keyed
+ * "row,col". A rectangle spans the rows between two copyable rows too (a
+ * skipped row inside it costs a few cells, not an extra IPC), and ends where
+ * the next copyable row would push it over the budget. A cell the backend does
+ * not return is EMPTY (`get_viewport_cells` sends only cells with content or a
+ * style, which is when `get_cell` answers null).
+ */
+async function prefetchCells(
+  rows: readonly number[],
+  minCol: number,
+  maxCol: number,
+): Promise<Map<string, CellData>> {
+  const map = new Map<string, CellData>();
+  if (rows.length === 0) return map;
+  for (let bandStart = minCol; bandStart <= maxCol; bandStart += BATCH_READ_MAX_CELLS) {
+    const bandEnd = Math.min(maxCol, bandStart + BATCH_READ_MAX_CELLS - 1);
+    const bandWidth = bandEnd - bandStart + 1;
+    const rowsPerRead = Math.max(1, Math.floor(BATCH_READ_MAX_CELLS / bandWidth));
+    let i = 0;
+    while (i < rows.length) {
+      const first = rows[i];
+      let j = i;
+      while (j + 1 < rows.length && rows[j + 1] - first + 1 <= rowsPerRead) j++;
+      const last = rows[j];
+      const cells = await getViewportCells(first, bandStart, last, bandEnd);
+      for (const cell of cells) {
+        if (cell.row < first || cell.row > last || cell.col < bandStart || cell.col > bandEnd) continue;
+        map.set(`${cell.row},${cell.col}`, cell);
+      }
+      i = j + 1;
+    }
+  }
+  return map;
+}
+
+/**
+ * Comments of the captured cells from ONE read of the active sheet's comments
+ * (the batched twin of {@link fetchComments}). Keyed "row,col" relative to the
+ * matrix.
+ */
+async function fetchCommentsBatched(
+  cells: (CellData | null)[][],
+  sourceRows: number[],
+  minCol: number,
+): Promise<Map<string, Comment>> {
+  const result = new Map<string, Comment>();
+  const width = cells[0]?.length ?? 0;
+  if (cells.length === 0 || width === 0) return result;
+  let all: Comment[];
+  try {
+    all = await getAllComments();
+  } catch (err) {
+    console.warn("[Clipboard] Failed to read comments:", err);
+    return result;
+  }
+  const matrixRowOf = new Map<number, number>();
+  sourceRows.forEach((absRow, r) => matrixRowOf.set(absRow, r));
+  for (const comment of all) {
+    const r = matrixRowOf.get(comment.row);
+    const c = comment.col - minCol;
+    if (r === undefined || c < 0 || c >= width) continue;
+    result.set(`${r},${c}`, comment);
+  }
+  return result;
+}
+
+/**
+ * Validations of the captured cells from ONE read of the active sheet's
+ * validation ranges (the batched twin of {@link fetchValidations}). The FIRST
+ * range that contains a cell answers for it, as `get_data_validation` does.
+ */
+async function fetchValidationsBatched(
+  cells: (CellData | null)[][],
+  sourceRows: number[],
+  minCol: number,
+): Promise<Map<string, DataValidation>> {
+  const result = new Map<string, DataValidation>();
+  const width = cells[0]?.length ?? 0;
+  if (cells.length === 0 || width === 0) return result;
+  let ranges: ValidationRange[];
+  try {
+    ranges = await getAllDataValidations();
+  } catch (err) {
+    console.warn("[Clipboard] Failed to read data validations:", err);
+    return result;
+  }
+  if (ranges.length === 0) return result;
+  const maxCol = minCol + width - 1;
+  for (let r = 0; r < sourceRows.length; r++) {
+    const absRow = sourceRows[r];
+    const rowRanges = ranges.filter(
+      (vr) => absRow >= vr.startRow && absRow <= vr.endRow && vr.endCol >= minCol && vr.startCol <= maxCol,
+    );
+    if (rowRanges.length === 0) continue;
+    for (let c = 0; c < width; c++) {
+      const absCol = minCol + c;
+      const hit = rowRanges.find((vr) => absCol >= vr.startCol && absCol <= vr.endCol);
+      if (hit) result.set(`${r},${c}`, hit.validation);
+    }
+  }
+  return result;
+}
+
+/**
+ * Copy a range of the ACTIVE sheet to the internal + system clipboard. Never
+ * touches Core's selection or the marching ants (the hook's `copy` dispatches
+ * setClipboard itself after calling this).
+ *
+ * A refusal ("empty": every row skipped; "tooLarge": over the cap) leaves the
+ * clipboard as it was, and so does "failed" (a read threw): the caller tells
+ * the user -- nothing here is console-only for a caller that asks.
+ */
+export async function copyCellRange(range: CellRangeCopyRequest): Promise<CellRangeCopyResult> {
+  const snapshot = getGridStateSnapshot();
+  const sourceSheetIndex = snapshot?.sheetContext?.activeSheetIndex ?? 0;
+  const sourceSheetName = snapshot?.sheetContext?.activeSheetName ?? "";
+
+  const minRow = Math.min(range.startRow, range.endRow);
+  const maxRow = Math.max(range.startRow, range.endRow);
+  const minCol = Math.min(range.startCol, range.endCol);
+  const maxCol = Math.max(range.startCol, range.endCol);
+  const width = maxCol - minCol + 1;
+  const maxCells = range.maxCells ?? MAX_CLIPBOARD_CELLS;
+
+  try {
+    let readCell: (row: number, col: number) => Promise<CellData | null>;
+    if (range.batchRead) {
+      // The cap first -- the SAME count captureClipboardCells uses (copyable
+      // rows x width) -- so an oversized range costs no read at all.
+      const rows = copyableSourceRows(minRow, maxRow, range.skipRows, false);
+      if (rows.length * width > maxCells) {
+        console.warn(`[Clipboard] Range too large for clipboard (${rows.length * width} cells). Skipping.`);
+        return { copied: false, reason: "tooLarge" };
+      }
+      const prefetched = await prefetchCells(rows, minCol, maxCol);
+      readCell = async (r, c) => prefetched.get(`${r},${c}`) ?? null;
+    } else {
+      readCell = async (r, c) => (await getCell(r, c)) || null;
+    }
+
+    // COPY takes the rows not skipped: a range spanning filter-hidden rows
+    // copies just the displayed cells, which then slide together and paste
+    // as a contiguous rectangle (Excel's filtered-copy rule).
+    const capture = await captureClipboardCells<CellData>({
+      minRow,
+      maxRow,
+      minCol,
+      maxCol,
+      filterHiddenRows: range.skipRows,
+      includeFilterHidden: false,
+      readCell,
+      maxCells,
+    });
+
+    if (capture.tooLarge) {
+      // Guard against unreasonably large ranges (e.g. select-all on 1M x 16K grid)
+      console.warn(
+        `[Clipboard] Range too large for clipboard ` +
+        `(${(maxRow - minRow + 1) * width} cells). Skipping.`
+      );
+      return { copied: false, reason: "tooLarge" };
+    }
+
+    const { cells, sourceRows } = capture;
+    if (cells.length === 0) {
+      // Nothing capturable (every row skipped). Leave the previous clipboard
+      // alone rather than replacing it with an empty payload that pastes
+      // nothing.
+      console.warn("[Clipboard] Nothing to copy in this selection");
+      return { copied: false, reason: "empty" };
+    }
+
+    // Detect collection cells and fetch their JSON representations
+    const collectionTexts = await fetchCollectionTexts(cells, sourceRows, minCol);
+
+    // Fetch comments and validations for paste special support
+    const comments = range.batchRead
+      ? await fetchCommentsBatched(cells, sourceRows, minCol)
+      : await fetchComments(cells, sourceRows, minCol);
+    const validations = range.batchRead
+      ? await fetchValidationsBatched(cells, sourceRows, minCol)
+      : await fetchValidations(cells, sourceRows, minCol);
+
+    const text = cellsToText(cells, collectionTexts);
+
+    // Store in internal clipboard
+    internalClipboard = {
+      sourceSelection: {
+        startRow: range.startRow,
+        startCol: range.startCol,
+        endRow: range.endRow,
+        endCol: range.endCol,
+        type: "cells",
+      },
+      cells,
+      sourceRows,
+      isCut: false,
+      sourceSheetIndex,
+      sourceSheetName,
+      text,
+      collectionTexts: collectionTexts.size > 0 ? collectionTexts : undefined,
+      comments: comments.size > 0 ? comments : undefined,
+      validations: validations.size > 0 ? validations : undefined,
+    };
+
+    // Write to system clipboard (HTML for Excel, plain text for Notepad)
+    const html = cellsToHtml(cells);
+    await writeToSystemClipboard(text, html);
+
+    return { copied: true, rows: cells.length, cols: width };
+  } catch (error) {
+    console.error("[Clipboard] Copy failed:", error);
+    return { copied: false, reason: "failed" };
+  }
+}
+
+/**
  * Hook for clipboard operations.
  */
 export function useClipboard(): UseClipboardReturn {
@@ -360,8 +650,9 @@ export function useClipboard(): UseClipboardReturn {
   /**
    * Get cell data for a range, applying Excel's hidden-row rule.
    *
-   * @param includeFilterHidden true for CUT (whole rectangle), false for COPY
-   *        (filter-hidden rows are left behind and the block collapses).
+   * @param includeFilterHidden true for CUT (whole rectangle), false for a
+   *        COPY (filter-hidden rows are left behind and the block collapses).
+   *        Copy itself goes through {@link copyCellRange}; Cut reads here.
    */
   const getCellRange = useCallback(
     async (
@@ -397,31 +688,11 @@ export function useClipboard(): UseClipboardReturn {
   );
 
   /**
-   * Convert cell matrix to plain text (tab-separated values).
-   * For List/Dict cells, uses JSON representation instead of display text.
-   */
-  const cellsToText = useCallback((
-    cells: (CellData | null)[][],
-    collectionTexts?: Map<string, string>,
-  ): string => {
-    return cells
-      .map((row, r) =>
-        row
-          .map((cell, c) => {
-            if (!cell) return "";
-            // Use JSON text for collection cells if available
-            const jsonText = collectionTexts?.get(`${r},${c}`);
-            if (jsonText) return jsonText;
-            // Use formula if present, otherwise display value
-            return cell.formula || cell.display || "";
-          })
-          .join("\t")
-      )
-      .join("\n");
-  }, []);
-
-  /**
    * Copy selected cells to clipboard.
+   *
+   * The copy itself is {@link copyCellRange} (shared with an object's inner
+   * cell selection); what is Core's selection's own stays here: the marching
+   * ants and forgetting a pending cut.
    */
   const copy = useCallback(async () => {
     if (!selection) {
@@ -431,56 +702,25 @@ export function useClipboard(): UseClipboardReturn {
 
     console.log("[Clipboard] Copying selection:", selection);
 
-    try {
-      // COPY takes VISIBLE rows only: a range spanning filter-hidden rows
-      // copies just the displayed cells, which then slide together and paste
-      // as a contiguous rectangle (Excel's filtered-copy rule).
-      const { cells, sourceRows, minCol } = await getCellRange(selection, false);
+    // COPY takes VISIBLE rows only: the FILTER-hidden rows are skipped (Excel's
+    // filtered-copy rule); hand hides and outline collapses are copied.
+    const result = await copyCellRange({
+      startRow: selection.startRow,
+      startCol: selection.startCol,
+      endRow: selection.endRow,
+      endCol: selection.endCol,
+      skipRows: filterHiddenRows,
+    });
+    // Refused or failed: copyCellRange said why on the console and left the
+    // previous clipboard (and its marching ants) as they were.
+    if (!result.copied) return;
 
-      if (cells.length === 0) {
-        // Nothing capturable (every row filtered away, or the range was
-        // refused as too large). Leave the previous clipboard alone rather
-        // than replacing it with an empty payload that pastes nothing.
-        console.warn("[Clipboard] Nothing to copy in this selection");
-        return;
-      }
+    // Update state for visual feedback (marching ants border)
+    dispatch(setClipboard("copy", { ...selection }, sheetContext.activeSheetIndex));
 
-      // Detect collection cells and fetch their JSON representations
-      const collectionTexts = await fetchCollectionTexts(cells, sourceRows, minCol);
-
-      // Fetch comments and validations for paste special support
-      const comments = await fetchComments(cells, sourceRows, minCol);
-      const validations = await fetchValidations(cells, sourceRows, minCol);
-
-      const text = cellsToText(cells, collectionTexts);
-
-      // Store in internal clipboard
-      internalClipboard = {
-        sourceSelection: { ...selection },
-        cells,
-        sourceRows,
-        isCut: false,
-        sourceSheetIndex: sheetContext.activeSheetIndex,
-        sourceSheetName: sheetContext.activeSheetName,
-        text,
-        collectionTexts: collectionTexts.size > 0 ? collectionTexts : undefined,
-        comments: comments.size > 0 ? comments : undefined,
-        validations: validations.size > 0 ? validations : undefined,
-      };
-
-      // Update state for visual feedback (marching ants border)
-      dispatch(setClipboard("copy", { ...selection }, sheetContext.activeSheetIndex));
-
-      // Write to system clipboard (HTML for Excel, plain text for Notepad)
-      const html = cellsToHtml(cells);
-      await writeToSystemClipboard(text, html);
-
-      // Clear any previous cut source
-      cutSourceRef.current = null;
-    } catch (error) {
-      console.error("[Clipboard] Copy failed:", error);
-    }
-  }, [selection, getCellRange, cellsToText, dispatch, sheetContext.activeSheetIndex, sheetContext.activeSheetName]);
+    // Clear any previous cut source
+    cutSourceRef.current = null;
+  }, [selection, filterHiddenRows, dispatch, sheetContext.activeSheetIndex]);
 
   /**
    * Cut selected cells to clipboard.
@@ -541,7 +781,7 @@ export function useClipboard(): UseClipboardReturn {
     } catch (error) {
       console.error("[Clipboard] Cut failed:", error);
     }
-  }, [selection, getCellRange, cellsToText, dispatch, sheetContext.activeSheetIndex, sheetContext.activeSheetName]);
+  }, [selection, getCellRange, dispatch, sheetContext.activeSheetIndex, sheetContext.activeSheetName]);
 
   /**
    * Paste clipboard contents to current selection.

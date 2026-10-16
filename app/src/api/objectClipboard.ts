@@ -41,6 +41,7 @@ import type { CanvasObjectRef } from "./lib";
 import {
   getObjectSelectionProvider,
   getSelectedObjectRegions,
+  innerSelectionClipboardCommand,
   objectLabelOf,
   objectOwnsKey,
   objectRefOf,
@@ -225,6 +226,12 @@ export function objectClipboardHasClipboardKeys(): boolean {
 /**
  * The command a Copy / Paste DOOR (a menu item, a ribbon button) runs right
  * now -- the command the KEY (Ctrl+C / Ctrl+V) runs in the same place:
+ *   - an INNER selection's own command, when a family whose inner selection
+ *     owns the clipboard keys names one (`innerClipboardCommand`,
+ *     @api/objectSelection: a canvas pivot box's selected cells copy THOSE
+ *     cells) and that command is registered; a family that owns the keys
+ *     without naming a command (a floating grid's cell) falls through to the
+ *     cell command below, as before;
  *   - on a CANVAS, the canvas's object-clipboard command, while the object
  *     clipboard holds the clipboard keys and that command is registered;
  *   - on a WORKSHEET with a floating control selected, Controls' own Copy of
@@ -237,6 +244,8 @@ export function objectClipboardHasClipboardKeys(): boolean {
  * SUBSCRIBED canvas, the publisher's page) and its own way of copying.
  */
 export function clipboardDoorCommand(action: "copy" | "paste"): string {
+  const inner = innerSelectionClipboardCommand(action);
+  if (inner && CommandRegistry.has(inner)) return inner;
   const objectCommand = action === "copy" ? OBJECT_COPY_COMMAND : OBJECT_PASTE_COMMAND;
   if (objectClipboardHasClipboardKeys() && CommandRegistry.has(objectCommand)) return objectCommand;
   if (worksheetControlHasClipboardKeys()) {

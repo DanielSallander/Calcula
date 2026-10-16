@@ -16,12 +16,19 @@ interface DesignQueryEditorProps {
   onChange: (value: string) => void;
   /** The BI connection whose model drives autocomplete (may be empty). */
   connectionId: string;
+  /**
+   * Size the editor to the query between two bounds (the object pane's Design
+   * tab: a narrow pane where a fixed 220px box is mostly void). Omitted, the
+   * editor keeps its fixed 220px (the chart dialog).
+   */
+  autoHeight?: { min: number; max: number };
 }
 
 export function DesignQueryEditor({
   value,
   onChange,
   connectionId,
+  autoHeight,
 }: DesignQueryEditorProps): React.ReactElement {
   const [biModel, setBiModel] = useState<BiPivotModelInfo | null>(null);
   // Charts support @param binding like reports — offer the same @-completion.
@@ -53,6 +60,7 @@ export function DesignQueryEditor({
       biModel={biModel}
       controlHints={controlHints}
       height="220px"
+      autoHeight={autoHeight}
       assist={{ connectionId, dryRun: dryRunDesignQuery }}
     />
   );

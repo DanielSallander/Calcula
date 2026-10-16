@@ -18,7 +18,15 @@
 //            3. every FLOATING family -- found by what it publishes (a
 //               `floating: {` box), so a new one cannot slip past -- registers
 //               `zoneAt` and no cell or pointer callback beside it;
-//            4. the cell-anchored users are exactly the three that need it.
+//            4. the cell-anchored users are exactly the three that need it;
+//            5. a reference pick (D-PICK) is answered by `referenceAt` --
+//               exactly the floating grid and the canvas pivot register it,
+//               and each beside `zoneAt` in the same registration (the
+//               families with cells a formula can name; every other object is
+//               inert during a pick by NOT registering it);
+//            6. every floating family publishes `container` (its visual
+//               container, WP-C D-FORMAT) on the same region literal as its
+//               `floating` box -- a family without one cannot be formatted.
 // CONTEXT: The type-level half (the fields are gone from OverlayRegistration)
 //          is gridOverlays-interactions.test.ts's @ts-expect-error pin.
 
@@ -65,7 +73,11 @@ const CODE = new Map(FILES.map((f) => [f, TEXT.get(f)!.replace(/\/\/.*$/gm, "")]
  * matching `}`), in comment-stripped code; null when `needle` is absent.
  */
 function enclosingObject(code: string, needle: string): string | null {
-  const at = code.indexOf(needle);
+  return enclosingObjectAt(code, code.indexOf(needle));
+}
+
+/** The object literal enclosing offset `at` of `code`; null when `at` < 0 or unbalanced. */
+function enclosingObjectAt(code: string, at: number): string | null {
   if (at < 0) return null;
   let depth = 0;
   let open = -1;
@@ -173,4 +185,102 @@ describe("every FLOATING family answers `zoneAt`, and nothing beside it", () => 
       expect(block!).not.toContain(DELETED_CLAIM);
     });
   }
+});
+
+/**
+ * The text of an object literal at its OWN depth only (nested `{...}` bodies
+ * dropped), so a key found in it is a key of that object and not of a child.
+ */
+function topLevelText(obj: string): string {
+  let depth = 0;
+  let out = "";
+  for (const ch of obj) {
+    if (ch === "{") {
+      depth++;
+      if (depth === 1) out += ch;
+      continue;
+    }
+    if (ch === "}") {
+      if (depth === 1) out += ch;
+      depth--;
+      continue;
+    }
+    if (depth === 1) out += ch;
+  }
+  return out;
+}
+
+/** Whether a region literal carries a top-level `container` key (written out or shorthand). */
+function publishesContainer(region: string): boolean {
+  return /(^|[{,\s])container\s*(:|,|\}|$)/m.test(topLevelText(region));
+}
+
+describe("every FLOATING family publishes its visual container beside its box (WP-C D-FORMAT)", () => {
+  // A family that publishes `floating` without `container` cannot be
+  // formatted: Core paints no background, border, shadow or title for it, its
+  // padding never insets the content, and the object pane's Format tab shows
+  // values the object never paints. One answer per box: the container rides
+  // on the SAME region literal as the box it decorates.
+  for (const fam of FLOATING_FAMILIES) {
+    it(`${fam.store}: every \`floating: {\` region literal also carries \`container\``, () => {
+      const code = CODE.get(join(APP, fam.store));
+      expect(code, `${fam.store} is gone`).toBeDefined();
+      const offsets = [...code!.matchAll(/\bfloating:\s*\{/g)].map((m) => m.index!);
+      expect(offsets.length, `${fam.store} publishes no floating box`).toBeGreaterThan(0);
+      for (const at of offsets) {
+        const region = enclosingObjectAt(code!, at);
+        expect(region, `unbalanced object around floating in ${fam.store}`).not.toBeNull();
+        expect(publishesContainer(region!), `${fam.store}: a region publishes floating without container`).toBe(true);
+      }
+    });
+  }
+
+  it("teeth: a nested `container` or a comment does not count; a shorthand or written key does", () => {
+    expect(publishesContainer('{ id: "a", floating: { x: 1 }, data: { container: 1 } }')).toBe(false);
+    expect(publishesContainer('{ id: "a", floating: { x: 1 } }')).toBe(false);
+    expect(publishesContainer('{ id: "a", floating: { x: 1 }, container }')).toBe(true);
+    expect(publishesContainer('{ id: "a", floating: { x: 1 },\n  container,\n}')).toBe(true);
+    expect(publishesContainer('{ id: "a", floating: { x: 1 }, container: c(id) }')).toBe(true);
+    expect(publishesContainer('{ id: "a", floating: { x: 1 }, containerX: 1 }')).toBe(false);
+  });
+});
+
+describe("referenceAt: exactly the families whose cells a formula can name, each beside zoneAt", () => {
+  /**
+   * Comment-stripped code: line comments (CODE) and the lines of block / doc
+   * comments, so a doc comment that names `referenceAt: frReferenceAt` is not
+   * counted as a registration.
+   */
+  const codeOnly = (f: string): string => CODE.get(f)!.replace(/^\s*(\/\*|\*).*$/gm, "");
+  const REFERENCE_AT = /\breferenceAt\s*:/g;
+  const REGISTERING = ["extensions/FloatingRange/index.ts", "extensions/Pivot/lib/pivotVisualOverlay.ts"];
+
+  it("exactly FloatingRange and the canvas pivot register `referenceAt` (charts, slicers, timelines, controls stay inert)", () => {
+    const users = FILES.filter((f) => /\breferenceAt\s*:/.test(codeOnly(f))).map(rel).sort();
+    // A family that wants picks adds itself here, on purpose; a family that
+    // registers one by accident (a chart naming a cell) fails here.
+    expect(users).toEqual(REGISTERING);
+  });
+
+  for (const file of REGISTERING) {
+    it(`${file}: every \`referenceAt\` sits in a registration that also answers \`zoneAt\` (one answer per question)`, () => {
+      const code = codeOnly(join(APP, file));
+      const offsets = [...code.matchAll(REFERENCE_AT)].map((m) => m.index!);
+      expect(offsets.length, `${file} registers no referenceAt`).toBeGreaterThan(0);
+      for (const at of offsets) {
+        const block = enclosingObjectAt(code, at);
+        expect(block, `unbalanced object around referenceAt in ${file}`).not.toBeNull();
+        expect(block!).toMatch(/\brender\s*:/); // it IS the overlay registration
+        expect(block!).toMatch(/\bzoneAt\s*:/);
+        expect(block!).toMatch(/\btype\s*:/);
+      }
+    });
+  }
+
+  it("the canvas pivot's registration names its own pure answer (`pivotVisualReferenceAt`)", () => {
+    const code = codeOnly(join(APP, "extensions/Pivot/lib/pivotVisualOverlay.ts"));
+    const block = enclosingObject(code, "type: PIVOT_VISUAL_REGION_TYPE");
+    expect(block).not.toBeNull();
+    expect(block!).toMatch(/\breferenceAt:\s*pivotVisualReferenceAt\b/);
+  });
 });

@@ -521,6 +521,18 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
         implemented_by: "prune_scripts_for_instance",
         note: "C10.",
     },
+    DependencyRule {
+        owner: ObjectKind::Pivot,
+        dependent: "objectBinding.object",
+        dependent_kind: None,
+        policy: DeletePolicy::Cascade,
+        implemented_by: "drop_bindings_for_objects",
+        note: "WP-D: a binding row names its object by id; it goes with the \
+                pivot (and with the slicers and timelines the delete takes) \
+                in the same undo step, which brings both back. dependent_kind \
+                is None: a binding paints nothing, and its store announces \
+                itself (object-bindings:changed).",
+    },
     // -----------------------------------------------------------------------
     // CHART
     // -----------------------------------------------------------------------
@@ -550,6 +562,17 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
         note: "The edge runs the other way — a chart READS cells. Nothing in \
                 the grid reads a chart.",
     },
+    DependencyRule {
+        owner: ObjectKind::Chart,
+        dependent: "objectBinding.object",
+        dependent_kind: None,
+        policy: DeletePolicy::Cascade,
+        implemented_by: "drop_bindings_for_objects",
+        note: "WP-D: the chart's property bindings go with it, in its one \
+                Delete chart step, recorded first so they restore after the \
+                chart is back. Both delete paths (the command and the AI's \
+                delete_chart_core) run it.",
+    },
     // -----------------------------------------------------------------------
     // SLICER
     // -----------------------------------------------------------------------
@@ -572,6 +595,15 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     },
     DependencyRule {
         owner: ObjectKind::Slicer,
+        dependent: "objectBinding.object",
+        dependent_kind: None,
+        policy: DeletePolicy::Cascade,
+        implemented_by: "drop_bindings_for_objects",
+        note: "WP-D: the slicer's property bindings (its header text, ...) go \
+                with it, in the same Delete slicer step.",
+    },
+    DependencyRule {
+        owner: ObjectKind::Slicer,
         dependent: "objectScript.instanceId",
         dependent_kind: Some(ObjectKind::ObjectScript),
         policy: DeletePolicy::Cascade,
@@ -588,6 +620,15 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
         policy: DeletePolicy::Cascade,
         implemented_by: "prune_scripts_for_instance",
         note: "C10. Nothing else points at a timeline.",
+    },
+    DependencyRule {
+        owner: ObjectKind::TimelineSlicer,
+        dependent: "objectBinding.object",
+        dependent_kind: None,
+        policy: DeletePolicy::Cascade,
+        implemented_by: "drop_bindings_for_objects",
+        note: "WP-D: the timeline's property bindings go with it, in the same \
+                Delete timeline slicer step.",
     },
     // -----------------------------------------------------------------------
     // RIBBON FILTER
@@ -652,6 +693,18 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
         note: "Named on-grid controls are in the GET.CONTROLVALUE snapshot \
                 too.",
     },
+    DependencyRule {
+        owner: ObjectKind::FloatingControl,
+        dependent: "objectBinding.object",
+        dependent_kind: None,
+        policy: DeletePolicy::Cascade,
+        implemented_by: "drop_bindings_for_objects",
+        note: "WP-D: keyed by the control's uid, never its anchor, so a binding \
+                is never inherited by the next control made at that cell. The \
+                controls restore and the bindings restore go to ONE recorder \
+                call: the controls recorder opens its own step when none is \
+                open, and a second record would be a second Ctrl+Z.",
+    },
     // -----------------------------------------------------------------------
     // NAMED RANGE
     // -----------------------------------------------------------------------
@@ -663,6 +716,18 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
         implemented_by: "recalc_after_name_change",
         note: "EXCEL'S BEHAVIOUR, DELIBERATELY: the formula keeps saying RATE \
                 and shows #NAME?. Not rewritten, not blanked.",
+    },
+    DependencyRule {
+        owner: ObjectKind::NamedRange,
+        dependent: "objectBinding.formula (NAME)",
+        dependent_kind: None,
+        policy: DeletePolicy::Recalculate,
+        implemented_by: "frontend:objectBindings.reevaluateAfterNameChange",
+        note: "WP-D: the same rule as formula.NamedRef -- a bound property's \
+                formula keeps saying RATE and its value becomes #NAME?. The \
+                seam's NAMED_RANGES_CHANGED handler re-evaluates every binding \
+                (a name change re-points dependency boxes without a store \
+                write).",
     },
     DependencyRule {
         owner: ObjectKind::NamedRange,
@@ -742,6 +807,15 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
                 through the identical delete_sheet_impl walk.",
     },
     DependencyRule {
+        owner: ObjectKind::FloatingRange,
+        dependent: "objectBinding.object",
+        dependent_kind: None,
+        policy: DeletePolicy::Cascade,
+        implemented_by: "drop_bindings_for_objects",
+        note: "WP-D: the floating range's property bindings go with its row. \
+                No restore: its backing sheet's delete ended the undo history.",
+    },
+    DependencyRule {
         owner: ObjectKind::Sheet,
         dependent: "chart.sheetIndex",
         dependent_kind: Some(ObjectKind::Chart),
@@ -795,6 +869,31 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
         implemented_by: "remap_report_sheets",
         note: "Otherwise the next refresh materializes a deleted-sheet report \
                 onto whichever sheet inherited its index.",
+    },
+    DependencyRule {
+        owner: ObjectKind::Sheet,
+        dependent: "objectBinding.object (the canvas page and every object on the sheet)",
+        dependent_kind: None,
+        policy: DeletePolicy::Cascade,
+        implemented_by: "drop_bindings_for_objects",
+        note: "WP-D: every bound object that stopped existing -- the page, its \
+                charts, controls, slicers, timelines, pivots, floating ranges \
+                and the slicers its tables took -- loses its bindings after the \
+                other cascades ran. No restore: a sheet delete ends the undo \
+                history.",
+    },
+    DependencyRule {
+        owner: ObjectKind::Sheet,
+        dependent: "objectBinding.formula (Sheet!A1)",
+        dependent_kind: None,
+        policy: DeletePolicy::Repair,
+        implemented_by: "delete_rule_references",
+        note: "WP-D: a binding of a SURVIVING object that reads the deleted \
+                sheet becomes #REF! (a 3D endpoint moves inward), the rule \
+                every cell formula and rule formula follows. Reached through \
+                delete_rule_references -> rewrite_rule_formulas -> \
+                rewrite_binding_formulas, proved by \
+                deleting_a_sheet_turns_binding_refs_into_ref_errors.",
     },
     // -----------------------------------------------------------------------
     // REPORT
@@ -995,6 +1094,16 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
                 list_object_dependents(biConnection, id) feeds the confirm, the \
                 same standard list_controls_referencing_macro set for macros.",
     },
+    DependencyRule {
+        owner: ObjectKind::BiConnection,
+        dependent: "objectBinding.model",
+        dependent_kind: None,
+        policy: DeletePolicy::WarnAndKeep,
+        implemented_by: "",
+        note: "WP-D: a binding reading [Measure] shows '(model not connected)'; \
+                the binding is kept, like a pivot's, and follows again once a \
+                connection with that model key exists.",
+    },
 ];
 
 /// Look up every declared rule for one owner.
@@ -1155,6 +1264,13 @@ pub struct SourceCascade {
     pub deleted_timelines: Vec<TimelineSlicer>,
     pub rebound_timelines: Vec<TimelineSlicer>,
     pub rebound_filters: Vec<RibbonFilter>,
+    /// The `obj_bindings` restore bytes (`undo_commands::bindings_restore_bytes`)
+    /// for the object property BINDINGS this cascade dropped -- those of the
+    /// removed PIVOTS and of the slicers and timelines it deleted -- or `None`
+    /// when none of them was bound. Recorded FIRST by
+    /// [`record_source_cascade_undo_into`], so the reverse replay restores them
+    /// LAST, after every object is back.
+    pub bindings_restore: Option<Vec<u8>>,
 }
 
 impl SourceCascade {
@@ -1164,6 +1280,7 @@ impl SourceCascade {
             && self.deleted_timelines.is_empty()
             && self.rebound_timelines.is_empty()
             && self.rebound_filters.is_empty()
+            && self.bindings_restore.is_none()
     }
 
     /// One log line naming what the cascade did, by object NAME — the same
@@ -1396,6 +1513,40 @@ pub fn cascade_deleted_sources(
                 effect,
                 &tl.id.to_string(),
             );
+        }
+    }
+
+    // --- THEIR OBJECT PROPERTY BINDINGS (WP-D, D §3.12) ---------------------
+    //
+    // The same rule, for bindings: every object this cascade destroys -- the
+    // removed PIVOTS themselves and the slicers and timelines deleted above --
+    // takes its binding rows with it. `delete_pivot_table` did this on its own
+    // and every OTHER door that ends here (Delete Table, Convert to Range, a row
+    // or column delete that swallows a pivot) did not: a bound slicer header
+    // outlived its slicer, listed as "(no longer in this workbook)" in Bound
+    // Properties, and made an .xlsx save warn about bindings whose objects were
+    // all gone. Done HERE, once, so no caller can forget it. The restore bytes
+    // ride the cascade into `record_source_cascade_undo_into`. Every object
+    // store guard above is released; the binding store is a leaf.
+    {
+        use crate::api_types::{ObjectBindingKind, ObjectBindingRef};
+        let mut objects: Vec<ObjectBindingRef> = dead_pivots
+            .iter()
+            .map(|id| ObjectBindingRef { kind: ObjectBindingKind::Pivot, id: id.to_string() })
+            .collect();
+        objects.extend(
+            out.deleted_slicers
+                .iter()
+                .map(|s| ObjectBindingRef { kind: ObjectBindingKind::Slicer, id: s.id.to_string() }),
+        );
+        objects.extend(
+            out.deleted_timelines
+                .iter()
+                .map(|t| ObjectBindingRef { kind: ObjectBindingKind::TimelineSlicer, id: t.id.to_string() }),
+        );
+        objects.sort();
+        if let Some(previous) = crate::object_bindings::cascade::drop_bindings_for_objects(state, effect, &objects) {
+            out.bindings_restore = Some(crate::undo_commands::bindings_restore_bytes(state, &previous));
         }
     }
 
@@ -1875,6 +2026,16 @@ pub fn record_source_cascade_undo_into(
 ) {
     if cascade.is_empty() {
         return;
+    }
+    // The dropped BINDINGS first of all: entries replay in REVERSE, so they
+    // come back LAST -- after the pivot, the slicers and the timelines they
+    // name exist again.
+    if let Some(bytes) = &cascade.bindings_restore {
+        undo_stack.record_custom_restore(
+            crate::undo_commands::BINDINGS_RESTORE_KIND.to_string(),
+            bytes.clone(),
+            "Restore property bindings",
+        );
     }
     for slicer in &cascade.deleted_slicers {
         let data = serde_json::to_vec(&SlicerSnapshotOut {

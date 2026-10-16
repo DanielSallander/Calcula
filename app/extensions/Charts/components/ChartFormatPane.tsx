@@ -1,9 +1,27 @@
 //! FILENAME: app/extensions/Charts/components/ChartFormatPane.tsx
-// PURPOSE: The ONE Format task pane for charts — Excel's retargeting "Format
-//          <element>" pane. It does not close and reopen as the selection
-//          moves; it RE-TARGETS in place, and every control applies
-//          immediately.
+// PURPOSE: The chart's "Chart elements" card — Excel's retargeting "Format
+//          <element>" body, shown on the Format tab of the ONE object pane
+//          (WP-C D-PANE: `ChartElementFormatCard`, contributed through the
+//          chart's @api/objectFormat provider as a Visual card). It does not
+//          close and reopen as the selection moves; it RE-TARGETS in place,
+//          and every control applies immediately.
 // CONTEXT:
+//          THE PANE IT USED TO BE. This was its own task pane ("chart-format").
+//          That pane id is retired: the object pane hosts this body, and every
+//          door that opened the old pane (Ctrl+1 on a chart, the chart
+//          double-click, "Format <element>...", the Format Axis / Format Data
+//          Point redirectors) opens the object pane on Format instead
+//          (lib/chartObjectPane.ts `openChartFormatPane`). The test ids
+//          `chart-format-pane` and `chart-format-subject` are kept on the card.
+//
+//          ONE UNDO STEP PER EDIT. Every write here goes through
+//          `applySpecPatch`, which lands the store's debounced save INSIDE one
+//          `runInUndoTransaction` -- a debounced `update_chart` that landed
+//          after the gesture would be a separate, unlabelled undo step (review
+//          R1-4 / R2-7). The chart area's Background writes the visual
+//          container (`commitObjectFormat`, background.color): the outer
+//          background moved there from `theme.background` (D-FORMAT).
+//
 //          SPLIT OF AUTHORITY — decided here, once, so this pane and the
 //          contextual ribbon Design panel cannot become two sources of truth:
 //
@@ -46,16 +64,17 @@
 //          starts with `getChartById(chartId)`, and no control writes back a
 //          collection it was rendered from.
 //
-//          THERE ARE NO DEAD TABS. Excel shows Effects and Size & Properties
-//          for most elements; Calcula's chart spec records neither shadow/glow
-//          nor per-element geometry, so those tabs would be empty for every
-//          element — the exact dead-member defect CI-7 removed from the hit
-//          taxonomy. They arrive with the spec fields, not before.
+//          THERE ARE NO DEAD TABS. Effects (background, border, shadow) and
+//          Size & Properties exist now -- for the WHOLE chart, in the object
+//          pane's General cards (Properties, Title, Effects), which the visual
+//          container drives. Per-ELEMENT effects (a shadow on one bar) are
+//          still not in the spec, so this card offers no Effects tab of its
+//          own: it would be empty for every element -- the exact dead-member
+//          defect CI-7 removed from the hit taxonomy.
 
 import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { css } from "@emotion/css";
 import { AppEvents, emitAppEvent, onAppEvent } from "@api/events";
-import type { TaskPaneViewProps } from "@api/uiTypes";
 import { DialogSection } from "@api/dialogLayout";
 import {
   getChartSelection,
@@ -88,6 +107,7 @@ import {
   markReadsSeriesColor,
 } from "../lib/chartDataReader";
 import {
+  flushPendingChartSaves,
   getChartById,
   getPreviewBaseSpec,
   previewChartSpec,
@@ -95,6 +115,15 @@ import {
   syncChartRegions,
   updateChartSpec,
 } from "../lib/chartStore";
+import { runInUndoTransaction } from "@api/objectGeometry";
+import {
+  commitObjectFormat,
+  endObjectFormatPreview,
+  previewObjectFormat,
+  type FormatCardProps,
+} from "@api/objectFormat";
+import { chartRegionOf } from "../lib/chartObjectPane";
+import { chartIdOfFormatRegion } from "../lib/chartObjectFormat";
 import { getCachedChartData, invalidateChartCache } from "../rendering/chartRenderer";
 import {
   markOffersPerPointFormatting,
@@ -121,9 +150,6 @@ import { getErrorBarOptions, withErrorBarOptions } from "../rendering/errorBarPa
 import { getCurrentChartId, getSubSelection, setSubSelection } from "../handlers/selectionHandler";
 import { ChartEvents } from "../lib/chartEvents";
 import { resolveChartTheme } from "../rendering/chartTheme";
-
-/** Task-pane view id. Also the id the retired modal dialogs redirect to. */
-export const CHART_FORMAT_PANE_ID = "chart-format";
 
 // ============================================================================
 // Publishing the selection into @api/chartSelection
@@ -352,6 +378,20 @@ function announceChartEdit(chartId: string): void {
   emitAppEvent(AppEvents.GRID_REFRESH);
 }
 
+/** The undo step an element-card edit records. */
+export const CHART_ELEMENT_FORMAT_UNDO_LABEL = "Format Chart";
+
+/**
+ * The persist of the last `applySpecPatch` (its one undo transaction), for a
+ * caller -- or a test -- that must know it LANDED. Never rejects.
+ */
+let lastElementCommit: Promise<void> = Promise.resolve();
+
+/** Settles when the last element-card edit's persist has landed (never rejects). */
+export function elementFormatCommitSettled(): Promise<void> {
+  return lastElementCommit;
+}
+
 /**
  * Apply a patch computed from the CURRENT stored spec.
  *
@@ -363,10 +403,18 @@ function announceChartEdit(chartId: string): void {
  * than at each control: this is the one commit funnel in the file, so every
  * control gets the guarantee that its patch is built from the STORED spec and
  * not from whatever the pointer is hovering over.
+ *
+ * ONE UNDO STEP. The store change is synchronous (the card re-renders at
+ * once); its persist is the store's DEBOUNCED save, which is landed here
+ * inside ONE `runInUndoTransaction(label)` -- `flushPendingChartSaves` awaited
+ * before the transaction closes, so the `update_chart` write and its undo
+ * record are one labelled Ctrl+Z (review R1-4 / R2-7, the `chartGeometry.ts`
+ * precedent).
  */
 export function applySpecPatch(
   chartId: string,
   build: (spec: ChartSpec) => Partial<ChartSpec> | null,
+  label: string = CHART_ELEMENT_FORMAT_UNDO_LABEL,
 ): void {
   endChartSpecPreview();
   const chart = getChartById(chartId);
@@ -375,6 +423,9 @@ export function applySpecPatch(
   if (patch === null) return;
   updateChartSpec(chartId, patch);
   announceChartEdit(chartId);
+  lastElementCommit = runInUndoTransaction(label, () => flushPendingChartSaves()).catch((err) => {
+    console.error(`[Charts] "${label}" could not be recorded as one step:`, err);
+  });
 }
 
 // ============================================================================
@@ -1108,12 +1159,15 @@ function ColorField({
   onChange,
   onClear,
   onPreview,
+  onEndPreview = endChartSpecPreview,
 }: {
   label: string;
   value: string | undefined;
   fallback: string;
   onChange: (hex: string) => void;
   onClear?: () => void;
+  /** Ends what `onPreview` shows. Default: the card's own spec preview. */
+  onEndPreview?: () => void;
   /**
    * Show `hex` on the chart without committing it. Given, the field grows a
    * swatch strip whose hover previews and whose click commits; omitted, the
@@ -1145,7 +1199,7 @@ function ColorField({
         <div
           className={s.swatches}
           data-chart-swatches={label}
-          onMouseLeave={endChartSpecPreview}
+          onMouseLeave={onEndPreview}
         >
           {PREVIEW_SWATCHES.map((hex) => (
             <button
@@ -1158,8 +1212,8 @@ function ColorField({
               data-chart-swatch={hex}
               onMouseEnter={() => onPreview(hex)}
               onFocus={() => onPreview(hex)}
-              onMouseLeave={endChartSpecPreview}
-              onBlur={endChartSpecPreview}
+              onMouseLeave={onEndPreview}
+              onBlur={onEndPreview}
               onClick={() => onChange(hex)}
             />
           ))}
@@ -2015,15 +2069,27 @@ function ChartAreaSections({
     );
   }
 
+  // THE CHART AREA'S BACKGROUND IS THE VISUAL CONTAINER'S (D-FORMAT): the same
+  // fact the Format tab's Effects card edits, written through the same seam --
+  // one spelling, one undo label, whichever control the reader used.
+  const region = chartRegionOf(chartId);
+  const stored = chart?.spec.container?.background?.color;
   return (
     <DialogSection title="Chart area fill">
       <ColorField
         label="Background"
-        value={chart?.spec.config?.theme?.background}
+        value={stored === "" ? undefined : stored}
         fallback={theme.background}
-        onChange={(hex) => commitThemePatch(chartId, { background: hex })}
-        onClear={() => commitThemePatch(chartId, { background: undefined })}
-        onPreview={(hex) => previewThemePatch(chartId, { background: hex })}
+        onChange={(hex) => {
+          if (region) void commitObjectFormat([{ region, patch: { background: { color: hex } } }]);
+        }}
+        onClear={() => {
+          if (region) void commitObjectFormat([{ region, patch: { background: { color: null } } }]);
+        }}
+        onPreview={(hex) => {
+          if (region) previewObjectFormat(region, { background: { color: hex } });
+        }}
+        onEndPreview={endObjectFormatPreview}
       />
     </DialogSection>
   );
@@ -2520,8 +2586,18 @@ function ResetToMatchStyleRow({
   );
 }
 
-export function ChartFormatPane(_props: TaskPaneViewProps): React.ReactElement {
-  // The target comes from the registry, NOT from `_props.data` — see the header.
+/**
+ * The "Chart elements" card of the object pane's Format tab (the chart's
+ * Visual card, lib/chartObjectFormat.ts `visualCards`). It formats the ELEMENT
+ * the reader picked on the chart the card was opened for -- the ladder's rung,
+ * read from `@api/chartSelection` -- and invites a pick when the published
+ * selection belongs to no chart or to another one. On a subscribed page every
+ * control is disabled (`readOnly`), with the reason.
+ */
+export function ChartElementFormatCard({ region, readOnly, readOnlyReason }: FormatCardProps): React.ReactElement {
+  // No region (a host that renders the card bare) = no chart constraint.
+  const regionChartId = region ? chartIdOfFormatRegion(region) : null;
+  // The target comes from the registry, NOT from props -- see the header.
   const [selection, setSelection] = useState<ChartSelectionSnapshot>(() => getChartSelection());
   useEffect(() => {
     setSelection(getChartSelection());
@@ -2562,13 +2638,13 @@ export function ChartFormatPane(_props: TaskPaneViewProps): React.ReactElement {
   const chartId = selection.chartId;
   const onPickTab = useCallback((tab: ChartFormatTabId) => setPreferredTab(tab), []);
 
-  if (chartId === null || subject === "none") {
+  if (chartId === null || subject === "none" || (regionChartId !== null && chartId !== regionChartId)) {
     return (
-      <div className={s.pane}>
+      <div className={s.pane} data-testid="chart-format-invitation">
         <div className={s.empty}>
-          Select a chart, then click the part you want to format — a bar, the title, an
-          axis or the legend. This pane always shows the current selection; the Chart
-          Design tab configures the whole chart.
+          Click the part of the chart you want to format — a bar, the title, an axis or
+          the legend. This card always shows the current selection; the cards below
+          format the whole chart.
         </div>
       </div>
     );
@@ -2643,8 +2719,12 @@ export function ChartFormatPane(_props: TaskPaneViewProps): React.ReactElement {
   })();
 
   return (
-    <div className={s.pane} data-testid="chart-format-pane">
-      <div className={s.header}>
+    <div className={s.pane} data-testid="chart-format-pane" data-read-only={readOnly ? "true" : undefined}>
+      <fieldset
+        className={s.header}
+        disabled={readOnly}
+        style={{ border: "none", margin: 0, minWidth: 0 }}
+      >
         <div className={s.subject} data-testid="chart-format-subject">
           Format {selection.displayName}
         </div>
@@ -2661,7 +2741,7 @@ export function ChartFormatPane(_props: TaskPaneViewProps): React.ReactElement {
             seriesName={selection.seriesName}
           />
         )}
-      </div>
+      </fieldset>
 
       {tabs.length > 1 && (
         <div className={s.tabs} role="tablist">
@@ -2683,10 +2763,17 @@ export function ChartFormatPane(_props: TaskPaneViewProps): React.ReactElement {
       {/* Keyed on the SUBJECT so every field's local draft reseeds on a
           retarget — without it, typing "12" into one bar's border width and
           then clicking the next bar would leave "12" in the box over a datum
-          that has no border at all. */}
-      <div className={s.body} key={subjectKey(selection)}>
+          that has no border at all. A subscribed page disables every control
+          at once (the fieldset), with the reason on hover. */}
+      <fieldset
+        className={s.body}
+        key={subjectKey(selection)}
+        disabled={readOnly}
+        title={readOnly ? (readOnlyReason ?? undefined) : undefined}
+        style={{ border: "none", margin: 0, minWidth: 0 }}
+      >
         {body}
-      </div>
+      </fieldset>
     </div>
   );
 }

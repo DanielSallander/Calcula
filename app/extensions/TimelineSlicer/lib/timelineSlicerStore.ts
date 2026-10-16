@@ -31,6 +31,7 @@ import {
   type PivotOverwriteTally,
 } from "@api/pivotOverwrite";
 import { applyTimelineFilter } from "./timelineSlicerFilterBridge";
+import { resolveTimelineContainer, timelineRegionId } from "./timelineObjectFormat";
 
 // ============================================================================
 // Module-level cache
@@ -160,22 +161,34 @@ export async function updateTimelineAsync(
   params: UpdateTimelineParams,
 ): Promise<TimelineSlicer | null> {
   try {
-    const updated = await api.updateTimelineSlicer(timelineId, params);
-    await refreshCache();
-    // If level changed, refresh data
-    if (params.level != null) {
-      await refreshTimelineData(timelineId);
-    }
-    window.dispatchEvent(
-      new CustomEvent(TimelineSlicerEvents.TIMELINE_UPDATED, {
-        detail: updated,
-      }),
-    );
-    return updated;
+    return await updateTimelineOrThrow(timelineId, params);
   } catch (err) {
     console.error("[TimelineSlicer] Failed to update timeline:", err);
     return null;
   }
+}
+
+/**
+ * `updateTimelineAsync` that REJECTS with the backend's sentence instead of
+ * logging it: for a caller that must report a refusal (the object pane's
+ * Format commit, whose refusals reach ONE toast through commitObjectFormat).
+ */
+export async function updateTimelineOrThrow(
+  timelineId: string,
+  params: UpdateTimelineParams,
+): Promise<TimelineSlicer> {
+  const updated = await api.updateTimelineSlicer(timelineId, params);
+  await refreshCache();
+  // If level changed, refresh data
+  if (params.level != null) {
+    await refreshTimelineData(timelineId);
+  }
+  window.dispatchEvent(
+    new CustomEvent(TimelineSlicerEvents.TIMELINE_UPDATED, {
+      detail: updated,
+    }),
+  );
+  return updated;
 }
 
 export async function updateTimelinePositionAsync(
@@ -754,8 +767,13 @@ export function syncTimelineRegions(): void {
 
   const regions: GridRegion[] = cachedTimelines
     .filter((tl) => tl.sheetIndex === activeSheet)
-    .map((tl) => ({
-      id: `timeline-slicer-${tl.id}`,
+    .map((tl) => {
+      // The RESOLVED visual container (WP-C D-FORMAT): bound > stored >
+      // defaults, a Format-tab preview over the stored literal. Core paints its
+      // shadow, background and border; the timeline lays out inside its content.
+      const container = resolveTimelineContainer(tl);
+      return {
+      id: timelineRegionId(tl.id),
       type: "timeline-slicer",
       startRow: 0,
       startCol: 0,
@@ -767,11 +785,15 @@ export function syncTimelineRegions(): void {
         width: tl.width,
         height: tl.height,
       },
+      container,
       // A timeline with its header HIDDEN keeps its year strip and empty space
       // as frame, but has no header to grab: Core shows its six-dot grip while
       // it is hovered or selected (@api/gridOverlays, BUG-0258 design phase 5).
-      data: { timelineId: tl.id, ...(tl.showHeader === false ? { grip: "hover" } : {}) },
-    }));
+      // The header as SHOWN -- the resolved title: a binding (or a preview)
+      // that hides it leaves the grip to grab.
+      data: { timelineId: tl.id, ...(container.title.show === false ? { grip: "hover" } : {}) },
+      };
+    });
 
   replaceGridRegionsByType("timeline-slicer", regions);
 }

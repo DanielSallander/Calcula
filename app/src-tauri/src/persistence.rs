@@ -1376,6 +1376,7 @@ fn collect_timeline_slicers_for_save(
                 show_scrollbar: tl.show_scrollbar,
                 style_preset: tl.style_preset.clone(),
                 connected_pivot_ids: tl.connected_pivot_ids.clone(),
+                container: tl.container.clone(),
             })
         })
         .collect();
@@ -1447,6 +1448,8 @@ pub(crate) fn saved_timeline_to_timeline_at(
         show_scrollbar: st.show_scrollbar,
         style_preset: st.style_preset.clone(),
         connected_pivot_ids: st.connected_pivot_ids.clone(),
+        // LOAD direction: repaired (the lenient reader already did; idempotent).
+        container: st.container.clone().and_then(|c| c.sanitized()),
     }
 }
 
@@ -1504,6 +1507,7 @@ pub(crate) fn slicer_to_saved(slicer: &crate::slicer::Slicer, sheet_ids: &[Sheet
         }).collect(),
         filter_level: slicer.filter_level,
         data_source_id: slicer.data_source_id.clone(),
+        container: slicer.container.clone(),
     })
 }
 
@@ -1573,6 +1577,8 @@ pub(crate) fn saved_slicer_to_slicer_at(
         }).collect(),
         filter_level: saved.filter_level,
         data_source_id: saved.data_source_id.clone(),
+        // LOAD direction: repaired (the lenient reader already did; idempotent).
+        container: saved.container.clone().and_then(|c| c.sanitized()),
     }
 }
 
@@ -1958,6 +1964,32 @@ fn restore_pane_controls(
 // Chart <-> SavedChart conversion
 // ============================================================================
 
+/// The PERSISTED form of a chart record's spec text (`ChartEntry.spec_json`,
+/// the IPC string the chart store owns): the ChartDefinition envelope embedded
+/// as a JSON value (`SavedChart.spec`, `.cala` v10). A spec that is not JSON is
+/// saved as a `Value::String` of the raw text and logged -- never dropped.
+pub(crate) fn saved_chart_spec_from_text(id: &identity::EntityId, spec_json: &str) -> serde_json::Value {
+    serde_json::from_str::<serde_json::Value>(spec_json).unwrap_or_else(|e| {
+        crate::log_warn!(
+            "PERSIST",
+            "chart {}: spec is not JSON ({}); saved as text so it is not lost",
+            id,
+            e
+        );
+        serde_json::Value::String(spec_json.to_string())
+    })
+}
+
+/// The inverse of [`saved_chart_spec_from_text`]: the IPC spec text of a
+/// persisted chart. A spec kept as a string value round-trips as its original
+/// text; an object serialises compactly.
+pub(crate) fn chart_spec_text_from_saved(spec: &serde_json::Value) -> String {
+    match spec {
+        serde_json::Value::String(raw) => raw.clone(),
+        other => other.to_string(),
+    }
+}
+
 /// Collect charts from AppState into SavedChart format for persistence.
 pub(crate) fn collect_charts_for_save(state: &State<AppState>, sheet_ids: &[SheetId]) -> Vec<persistence::SavedChart> {
     let charts = state.charts.read().unwrap();
@@ -1966,7 +1998,7 @@ pub(crate) fn collect_charts_for_save(state: &State<AppState>, sheet_ids: &[Shee
         .filter_map(|c| Some(persistence::SavedChart {
             id: c.id,
             sheet_id: sheet_index_to_id(sheet_ids, c.sheet_index)?,
-            spec_json: c.spec_json.clone(),
+            spec: saved_chart_spec_from_text(&c.id, &c.spec_json),
         }))
         .collect()
 }
@@ -1985,8 +2017,9 @@ pub(crate) fn restore_charts(saved: &[persistence::SavedChart], state: &AppState
     charts.clear();
     for s in saved {
         let Some(sheet_index) = sheet_id_to_index(workbook, s.sheet_id) else { continue };
-        let spec_json = crate::chart_commands::stamp_chart_record_sheet_ids(&s.spec_json, &sheet_id_at)
-            .unwrap_or_else(|| s.spec_json.clone());
+        let text = chart_spec_text_from_saved(&s.spec);
+        let spec_json = crate::chart_commands::stamp_chart_record_sheet_ids(&text, &sheet_id_at)
+            .unwrap_or(text);
         charts.push(crate::api_types::ChartEntry {
             id: s.id,
             sheet_index,
@@ -2046,6 +2079,7 @@ pub(crate) fn collect_floating_ranges_for_save(
             show_title: fr.show_title,
             show_column_headers: fr.show_column_headers,
             show_row_headers: fr.show_row_headers,
+            container: fr.container.clone(),
         })
         .collect();
     saved.sort_by_key(|fr| fr.id.to_string());
@@ -2108,6 +2142,8 @@ pub(crate) fn saved_floating_range_to_row(
         show_title: s.show_title,
         show_column_headers: s.show_column_headers,
         show_row_headers: s.show_row_headers,
+        // LOAD direction: repaired (the lenient reader already did; idempotent).
+        container: s.container.clone().and_then(|c| c.sanitized()),
     }
 }
 
@@ -2537,6 +2573,24 @@ fn assemble_workbook_for_save(
     // sparklines, user files, theme and defaults, and runs the per-sheet
     // metadata enrichment.
     let mut workbook = build_workbook_for_save(state, user_files_state)?;
+
+    // Object property BINDINGS (bindings.json, .cala v10). FIRST, before
+    // `sheet_ids_save` below is taken and held to the end of this function:
+    // the live-object walk reads `sheet_ids` itself, and a std mutex is not
+    // reentrant. The family stores are read and released by the walk, and only
+    // then is the (leaf) binding store read; a binding whose object no longer
+    // exists is not written.
+    {
+        let stores = crate::object_bindings::object_json::ObjectStores {
+            state,
+            slicers: slicer_state,
+            timelines: timeline_state,
+            pivots: pivot_state,
+        };
+        let live = crate::object_bindings::object_json::live_object_refs(&stores);
+        workbook.object_bindings = crate::object_bindings::store::collect_bindings_for_save(state, &live);
+    }
+
     let sheet_ids_save = state.sheet_ids.read().map_err(|e| e.to_string())?;
     workbook.slicers = collect_slicers_for_save(slicer_state, &sheet_ids_save);
     workbook.timeline_slicers =
@@ -3830,10 +3884,12 @@ pub fn open_file(
     // survived but the onSelect wiring and formula properties did not.
     if let Ok(mut controls) = state.controls.write(&load_effect) {
         controls.clear();
+        // The user's OWN workbook: its page-target ids are already its own.
         crate::controls::materialize_saved_controls(
             &workbook.controls,
             &mut controls,
             |sid| sheet_id_to_index(&workbook, sid),
+            &crate::controls::PageTargetRemap::identity(),
         );
 
         // Restore content-addressed media, then migrate the LEGACY corpus: every
@@ -3942,6 +3998,29 @@ pub fn open_file(
     // dependency rebuild below; the GAP-B edge installer that follows it needs
     // only the sheet visibility markers, which the sheet sections restored.
     restore_floating_ranges(&workbook.floating_ranges, &state, &workbook);
+
+    // Restore object property BINDINGS (bindings.json, .cala v10). After every
+    // object family above (controls, charts, slicers, timelines, pivots,
+    // floating ranges, canvas kinds), so the objects they overlay exist.
+    // `reset_document_scoped_stores` already emptied the store and its runtime;
+    // the runtime rebuilds lazily from the bumped generation.
+    if let Err(e) = crate::object_bindings::store::restore_bindings_from_disk(&state, &workbook.object_bindings) {
+        crate::log_warn!("BINDINGS", "the workbook's property bindings could not be restored: {}", e);
+    }
+    // ...then retire the OLD spellings of a bound property: a control's
+    // formula-typed property and -- ONLY in a file a pre-bindings writer
+    // produced (format below v10, or an .xlsx) -- a chart's `=A1` title become
+    // bindings (one spelling per fact). In a v10 file a chart title "=B2" is a
+    // literal the user stored as text and stays text. A normalisation of what
+    // was on disk, not an edit: `LoadingFromDisk`, like the media migration
+    // above. Idempotent.
+    crate::object_bindings::migrate::migrate_legacy_formulas(
+        &state,
+        &crate::document_effect::DocumentEffect::deliberately_clean(
+            crate::document_effect::CleanReason::LoadingFromDisk,
+        ),
+        crate::object_bindings::migrate::ChartTextFields::for_format_version(workbook.format_version),
+    );
 
     // Restore scripts and notebooks
     restore_scripts(&workbook.scripts, &script_state);
@@ -4575,6 +4654,17 @@ pub(crate) fn reset_document_scoped_stores(
     *state.next_computed_prop_id.lock().map_err(|e| e.to_string())? = 1;
     state.computed_prop_dependencies.lock().map_err(|e| e.to_string())?.clear();
     state.computed_prop_dependents.lock().map_err(|e| e.to_string())?.clear();
+
+    // ---- Object property bindings (store + its derived runtime) -------------
+    // A save source (`bindings.json`): left resident, workbook A's bindings
+    // would be written into workbook B's next save, overlaying B's objects
+    // wherever the ids collide and riding along as orphans everywhere else.
+    // The runtime (dependency maps, resolved values, the page-filter mirror)
+    // describes the same document and goes with it. Store before runtime: the
+    // runtime is the leaf below the store.
+    state.object_bindings.write(effect).map_err(|e| e.to_string())?.clear_bindings();
+    *state.object_binding_runtime.lock().map_err(|e| e.to_string())? =
+        crate::object_bindings::eval::BindingRuntime::default();
 
     // ---- Named styles ------------------------------------------------------
     // Clear-then-reseed, in this order and in this function, because the seed
@@ -5762,6 +5852,23 @@ pub fn xlsx_save_loss_report(
         state.sheet_kinds.read().map_err(|e| e.to_string())?.iter().any(|k| k.is_canvas()),
         "Canvas sheets (they reopen as ordinary worksheets; page size, snap grid and object stacking are lost)",
     );
+    // A bound property (a title, a KPI goal, a colour following a formula) has
+    // nowhere to live in an .xlsx: the writer exports the object's LITERAL, so
+    // the property freezes at whatever it last held and stops following its
+    // formula -- which looks live and is not, so the user must be told.
+    // Only the bindings of objects that still EXIST count: an orphan row (its
+    // object deleted by a path that did not take the row with it) is never
+    // saved, so it is no loss -- and warning about it told the user a workbook
+    // with no bound object left would lose its bindings.
+    check(
+        crate::object_bindings::store::any_live_binding(&crate::object_bindings::object_json::ObjectStores {
+            state: state.inner(),
+            slicers: slicer_state.inner(),
+            timelines: timeline_state.inner(),
+            pivots: pivot_state.inner(),
+        }),
+        "Bound properties (they export as their current literal and stop following their formula)",
+    );
 
     Ok(lost)
 }
@@ -5830,6 +5937,12 @@ pub(crate) const XLSX_LOSS_COVERAGE: &[(&str, &str)] = &[
         "format_version",
         "SILENT: the .cala stamp. An .xlsx carries its own format identity and \
          this number has no meaning inside one.",
+    ),
+    (
+        "object_bindings",
+        "REPORTED: 'Bound properties (they export as their current literal and stop \
+         following their formula)' -- xlsx has no binding concept; the writer exports \
+         each object's literal",
     ),
 ];
 

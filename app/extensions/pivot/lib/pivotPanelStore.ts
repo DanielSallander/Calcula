@@ -11,10 +11,12 @@
 //          mirroring the old tab components' mount/unmount lifecycle.
 
 import { useSyncExternalStore } from "react";
-import { onAppEvent, emitAppEvent } from "@api";
+import { onAppEvent, emitAppEvent, showToast } from "@api";
 import { PivotEvents } from "../../_shared/lib/pivotEvents";
 import { getActivePivotId } from "../handlers/selectionHandler";
 import { getPivotTableInfo } from "./pivot-api";
+import { setPivotStyle } from "./pivotStylePersist";
+import { hasMountedPivotEditor } from "./pivotEditorPresence";
 import type { LayoutConfig, PivotId } from "../components/types";
 
 // ---------------------------------------------------------------------------
@@ -113,6 +115,35 @@ function handleLayoutStateBroadcast(detail: PivotLayoutBroadcast): void {
   if (pivotChanged && detail.pivotId) {
     fetchSourceRange(detail.pivotId);
   }
+  if (detail.pivotId && Object.keys(layout).length === 0) {
+    readLayoutWithoutEditor(detail.pivotId);
+  }
+}
+
+/**
+ * The pivot's REAL layout when no field-list editor of it is mounted (the
+ * worksheet pane closed by hand, a canvas box whose object pane shows only
+ * Format). An editor broadcasts its full layout itself; without one, the
+ * selection only announces `layout: {}` and the sections would show the
+ * DEFAULTS instead of what the pivot has. Read from the definition and filled
+ * in only while nothing has stated the layout yet (an edit made meanwhile is
+ * newer and wins).
+ */
+function readLayoutWithoutEditor(pivotId: string): void {
+  if (hasMountedPivotEditor(pivotId)) return;
+  // A dynamic import: the read goes through the selection handler, which
+  // (through the manifest) mounts the sections that import this store.
+  import("./pivotLayoutEdits")
+    .then(({ readPivotLayout }) => readPivotLayout(pivotId))
+    .then((layout) => {
+      if (!layout || hasMountedPivotEditor(pivotId)) return;
+      const current = state.layoutState;
+      if (!current || current.pivotId !== pivotId) return;
+      const stated = Object.entries(current.layout).some(([k, v]) => k !== "styleId" && v !== undefined);
+      if (stated) return;
+      setState({ layoutState: { pivotId, layout: { ...layout } } });
+    })
+    .catch((err) => console.warn(`[pivotPanelStore] could not read the layout of pivot ${pivotId}:`, err));
 }
 
 function handleDeselected(): void {
@@ -141,6 +172,7 @@ function attach(): void {
       layoutState: state.layoutState ?? { pivotId: active, layout: {} },
     });
     fetchSourceRange(active);
+    readLayoutWithoutEditor(active);
   } else {
     console.log(`[CALP-DIAG] pivotPanelStore attached, requesting layout state`);
     emitAppEvent(PivotEvents.PIVOT_REQUEST_LAYOUT);
@@ -186,19 +218,48 @@ export function usePivotPanelState(): PivotPanelState {
 }
 
 /**
- * Merge layout updates into the shared state and broadcast PIVOT_LAYOUT_CHANGED
- * (same contract as the old design tab's updateLayout). No-op when no layout
+ * Merge layout updates into the shared state and have them SENT -- by the
+ * pivot's mounted field-list editor when it has one (PIVOT_LAYOUT_CHANGED,
+ * the old design tab's contract: the editor owns the fields request), else
+ * headlessly (pivotLayoutEdits.ts: a canvas box's Format tab opened without
+ * its Fields tab, the ribbon with no editor mounted). No-op when no layout
  * state is active.
+ *
+ * The STYLE is not layout any more (WP-C): a `styleId` goes to the persisted
+ * style door (`setPivotStyle`, ONE update_pivot_properties, "" = the default
+ * style) and is stripped from what is broadcast, so a gallery click never
+ * schedules a fields update.
  */
 export function updateSharedLayout(updates: Partial<LayoutConfig>): void {
   const current = state.layoutState;
   if (!current) {
     return;
   }
-  const newLayout = { ...current.layout, ...updates };
+  const pivotId = current.pivotId;
+  const rest: Partial<LayoutConfig> = { ...updates };
+  delete rest.styleId;
+  if (updates.styleId !== undefined && pivotId) {
+    setPivotStyle(pivotId, updates.styleId === "" ? null : updates.styleId).catch((err) =>
+      showToast(`The PivotTable style could not be set: ${err instanceof Error ? err.message : String(err)}`, { type: "error" }),
+    );
+  }
+  if (Object.keys(rest).length === 0) {
+    return;
+  }
+  const newLayout = { ...current.layout, ...rest };
   setState({ layoutState: { ...current, layout: newLayout } });
+  if (pivotId && !hasMountedPivotEditor(pivotId)) {
+    // A dynamic import: the headless send reads the selection handler, which
+    // (through the manifest) mounts the sections that import this store.
+    import("./pivotLayoutEdits")
+      .then(({ editPivotLayoutHeadless }) => editPivotLayoutHeadless(pivotId, rest))
+      .catch((err) =>
+        showToast(`The PivotTable layout could not be changed: ${err instanceof Error ? err.message : String(err)}`, { type: "error" }),
+      );
+    return;
+  }
   emitAppEvent(PivotEvents.PIVOT_LAYOUT_CHANGED, {
-    pivotId: current.pivotId,
+    pivotId,
     layout: newLayout,
   });
 }

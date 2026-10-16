@@ -63,6 +63,12 @@ import {
   type Viewport,
 } from "../../types";
 import type { GridRegion, OverlayRegistration } from "./core";
+import {
+  BASE_CONTAINER_DEFAULTS,
+  layoutVisualContainer,
+  type ResolvedVisualContainer,
+} from "../../../api/visualContainer";
+import { resetPaintedContainerLayouts, visualContentRect } from "../../../api/visualContainerPaint";
 
 const W = 800;
 const H = 600;
@@ -71,7 +77,13 @@ const VIEWPORT: Viewport = { scrollX: 0, scrollY: 0, startRow: 0, startCol: 0, r
 
 type Op = { op: string; args: number[]; style: string };
 
-/** A recording context: every stroke/fill and every overlay render, in order. */
+/**
+ * A recording context: every stroke/fill and every overlay render, in order.
+ * Path fills/strokes, `rect` and `clip` are recorded too (the visual
+ * container's painters use them), and `__activeClips` answers how many clips
+ * are in force right now (a clip counts until the save it was made under is
+ * restored).
+ */
 function recordingCtx(log: Op[]): CanvasRenderingContext2D {
   const state: Record<string | symbol, unknown> = {
     canvas: { width: W, height: H },
@@ -83,9 +95,24 @@ function recordingCtx(log: Op[]): CanvasRenderingContext2D {
     textBaseline: "alphabetic",
     globalAlpha: 1,
   };
+  let clips = 0;
+  const saved: number[] = [];
   return new Proxy(state, {
     get(t, prop) {
+      if (prop === "__activeClips") return clips;
       if (prop in t) return t[prop];
+      if (prop === "save") return () => saved.push(clips);
+      if (prop === "restore") return () => {
+        clips = saved.pop() ?? 0;
+      };
+      if (prop === "clip") return () => {
+        clips++;
+        log.push({ op: "clip", args: [], style: "" });
+      };
+      if (prop === "rect") return (...a: number[]) => log.push({ op: "rect", args: a, style: "" });
+      if (prop === "fill") return () => log.push({ op: "fill", args: [], style: String(t.fillStyle) });
+      if (prop === "stroke") return () => log.push({ op: "stroke", args: [], style: String(t.strokeStyle) });
+      if (prop === "fillText") return (s: string, ...a: number[]) => log.push({ op: "fillText", args: a, style: String(s) });
       if (prop === "strokeRect") return (...a: number[]) => log.push({ op: "strokeRect", args: a, style: String(t.strokeStyle) });
       if (prop === "fillRect") return (...a: number[]) => log.push({ op: "fillRect", args: a, style: String(t.fillStyle) });
       if (prop === "measureText") return (s: string) => ({ width: String(s).length * 6 });
@@ -451,5 +478,127 @@ describe("Core paints the GRIP of every object whose grip shows -- from the geom
     setGridRegions([c1]);
     addToObjectSelection(c1);
     expect(platesAt(paint([c1], "canvas"), plateArgs(c1, "canvas"))).toEqual([]);
+  });
+});
+
+// ============================================================================
+// THE VISUAL CONTAINER (D-FORMAT, WP-C S3): Core paints it around the render
+// ============================================================================
+
+describe("Core paints a floating region's CONTAINER around its family's render", () => {
+  const BG = "#abcdef";
+  const BORDER = "#123456";
+  const SHADOW = "#000000";
+
+  /** A container with an outside shadow, a coloured background and a shown border (radius 0 = plain rects). */
+  function container(over: Partial<ResolvedVisualContainer> = {}): ResolvedVisualContainer {
+    return {
+      ...BASE_CONTAINER_DEFAULTS,
+      padding: { top: 10, right: 10, bottom: 10, left: 10 },
+      background: { ...BASE_CONTAINER_DEFAULTS.background, color: BG },
+      border: { show: true, color: BORDER, width: 2, radius: 0 },
+      shadow: { ...BASE_CONTAINER_DEFAULTS.shadow, show: true, color: SHADOW },
+      ...over,
+    };
+  }
+
+  function framed(id: string, type: string, box: FloatingCanvasRect, c?: ResolvedVisualContainer): GridRegion {
+    return { ...floating(id, type, box), ...(c ? { container: c } : {}) };
+  }
+
+  afterEach(() => {
+    resetPaintedContainerLayouts();
+  });
+
+  const indexOf = (ops: Op[], pred: (o: Op) => boolean) => ops.findIndex(pred);
+  const lastIndexOf = (ops: Op[], pred: (o: Op) => boolean) => {
+    for (let i = ops.length - 1; i >= 0; i--) if (pred(ops[i])) return i;
+    return -1;
+  };
+
+  it("the shadow, then the background are painted BEFORE the render; the border AFTER it", () => {
+    const ops = paint([framed("c1", "chart", C1, container())]);
+    const render = indexOf(ops, (o) => o.op === "render" && o.style === "c1");
+    const shadow = indexOf(ops, (o) => o.op === "fill" && o.style === "#000000");
+    const background = indexOf(ops, (o) => o.op === "fill" && o.style === BG);
+    const border = indexOf(ops, (o) => o.op === "stroke" && o.style === BORDER);
+    expect(render).toBeGreaterThan(-1);
+    expect(shadow, "no shadow fill").toBeGreaterThan(-1);
+    expect(background, "no background fill").toBeGreaterThan(-1);
+    expect(border, "no border stroke").toBeGreaterThan(-1);
+    expect(shadow).toBeLessThan(background);
+    expect(background).toBeLessThan(render);
+    expect(border).toBeGreaterThan(render);
+  });
+
+  it("at the families' origin: the painted gutters minus the scroll (worksheet gutters here)", () => {
+    const ops = paint([framed("c1", "chart", C1, container())], "grid");
+    const gx = CONFIG.rowHeaderWidth ?? 0;
+    const gy = CONFIG.colHeaderHeight ?? 0;
+    const background = indexOf(ops, (o) => o.op === "fill" && o.style === BG);
+    // The background's path is the last `rect` before its fill: the outer box in canvas px.
+    const rect = lastIndexOf(ops.slice(0, background), (o) => o.op === "rect");
+    expect(ops[rect].args).toEqual([gx + C1.x, gy + C1.y, C1.width, C1.height]);
+  });
+
+  it("a region WITHOUT a container gets no Core ops at all around its render", () => {
+    const ops = paint([floating("c1", "chart", C1)]);
+    expect(ops.filter((o) => o.op === "fill" || o.op === "stroke" || o.op === "clip" || o.op === "rect")).toEqual([]);
+    // And with one, the same frame does carry them (the assertion above can fail).
+    const withOne = paint([framed("c1", "chart", C1, container())]);
+    expect(withOne.filter((o) => o.op === "fill" || o.op === "stroke").length).toBeGreaterThan(0);
+  });
+
+  it("Core sets NO clip around the render: a family painting OUTSIDE its box (x = right + 10) still lands, radius 12", () => {
+    let clipsAtRender = -1;
+    cleanups.push(
+      registerGridOverlay({
+        type: "qa-probe",
+        priority: 16,
+        render: ({ ctx, region }) => {
+          clipsAtRender = (ctx as unknown as { __activeClips: number }).__activeClips;
+          const f = region.floating!;
+          ctx.fillRect(f.x + f.width + 10, f.y, 8, 8);
+        },
+      }),
+    );
+    const c = container({ border: { show: true, color: BORDER, width: 2, radius: 12 } });
+    const ops = paint([framed("q1", "qa-probe", C1, c)]);
+    expect(clipsAtRender, "Core's clip was still in force while the family rendered").toBe(0);
+    expect(ops.some((o) => o.op === "fillRect" && o.args[0] === C1.x + C1.width + 10)).toBe(true);
+    // ...while Core's own passes ARE clipped (to the cell area).
+    expect(ops.filter((o) => o.op === "clip").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("the selection chrome is still painted after EVERY floating object -- containers included", () => {
+    const regions = [
+      framed("c1", "chart", C1, container()),
+      framed("s1", "slicer", S1, container()),
+      framed("c2", "chart", C2, container()),
+    ];
+    setGridRegions(regions);
+    addToObjectSelection(regions[0]);
+    const ops = paint(regions);
+    const lastBorder = lastIndexOf(ops, (o) => o.op === "stroke" && o.style === BORDER);
+    const firstChrome = indexOf(ops, (o) => o.op === "strokeRect" && o.style === FLOATING_SELECTION_COLOUR);
+    expect(ops.filter((o) => o.op === "render")).toHaveLength(3);
+    expect(lastBorder).toBeGreaterThan(-1);
+    expect(firstChrome, "the chrome was painted before a container's over-pass").toBeGreaterThan(lastBorder);
+  });
+
+  it("paint == hit: the content rect families read is the layout Core PAINTED (a measured 2-line title)", () => {
+    const c = container({
+      title: { ...BASE_CONTAINER_DEFAULTS.title, show: true, text: "Quarterly revenue by region and product line", fontSize: 14 },
+    });
+    const region = framed("c1", "chart", C1, c);
+    const oneLine = layoutVisualContainer(C1, c).content;
+    expect(visualContentRect(region), "before any paint: the 1-line layout").toEqual(oneLine);
+    paint([region]);
+    // 6 px per character (the recording measureText): "Quarterly revenue by region" fits the
+    // 176 px content width, "and product line" wraps -- two 18 px lines, not one.
+    const painted = visualContentRect(region);
+    expect(painted.y).toBe(oneLine.y + 18);
+    expect(painted.height).toBe(oneLine.height - 18);
+    expect(painted.x).toBe(oneLine.x);
   });
 });

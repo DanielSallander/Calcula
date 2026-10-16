@@ -2,6 +2,7 @@
 pub mod types;
 pub mod utils;
 pub mod operations;
+pub mod grid_theme;
 pub mod commands;
 pub mod layout_commands;
 pub mod headless;

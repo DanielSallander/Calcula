@@ -83,6 +83,7 @@ import { installCanvasObjectClipboard } from "./lib/canvasClipboard";
 import { installCanvasLayoutRefs } from "./lib/layoutRefs";
 import { installCanvasGripMenuItems } from "./lib/gripMenuItems";
 import { installObjectsLockedNotice } from "./lib/objectsLock";
+import { installCanvasPageBindings } from "./lib/canvasBindings";
 
 /** The id of the page layer; one per app. */
 export const CANVAS_PAGE_LAYER_ID = "canvas-sheet-page";
@@ -107,6 +108,10 @@ function activate(_context: ExtensionContext): void {
       paint: (context) => paintCanvasPage(context),
     }),
   );
+  // A page's BOUND background / wallpaper (@api/objectBindings, D-BIND): the
+  // canvasPage kind's registration, and a repaint when a page's bound colour
+  // changes (requestOverlayRedraw repaints the layers; never GRID_REFRESH).
+  cleanupFns.push(installCanvasPageBindings(requestOverlayRedraw));
 
   // Above every object and above Core's selection chrome: the lock mark of a
   // selected locked object (Core paints every selected object's outline and

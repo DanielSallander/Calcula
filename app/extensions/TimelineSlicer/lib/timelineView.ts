@@ -21,18 +21,37 @@
 //          The zone input places the range-end markers on the range the
 //          renderer PAINTS (a released drag's, until its commit lands), read
 //          from timelineGestureView.ts.
+//
+//          The zone input is measured on the CONTENT box inside the timeline's
+//          visual container (lib/timelineObjectFormat.ts
+//          `timelineContentShape`, WP-C D-FORMAT) -- the shape the renderer
+//          paints -- and carries that box's offset, so every caller keeps
+//          measuring points from the timeline's OUTER top-left.
 
 import type { OverlayHitTestContext, OverlayZoneFn } from "@api/gridOverlays";
 import { getCachedTimelineData, getTimelineById } from "./timelineSlicerStore";
 import { getTimelineRangePreview } from "./timelineGestureView";
+import { timelineContentShape } from "./timelineObjectFormat";
 import {
   computeTimelineLayout,
   maxScrollOf,
   timelineZoneAt,
   zoneInputOf,
+  type TimelineShape,
   type TimelineZone,
   type TimelineZoneInput,
 } from "./timelineZones";
+import type { TimelineSlicer } from "./timelineSlicerTypes";
+
+/**
+ * A timeline as it is SHOWN, as the zone table's shape: its CONTENT box's
+ * size, and the header as the resolved title shows it (a bound show-header or
+ * header text, a Format-tab preview). The renderer, the zones, the keyboard
+ * and the scroll clamp all lay out on this.
+ */
+export function shownTimelineShape(tl: TimelineSlicer): TimelineShape & TimelineSlicer {
+  return { ...tl, ...timelineContentShape(tl).shape };
+}
 
 // ============================================================================
 // Scroll (viewing state)
@@ -54,7 +73,8 @@ export function getMaxScrollOffset(timelineId: string): number {
   if (!tl) return 0;
   const data = getCachedTimelineData(timelineId);
   if (!data) return 0;
-  return maxScrollOf(computeTimelineLayout(tl, data.periods.length));
+  // The layout as SHOWN (the content box, a bound show-header), the renderer's.
+  return maxScrollOf(computeTimelineLayout(shownTimelineShape(tl), data.periods.length));
 }
 
 export function resetScrollOffsets(): void {
@@ -70,10 +90,18 @@ export function resetScrollOffsets(): void {
  * range the renderer paints -- or null for an unknown id.
  */
 export function liveTimelineZoneInput(timelineId: string): TimelineZoneInput | null {
-  const tl = getTimelineById(timelineId);
-  if (!tl) return null;
+  const stored = getTimelineById(timelineId);
+  if (!stored) return null;
+  // Measured as SHOWN -- the content box the renderer paints in, the header
+  // as the resolved title shows it (a bound one included): a header a binding
+  // hides catches no press, and the container's band is frame.
+  const content = timelineContentShape(stored);
+  const tl = { ...stored, ...content.shape };
   const periods = getCachedTimelineData(timelineId)?.periods ?? [];
-  return zoneInputOf(tl, periods, getScrollOffset(timelineId), getTimelineRangePreview(timelineId));
+  return zoneInputOf(tl, periods, getScrollOffset(timelineId), getTimelineRangePreview(timelineId), {
+    x: content.offsetX,
+    y: content.offsetY,
+  });
 }
 
 /**

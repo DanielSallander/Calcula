@@ -257,56 +257,8 @@ async function resolveSheetIndex(sheetName: string): Promise<number> {
 }
 
 // ============================================================================
-// Cell Reference Resolution (for spec string fields)
+// Param cells (ParamSpec.cellRef -- a two-way cell link, not a binding)
 // ============================================================================
-
-/**
- * Check if a string value is a cell reference (starts with "=" followed by a cell ref).
- * Examples: "=A3", "=Sheet1!B5", "='My Sheet'!C1"
- */
-function isCellReference(value: string): boolean {
-  if (!value.startsWith("=")) return false;
-  const ref = value.substring(1).trim();
-  const parsed = parseA1Reference(ref);
-  // Must be a single cell (not a range)
-  return parsed !== null && parsed.startRow === parsed.endRow && parsed.startCol === parsed.endCol;
-}
-
-/**
- * Resolve a cell reference string to the display value of that cell.
- * Input: "=A3" or "=Sheet1!B5"
- * Returns: the cell's display text, or null if the cell is empty.
- *
- * Reads the sheet the reference NAMES; an unqualified reference reads
- * `fallbackSheetIndex`, and with no fallback the active sheet (the backend's
- * default for an absent index).
- */
-async function resolveCellValue(
-  ref: string,
-  fallbackSheetIndex: number | undefined,
-): Promise<string | null> {
-  const cellRef = ref.substring(1).trim();
-  const parsed = parseA1Reference(cellRef);
-  if (!parsed) return null;
-
-  const sheetIndex = parsed.sheetName
-    ? await resolveSheetIndex(parsed.sheetName)
-    : fallbackSheetIndex;
-
-  // Sparse: a cell that does not exist is simply absent from the result.
-  const cells = await getRangeCellsTyped(
-    parsed.startRow,
-    parsed.startCol,
-    parsed.startRow,
-    parsed.startCol,
-    sheetIndex,
-  );
-
-  if (cells.length > 0) {
-    return cells[0].display || null;
-  }
-  return null;
-}
 
 /**
  * The chart a param belongs to, as far as its bound cell is concerned: the
@@ -338,7 +290,7 @@ export type ParamCellLocation =
  *     showing on while you click it; naming it keeps a chart on a sheet that
  *     is NOT active reading its own cell);
  *   - a chart on a CANVAS, which has no cells: the sheet its DATA comes from,
- *     the rule an unqualified `=A1` title already follows
+ *     the rule a bound title's unqualified `=A1` follows too
  *     ({@link specReferenceSheet}). It used to read the canvas, find nothing,
  *     and keep the literal default forever, and its write-back was refused;
  *   - a canvas chart whose data has no sheet: "noSheet".
@@ -401,24 +353,12 @@ export function parseParamCellTarget(cellRef: string): { row: number; col: numbe
 }
 
 /**
- * Resolve a string field that may be a cell reference.
- * If it starts with "=" and is a valid cell ref, fetches the cell value.
- * Otherwise returns the original string unchanged.
- */
-async function resolveStringField(
-  value: string | null,
-  fallbackSheetIndex: number | undefined,
-): Promise<string | null> {
-  if (!value || !isCellReference(value)) return value;
-  return resolveCellValue(value, fallbackSheetIndex);
-}
-
-/**
- * The sheet an UNQUALIFIED `=A1` in a title / axis title / series name reads:
- * the sheet the chart's data resolves to, so a chart on a canvas titled `=A1`
- * reads A1 of its data sheet rather than of the empty canvas. Undefined (the
- * active sheet) for an aggregated source, or when the data cannot resolve --
- * the data read reports that failure itself.
+ * The sheet a canvas chart's UNQUALIFIED param cell is on: the sheet the
+ * chart's data resolves to, so a param cell `=B1` on a chart placed on a canvas
+ * reads B1 of its data sheet rather than of the empty canvas. (A BOUND title
+ * follows the same rule, decided in Rust: `object_bindings/formula.rs`
+ * `chart_data_sheet`.) Undefined for an aggregated source, or when the data
+ * cannot resolve -- the data read reports that failure itself.
  */
 async function specReferenceSheet(spec: ChartSpec): Promise<number | undefined> {
   if (!isDataRangeRef(spec.data) && typeof spec.data !== "string") return undefined;
@@ -427,58 +367,4 @@ async function specReferenceSheet(spec: ChartSpec): Promise<number | undefined> 
   } catch {
     return undefined;
   }
-}
-
-/**
- * Resolve all cell references in a ChartSpec's string fields.
- * Fields that support cell references:
- * - `title` ("=A1" reads the chart title from cell A1)
- * - `xAxis.title` / `yAxis.title`
- * - `series[].name`
- *
- * Returns a new spec with resolved values. The original spec is not modified.
- */
-export async function resolveSpecReferences(spec: ChartSpec): Promise<ChartSpec> {
-  const fields: Array<string | null | undefined> = [
-    spec.title,
-    spec.xAxis?.title,
-    spec.yAxis?.title,
-    ...(spec.series ?? []).map((s) => s.name),
-  ];
-  // Nothing to resolve -> no sheet lookup at all (the common case).
-  if (!fields.some((v) => typeof v === "string" && isCellReference(v))) return spec;
-
-  // The sheet an unqualified reference reads (the chart's data sheet).
-  const sheetIndex = await specReferenceSheet(spec);
-
-  // Resolve in parallel for performance
-  const [title, xAxisTitle, yAxisTitle, ...seriesNames] = await Promise.all([
-    resolveStringField(spec.title, sheetIndex),
-    resolveStringField(spec.xAxis.title, sheetIndex),
-    resolveStringField(spec.yAxis.title, sheetIndex),
-    ...spec.series.map((s) => resolveStringField(s.name, sheetIndex)),
-  ]);
-
-  // Only create a new object if something changed
-  const titleChanged = title !== spec.title;
-  const xChanged = xAxisTitle !== spec.xAxis.title;
-  const yChanged = yAxisTitle !== spec.yAxis.title;
-  const seriesChanged = seriesNames.some((name, i) => name !== spec.series[i].name);
-
-  if (!titleChanged && !xChanged && !yChanged && !seriesChanged) {
-    return spec;
-  }
-
-  return {
-    ...spec,
-    title: title,
-    xAxis: xChanged ? { ...spec.xAxis, title: xAxisTitle } : spec.xAxis,
-    yAxis: yChanged ? { ...spec.yAxis, title: yAxisTitle } : spec.yAxis,
-    series: seriesChanged
-      ? spec.series.map((s, i) => ({
-          ...s,
-          name: seriesNames[i] ?? s.name,
-        }))
-      : spec.series,
-  };
 }

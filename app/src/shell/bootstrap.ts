@@ -37,6 +37,7 @@ import { WRITEBACK_INDEX_CHANGED_EVENT } from "../api/collaboration";
 import { bridgeDirtyStateAnnouncement } from "./dirtyStateBridge";
 import { bridgeSheetDisplayFlagsAnnouncement } from "./sheetDisplayFlagsBridge";
 import { bridgeCanvasLayoutAnnouncement } from "./canvasLayoutBridge";
+import { installObjectBindingsBridge } from "../api/objectBindings";
 import { bridgeUndoStateAnnouncement } from "./undoStateBridge";
 
 import {
@@ -358,6 +359,8 @@ export function bootstrapShell(): void {
     addActiveContextKey: (key) => useTaskPaneStore.getState().addActiveContextKey(key),
     removeActiveContextKey: (key) => useTaskPaneStore.getState().removeActiveContextKey(key),
     onRegistryChange: (listener) => TaskPaneExtensionsImpl.onRegistryChange(listener),
+    getOpenPaneIds: () => useTaskPaneStore.getState().openPanes.map((p) => p.viewId),
+    onStateChange: (listener) => useTaskPaneStore.subscribe(() => listener()),
   };
   registerTaskPaneService(taskPaneService);
 
@@ -624,6 +627,13 @@ export function bootstrapShell(): void {
   // page and snap grid follow the authority when a script, an MCP tool or a
   // package refresh moves it. See shell/canvasLayoutBridge.ts.
   void bridgeCanvasLayoutAnnouncement();
+
+  // 2i: the OBJECT PROPERTY BINDINGS bridge (@api/objectBindings). Rust owns
+  // the bindings and evaluates them; this keeps the seam's cache in step with
+  // `object-bindings:changed`, mirrors the page filters to Rust, and is the ONE
+  // trigger that asks Rust to re-evaluate after cells, names or sheets move.
+  // See app/src/api/objectBindings/bridge.ts.
+  installObjectBindingsBridge();
 
   // Bridge the backend's undo/redo AVAILABILITY announcement, so the ribbon's
   // Undo/Redo buttons and the Edit menu items reflect a stack the user really

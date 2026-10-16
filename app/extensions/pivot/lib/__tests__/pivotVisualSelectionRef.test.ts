@@ -38,6 +38,13 @@ import {
 } from "../pivotVisualSelection";
 import { PIVOT_VISUAL_REGION_TYPE } from "../pivotVisualRegions";
 import { notePivotBoxMenuOpened, setPivotChromePressLive } from "../pivotVisualMenuState";
+import {
+  clearPivotCellSelection,
+  getPivotCellSelection,
+  resetPivotCellSelection,
+  setPivotCellSelection,
+} from "../pivotVisualCellSelection";
+import { PIVOT_CANVAS_COPY_CELLS_COMMAND, PIVOT_CANVAS_REFUSE_EDIT_COMMAND } from "../pivotCanvasCellCommands";
 
 function region(pivotId: string, type = PIVOT_VISUAL_REGION_TYPE): GridRegion {
   return {
@@ -146,5 +153,39 @@ describe("ownsKey: the box's menu and a held chrome press own Escape AND Delete"
       off();
     }
     expect(objectOwnsKey("Delete")).toBe(false);
+  });
+});
+
+// D-CELLS (S6): selected CELLS are an inner selection. The keyboard itself is
+// driven through the real dispatcher in pivotCanvasCellKeys.test.ts.
+describe("ownsKey / innerClipboardCommand while the box's CELLS are selected", () => {
+  afterEach(() => resetPivotCellSelection());
+
+  it("owns Arrow, Escape, Clipboard and Delete -- not Tab -- and nothing once the cells are gone", () => {
+    const p = createPivotVisualSelectionProvider();
+    setPivotCellSelection({ pivotId: "p-1", anchorRow: 1, anchorCol: 1, endRow: 2, endCol: 2 });
+    for (const key of ["Arrow", "Escape", "Clipboard", "Delete"] as const) {
+      expect(p.ownsKey!(key), `${key} is not the cells' while they are selected`).toBe(true);
+    }
+    expect(p.ownsKey!("Tab"), "Tab keeps cycling the canvas's objects").toBe(false);
+    clearPivotCellSelection();
+    for (const key of ["Arrow", "Escape", "Clipboard", "Delete", "Tab"] as const) {
+      expect(p.ownsKey!(key), `${key} still owned with no cells`).toBe(false);
+    }
+  });
+
+  it("innerClipboardCommand: Copy copies the cells, Paste is refused; null without cells", () => {
+    const p = createPivotVisualSelectionProvider();
+    expect(p.innerClipboardCommand!("copy")).toBeNull();
+    setPivotCellSelection({ pivotId: "p-1", anchorRow: 0, anchorCol: 0, endRow: 0, endCol: 0 });
+    expect(p.innerClipboardCommand!("copy")).toBe(PIVOT_CANVAS_COPY_CELLS_COMMAND);
+    expect(p.innerClipboardCommand!("paste")).toBe(PIVOT_CANVAS_REFUSE_EDIT_COMMAND);
+  });
+
+  it("deselectAll clears the cells as well as the box", () => {
+    const p = createPivotVisualSelectionProvider();
+    setPivotCellSelection({ pivotId: "p-1", anchorRow: 0, anchorCol: 0, endRow: 0, endCol: 0 });
+    p.deselectAll();
+    expect(getPivotCellSelection()).toBeNull();
   });
 });

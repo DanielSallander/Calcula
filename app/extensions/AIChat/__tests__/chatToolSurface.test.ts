@@ -272,6 +272,41 @@ describe("the tool schemas reach the STRICTEST provider in the picker", () => {
   });
 });
 
+describe("the object-property tools (WP-D)", () => {
+  const BINDING_TOOLS = ["list_object_properties", "set_object_property", "set_object_binding"];
+
+  it.each(BINDING_TOOLS)("%s is declared AND dispatched", (name) => {
+    expect(DECLARED).toContain(name);
+    expect(ARMS, `${name} has no arm in ai_chat_run_tool`).toContain(name);
+  });
+
+  it("offers the kinds the Rust enum knows, as a closed string enum", () => {
+    const typesRs = fs.readFileSync(path.join(REPO, "app/src-tauri/src/object_bindings/mod.rs"), "utf8");
+    const rustKinds = [...typesRs.matchAll(/ObjectBindingKind::\w+ => "([a-zA-Z]+)",/g)].map((m) => m[1]);
+    // `wire_name` and `label` both match; the wire names are the first seven.
+    expect(rustKinds.length).toBeGreaterThanOrEqual(7);
+    for (const name of BINDING_TOOLS) {
+      const kind = TOOLS.find((t) => t.name === name)!.inputSchema.properties.kind as { enum?: string[] };
+      expect(kind.enum, name).toEqual(rustKinds.slice(0, 7));
+    }
+  });
+
+  it("never auto-runs a write, and the read is allowed to", () => {
+    expect(AUTORUN_TOOLS.has("list_object_properties")).toBe(true);
+    expect(AUTORUN_TOOLS.has("set_object_property")).toBe(false);
+    expect(AUTORUN_TOOLS.has("set_object_binding")).toBe(false);
+  });
+
+  it("teaches binding-vs-literal only when all three tools are offered", () => {
+    expect(SYSTEM_PROMPT).toContain("OBJECT PROPERTIES.");
+    expect(SYSTEM_PROMPT).toMatch(/starts with '=' is shown as text/);
+    expect(buildSystemPrompt(CORE_TOOL_NAMES)).not.toContain("OBJECT PROPERTIES.");
+    expect(buildSystemPrompt(TOOL_NAMES.filter((n) => n !== "set_object_binding"))).not.toContain(
+      "OBJECT PROPERTIES.",
+    );
+  });
+});
+
 describe("draft object types mirror the Rust validator", () => {
   it("matches VALID_OBJECT_TYPES in mcp/drafts.rs exactly, in order", () => {
     // Rust is the source of truth: it is the validator that actually refuses,

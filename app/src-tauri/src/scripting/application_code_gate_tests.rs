@@ -68,7 +68,7 @@ fn held_button(macro_id: &str, application: &str) -> ControlMetadata {
     properties.insert("text".to_string(), prop("Run report"));
     properties.insert(HELD_MACRO_REF_PROPERTY.to_string(), prop(macro_id));
     properties.insert(HELD_FROM_PROPERTY.to_string(), prop(&stamp(application)));
-    ControlMetadata { control_type: "button".into(), properties }
+    ControlMetadata { control_type: "button".into(), uid: String::new(), properties }
 }
 
 /// A button control with a live link of the author's own.
@@ -76,7 +76,7 @@ fn live_button(macro_id: &str) -> ControlMetadata {
     let mut properties = HashMap::new();
     properties.insert("text".to_string(), prop("Mine"));
     properties.insert(MACRO_REF_PROPERTY.to_string(), prop(macro_id));
-    ControlMetadata { control_type: "button".into(), properties }
+    ControlMetadata { control_type: "button".into(), uid: String::new(), properties }
 }
 
 fn button_cell(params: serde_json::Value) -> crate::cell_types::CellTypeAssignment {
@@ -1227,7 +1227,7 @@ fn holding(code: &str) -> crate::AppState {
         .controls
         .write(&test_seed_effect())
         .unwrap()
-        .insert((1, 1, 1), ControlMetadata { control_type: "button".into(), properties });
+        .insert((1, 1, 1), ControlMetadata { control_type: "button".into(), uid: String::new(), properties });
     state
 }
 

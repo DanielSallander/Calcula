@@ -529,17 +529,19 @@ fn write_report_to_grid(
             }
 
             let active_sheet = *state.active_sheet.read().unwrap();
+            // A grid report has no PivotTable style of its own: the default.
+            let theme = crate::pivot::grid_theme::PivotGridTheme::default_style();
             let merges = if sheet_idx == active_sheet {
                 if let Some(ref r) = old {
                     if r.sheet_index == sheet_idx {
                         active_grid.clear_region(r.start_row, r.start_col, r.end_row, r.end_col);
                     }
                 }
-                let m = write_pivot_to_grid(dest_grid, Some(&mut active_grid), view, dest, &mut styles);
+                let m = write_pivot_to_grid(dest_grid, Some(&mut active_grid), view, dest, &mut styles, &theme);
                 active_grid.recalculate_bounds();
                 m
             } else {
-                write_pivot_to_grid(dest_grid, None, view, dest, &mut styles)
+                write_pivot_to_grid(dest_grid, None, view, dest, &mut styles, &theme)
             };
 
             let (dest_row, dest_col) = dest;

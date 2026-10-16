@@ -12,14 +12,19 @@ import {
   FLOATING_RANGE_MAX_COLS,
 } from "@api/floatingRanges";
 import { FLOATING_HANDLE_HIT_HALF } from "@api/gridOverlays";
+import { lineHeightFor } from "@api/visualContainer";
+import { frContainerOf, frInsets, frShowsTitle } from "./frObjectFormat";
 import { firstEndingAfter, lastStartingBefore } from "../../_shared/lib/offsetSearch";
 
 // ============================================================================
 // Frame chrome constants
 // ============================================================================
 
-/** Title bar height WHEN SHOWN (the Core-move grab zone). */
+/** Title bar height WHEN SHOWN (the Core-move grab zone), at least: a larger
+ *  title font grows the bar (`frTitleH`). */
 export const FR_TITLE_H = 20;
+/** Room above and below the title text line inside the bar (11px -> 14 + 6 = 20). */
+export const FR_TITLE_PAD_Y = 6;
 /** Local column-header strip height WHEN SHOWN (A, B, C, …). */
 export const FR_COL_HDR_H = 16;
 /** Local row-header strip width WHEN SHOWN (1, 2, 3, …). */
@@ -34,14 +39,23 @@ export const FR_DEFAULT_ROW_H = 20;
 // ============================================================================
 //
 // Every piece of frame math below (and in frRenderer / index.ts / frEditor)
-// goes through these three, never the raw constants. A hidden strip is ZERO
+// goes through these three -- and the container INSETS (`frInsets`, the
+// border and padding of the visual container, lib/frObjectFormat.ts) -- never
+// the raw constants. A hidden strip is ZERO
 // pixels wide/tall, so the frame SHRINKS and every derived coordinate — cell
 // origins, hit zones, the resize quantization, the editor's DOM rect — moves
 // with it. That is what makes hiding chrome one edit instead of thirty.
 
-/** Title-bar height for this entry: 0 when hidden. */
+/**
+ * Title-bar height for this entry: 0 when hidden. The bar fits its RESOLVED
+ * title font (a bound or formatted size grows it), never below FR_TITLE_H.
+ * Visibility is the resolved `title.show` -- `showTitle`, or what a Format
+ * pane preview shows.
+ */
 export function frTitleH(entry: FloatingRangeEntry): number {
-  return entry.showTitle ? FR_TITLE_H : 0;
+  if (!frShowsTitle(entry)) return 0;
+  const size = frContainerOf(entry).title.fontSize;
+  return Math.max(FR_TITLE_H, lineHeightFor(size) + FR_TITLE_PAD_Y);
 }
 
 /** Column-header strip height for this entry: 0 when hidden. */
@@ -54,9 +68,29 @@ export function frRowHdrW(entry: FloatingRangeEntry): number {
   return entry.showRowHeaders ? FR_ROW_HDR_W : 0;
 }
 
-/** Top of the cell area, relative to the frame origin (title + col header). */
+/** Top of the cell area, relative to the frame origin (container inset + title + col header). */
 export function frCellsTop(entry: FloatingRangeEntry): number {
-  return frTitleH(entry) + frColHdrH(entry);
+  return frInsets(entry).top + frTitleH(entry) + frColHdrH(entry);
+}
+
+/** Left of the cell area, relative to the frame origin (container inset + row gutter). */
+export function frCellsLeft(entry: FloatingRangeEntry): number {
+  return frInsets(entry).left + frRowHdrW(entry);
+}
+
+/**
+ * The grid's OWN frame (title bar, headers, cells) inside the container,
+ * frame-relative: the content rect Core's band leaves (`visualContentRect`).
+ * With no padding and no border it IS the frame.
+ */
+export function frInnerBox(entry: FloatingRangeEntry): { x: number; y: number; width: number; height: number } {
+  const ins = frInsets(entry);
+  return {
+    x: ins.left,
+    y: ins.top,
+    width: frRowHdrW(entry) + contentWidth(entry),
+    height: frTitleH(entry) + frColHdrH(entry) + contentHeight(entry),
+  };
 }
 
 // ============================================================================
@@ -95,14 +129,14 @@ export function contentHeight(entry: FloatingRangeEntry): number {
   return h;
 }
 
-/** Derived frame width: local row header (if shown) + cells. */
+/** Derived frame width: container insets + local row header (if shown) + cells. */
 export function frameWidth(entry: FloatingRangeEntry): number {
-  return frRowHdrW(entry) + contentWidth(entry);
+  return frCellsLeft(entry) + contentWidth(entry) + frInsets(entry).right;
 }
 
-/** Derived frame height: title bar + local col header (each if shown) + cells. */
+/** Derived frame height: container insets + title bar + local col header (each if shown) + cells. */
 export function frameHeight(entry: FloatingRangeEntry): number {
-  return frCellsTop(entry) + contentHeight(entry);
+  return frCellsTop(entry) + contentHeight(entry) + frInsets(entry).bottom;
 }
 
 /** Frame size for arbitrary counts (resize-ghost math), using this entry's
@@ -112,9 +146,10 @@ export function frameSizeForCounts(
   rows: number,
   cols: number,
 ): { width: number; height: number } {
-  let w = frRowHdrW(entry);
+  const ins = frInsets(entry);
+  let w = frCellsLeft(entry) + ins.right;
   for (let c = 0; c < cols; c++) w += frColWidth(entry, c);
-  let h = frCellsTop(entry);
+  let h = frCellsTop(entry) + ins.bottom;
   for (let r = 0; r < rows; r++) h += frRowHeight(entry, r);
   return { width: w, height: h };
 }
@@ -276,7 +311,7 @@ export function localCellOrigin(
   col: number,
   view?: FrView,
 ): { x: number; y: number } {
-  let x = frRowHdrW(entry);
+  let x = frCellsLeft(entry);
   for (let c = 0; c < col; c++) x += frColWidth(entry, c);
   let y = frCellsTop(entry);
   for (let r = 0; r < row; r++) y += frRowHeight(entry, r);
@@ -290,6 +325,8 @@ export function localCellOrigin(
 /** Which zone of the frame a point (relative to the frame origin) is in. */
 export type FrHitZone =
   | { zone: "outside" }
+  /** The container band (border + padding) around the grid's own frame: no cell, no strip. */
+  | { zone: "padding" }
   | { zone: "title" }
   | { zone: "colHeader"; col: number }
   | { zone: "rowHeader"; row: number }
@@ -306,6 +343,11 @@ export type FrHitZone =
  * with `frTitleH` at 0 the `dy < titleH` test can never pass, with `frColHdrH`
  * at 0 the col-header band is empty, and with `frRowHdrW` at 0 `colX` is never
  * negative. Nothing here needs an `if (showX)` — the extents already say it.
+ *
+ * The container band (`frInsets`: the border and the padding) lies outside the
+ * grid's own frame and answers `padding` -- no cell, no header: Core answers
+ * it as the object's frame before it asks the zone, and a reference pick or a
+ * double-click there names nothing.
  */
 export function localCellFromPoint(
   entry: FloatingRangeEntry,
@@ -316,9 +358,15 @@ export function localCellFromPoint(
   if (dx < 0 || dy < 0 || dx > frameWidth(entry) || dy > frameHeight(entry)) {
     return { zone: "outside" };
   }
+  // Inner (grid-frame) coordinates: the container band comes off first.
+  const inner = frInnerBox(entry);
+  const ix = dx - inner.x;
+  const iy = dy - inner.y;
+  if (ix < 0 || iy < 0 || ix > inner.width || iy > inner.height) return { zone: "padding" };
+
   const titleH = frTitleH(entry);
-  const cellsTop = frCellsTop(entry);
-  if (dy < titleH) return { zone: "title" };
+  const cellsTop = titleH + frColHdrH(entry);
+  if (iy < titleH) return { zone: "title" };
 
   const colOff = frColOffsets(entry, view.cols);
   const rowOff = frRowOffsets(entry, view.rows);
@@ -328,21 +376,21 @@ export function localCellFromPoint(
   const rowAt = (y: number) => Math.min(view.rows - 1, firstEndingAfter(rowOff, 0, view.rows, y));
 
   // Column from x (points in the local row-header gutter have no column).
-  const colX = dx - frRowHdrW(entry);
+  const colX = ix - frRowHdrW(entry);
   const col = colX >= 0 ? colAt(colX + view.scrollLeft) : 0;
 
-  if (dy < cellsTop) {
+  if (iy < cellsTop) {
     // Top-left corner box. With no title bar there is nothing to grab there,
     // so it reads as the row-header gutter it sits above -- the top VISIBLE
     // row's gutter -- rather than as a move zone that does not exist.
     if (colX < 0) {
-      return entry.showTitle ? { zone: "title" } : { zone: "rowHeader", row: rowAt(view.scrollTop) };
+      return frShowsTitle(entry) ? { zone: "title" } : { zone: "rowHeader", row: rowAt(view.scrollTop) };
     }
     return { zone: "colHeader", col };
   }
 
   // Row from y.
-  const row = rowAt(dy - cellsTop + view.scrollTop);
+  const row = rowAt(iy - cellsTop + view.scrollTop);
 
   if (colX < 0) return { zone: "rowHeader", row };
   return { zone: "cells", row, col };
@@ -622,8 +670,9 @@ export function bestCountsForSize(
   width: number,
   height: number,
 ): { rows: number; cols: number } {
-  const targetW = width - frRowHdrW(entry);
-  const targetH = height - frCellsTop(entry);
+  const ins = frInsets(entry);
+  const targetW = width - frCellsLeft(entry) - ins.right;
+  const targetH = height - frCellsTop(entry) - ins.bottom;
 
   let cols = 1;
   {

@@ -8,8 +8,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import type { ChartSpec, ParsedChartData, TransformDiagnostic } from "../types";
 import { hasRenderableData } from "../types";
-import { resolveChartTheme } from "../rendering/chartTheme";
-import { dispatchPaint, dispatchComputeLayout } from "../rendering/chartDispatch";
+import { paintChartWithContainer } from "../lib/paintChartWithContainer";
 import {
   onOpenWithSpec,
   onSpecUpdated,
@@ -233,10 +232,10 @@ function PreviewCanvas({ spec, data }: {
       return;
     }
 
-    const theme = resolveChartTheme(spec.config);
-    const layout = dispatchComputeLayout(w, h, spec, data, theme);
+    // The chart inside its visual container, as the canvas paints it (the
+    // painters fill no background of their own -- review R1-3).
     ctx.clearRect(0, 0, w, h);
-    dispatchPaint(ctx, data, spec, layout, theme);
+    paintChartWithContainer(ctx, w, h, spec, data);
   }, [spec, data]);
 
   // Re-render on resize
@@ -257,10 +256,8 @@ function PreviewCanvas({ spec, data }: {
       canvas.height = h * dpr;
       ctx.scale(dpr, dpr);
 
-      const theme = resolveChartTheme(spec.config);
-      const layout = dispatchComputeLayout(w, h, spec, data, theme);
       ctx.clearRect(0, 0, w, h);
-      dispatchPaint(ctx, data, spec, layout, theme);
+      paintChartWithContainer(ctx, w, h, spec, data);
     });
 
     observer.observe(container);

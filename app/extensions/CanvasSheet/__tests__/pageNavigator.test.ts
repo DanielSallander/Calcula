@@ -1,13 +1,13 @@
 //! FILENAME: app/extensions/CanvasSheet/__tests__/pageNavigator.test.ts
-// PURPOSE: Buttons > Page Navigator: Power BI's page navigator is ONE row of
-//          buttons, one per visible report page, the page on screen shown
-//          selected. Calcula builds it from the declarative navigate action
-//          (@api/buttonControlService): one navigate button per VISIBLE CANVAS,
-//          in tab order, laid out in a row that wraps at the page edge, all
-//          created as ONE undo step ("Insert Page Navigator").
+// PURPOSE: Buttons > Page Navigator inserts ONE live control (controlType
+//          "pageNavigator") through the seam's `createPageNavigator` -- never a
+//          row of navigate buttons -- in ONE undo step ("Insert Page
+//          Navigator"). Its box is the seam's natural size for the pages it
+//          lists now, clamped to the page, so it never lands off a small page.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { SheetInfo } from "@api";
+import { pageNavigatorNaturalSize } from "@api/buttonControlService";
 
 const getSheets = vi.fn();
 vi.mock("@api", async (importOriginal) => ({
@@ -22,17 +22,26 @@ vi.mock("@api/grid", async (importOriginal) => ({
 }));
 
 const createButton = vi.fn();
+const createPageNavigator = vi.fn();
 vi.mock("@api/buttonControlService", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@api/buttonControlService")>()),
-  requireButtonControlProvider: () => ({ createButton }),
+  requireButtonControlProvider: () => ({ createButton, createPageNavigator }),
 }));
 
 const transactions: string[] = [];
+/** Whether a create ran INSIDE the transaction (between open and commit). */
+let insideTransaction = false;
+const createdInside: boolean[] = [];
 vi.mock("@api/objectGeometry", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@api/objectGeometry")>()),
   runInUndoTransaction: async (label: string, fn: () => Promise<unknown>) => {
     transactions.push(label);
-    return fn();
+    insideTransaction = true;
+    try {
+      return await fn();
+    } finally {
+      insideTransaction = false;
+    }
   },
 }));
 
@@ -47,15 +56,11 @@ vi.mock("../lib/layoutSurfaceProvider", () => ({
   canvasLayoutSurface: () => surface,
 }));
 
-import {
-  PAGE_NAVIGATOR_BUTTON,
-  PAGE_NAVIGATOR_GAP_PX,
-  PAGE_NAVIGATOR_UNDO_LABEL,
-  insertPageNavigator,
-  layoutPageNavigator,
-  pageNavigatorTargets,
-} from "../lib/pageNavigator";
+import { PAGE_NAVIGATOR_UNDO_LABEL, insertPageNavigator, pageNavigatorDefaultSize } from "../lib/pageNavigator";
 import { resetInsertCascade } from "../lib/insertOnCanvas";
+
+const WIDE = { width: 1280, height: 720 } as const; // 16:9
+const TOOLTIP = { width: 320, height: 240 } as const; // the Tooltip page preset
 
 function sheet(index: number, name: string, over: Partial<SheetInfo> = {}): SheetInfo {
   return { index, name, visibility: "visible", sheetId: `id-${index}`, kind: "canvas", ...over } as SheetInfo;
@@ -67,15 +72,40 @@ const SHEETS: SheetInfo[] = [
   sheet(2, "Hidden page", { visibility: "hidden" }),
   sheet(3, "Detail"),
   sheet(4, "Very hidden", { visibility: "veryHidden" }),
+  sheet(5, "Tip", { canvasLayout: { pagePreset: "tooltip" } } as Partial<SheetInfo>),
 ];
+
+function manyPages(n: number): SheetInfo[] {
+  return Array.from({ length: n }, (_, i) => sheet(i + 1, `Page ${i + 1}`));
+}
+
+type Req = { sheetIndex: number; x: number; y: number; width: number; height: number } & Record<string, unknown>;
+
+function onlyRequest(): Req {
+  expect(createPageNavigator).toHaveBeenCalledTimes(1);
+  return createPageNavigator.mock.calls[0][0] as Req;
+}
+
+function expectOnPage(r: Req, page: { width: number; height: number }): void {
+  expect(r.x, "left edge").toBeGreaterThanOrEqual(0);
+  expect(r.y, "top edge").toBeGreaterThanOrEqual(0);
+  expect(r.x + r.width, "right edge").toBeLessThanOrEqual(page.width);
+  expect(r.y + r.height, "bottom edge").toBeLessThanOrEqual(page.height);
+}
 
 beforeEach(() => {
   resetInsertCascade();
   transactions.length = 0;
-  createButton.mockReset().mockResolvedValue({ instanceId: "x", sheetIndex: 1, row: 0, col: 0, x: 0, y: 0, width: 0, height: 0 });
+  createdInside.length = 0;
+  insideTransaction = false;
+  createButton.mockReset();
+  createPageNavigator.mockReset().mockImplementation(async (req: Req) => {
+    createdInside.push(insideTransaction);
+    return { instanceId: "n", sheetIndex: req.sheetIndex, row: 0, col: 0, x: req.x, y: req.y, width: req.width, height: req.height };
+  });
   alertAsync.mockClear();
   getSheets.mockReset().mockResolvedValue({ sheets: SHEETS, activeIndex: 1 });
-  surface = { snapToGrid: true, gridSize: 16, showGrid: true, page: { width: 1280, height: 720 }, editable: true };
+  surface = { snapToGrid: true, gridSize: 16, showGrid: true, page: { ...WIDE }, editable: true };
   gridSnapshot = {
     sheetContext: { activeSheetIndex: 1 },
     viewport: { scrollX: 0, scrollY: 0 },
@@ -84,123 +114,112 @@ beforeEach(() => {
   };
 });
 
-describe("which pages it lists", () => {
-  it("every VISIBLE canvas, in tab order -- never a worksheet, never a hidden page", () => {
-    expect(pageNavigatorTargets(SHEETS)).toEqual([
-      { sheetId: "id-1", sheetName: "Overview" },
-      { sheetId: "id-3", sheetName: "Detail" },
-    ]);
+describe("the default box (pure)", () => {
+  it("is the seam's natural size when it fits on the page", () => {
+    expect(pageNavigatorDefaultSize(1, WIDE)).toEqual(pageNavigatorNaturalSize(1));
+    expect(pageNavigatorDefaultSize(4, WIDE)).toEqual(pageNavigatorNaturalSize(4));
   });
 
-  it("a sheet with no stable id is still listed, by name (the action falls back to it)", () => {
-    expect(pageNavigatorTargets([sheet(5, "Old", { sheetId: undefined })])).toEqual([{ sheetName: "Old" }]);
-  });
-});
-
-describe("how the row is laid out", () => {
-  it("side by side from the origin, one gap apart", () => {
-    const rects = layoutPageNavigator(3, { x: 100, y: 50 }, { width: 1280, height: 720 });
-    const w = PAGE_NAVIGATOR_BUTTON.width;
-    expect(rects.map((r) => [r.x, r.y])).toEqual([
-      [100, 50],
-      [100 + w + PAGE_NAVIGATOR_GAP_PX, 50],
-      [100 + 2 * (w + PAGE_NAVIGATOR_GAP_PX), 50],
-    ]);
-    for (const r of rects) expect([r.width, r.height]).toEqual([PAGE_NAVIGATOR_BUTTON.width, PAGE_NAVIGATOR_BUTTON.height]);
+  it("is clamped to the page on each axis (the box is fixed; the items divide it)", () => {
+    const natural30 = pageNavigatorNaturalSize(30);
+    expect(natural30.width).toBeGreaterThan(WIDE.width);
+    expect(pageNavigatorDefaultSize(30, WIDE)).toEqual({ width: WIDE.width, height: natural30.height });
+    expect(pageNavigatorDefaultSize(4, TOOLTIP)).toEqual({ width: TOOLTIP.width, height: pageNavigatorNaturalSize(4).height });
+    expect(pageNavigatorDefaultSize(1, { width: 50, height: 10 })).toEqual({ width: 50, height: 10 });
   });
 
-  it("wraps to a new row instead of running off the page", () => {
-    const rects = layoutPageNavigator(4, { x: 0, y: 0 }, { width: 300, height: 720 });
-    // 112 + 8 + 112 = 232 fits in 300; a third would end at 352.
-    expect(rects.map((r) => r.y)).toEqual([0, 0, PAGE_NAVIGATOR_BUTTON.height + PAGE_NAVIGATOR_GAP_PX, PAGE_NAVIGATOR_BUTTON.height + PAGE_NAVIGATOR_GAP_PX]);
-    for (const r of rects) expect(r.x + r.width).toBeLessThanOrEqual(300);
+  it("off a page (no layout surface) it is the natural size, unclamped", () => {
+    expect(pageNavigatorDefaultSize(30, null)).toEqual(pageNavigatorNaturalSize(30));
+  });
+
+  it("zero pages still get one item's room, never an invisible box", () => {
+    expect(pageNavigatorDefaultSize(0, WIDE)).toEqual(pageNavigatorNaturalSize(1));
   });
 });
 
 describe("inserting it", () => {
-  it("one navigate button per page, captioned with the page, in ONE undo step", async () => {
+  it("is ONE createPageNavigator call, never createButton, in ONE undo step", async () => {
     await insertPageNavigator();
+    expect(createButton).not.toHaveBeenCalled();
     expect(transactions).toEqual([PAGE_NAVIGATOR_UNDO_LABEL]);
-    expect(createButton).toHaveBeenCalledTimes(2);
-    const reqs = createButton.mock.calls.map((c) => c[0]);
-    expect(reqs.map((r) => r.label)).toEqual(["Overview", "Detail"]);
-    expect(reqs.map((r) => r.action)).toEqual([
-      { kind: "navigate", sheetId: "id-1", sheetName: "Overview" },
-      { kind: "navigate", sheetId: "id-3", sheetName: "Detail" },
-    ]);
-    for (const r of reqs) {
-      expect(r.sheetIndex).toBe(1);
-      expect(r.onSelect).toBeUndefined();
-      expect(r.row).toBeUndefined();
-    }
-    // A row: same y, increasing x.
-    expect(reqs[1].y).toBe(reqs[0].y);
-    expect(reqs[1].x).toBeGreaterThan(reqs[0].x);
+    expect(PAGE_NAVIGATOR_UNDO_LABEL).toBe("Insert Page Navigator");
+    expect(createdInside).toEqual([true]);
+    const r = onlyRequest();
+    expect(r.sheetIndex).toBe(1);
+  });
+
+  it("asks only WHERE and HOW BIG -- nothing about pages, captions or actions is stored", async () => {
+    await insertPageNavigator();
+    const r = onlyRequest();
+    expect(Object.keys(r).sort()).toEqual(["height", "sheetIndex", "width", "x", "y"]);
+  });
+
+  it("sizes the box for the pages it lists now: visible, non-Tooltip canvases only", async () => {
+    // Overview + Detail. Never the worksheet, the hidden, the veryHidden or the Tooltip page.
+    await insertPageNavigator();
+    const r = onlyRequest();
+    expect({ width: r.width, height: r.height }).toEqual(pageNavigatorNaturalSize(2));
   });
 
   it("is placed like any other insert: centred in the view and kept on the page", async () => {
     await insertPageNavigator();
-    const reqs = createButton.mock.calls.map((c) => c[0]);
-    const right = Math.max(...reqs.map((r) => r.x + r.width));
-    expect(reqs[0].x).toBeGreaterThan(0);
-    expect(right).toBeLessThanOrEqual(1280);
+    const r = onlyRequest();
+    expect(r.x).toBeGreaterThan(0);
+    expectOnPage(r, WIDE);
   });
 
-  it("a refused button is said once and the rest are not attempted", async () => {
-    createButton.mockReset().mockRejectedValueOnce(new Error("full"));
+  for (const n of [1, 4, 30]) {
+    it(`${n} page(s) on a 16:9 page: the box stays on the page`, async () => {
+      getSheets.mockReset().mockResolvedValue({ sheets: manyPages(n), activeIndex: 1 });
+      gridSnapshot = { ...gridSnapshot!, viewport: { scrollX: 400, scrollY: 300 } };
+      await insertPageNavigator();
+      const r = onlyRequest();
+      expect({ width: r.width, height: r.height }).toEqual(pageNavigatorDefaultSize(n, WIDE));
+      expectOnPage(r, WIDE);
+    });
+
+    it(`${n} page(s) on a 320 x 240 Tooltip page: the box stays on the page`, async () => {
+      surface = { ...surface, page: { ...TOOLTIP } };
+      getSheets.mockReset().mockResolvedValue({ sheets: manyPages(n), activeIndex: 1 });
+      // Scrolled so an unclamped box would be placed off the page.
+      gridSnapshot = { ...gridSnapshot!, viewport: { scrollX: 200, scrollY: 200 } };
+      await insertPageNavigator();
+      const r = onlyRequest();
+      expect(r.width).toBeLessThanOrEqual(TOOLTIP.width);
+      expect(r.height).toBeLessThanOrEqual(TOOLTIP.height);
+      expectOnPage(r, TOOLTIP);
+    });
+  }
+
+  it("with no page listed yet it is still inserted (it is live), one item's room", async () => {
+    getSheets.mockReset().mockResolvedValue({ sheets: [sheet(0, "Data", { kind: "worksheet" })], activeIndex: 0 });
     await insertPageNavigator();
-    expect(createButton).toHaveBeenCalledTimes(1);
+    const r = onlyRequest();
+    expect({ width: r.width, height: r.height }).toEqual(pageNavigatorNaturalSize(1));
+  });
+
+  it("a refused create is said once, with the provider's reason", async () => {
+    createPageNavigator.mockReset().mockRejectedValueOnce(new Error("Lock Objects is on"));
+    await insertPageNavigator();
+    expect(createPageNavigator).toHaveBeenCalledTimes(1);
     expect(alertAsync).toHaveBeenCalledTimes(1);
-    expect(String(alertAsync.mock.calls[0][0])).toContain("full");
+    expect(String(alertAsync.mock.calls[0][0])).toBe("Could not insert a page navigator: Lock Objects is on");
   });
 
-  // Review finding (2026-10-08): the insert placed and clamped a ONE-row box,
-  // then wrapped downwards with no regard for the page's bottom edge, so on a
-  // small page (Tooltip, 320 x 240) with many pages the last rows landed below
-  // the page. The WHOLE wrapped block is now placed and kept on the page, and
-  // when even that cannot fit the buttons get narrower until it does.
-  function manyPages(n: number): SheetInfo[] {
-    return Array.from({ length: n }, (_, i) => sheet(i + 1, `Page ${i + 1}`));
-  }
-  function onPage(reqs: Array<{ x: number; y: number; width: number; height: number }>, w: number, h: number): void {
-    for (const r of reqs) {
-      expect(r.x, "left edge").toBeGreaterThanOrEqual(0);
-      expect(r.y, "top edge").toBeGreaterThanOrEqual(0);
-      expect(r.x + r.width, `right edge of the button at ${r.x},${r.y}`).toBeLessThanOrEqual(w);
-      expect(r.y + r.height, `bottom edge of the button at ${r.x},${r.y}`).toBeLessThanOrEqual(h);
-    }
-  }
-
-  it("a wrapped navigator stays on a small page: every row, not just the first", async () => {
-    surface = { ...surface, page: { width: 320, height: 240 } };
-    // The view is scrolled so a one-row box would be placed low on the page.
-    gridSnapshot = { ...gridSnapshot!, viewport: { scrollX: 0, scrollY: 200 } };
-    getSheets.mockReset().mockResolvedValue({ sheets: manyPages(10), activeIndex: 1 });
+  it("a failed page read is said once and nothing is created", async () => {
+    getSheets.mockReset().mockRejectedValue(new Error("ipc down"));
     await insertPageNavigator();
-    const reqs = createButton.mock.calls.map((c) => c[0]);
-    expect(reqs).toHaveLength(10);
-    expect(new Set(reqs.map((r) => r.y)).size, "it wraps").toBeGreaterThan(1);
-    onPage(reqs, 320, 240);
-    // Room enough: the buttons keep their full width.
-    for (const r of reqs) expect(r.width).toBe(PAGE_NAVIGATOR_BUTTON.width);
-  });
-
-  it("too many pages for full-width buttons: the buttons get narrower, and still fit", async () => {
-    surface = { ...surface, page: { width: 320, height: 240 } };
-    getSheets.mockReset().mockResolvedValue({ sheets: manyPages(24), activeIndex: 1 });
-    await insertPageNavigator();
-    const reqs = createButton.mock.calls.map((c) => c[0]);
-    expect(reqs).toHaveLength(24);
-    expect(reqs[0].width).toBeLessThan(PAGE_NAVIGATOR_BUTTON.width);
-    onPage(reqs, 320, 240);
-    // Never two buttons on top of each other.
-    const spots = new Set(reqs.map((r) => `${r.x},${r.y}`));
-    expect(spots.size).toBe(24);
+    expect(createPageNavigator).not.toHaveBeenCalled();
+    expect(transactions).toEqual([]);
+    expect(alertAsync).toHaveBeenCalledTimes(1);
+    expect(String(alertAsync.mock.calls[0][0])).toContain("ipc down");
   });
 
   it("with no grid yet nothing is created", async () => {
     gridSnapshot = null;
     await insertPageNavigator();
+    expect(createPageNavigator).not.toHaveBeenCalled();
     expect(createButton).not.toHaveBeenCalled();
+    expect(alertAsync).not.toHaveBeenCalled();
   });
 });

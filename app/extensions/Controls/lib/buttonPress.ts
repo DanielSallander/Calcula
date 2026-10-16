@@ -32,6 +32,10 @@
 //              handle answers under a held button, and the button keeps its
 //              hand (BUG-0258 M7 review).
 //            - The window listeners live only as long as the press.
+//            - A Page Navigator ITEM is pressed the same way (WP-B, D-NAV;
+//              PageNavigator/navigatorPress.ts), with one more condition on
+//              "inside": the pointer must be over the SAME item, so a slide
+//              from one page's item onto another's opens neither.
 //          WHAT RUNS is the caller's (Controls/index.ts): the `button:clicked`
 //          hook and `runFloatingButtonClick` -- the M4 click path with its
 //          macro link, application approval and audit gates -- unchanged, only
@@ -48,12 +52,24 @@ export interface FloatingButtonPress {
   regionId: string;
   /** What a click on the button does; called once, at a release inside it. */
   run: () => void;
+  /**
+   * A Page Navigator ITEM (PageNavigator/navigatorPress.ts): the key of the
+   * item pressed. "Inside" then also means "over THIS item": the release must
+   * be inside the region AND over the same item, so a press on page A that
+   * slides onto page B and lets go there opens nothing.
+   */
+  itemKey?: string;
+  /** The key of the navigator item under a client point, or null (a gap, outside). Required with `itemKey`. */
+  itemAtClient?: (clientX: number, clientY: number) => string | null;
 }
 
 interface Session {
   controlId: string;
   regionId: string;
   run: () => void;
+  /** A navigator item's key; absent for a button. */
+  itemKey?: string;
+  itemAtClient?: (clientX: number, clientY: number) => string | null;
   /** Is the pointer inside the button (the pressed look)? */
   inside: boolean;
   /** Lets go of Core's pointer this press holds (every end path runs it). */
@@ -62,9 +78,19 @@ interface Session {
 
 let session: Session | null = null;
 
-/** Whether the release point is INSIDE the button: on it, and nothing floating on top of it there. */
-function insideAt(regionId: string, clientX: number, clientY: number): boolean {
-  return topFloatingRegionAtClient(clientX, clientY)?.id === regionId;
+/**
+ * Whether a point is INSIDE what was pressed: on the region, with nothing
+ * floating on top of it there -- and, for a navigator item, over that same
+ * item (a slide from item A onto item B is OUTSIDE A).
+ */
+function insideAt(
+  press: Pick<Session, "regionId" | "itemKey" | "itemAtClient">,
+  clientX: number,
+  clientY: number,
+): boolean {
+  if (topFloatingRegionAtClient(clientX, clientY)?.id !== press.regionId) return false;
+  if (!press.itemKey) return true;
+  return press.itemAtClient?.(clientX, clientY) === press.itemKey;
 }
 
 /**
@@ -78,6 +104,7 @@ export function beginFloatingButtonPress(press: FloatingButtonPress): void {
     controlId: press.controlId,
     regionId: press.regionId,
     run: press.run,
+    ...(press.itemKey ? { itemKey: press.itemKey, itemAtClient: press.itemAtClient } : {}),
     inside: true,
     releaseCursor: holdContentGestureCursor(press.regionId, "pointer"),
   };
@@ -88,9 +115,13 @@ export function beginFloatingButtonPress(press: FloatingButtonPress): void {
   requestOverlayRedraw();
 }
 
-/** Is this button showing PRESSED (a press on it is held, and the pointer is inside)? */
-export function isFloatingButtonPressed(controlId: string): boolean {
-  return session !== null && session.controlId === controlId && session.inside;
+/**
+ * Is this button showing PRESSED (a press on it is held, and the pointer is
+ * inside)? With `itemKey`: is THAT item of a navigator the one pressed.
+ */
+export function isFloatingButtonPressed(controlId: string, itemKey?: string): boolean {
+  if (session === null || session.controlId !== controlId || !session.inside) return false;
+  return itemKey === undefined || session.itemKey === itemKey;
 }
 
 /** Whether a button press is held at all (inside or not). */
@@ -123,7 +154,7 @@ const onPressMove = (e: MouseEvent): void => {
     cancelFloatingButtonPress();
     return;
   }
-  const inside = insideAt(session.regionId, e.clientX, e.clientY);
+  const inside = insideAt(session, e.clientX, e.clientY);
   if (inside !== session.inside) {
     session.inside = inside;
     requestOverlayRedraw();
@@ -144,7 +175,7 @@ const onPressUp = (e: MouseEvent): void => {
   if (!s) return;
   requestOverlayRedraw();
   // Released INSIDE the button it was pressed on, or nothing runs.
-  if (!insideAt(s.regionId, e.clientX, e.clientY)) return;
+  if (!insideAt(s, e.clientX, e.clientY)) return;
   s.run();
 };
 

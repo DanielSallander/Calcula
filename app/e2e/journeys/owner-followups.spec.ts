@@ -60,6 +60,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, expect } from "../fixtures";
+import { closeObjectPaneForGood } from "../helpers/object-pane";
 import {
   COLLAB,
   activate,
@@ -520,6 +521,15 @@ async function waitForCheckoutResult(dialog: Locator): Promise<void> {
   }
 }
 
+// WP-C (D-PANE): on a canvas a click opens the ONE object pane at its release,
+// and a docked pane narrows the grid. This journey predates the pane and asserts
+// nothing about it, so every test starts with the pane closed AS IF BY HAND
+// (helpers/object-pane.ts). Per test, not once: the fixture's per-test task-pane
+// reset clears the "closed by hand" mark, and Playwright runs this hook after it.
+test.beforeEach(async ({ appPage }) => {
+  await closeObjectPaneForGood(appPage);
+});
+
 // ===========================================================================
 // 1-3. COLLABORATION
 // ===========================================================================
@@ -729,6 +739,24 @@ test.describe("owner follow-ups, live: button code in Collaboration (BUG-0257 / 
           await activate(page, sheetName);
           await revealControls(page, sheetName, [[1, 1]]);
           await grid.clickCell("B2");
+          // WP-C (D-PANE, S13): on a WORKSHEET a press opens no pane; the
+          // floating button's Properties are a tab of the ONE object pane, and
+          // its own right-click menu's "Properties..." is the door to it.
+          // cellCenterScrollAware is CANVAS-relative: offset by the canvas box.
+          const rel = await grid.cellCenterScrollAware("B2");
+          const box = await grid.canvas.boundingBox();
+          const at = { x: (box?.x ?? 0) + rel.x, y: (box?.y ?? 0) + rel.y };
+          await page.mouse.move(at.x, at.y);
+          await page.mouse.down({ button: "right" });
+          await page.waitForTimeout(60);
+          await page.mouse.up({ button: "right" });
+          const door = page.locator('[data-control-menu-item="controls.properties"]');
+          const offered = await door.waitFor({ state: "visible", timeout: 8_000 }).then(
+            () => true,
+            () => false,
+          );
+          expect.soft(offered, `${label}: the Design Mode button's menu offers no "Properties..."`).toBe(true);
+          if (offered) await door.click();
           const opened = await heldSection
             .or(paneTitle)
             .first()
@@ -737,7 +765,7 @@ test.describe("owner follow-ups, live: button code in Collaboration (BUG-0257 / 
               () => true,
               () => false,
             );
-          expect.soft(opened, `${label}: clicking the button in Design Mode did not open its Properties pane`).toBe(true);
+          expect.soft(opened, `${label}: the button menu's "Properties..." did not open its Properties`).toBe(true);
           if (!opened) {
             await callModule(page, UI, "openTaskPane", [
               CONTROL_PROPERTIES_PANE,
@@ -843,6 +871,11 @@ test.describe("owner follow-ups, live: button code in Collaboration (BUG-0257 / 
     } finally {
       // A confirm left open blocks every IPC call, File > New included.
       drainConfirms(ADOPT_TITLE);
+      // The object pane the "Properties..." door opened must not narrow the
+      // grid for the specs after this one (File > New closes no pane).
+      for (const paneId of ["object-pane", CONTROL_PROPERTIES_PANE]) {
+        await callModule(page, UI, "closeTaskPane", [paneId]).catch(() => undefined);
+      }
       await callModule(page, DESIGN_MODE, "setDesignMode", [false]).catch(() => undefined);
       await newFile(page).catch(() => undefined);
     }

@@ -38,8 +38,11 @@ import {
   MAX_SHAPE_PROPERTY_KEY,
   SCRIPT_SHAPE_PROPERTY_KEYS,
   SCRIPT_REFUSED_SHAPE_PROPERTY_KEYS,
+  checkPropertySetAspect,
+  checkBindingSetAspect,
 } from "../validators";
 import { ALLOWLIST } from "../allowlist";
+import { CONTROL_CONTAINER_PROPERTY_KEYS } from "../../visualContainer";
 import { METHOD_DEADLINES_MS } from "../protocol";
 import { capabilityAuditClassification } from "../broker";
 
@@ -169,7 +172,13 @@ describe("shape.setProperty: keys and bounds", () => {
   it("accepts the real property keys the Controls extension defines", () => {
     for (const key of SCRIPT_SHAPE_PROPERTY_KEYS) {
       if (key === "src") continue; // its own rule, covered above
-      expect(vSetState(["shape.setProperty", [key, "value"]]), key).toBe(true);
+      // A Page Navigator's per-page overrides are a JSON array, checked
+      // strictly (pageNavigatorSetProperty.test.ts): an empty list is valid.
+      // A visual container key's VALUE is checked by the container's leaf
+      // rule (WP-C S14, validators.test.ts): "" -- the family default -- is
+      // valid for every one of them, so this stays a test of the KEYS.
+      const value = key === "pageOverrides" ? "[]" : CONTROL_CONTAINER_PROPERTY_KEYS.includes(key) ? "" : "value";
+      expect(vSetState(["shape.setProperty", [key, value]]), key).toBe(true);
     }
   });
 
@@ -301,6 +310,43 @@ describe("the shape-property key list tracks the Controls extension", () => {
         continue;
       }
       expect(SCRIPT_SHAPE_PROPERTY_KEYS, `BUTTON_PROPERTIES.${k}`).toContain(k);
+    }
+  });
+
+  // WP-B (D-NAV). The navigator's rows live in their OWN file so this slice
+  // "to the end" cannot fold them into another census. The guards come BEFORE
+  // the loop: the regex matches only a four-space `key: "` row, so a file
+  // indented differently parses to zero keys and an unguarded loop passes.
+  //
+  // SABOTAGE (run once): add a row keyed "navSabotage" -> red at the loop;
+  // re-indent the file to two spaces -> red at the guards.
+  it("covers every PAGE NAVIGATOR property Controls defines", () => {
+    const keys = propertyKeysIn(
+      "PageNavigator/pageNavigatorProperties.ts",
+      "PAGE_NAVIGATOR_PROPERTIES: PropertyDefinition[]",
+    );
+    expect(keys).toContain("showTooltipPages");
+    expect(keys).toContain("orientation");
+    expect(keys.length).toBeGreaterThanOrEqual(13);
+    for (const k of keys) {
+      expect(SCRIPT_SHAPE_PROPERTY_KEYS, `PAGE_NAVIGATOR_PROPERTIES.${k}`).toContain(k);
+    }
+  });
+
+  // WP-C S13 (D-FORMAT): a control's visual container lives in FLAT keys --
+  // containerTitleText, containerPaddingTop, a navigator's
+  // containerBackgroundColor ... -- which a script reaches through the same
+  // shape.setProperty door. Every one of them is in the list (spread from
+  // @api/visualContainer, never re-typed), and the paint keys a shape's,
+  // button's and picture's background / border ARE were already there.
+  // SABOTAGE (run once): drop the spread from SCRIPT_SHAPE_PROPERTY_KEYS -> red.
+  it("covers every CONTROL_CONTAINER_PROPERTY_KEYS key, and the paint keys a container maps onto", () => {
+    expect(CONTROL_CONTAINER_PROPERTY_KEYS.length).toBeGreaterThanOrEqual(51);
+    for (const k of CONTROL_CONTAINER_PROPERTY_KEYS) {
+      expect(SCRIPT_SHAPE_PROPERTY_KEYS, `container key ${k}`).toContain(k);
+    }
+    for (const k of ["fill", "stroke", "strokeWidth", "borderColor"]) {
+      expect(SCRIPT_SHAPE_PROPERTY_KEYS, k).toContain(k);
     }
   });
 
@@ -553,5 +599,60 @@ describe("cap.fileImportMedia hands back a handle, not an image", () => {
     vi.doMock("../../filesystem", () => ({ importImageViaPicker }));
     const { executeMediaImport } = await import("../host");
     await expect(executeMediaImport("My Script")).rejects.toThrow(/41 MB/);
+  });
+});
+
+// ============================================================================
+// 4. The pointer doors (D-BIND §3.19): a picture slot by PATH is the same slot
+// ============================================================================
+//
+// `setProperty("/properties/src", value)` and `bindProperty("/properties/src",
+// formula)` reach the very slot `shape.setProperty("src")` guards, through two
+// NEW aspects. A second door to a slot must never be the lax one, so each is
+// held to the media rule here -- both setState doors, because vObjectAspect
+// delegates to vSetState.
+
+describe("a picture slot addressed by POINTER keeps the media rule", () => {
+  const SRC = "/properties/src";
+
+  it("property.set takes a handle or \"\" -- and refuses inline bytes, a URL and a path", () => {
+    expect(checkPropertySetAspect([SRC, HANDLE])).toBe(true);
+    expect(checkPropertySetAspect([SRC, ""])).toBe(true);
+    for (const bad of [
+      "data:image/png;base64,iVBORw0KGgo=",
+      "DATA:,x",
+      "https://tracker.example/p.png",
+      "C:\\Users\\me\\a.png",
+      "media:../../etc",
+    ]) {
+      const verdict = checkPropertySetAspect([SRC, bad]);
+      expect(verdict, bad).not.toBe(true);
+      expect(String(verdict), bad).toMatch(/must be a media handle/);
+      // Both setState doors refuse it.
+      expect(vSetState(["property.set", [SRC, bad]]), bad).not.toBe(true);
+      expect(vObjectAspect(["control", "uid-1", "property.set", [SRC, bad]]), bad).not.toBe(true);
+    }
+    // A picture is not a number either.
+    expect(String(checkPropertySetAspect([SRC, 42]))).toMatch(/takes a media handle/);
+  });
+
+  it("binding.set refuses a formula that carries inline bytes into a picture slot", () => {
+    const formula = '="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"';
+    const verdict = checkBindingSetAspect([SRC, formula]);
+    expect(verdict).not.toBe(true);
+    expect(String(verdict)).toMatch(/must be a media handle/);
+    expect(vSetState(["binding.set", [SRC, formula]])).not.toBe(true);
+    expect(vObjectAspect(["control", "uid-1", "binding.set", [SRC, formula]])).not.toBe(true);
+  });
+
+  it("binding.set admits a formula that REFERENCES media (a cell holding a handle) -- Rust checks it exists", () => {
+    // The formula names a cell; whatever the cell holds is coerced by Rust's
+    // Media rule at every evaluation (a handle that names nothing in the
+    // document is an error, never a paint).
+    expect(checkBindingSetAspect([SRC, "=Pictures!B2"])).toBe(true);
+    expect(checkBindingSetAspect([SRC, `="${HANDLE}"`])).toBe(true);
+    // The same inline bytes on a TEXT slot are just text (8 KiB-capped), not a
+    // picture -- the media refusal is for media slots.
+    expect(checkBindingSetAspect(["/properties/text", '="data:,hello"'])).toBe(true);
   });
 });

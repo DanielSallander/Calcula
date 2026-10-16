@@ -6,8 +6,7 @@
 import React, { useRef, useEffect, useCallback } from "react";
 import type { ChartSpec, ParsedChartData } from "../types";
 import { hasRenderableData } from "../types";
-import { resolveChartTheme } from "../rendering/chartTheme";
-import { dispatchPaint, dispatchComputeLayout } from "../rendering/chartDispatch";
+import { paintChartWithContainer } from "../lib/paintChartWithContainer";
 import { PreviewContainer, PreviewCanvas } from "./CreateChartDialog.styles";
 
 interface ChartPreviewProps {
@@ -60,10 +59,11 @@ export function ChartPreview({ spec, data, emptyMessage }: ChartPreviewProps): R
       return;
     }
 
-    const theme = resolveChartTheme(spec.config);
-    const layout = dispatchComputeLayout(w, h, spec, data, theme);
+    // The chart inside its visual container, as the canvas paints it: the
+    // painters fill no background of their own, so a raster painted without
+    // the container would be transparent (review R1-3).
     ctx.clearRect(0, 0, w, h);
-    dispatchPaint(ctx, data, spec, layout, theme);
+    paintChartWithContainer(ctx, w, h, spec, data);
   }, [spec, data, emptyMessage]);
 
   useEffect(() => {

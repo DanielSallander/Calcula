@@ -93,10 +93,19 @@ describe("the pivot tabs after a sheet switch", () => {
   });
 
   it("the SHEET_CHANGED handler re-derives AFTER the new sheet's regions are cached", () => {
-    const src = fs.readFileSync(path.resolve(__dirname, "../../index.ts"), "utf8");
-    const at = src.indexOf("context.events.on(AppEvents.SHEET_CHANGED");
+    const src = fs.readFileSync(path.resolve(__dirname, "../../index.ts"), "utf8").replace(/\/\/.*$/gm, "");
+    const at = src.search(/context\.events\.on(?:<[^>]*>)?\(AppEvents\.SHEET_CHANGED/);
     expect(at, "the extension no longer listens for SHEET_CHANGED").toBeGreaterThan(0);
-    const block = src.slice(at, at + 500);
-    expect(block).toMatch(/refreshPivotRegions\([^)]*\)\.then\(\(\) => recheckSelectionAfterSheetChange\(\)\)/);
+    const block = src.slice(at, at + 1500);
+    // The re-derive runs in the refresh's continuation (the canvas cell
+    // selection's second sheet check, D-CELLS, sits beside it there).
+    expect(block).toMatch(
+      /refreshPivotRegions\([^)]*\)\.then\(\(\) => (?:recheckSelectionAfterSheetChange\(\)\)|\{[^}]*recheckSelectionAfterSheetChange\(\);[^}]*\}\))/,
+    );
+    // D-CELLS: a canvas box's cell selection is cleared only on a REAL sheet
+    // change -- the event's own index first (the snapshot still shows the old
+    // sheet when it fires), never unconditionally.
+    expect(block).toMatch(/clearPivotCellSelectionIfSheetChanged\([^)]*detail\?\.sheetIndex/);
+    expect(block, "the cells are cleared on every SHEET_CHANGED").not.toMatch(/clearPivotCellSelection\(\)/);
   });
 });

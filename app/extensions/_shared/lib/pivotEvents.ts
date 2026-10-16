@@ -30,6 +30,24 @@ export const PivotEvents = {
    * filtered-out category had vacated.
    */
   PIVOT_VIEW_UPDATED: "app:pivot-view-updated",
+  /**
+   * A value-field modal (Value Field Settings / Number Format) was requested
+   * for a pivot -- by the value-cell context menu, through
+   * `requestValueFieldDialog` (Pivot/lib/valueFieldDialogRequest.ts). Payload
+   * `{ pivotId, valueFieldIndex, dialog }`. The listener lives INSIDE the
+   * PivotEditor component, which takes the pending request and opens the
+   * modal, wherever the editor is mounted.
+   */
+  PIVOT_OPEN_VALUE_FIELD_DIALOG: "app:pivot-open-value-field-dialog",
+  /**
+   * A pivot's FIELDS were changed by a door other than the field-list editor --
+   * the value-cell menu's Remove / Summarize Values By / Show Values As
+   * (Pivot/lib/valueFieldEdits.ts) or a header's Remove "<field>". Payload
+   * `{ pivotId }`. An open editor re-seeds its zones from the definition
+   * (usePivotEditorState): every editor request REPLACES the zones, so a stale
+   * editor's next edit would otherwise send the old fields back (BUG-0466).
+   */
+  PIVOT_FIELDS_EDITED_ELSEWHERE: "app:pivot-fields-edited-elsewhere",
   /** Emitted by the backend during long-running pivot operations (Tauri event) */
   PIVOT_PROGRESS: "pivot:progress",
 } as const;

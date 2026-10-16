@@ -48,7 +48,12 @@
 import { holdContentGestureCursor, isFloatingRegionCoveredAtClient, requestOverlayRedraw } from "@api/gridOverlays";
 import { getPivotVisualRecord, hitPivotVisualChrome } from "./pivotVisualHits";
 import { handlePivotVisualPress, pressKey } from "./pivotVisualOverlay";
-import { isPivotChromePressLive, setPivotChromePressLive } from "./pivotVisualMenuState";
+import {
+  cancelPivotPress,
+  isPivotChromePressLive,
+  registerPivotPressCanceller,
+  setPivotChromePressLive,
+} from "./pivotVisualMenuState";
 
 /** A chrome press, as the box's bodyDragStart listener hands it over. */
 export interface PivotChromePress {
@@ -89,8 +94,10 @@ export function isPivotChromePressActive(): boolean {
  * pivot has no painted record. It never acts: the release does.
  */
 export function beginPivotChromePress(press: PivotChromePress): boolean {
-  // A press whose release was never heard ends here, with no action.
+  // A press whose release was never heard ends here, with no action -- and so
+  // does a CELL press (pivotCellPress.ts): one press at a time.
   cancelPivotChromePress();
+  cancelPivotPress("cell");
 
   const record = getPivotVisualRecord(press.pivotId);
   const hit = record ? hitPivotVisualChrome(record, press.canvasX, press.canvasY) : null;
@@ -118,6 +125,10 @@ export function beginPivotChromePress(press: PivotChromePress): boolean {
 export function cancelPivotChromePress(): void {
   endPress();
 }
+
+// A cell press that begins ends this one (pivotVisualMenuState.ts brokers it,
+// so neither press module imports the other).
+registerPivotPressCanceller("chrome", cancelPivotChromePress);
 
 function endPress(): Session | null {
   const s = session;

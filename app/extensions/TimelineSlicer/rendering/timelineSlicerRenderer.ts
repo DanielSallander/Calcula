@@ -3,6 +3,14 @@
 // CONTEXT: Renders a horizontal scrollable timeline with a header bar,
 //          period cells (years/quarters/months/days), group labels,
 //          a level selector, and optional scrollbar.
+//
+//          THE VISUAL CONTAINER (WP-C D-FORMAT). Core paints the timeline's
+//          shadow, background and border from the region's container; the
+//          timeline paints its header (the container's TITLE, from the
+//          resolved title style) and everything else inside the CONTENT box
+//          (lib/timelineObjectFormat.ts `timelineContentShape`), clipped there
+//          by `withContainerContentClip` -- the shape the zone table measures
+//          presses on, so what is painted is what a press hits.
 
 import {
   overlaySheetToCanvas,
@@ -10,12 +18,17 @@ import {
   type OverlayHitTestContext,
 } from "@api/gridOverlays";
 import { getTimelineById, getCachedTimelineData } from "../lib/timelineSlicerStore";
-import { TIMELINE_STYLES_BY_ID } from "../components/TimelineSlicerStylesGallery";
+import {
+  DEFAULT_TIMELINE_STYLE_COLORS,
+  LEGACY_TIMELINE_STYLE_COLORS,
+  TIMELINE_STYLES_BY_ID,
+  timelineStyleColors,
+  type TimelineStyleColors,
+} from "../lib/timelineStyles";
 import type { TimelineLevel } from "../lib/timelineSlicerTypes";
 import {
   TIMELINE_CLEAR_BUTTON_MARGIN,
   TIMELINE_CLEAR_BUTTON_SIZE,
-  TIMELINE_HEADER_HEIGHT,
   TIMELINE_LEVELS,
   TIMELINE_LEVEL_SELECTOR_HEIGHT,
   TIMELINE_LEVEL_BUTTON_WIDTH,
@@ -31,6 +44,12 @@ import {
 import { getScrollOffset, timelineZoneAtCanvas } from "../lib/timelineView";
 import { getTimelineRangePreview } from "../lib/timelineGestureView";
 import { getTimelineKeyFocus, resolveTimelineFocus } from "../lib/timelineKeyFocus";
+// The header as SHOWN -- a BOUND header text / show-header (D-BIND) and a
+// Format-tab preview included -- is the RESOLVED container's title, carried by
+// the content shape the zone table measures (lib/timelineView.ts).
+import { timelineContentShape } from "../lib/timelineObjectFormat";
+import { withContainerContentClip, type ContainerRegion } from "@api/visualContainerPaint";
+import { drawHeaderTitle } from "../../_shared/lib/headerTitlePaint";
 
 // ============================================================================
 // Style Constants
@@ -38,10 +57,8 @@ import { getTimelineKeyFocus, resolveTimelineFocus } from "../lib/timelineKeyFoc
 
 // The geometry (header, year strip, tiles, level row, scrollbar) is the zone
 // table's (lib/timelineZones.ts): what is painted is what a press hits.
-const HEADER_HEIGHT = TIMELINE_HEADER_HEIGHT;
 const LEVEL_SELECTOR_HEIGHT = TIMELINE_LEVEL_SELECTOR_HEIGHT;
 const SCROLLBAR_HEIGHT = TIMELINE_SCROLLBAR_HEIGHT;
-const BORDER_RADIUS = 3;
 const FONT_FAMILY = "Calibri, Segoe UI, sans-serif";
 const CLEAR_BUTTON_SIZE = TIMELINE_CLEAR_BUTTON_SIZE;
 
@@ -55,87 +72,6 @@ const CLEAR_BUTTON_SIZE = TIMELINE_CLEAR_BUTTON_SIZE;
  */
 export const TIMELINE_FOCUS_RING_DARK = "#000000";
 export const TIMELINE_FOCUS_RING_LIGHT = "#ffffff";
-
-interface TimelineStyleColors {
-  bg: string;
-  headerBg: string;
-  headerFg: string;
-  selectedBg: string;
-  selectedFg: string;
-  periodBg: string;
-  periodFg: string;
-  noDataFg: string;
-  groupFg: string;
-  border: string;
-  levelBg: string;
-  levelFg: string;
-  levelActiveBg: string;
-  levelActiveFg: string;
-  selectionBarBg: string;
-}
-
-const DEFAULT_COLORS: TimelineStyleColors = {
-  bg: "#FFFFFF",
-  headerBg: "#4472C4",
-  headerFg: "#FFFFFF",
-  selectedBg: "#4472C4",
-  selectedFg: "#FFFFFF",
-  periodBg: "#F5F5F5",
-  periodFg: "#333333",
-  noDataFg: "#CCCCCC",
-  groupFg: "#666666",
-  border: "#8FAADC",
-  levelBg: "#E8E8E8",
-  levelFg: "#666666",
-  levelActiveBg: "#4472C4",
-  levelActiveFg: "#FFFFFF",
-  selectionBarBg: "rgba(68, 114, 196, 0.3)",
-};
-
-const LEGACY_STYLES: Record<string, TimelineStyleColors> = {
-  TimelineStyleLight1: DEFAULT_COLORS,
-  TimelineStyleLight2: {
-    ...DEFAULT_COLORS,
-    headerBg: "#ED7D31",
-    selectedBg: "#ED7D31",
-    border: "#F4B183",
-    levelActiveBg: "#ED7D31",
-    selectionBarBg: "rgba(237, 125, 49, 0.3)",
-  },
-  TimelineStyleLight3: {
-    ...DEFAULT_COLORS,
-    headerBg: "#548235",
-    selectedBg: "#548235",
-    border: "#A9D18E",
-    levelActiveBg: "#548235",
-    selectionBarBg: "rgba(84, 130, 53, 0.3)",
-  },
-  TimelineStyleDark1: {
-    bg: "#333333",
-    headerBg: "#4472C4",
-    headerFg: "#FFFFFF",
-    selectedBg: "#4472C4",
-    selectedFg: "#FFFFFF",
-    periodBg: "#444444",
-    periodFg: "#EEEEEE",
-    noDataFg: "#666666",
-    groupFg: "#AAAAAA",
-    border: "#555555",
-    levelBg: "#444444",
-    levelFg: "#AAAAAA",
-    levelActiveBg: "#4472C4",
-    levelActiveFg: "#FFFFFF",
-    selectionBarBg: "rgba(68, 114, 196, 0.4)",
-  },
-};
-
-function getStyleColors(preset: string): TimelineStyleColors {
-  const galleryStyle = TIMELINE_STYLES_BY_ID.get(preset);
-  if (galleryStyle) {
-    return galleryStyle.colors;
-  }
-  return LEGACY_STYLES[preset] || DEFAULT_COLORS;
-}
 
 // ============================================================================
 // Renderer
@@ -155,12 +91,23 @@ export function renderTimelineSlicer(ctx: OverlayRenderContext): void {
   const data = getCachedTimelineData(timelineId);
   const periods = data?.periods ?? [];
   const c = ctx.ctx;
-  const colors = getStyleColors(tl.stylePreset);
+  const colors = timelineStyleColors(tl.stylePreset);
 
   const { canvasX, canvasY } = overlaySheetToCanvas(ctx, tl.x, tl.y);
-  const w = tl.width;
-  const h = tl.height;
-  const layout: TimelineLayout = computeTimelineLayout(tl, periods.length);
+  const outerW = tl.width;
+  const outerH = tl.height;
+  // The CONTENT box inside the container and the header as SHOWN (the
+  // resolved title: a bound header text / show-header replaces the literal
+  // here only; the store keeps the literal) -- the shape the zone table
+  // measures presses on (lib/timelineView.ts).
+  const content = timelineContentShape(tl);
+  const shape = content.shape;
+  const title = content.container.title;
+  const x0 = canvasX + content.offsetX;
+  const y0 = canvasY + content.offsetY;
+  const w = shape.width;
+  const h = shape.height;
+  const layout: TimelineLayout = computeTimelineLayout(shape, periods.length);
   const scrollVal = clampScroll(layout, getScrollOffset(timelineId));
 
   // The range to paint: a live range drag's TRANSIENT preview (or a released
@@ -171,209 +118,192 @@ export function renderTimelineSlicer(ctx: OverlayRenderContext): void {
   const isShownSelected = (i: number): boolean =>
     preview ? i >= preview.first && i <= preview.last : periods[i].isSelected;
 
-  // Clip to bounds
-  c.save();
-  c.beginPath();
-  c.roundRect(canvasX, canvasY, w, h, BORDER_RADIUS);
-  c.clip();
+  // Core painted the container's shadow, background and border around this
+  // (it does not clip the family). Everything the timeline paints is CONTENT:
+  // clipped to the content box and the rounded outer path.
+  const region: ContainerRegion = { ...ctx.region, container: content.container };
+  withContainerContentClip(
+    c,
+    region,
+    { x: canvasX, y: canvasY, width: outerW, height: outerH },
+    { x: x0, y: y0, width: w, height: h },
+    () => {
+      // Header bar: the container's TITLE, painted by the timeline (paint.title "family").
+      if (layout.headerH > 0) {
+        if (title.background) {
+          c.fillStyle = title.background;
+          c.fillRect(x0, y0, w, layout.headerH);
+        }
+        drawHeaderTitle(c, title, title.text, x0 + 8, x0 + w - CLEAR_BUTTON_SIZE - 12, y0 + layout.headerH / 2);
 
-  // Background
-  c.fillStyle = colors.bg;
-  c.fillRect(canvasX, canvasY, w, h);
-
-  // Header bar
-  if (tl.showHeader) {
-    c.fillStyle = colors.headerBg;
-    c.fillRect(canvasX, canvasY, w, HEADER_HEIGHT);
-
-    c.fillStyle = colors.headerFg;
-    c.font = `bold 11px ${FONT_FAMILY}`;
-    c.textAlign = "left";
-    c.textBaseline = "middle";
-    c.fillText(
-      tl.headerText ?? tl.name,
-      canvasX + 8,
-      canvasY + HEADER_HEIGHT / 2,
-      w - CLEAR_BUTTON_SIZE - 20,
-    );
-
-    // Clear filter button: lit (and a press target, lib/timelineZones.ts)
-    // only while there is a filter to clear.
-    const isFiltered = isTimelineFiltered(tl);
-    const btnX = canvasX + w - CLEAR_BUTTON_SIZE - TIMELINE_CLEAR_BUTTON_MARGIN;
-    const btnY = canvasY + (HEADER_HEIGHT - CLEAR_BUTTON_SIZE) / 2;
-    drawClearFilterButton(c, btnX, btnY, CLEAR_BUTTON_SIZE, isFiltered, colors.headerFg);
-  }
-
-  // Period area
-  const periodAreaTop = canvasY + layout.headerH;
-  const periodAreaH = h - layout.headerH - layout.levelSelectorH - layout.scrollbarH;
-
-  // Clip period area
-  c.save();
-  c.beginPath();
-  c.rect(canvasX, periodAreaTop, w, periodAreaH);
-  c.clip();
-
-  // Draw group labels and periods
-  let lastGroupLabel = "";
-  let groupStartX = 0;
-
-  for (let i = 0; i < periods.length; i++) {
-    const period = periods[i];
-    const px = canvasX + i * layout.periodWidth - scrollVal;
-
-    // Skip off-screen periods
-    if (px + layout.periodWidth < canvasX) continue;
-    if (px > canvasX + w) break;
-
-    // Group label row (e.g., year label above months)
-    if (period.groupLabel && period.groupLabel !== lastGroupLabel) {
-      // Draw previous group separator
-      if (lastGroupLabel !== "") {
-        c.strokeStyle = colors.border;
-        c.lineWidth = 0.5;
-        c.beginPath();
-        c.moveTo(px, periodAreaTop);
-        c.lineTo(px, periodAreaTop + layout.groupLabelH);
-        c.stroke();
+        // Clear filter button: lit (and a press target, lib/timelineZones.ts)
+        // only while there is a filter to clear.
+        const isFiltered = isTimelineFiltered(tl);
+        const btnX = x0 + w - CLEAR_BUTTON_SIZE - TIMELINE_CLEAR_BUTTON_MARGIN;
+        const btnY = y0 + (layout.headerH - CLEAR_BUTTON_SIZE) / 2;
+        drawClearFilterButton(c, btnX, btnY, CLEAR_BUTTON_SIZE, isFiltered, title.color);
       }
 
-      // Draw group label
-      c.fillStyle = colors.groupFg;
-      c.font = `10px ${FONT_FAMILY}`;
-      c.textAlign = "left";
-      c.textBaseline = "middle";
-      c.fillText(
-        period.groupLabel,
-        px + 4,
-        periodAreaTop + layout.groupLabelH / 2,
-      );
+      // Period area
+      const periodAreaTop = y0 + layout.yearStripTop;
+      const periodAreaH = Math.max(0, layout.periodAreaBottom - layout.yearStripTop);
 
-      lastGroupLabel = period.groupLabel;
-      groupStartX = px;
-    }
-
-    // Period cell
-    const cellTop = periodAreaTop + layout.groupLabelH;
-    const cellH = layout.periodH;
-
-    // Selection highlight
-    const shownSelected = isShownSelected(i);
-    if (shownSelected) {
-      c.fillStyle = colors.selectionBarBg;
-      c.fillRect(px, cellTop, layout.periodWidth, cellH);
-    }
-
-    // Period label
-    if (period.hasData) {
-      c.fillStyle = shownSelected ? colors.selectedFg : colors.periodFg;
-    } else {
-      c.fillStyle = colors.noDataFg;
-    }
-    c.font = `11px ${FONT_FAMILY}`;
-    c.textAlign = "center";
-    c.textBaseline = "middle";
-    c.fillText(
-      period.label,
-      px + layout.periodWidth / 2,
-      cellTop + cellH / 2,
-      layout.periodWidth - 4,
-    );
-
-    // Period separator
-    c.strokeStyle = colors.border;
-    c.lineWidth = 0.3;
-    c.globalAlpha = 0.3;
-    c.beginPath();
-    c.moveTo(px + layout.periodWidth, cellTop);
-    c.lineTo(px + layout.periodWidth, cellTop + cellH);
-    c.stroke();
-    c.globalAlpha = 1.0;
-  }
-
-  // Selection bar (thick bar across selected range)
-  const span = preview ?? selectedSpanOf(periods);
-  if (span && span.last < periods.length) {
-    const selX = canvasX + span.first * layout.periodWidth - scrollVal;
-    const selW = (span.last - span.first + 1) * layout.periodWidth;
-    const barTop = periodAreaTop + layout.groupLabelH + layout.periodH - 4;
-
-    c.fillStyle = colors.selectedBg;
-    c.fillRect(selX, barTop, selW, 4);
-
-    // Selection handles (small circles at start and end)
-    c.beginPath();
-    c.arc(selX, barTop + 2, 3, 0, Math.PI * 2);
-    c.fill();
-    c.beginPath();
-    c.arc(selX + selW, barTop + 2, 3, 0, Math.PI * 2);
-    c.fill();
-  }
-
-  // The keyboard's focus ring (M8 S8), on the period the next key acts on
-  // (`resolveTimelineFocus`, which the key handler asks too), at the tile the
-  // period loop above painted -- after the selection bar, so the bar does not
-  // cover the ring's lower edge, and inside the period clip, so a focused
-  // period scrolled out of view shows no ring.
-  const keyFocus = getTimelineKeyFocus();
-  if (keyFocus !== null && keyFocus.timelineId === timelineId) {
-    const at = resolveTimelineFocus(
-      keyFocus,
-      tl.level,
-      periods.map((p) => p.startDate),
-    );
-    if (at !== null) {
-      const tileX = canvasX + at.index * layout.periodWidth - scrollVal;
-      drawFocusRing(c, tileX, periodAreaTop + layout.groupLabelH, layout.periodWidth, layout.periodH);
-    }
-  }
-
-  c.restore(); // restore period clip
-
-  // Level selector
-  if (tl.showLevelSelector) {
-    const levelTop = canvasY + layout.levelTop;
-    const levels: readonly TimelineLevel[] = TIMELINE_LEVELS;
-    const levelLabels = ["YEARS", "QUARTERS", "MONTHS", "DAYS"];
-    const levelBtnWidth = TIMELINE_LEVEL_BUTTON_WIDTH;
-
-    for (let i = 0; i < levels.length; i++) {
-      const lx = canvasX + levelButtonLeft(w, i);
-      const isActive = levels[i] === tl.level;
-
-      c.fillStyle = isActive ? colors.levelActiveBg : colors.levelBg;
+      // Clip period area
+      c.save();
       c.beginPath();
-      c.roundRect(lx, levelTop + 2, levelBtnWidth, LEVEL_SELECTOR_HEIGHT - 4, 3);
-      c.fill();
+      c.rect(x0, periodAreaTop, w, periodAreaH);
+      c.clip();
 
-      c.fillStyle = isActive ? colors.levelActiveFg : colors.levelFg;
-      c.font = `bold 9px ${FONT_FAMILY}`;
-      c.textAlign = "center";
-      c.textBaseline = "middle";
-      c.fillText(levelLabels[i], lx + levelBtnWidth / 2, levelTop + LEVEL_SELECTOR_HEIGHT / 2);
-    }
-  }
+      // Draw group labels and periods
+      let lastGroupLabel = "";
 
-  // Scrollbar
-  if (layout.needsScroll && tl.showScrollbar) {
-    const sbTop = canvasY + layout.scrollbarTop;
-    drawHScrollbar(c, canvasX, sbTop, w, SCROLLBAR_HEIGHT, scrollbarThumbOf(layout, scrollVal));
-  }
+      for (let i = 0; i < periods.length; i++) {
+        const period = periods[i];
+        const px = x0 + i * layout.periodWidth - scrollVal;
 
-  // Border
-  c.strokeStyle = colors.border;
-  c.lineWidth = 1;
-  c.beginPath();
-  c.roundRect(canvasX, canvasY, w, h, BORDER_RADIUS);
-  c.stroke();
+        // Skip off-screen periods
+        if (px + layout.periodWidth < x0) continue;
+        if (px > x0 + w) break;
 
-  // A selected timeline's outline and resize handles are Core's (core/lib/
-  // gridRenderer/rendering/floatingObjectChrome.ts, BUG-0258 design phase 3):
-  // the half-clipped border this drew is gone, and the handles are painted
-  // exactly where Core's selection-gated resize answers.
+        // Group label row (e.g., year label above months)
+        if (period.groupLabel && period.groupLabel !== lastGroupLabel) {
+          // Draw previous group separator
+          if (lastGroupLabel !== "") {
+            c.strokeStyle = colors.border;
+            c.lineWidth = 0.5;
+            c.beginPath();
+            c.moveTo(px, periodAreaTop);
+            c.lineTo(px, periodAreaTop + layout.groupLabelH);
+            c.stroke();
+          }
 
-  c.restore(); // restore outer clip
+          // Draw group label
+          c.fillStyle = colors.groupFg;
+          c.font = `10px ${FONT_FAMILY}`;
+          c.textAlign = "left";
+          c.textBaseline = "middle";
+          c.fillText(
+            period.groupLabel,
+            px + 4,
+            periodAreaTop + layout.groupLabelH / 2,
+          );
+
+          lastGroupLabel = period.groupLabel;
+        }
+
+        // Period cell
+        const cellTop = periodAreaTop + layout.groupLabelH;
+        const cellH = layout.periodH;
+
+        // Selection highlight
+        const shownSelected = isShownSelected(i);
+        if (shownSelected) {
+          c.fillStyle = colors.selectionBarBg;
+          c.fillRect(px, cellTop, layout.periodWidth, cellH);
+        }
+
+        // Period label
+        if (period.hasData) {
+          c.fillStyle = shownSelected ? colors.selectedFg : colors.periodFg;
+        } else {
+          c.fillStyle = colors.noDataFg;
+        }
+        c.font = `11px ${FONT_FAMILY}`;
+        c.textAlign = "center";
+        c.textBaseline = "middle";
+        c.fillText(
+          period.label,
+          px + layout.periodWidth / 2,
+          cellTop + cellH / 2,
+          layout.periodWidth - 4,
+        );
+
+        // Period separator
+        c.strokeStyle = colors.border;
+        c.lineWidth = 0.3;
+        c.globalAlpha = 0.3;
+        c.beginPath();
+        c.moveTo(px + layout.periodWidth, cellTop);
+        c.lineTo(px + layout.periodWidth, cellTop + cellH);
+        c.stroke();
+        c.globalAlpha = 1.0;
+      }
+
+      // Selection bar (thick bar across selected range)
+      const span = preview ?? selectedSpanOf(periods);
+      if (span && span.last < periods.length) {
+        const selX = x0 + span.first * layout.periodWidth - scrollVal;
+        const selW = (span.last - span.first + 1) * layout.periodWidth;
+        const barTop = periodAreaTop + layout.groupLabelH + layout.periodH - 4;
+
+        c.fillStyle = colors.selectedBg;
+        c.fillRect(selX, barTop, selW, 4);
+
+        // Selection handles (small circles at start and end)
+        c.beginPath();
+        c.arc(selX, barTop + 2, 3, 0, Math.PI * 2);
+        c.fill();
+        c.beginPath();
+        c.arc(selX + selW, barTop + 2, 3, 0, Math.PI * 2);
+        c.fill();
+      }
+
+      // The keyboard's focus ring (M8 S8), on the period the next key acts on
+      // (`resolveTimelineFocus`, which the key handler asks too), at the tile the
+      // period loop above painted -- after the selection bar, so the bar does not
+      // cover the ring's lower edge, and inside the period clip, so a focused
+      // period scrolled out of view shows no ring.
+      const keyFocus = getTimelineKeyFocus();
+      if (keyFocus !== null && keyFocus.timelineId === timelineId) {
+        const at = resolveTimelineFocus(
+          keyFocus,
+          tl.level,
+          periods.map((p) => p.startDate),
+        );
+        if (at !== null) {
+          const tileX = x0 + at.index * layout.periodWidth - scrollVal;
+          drawFocusRing(c, tileX, periodAreaTop + layout.groupLabelH, layout.periodWidth, layout.periodH);
+        }
+      }
+
+      c.restore(); // restore period clip
+
+      // Level selector
+      if (shape.showLevelSelector) {
+        const levelTop = y0 + layout.levelTop;
+        const levels: readonly TimelineLevel[] = TIMELINE_LEVELS;
+        const levelLabels = ["YEARS", "QUARTERS", "MONTHS", "DAYS"];
+        const levelBtnWidth = TIMELINE_LEVEL_BUTTON_WIDTH;
+
+        for (let i = 0; i < levels.length; i++) {
+          const lx = x0 + levelButtonLeft(w, i);
+          const isActive = levels[i] === tl.level;
+
+          c.fillStyle = isActive ? colors.levelActiveBg : colors.levelBg;
+          c.beginPath();
+          c.roundRect(lx, levelTop + 2, levelBtnWidth, LEVEL_SELECTOR_HEIGHT - 4, 3);
+          c.fill();
+
+          c.fillStyle = isActive ? colors.levelActiveFg : colors.levelFg;
+          c.font = `bold 9px ${FONT_FAMILY}`;
+          c.textAlign = "center";
+          c.textBaseline = "middle";
+          c.fillText(levelLabels[i], lx + levelBtnWidth / 2, levelTop + LEVEL_SELECTOR_HEIGHT / 2);
+        }
+      }
+
+      // Scrollbar
+      if (layout.needsScroll && shape.showScrollbar) {
+        const sbTop = y0 + layout.scrollbarTop;
+        drawHScrollbar(c, x0, sbTop, w, SCROLLBAR_HEIGHT, scrollbarThumbOf(layout, scrollVal));
+      }
+    },
+  );
+
+  // The outline is the container's border, painted by Core over this (the
+  // timeline strokes no border of its own any more). A selected timeline's
+  // outline and resize handles are Core's too (core/lib/gridRenderer/
+  // rendering/floatingObjectChrome.ts, BUG-0258 design phase 3).
 }
 
 /** The focus ring inside a period's tile (x, y, w, h: the tile, in canvas px). */
@@ -394,17 +324,17 @@ function drawFocusRing(c: CanvasRenderingContext2D, x: number, y: number, w: num
 }
 
 /**
- * Every colour set the renderer can paint (`getStyleColors`): the gallery's
+ * Every colour set the renderer can paint (`timelineStyleColors`): the gallery's
  * presets by id, the legacy ids the gallery does not shadow, and the fallback
  * for an unknown id -- for the focus ring's contrast test.
  */
 export function timelinePresetColorSets(): Array<{ id: string; colors: TimelineStyleColors }> {
   const sets: Array<{ id: string; colors: TimelineStyleColors }> = [];
   for (const [id, style] of TIMELINE_STYLES_BY_ID) sets.push({ id, colors: style.colors });
-  for (const [id, colors] of Object.entries(LEGACY_STYLES)) {
+  for (const [id, colors] of Object.entries(LEGACY_TIMELINE_STYLE_COLORS)) {
     if (!TIMELINE_STYLES_BY_ID.has(id)) sets.push({ id, colors });
   }
-  sets.push({ id: "<unknown preset>", colors: DEFAULT_COLORS });
+  sets.push({ id: "<unknown preset>", colors: DEFAULT_TIMELINE_STYLE_COLORS });
   return sets;
 }
 

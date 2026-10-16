@@ -42,6 +42,7 @@ fn timeline(name: &str, source: identity::EntityId) -> TimelineSlicer {
         show_scrollbar: true,
         style_preset: "TimelineStyleLight1".to_string(),
         connected_pivot_ids: vec![],
+        container: None,
     }
 }
 

@@ -65,7 +65,13 @@ interface DropTargetRef {
 }
 
 let dragPreview: HTMLElement | null = null;
-const dropZoneRefs: Map<DropZoneType, DropZoneRef> = new Map();
+/**
+ * Live field-channel drop zones, keyed by the zone's `dropKey` -- its
+ * DropZoneType when it has none (the pivot editor's four zones). A chart's
+ * wells share DropZoneTypes (a gauge's Value, Target, Minimum and Maximum are
+ * all "values"), so each well registers under its own key.
+ */
+const dropZoneRefs: Map<string, DropZoneRef> = new Map();
 const dropTargetRefs: Map<string, DropTargetRef> = new Map();
 /** The generic drag in progress, or null. Never set at the same time as `dragData`. */
 let genericDrag: GenericDragPayload | null = null;
@@ -231,6 +237,10 @@ function handleGlobalMouseUp(e: MouseEvent) {
     dropZone.onDrop(globalDragState.dragData, insertIndex);
   } else if (
     dragOutRemovalCallback &&
+    // A pill from a KEYED zone (a chart well) is not the registrant's: the
+    // one callback belongs to the pivot editor, and handing it a chart pill
+    // would remove the pivot field at the same zone and index.
+    globalDragState.dragData.fromKey === undefined &&
     globalDragState.dragData.fromZone !== undefined &&
     globalDragState.dragData.fromIndex !== undefined
   ) {
@@ -311,12 +321,14 @@ export function useDraggable(dragData: DragField, displayName: string) {
 }
 
 /**
- * Hook for drop zones
+ * Hook for drop zones. `dropKey` names the zone in the registry when several
+ * live zones share one DropZoneType (default: the type itself).
  */
 export function useDropZone(
   zone: DropZoneType,
   onDrop: (field: DragField, insertIndex?: number) => void,
-  getInsertIndex?: (y: number) => number
+  getInsertIndex?: (y: number) => number,
+  dropKey?: string
 ) {
   const [isDragOver, setIsDragOver] = useState(false);
   const elementRef = useRef<HTMLDivElement>(null);
@@ -324,13 +336,16 @@ export function useDropZone(
   useEffect(() => {
     initGlobalListeners();
 
+    const key = dropKey ?? zone;
+    let registered: DropZoneRef | null = null;
     if (elementRef.current) {
-      dropZoneRefs.set(zone, {
+      registered = {
         zone,
         element: elementRef.current,
         onDrop,
         getInsertIndex,
-      });
+      };
+      dropZoneRefs.set(key, registered);
     }
 
     const unsubscribe = () => {
@@ -347,10 +362,12 @@ export function useDropZone(
     subscribers.add(unsubscribe);
 
     return () => {
-      dropZoneRefs.delete(zone);
+      // Only our OWN registration: a second zone that registered under the
+      // same key after us keeps its entry when we unmount.
+      if (registered !== null && dropZoneRefs.get(key) === registered) dropZoneRefs.delete(key);
       subscribers.delete(unsubscribe);
     };
-  }, [zone, onDrop, getInsertIndex]);
+  }, [zone, onDrop, getInsertIndex, dropKey]);
 
   return {
     isDragOver,

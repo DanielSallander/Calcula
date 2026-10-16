@@ -27,6 +27,8 @@ import HomeTabExtension from "./BuiltIn/HomeTab";
 import DocumentThemeExtension from "./BuiltIn/DocumentTheme";
 import CollectionPreviewExtension from "./BuiltIn/CollectionPreview";
 import ObjectPositionExtension from "./BuiltIn/ObjectPosition";
+import ObjectPaneExtension from "./BuiltIn/ObjectPane";
+import BoundPropertiesExtension from "./BuiltIn/BoundProperties";
 
 // Activity Bar views (migrated from Path B)
 import FileExplorerExtension from "./FileExplorer";
@@ -233,6 +235,18 @@ export const builtInExtensions: ExtensionModule[] = [
   // @api/objectPosition. After the families and the canvas, whose grip-menu
   // items it lists (order-independent: read when the menu opens).
   ObjectPositionExtension,
+  // THE object pane (WP-C D-PANE): one side pane for the selected floating
+  // object -- its family's build tabs + the shared Format tab -- with the open
+  // policy and the Ctrl+1 / "Format..." doors. After the families and the
+  // canvas, whose pane and format providers it hosts (read at each open, so
+  // the order is not load-bearing), and right after Size and Position, whose
+  // grip menu it adds "Format..." to.
+  ObjectPaneExtension,
+  // Bound Properties (WP-D): every object property that follows a formula.
+  // After Tracing, whose Formulas menu it adds its item to, and after the
+  // object families, whose binding registrations label its rows (read when
+  // the view opens, so the order is not load-bearing).
+  BoundPropertiesExtension,
   BusinessIntelligenceExtension,
   // In-app model authoring (measures) — edits BI connections' embedded models
   ModelEditorExtension,

@@ -30,6 +30,7 @@ import CollectionPreview from "../CollectionPreview";
 import PasteSpecial from "../PasteSpecial";
 import StandardMenus from "../StandardMenus";
 import ObjectPosition from "../ObjectPosition";
+import ObjectPane from "../ObjectPane";
 
 /** Every door inert, except `commands`, which are REAL and recorded. */
 function recordingContext(registered: string[]): never {
@@ -66,6 +67,7 @@ const EXTENSIONS: [string, ExtensionModule][] = [
   ["Paste Special", PasteSpecial],
   ["Standard Menus", StandardMenus],
   ["Size and Position", ObjectPosition],
+  ["Object Pane", ObjectPane],
 ];
 
 describe("a built-in extension's commands live exactly as long as the extension", () => {

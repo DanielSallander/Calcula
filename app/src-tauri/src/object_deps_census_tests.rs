@@ -770,20 +770,22 @@ fn frontend_owned_cascades_name_a_symbol_that_exists() {
     // Some cleanups can only run on the frontend — unmounting a live worker,
     // or the GET.CONTROLVALUE recalc that has to apply returned cells to the
     // painted grid. Those rows are still checkable: the named symbol must
-    // exist in the extension sources.
-    let ext_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("extensions");
-    assert!(
-        ext_root.is_dir(),
-        "extension sources not found at {} — this check cannot run",
-        ext_root.display()
-    );
+    // exist in the frontend sources -- the extensions AND the `@api` seams
+    // (`app/src/api`), which are frontend code too: the object-binding seam's
+    // `reevaluateAfterNameChange` (WP-D) lives there, not in an extension.
+    let app_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let mut texts: Vec<String> = Vec::new();
-    collect_ts_sources(&ext_root, &mut texts);
+    for root in [app_root.join("extensions"), app_root.join("src").join("api")] {
+        assert!(
+            root.is_dir(),
+            "frontend sources not found at {} — this check cannot run",
+            root.display()
+        );
+        collect_ts_sources(&root, &mut texts);
+    }
     assert!(
         texts.len() > 100,
-        "only {} extension sources read; the walk is broken",
+        "only {} frontend sources read; the walk is broken",
         texts.len()
     );
     let haystack = texts.join("\n");
@@ -797,7 +799,7 @@ fn frontend_owned_cascades_name_a_symbol_that_exists() {
         if !haystack.contains(symbol) {
             missing.push(format!(
                 "{} -> {} names frontend symbol `{}`, which is nowhere in \
-                 app/extensions",
+                 app/extensions or app/src/api",
                 rule.owner.wire_name(),
                 rule.dependent,
                 symbol

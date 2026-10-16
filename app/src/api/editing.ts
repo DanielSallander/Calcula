@@ -32,6 +32,13 @@ export type {
   ExternalFormulaReference,
 } from "../core/lib/formulaEditTarget";
 
+// THE one "is a formula picking a reference right now?" predicate (D-PICK):
+// the grid's own editor in formula mode, or an external editor expecting a
+// reference. Core's floating-object press reads the same binding; a family
+// reads it here and never re-derives it from isGlobalFormulaMode() plus the
+// external target.
+export { floatingReferencePickActive as isFormulaReferencePickActive } from "../core/lib/referencePickState";
+
 // The rest of the external-edit seam (the two-view session, the selected
 // external cell, the Name Box resolver, the point-mode switch). A PURE
 // re-export of the `externalEdit` subpath: one binding per name, so this door

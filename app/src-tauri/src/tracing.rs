@@ -205,6 +205,7 @@ pub fn trace_precedents(state: State<AppState>, row: u32, col: u32) -> TraceResu
         ranges,
         cross_sheet_refs,
         source_is_error,
+        bound_objects: Vec::new(),
     }
 }
 
@@ -212,10 +213,47 @@ pub fn trace_precedents(state: State<AppState>, row: u32, col: u32) -> TraceResu
 // Trace Dependents
 // ============================================================================
 
-/// Returns the formula cells that rely ON the given cell.
+/// Returns the formula cells that rely ON the given cell, and (WP-D) the object
+/// properties whose BINDING formula reads it -- a chart title, a button caption
+/// or a canvas page's background that follows the cell is a dependent too.
 /// Reads from the `dependents` map (what formulas reference this cell).
 #[tauri::command]
-pub fn trace_dependents(state: State<AppState>, row: u32, col: u32) -> TraceResult {
+pub fn trace_dependents(
+    state: State<AppState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
+    timeline_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
+    pivot_state: State<'_, crate::pivot::types::PivotState>,
+    row: u32,
+    col: u32,
+) -> TraceResult {
+    let stores = crate::object_bindings::object_json::ObjectStores {
+        state: &state,
+        slicers: &slicer_state,
+        timelines: &timeline_state,
+        pivots: &pivot_state,
+    };
+    trace_dependents_core(&stores, row, col)
+}
+
+/// [`trace_dependents`] over plain references, for the unit tier.
+///
+/// The cell walk runs first and RELEASES every grid guard; only then is the
+/// binding runtime read (`object_bindings::trace`): the binding store and its
+/// runtime are leaves, and the runtime may need a rebuild that reads the
+/// sheet table and the object stores itself.
+pub(crate) fn trace_dependents_core(
+    stores: &crate::object_bindings::object_json::ObjectStores<'_>,
+    row: u32,
+    col: u32,
+) -> TraceResult {
+    let (mut result, active_sheet) = trace_dependent_cells(stores.state, row, col);
+    result.bound_objects = crate::object_bindings::trace::bound_objects_reading_cell(stores, active_sheet, row, col);
+    result
+}
+
+/// The cell half of Trace Dependents, and the sheet it traced on. Every guard
+/// is released when it returns.
+fn trace_dependent_cells(state: &AppState, row: u32, col: u32) -> (TraceResult, usize) {
     // CANONICAL LOCK ORDER: both grid locks FIRST, then everything else.
     // `grids` is read in the cross-sheet loop below; taken THERE it was taken
     // while seven other guards were alive, which is the inverted order.
@@ -269,14 +307,18 @@ pub fn trace_dependents(state: State<AppState>, row: u32, col: u32) -> TraceResu
     let current_sheet_name = if active_sheet < sheet_names.len() {
         &sheet_names[active_sheet]
     } else {
-        return TraceResult {
-            source_row: row,
-            source_col: col,
-            cells,
-            ranges,
-            cross_sheet_refs,
-            source_is_error,
-        };
+        return (
+            TraceResult {
+                source_row: row,
+                source_col: col,
+                cells,
+                ranges,
+                cross_sheet_refs,
+                source_is_error,
+                bound_objects: Vec::new(),
+            },
+            active_sheet,
+        );
     };
 
     if let Some(cs_deps) = cross_sheet_deps.get(&(current_sheet_name.clone(), row, col)) {
@@ -305,12 +347,16 @@ pub fn trace_dependents(state: State<AppState>, row: u32, col: u32) -> TraceResu
         }
     }
 
-    TraceResult {
-        source_row: row,
-        source_col: col,
-        cells,
-        ranges,
-        cross_sheet_refs,
-        source_is_error,
-    }
+    (
+        TraceResult {
+            source_row: row,
+            source_col: col,
+            cells,
+            ranges,
+            cross_sheet_refs,
+            source_is_error,
+            bound_objects: Vec::new(),
+        },
+        active_sheet,
+    )
 }

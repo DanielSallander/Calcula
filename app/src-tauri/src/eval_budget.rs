@@ -780,11 +780,16 @@ mod tests {
     /// only check that fails when somebody adds a 19th site next year.
     #[test]
     fn governor_is_applied_at_every_construction_site() {
-        let sources: [(&str, &str); 4] = [
+        // controls.rs constructed one until WP-D S5a moved control formula
+        // properties into bindings; the binding evaluator (object_bindings/
+        // eval.rs) is that site now. controls.rs stays scanned so a new
+        // construction there is still caught.
+        let sources: [(&str, &str); 5] = [
             ("lib.rs", include_str!("lib.rs")),
             ("formula.rs", include_str!("formula.rs")),
             ("controls.rs", include_str!("controls.rs")),
             ("evaluate_formula.rs", include_str!("evaluate_formula.rs")),
+            ("object_bindings/eval.rs", include_str!("object_bindings/eval.rs")),
         ];
         let mut constructions = 0usize;
         let mut applications = 0usize;

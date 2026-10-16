@@ -23,7 +23,11 @@ vi.mock("../../core/state/GridContext", () => ({ getGridStateSnapshot: () => gri
 
 import * as objectClipboard from "../objectClipboard";
 import { CommandRegistry, CoreCommands } from "../commands";
-import { registerObjectSelectionProvider, type ObjectSelectionKey } from "../objectSelection";
+import {
+  innerSelectionClipboardCommand,
+  registerObjectSelectionProvider,
+  type ObjectSelectionKey,
+} from "../objectSelection";
 
 const APP = path.resolve(__dirname, "../../..");
 const read = (rel: string): string => fs.readFileSync(path.join(APP, rel), "utf8").replace(/\r\n/g, "\n");
@@ -104,6 +108,95 @@ describe("@api/objectClipboard owns the Copy / Paste door rule", () => {
     expect(rule.objectClipboardHasClipboardKeys!()).toBe(false);
     expect(rule.clipboardDoorCommand!("copy")).toBe(CoreCommands.COPY);
     expect(rule.clipboardDoorCommand!("paste")).toBe(CoreCommands.PASTE);
+  });
+});
+
+describe("an INNER selection that names its own Copy / Paste (innerClipboardCommand, WP-A S7a)", () => {
+  const INNER_COPY = "test.inner.copyCells";
+  const INNER_PASTE = "test.inner.refusePaste";
+  const inner = { owns: true };
+
+  function innerSelectionNamesCommands(opts: { register?: boolean } = {}): void {
+    cleanups.push(
+      registerObjectSelectionProvider({
+        types: ["test-inner-cells"],
+        isSelected: () => true,
+        select: () => {},
+        deselectAll: () => {},
+        ownsKey: (key: ObjectSelectionKey) => inner.owns && key === "Clipboard",
+        innerClipboardCommand: (action) => {
+          if (!inner.owns) return null;
+          return action === "copy" ? INNER_COPY : INNER_PASTE;
+        },
+      }),
+    );
+    if (opts.register !== false) {
+      for (const id of [INNER_COPY, INNER_PASTE]) {
+        CommandRegistry.register(id, () => {});
+        cleanups.push(() => CommandRegistry.unregister(id));
+      }
+    }
+  }
+
+  beforeEach(() => {
+    inner.owns = true;
+  });
+
+  it("on a canvas: the Copy door runs the inner Copy, the Paste door the inner Paste", () => {
+    grid.state = { surface: "canvas", selection: null };
+    registerCanvasCommands();
+    innerSelectionNamesCommands();
+    expect(innerSelectionClipboardCommand("copy")).toBe(INNER_COPY);
+    expect(rule.clipboardDoorCommand!("copy")).toBe(INNER_COPY);
+    expect(rule.clipboardDoorCommand!("paste")).toBe(INNER_PASTE);
+  });
+
+  it("the inner selection no longer owning the keys: the canvas's object commands again (positive control)", () => {
+    grid.state = { surface: "canvas", selection: null };
+    registerCanvasCommands();
+    innerSelectionNamesCommands();
+    inner.owns = false;
+    expect(innerSelectionClipboardCommand("copy")).toBeNull();
+    expect(rule.clipboardDoorCommand!("copy")).toBe(rule.OBJECT_COPY_COMMAND);
+    expect(rule.clipboardDoorCommand!("paste")).toBe(rule.OBJECT_PASTE_COMMAND);
+  });
+
+  it("an inner command that is not registered: the door falls through to the cell command", () => {
+    grid.state = { surface: "canvas", selection: null };
+    registerCanvasCommands();
+    innerSelectionNamesCommands({ register: false });
+    expect(rule.clipboardDoorCommand!("copy")).toBe(CoreCommands.COPY);
+    expect(rule.clipboardDoorCommand!("paste")).toBe(CoreCommands.PASTE);
+  });
+
+  it("a provider owning the keys WITHOUT the method (the floating grid) keeps CoreCommands.COPY / PASTE", () => {
+    grid.state = { surface: "canvas", selection: null };
+    registerCanvasCommands();
+    innerSelectionOwnsClipboard();
+    expect(innerSelectionClipboardCommand("copy")).toBeNull();
+    expect(innerSelectionClipboardCommand("paste")).toBeNull();
+    expect(rule.clipboardDoorCommand!("copy")).toBe(CoreCommands.COPY);
+    expect(rule.clipboardDoorCommand!("paste")).toBe(CoreCommands.PASTE);
+  });
+
+  it("a provider whose innerClipboardCommand throws answers nothing (guarded), never breaks the door", () => {
+    grid.state = { surface: "canvas", selection: null };
+    registerCanvasCommands();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    cleanups.push(
+      registerObjectSelectionProvider({
+        types: ["test-inner-throws"],
+        isSelected: () => true,
+        select: () => {},
+        deselectAll: () => {},
+        ownsKey: (key: ObjectSelectionKey) => key === "Clipboard",
+        innerClipboardCommand: () => {
+          throw new Error("boom");
+        },
+      }),
+    );
+    expect(innerSelectionClipboardCommand("copy")).toBeNull();
+    expect(rule.clipboardDoorCommand!("copy")).toBe(CoreCommands.COPY);
   });
 });
 

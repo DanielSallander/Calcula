@@ -7,8 +7,9 @@
 //          reader resolved them against the ACTIVE sheet, which is the sheet a
 //          chart is showing on -- so a chart on a CANVAS (which has no cells)
 //          kept its literal default forever, and its write-back was refused
-//          with a message. The rule now, the one an unqualified `=A1` title
-//          already follows (dataSourceResolver `specReferenceSheet`):
+//          with a message. The rule now (dataSourceResolver
+//          `specReferenceSheet`; a BOUND title's unqualified `=A1` follows the
+//          same rule, decided in Rust):
 //            - on a WORKSHEET, the chart's own sheet (unchanged in practice:
 //              it is the sheet you are looking at);
 //            - on a CANVAS, the sheet the chart's DATA comes from;

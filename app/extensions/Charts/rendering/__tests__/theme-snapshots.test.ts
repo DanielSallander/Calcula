@@ -57,15 +57,14 @@ describe('resolveChartTheme', () => {
     expect(resolveChartTheme({ theme: {} })).toMatchSnapshot();
   });
 
-  it('with background override', () => {
-    expect(resolveChartTheme({ theme: { background: '#000000' } })).toMatchSnapshot();
+  it('ignores a legacy background override (the outer background is the container\'s)', () => {
+    expect(resolveChartTheme({ theme: { background: '#000000' } as never })).toEqual(resolveChartTheme(undefined));
   });
 
   it('with multiple overrides', () => {
     expect(
       resolveChartTheme({
         theme: {
-          background: '#1a1a2e',
           plotBackground: '#16213e',
           titleColor: '#e94560',
           gridLineColor: '#333333',

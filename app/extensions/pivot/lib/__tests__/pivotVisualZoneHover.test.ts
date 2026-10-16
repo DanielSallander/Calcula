@@ -10,7 +10,8 @@
 //          press before anything is selected, and its contract is purity. The
 //          hover moved to the mousemove observer, which must not light up a
 //          box another object covers (the old getCursor never ran for a
-//          covered box: Core asks the topmost object only).
+//          covered box: Core asks the topmost object only). While a formula
+//          picks a reference (D-PICK) nothing is lit: the chrome does not act.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
@@ -81,6 +82,7 @@ vi.mock("../pivotCellDoubleClick", () => ({ runPivotCellDoubleClick: vi.fn(() =>
 import type { GridRegion, OverlayHitTestContext } from "@api/gridOverlays";
 import { clearPivotVisualHoverUnlessHovered, pivotVisualZoneAt, updatePivotVisualHoverAt } from "../pivotVisualOverlay";
 import { setGridRegions } from "@api/gridOverlays";
+import { registerExternalFormulaTarget } from "@api/editing";
 import { PIVOT_VISUAL_REGION_TYPE } from "../pivotVisualRegions";
 import {
   anyPivotVisualHover,
@@ -148,7 +150,9 @@ describe("the zone answer is PURE", () => {
     recordWithChrome();
     for (let i = 0; i < 50; i++) {
       const zone = pivotVisualZoneAt(ctx(i % 2 === 0 ? ICON : CELL));
-      expect(zone?.kind ?? null).toBe(i % 2 === 0 ? "content" : null);
+      // No geometry is painted here, so the non-chrome point is the box's
+      // blank frame (D-CELLS: a painted cell would be content).
+      expect(zone?.kind ?? null).toBe(i % 2 === 0 ? "content" : "frame");
     }
     expect(anyPivotVisualHover()).toBe(false);
     expect(getPivotVisualHover("cp1")).toBeUndefined();
@@ -267,5 +271,40 @@ describe("Core's hover leaving every box clears the highlight (clearPivotVisualH
     recordWithChrome();
     clearPivotVisualHoverUnlessHovered(null);
     expect(h.redraw).not.toHaveBeenCalled();
+  });
+});
+
+describe("during a reference pick the chrome is not lit (D-PICK: a press names the cell beneath it)", () => {
+  // A pick-only external target expecting a reference (the chart title
+  // editor's shape) drives the ONE predicate, isFormulaReferencePickActive.
+  let unregister: (() => void) | null = null;
+  afterEach(() => {
+    unregister?.();
+    unregister = null;
+  });
+  const startPick = () => {
+    unregister = registerExternalFormulaTarget({ isExpectingReference: () => true, insertReference: vi.fn() });
+  };
+
+  it("a lit +/- clears when the pick starts (one repaint), and the pointer over it lights nothing while it lasts", () => {
+    recordWithChrome();
+    h.top = BOX_REGION;
+    updatePivotVisualHoverAt(ICON.x, ICON.y, area);
+    expect(getPivotVisualHover("cp1"), "precondition: the +/- is lit").toEqual({ iconKey: "7-0" });
+    h.redraw.mockClear();
+
+    startPick();
+    updatePivotVisualHoverAt(ICON.x, ICON.y, area);
+    expect(anyPivotVisualHover(), "the chrome stayed lit during a pick").toBe(false);
+    expect(h.redraw).toHaveBeenCalledTimes(1);
+    updatePivotVisualHoverAt(ICON.x + 1, ICON.y, area);
+    expect(anyPivotVisualHover()).toBe(false);
+    expect(h.redraw, "an unchanged (cleared) hover repainted again").toHaveBeenCalledTimes(1);
+
+    // The pick ends: the chrome lights up again.
+    unregister!();
+    unregister = null;
+    updatePivotVisualHoverAt(ICON.x, ICON.y, area);
+    expect(getPivotVisualHover("cp1")).toEqual({ iconKey: "7-0" });
   });
 });

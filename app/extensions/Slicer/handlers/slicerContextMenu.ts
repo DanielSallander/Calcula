@@ -20,6 +20,7 @@ import { slicerAtCanvasPoint } from "../lib/slicerCanvasGeometry";
 import { slicerIdOfRegion } from "../lib/slicerGeometry";
 import { getGridRegions, type GridRegion } from "@api/gridOverlays";
 import { sizeAndPositionMenuEntry } from "@api/objectPosition";
+import { objectPaneMenuEntry } from "@api/objectPane";
 
 // ============================================================================
 // State
@@ -135,12 +136,24 @@ function slicerRegionOf(slicerId: string): GridRegion | null {
   return getGridRegions().find((r) => r.type === "slicer" && slicerIdOfRegion(r) === slicerId) ?? null;
 }
 
-/** The "Size and Position..." row (and its rule) for the slicer's region; none when it is not published. */
+/**
+ * The "Format..." row (the object pane on its Format tab, WP-C D-PANE), the
+ * "Size and Position..." row and their rule, for the slicer's region; none
+ * when it is not published. Each row is disabled with its reason when its
+ * door is shut (no object pane installed, a locked or subscribed page).
+ */
 function sizeAndPositionRows(slicerId: string): MenuItem[] {
   const region = slicerRegionOf(slicerId);
   if (!region) return [];
+  const format = objectPaneMenuEntry(region);
   const entry = sizeAndPositionMenuEntry(region);
   return [
+    {
+      label: format.label,
+      disabled: format.disabled,
+      title: format.reason ?? undefined,
+      onClick: format.run,
+    },
     {
       label: entry.label,
       disabled: entry.disabled,

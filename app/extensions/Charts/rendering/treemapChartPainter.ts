@@ -10,7 +10,6 @@ import { resolveDatumStyle } from "../lib/dataPointOverrides";
 import { applyFillStyle } from "./gradientFill";
 import {
   computeRadialLayout,
-  drawChartBackground,
   drawTitle,
   drawRadialLegend,
   drawRoundedRect,
@@ -54,12 +53,10 @@ export function paintTreemapChart(
   const values = data.series.length > 0 ? data.series[0].values : [];
   const n = values.length;
   if (n === 0) {
-    drawChartBackground(ctx, layout, theme);
     return;
   }
 
   // 1. Background
-  drawChartBackground(ctx, layout, theme);
 
   // 2. Compute squarified treemap layout
   const total = values.reduce((sum, v) => sum + Math.max(0, v), 0);
@@ -165,9 +162,7 @@ export function paintTreemapChart(
   }
 
   // 5. Title
-  if (spec.title) {
-    drawTitle(ctx, spec.title, layout, theme);
-  }
+  drawTitle(ctx, spec.title, layout, theme);
 
   // 6. Legend
   if (spec.legend.visible && data.categories.length > 0) {

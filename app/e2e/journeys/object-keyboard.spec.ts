@@ -177,6 +177,7 @@
  */
 import type { Page } from "@playwright/test";
 import { test, expect } from "../fixtures";
+import { closeObjectPaneForGood } from "../helpers/object-pane";
 import { readGridGeometry } from "../helpers/grid";
 import {
   MOD,
@@ -438,6 +439,15 @@ async function endClean(page: Page): Promise<void> {
   await page.keyboard.press("Escape").catch(() => undefined);
   await newFile(page).catch(() => undefined);
 }
+
+// WP-C (D-PANE): on a canvas a click opens the ONE object pane at its release,
+// and a docked pane narrows the grid. This journey predates the pane and asserts
+// nothing about it, so every test starts with the pane closed AS IF BY HAND
+// (helpers/object-pane.ts). Per test, not once: the fixture's per-test task-pane
+// reset clears the "closed by hand" mark, and Playwright runs this hook after it.
+test.beforeEach(async ({ appPage }) => {
+  await closeObjectPaneForGood(appPage);
+});
 
 // ---------------------------------------------------------------------------
 // K-1. Worksheet: Enter, Down twice, Space -- the active cell never moves

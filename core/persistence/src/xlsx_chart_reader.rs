@@ -63,13 +63,18 @@ pub fn parse_xlsx_charts(
             if let Some(spec_json) = parse_chart_xml(&chart_xml, &anchor) {
                 // Use the logical sheet index (0-based, from the caller's mapping)
                 let sheet_index = logical_idx.saturating_sub(1);
+                // The spec is built as text (every string value goes through
+                // escape_json); it is embedded as a JSON value. A spec that
+                // somehow fails to parse is KEPT as a string, never dropped.
+                let spec = serde_json::from_str::<serde_json::Value>(&spec_json)
+                    .unwrap_or(serde_json::Value::String(spec_json));
                 // SheetId will be assigned by the caller once sheets are built
                 results.push((
                     sheet_index,
                     SavedChart {
                         id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
                         sheet_id: identity::SheetId::from_bytes(identity::generate_uuid_v7()),
-                        spec_json,
+                        spec,
                     },
                 ));
             }

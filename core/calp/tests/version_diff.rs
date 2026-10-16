@@ -785,6 +785,7 @@ fn a_moved_floating_range_and_an_added_timeline_are_reported_by_domain() {
             show_title: true,
             show_column_headers: true,
             show_row_headers: true,
+            container: None,
         }
     };
     let pivot = persistence::SavedPivotDefinition {
@@ -828,6 +829,7 @@ fn a_moved_floating_range_and_an_added_timeline_are_reported_by_domain() {
         show_scrollbar: true,
         style_preset: "TimelineStyleLight1".to_string(),
         connected_pivot_ids: Vec::new(),
+        container: None,
     }];
     f.publish(
         &v2,
@@ -859,7 +861,14 @@ fn a_moved_floating_range_and_an_added_timeline_are_reported_by_domain() {
 // ---------------------------------------------------------------------------
 
 /// The TS chart store's envelope, in ITS key order (not alphabetical).
-const CHART_SPEC: &str = r#"{"chartId":1,"name":"Sales","sheetIndex":1,"x":10,"y":10,"width":300,"height":200,"spec":{"mark":"bar","data":"Data!A1:B5"}}"#;
+/// The chart's string source spells its sheet "DATA" (as a formula's lexer
+/// would): the checkout rename and the push's undo of it bring it home as
+/// "Data", a re-spelling the version diff must not call an edit.
+const CHART_SPEC: &str = r#"{"chartId":1,"name":"Sales","sheetIndex":1,"x":10,"y":10,"width":300,"height":200,"spec":{"mark":"bar","data":"DATA!A1:B5"}}"#;
+
+fn chart_spec(text: &str) -> serde_json::Value {
+    serde_json::from_str(text).unwrap()
+}
 
 /// ["Data" (A1 = 21), "Report" (A1 = Data!A1*2)], a defined name and a chart
 /// string source that both name "Data" -- the three places a checkout's
@@ -884,7 +893,7 @@ fn data_and_report() -> Workbook {
     wb.charts = vec![persistence::SavedChart {
         id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
         sheet_id: report_id,
-        spec_json: CHART_SPEC.to_string(),
+        spec: chart_spec(CHART_SPEC),
     }];
     wb
 }
@@ -907,12 +916,9 @@ fn through_a_checkout_rename_and_back(wb: &Workbook) -> Workbook {
             }
         }
         for chart in w.charts.iter_mut() {
-            if let Some(spec) =
-                calp::chart_refs::rename_chart_spec_sheet_names(&chart.spec_json, renames)
-            {
-                chart.spec_json = spec;
-            }
+            calp::chart_refs::rename_chart_spec_sheet_names(&mut chart.spec, renames);
         }
+        renames.rename_binding_formulas(&mut w.object_bindings);
     }
     w
 }
@@ -938,10 +944,77 @@ fn yours_against(f: &Fixture, base: &str, working: &Workbook) -> calp::diff::Ver
     .unwrap()
 }
 
+/// `data_and_report` plus an object property BINDING on the chart, spelled
+/// the way a lexer stores a bare sheet name (`DATA`), so the checkout rename
+/// and the push's undo of it bring it home re-spelled.
+fn bound_data_and_report() -> Workbook {
+    let mut wb = data_and_report();
+    let chart = wb.charts[0].id.to_string();
+    wb.object_bindings = vec![persistence::SavedObjectBinding {
+        object: persistence::SavedObjectRef { kind: "chart".to_string(), id: chart },
+        path: "/spec/title".to_string(),
+        formula: "=DATA!A1&\" sold\"".to_string(),
+        model: None,
+    }];
+    wb
+}
+
+/// A BINDING IS DIFFED AS ITSELF, SPELLING-BLIND (WP-D S6). `bindings.json`
+/// is one item per row, keyed by (object, path): an untouched working copy
+/// whose collision rename re-spelled a binding formula reports nothing, a
+/// real edit of the formula is ONE modified `binding`, and a new binding is
+/// ONE added `binding` -- never an anonymous positional artifact change.
+///
+/// SABOTAGE: remove `("bindings.json", "binding")` from `GROUPED` in diff.rs --
+/// the file is then reported as an unknown `artifact` and every assertion on
+/// the `binding` domain fails.
+#[test]
+fn a_binding_is_diffed_by_object_and_path_and_spelling_is_not_an_edit() {
+    let f = Fixture::new();
+    let base = bound_data_and_report();
+    f.publish(&base, SemVer::new(1, 0, 0), PushMode::CreateNew);
+
+    let working = through_a_checkout_rename_and_back(&base);
+    assert_ne!(
+        working.object_bindings[0].formula, base.object_bindings[0].formula,
+        "precondition: the round trip re-spelled the binding"
+    );
+    let untouched = yours_against(&f, "1.0.0", &working);
+    assert!(
+        untouched.objects.is_empty(),
+        "a re-spelled binding is not an edit: {:?}",
+        untouched.objects.iter().map(|o| (&o.domain, &o.id, &o.change)).collect::<Vec<_>>()
+    );
+
+    let mut edited = working.clone();
+    edited.object_bindings[0].formula = "=Data!A2&\" sold\"".to_string();
+    let chart = edited.charts[0].id.to_string();
+    edited.object_bindings.push(persistence::SavedObjectBinding {
+        object: persistence::SavedObjectRef { kind: "chart".to_string(), id: chart.clone() },
+        path: "/spec/xAxis/title".to_string(),
+        formula: "=Data!A1".to_string(),
+        model: None,
+    });
+    let diff = yours_against(&f, "1.0.0", &edited);
+    let rows: Vec<(String, String, String)> = diff
+        .objects
+        .iter()
+        .map(|o| (o.domain.clone(), o.id.clone(), o.change.clone()))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("binding".to_string(), format!("chart:{chart}/spec/title"), "modified".to_string()),
+            ("binding".to_string(), format!("chart:{chart}/spec/xAxis/title"), "added".to_string()),
+        ],
+        "one row per binding, by (object, path)"
+    );
+}
+
 /// AN UNTOUCHED WORKING COPY HAS NOTHING TO PUSH. The rename round trip is not
 /// the identity on bytes: the lexer stored the author's `Data!A1*2` as
 /// `DATA!A1*2` and it comes home as `Data!A1*2`; the defined name likewise;
-/// and the chart's spec is re-serialized with its keys SORTED. Byte-wise the
+/// and the chart's string source comes home re-spelled the same way. Byte-wise the
 /// push preview listed all three as changed, the push shipped them to every
 /// subscriber, and the published version's own diff said so too.
 ///
@@ -956,7 +1029,7 @@ fn an_untouched_working_copy_through_a_collision_rename_reports_nothing() {
     // Preconditions: the round trip really did re-spell all three.
     assert_ne!(working.sheets[1].cells[&(0, 0)].formula, base.sheets[1].cells[&(0, 0)].formula);
     assert_ne!(working.named_ranges[0].refers_to, base.named_ranges[0].refers_to);
-    assert_ne!(working.charts[0].spec_json, base.charts[0].spec_json);
+    assert_ne!(working.charts[0].spec, base.charts[0].spec);
 
     let preview = yours_against(&f, "1.0.0", &working);
     f.publish(
@@ -1006,7 +1079,7 @@ fn a_re_spelled_piece_does_not_collide_with_a_teammates_real_edit() {
         PushMode::Update { expected_base: SemVer::new(1, 0, 0) },
     );
     let mut theirs_chart = base.clone();
-    theirs_chart.charts[0].spec_json = CHART_SPEC.replace("\"Sales\"", "\"Sales 2026\"");
+    theirs_chart.charts[0].spec = chart_spec(&CHART_SPEC.replace("\"Sales\"", "\"Sales 2026\""));
     f.publish(
         &theirs_chart,
         SemVer::new(1, 2, 0),

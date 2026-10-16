@@ -5,7 +5,7 @@
 //          one-click style change.
 
 import type { ChartRenderTheme } from "../rendering/chartTheme";
-import type { AxisSpec } from "../types";
+import type { AxisSpec, ChartContainerFormat } from "../types";
 
 // ============================================================================
 // Preset Type
@@ -20,8 +20,14 @@ export interface ChartStylePreset {
   category: "colorful" | "monochromatic" | "dark" | "outline" | "gradient";
   /** Color palette name. */
   palette: string;
-  /** Theme overrides applied to ChartRenderTheme. */
-  theme: Partial<ChartRenderTheme>;
+  /**
+   * The chart's outer background colour. It is the visual CONTAINER's
+   * (`spec.container.background.color`, D-FORMAT), never a theme key -- one
+   * spelling for the fact, which Core paints under the chart.
+   */
+  background: string;
+  /** Theme overrides applied to ChartRenderTheme (never the derived background). */
+  theme: Partial<Omit<ChartRenderTheme, "background" | "titleStyle">>;
   /** Whether gridlines should be visible. */
   gridLines: boolean;
   /** Bar border radius. */
@@ -53,7 +59,8 @@ const colorfulStyles: ChartStylePreset[] = [
     name: "Classic",
     category: "colorful",
     palette: "default",
-    theme: { background: "#ffffff", plotBackground: "#fafafa", gridLineColor: "#e8e8e8" },
+    background: "#ffffff",
+    theme: { plotBackground: "#fafafa", gridLineColor: "#e8e8e8" },
     gridLines: true,
     barBorderRadius: 2,
   },
@@ -62,7 +69,8 @@ const colorfulStyles: ChartStylePreset[] = [
     name: "Vivid",
     category: "colorful",
     palette: "vivid",
-    theme: { background: "#ffffff", plotBackground: "#fafafa", gridLineColor: "#e8e8e8" },
+    background: "#ffffff",
+    theme: { plotBackground: "#fafafa", gridLineColor: "#e8e8e8" },
     gridLines: true,
     barBorderRadius: 2,
   },
@@ -71,7 +79,8 @@ const colorfulStyles: ChartStylePreset[] = [
     name: "Pastel",
     category: "colorful",
     palette: "pastel",
-    theme: { background: "#ffffff", plotBackground: "#fafafa", gridLineColor: "#e0e0e0" },
+    background: "#ffffff",
+    theme: { plotBackground: "#fafafa", gridLineColor: "#e0e0e0" },
     gridLines: true,
     barBorderRadius: 3,
   },
@@ -80,7 +89,8 @@ const colorfulStyles: ChartStylePreset[] = [
     name: "Ocean",
     category: "colorful",
     palette: "ocean",
-    theme: { background: "#ffffff", plotBackground: "#f8f9fa", gridLineColor: "#e0e0e0" },
+    background: "#ffffff",
+    theme: { plotBackground: "#f8f9fa", gridLineColor: "#e0e0e0" },
     gridLines: true,
     barBorderRadius: 0,
   },
@@ -89,7 +99,8 @@ const colorfulStyles: ChartStylePreset[] = [
     name: "Clean",
     category: "colorful",
     palette: "default",
-    theme: { background: "#ffffff", plotBackground: "#ffffff", gridLineColor: "#f0f0f0", gridLineWidth: 1 },
+    background: "#ffffff",
+    theme: { plotBackground: "#ffffff", gridLineColor: "#f0f0f0", gridLineWidth: 1 },
     gridLines: true,
     barBorderRadius: 0,
   },
@@ -98,7 +109,8 @@ const colorfulStyles: ChartStylePreset[] = [
     name: "Minimal",
     category: "colorful",
     palette: "default",
-    theme: { background: "#ffffff", plotBackground: "#ffffff", gridLineWidth: 0 },
+    background: "#ffffff",
+    theme: { plotBackground: "#ffffff", gridLineWidth: 0 },
     gridLines: false,
     barBorderRadius: 4,
   },
@@ -107,7 +119,8 @@ const colorfulStyles: ChartStylePreset[] = [
     name: "Warm",
     category: "colorful",
     palette: "vivid",
-    theme: { background: "#fffdf7", plotBackground: "#fffdf7", gridLineColor: "#efe8d8" },
+    background: "#fffdf7",
+    theme: { plotBackground: "#fffdf7", gridLineColor: "#efe8d8" },
     gridLines: true,
     barBorderRadius: 3,
   },
@@ -116,7 +129,8 @@ const colorfulStyles: ChartStylePreset[] = [
     name: "Cool",
     category: "colorful",
     palette: "pastel",
-    theme: { background: "#f7faff", plotBackground: "#f7faff", gridLineColor: "#dde6f0" },
+    background: "#f7faff",
+    theme: { plotBackground: "#f7faff", gridLineColor: "#dde6f0" },
     gridLines: true,
     barBorderRadius: 3,
   },
@@ -132,8 +146,9 @@ const monochromaticStyles: ChartStylePreset[] = [
     name: "Blue",
     category: "monochromatic",
     palette: "default",
+    background: "#ffffff",
     theme: {
-      background: "#ffffff", plotBackground: "#f0f5fa",
+      plotBackground: "#f0f5fa",
       gridLineColor: "#d0dce8", axisColor: "#4E79A7",
       titleColor: "#2c4a6e",
     },
@@ -145,8 +160,9 @@ const monochromaticStyles: ChartStylePreset[] = [
     name: "Green",
     category: "monochromatic",
     palette: "default",
+    background: "#ffffff",
     theme: {
-      background: "#ffffff", plotBackground: "#f0faf5",
+      plotBackground: "#f0faf5",
       gridLineColor: "#c8e6d8", axisColor: "#59A14F",
       titleColor: "#2d6a3f",
     },
@@ -158,8 +174,9 @@ const monochromaticStyles: ChartStylePreset[] = [
     name: "Gray",
     category: "monochromatic",
     palette: "default",
+    background: "#ffffff",
     theme: {
-      background: "#ffffff", plotBackground: "#f5f5f5",
+      plotBackground: "#f5f5f5",
       gridLineColor: "#ddd", axisColor: "#888",
       titleColor: "#444",
     },
@@ -171,8 +188,9 @@ const monochromaticStyles: ChartStylePreset[] = [
     name: "Orange",
     category: "monochromatic",
     palette: "vivid",
+    background: "#ffffff",
     theme: {
-      background: "#ffffff", plotBackground: "#fff8f0",
+      plotBackground: "#fff8f0",
       gridLineColor: "#f0dcc8", axisColor: "#d47520",
       titleColor: "#8b4c10",
     },
@@ -191,8 +209,9 @@ const darkStyles: ChartStylePreset[] = [
     name: "Dark",
     category: "dark",
     palette: "vivid",
+    background: "#1e1e1e",
     theme: {
-      background: "#1e1e1e", plotBackground: "#252525",
+      plotBackground: "#252525",
       gridLineColor: "#3a3a3a", gridLineWidth: 1,
       axisColor: "#666", axisLabelColor: "#aaa",
       axisTitleColor: "#ccc", titleColor: "#e0e0e0",
@@ -206,8 +225,9 @@ const darkStyles: ChartStylePreset[] = [
     name: "Midnight",
     category: "dark",
     palette: "pastel",
+    background: "#0d1b2a",
     theme: {
-      background: "#0d1b2a", plotBackground: "#1b2838",
+      plotBackground: "#1b2838",
       gridLineColor: "#2a3a4a", gridLineWidth: 1,
       axisColor: "#4a5a6a", axisLabelColor: "#8a9aaa",
       axisTitleColor: "#aabbcc", titleColor: "#d0e0f0",
@@ -221,8 +241,9 @@ const darkStyles: ChartStylePreset[] = [
     name: "Charcoal",
     category: "dark",
     palette: "default",
+    background: "#2d2d2d",
     theme: {
-      background: "#2d2d2d", plotBackground: "#333333",
+      plotBackground: "#333333",
       gridLineColor: "#444", gridLineWidth: 1,
       axisColor: "#777", axisLabelColor: "#aaa",
       axisTitleColor: "#ccc", titleColor: "#eee",
@@ -236,8 +257,9 @@ const darkStyles: ChartStylePreset[] = [
     name: "Dark Clean",
     category: "dark",
     palette: "vivid",
+    background: "#1a1a2e",
     theme: {
-      background: "#1a1a2e", plotBackground: "#16213e",
+      plotBackground: "#16213e",
       gridLineWidth: 0,
       axisColor: "#555", axisLabelColor: "#8899aa",
       axisTitleColor: "#aabbcc", titleColor: "#ddeeff",
@@ -258,8 +280,9 @@ const outlineStyles: ChartStylePreset[] = [
     name: "Flat",
     category: "outline",
     palette: "default",
+    background: "#ffffff",
     theme: {
-      background: "#ffffff", plotBackground: "#ffffff",
+      plotBackground: "#ffffff",
       gridLineWidth: 0, axisColor: "#ccc",
     },
     gridLines: false,
@@ -270,8 +293,9 @@ const outlineStyles: ChartStylePreset[] = [
     name: "Rounded",
     category: "outline",
     palette: "pastel",
+    background: "#ffffff",
     theme: {
-      background: "#ffffff", plotBackground: "#ffffff",
+      plotBackground: "#ffffff",
       gridLineColor: "#f0f0f0", gridLineWidth: 1,
       axisColor: "#ddd",
     },
@@ -283,8 +307,9 @@ const outlineStyles: ChartStylePreset[] = [
     name: "Bold Grid",
     category: "outline",
     palette: "vivid",
+    background: "#ffffff",
     theme: {
-      background: "#ffffff", plotBackground: "#fafafa",
+      plotBackground: "#fafafa",
       gridLineColor: "#ccc", gridLineWidth: 2,
       axisColor: "#999",
     },
@@ -296,8 +321,9 @@ const outlineStyles: ChartStylePreset[] = [
     name: "Gray Background",
     category: "outline",
     palette: "default",
+    background: "#f0f0f0",
     theme: {
-      background: "#f0f0f0", plotBackground: "#e8e8e8",
+      plotBackground: "#e8e8e8",
       gridLineColor: "#d0d0d0", gridLineWidth: 1,
       axisColor: "#999",
     },
@@ -316,8 +342,8 @@ const gradientStyles: ChartStylePreset[] = [
     name: "Sky",
     category: "gradient",
     palette: "default",
+    background: "#ffffff",
     theme: {
-      background: "#ffffff",
       plotBackground: "#f0f5ff",
       plotBackgroundGradient: {
         type: "linear",
@@ -336,8 +362,8 @@ const gradientStyles: ChartStylePreset[] = [
     name: "Sunset",
     category: "gradient",
     palette: "vivid",
+    background: "#fff8f0",
     theme: {
-      background: "#fff8f0",
       plotBackground: "#fff5e8",
       plotBackgroundGradient: {
         type: "linear",
@@ -356,8 +382,8 @@ const gradientStyles: ChartStylePreset[] = [
     name: "Dark Gradient",
     category: "gradient",
     palette: "vivid",
+    background: "#1a1a2e",
     theme: {
-      background: "#1a1a2e",
       plotBackground: "#16213e",
       plotBackgroundGradient: {
         type: "linear",
@@ -380,8 +406,8 @@ const gradientStyles: ChartStylePreset[] = [
     name: "Mint",
     category: "gradient",
     palette: "pastel",
+    background: "#f0fff0",
     theme: {
-      background: "#f0fff0",
       plotBackground: "#e8fae8",
       plotBackgroundGradient: {
         type: "linear",
@@ -436,8 +462,24 @@ export function applyPreset(preset: ChartStylePreset): Record<string, unknown> {
   return {
     palette: preset.palette,
     config: { theme: preset.theme },
+    container: presetContainerPatch(preset),
     yAxis: undefined, // Handled separately below
   };
+}
+
+/** The container patch a preset writes: its background colour (a merge: the rest of the container stays). */
+export function presetContainerPatch(preset: ChartStylePreset): ChartContainerFormat {
+  return { background: { color: preset.background } };
+}
+
+/** Whether `spec` already shows this preset's background (the gallery's "current" ring). */
+export function specHasPresetBackground(
+  spec: { container?: ChartContainerFormat },
+  preset: ChartStylePreset,
+): boolean {
+  const current = spec.container?.background?.color;
+  const shown = current === undefined || current === "" ? "#ffffff" : current;
+  return shown.toLowerCase() === preset.background.toLowerCase();
 }
 
 /**
@@ -450,6 +492,8 @@ export function buildPresetUpdates(
   const updates: Record<string, unknown> = {
     palette: preset.palette,
     config: { theme: preset.theme },
+    // The background is the container's (merged: padding, border ... stay).
+    container: presetContainerPatch(preset),
     yAxis: { ...currentSpec.yAxis, gridLines: preset.gridLines },
   };
 

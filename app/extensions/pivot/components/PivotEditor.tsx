@@ -11,7 +11,7 @@ import { SaveLoadToolbar } from './SaveLoadToolbar';
 import { usePivotEditorState } from './usePivotEditorState';
 import { buildSourceSignature } from '../lib/namedConfigs';
 import { pivot, savePivotLayout } from '@api/pivot';
-import { openTaskPane, getBiConnectionService } from '@api';
+import { openTaskPane, getBiConnectionService, showToast } from '@api';
 import { onAppEvent } from '@api/events';
 import type { SavePivotLayoutRequest } from '@api/pivot';
 import type { DesignStrategySummary } from '@api/designQueryAssist';
@@ -23,7 +23,6 @@ import type {
   ZoneField,
   LayoutConfig,
   UpdatePivotFieldsRequest,
-  UpdateBiPivotFieldsRequest,
   BiPivotModelInfo,
   BiPerspectiveInfo,
   BiCultureInfo,
@@ -31,17 +30,29 @@ import type {
   MeasureField,
   PivotId,
   CalculatedFieldDef,
+  ValueColumnRefDef,
   DropZoneType,
   DragField,
 } from './types';
-import { buildBiUpdateRequest, rangeRequestWithHiddenItemEdits } from './biFieldsRequest';
+import { buildBiUpdateRequest } from './biFieldsRequest';
+import { sendPivotFieldsUpdate } from '../lib/pivotFieldsRequest';
+import {
+  takePendingValueFieldDialog,
+  valuesZoneIndexOf,
+  type ValueFieldDialogRequest,
+} from '../lib/valueFieldDialogRequest';
+import { PivotEvents } from '../../_shared/lib/pivotEvents';
 import type { HiddenItemEditBatch } from './usePivotEditorState';
 import { useJsonToggle, JsonToggleButton, JsonToggleEditor } from "../../_shared/components/jsonToggle";
 import { splitBiFieldKey } from "../../_shared/lib/biFieldKey";
 import { ConnectSourceDialog, type ConnectSourceFields } from "../../_shared/components/ConnectSourceDialog";
 import { confirmAsync } from "@api/dialogs";
+import { notePivotEditorMounted } from "../lib/pivotEditorPresence";
 
 type EditorTab = 'fields' | 'design';
+
+/** The editor's two bodies: the field list + zones, and the Pivot Layout DSL. */
+export type PivotEditorTab = EditorTab;
 
 interface PivotEditorProps {
   pivotId: PivotId;
@@ -52,10 +63,20 @@ interface PivotEditorProps {
   initialFilters?: ZoneField[];
   initialLayout?: LayoutConfig;
   initialCalculatedFields?: CalculatedFieldDef[];
+  /** How the value and calculated columns interleave (definition.value_column_order). */
+  initialValueColumnOrder?: ValueColumnRefDef[];
   biModel?: BiPivotModelInfo;
   sourceTableName?: string;
   onClose?: () => void;
   onViewUpdate?: () => void;
+  /**
+   * CONTROLLED tab (WP-C D-PANE): a host that owns the tab strip -- the object
+   * pane's Fields / Design tabs for a canvas box -- says which body shows. The
+   * editor's own strip is then not rendered. Absent = the editor's own state.
+   */
+  tab?: EditorTab;
+  /** Render the editor's own Fields / Design strip (default true; never when `tab` is given). */
+  showTabStrip?: boolean;
 }
 
 /** Banner showing BI connection status with connect action */
@@ -189,10 +210,13 @@ export function PivotEditor({
   initialFilters = [],
   initialLayout = {},
   initialCalculatedFields,
+  initialValueColumnOrder,
   biModel,
   sourceTableName,
   onClose,
   onViewUpdate,
+  tab,
+  showTabStrip = true,
 }: PivotEditorProps): React.ReactElement {
   const isBiPivot = !!biModel;
 
@@ -209,8 +233,17 @@ export function PivotEditor({
   // JSON toggle (Phase C)
   const jsonToggle = useJsonToggle("pivot", String(pivotId), onViewUpdate);
 
-  // Tab state: Fields (visual drag-drop) or Design (DSL text editor)
-  const [activeTab, setActiveTab] = useState<EditorTab>('fields');
+  // Tab state: Fields (visual drag-drop) or Design (DSL text editor). A host
+  // that owns the tab strip CONTROLS it (`tab`); both bodies stay mounted
+  // either way, so the zones survive a switch.
+  const [ownTab, setActiveTab] = useState<EditorTab>('fields');
+  const activeTab: EditorTab = tab ?? ownTab;
+  const stripShown = tab === undefined && showTabStrip;
+
+  // A mounted editor of this pivot SENDS its layout changes: the Design
+  // sections route a change to it, and only without one send it headlessly
+  // (lib/pivotEditorPresence.ts).
+  useEffect(() => notePivotEditorMounted(String(pivotId)), [pivotId]);
 
   // Modal state
   const [valueSettingsIndex, setValueSettingsIndex] = useState<number | null>(null);
@@ -353,6 +386,15 @@ export function PivotEditor({
   // pivot, echoed back -- as it was when the pane mounted.
   const readPivotFields = useCallback(() => getPivotFieldConfiguration(pivotId), [pivotId]);
 
+  // The zones re-seed from the definition after a field edit made by another
+  // door (the value-cell menu, a header's Remove; BUG-0466). A dynamic import:
+  // valueFieldEdits reads selectionHandler, which (through the manifest) mounts
+  // this editor -- a static import would close that cycle.
+  const readPivotZones = useCallback(
+    async () => (await import('../lib/valueFieldEdits')).readPivotEditorZones(pivotId),
+    [pivotId],
+  );
+
   // Ref to resetZones (set after usePivotEditorState, used in handleUpdate catch)
   const resetZonesRef = useRef<(() => void) | null>(null);
 
@@ -360,33 +402,18 @@ export function PivotEditor({
     request: UpdatePivotFieldsRequest,
     hiddenItemEdits: HiddenItemEditBatch,
   ) => {
-    // Build BI request upfront (if applicable) so it's accessible in catch block for retry.
-    // A real field's hidden items travel ONLY when edited here (hiddenItemEdits):
-    // a chip's own list is a display copy that may be stale -- see biFieldsRequest.ts.
-    let biRequest: UpdateBiPivotFieldsRequest | undefined;
-    if (isBiPivot) {
-      biRequest = buildBiUpdateRequest(request, {
-        calcGroupNames,
-        biTableNames,
-        lookupColumns,
-        hiddenItemEdits: hiddenItemEdits.edits,
-      });
-    }
-
     try {
       const t0 = performance.now();
 
-      if (isBiPivot && biRequest) {
-        console.log(`[CALP-DIAG] PivotEditor.handleUpdate: BI pivot, pivotId=${request.pivotId}`);
-        console.log(`[CALP-DIAG]   request rows=${request.rowFields?.length}, cols=${request.columnFields?.length}, vals=${request.valueFields?.length}`);
-        console.log(`[CALP-DIAG]   biRequest: rows=${biRequest.rowFields.length} [${biRequest.rowFields.map(f => `${f.table}.${f.column}`).join(', ')}]`);
-        console.log(`[CALP-DIAG]   biRequest: vals=${biRequest.valueFields.length} [${biRequest.valueFields.map(f => f.measureName).join(', ')}]`);
-        await pivot.updateBiFields(biRequest);
-      } else {
-        // A range pivot sends a field's item filter only when it was edited
-        // here, the same rule (BUG-0184: an absent list now keeps).
-        await pivot.updateFields(rangeRequestWithHiddenItemEdits(request, hiddenItemEdits.edits));
-      }
+      // The ONE send recipe (lib/pivotFieldsRequest.ts), shared with the
+      // value-cell menu's headless edits. A real field's hidden items travel
+      // ONLY when edited here (hiddenItemEdits): a chip's own list is a
+      // display copy that may be stale -- see biFieldsRequest.ts.
+      await sendPivotFieldsUpdate(
+        request,
+        hiddenItemEdits.edits,
+        isBiPivot ? { calcGroupNames, biTableNames, lookupColumns } : null,
+      );
       // The backend took the request: the item-filter edits it carried are
       // on the pivot now, and the next edit must not resend them.
       hiddenItemEdits.acknowledge();
@@ -470,12 +497,50 @@ export function PivotEditor({
     initialFilters,
     initialLayout,
     initialCalculatedFields,
+    initialValueColumnOrder,
     onUpdate: handleUpdate,
     readPivotFields,
+    readPivotZones,
   });
 
   // Wire up the reset ref so handleUpdate's catch block can access it
   resetZonesRef.current = resetZones;
+
+  // The value-field dialog contract (lib/valueFieldDialogRequest.ts): the
+  // value-cell context menu asks for Value Field Settings / Number Format on a
+  // value field; this editor TAKES the pending request for its own pivot on
+  // mount and on PIVOT_OPEN_VALUE_FIELD_DIALOG, then opens the modal. The
+  // request is mapped to the Values zone in a second step, after the render
+  // that follows: when the editor switched pivots in the same commit, the hook
+  // re-seeds its zones there, and mapping against the previous pivot's values
+  // would open the modal on the wrong chip.
+  const [requestedValueDialog, setRequestedValueDialog] = useState<ValueFieldDialogRequest | null>(null);
+  useEffect(() => {
+    const take = () => {
+      const req = takePendingValueFieldDialog(pivotId);
+      if (req) setRequestedValueDialog(req);
+    };
+    take();
+    return onAppEvent<ValueFieldDialogRequest>(PivotEvents.PIVOT_OPEN_VALUE_FIELD_DIALOG, (detail) => {
+      if (detail?.pivotId === pivotId) take();
+    });
+  }, [pivotId]);
+  useEffect(() => {
+    if (!requestedValueDialog || requestedValueDialog.pivotId !== pivotId) return;
+    setRequestedValueDialog(null);
+    const index = valuesZoneIndexOf(values, requestedValueDialog.valueFieldIndex);
+    if (index < 0) {
+      showToast("That value field is no longer in the PivotTable.", { variant: "info" });
+      return;
+    }
+    if (requestedValueDialog.dialog === 'settings') {
+      setNumberFormatIndex(null);
+      setValueSettingsIndex(index);
+    } else {
+      setValueSettingsIndex(null);
+      setNumberFormatIndex(index);
+    }
+  }, [requestedValueDialog, values, pivotId]);
 
   // BI-specific: compute used columns ("Table.Column" keys) and used measures
   const usedColumnsSet = useMemo(() => {
@@ -857,20 +922,24 @@ export function PivotEditor({
   return (
     <div className={styles.container}>
       <div className={styles.header}>
-        <div className={tabBarStyles.tabBar}>
-          <button
-            className={`${tabBarStyles.tab} ${activeTab === 'fields' ? tabBarStyles.tabActive : ''}`}
-            onClick={() => setActiveTab('fields')}
-          >
-            Fields
-          </button>
-          <button
-            className={`${tabBarStyles.tab} ${activeTab === 'design' ? tabBarStyles.tabActive : ''}`}
-            onClick={() => setActiveTab('design')}
-          >
-            Design
-          </button>
-        </div>
+        {stripShown ? (
+          <div className={tabBarStyles.tabBar} data-testid="pivot-editor-tabs">
+            <button
+              className={`${tabBarStyles.tab} ${activeTab === 'fields' ? tabBarStyles.tabActive : ''}`}
+              onClick={() => setActiveTab('fields')}
+            >
+              Fields
+            </button>
+            <button
+              className={`${tabBarStyles.tab} ${activeTab === 'design' ? tabBarStyles.tabActive : ''}`}
+              onClick={() => setActiveTab('design')}
+            >
+              Design
+            </button>
+          </div>
+        ) : (
+          <div />
+        )}
         <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
           <JsonToggleButton isActive={jsonToggle.isJsonMode} onClick={jsonToggle.toggle} />
           {onClose && (
@@ -923,7 +992,7 @@ export function PivotEditor({
       )}
 
       {/* Fields tab content */}
-      <div className={styles.content} style={{ display: activeTab === 'fields' ? 'flex' : 'none' }}>
+      <div className={styles.content} data-pivot-editor-body="fields" style={{ display: activeTab === 'fields' ? 'flex' : 'none' }}>
         {isBiPivot && fieldListModel ? (
           <TableFieldList
             biModel={fieldListModel}
@@ -975,7 +1044,7 @@ export function PivotEditor({
       </div>
 
       {/* Design tab content */}
-      <div className={styles.content} style={{ display: activeTab === 'design' ? 'flex' : 'none', flexDirection: 'column' }}>
+      <div className={styles.content} data-pivot-editor-body="design" style={{ display: activeTab === 'design' ? 'flex' : 'none', flexDirection: 'column' }}>
         <SaveLoadToolbar
           sourceFields={sourceFields}
           biModel={biModel}

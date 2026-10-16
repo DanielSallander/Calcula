@@ -29,7 +29,7 @@ import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, KpiMarkOptio
 import type { ChartRenderTheme } from "../chartTheme";
 import { resolveDatumStyle } from "../../lib/dataPointOverrides";
 import { truncateText } from "../chartPainterUtils";
-import { BLANK_TEXT, datumText, datumValue, formatVisualNumber, formatVisualValue } from "./visualValues";
+import { BLANK_TEXT, datumText, datumValue, formatVisualNumber, formatVisualValue, visualFormatFor } from "./visualValues";
 import { computeVisualLayout, drawVisualFrame, fitFontSize } from "./visualLayout";
 
 /** Status colours. Categorical colour DATA, so it lives here and not in chrome. */
@@ -175,7 +175,7 @@ export function paintKpiChart(
     ? resolveDatumStyle(spec, data, 0, reading.latest, { fill: theme.titleColor })
     : null;
   const valueText = reading.latest >= 0
-    ? formatVisualValue(datumValue(data, 0, reading.latest), opts)
+    ? formatVisualValue(datumValue(data, 0, reading.latest), visualFormatFor(spec, opts, data.series[0]?.name))
     : BLANK_TEXT;
   const top = plotArea.y + 4;
   const valueAreaH = plotArea.height - trendBand(layout).height - 8;

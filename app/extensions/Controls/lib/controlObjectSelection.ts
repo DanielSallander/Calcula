@@ -53,6 +53,8 @@ import {
   selectFloatingControls,
 } from "../Button/floatingSelection";
 import { onDesignModeChange } from "./designMode";
+import { controlKindLabel, isDesignModeOnlyControl } from "./controlKinds";
+import { getSelectedNavigatorItem } from "../PageNavigator/navigatorItemSelection";
 
 /**
  * Make `controlId` — expanded to its whole group when it has one — THE
@@ -91,13 +93,6 @@ function withGroup(controlId: string): string[] {
   return groupId ? getGroupMembers(groupId) : [controlId];
 }
 
-/** The generic word the Name Box shows for a control of `controlType`. */
-const CONTROL_TYPE_LABELS: ReadonlyMap<string, string> = new Map([
-  ["button", "Button"],
-  ["shape", "Shape"],
-  ["image", "Picture"],
-]);
-
 /**
  * What the Name Box calls a control. A control's user-given name lives in its
  * backend metadata, which is read asynchronously and is not cached here, so
@@ -106,8 +101,10 @@ const CONTROL_TYPE_LABELS: ReadonlyMap<string, string> = new Map([
  */
 export function controlLabelOf(region: GridRegion): string | null {
   const type = region.data?.controlType;
+  // An untyped region shows nothing in the Name Box (the kind table would say
+  // "Control"), so this guard stays BEFORE the shared table.
   if (typeof type !== "string" || type === "") return null;
-  return CONTROL_TYPE_LABELS.get(type) ?? type.charAt(0).toUpperCase() + type.slice(1);
+  return controlKindLabel(type);
 }
 
 /** What the provider needs from the extension (index.ts), injected. */
@@ -166,10 +163,18 @@ export function createControlSelectionProvider(deps: ControlObjectSelectionDeps 
     // (BUG-0196; lib/controlMenuState.ts). The same for a run-mode button's
     // held PRESS (lib/buttonPress.ts, BUG-0258 phase 4c): Escape cancels it,
     // and must not also deselect the button under the pointer (the slicer and
-    // timeline gestures' precedent). A control has no inner selection, so
-    // nothing else is ever Controls'.
+    // timeline gestures' precedent). Apart from the navigator item below, a
+    // control has no inner selection, so nothing else is ever Controls'.
+    // And while ONE ITEM of a Page Navigator is selected (Design Mode's second
+    // rung, PageNavigator/navigatorItemSelection.ts), Escape climbs back to the
+    // whole navigator -- that file's session keydown does it -- instead of
+    // deselecting the navigator. That item owns Escape ONLY: Delete, Tab, the
+    // arrows and the clipboard keys act on the whole navigator, the one object.
     ownsKey(key: ObjectSelectionKey): boolean {
-      return key === "Escape" && (isControlMenuOpen() || isFloatingButtonPressActive());
+      return (
+        key === "Escape" &&
+        (isControlMenuOpen() || isFloatingButtonPressActive() || getSelectedNavigatorItem() !== null)
+      );
     },
 
     // Controls hold several (the Ctrl+click set), so a canvas multi-selection
@@ -209,8 +214,9 @@ export function createControlSelectionProvider(deps: ControlObjectSelectionDeps 
 }
 
 /**
- * Design Mode ENDING deselects the selected BUTTONS -- each with its group, the
- * rule `select` follows -- and leaves shapes and pictures selected (they are
+ * Design Mode ENDING deselects the selected BUTTONS and PAGE NAVIGATORS (the
+ * kinds `isDesignModeOnlyControl` names: content in run mode) -- each with its
+ * group, the rule `select` follows -- and leaves shapes and pictures selected (they are
  * selected in run mode too). A button is selected for EDITING in Design Mode;
  * once it ends, a press runs the button instead. Before this the button stayed
  * selected (its chrome painted), and since a selected object claims the
@@ -220,7 +226,9 @@ export function createControlSelectionProvider(deps: ControlObjectSelectionDeps 
  */
 export function deselectButtonsWhenDesignModeEnds(designMode: boolean): void {
   if (designMode) return;
-  const buttons = [...getSelectedFloatingControls()].filter((id) => getFloatingControl(id)?.controlType === "button");
+  const buttons = [...getSelectedFloatingControls()].filter((id) =>
+    isDesignModeOnlyControl(getFloatingControl(id)?.controlType ?? ""),
+  );
   if (buttons.length === 0) return;
   const leaving = new Set<string>();
   for (const id of buttons) for (const member of withGroup(id)) leaving.add(member);

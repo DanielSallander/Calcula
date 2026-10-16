@@ -6,6 +6,7 @@ import {
   getPropertyDefinitions,
   BUTTON_PROPERTIES,
 } from "../types";
+import { PAGE_NAVIGATOR_PROPERTIES } from "../../PageNavigator/pageNavigatorProperties";
 
 // ============================================================================
 // Tests
@@ -36,6 +37,16 @@ describe("getPropertyDefinitions", () => {
   it("returns image properties for 'image' type", () => {
     const defs = getPropertyDefinitions("image");
     expect(defs.length).toBeGreaterThan(0);
+  });
+
+  it("returns the page navigator's rows for 'pageNavigator', none grouped as 'Buttons'", () => {
+    const defs = getPropertyDefinitions("pageNavigator");
+    expect(defs).toBe(PAGE_NAVIGATOR_PROPERTIES);
+    expect(defs.map((p) => p.key)).toContain("orientation");
+    // "Buttons" is the per-page overrides section; a property group of the same
+    // name would put two sections with one title in the pane.
+    expect(defs.filter((p) => p.group === "Buttons")).toEqual([]);
+    expect(defs.map((p) => p.key)).not.toContain("pageOverrides");
   });
 
   it("returns empty array for unknown type", () => {

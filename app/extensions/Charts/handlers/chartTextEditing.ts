@@ -10,26 +10,35 @@
 //          no second copy of the element taxonomy.
 //
 // ===========================================================================
-// THE TRAP THAT WOULD SILENTLY DESTROY A CELL LINK
+// THE TRAP THAT WOULD SILENTLY DESTROY A LINK
 // ===========================================================================
-// A chart title may be a cell reference: `=Sheet1!A1`. `resolveSpecReferences`
-// (lib/dataSourceResolver.ts) returns a NEW spec whose `title`,
-// `xAxis.title` and `yAxis.title` are the RESOLVED STRINGS, and that resolved
-// spec is what reaches the layout, the painters and therefore `layout.elements`.
+// A chart title may be BOUND: a formula (`=Sheet1!A1`, `=[Revenue]`) held in the
+// workbook's binding store (@api/objectBindings) and evaluated by Rust. The
+// spec the chart PAINTS is the literal spec with the resolved values laid over
+// it (`overlayChartBindings`, lib/chartBindings.ts), and that painted spec is
+// what reaches the layout, the painters and therefore `layout.elements`.
 //
-// So the two halves of this editor read from two DIFFERENT specs, on purpose:
+// So the two halves of this editor read from two DIFFERENT sources, on purpose:
 //
-//   * the TEXT comes from the RAW store spec — `getChartById(id).spec` — because
-//     seeding it from the render spec would open the editor showing "Revenue"
-//     and commit the literal string "Revenue", silently replacing the link with
-//     a frozen copy of what it happened to say that morning. Nothing would
-//     report an error; the chart would simply stop tracking the cell.
-//   * the RECT comes from the RESOLVED layout, because that is where the glyphs
-//     actually are. A box measured from `=Sheet1!A1` would be the wrong size and
-//     in the wrong place.
+//   * the TEXT comes from the BINDING when the field is bound (its
+//     `displayFormula`, in the user's locale) and otherwise from the RAW store
+//     spec — `getChartById(id).spec` — never from the painted spec. Seeding it
+//     from the painted spec would open the editor showing "Revenue" and commit
+//     the literal string "Revenue", silently replacing the link with a frozen
+//     copy of what it happened to say that morning.
+//   * the RECT comes from the PAINTED layout, because that is where the glyphs
+//     actually are.
 //
-// `rawChartTextValue` is the only reader of the title fields here and it takes a
-// spec argument, so the mistake cannot be made by reaching for a module global.
+// A commit that starts with "=" BINDS the field (the literal underneath is
+// left alone: it is what shows while a measure is still being fetched). Plain
+// text on a bound field UNBINDS it and writes the literal, in ONE undo step
+// (`runInUndoTransaction`, @api/objectGeometry). There is no in-spec spelling
+// of a link any more: a literal `=A1` is text (the old "=" resolver is deleted
+// and old files are migrated into bindings on load).
+//
+// `rawChartTextValue` is the only reader of the literal title fields here and it
+// takes a spec argument, so the mistake cannot be made by reaching for a module
+// global.
 //
 // ===========================================================================
 // WHY A DOUBLE-CLICK'S ANSWER IS COMPUTED FROM THE PIXEL AND NOTHING ELSE
@@ -69,6 +78,15 @@ import {
 } from "@api/overlayTextEditor";
 import { requestOverlayRedraw, type OverlayHitTestContext } from "@api/gridOverlays";
 import { emitAppEvent } from "@api/events";
+import { showToast } from "@api/notifications";
+import { runInUndoTransaction } from "@api/objectGeometry";
+import {
+  BindingRefusal,
+  clearBinding,
+  getBinding,
+  setBinding,
+  type ObjectBindingInfo,
+} from "@api/objectBindings";
 import type {
   ChartElementId,
   ChartElementRect,
@@ -76,7 +94,8 @@ import type {
   ChartSpec,
   ChartSubSelection,
 } from "../types";
-import { getChartById, updateChartSpec } from "../lib/chartStore";
+import { flushPendingChartSaves, getChartById, updateChartSpec } from "../lib/chartStore";
+import { chartBindingRef } from "../lib/chartBindings";
 import {
   getCachedChartData,
   getChartLocalCoords,
@@ -84,6 +103,7 @@ import {
 } from "../rendering/chartRenderer";
 import { chartElementOf, hitTestGeometry } from "../rendering/chartHitTesting";
 import { resolveChartTheme } from "../rendering/chartTheme";
+import { resolveChartContainer } from "../lib/chartObjectFormat";
 import {
   getSubSelection,
   isChartSelected,
@@ -263,16 +283,156 @@ export function chartTextSpecPatch(
   }
 }
 
+// ============================================================================
+// Bindings of the text elements
+// ============================================================================
+
 /**
- * Write an edited title back.
+ * The binding-store pointer of each text element (catalog rows `/spec/title`,
+ * `/spec/xAxis/title`, `/spec/yAxis/title`). Switches exhaustively with
+ * {@link rawChartTextValue}: adding a text element means adding its row here.
+ */
+export const CHART_TEXT_BINDING_POINTERS: Readonly<Record<ChartTextElementId, string>> = {
+  title: "/spec/title",
+  xAxisTitle: "/spec/xAxis/title",
+  yAxisTitle: "/spec/yAxis/title",
+};
+
+/** The binding on one text element, or null (synchronous: the seam's cache). */
+export function chartTextBinding(chartId: string, elementId: ChartTextElementId): ObjectBindingInfo | null {
+  return getBinding(chartBindingRef(chartId), CHART_TEXT_BINDING_POINTERS[elementId]);
+}
+
+/**
+ * What the editor opens with: a bound field shows its FORMULA (localised, as
+ * the user typed it), an unbound one its raw literal. Never the painted value.
+ */
+export function chartTextEditorSeed(
+  spec: ChartSpec,
+  elementId: ChartTextElementId,
+  binding: ObjectBindingInfo | null,
+): string {
+  if (binding) return binding.displayFormula;
+  return rawChartTextValue(spec, elementId) ?? "";
+}
+
+/** What committing the editor's text does to one element. */
+export type ChartTextCommitPlan =
+  /** Nothing changed: no write, no undo entry. */
+  | { kind: "none" }
+  /** Unbound field, plain text: write the literal (null = no title). */
+  | { kind: "literal"; value: string | null }
+  /** Text starting with "=": bind the field to it (the literal is kept). */
+  | { kind: "bind"; formula: string }
+  /** Bound field, plain text: drop the binding AND write the literal, one step. */
+  | { kind: "unbind"; value: string | null };
+
+/**
+ * Decide what a commit means. Pure: the stored literal, the field's binding
+ * (or null) and the typed text are all it reads.
+ *
+ *   * text starting with "=" BINDS -- unless it is the bound formula already;
+ *   * empty text means NO TITLE (`null`), which is how Excel removes one;
+ *   * plain text on an unbound field writes the literal unless it is unchanged;
+ *   * plain text on a bound field unbinds and writes the literal, even when the
+ *     literal is unchanged (the binding going IS the change).
+ */
+export function planChartTextCommit(
+  spec: ChartSpec,
+  elementId: ChartTextElementId,
+  binding: ObjectBindingInfo | null,
+  text: string,
+): ChartTextCommitPlan {
+  const trimmed = text.trim();
+  if (trimmed.startsWith("=")) {
+    if (binding && binding.displayFormula.trim() === trimmed) return { kind: "none" };
+    return { kind: "bind", formula: trimmed };
+  }
+  const next = trimmed === "" ? null : text;
+  if (binding) return { kind: "unbind", value: next };
+  if (rawChartTextValue(spec, elementId) === next) return { kind: "none" };
+  return { kind: "literal", value: next };
+}
+
+/** The undo-step label of a chart text edit that unbinds. */
+const CHART_TEXT_UNDO_LABEL = "Edit chart text";
+
+/**
+ * Binding writes are asynchronous; they run one after another (a quick second
+ * commit must not overtake the first) and this is the tail of that queue.
+ */
+let pendingBindingWrite: Promise<void> = Promise.resolve();
+
+/** Settles once every chart text BINDING write queued so far has finished. */
+export function chartTextWritesSettled(): Promise<void> {
+  return pendingBindingWrite;
+}
+
+function queueBindingWrite(work: () => Promise<void>): void {
+  pendingBindingWrite = pendingBindingWrite.then(work, work);
+}
+
+/** Tell the user why a binding write was refused, in Rust's own words. */
+function reportBindingRefusal(err: unknown): void {
+  const sentence = err instanceof BindingRefusal ? err.sentence : err instanceof Error ? err.message : String(err);
+  console.warn("[Charts] A chart text binding write was refused:", sentence);
+  showToast(sentence, { variant: "error" });
+}
+
+function repaintChart(chartId: string): void {
+  invalidateChartCache(chartId);
+  requestOverlayRedraw();
+}
+
+/** Bind one text element to `formula` (the user's locale; Rust delocalises). */
+async function bindChartText(chartId: string, elementId: ChartTextElementId, formula: string): Promise<void> {
+  try {
+    await setBinding(chartBindingRef(chartId), CHART_TEXT_BINDING_POINTERS[elementId], formula);
+  } catch (err) {
+    reportBindingRefusal(err);
+  }
+  repaintChart(chartId);
+}
+
+/**
+ * Drop one text element's binding and write its literal, as ONE undo step: the
+ * binding store's restore and the chart's own spec undo join the same frontend
+ * transaction, and the debounced chart save is flushed INSIDE it so the spec
+ * write lands before the step is committed.
+ */
+async function unbindChartText(
+  chartId: string,
+  elementId: ChartTextElementId,
+  value: string | null,
+): Promise<void> {
+  try {
+    await runInUndoTransaction(CHART_TEXT_UNDO_LABEL, async () => {
+      await clearBinding(chartBindingRef(chartId), CHART_TEXT_BINDING_POINTERS[elementId]);
+      const chart = getChartById(chartId);
+      if (chart && rawChartTextValue(chart.spec, elementId) !== value) {
+        updateChartSpec(chartId, chartTextSpecPatch(chart.spec, elementId, value));
+        await flushPendingChartSaves();
+      }
+    });
+  } catch (err) {
+    reportBindingRefusal(err);
+  }
+  repaintChart(chartId);
+}
+
+/**
+ * Write an edited title back ({@link planChartTextCommit} decides what that
+ * means).
  *
  * Empty text means NO TITLE, not an empty title: `spec.title === null` is how a
  * chart says it has none, and clearing the box is how Excel removes one. A
- * value identical to what is already stored writes nothing at all, so clicking
- * away from an untouched title does not produce a backend update or an undo
- * entry.
+ * value identical to what is already stored (or the bound formula, unchanged)
+ * writes nothing at all, so clicking away from an untouched title does not
+ * produce a backend update or an undo entry.
  *
- * Returns true when the store was actually written.
+ * Returns true when a write was made or queued. A binding write is
+ * asynchronous ({@link chartTextWritesSettled}); a refusal is shown as a toast
+ * carrying Rust's sentence and leaves the chart as it was.
  */
 export function commitChartText(
   chartId: string,
@@ -281,21 +441,33 @@ export function commitChartText(
 ): boolean {
   const chart = getChartById(chartId);
   if (!chart) return false;
-  const next = text.trim() === "" ? null : text;
-  if (rawChartTextValue(chart.spec, elementId) === next) return false;
-  // `updateChartSpec` is the existing 300ms-debounced path: ONE backend update
-  // and ONE `record_chart_undo` entry for the whole edit, however many
-  // keystrokes it took.
-  updateChartSpec(chartId, chartTextSpecPatch(chart.spec, elementId, next));
-  invalidateChartCache(chartId);
-  requestOverlayRedraw();
-  return true;
+  const plan = planChartTextCommit(chart.spec, elementId, chartTextBinding(chartId, elementId), text);
+  switch (plan.kind) {
+    case "none":
+      return false;
+    case "literal":
+      // `updateChartSpec` is the existing 300ms-debounced path: ONE backend
+      // update and ONE `record_chart_undo` entry for the whole edit, however
+      // many keystrokes it took.
+      updateChartSpec(chartId, chartTextSpecPatch(chart.spec, elementId, plan.value));
+      repaintChart(chartId);
+      return true;
+    case "bind":
+      queueBindingWrite(() => bindChartText(chartId, elementId, plan.formula));
+      return true;
+    case "unbind":
+      queueBindingWrite(() => unbindChartText(chartId, elementId, plan.value));
+      return true;
+  }
 }
 
 /**
  * Remove a title outright — the Delete key on a selected title.
  *
- * This is the other way `spec.title === null` becomes reachable from the UI.
+ * This is the other way `spec.title === null` becomes reachable from the UI. A
+ * BOUND title loses its binding too, in one undo step: a removed title that
+ * still followed its cell would come straight back.
+ *
  * Putting a removed title BACK is the Chart Elements checkbox, which is a
  * separate item; until it lands, re-adding one means the Design panel's title
  * field or the spec editor.
@@ -303,10 +475,13 @@ export function commitChartText(
 export function clearChartText(chartId: string, elementId: ChartTextElementId): boolean {
   const chart = getChartById(chartId);
   if (!chart) return false;
+  if (chartTextBinding(chartId, elementId)) {
+    queueBindingWrite(() => unbindChartText(chartId, elementId, null));
+    return true;
+  }
   if (rawChartTextValue(chart.spec, elementId) === null) return false;
   updateChartSpec(chartId, chartTextSpecPatch(chart.spec, elementId, null));
-  invalidateChartCache(chartId);
-  requestOverlayRedraw();
+  repaintChart(chartId);
   return true;
 }
 
@@ -372,11 +547,16 @@ export function openChartTextEditor(
   const chart = getChartById(chartId);
   if (!chart) return null;
 
-  const theme = resolveChartTheme(chart.spec.config);
+  // The main title is typed in the look it paints with: the resolved
+  // container's title style (font, weight, alignment) over the theme's colour
+  // and size (D-FORMAT; rendering/chartPainterUtils `chartTitleBlock`).
+  const theme = resolveChartTheme(chart.spec.config, resolveChartContainer(chartId, chart.spec));
   const isMainTitle = elementId === "title";
+  const titleStyle = isMainTitle ? theme.titleStyle?.title : undefined;
 
-  // RAW, not resolved. The whole reason this module exists — see the header.
-  const initialText = rawChartTextValue(chart.spec, elementId) ?? "";
+  // The binding's formula, or the RAW literal — never the painted value. The
+  // whole reason this module exists — see the header.
+  const initialText = chartTextEditorSeed(chart.spec, elementId, chartTextBinding(chartId, elementId));
 
   const session = { chartId, elementId } as ActiveTextEdit;
 
@@ -387,16 +567,16 @@ export function openChartTextEditor(
     // Excel's chart-title rule: Enter inserts a newline and the edit is
     // committed by clicking outside. There is no cancelling key there.
     enterInserts: true,
-    // Typing '=' and then clicking a cell yields '=Sheet1!A1', which is exactly
-    // the cell-linked title `resolveSpecReferences` already resolves and
-    // `chartInvalidation` already watches. No new storage is involved.
+    // Typing '=' and then clicking a cell yields '=Sheet1!A1', which commits as
+    // a BINDING of this field (@api/objectBindings): Rust evaluates it and the
+    // seam repaints the chart when the cell changes.
     acceptsFormulaReferences: true,
     selectAll: true,
-    textAlign: "center",
+    textAlign: titleStyle?.align ?? "center",
     font: {
       sizePx: isMainTitle ? theme.titleFontSize : theme.axisTitleFontSize,
-      family: theme.fontFamily,
-      weight: isMainTitle ? 600 : "normal",
+      family: titleStyle?.fontFamily ?? theme.fontFamily,
+      weight: isMainTitle ? (titleStyle && !titleStyle.bold ? "normal" : 600) : "normal",
       color: isMainTitle ? theme.titleColor : theme.axisTitleColor,
     },
     owner: `charts:text:${elementId}`,

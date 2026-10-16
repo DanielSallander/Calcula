@@ -210,6 +210,9 @@ function timelineRow(id: string, y: number, range: [number, number] | null = nul
     name: id === "t1" ? "Order Date" : "Ship Date",
     headerText: null,
     sheetIndex: 0,
+    // The container's default 1 px border insets the content by 1 px (WP-C
+    // D-FORMAT); off here, so this file's geometry is the content box's own.
+    container: { border: { show: false } },
     x: 100,
     y,
     width: 420,

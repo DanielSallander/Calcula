@@ -383,3 +383,56 @@ describe("compileDesignQuerySource takes the filters of the chart's OWN page", (
     expect(data.series[0].values).toEqual([5]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The chart's data formats ride the value fields (WP-C S9b)
+// ---------------------------------------------------------------------------
+
+describe("spec.fieldFormats -> request.valueFields[i].numberFormat (by measure name)", () => {
+  const twoMeasures = { type: "designQuery" as const, dslText: "ROWS: Time.Year\nVALUES: [Revenue], [Cost]", connectionId: "conn-a" };
+  const withCost: BiPivotModelInfo = {
+    ...MODEL,
+    measures: [...MODEL.measures, { name: "Cost" } as BiPivotModelInfo["measures"][number]],
+  };
+
+  beforeEach(() => {
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_connection_bi_model") return withCost;
+      if (cmd === "run_design_query") return view([{ type: "GrandTotal", label: "Grand Total", value: 5 }]);
+      throw new Error(`unexpected ${cmd}`);
+    });
+  });
+
+  it("the context's formats are attached to the matching measure only", async () => {
+    const req = await compileDesignQuerySource(twoMeasures, { fieldFormats: { Revenue: "#,##0.00" } });
+    expect(req.valueFields).toEqual([
+      { measureName: "Revenue", customName: "[Revenue]", numberFormat: "#,##0.00" },
+      { measureName: "Cost", customName: "[Cost]" },
+    ]);
+  });
+
+  it("absent formats -> NO numberFormat key at all (the backend's default stands)", async () => {
+    const req = await compileDesignQuerySource(twoMeasures, { fieldFormats: undefined });
+    for (const f of req.valueFields) expect("numberFormat" in f).toBe(false);
+    // An empty entry is no format either.
+    const empty = await compileDesignQuerySource(twoMeasures, { fieldFormats: { Revenue: "" } });
+    expect("numberFormat" in empty.valueFields[0]).toBe(false);
+  });
+
+  it("with no formats in the context, the STORED chart's are read (by id, else by the source object)", async () => {
+    mockGetAllCharts.mockReturnValue([
+      { chartId: "c-9", name: "Chart 9", sheetIndex: 1, spec: { data: twoMeasures, fieldFormats: { Cost: "0%" } } },
+    ]);
+    const byId = await compileDesignQuerySource(twoMeasures, { chartId: "c-9" });
+    expect(byId.valueFields.map((f) => f.numberFormat)).toEqual([undefined, "0%"]);
+    const bySource = await compileDesignQuerySource(twoMeasures);
+    expect(bySource.valueFields.map((f) => f.numberFormat)).toEqual([undefined, "0%"]);
+  });
+
+  it("readDesignQueryData SENDS the format on the run_design_query request", async () => {
+    await readDesignQueryData(twoMeasures, { fieldFormats: { Cost: "0.0%" } });
+    const sent = mockInvoke.mock.calls.find((c) => c[0] === "run_design_query")?.[1] as { request: DesignQueryRequest };
+    expect(sent.request.valueFields[1]).toEqual({ measureName: "Cost", customName: "[Cost]", numberFormat: "0.0%" });
+    expect("numberFormat" in sent.request.valueFields[0]).toBe(false);
+  });
+});

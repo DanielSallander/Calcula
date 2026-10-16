@@ -103,6 +103,78 @@ binding id in the cell-behaviors store) and `panel` (UI objects keyed by panel i
 - Shares the extension API
 - Monaco provides native TS support
 
+### 7. Properties by path, and bound properties (2026-10-15)
+
+Every bindable object -- a chart, an on-grid or canvas control, a slicer, a timeline, a canvas page -- is
+reachable through ONE handle that addresses its properties by JSON Pointer, the paths the object's own
+JSON uses (`/spec/title`, `/properties/text`, `/headerText`, `/background`):
+
+- `context.self` -- the script's OWN object, through `object.getState` / `object.setState` (restricted).
+- `api.object(kind, id)` -- ANY object, through `api.objectGetState` / `api.objectSetState` (unlocked).
+  `kind` is a binding kind (`chart`, `control` -- by the control's `uid` --, `slicer`, `timelineSlicer`,
+  `pivot`, `floatingRange`, `canvasPage`) or a script object type mapped through the object's
+  registration (`api.object("shape", "control-0-5-2")`); anything else is a ValidationError naming the
+  kinds.
+
+Six methods: `getProperty(path)` (what the user SEES: the binding's result, else the literal),
+`getLiteral(path)` (the stored value; `getLiteral("")` returns the whole object JSON, the quickest way to
+discover its paths), `getBinding(path)` (`{ formula, model }` or null), `setProperty(path, value)` (a
+LITERAL, one JSON value of the property's type), `bindProperty(path, formula, { model? })` and
+`unbindProperty(path)`. A BINDING is a formula -- cells, names, a model `[Measure]` under the page's
+slicers, literal CUBE functions -- that Calcula re-evaluates whenever what it reads changes; scripts write
+it INVARIANT (`,` separators, `.` decimals) whatever the user's locale. Design and semantics:
+`canvas-sheets.md` §15.
+
+The rules, each enforced before anything is written:
+
+- **Three setState aspects with their own validator rows** (`binding.set`, `binding.clear`,
+  `property.set`, `validators.ts`), so no path reaches `vSetState`'s permissive tail: the pointer must be a
+  catalog path (the `@api/objectBindings` mirror of Rust's catalog); code, held code, a button's action
+  wiring, position and identity keys are refused by name ("'onSelect' is code; code is never bound.");
+  `setProperty` on a control key goes through the SAME per-key check as `shape.setProperty`
+  (`checkShapeSetProperty`, which carries the media rule -- `src` takes a `media:{sha256}` already in the
+  document or `""`, never a data: URI), and any other path through its catalog value type.
+- **The restricted clamp.** A restricted script may bind only to cells on the sheet in front of the user
+  -- no other sheet, no defined name, no table reference, nothing indirect (INDIRECT, OFFSET over a
+  computed start, GETPIVOTDATA, GET.CONTROLVALUE). The host executor decides it from Rust's own analysis
+  of the formula.
+- **`bi.query` for measures.** A formula that reads a `[Measure]` or a CUBE function reaches the BI
+  engine, so `bindProperty` requires `bi.query` (declared ceiling, then the grant, then the just-in-time
+  prompt for a local script), although the method itself names no capability -- its JSDoc says so.
+- **The object's own gates.** Protection ("edit objects") and Lock Objects refuse a binding or a literal
+  exactly where they refuse the same change from the Properties pane; Rust re-applies them at its door.
+- Every write is one undo step and one audit row as this script's (surface `objectScript`).
+
+`ShapeContext.getProperty(key)` / `setProperty(key, value)` keep their meaning: key-based, literal, and
+`=...` written through them is stored as TEXT (a formula-typed control property is refused since
+2026-10-15; following a formula is `bindProperty`). In the typings, `context.self` is `ScriptObjectHandle`
+and `api.object()` returns `ScriptTargetObjectHandle` (the same six methods): two names, because the
+generator walks a named interface once and the two doors differ in tier and broker.
+
+**The visual container (WP-C, 2026-10-16).** An object's Format-pane look -- padding, title, subtitle,
+divider, spacing, background, border, shadow (`canvas-sheets.md` §14) -- is reached through the SAME doors,
+never a new one: there is no `container.set` aspect, no shim method and no typings change
+(`validators.test.ts` / `containerKeyScriptDoors.test.ts` assert the source names none).
+
+- A chart, pivot box, slicer, timeline or floating grid: `setProperty` / `bindProperty` on a pointer under
+  the kind's container root -- `/spec/container/border/radius`, `/canvasFrame/container/padding/top`,
+  `/container/shadow/show` -- through `property.set` / `binding.set` and the catalog's `O::Container` rows.
+  The value is checked by the container's own leaf rule (`checkContainerFieldValue`, the same sentence Rust
+  gives); a colour given as `rgb()` / `rgba()` is stored as hex. Facts that keep their own spelling are
+  refused under the container: `/spec/container/title/text` (a chart's title is `/spec/title`), a slicer's
+  title text (`/headerText`), a floating grid's title text (its name: rename it) and `lockAspect` (never bound).
+- A control: its flat `container*` keys (`containerTitleText`, `containerBackgroundColor`, ...; 51 keys,
+  `CONTROL_CONTAINER_PROPERTY_KEYS`). The KEY door `ShapeContext.setProperty("containerTitleColor", v)`
+  checks the value with `checkControlContainerValue` (after the 8 KiB cap) and stores text exactly as given:
+  `#rgb` is accepted, `rgb()` is refused. The POINTER door `setProperty("/properties/containerTitleColor",
+  v)` gives the SAME refusal sentence (the key's leaf rule speaks first) and then judges Rust's canonical
+  spelling: `rgb()` becomes hex, an enum's case is ignored, and `#rgb` is refused (not a binding colour).
+  `containerLockAspect` has no pointer row. Both doors end in `set_control_property_core`'s Rust check.
+
+A binding is EVALUATED, never executed: it is not code, it is not in the code inventory, and it cannot run
+anything -- the formula language is the cell formula language, under the transient evaluation budget.
+Every binding in the workbook is listed by Formulas > Bound Properties... and in the AI's sheet summary.
+
 ## Execution Model
 
 Lifecycle-based, not continuously running:

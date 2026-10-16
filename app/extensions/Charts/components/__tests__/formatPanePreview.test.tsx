@@ -73,12 +73,15 @@ vi.mock("@api/events", () => ({
 vi.mock("@api/gridOverlays", () => ({
   removeGridRegionsByType: vi.fn(),
   addGridRegions: vi.fn(),
+  // The chart area's Background row looks up the chart's region (the object
+  // pane's Format seam); none is published in this test.
+  getGridRegions: vi.fn(() => []),
 }));
 
 vi.mock("@api", () => ({ showDialog: vi.fn() }));
 vi.mock("../../manifest", () => ({ CHART_DIALOG_ID: "chart:createDialog" }));
 
-import { ChartFormatPane, runResetToMatchStyleCommand } from "../ChartFormatPane";
+import { ChartElementFormatCard, runResetToMatchStyleCommand } from "../ChartFormatPane";
 import {
   getChartById,
   loadChartsFromBackend,
@@ -194,7 +197,7 @@ async function renderPane(): Promise<void> {
   document.body.appendChild(container);
   root = createRoot(container);
   await act(async () => {
-    root!.render(React.createElement(ChartFormatPane, {} as never));
+    root!.render(React.createElement(ChartElementFormatCard, {} as never));
   });
 }
 

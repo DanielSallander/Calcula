@@ -75,6 +75,7 @@ pub(crate) fn create_timeline_slicer_core(
             .style_preset
             .unwrap_or_else(|| "TimelineStyleLight1".to_string()),
         connected_pivot_ids: vec![],
+        container: None,
     };
 
     log_debug!(
@@ -149,11 +150,25 @@ pub(crate) fn delete_timeline_slicer_core(
     let removed = pending.authorize(&effect).remove(&timeline_id);
 
     if let Some(previous) = removed {
-        crate::undo_commands::record_restores_joining_open_transaction(
+        // WP-D (D §3.12): the timeline's object property BINDINGS go with it,
+        // in the SAME step -- listed first, so the reverse replay restores
+        // them last, after the timeline exists again.
+        let mut restores: Vec<(&str, Vec<u8>)> = Vec::new();
+        if let Some(previous_bindings) = crate::object_bindings::cascade::drop_bindings_for_objects(
             state,
-            "Delete timeline slicer",
-            vec![crate::undo_commands::timeline_delete_restore(timeline_id, previous)],
-        );
+            &effect,
+            &[crate::api_types::ObjectBindingRef {
+                kind: crate::api_types::ObjectBindingKind::TimelineSlicer,
+                id: timeline_id.to_string(),
+            }],
+        ) {
+            restores.push((
+                crate::undo_commands::BINDINGS_RESTORE_KIND,
+                crate::undo_commands::bindings_restore_bytes(state, &previous_bindings),
+            ));
+        }
+        restores.push(crate::undo_commands::timeline_delete_restore(timeline_id, previous));
+        crate::undo_commands::record_restores_joining_open_transaction(state, "Delete timeline slicer", restores);
     }
     // C10: a deleted timeline must not leave its object script mounted/persisted.
     crate::scripting::object_script_commands::prune_scripts_for_instance(state, &effect, &timeline_id.to_string());
@@ -183,6 +198,11 @@ pub(crate) fn update_timeline_slicer_core(
 ) -> Result<TimelineSlicer, String> {
     log_debug!("TIMELINE", "update_timeline_slicer id={}", timeline_id);
 
+    // The visual container (D-FORMAT) is validated before the effect: a
+    // refused value leaves the document clean and the store untouched.
+    if let Some(Some(container)) = &params.container {
+        container.validate()?;
+    }
     let mut next = None;
     let recorded = update_timeline_with(state, timeline_state, file_state, timeline_id, "Update timeline slicer", |tl| {
         if let Some(name) = params.name {
@@ -206,6 +226,10 @@ pub(crate) fn update_timeline_slicer_core(
         if let Some(style_preset) = params.style_preset {
             tl.style_preset = style_preset;
         }
+        if let Some(container) = params.container {
+            // An empty container is no container (no key on save).
+            tl.container = container.filter(|c| !c.is_empty());
+        }
         next = Some(tl.clone());
     });
     recorded?;
@@ -218,7 +242,10 @@ pub(crate) fn update_timeline_slicer_core(
 /// before anything is written; an edit that changes nothing mints no effect
 /// and records nothing (no Ctrl+Z step that restores itself). The store guard
 /// drops before the undo stack is taken (never both held).
-fn update_timeline_with(
+///
+/// `pub(crate)` for the binding surface's `SetLiteral` (object_bindings/literal.rs),
+/// which writes a timeline's header literal through this same door.
+pub(crate) fn update_timeline_with(
     state: &crate::AppState,
     timeline_state: &TimelineSlicerState,
     file_state: &crate::persistence::FileState,

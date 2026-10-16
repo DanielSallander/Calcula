@@ -87,6 +87,7 @@ export type TaskPaneContextKey =
   | "connections"     // BI Connections pane
   | "slicer"          // Slicer selected
   | "timeline-slicer" // Timeline slicer selected
+  | "object"          // A floating object is selected (the object pane)
   | "always";         // Always available
 
 /**
@@ -107,6 +108,12 @@ export interface TaskPaneViewDefinition {
   priority?: number;
   /** Whether this pane can be closed by the user */
   closable?: boolean;
+  /**
+   * What the view's `onUpdate` prop does when the view calls it (the pivot
+   * editor: announce "pivot:refresh"). Absent = nothing: the Shell broadcasts
+   * no feature event of its own on behalf of a view.
+   */
+  onUpdate?: () => void;
 }
 
 /**

@@ -49,6 +49,9 @@ import { resolveControlProperties } from "../lib/controlApi";
 import { beginControlGeometryRead, controlGeometryWritesInFlight } from "../lib/geometryWriteOrder";
 import { getSelectedFloatingControls } from "../Button/floatingSelection";
 import { getShapeDefinition, isConnectorShape, type ShapePathCommand } from "./shapeCatalog";
+import { BACKGROUND_TRANSPARENCY_KEY, backgroundAlphaOf, isNoPaint, parseStrokeWidth } from "./shapeRecipe";
+import { getControlPaintPreview, noteControlProperties } from "../lib/controlContainer";
+import { visualContentRectFor, type ContainerRegion } from "@api/visualContainerPaint";
 
 // ============================================================================
 // Global postMessage listener (receives messages from shape iframes)
@@ -87,6 +90,8 @@ window.addEventListener("message", (e) => {
 interface CachedShapeData {
   shapeType: string;
   fill: string;
+  /** The fill's alpha: Effects > Background > Transparency (1 = opaque). */
+  fillAlpha: number;
   stroke: string;
   strokeWidth: number;
   text: string;
@@ -934,6 +939,24 @@ export function renderFloatingShape(overlayCtx: OverlayRenderContext): void {
     return;
   }
 
+  // The shape lays out in its CONTENT RECT (WP-C D-FORMAT): the region's box
+  // less the container's border band, its padding and a Core-painted title --
+  // the one rect Core painted the container round and answers its band from,
+  // so the path, the text, a script's canvas and its html frame sit where a
+  // press on them is a press on the shape. The fill and the outline ARE the
+  // container's background and border (`paint` "family"): this renderer
+  // paints them, along the shape's own path. Selection chrome, the connection
+  // points and the script badge stay on the region's box.
+  const body = visualContentRectFor(
+    region.id,
+    { x: canvasX, y: canvasY, width: shapeWidth, height: shapeHeight },
+    (region as ContainerRegion).container,
+  );
+  const bodyX = body.x;
+  const bodyY = body.y;
+  const bodyWidth = body.width;
+  const bodyHeight = body.height;
+
   // Clip to cell area (not over headers)
   ctx.save();
   ctx.beginPath();
@@ -957,6 +980,7 @@ export function renderFloatingShape(overlayCtx: OverlayRenderContext): void {
     data = {
       shapeType: "rectangle",
       fill: "#4472C4",
+      fillAlpha: 1,
       stroke: "#2F528F",
       strokeWidth: 1,
       text: "",
@@ -977,9 +1001,9 @@ export function renderFloatingShape(overlayCtx: OverlayRenderContext): void {
   // never paint outside its region. Missing bitmap = single-flight request
   // queued; skip the custom layer this frame (graceful degradation).
   if (hasShapeBitmapRenderer(controlId)) {
-    const bmp = getShapeBitmap(controlId, shapeWidth, shapeHeight, window.devicePixelRatio || 1);
+    const bmp = getShapeBitmap(controlId, bodyWidth, bodyHeight, window.devicePixelRatio || 1);
     if (bmp) {
-      ctx.drawImage(bmp, canvasX, canvasY, shapeWidth, shapeHeight);
+      ctx.drawImage(bmp, bodyX, bodyY, bodyWidth, bodyHeight);
     }
     ctx.restore();
     return;
@@ -989,7 +1013,7 @@ export function renderFloatingShape(overlayCtx: OverlayRenderContext): void {
   const customRenderer = customCanvasRenderers.get(controlId);
   if (customRenderer) {
     try {
-      customRenderer(ctx, { x: canvasX, y: canvasY, width: shapeWidth, height: shapeHeight });
+      customRenderer(ctx, { x: bodyX, y: bodyY, width: bodyWidth, height: bodyHeight });
     } catch (err) {
       console.error("[ShapeRenderer] Custom renderer error:", err);
     }
@@ -1020,10 +1044,10 @@ export function renderFloatingShape(overlayCtx: OverlayRenderContext): void {
     updateHtmlOverlay(
       controlId,
       htmlContent,
-      canvasX,
-      canvasY,
-      shapeWidth,
-      shapeHeight,
+      bodyX,
+      bodyY,
+      bodyWidth,
+      bodyHeight,
       rowHeaderWidth,
       colHeaderHeight,
       overlayCtx.canvasWidth,
@@ -1073,8 +1097,8 @@ export function renderFloatingShape(overlayCtx: OverlayRenderContext): void {
 
   // Apply rotation around center
   if (data.rotation !== 0) {
-    const cx = canvasX + shapeWidth / 2;
-    const cy = canvasY + shapeHeight / 2;
+    const cx = bodyX + bodyWidth / 2;
+    const cy = bodyY + bodyHeight / 2;
     ctx.translate(cx, cy);
     ctx.rotate((data.rotation * Math.PI) / 180);
     ctx.translate(-cx, -cy);
@@ -1082,25 +1106,43 @@ export function renderFloatingShape(overlayCtx: OverlayRenderContext): void {
 
   // Apply flip transforms around center
   if (data.flipH || data.flipV) {
-    const cx = canvasX + shapeWidth / 2;
-    const cy = canvasY + shapeHeight / 2;
+    const cx = bodyX + bodyWidth / 2;
+    const cy = bodyY + bodyHeight / 2;
     ctx.translate(cx, cy);
     ctx.scale(data.flipH ? -1 : 1, data.flipV ? -1 : 1);
     ctx.translate(-cx, -cy);
   }
 
-  // 1. Fill path (skip for line shapes)
-  if (!shapeDef.isLine) {
-    buildPath(ctx, shapeDef.path, shapeWidth, shapeHeight, canvasX, canvasY);
-    ctx.fillStyle = data.fill;
+  // The Format pane's PREVIEW of a fill / outline (lib/controlContainer.ts):
+  // the would-be keys over the cached ones, in memory only.
+  const paintPreview = getControlPaintPreview(controlId);
+  const fill = paintPreview?.fill ?? data.fill;
+  const fillAlpha =
+    paintPreview?.[BACKGROUND_TRANSPARENCY_KEY] !== undefined
+      ? backgroundAlphaOf(paintPreview[BACKGROUND_TRANSPARENCY_KEY])
+      : data.fillAlpha;
+  const stroke = paintPreview?.stroke ?? data.stroke;
+  const strokeWidth =
+    paintPreview?.strokeWidth !== undefined ? parseStrokeWidth(paintPreview.strokeWidth) : data.strokeWidth;
+
+  // 1. Fill path (skip for line shapes, and for "none" / "transparent" / "":
+  //    a text box has no fill). The background's transparency fades the FILL
+  //    only -- the outline and the text stay as opaque as the shape is
+  //    (`opacity` above fades the whole object).
+  if (!shapeDef.isLine && !isNoPaint(fill) && fillAlpha > 0) {
+    buildPath(ctx, shapeDef.path, bodyWidth, bodyHeight, bodyX, bodyY);
+    ctx.fillStyle = fill;
+    const shapeAlpha = ctx.globalAlpha;
+    ctx.globalAlpha = shapeAlpha * fillAlpha;
     ctx.fill();
+    ctx.globalAlpha = shapeAlpha;
   }
 
-  // 2. Stroke path
-  if (data.strokeWidth > 0) {
-    buildPath(ctx, shapeDef.path, shapeWidth, shapeHeight, canvasX, canvasY);
-    ctx.lineWidth = data.strokeWidth;
-    ctx.strokeStyle = data.stroke;
+  // 2. Stroke path ("0" is NO outline; a "none" stroke paints nothing).
+  if (strokeWidth > 0 && !isNoPaint(stroke)) {
+    buildPath(ctx, shapeDef.path, bodyWidth, bodyHeight, bodyX, bodyY);
+    ctx.lineWidth = strokeWidth;
+    ctx.strokeStyle = stroke;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     ctx.stroke();
@@ -1118,14 +1160,14 @@ export function renderFloatingShape(overlayCtx: OverlayRenderContext): void {
     // Clip text to shape bounds with padding
     ctx.save();
     ctx.beginPath();
-    ctx.rect(canvasX + 4, canvasY + 4, shapeWidth - 8, shapeHeight - 8);
+    ctx.rect(bodyX + 4, bodyY + 4, bodyWidth - 8, bodyHeight - 8);
     ctx.clip();
 
-    let textX = canvasX + shapeWidth / 2;
-    if (data.textAlign === "left") textX = canvasX + 6;
-    else if (data.textAlign === "right") textX = canvasX + shapeWidth - 6;
+    let textX = bodyX + bodyWidth / 2;
+    if (data.textAlign === "left") textX = bodyX + 6;
+    else if (data.textAlign === "right") textX = bodyX + bodyWidth - 6;
 
-    ctx.fillText(data.text, textX, canvasY + shapeHeight / 2);
+    ctx.fillText(data.text, textX, bodyY + bodyHeight / 2);
     ctx.restore();
   }
 
@@ -1200,8 +1242,10 @@ async function fetchShapeData(
     shapeDataCache.set(controlId, {
       shapeType: resolved.shapeType ?? "rectangle",
       fill: resolved.fill ?? "#4472C4",
+      fillAlpha: backgroundAlphaOf(resolved[BACKGROUND_TRANSPARENCY_KEY]),
       stroke: resolved.stroke ?? "#2F528F",
-      strokeWidth: parseFloat(resolved.strokeWidth ?? "1") || 1,
+      // "0" is no outline (a text box): never `|| 1`.
+      strokeWidth: parseStrokeWidth(resolved.strokeWidth, 1),
       text: resolved.text ?? "",
       textColor: resolved.textColor ?? "#FFFFFF",
       fontSize: parseInt(resolved.fontSize ?? "11", 10) || 11,
@@ -1214,6 +1258,9 @@ async function fetchShapeData(
       flipV: resolved.flipV === "true",
     });
     staleEntries.delete(controlId);
+    // The same read is the shape's visual container (WP-C D-FORMAT): resolved
+    // and, when it changed, re-published for Core to paint round the shape.
+    noteControlProperties(controlId, "shape", resolved);
 
     // The resolved width/height (a formula-driven size) goes back into the
     // store -- unless the geometry changed while this read was on its way: then

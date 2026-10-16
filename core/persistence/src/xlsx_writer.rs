@@ -445,10 +445,12 @@ pub fn save_xlsx(workbook: &Workbook, path: &Path) -> Result<(), PersistenceErro
         // faithful this native mapping is. A chart that cannot be mapped is
         // skipped here (not an error) — it still survives via the meta carry.
         for chart_entry in workbook.charts.iter().filter(|c| c.sheet_id == sheet.id) {
-            let Ok(def) = serde_json::from_str::<serde_json::Value>(&chart_entry.spec_json) else {
+            // An unparseable spec (kept as a string value) has no native form.
+            let def = &chart_entry.spec;
+            if !def.is_object() {
                 continue;
-            };
-            if let Some((chart, row, col)) = build_native_chart(&def, &sheet.name) {
+            }
+            if let Some((chart, row, col)) = build_native_chart(def, &sheet.name) {
                 match worksheet.insert_chart(row, col, &chart) {
                     Ok(_) => {
                         natively_emitted.insert(chart_entry.id);
@@ -505,7 +507,12 @@ pub fn save_xlsx(workbook: &Workbook, path: &Path) -> Result<(), PersistenceErro
                 .position(|s| s.id == c.sheet_id)
                 .map(|idx| crate::MetaChart {
                     sheet_index: idx,
-                    spec_json: c.spec_json.clone(),
+                    // The meta sheet carries TEXT. An unparseable spec kept
+                    // as a string value round-trips as its original text.
+                    spec_json: match &c.spec {
+                        serde_json::Value::String(raw) => raw.clone(),
+                        other => other.to_string(),
+                    },
                     native_emitted: natively_emitted.contains(&c.id),
                 })
         })
@@ -2669,5 +2676,53 @@ mod tests {
             "[S7] first-column followers with a formula: {} of 2; other columns: {} of 6",
             first_col_followers, other_col_followers
         );
+    }
+
+    /// .cala v10 embeds the chart spec as a JSON VALUE; the xlsx meta carry
+    /// still holds it as TEXT. A chart must survive save_xlsx -> load_xlsx
+    /// through the carry with its spec back as the same OBJECT (not a string
+    /// holding JSON) and its identity kept, and an unparseable spec that was
+    /// kept as a string value must come back as that same string.
+    #[test]
+    fn a_chart_spec_value_survives_the_xlsx_meta_carry_as_an_object() {
+        let mut workbook = Workbook::new();
+        let sheet_id = workbook.sheets[0].id;
+        let chart_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        // A mark with no native OOXML form, so ONLY the carry can restore it.
+        let spec = serde_json::json!({
+            "chartId": chart_id.to_string(),
+            "name": "Gauge 1",
+            "sheetIndex": 0,
+            "x": 10, "y": 20, "width": 300, "height": 200,
+            "spec": { "mark": "gauge", "data": "A1:B3", "title": "Kärna" }
+        });
+        workbook.charts.push(crate::SavedChart { id: chart_id, sheet_id, spec: spec.clone() });
+        let broken_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        workbook.charts.push(crate::SavedChart {
+            id: broken_id,
+            sheet_id,
+            spec: serde_json::Value::String("{not json".to_string()),
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chart.xlsx");
+        save_xlsx(&workbook, &path).unwrap();
+        let loaded = crate::xlsx_reader::load_xlsx(&path).unwrap();
+
+        let back = loaded
+            .charts
+            .iter()
+            .find(|c| c.id == chart_id)
+            .expect("the carried chart must keep its id");
+        assert!(back.spec.is_object(), "spec must be an embedded object, got {:?}", back.spec);
+        assert_eq!(back.spec, spec, "the carried spec must round-trip unchanged");
+        assert_eq!(back.sheet_id, loaded.sheets[0].id);
+
+        let raw = loaded
+            .charts
+            .iter()
+            .find(|c| c.spec.is_string())
+            .expect("an unparseable spec is kept, never dropped");
+        assert_eq!(raw.spec, serde_json::Value::String("{not json".to_string()));
     }
 }

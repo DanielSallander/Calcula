@@ -27,13 +27,22 @@ export function actionGlyphOf(action: ButtonAction | undefined): ButtonActionGly
 }
 
 /**
- * Whether a navigation button goes to the page that is active now, compared
- * by name (what the grid state carries; the paint is the only consequence of
- * a stale id).
+ * Whether a navigation button goes to the sheet that is active now. By ID when
+ * BOTH the action and the active sheet (any kind: a navigate button may aim at
+ * a worksheet) have one -- a page renamed while it is on screen is still the
+ * page the button goes to, so its button keeps its current-page wash. By NAME
+ * (ignoring case, as sheet names compare) only when either side has no id: a
+ * button written before ids existed, or an active sheet the page list has not
+ * read yet.
  */
-export function isCurrentPageButton(action: ButtonAction | undefined, activeSheetName: string | undefined): boolean {
-  if (!action || action.kind !== "navigate" || !activeSheetName) return false;
-  return action.sheetName.toLocaleLowerCase() === activeSheetName.toLocaleLowerCase();
+export function isCurrentPageButton(
+  action: ButtonAction | undefined,
+  active: { sheetId?: string | null; sheetName?: string | null },
+): boolean {
+  if (!action || action.kind !== "navigate") return false;
+  if (action.sheetId && active.sheetId) return action.sheetId === active.sheetId;
+  if (!active.sheetName) return false;
+  return action.sheetName.toLocaleLowerCase() === active.sheetName.toLocaleLowerCase();
 }
 
 /** The glyph's side and its gap to the caption, for a caption font size. */

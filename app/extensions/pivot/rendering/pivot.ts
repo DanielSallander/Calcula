@@ -7,6 +7,7 @@ import type {
 } from '../lib/pivot-api';
 import { getCellDisplayValue } from '../lib/pivot-api';
 import type { PivotInteractiveBounds } from '@api/pivotTypes';
+import { FALLBACK_PIVOT_STYLE_THEME } from '../styles/excelPivotStyles';
 
 // =============================================================================
 // TYPES
@@ -58,38 +59,12 @@ export interface PivotTheme {
 }
 
 export const DEFAULT_PIVOT_THEME: PivotTheme = {
-  // Text colors — PivotStyleLight16 uses black text throughout
-  headerText: '#000000',
-  labelText: '#000000',
-  valueText: '#000000',
-  totalText: '#000000',
-  grandTotalText: '#000000',
-  filterText: '#000000',
-
-  // Background colors — PivotStyleLight16: light blue header/total, gray banding
-  headerBackground: '#C0E6F5',
-  labelBackground: '#ffffff',
-  valueBackground: '#ffffff',
-  totalBackground: '#e8e8e8',
-  grandTotalBackground: '#C0E6F5',
-  filterRowBackground: '#C0E6F5',
-
-  // Alternating rows — only used when banding is explicitly enabled
-  alternateRowBackground: '#ffffff',
-
-  // Borders
-  borderColor: '#e8e8e8',
-  headerBorderColor: '#C0E6F5',
-
-  // Filter button
-  filterButtonBackground: '#C0E6F5',
-  filterButtonBorder: '#a0d0e8',
-  filterButtonHoverBackground: '#d5eff9',
-  filterDropdownArrow: '#000000',
-
-  // Icons
-  iconColor: '#6b7280',
-  iconHoverColor: '#1f2937',
+  // Every colour a style decides (texts, backgrounds, banding, borders, the
+  // filter button, icons) and the header font weight: the ONE preset data
+  // file's `fallbackTheme` (styles/excelPivotStyles.json), which the backend
+  // reads too, so a pivot whose style id the catalogue does not know paints
+  // the same in the box and in the hidden grid (ruling R3, WP-C S10b).
+  ...FALLBACK_PIVOT_STYLE_THEME,
 
   // Selection
   selectionBackground: 'rgba(59, 130, 246, 0.1)',
@@ -99,7 +74,6 @@ export const DEFAULT_PIVOT_THEME: PivotTheme = {
   fontFamily: 'Calibri, "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif',
   fontSize: 13,
   headerFontSize: 13,
-  headerFontWeight: '700',
 };
 
 export interface PivotCellDrawResult {

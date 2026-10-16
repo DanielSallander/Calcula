@@ -12,7 +12,7 @@
 //          gets its own ticker, the same shape.
 
 import type { FloatingRangeEntry } from "./floatingRangeStore";
-import { frCellsTop, frRowHdrW, frameHeight, frameWidth } from "./frDimensions";
+import { contentHeight, contentWidth, frCellsLeft, frCellsTop } from "./frDimensions";
 
 /** One tick's move of the selection's end: a row and/or a column. */
 export interface FrAutoScrollStep {
@@ -27,11 +27,14 @@ export const FR_AUTOSCROLL_INTERVAL_MS = 60;
  * Past which edge of the CELL AREA a frame-relative point lies, or null while
  * it is inside it. Above the first row means the title bar and the column
  * headers too, left of the first column the row headers: dragging onto them
- * scrolls, as dragging onto the grid's headers does.
+ * scrolls, as dragging onto the grid's headers does. Below / right of it
+ * means past the last row / column -- the container's padding band included.
  */
 export function frAutoScrollStep(entry: FloatingRangeEntry, dx: number, dy: number): FrAutoScrollStep | null {
-  const dRow: -1 | 0 | 1 = dy < frCellsTop(entry) ? -1 : dy >= frameHeight(entry) ? 1 : 0;
-  const dCol: -1 | 0 | 1 = dx < frRowHdrW(entry) ? -1 : dx >= frameWidth(entry) ? 1 : 0;
+  const top = frCellsTop(entry);
+  const left = frCellsLeft(entry);
+  const dRow: -1 | 0 | 1 = dy < top ? -1 : dy >= top + contentHeight(entry) ? 1 : 0;
+  const dCol: -1 | 0 | 1 = dx < left ? -1 : dx >= left + contentWidth(entry) ? 1 : 0;
   return dRow === 0 && dCol === 0 ? null : { dRow, dCol };
 }
 

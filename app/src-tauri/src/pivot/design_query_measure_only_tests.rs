@@ -64,6 +64,12 @@ fn model() -> DataModel {
             "TotalViaClear",
             parse_measure("SUM(Sales[amount], CLEAR(Sales))").unwrap(),
         ))
+        // 210 * 5 + 184.5 = 1234.5: a total wide enough for a thousands
+        // separator (the per-field format override test).
+        .add_measure(expression_measure(
+            "Scaled",
+            parse_measure("SUM(Sales[amount]) * 5.0 + 184.5").unwrap(),
+        ))
         .build()
         .unwrap()
 }
@@ -131,7 +137,7 @@ async fn bi() -> (BiState, ConnectionId) {
 }
 
 fn measure(name: &str) -> BiValueFieldRef {
-    BiValueFieldRef { measure_name: name.to_string(), custom_name: None }
+    BiValueFieldRef { measure_name: name.to_string(), custom_name: None, number_format: None }
 }
 
 fn region(included: Option<&[&str]>, hidden: Option<&[&str]>) -> DesignQueryFieldRef {
@@ -544,4 +550,41 @@ async fn a_grouped_share_chart_under_a_page_slicer_falls_back_to_the_mask() {
     let (_d, _c, view) = compute_design_query_view(&bi, &req).await.expect("a share answers, not refuses");
     let bars = data_numbers(&view);
     assert!(close(&bars, &[70.0 / 120.0, 20.0 / 120.0]), "Bikes 70/120, Helmets 20/120; got {bars:?}");
+}
+
+/// WP-C data format (BUG-0478's design-query half): a request value field's
+/// `numberFormat` is the per-field override a design-query chart carries
+/// (`spec.fieldFormats`), and Rust formats `formattedValue` with it -- through
+/// the shared `expand_bi_value_fields`, with no adoption on this path.
+#[tokio::test]
+async fn a_value_fields_number_format_reaches_the_formatted_value() {
+    let (bi, conn) = bi().await;
+    let formatted_total = |format: Option<&str>| {
+        let mut req = request(conn, &["Scaled"], vec![], vec![]);
+        req.value_fields[0].number_format = format.map(str::to_string);
+        req
+    };
+
+    let (def, mut cache, view) = compute_design_query_view(&bi, &formatted_total(Some("#,##0.00"))).await.expect("runs");
+    assert_eq!(grand_total_rows(&view), vec![vec![Some(1234.5)]], "fixture: 210 * 5 + 184.5");
+    assert_eq!(def.value_fields[0].number_format.as_deref(), Some("#,##0.00"));
+    assert!(!def.value_fields[0].number_format_from_model, "a request's format is an override");
+    let json = serde_json::to_value(crate::pivot::utils::view_to_response(&view, &def, &mut cache)).unwrap();
+    let texts: Vec<String> = json["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["rowType"].as_str().unwrap_or_default().eq_ignore_ascii_case("grandtotal"))
+        .flat_map(|r| r["cells"].as_array().cloned().unwrap_or_default())
+        .filter_map(|c| c["formattedValue"].as_str().map(str::to_string))
+        .filter(|t| !t.is_empty())
+        .collect();
+    assert!(texts.contains(&"1,234.50".to_string()), "the override formats the Card's value: {texts:?}");
+
+    // No override: no format on this path (the model adopts nothing here).
+    let (def, mut cache, view) = compute_design_query_view(&bi, &formatted_total(None)).await.expect("runs");
+    assert_eq!(def.value_fields[0].number_format, None);
+    let response = crate::pivot::utils::view_to_response(&view, &def, &mut cache);
+    let json = serde_json::to_value(response).unwrap();
+    assert!(!json.to_string().contains("1,234.50"), "unformatted without an override");
 }

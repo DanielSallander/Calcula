@@ -224,7 +224,7 @@ fn shape_at(wb: &Workbook, sheet_index: usize, row: u32, col: u32) -> (usize, u3
         .controls
         .write(&crate::document_effect::test_seed_effect())
         .unwrap()
-        .insert((sheet_index, row, col), ControlMetadata { control_type: "shape".to_string(), properties });
+        .insert((sheet_index, row, col), ControlMetadata { control_type: "shape".to_string(), uid: String::new(), properties });
     (sheet_index, row, col)
 }
 
@@ -396,6 +396,7 @@ fn a_locked_page_refuses_a_timeline_move() {
         show_scrollbar: true,
         style_preset: "TimelineStyleLight1".to_string(),
         connected_pivot_ids: vec![],
+        container: None,
     };
     let id = timeline.id;
     wb.timelines.timelines.write(&crate::document_effect::test_seed_effect()).unwrap().insert(id, timeline);
@@ -437,11 +438,11 @@ fn a_locked_page_refuses_a_canvas_pivot_box_move_but_not_a_rename() {
     let wb = Workbook::new(1);
     let canvas = add_canvas(&wb);
     let canvas_name = wb.state.sheet_names.read().unwrap()[canvas].clone();
-    let frame = pivot_engine::CanvasFrame { x: 40.0, y: 60.0, width: 320.0, height: 200.0, frozen_headers: false };
+    let frame = pivot_engine::CanvasFrame { x: 40.0, y: 60.0, width: 320.0, height: 200.0, frozen_headers: false, container: None };
     let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
     let mut def = pivot_engine::PivotDefinition::new(id, (0, 0), (0, 0));
     def.destination_sheet = Some(canvas_name);
-    def.canvas_frame = Some(frame);
+    def.canvas_frame = Some(frame.clone());
     wb.pivots
         .pivot_tables
         .write(&crate::document_effect::test_seed_effect())
@@ -456,19 +457,20 @@ fn a_locked_page_refuses_a_canvas_pivot_box_move_but_not_a_rename() {
         refresh_on_open: None,
         use_custom_sort_lists: None,
         canvas_frame: frame.map(Into::into),
+        style: None,
     };
     let update = |r| crate::pivot::commands::update_pivot_properties_core(&wb.state, &wb.file, &wb.pivots, r);
-    let stored = || wb.pivots.pivot_tables.read().unwrap()[&id].0.canvas_frame.unwrap();
+    let stored = || wb.pivots.pivot_tables.read().unwrap()[&id].0.canvas_frame.clone().unwrap();
 
     assert_clean_refusal(&wb, "pivot box move", || {
-        update(request(Some(pivot_engine::CanvasFrame { x: 400.0, ..frame }), None))
+        update(request(Some(pivot_engine::CanvasFrame { x: 400.0, ..frame.clone() }), None))
     });
     assert_eq!(stored().x, 40.0);
-    update(request(Some(pivot_engine::CanvasFrame { frozen_headers: true, ..frame }), None))
+    update(request(Some(pivot_engine::CanvasFrame { frozen_headers: true, ..frame.clone() }), None))
         .expect("freezing the box's headers is formatting, not a move");
     update(request(None, Some("Sales by region"))).expect("a rename is not a move");
 
     lock(&wb, canvas, false);
-    update(request(Some(pivot_engine::CanvasFrame { x: 400.0, ..frame }), None)).expect("an unlocked page moves the box");
+    update(request(Some(pivot_engine::CanvasFrame { x: 400.0, ..frame.clone() }), None)).expect("an unlocked page moves the box");
     assert_eq!(stored().x, 400.0);
 }

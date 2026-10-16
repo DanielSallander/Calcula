@@ -41,6 +41,11 @@ export interface DesignQueryFieldRef {
 export interface DesignQueryValueRef {
   measureName: string;
   customName?: string;
+  /** The Excel format code the consumer chose for this measure (a chart's
+   *  `spec.fieldFormats[measure]`). Rust formats `formattedValue` with it
+   *  (`BiValueFieldRef.number_format`); absent = the backend's own default.
+   *  The compiler never sets it -- the DSL has no spelling for a format. */
+  numberFormat?: string;
 }
 
 /** Compiled design query — the payload sent to `run_design_query`. */

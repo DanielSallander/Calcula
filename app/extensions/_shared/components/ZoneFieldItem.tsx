@@ -27,6 +27,8 @@ interface ZoneFieldItemProps {
   onOpenValueSettings?: (index: number) => void;
   /** Callback to open number format modal */
   onOpenNumberFormat?: (index: number) => void;
+  /** The owning DropZone's `dropKey`, carried on the drag as `fromKey`. */
+  dropKey?: string;
 }
 
 export function ZoneFieldItem({
@@ -40,6 +42,7 @@ export function ZoneFieldItem({
   onMoveField,
   onOpenValueSettings,
   onOpenNumberFormat,
+  dropKey,
 }: ZoneFieldItemProps): React.ReactElement {
   const [showMenu, setShowMenu] = useState(false);
   const [menuPosition, setMenuPosition] = useState({ x: 0, y: 0 });
@@ -71,8 +74,9 @@ export function ZoneFieldItem({
       isNumeric: field.isNumeric,
       fromZone: zone,
       fromIndex: index,
+      ...(dropKey !== undefined ? { fromKey: dropKey } : {}),
     }),
-    [field.sourceIndex, field.name, field.isNumeric, zone, index]
+    [field.sourceIndex, field.name, field.isNumeric, zone, index, dropKey]
   );
 
   const { isDragging, dragHandleProps } = useDraggable(dragData, displayName);

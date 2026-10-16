@@ -978,6 +978,11 @@ function buildBase(rt: WorkerRuntime): Record<string, unknown> {
       callFire(rt, "base.notify", [message, type]);
     },
 
+    // This script's OWN object's properties by JSON Pointer (D-BIND): read the
+    // resolved value / the literal / the binding, write a literal, bind or
+    // unbind -- through the restricted own-object door, so every tier has it.
+    self: makeOwnObjectHandle(rt),
+
     // The FULL unlocked shape for an explicit run's realm too (owner decision
     // B), so a recorded macro runs unchanged and a method outside its cell
     // access is refused by the broker with a sentence, not a TypeError. The
@@ -1892,6 +1897,65 @@ function makeShapeHandle(rt: WorkerRuntime, id: string): Record<string, unknown>
     sendMessage: (type: string, data?: unknown) =>
       objSet(rt, "shape", id, "shape.sendMessage", [type, data]),
   };
+}
+
+/** `bindProperty`'s options: which model a `[Measure]` is read from (omit for
+ *  the page's own). */
+interface ScriptBindOptionsShim {
+  model?: string;
+}
+
+/**
+ * A handle on ONE bindable object's properties, by JSON Pointer (D-BIND §3.19)
+ * -- `context.self` (the script's own object, through the restricted
+ * own-object door) and `api.object(kind, id)` (any object, through the unlocked
+ * target door). Six methods over six aspects; every rule lives host-side
+ * (validators.ts rows, host.ts executors) and in Rust, so this shim only names
+ * the aspect and forwards. Formulas are sent as written: scripts are INVARIANT
+ * (`,` separators, `.` decimals), which the executor states to Rust.
+ */
+function makeObjectHandle(
+  kind: string,
+  id: string,
+  get: (aspect: string, args: unknown[]) => Promise<unknown>,
+  set: (aspect: string, args: unknown[]) => Promise<unknown>,
+): Record<string, unknown> {
+  return {
+    kind,
+    id,
+    getProperty: (path: string) => get("property.get", [path]),
+    getLiteral: (path: string) => get("literal.get", [path]),
+    getBinding: (path: string) => get("binding.get", [path]),
+    async setProperty(path: string, value: unknown): Promise<void> {
+      await set("property.set", [path, value]);
+    },
+    async bindProperty(path: string, formula: string, opts?: ScriptBindOptionsShim): Promise<void> {
+      await set("binding.set", opts === undefined ? [path, formula] : [path, formula, opts]);
+    },
+    async unbindProperty(path: string): Promise<void> {
+      await set("binding.clear", [path]);
+    },
+  };
+}
+
+/** `context.self`: the script's OWN object, through object.getState/setState. */
+function makeOwnObjectHandle(rt: WorkerRuntime): Record<string, unknown> {
+  return makeObjectHandle(
+    rt.spec.objectType,
+    rt.spec.instanceId || "",
+    (aspect, args) => getState(rt, aspect, args),
+    (aspect, args) => setState(rt, aspect, args),
+  );
+}
+
+/** `api.object(kind, id)`: ANY bindable object, through api.objectGetState/SetState. */
+function makeTargetObjectHandle(rt: WorkerRuntime, kind: string, id: string): Record<string, unknown> {
+  return makeObjectHandle(
+    kind,
+    id,
+    (aspect, args) => objGet(rt, kind, id, aspect, args),
+    (aspect, args) => objSet(rt, kind, id, aspect, args),
+  );
 }
 
 /** The namedRange.update patch (tri-state scope: absent = keep, null =
@@ -3267,6 +3331,9 @@ function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
     slicer: (slicerId: string) => makeSlicerHandle(rt, slicerId),
     shape: (shapeId: string) => makeShapeHandle(rt, shapeId),
     namedRange: (name: string) => makeNamedRangeHandle(rt, name),
+    // Any bindable object's properties by JSON Pointer (D-BIND): a binding
+    // kind + the object's binding id, the paths list_object_properties shows.
+    object: (kind: string, id: string) => makeTargetObjectHandle(rt, kind, id),
   };
 }
 

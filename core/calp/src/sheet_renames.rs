@@ -269,12 +269,17 @@ pub struct RenameCounts {
     pub conditional_formats: usize,
     /// Formulas inside data-validation rules.
     pub data_validations: usize,
-    /// Formula-valued properties of cell-anchored controls.
+    /// Static page-target names of cell-anchored controls (a navigate
+    /// button's `actionTargetName`, a Page Navigator override's `sheetName`).
+    /// A control holds no formula of its own: a property that follows a
+    /// formula is an object property BINDING (counted in `bindings`).
     pub controls: usize,
     /// Cell-range sources of pane-control dropdowns.
     pub pane_controls: usize,
     /// Formulas of slicers' computed properties (BUG-0263: they travel now).
     pub slicer_formulas: usize,
+    /// Formulas of object property bindings (`bindings.json`, `.cala` v10).
+    pub bindings: usize,
 }
 
 /// The per-sheet and workbook-scoped RULE payloads a pull carries next to its
@@ -453,8 +458,8 @@ impl SheetRenames {
     /// Rename every sheet-name-bound reference a pull carries: the formulas on
     /// every pulled sheet (object-backed sheets included -- they are sheets of
     /// the pull like any other), every defined name's `refers_to`, every
-    /// chart's string sources, the rule payloads, and every slicer's computed
-    /// property formulas. Run BEFORE the sheets become grids, so the edges
+    /// chart's string sources, the rule payloads, every slicer's computed
+    /// property formulas and every object property binding's formula. Run BEFORE the sheets become grids, so the edges
     /// built from them, the override baselines captured from them and the
     /// upstream values a refresh compares against are all in ONE spelling.
     pub fn rename_pull(&self, result: &mut crate::pull::PullResult) -> RenameCounts {
@@ -467,6 +472,7 @@ impl SheetRenames {
             pane_controls: &mut result.pane_controls,
         });
         let slicer_formulas = self.rename_slicer_formulas(&mut result.slicers);
+        let bindings = self.rename_binding_formulas(&mut result.object_bindings);
         RenameCounts {
             cell_formulas: content.cell_formulas,
             named_ranges: content.named_ranges,
@@ -476,7 +482,25 @@ impl SheetRenames {
             controls: rules.controls,
             pane_controls: rules.pane_controls,
             slicer_formulas,
+            // The object property bindings the pull carries (`bindings.json`):
+            // a bound title reading the publisher's "Data" must read "Data (2)"
+            // once the collision rename moved it, like every cell formula.
+            bindings,
         }
+    }
+
+    /// Rename the sheet references in every object property BINDING formula
+    /// (`bindings.json`). A binding formula is always a formula (it is stored
+    /// with its `=`, sheet-qualified), so every row's `formula` is renamed --
+    /// the slot [`visit_binding_formulas`] visits. Returns how many changed.
+    pub fn rename_binding_formulas(&self, bindings: &mut [persistence::SavedObjectBinding]) -> usize {
+        if self.is_empty() {
+            return 0;
+        }
+        bindings
+            .iter_mut()
+            .map(|binding| usize::from(self.rename_slot(&mut binding.formula)))
+            .sum()
     }
 
     /// Rename the sheet references in every slicer's COMPUTED PROPERTY
@@ -501,8 +525,8 @@ impl SheetRenames {
     }
 
     /// Rename the sheet references inside the RULE payloads a pull carries:
-    /// conditional-formatting formulas, data-validation formulas, the
-    /// formula-valued properties of cell-anchored controls, and pane-control
+    /// conditional-formatting formulas, data-validation formulas, the static
+    /// page-target names of cell-anchored controls, and pane-control
     /// dropdowns' cell-range sources. Each names sheets by NAME exactly as a
     /// cell formula does, so after a collision rename each read the
     /// SUBSCRIBER's own same-named sheet -- a highlight, a validation rule or
@@ -553,10 +577,45 @@ impl SheetRenames {
     }
 
     /// Cell-anchored controls (the host's `Vec<SavedControlEntry>`): every
-    /// formula-valued property (see [`visit_control_formulas`]). Returns how
-    /// many changed.
+    /// static page-target NAME (see [`visit_control_page_target_names`]) -- a
+    /// navigate button's `actionTargetName` and each `sheetName` of a Page
+    /// Navigator's `pageOverrides`. Those names are the fallback a click uses
+    /// when the target's id does not resolve, so after a collision rename the
+    /// publisher's "Detail" would otherwise land on the SUBSCRIBER's own
+    /// "Detail" (BUG-0449). Joining this one authority gives them its
+    /// simultaneous one-step mapping, its push reversal
+    /// (`restore_published_sheet_references` calls this) and its gone-sheet
+    /// rule. Returns how many changed.
+    ///
+    /// A control holds NO formula of its own (WP-D): a property that follows
+    /// a formula is an object property binding, renamed through
+    /// [`Self::rename_binding_formulas`]. A `valueType: "formula"` left in a
+    /// payload is a literal here -- the host refuses to write one and migrates
+    /// an old one into a binding on load.
     pub fn rename_control_entries(&self, controls: &mut serde_json::Value) -> usize {
-        visit_control_formulas(controls, &mut |s| self.rename_slot(s))
+        if self.is_empty() {
+            return 0;
+        }
+        visit_control_page_target_names(controls, &mut |name| self.rename_page_name(name))
+    }
+
+    /// Rename one bare sheet NAME in place (a page target, not a formula): a
+    /// GONE sheet's name becomes `#REF!` -- so a static fallback can never land
+    /// on the subscriber's own same-named sheet (see "A sheet that is GONE" in
+    /// the module header) -- else the one-step, case-insensitive target in the
+    /// target's own spelling, else unchanged. True when it changed.
+    fn rename_page_name(&self, name: &mut String) -> bool {
+        if name.is_empty() {
+            return false;
+        }
+        if self.is_gone(name) {
+            if name == "#REF!" {
+                return false;
+            }
+            *name = "#REF!".to_string();
+            return true;
+        }
+        self.swap(name)
     }
 
     /// A pane control's config (the host's `PaneControlConfig`): a dropdown's
@@ -593,10 +652,7 @@ impl SheetRenames {
             }
         }
         for chart in charts.iter_mut() {
-            if let Some(renamed) =
-                crate::chart_refs::rename_chart_spec_sheet_names(&chart.spec_json, self)
-            {
-                chart.spec_json = renamed;
+            if crate::chart_refs::rename_chart_spec_sheet_names(&mut chart.spec, self) {
                 counts.charts += 1;
             }
         }
@@ -608,8 +664,9 @@ impl SheetRenames {
 // The RULE payloads' formula slots (wave-B B4)
 // ---------------------------------------------------------------------------
 //
-// Conditional formats, data validations, cell-anchored controls and pane
-// controls travel as OPAQUE host JSON, and each names sheets inside. ONE
+// Conditional formats, data validations, cell-anchored controls (their static
+// page targets), pane controls and object property bindings travel as OPAQUE
+// host JSON, and each names sheets inside. ONE
 // visitor per payload decides which strings are formulas (or, for a dropdown,
 // an A1 reference); the rename on pull and push and the version diff's
 // spelling-blind comparison both walk through it, so they cannot disagree
@@ -688,26 +745,83 @@ pub fn visit_validation_formulas(ranges: &mut serde_json::Value, f: &mut dyn FnM
     changed
 }
 
-/// Every formula-valued property of a cell-anchored controls payload
-/// (`Vec<SavedControlEntry>`): a property whose `valueType` is `"formula"`
-/// AND whose value starts with `=` -- the host's own rule (`controls.rs`
-/// evaluates `value_type == "formula" && value.starts_with('=')` and displays
-/// anything else literally). A static property is a literal.
-pub fn visit_control_formulas(controls: &mut serde_json::Value, f: &mut dyn FnMut(&mut String) -> bool) -> usize {
+/// Every formula of an object property BINDINGS payload (`bindings.json`, a
+/// `Vec<SavedObjectBinding>`): each row's `formula`. A binding formula is
+/// always a formula -- stored with its `=` and every reference qualified -- so
+/// it is visited unconditionally. The row's `object` and `path` are identity,
+/// never text a rename may touch. Returns how many `f` changed.
+///
+/// This replaced the cell-anchored controls' formula visitor: a control's
+/// property that follows a formula is a binding row now, not a
+/// `valueType: "formula"` property (WP-D, D §3.13).
+pub fn visit_binding_formulas(bindings: &mut serde_json::Value, f: &mut dyn FnMut(&mut String) -> bool) -> usize {
+    let Some(rows) = bindings.as_array_mut() else { return 0 };
+    rows.iter_mut()
+        .map(|row| usize::from(visit_string(row.get_mut("formula"), f)))
+        .sum()
+}
+
+/// The STATIC value of one control property object (`{ valueType, value }`),
+/// or `None` for a formula-typed or malformed one.
+fn static_control_value(props: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
+    let prop = props.get(key)?.as_object()?;
+    if prop.get("valueType").and_then(|t| t.as_str()) != Some("static") {
+        return None;
+    }
+    prop.get("value").and_then(|v| v.as_str()).map(str::to_string)
+}
+
+/// Every STATIC page-target NAME of a cell-anchored controls payload
+/// (`Vec<SavedControlEntry>`): a navigate button's `actionTargetName` (only
+/// when it is a `button` whose static `action` is `"navigate"` -- the
+/// frontend's own reading, `buttonActionOfControl`; a `back` button's stray
+/// name is not a target), and each `sheetName` of a Page Navigator's static
+/// `pageOverrides` (parsed by `calcula_format::page_navigator` and
+/// re-serialised in the frontend's canonical bytes ONLY when a name changed,
+/// so an untouched value keeps its bytes). A formula-typed value is never
+/// visited (it is a literal; a formula is a binding). The IDS beside these names
+/// are the host's to remap (`controls.rs` `remap_control_page_targets`): a
+/// subscriber's sheet ids are its own, which only the host knows. Returns how
+/// many names `f` changed.
+pub fn visit_control_page_target_names(
+    controls: &mut serde_json::Value,
+    f: &mut dyn FnMut(&mut String) -> bool,
+) -> usize {
+    use calcula_format::page_navigator::{
+        parse_page_overrides, serialize_page_overrides, PAGE_NAVIGATOR_CONTROL_TYPE,
+        PAGE_NAVIGATOR_OVERRIDES_PROPERTY,
+    };
     let Some(entries) = controls.as_array_mut() else { return 0 };
     let mut changed = 0;
     for entry in entries.iter_mut() {
+        let control_type = entry.get("controlType").and_then(|t| t.as_str()).unwrap_or("").to_string();
         let Some(props) = entry.get_mut("properties").and_then(|p| p.as_object_mut()) else { continue };
-        for prop in props.values_mut() {
-            let Some(prop) = prop.as_object_mut() else { continue };
-            if prop.get("valueType").and_then(|t| t.as_str()) != Some("formula") {
+        if control_type == "button" {
+            if static_control_value(props, "action").as_deref() != Some("navigate") {
                 continue;
             }
-            match prop.get_mut("value") {
-                Some(serde_json::Value::String(text)) if text.starts_with('=') => {
-                    changed += usize::from(f(text));
+            let Some(prop) = props.get_mut("actionTargetName").and_then(|p| p.as_object_mut()) else { continue };
+            if prop.get("valueType").and_then(|t| t.as_str()) != Some("static") {
+                continue;
+            }
+            if let Some(serde_json::Value::String(name)) = prop.get_mut("value") {
+                changed += usize::from(f(name));
+            }
+        } else if control_type == PAGE_NAVIGATOR_CONTROL_TYPE {
+            let Some(raw) = static_control_value(props, PAGE_NAVIGATOR_OVERRIDES_PROPERTY) else { continue };
+            let Some(mut overrides) = parse_page_overrides(&raw) else { continue };
+            let mut here = 0;
+            for o in overrides.iter_mut() {
+                here += usize::from(f(&mut o.sheet_name));
+            }
+            if here > 0 {
+                if let Some(prop) = props.get_mut(PAGE_NAVIGATOR_OVERRIDES_PROPERTY).and_then(|p| p.as_object_mut()) {
+                    prop.insert(
+                        "value".to_string(),
+                        serde_json::Value::String(serialize_page_overrides(&overrides)),
+                    );
                 }
-                _ => {}
+                changed += here;
             }
         }
     }
@@ -748,11 +862,29 @@ pub fn visit_slicer_computed_formulas(props: &mut serde_json::Value, f: &mut dyn
 /// byte-compared: `abc` becoming `ABC` is still a change. `None` for a domain
 /// with no such slots (and for a slicer that carries no computed properties,
 /// which is then compared byte for byte like any other object).
+///
+/// The `"binding"` domain's item is ONE `bindings.json` row (`{object, path,
+/// formula, model}`), visited through [`visit_binding_formulas`] like a
+/// one-row payload. A cell-anchored control has no formula slot any more (a
+/// formula is a binding), so a `"control"` item is compared byte for byte.
 pub fn comparable_rule_payload(domain: &str, item: &serde_json::Value) -> Option<serde_json::Value> {
+    let canonical_formula = &mut |text: &mut String| {
+        if let Some(canonical) = comparable_formula(text) {
+            *text = format!("={}", canonical);
+        }
+        false
+    };
+    if domain == "binding" {
+        if !item.is_object() {
+            return None;
+        }
+        let mut rows = serde_json::Value::Array(vec![item.clone()]);
+        visit_binding_formulas(&mut rows, canonical_formula);
+        return rows.as_array_mut()?.pop();
+    }
     let (field, visit): (&str, fn(&mut serde_json::Value, &mut dyn FnMut(&mut String) -> bool) -> usize) = match domain {
         "conditionalFormat" => ("rules", visit_cf_rule_formulas),
         "dataValidation" => ("ranges", visit_validation_formulas),
-        "control" => ("controls", visit_control_formulas),
         "paneControl" => ("config", visit_pane_control_reference),
         "slicer" => ("computed_properties", visit_slicer_computed_formulas),
         _ => return None,
@@ -765,12 +897,7 @@ pub fn comparable_rule_payload(domain: &str, item: &serde_json::Value) -> Option
             false
         });
     } else {
-        visit(slot, &mut |text| {
-            if let Some(canonical) = comparable_formula(text) {
-                *text = format!("={}", canonical);
-            }
-            false
-        });
+        visit(slot, canonical_formula);
     }
     Some(out)
 }
@@ -943,7 +1070,7 @@ mod tests {
         let mut charts = vec![persistence::SavedChart {
             id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
             sheet_id: identity::SheetId::from_bytes(identity::generate_uuid_v7()),
-            spec_json: serde_json::json!({ "spec": { "data": "Data!A1:B5" } }).to_string(),
+            spec: serde_json::json!({ "spec": { "data": "Data!A1:B5" } }),
         }];
 
         let counts = renames(&[("Data", "Data (2)")])
@@ -956,7 +1083,7 @@ mod tests {
         assert_eq!(cells[&(0, 0)].formula.as_deref(), Some("'Data (2)'!A1*2"));
         assert_eq!(cells[&(1, 0)].formula.as_deref(), Some("B1+1"), "an unrelated formula keeps its bytes");
         assert_eq!(named_ranges[0].refers_to, "='Data (2)'!$B$2");
-        assert!(charts[0].spec_json.contains("'Data (2)'!A1:B5"));
+        assert_eq!(charts[0].spec["spec"]["data"], "'Data (2)'!A1:B5");
     }
 
     /// The rule payloads, in the host's own JSON shapes (the host pins those
@@ -1048,7 +1175,10 @@ mod tests {
         assert_eq!(dvs[0].ranges[1]["validation"]["rule"]["list"]["source"]["values"][0], "Data!A1", "a literal list item");
 
         let props = &controls[0].controls[0]["properties"];
-        assert_eq!(props["text"]["value"], "='Data (2)'!A1", "a formula-valued control property");
+        assert_eq!(
+            props["text"]["value"], "=Data!A1",
+            "a control holds no formula of its own (a formula is a binding): a formula-typed value is a literal"
+        );
         assert_eq!(props["fill"]["value"], "Data!A1", "a STATIC property is a literal");
 
         assert_eq!(panes[0].config["source"]["reference"], "'Data (2)'!A1:A5", "a dropdown's cell-range source");
@@ -1056,16 +1186,85 @@ mod tests {
 
         assert_eq!(
             counts,
-            RenameCounts { conditional_formats: 6, data_validations: 1, controls: 1, pane_controls: 1, ..RenameCounts::default() }
+            RenameCounts { conditional_formats: 6, data_validations: 1, pane_controls: 1, ..RenameCounts::default() }
         );
+    }
+
+    /// A binding row as `bindings.json` spells it.
+    fn binding_row(formula: &str) -> persistence::SavedObjectBinding {
+        persistence::SavedObjectBinding {
+            object: persistence::SavedObjectRef { kind: "chart".to_string(), id: "c-1".to_string() },
+            path: "/spec/title".to_string(),
+            formula: formula.to_string(),
+            model: None,
+        }
+    }
+
+    /// WP-D: a property that follows a formula is an object property BINDING,
+    /// and every binding formula is renamed -- the typed rename and the JSON
+    /// visitor reach the same slot, `formula`, and never the identity beside it
+    /// (a path or an object id that happens to look like a reference).
+    ///
+    /// SABOTAGE: make `visit_binding_formulas` visit `path` instead of
+    /// `formula` -- the JSON half fails.
+    #[test]
+    fn every_binding_formula_follows_a_rename_and_nothing_else_does() {
+        let r = renames(&[("Data", "Data (2)")]);
+        let mut rows = vec![binding_row("=Data!A1&\" units\""), binding_row("=Other!B2"), binding_row("=SUM(Data!A1:A3)")];
+        rows[2].path = "/spec/series/0/name".to_string();
+        assert_eq!(r.rename_binding_formulas(&mut rows), 2);
+        assert_eq!(rows[0].formula, "='Data (2)'!A1&\" units\"");
+        assert_eq!(rows[1].formula, "=Other!B2", "an unrelated binding keeps its bytes");
+        assert_eq!(rows[2].formula, "=SUM('Data (2)'!A1:A3)");
+
+        let mut json = serde_json::to_value(vec![binding_row("=Data!A1"), binding_row("=Other!A1")]).unwrap();
+        json[0]["object"]["id"] = serde_json::json!("Data!A1");
+        let mut seen = Vec::new();
+        let changed = visit_binding_formulas(&mut json, &mut |text| {
+            seen.push(text.clone());
+            *text = format!("{text}+0");
+            true
+        });
+        assert_eq!(changed, 2);
+        assert_eq!(seen, vec!["=Data!A1".to_string(), "=Other!A1".to_string()]);
+        let back: Vec<persistence::SavedObjectBinding> = serde_json::from_value(json).unwrap();
+        assert_eq!(back[0].formula, "=Data!A1+0");
+        assert_eq!(back[0].object.id, "Data!A1", "an object id is identity, never a reference");
+        assert_eq!(back[0].path, "/spec/title");
+
+        let gone = SheetRenames::default().with_gone(["Data"]);
+        let mut rows = vec![binding_row("=Data!A1")];
+        assert_eq!(gone.rename_binding_formulas(&mut rows), 1);
+        assert_eq!(rows[0].formula, "=#REF!", "a binding reading a gone sheet reads #REF!");
+    }
+
+    /// A binding re-spelled by a checkout + push round trip is the same
+    /// binding in the version diff; a real edit is still a change.
+    ///
+    /// SABOTAGE: drop the `"binding"` branch from `comparable_rule_payload`.
+    #[test]
+    fn a_binding_re_spelled_by_a_rename_round_trip_is_the_same_binding() {
+        let row = |formula: &str| serde_json::to_value(binding_row(formula)).unwrap();
+        let same = |a: &serde_json::Value, b: &serde_json::Value| {
+            match (comparable_rule_payload("binding", a), comparable_rule_payload("binding", b)) {
+                (Some(x), Some(y)) => x == y,
+                _ => false,
+            }
+        };
+        assert!(same(&row("=data!a1"), &row("='Data'!A1")), "only spelling");
+        assert!(!same(&row("=Data!A1"), &row("=Data!A2")), "a real edit is a change");
+        let mut other_path = row("=Data!A1");
+        other_path["path"] = serde_json::json!("/spec/xAxis/title");
+        assert!(!same(&row("=Data!A1"), &other_path), "another property is another binding");
+        assert!(comparable_rule_payload("control", &serde_json::json!({ "controls": [] })).is_none(), "a control has no formula slot");
     }
 
     /// Wave-B fix-up: a slot is renamed exactly where the HOST reads a formula.
     /// An always-formula slot (a CF expression, a data-bar bound, ...) is one
     /// with or without its `=` -- the CF evaluator parses either -- while a
     /// cell-value bound without `=` is a literal (the evaluator reads it as a
-    /// number) and a formula-typed control property without `=` is shown
-    /// literally (`controls.rs` evaluates only values starting with `=`).
+    /// number), and a control property is ALWAYS a literal -- a formula is an
+    /// object property binding (WP-D).
     /// Renaming a literal rewrote text the user sees; leaving an `=`-less
     /// formula alone left it reading the wrong sheet.
     #[test]
@@ -1088,12 +1287,12 @@ mod tests {
             "text": { "valueType": "formula", "value": "Data!A1" },
             "tooltip": { "valueType": "formula", "value": "=Data!A2" } } }]);
         let controls_changed = r.rename_control_entries(&mut controls);
+        assert_eq!(controls[0]["properties"]["text"]["value"], "Data!A1", "a control value is a literal");
         assert_eq!(
-            controls[0]["properties"]["text"]["value"], "Data!A1",
-            "a formula-typed control value without `=` is displayed literally by the host"
+            controls[0]["properties"]["tooltip"]["value"], "=Data!A2",
+            "a formula-typed control value is a literal too: the formula would be a binding"
         );
-        assert_eq!(controls[0]["properties"]["tooltip"]["value"], "='Data (2)'!A2");
-        assert_eq!(controls_changed, 1, "{controls}");
+        assert_eq!(controls_changed, 0, "{controls}");
     }
 
     #[test]
@@ -1160,5 +1359,111 @@ mod tests {
         let mut no_props = typed.clone();
         no_props.as_object_mut().unwrap().remove("computed_properties");
         assert!(!same(&typed, &no_props), "losing the computed properties is a change");
+    }
+
+    /// A controls payload: a navigate button, a `back` button carrying a stray
+    /// target name, a formula-typed target name, and a Page Navigator with
+    /// overrides on `names`.
+    fn page_target_controls(target: &str, names: &[&str]) -> serde_json::Value {
+        use serde_json::json;
+        let s = |v: &str| json!({ "valueType": "static", "value": v });
+        let overrides = calcula_format::page_navigator::serialize_page_overrides(
+            &names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| calcula_format::page_navigator::PageOverrideWire {
+                    sheet_id: format!("id-{i}"),
+                    sheet_name: n.to_string(),
+                    text: Some(format!("Caption {i}")),
+                    hidden: None,
+                    fill: None,
+                    color: None,
+                    border_color: None,
+                })
+                .collect::<Vec<_>>(),
+        );
+        json!([
+            { "row": 0, "col": 0, "controlType": "button", "properties": {
+                "action": s("navigate"), "actionTarget": s("id-0"), "actionTargetName": s(target) } },
+            { "row": 1, "col": 0, "controlType": "button", "properties": {
+                "action": s("back"), "actionTarget": s(""), "actionTargetName": s(target) } },
+            { "row": 2, "col": 0, "controlType": "button", "properties": {
+                "action": s("navigate"),
+                "actionTargetName": { "valueType": "formula", "value": target } } },
+            { "row": 3, "col": 0, "controlType": "pageNavigator", "properties": {
+                "orientation": s("horizontal"), "pageOverrides": s(&overrides) } }
+        ])
+    }
+
+    fn override_names(controls: &serde_json::Value) -> Vec<String> {
+        let raw = controls[3]["properties"]["pageOverrides"]["value"].as_str().unwrap();
+        calcula_format::page_navigator::parse_page_overrides(raw)
+            .expect("the rewritten overrides still parse")
+            .into_iter()
+            .map(|o| o.sheet_name)
+            .collect()
+    }
+
+    /// BUG-0449, the NAME half. A navigate button's static `actionTargetName`
+    /// and a Page Navigator override's `sheetName` are the fallback a click
+    /// uses when the target's id does not resolve -- after a collision rename
+    /// the publisher's "Detail" read the SUBSCRIBER's own "Detail". They follow
+    /// this module's one rule: simultaneous and one step per name, matched
+    /// ignoring case and written in the target's spelling, a gone sheet ->
+    /// `#REF!`; a `back` button's stray name and a formula-typed value are not
+    /// page targets and keep their bytes.
+    ///
+    /// SABOTAGE: drop the `visit_control_page_target_names` call from
+    /// `rename_control_entries`.
+    #[test]
+    fn rename_control_entries_moves_static_page_target_names() {
+        let collision = renames(&[("Detail", "Detail (2)")]);
+        let mut controls = page_target_controls("detail", &["Detail", "Sales"]);
+        let untouched_overrides = page_target_controls("x", &["Sales"])[3].clone();
+        let changed = collision.rename_control_entries(&mut controls);
+        assert_eq!(
+            controls[0]["properties"]["actionTargetName"]["value"], "Detail (2)",
+            "matched ignoring case, written in the target's spelling"
+        );
+        assert_eq!(controls[1]["properties"]["actionTargetName"]["value"], "detail", "a back button names no page");
+        assert_eq!(controls[2]["properties"]["actionTargetName"]["value"], "detail", "formula-typed: not visited");
+        assert_eq!(override_names(&controls), vec!["Detail (2)", "Sales"]);
+        assert_eq!(changed, 2, "{controls}");
+        let raw = controls[3]["properties"]["pageOverrides"]["value"].as_str().unwrap();
+        assert!(raw.starts_with(r#"[{"sheetId":"id-0","sheetName":"Detail (2)","text":"Caption 0"}"#), "{raw}");
+
+        // An untouched navigator keeps its bytes (no re-serialisation).
+        let mut only_sales = serde_json::json!([untouched_overrides.clone()]);
+        assert_eq!(collision.rename_control_entries(&mut only_sales), 0);
+        assert_eq!(only_sales[0], untouched_overrides);
+
+        // THE CHAIN: each name moves exactly ONE step.
+        let chain = renames(&[("A", "A (2)"), ("A (2)", "A (2) (2)")]);
+        let mut controls = page_target_controls("A", &["A", "A (2)"]);
+        chain.rename_control_entries(&mut controls);
+        assert_eq!(controls[0]["properties"]["actionTargetName"]["value"], "A (2)");
+        assert_eq!(override_names(&controls), vec!["A (2)", "A (2) (2)"]);
+
+        // A GONE sheet's name becomes #REF!, never the subscriber's namesake.
+        let gone = SheetRenames::default().with_gone(["Detail"]);
+        let mut controls = page_target_controls("Detail", &["Detail", "Sales"]);
+        assert_eq!(gone.rename_control_entries(&mut controls), 2);
+        assert_eq!(controls[0]["properties"]["actionTargetName"]["value"], "#REF!");
+        assert_eq!(override_names(&controls), vec!["#REF!", "Sales"]);
+
+        // The push half: the reverse map restores the published spelling.
+        let push = renames(&[("detail (2)", "Detail")]);
+        let mut controls = page_target_controls("Detail", &["Detail", "Sales"]);
+        let published = controls.clone();
+        collision.rename_control_entries(&mut controls);
+        push.rename_control_entries(&mut controls);
+        assert_eq!(controls, published, "checkout + push is byte for byte");
+
+        // A malformed overrides value is left exactly as it was.
+        let mut bad = serde_json::json!([{ "row": 0, "col": 0, "controlType": "pageNavigator", "properties": {
+            "pageOverrides": { "valueType": "static", "value": "[{\"sheetName\":\"Detail\"}]" } } }]);
+        let before = bad.clone();
+        assert_eq!(collision.rename_control_entries(&mut bad), 0);
+        assert_eq!(bad, before);
     }
 }

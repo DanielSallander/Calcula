@@ -19,7 +19,16 @@ import { isFloatingControlSelected } from "./floatingSelection";
 import { isFloatingButtonPressed } from "../lib/buttonPress";
 import { getFloatingControl } from "../lib/floatingStore";
 import { getGridStateSnapshot } from "@api/grid";
+import { getReportPagesSnapshot, sheetIdAt } from "@api/reportPages";
 import { actionGlyphMetrics, actionGlyphOf, drawActionGlyph, isCurrentPageButton } from "./actionGlyph";
+import {
+  invalidateAllPageNavigatorCaches,
+  invalidatePageNavigatorCache,
+} from "../PageNavigator/navigatorCache";
+import { getControlPaintPreview, noteControlProperties } from "../lib/controlContainer";
+import { BUTTON_PAINT_DEFAULTS } from "../lib/controlContainerDefaults";
+import { BACKGROUND_TRANSPARENCY_KEY, backgroundAlphaOf, isNoPaint, parseStrokeWidth } from "../Shape/shapeRecipe";
+import { visualContentRectFor, type ContainerRegion } from "@api/visualContainerPaint";
 
 /** How dark a PRESSED run-mode button's face goes (a black wash, 0..1). */
 export const BUTTON_PRESSED_SHADE = 0.12;
@@ -31,8 +40,12 @@ export const BUTTON_PRESSED_SHADE = 0.12;
 interface CachedButtonData {
   text: string;
   fill: string;
+  /** The face's alpha: Effects > Background > Transparency (1 = opaque). */
+  fillAlpha: number;
   color: string;
   borderColor: string;
+  /** The face's outline width; 0 = no outline (WP-C: the container's border width). */
+  strokeWidth: number;
   fontSize: number;
 }
 
@@ -46,10 +59,16 @@ const pendingFetches = new Set<string>();
  */
 const staleEntries = new Set<string>();
 
-/** Invalidate cached data for a specific control. */
+/**
+ * Invalidate cached data for a specific control. THE one invalidation entry
+ * point for every floating control painted from resolved properties: a Page
+ * Navigator's settings (PageNavigator/navigatorCache.ts) go stale here too, so
+ * every existing call site covers the navigator with no new one.
+ */
 export function invalidateFloatingButtonCache(controlId: string): void {
   staleEntries.add(controlId);
   pendingFetches.delete(controlId);
+  invalidatePageNavigatorCache(controlId);
 }
 
 /** Invalidate all cached button data. */
@@ -59,6 +78,7 @@ export function invalidateAllFloatingButtonCaches(): void {
     staleEntries.add(key);
   }
   pendingFetches.clear();
+  invalidateAllPageNavigatorCaches();
 }
 
 // ============================================================================
@@ -144,15 +164,44 @@ export function renderFloatingButton(overlayCtx: OverlayRenderContext): void {
   const isStale = staleEntries.has(controlId);
 
   if ((!data || isStale) && !pendingFetches.has(controlId)) {
-    fetchButtonData(controlId, sheetIndex, row, col);
+    fetchButtonData(controlId, sheetIndex, row, col, String(region.data?.controlType ?? "button"));
   }
   if (!data) {
     // Truly new control with no cache at all — use hard-coded defaults
-    data = { text: "Button", fill: "#e0e0e0", color: "#000000", borderColor: "#999999", fontSize: 11 };
+    data = {
+      text: "Button",
+      fill: BUTTON_PAINT_DEFAULTS.fill,
+      fillAlpha: 1,
+      color: "#000000",
+      borderColor: BUTTON_PAINT_DEFAULTS.borderColor,
+      strokeWidth: BUTTON_PAINT_DEFAULTS.strokeWidth,
+      fontSize: 11,
+    };
   }
 
   const isDesignMode = getDesignMode();
-  const borderRadius = 3;
+  // WP-C D-FORMAT: the button's face IS its container's background and border
+  // (`paint` "family": painted here, over the region's box, with the
+  // container's corner radius), and its caption lays out in the CONTENT RECT
+  // -- the box less the border band Core answers as frame.
+  const container = (region as ContainerRegion).container;
+  const borderRadius = container ? container.border.radius : BUTTON_PAINT_DEFAULTS.radius;
+  const content = visualContentRectFor(
+    region.id,
+    { x: canvasX, y: canvasY, width: btnWidth, height: btnHeight },
+    container,
+  );
+  // The Format pane's PREVIEW of the face (lib/controlContainer.ts), in memory only.
+  const paintPreview = getControlPaintPreview(controlId);
+  const fill = paintPreview?.fill ?? data.fill;
+  const fillAlpha =
+    paintPreview?.[BACKGROUND_TRANSPARENCY_KEY] !== undefined
+      ? backgroundAlphaOf(paintPreview[BACKGROUND_TRANSPARENCY_KEY])
+      : data.fillAlpha;
+  const borderColor = paintPreview?.borderColor ?? data.borderColor;
+  const strokeWidth =
+    paintPreview?.strokeWidth !== undefined ? parseStrokeWidth(paintPreview.strokeWidth) : data.strokeWidth;
+  const filled = !isNoPaint(fill) && fillAlpha > 0;
   // A run-mode press held INSIDE the button (lib/buttonPress.ts, BUG-0258
   // phase 4c): it looks pushed in -- no raised highlight, a darker face, the
   // caption one pixel down and right -- until the release runs it or the
@@ -163,15 +212,27 @@ export function renderFloatingButton(overlayCtx: OverlayRenderContext): void {
   // face, held -- as a Power BI page navigator marks the current page; Back
   // and Clear all slicers draw their picture before the caption.
   const buttonAction = getFloatingControl(controlId)?.buttonAction;
+  // The active sheet BY ID (the grid's index -> the page list's id; any kind
+  // of sheet), so a page renamed while on screen keeps its button's wash.
+  const sheetContext = getGridStateSnapshot()?.sheetContext;
   const currentPage =
-    !pressed && isCurrentPageButton(buttonAction, getGridStateSnapshot()?.sheetContext?.activeSheetName);
+    !pressed &&
+    isCurrentPageButton(buttonAction, {
+      sheetId: sheetIdAt(getReportPagesSnapshot(), sheetContext?.activeSheetIndex),
+      sheetName: sheetContext?.activeSheetName,
+    });
   const glyph = actionGlyphOf(buttonAction);
 
-  // 1. Draw button background
-  ctx.beginPath();
-  ctx.roundRect(canvasX, canvasY, btnWidth, btnHeight, borderRadius);
-  ctx.fillStyle = data.fill;
-  ctx.fill();
+  // 1. Draw button background ("none" = no face), faded by the background's
+  //    transparency (the border and the caption are not).
+  if (filled) {
+    ctx.beginPath();
+    ctx.roundRect(canvasX, canvasY, btnWidth, btnHeight, borderRadius);
+    ctx.fillStyle = fill;
+    ctx.globalAlpha = fillAlpha;
+    ctx.fill();
+    ctx.globalAlpha = 1.0;
+  }
 
   if (pressed || currentPage) {
     // 2'. Pressed (or the current page's navigator button): a 12% black wash
@@ -182,36 +243,45 @@ export function renderFloatingButton(overlayCtx: OverlayRenderContext): void {
     ctx.globalAlpha = BUTTON_PRESSED_SHADE;
     ctx.fill();
     ctx.globalAlpha = 1.0;
-  } else {
+  } else if (filled) {
     // 2. Top highlight for 3D effect
     ctx.beginPath();
     ctx.roundRect(canvasX, canvasY, btnWidth, btnHeight / 2, [borderRadius, borderRadius, 0, 0]);
     ctx.fillStyle = "#f0f0f0";
-    ctx.globalAlpha = 0.4;
+    ctx.globalAlpha = 0.4 * fillAlpha;
     ctx.fill();
     ctx.globalAlpha = 1.0;
   }
 
-  // 3. Border
-  ctx.beginPath();
-  ctx.roundRect(canvasX + 0.5, canvasY + 0.5, btnWidth - 1, btnHeight - 1, borderRadius);
-  ctx.lineWidth = 1;
-  ctx.strokeStyle = data.borderColor;
-  ctx.stroke();
+  // 3. Border: `strokeWidth` wide, inside the box ("0" or a "none" colour = none).
+  if (strokeWidth > 0 && !isNoPaint(borderColor)) {
+    const half = strokeWidth / 2;
+    ctx.beginPath();
+    ctx.roundRect(
+      canvasX + half,
+      canvasY + half,
+      Math.max(0, btnWidth - strokeWidth),
+      Math.max(0, btnHeight - strokeWidth),
+      borderRadius,
+    );
+    ctx.lineWidth = strokeWidth;
+    ctx.strokeStyle = borderColor;
+    ctx.stroke();
+  }
 
-  // 4. Button text
+  // 4. Button text, centred in the content rect
   ctx.font = `${data.fontSize}px system-ui`;
   ctx.fillStyle = data.color;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   const textOffset = pressed ? 1 : 0;
-  const centerX = canvasX + btnWidth / 2 + textOffset;
-  const centerY = canvasY + btnHeight / 2 + textOffset;
+  const centerX = content.x + content.width / 2 + textOffset;
+  const centerY = content.y + content.height / 2 + textOffset;
 
-  // Clip text to button bounds
+  // Clip text to the content rect
   ctx.save();
   ctx.beginPath();
-  ctx.rect(canvasX + 4, canvasY, btnWidth - 8, btnHeight);
+  ctx.rect(content.x + 4, content.y, Math.max(0, content.width - 8), content.height);
   ctx.clip();
   if (glyph) {
     // The glyph and the caption are centred TOGETHER, glyph first.
@@ -276,6 +346,7 @@ async function fetchButtonData(
   sheetIndex: number,
   row: number,
   col: number,
+  controlType: string,
 ): Promise<void> {
   pendingFetches.add(controlId);
   try {
@@ -285,18 +356,22 @@ async function fetchButtonData(
     const writes = controlGeometryWritesInFlight(anchor);
     if (writes) await writes;
     const readIsCurrent = beginControlGeometryRead(anchor);
-    // Use resolveControlProperties to evaluate formula-type properties
+    // The literals with every bound property overlaid (Rust, D-BIND).
     const resolved = await resolveControlProperties(sheetIndex, row, col);
     if (!resolved || Object.keys(resolved).length === 0) return;
 
     buttonDataCache.set(controlId, {
       text: resolved.text ?? "Button",
-      fill: resolved.fill ?? "#e0e0e0",
+      fill: resolved.fill ?? BUTTON_PAINT_DEFAULTS.fill,
+      fillAlpha: backgroundAlphaOf(resolved[BACKGROUND_TRANSPARENCY_KEY]),
       color: resolved.color ?? "#000000",
-      borderColor: resolved.borderColor ?? "#999999",
+      borderColor: resolved.borderColor ?? BUTTON_PAINT_DEFAULTS.borderColor,
+      strokeWidth: parseStrokeWidth(resolved.strokeWidth, BUTTON_PAINT_DEFAULTS.strokeWidth),
       fontSize: parseInt(resolved.fontSize ?? "11", 10) || 11,
     });
     staleEntries.delete(controlId);
+    // The same read is the button's visual container (WP-C D-FORMAT).
+    noteControlProperties(controlId, controlType, resolved);
 
     // The resolved width/height (a formula-driven size) goes back into the
     // store -- unless the geometry changed while this read was on its way: then

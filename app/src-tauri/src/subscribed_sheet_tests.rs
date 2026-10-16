@@ -1005,6 +1005,7 @@ fn a_chart_source_that_hosts_a_floating_range_brings_its_backing_sheet_too() {
             show_title: true,
             show_column_headers: true,
             show_row_headers: true,
+            container: None,
         });
         state.floating_ranges.write(&seed).unwrap().push(row);
     }
@@ -1028,6 +1029,7 @@ fn a_chart_source_that_hosts_a_floating_range_brings_its_backing_sheet_too() {
             show_title: true,
             show_column_headers: true,
             show_row_headers: true,
+            container: None,
         });
         state.floating_ranges.write(&seed).unwrap().push(row);
     }
@@ -1176,6 +1178,7 @@ fn the_filter_object_snapshot_reads_slicers_and_timelines() {
         }],
         filter_level: 1,
         data_source_id: None,
+        container: None,
     };
     let slicer = crate::persistence::saved_slicer_to_slicer_at(&saved, 2);
     slicer_state.slicers.write(&seed).unwrap().insert(slicer.id, slicer);
@@ -1200,6 +1203,7 @@ fn the_filter_object_snapshot_reads_slicers_and_timelines() {
             show_scrollbar: true,
             style_preset: "TimelineStyleLight1".to_string(),
             connected_pivot_ids: vec![pivot_a, pivot_b],
+            container: None,
         },
         1,
     );
@@ -1481,6 +1485,7 @@ fn floating_range_on(state: &AppState, host: usize, name: &str) -> usize {
         show_title: true,
         show_column_headers: true,
         show_row_headers: true,
+        container: None,
     });
     state.floating_ranges.write(&seed).unwrap().push(row);
     backing
@@ -1591,6 +1596,7 @@ fn a_pruned_pivot_is_named_with_the_sheet_that_kept_it_home() {
         connected_sources: Vec::new(),
         filter_level: 1,
         data_source_id: None,
+        container: None,
     }];
     wb.timeline_slicers = vec![::persistence::SavedTimelineSlicer {
         id: new_entity(),
@@ -1612,6 +1618,7 @@ fn a_pruned_pivot_is_named_with_the_sheet_that_kept_it_home() {
         show_scrollbar: true,
         style_preset: "TimelineStyleLight1".to_string(),
         connected_pivot_ids: Vec::new(),
+        container: None,
     }];
 
     // Sheet3 (the source) was withheld: the pivot's page travels, its data not.

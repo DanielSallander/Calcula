@@ -21,7 +21,6 @@ import {
 import { createLinearScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
-  drawChartBackground,
   drawPlotBackground,
   drawHorizontalGridLines,
   drawTitle,
@@ -80,7 +79,6 @@ export function paintLineChart(
   const xAxis = resolveScatterXAxis(data, spec, plotArea, { requireScale: true });
 
   // 1. Background
-  drawChartBackground(ctx, layout, theme);
 
   // 2. Plot area background
   drawPlotBackground(ctx, plotArea, theme);
@@ -273,9 +271,7 @@ export function paintLineChart(
   ctx.restore();
 
   // 6. Title
-  if (spec.title) {
-    drawTitle(ctx, spec.title, layout, theme);
-  }
+  drawTitle(ctx, spec.title, layout, theme);
 
   // 7. Legend
   if (spec.legend.visible && data.series.length > 0) {

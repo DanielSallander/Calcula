@@ -21,8 +21,19 @@
 //          Imported by its own path (`@api/cellClipboard`), like every module
 //          the Home-tab programme adds (contract 6.9): the barrel and
 //          @api/lib belong to other lanes.
+//
+//          `copyCellRange` (WP-A, 2026-10-15): the COPY primitive Core's own
+//          Copy runs, for an object whose cells live in the active sheet's grid
+//          and are selected INSIDE the object (a canvas pivot box's cells, which
+//          Core's selection never holds). It fills the same internal and system
+//          clipboard Copy does -- so Paste, Paste Special and Paste Link read
+//          it -- and never touches Core's selection or its marching ants. It
+//          answers why it did not copy ("empty" / "tooLarge" / "failed"); the
+//          caller tells the user.
 
 export {
   internalClipboardIsCurrent,
   internalClipboardMatchesSystemText,
+  copyCellRange,
 } from "../core/hooks/useClipboard";
+export type { CellRangeCopyRequest, CellRangeCopyResult } from "../core/hooks/useClipboard";

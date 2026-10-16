@@ -29,6 +29,18 @@
 //          THE GESTURE FLAG (core/lib/objectHover.ts): a move that passes its
 //          threshold is a Core floating gesture until its release -- no grip
 //          shows while one is in progress.
+//
+//          THE REFERENCE PICK (D-PICK, owner finding F3): while a formula is
+//          picking a reference (core/lib/referencePickState.ts), a press on a
+//          floating object is decided HERE, once, before anything selects: where
+//          the object's `referenceAt` answers, the press starts a pick
+//          (floatingReferencePickSession.ts) that inserts the cell -- or the
+//          range a drag covers -- at its release; everywhere else it is inert.
+//          Either way no object-selection press hook runs, no
+//          `floatingObject:selected` / `bodyDragStart` is dispatched and no move
+//          is armed, so the edited object stays selected and the edit stays
+//          open. The second press and the dblclick of a double-click that
+//          started as a pick are its ECHO and are swallowed too.
 
 import type { GridConfig, Viewport } from "../../../types";
 import {
@@ -41,8 +53,12 @@ import {
   type GridRegion,
   type OverlayHitTestContext,
   type ResolvedFloatingZone,
+  referenceAtPoint,
+  type FloatingReferencePickRange,
 } from "../../../../api/gridOverlays";
-import { noteObjectPress, noteWorksheetObjectPress } from "../../../../api/objectSelection";
+import { floatingReferencePickActive, isReferencePickEcho } from "../../../lib/referencePickState";
+import { beginFloatingReferencePick } from "./floatingReferencePickSession";
+import { OBJECT_DRAG_THRESHOLD_PX, noteObjectPress, noteWorksheetObjectPress } from "../../../../api/objectSelection";
 import { isPointerClaimed } from "../../../lib/pointerClaims";
 import { getLayoutSurface, applySurfaceToMove } from "../../../lib/layoutSurface";
 import { getGridStateSnapshot } from "../../../state/GridContext";
@@ -142,6 +158,12 @@ interface OverlayMoveDependencies {
   setIsOverlayMoving: (value: boolean) => void;
   setCursorStyle: (style: string) => void;
   overlayMoveStateRef: React.MutableRefObject<OverlayMoveState | null>;
+  /**
+   * Where a finished REFERENCE PICK on a floating object goes
+   * (useSpreadsheetSelection.handleFloatingReferencePick). Without it a pick
+   * press is still decided as a pick -- inert -- and inserts nothing.
+   */
+  onFloatingReferencePick?: (range: FloatingReferencePickRange) => void;
 }
 
 // ============================================================================
@@ -159,6 +181,13 @@ export interface OverlayBodyHit {
   region: GridRegion;
   zone: ResolvedFloatingZone;
   cursor: string;
+  /**
+   * The hit-test context the zone was resolved with (canvas point and the
+   * object's canvas bounds). The pick branch asks `referenceAt` with this
+   * SAME context, so a pick and a zone answer can never be computed against
+   * two different geometries.
+   */
+  ctx: OverlayHitTestContext;
 }
 
 export interface OverlayMoveHandlers {
@@ -274,7 +303,17 @@ export function createOverlayMoveHandlers(
     setIsOverlayMoving,
     setCursorStyle,
     overlayMoveStateRef,
+    onFloatingReferencePick,
   } = deps;
+
+  /** CLIENT px -> the logical canvas px Core's mouse handling uses, or null before mount. */
+  const clientToCanvas = (clientX: number, clientY: number): { x: number; y: number } | null => {
+    const container = containerRef.current;
+    if (!container) return null;
+    const rect = container.getBoundingClientRect();
+    const zoom = getGridStateSnapshot()?.zoom || 1;
+    return { x: (clientX - rect.left) / zoom, y: (clientY - rect.top) / zoom };
+  };
 
   /**
    * Check if mouse is over a floating overlay body.
@@ -325,7 +364,15 @@ export function createOverlayMoveHandlers(
           floatingCanvasBounds: bounds,
         };
         const zone = resolveFloatingZone(ctx);
-        return { region, zone, cursor: contentGestureCursorFor(region.id) ?? zone.cursor };
+        const held = contentGestureCursorFor(region.id);
+        // DURING A REFERENCE PICK the pointer says what a press there would
+        // do: 'cell' where the object names a cell, 'default' where the press
+        // is inert -- the same answer the press reads (one question, asked of
+        // the same context). A held content gesture's pointer still wins.
+        if (held === null && floatingReferencePickActive()) {
+          return { region, zone, cursor: referenceAtPoint(ctx) ? "cell" : "default", ctx };
+        }
+        return { region, zone, cursor: held ?? zone.cursor, ctx };
       }
     }
     return null;
@@ -519,6 +566,34 @@ export function createOverlayMoveHandlers(
       return true;
     }
 
+    // THE REFERENCE PICK (D-PICK), decided before anything selects.
+    //
+    // The ECHO comes first and wins unconditionally: a canvas pivot pick
+    // inserts its text only after awaited IPCs (the GETPIVOTDATA interceptor),
+    // so the second press of a double-click can arrive while the predicate is
+    // STILL true -- it must not start a second pick -- or after it turned
+    // false -- it must not select the object and commit the edit.
+    if (isReferencePickEcho(hit.region.id, event.clientX, event.clientY)) {
+      event.preventDefault();
+      clearContentGestureCursor();
+      return true;
+    }
+    if (floatingReferencePickActive()) {
+      event.preventDefault(); // keeps the editor's focus: no blur, no commit
+      clearContentGestureCursor();
+      const pick = referenceAtPoint(hit.ctx);
+      if (pick && onFloatingReferencePick) {
+        beginFloatingReferencePick(hit.region, pick, event.clientX, event.clientY, {
+          boundsOf: (r) => getFloatingCanvasBounds(r, config, viewport),
+          clientToCanvas,
+          onPick: onFloatingReferencePick,
+        });
+      }
+      // No noteObjectPress, no floatingObject:selected, no bodyDragStart, no
+      // armMove: the pick (or the inert press) is invisible to every family.
+      return true;
+    }
+
     const region = hit.region;
     event.preventDefault();
 
@@ -637,7 +712,10 @@ export function createOverlayMoveHandlers(
 
     // Mark as moved if we've gone beyond a small threshold. From here to the
     // release this is a Core floating GESTURE: no grip shows while it lasts.
-    if (!moveState.hasMoved && (Math.abs(deltaX) > 3 || Math.abs(deltaY) > 3)) {
+    if (
+      !moveState.hasMoved &&
+      (Math.abs(deltaX) > OBJECT_DRAG_THRESHOLD_PX || Math.abs(deltaY) > OBJECT_DRAG_THRESHOLD_PX)
+    ) {
       moveState.hasMoved = true;
       setFloatingGestureActive(true);
     }
@@ -781,6 +859,16 @@ export function createOverlayMoveHandlers(
         target.isContentEditable)
     ) {
       return false;
+    }
+
+    // A double-click during a reference pick, or the dblclick of one that
+    // STARTED as a pick (its first press inserted the reference, which ended
+    // the pick): swallowed -- the owner never hears it (no drill, no editor).
+    if (
+      floatingReferencePickActive() ||
+      isReferencePickEcho(region.id, event.clientX, event.clientY)
+    ) {
+      return true;
     }
 
     const registration = getOverlayRegistration(region.type);

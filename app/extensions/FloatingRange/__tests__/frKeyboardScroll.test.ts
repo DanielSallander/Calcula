@@ -29,6 +29,7 @@ vi.mock("@api/editing", () => ({
   getGlobalIsEditing: () => false,
   insertTextIntoActiveFormula: vi.fn(),
   getExternalFormulaTarget: () => null,
+  isFormulaReferencePickActive: () => false,
 }));
 
 const WINDOW_ROWS = 4;

@@ -1347,6 +1347,7 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         // -- Whole-sheet / whole-workbook evaluation --------------------------
         ("calculation.rs", "mark_off_sheet_circular_cells", "an inner step of the sheet-scoped pass"),
         ("pivot/operations.rs", "recalculate_sheet_formulas", "whole-sheet evaluation; removes no origin"),
+        ("pivot/operations.rs", "restyle_pivot_in_grid", "STYLE ONLY, inside the pivot's own written block: it re-sets each existing cell's style_index and keeps its value and ast (a pivot cell has no formula), so it removes no origin and overwrites no spill claim"),
         ("persistence.rs", "open_file", "document replacement: reset_document_scoped_stores clears both spill maps for the outgoing document, and `spill_restore::restore_spill_map_on_load` refills them for the incoming one from the extents the file carries (§2ab). Neither half writes a document cell"),
         // -- Helper: the CALLER maintains --------------------------------------
         ("consolidate.rs", "consolidate_data_inner", "`consolidate_data` seeds the shared cascade over its updated_cells"),

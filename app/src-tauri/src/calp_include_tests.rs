@@ -231,7 +231,7 @@ impl WorkingCopy {
             .controls
             .write(&test_seed_effect())
             .unwrap()
-            .insert((self.dashboard, row, col), ControlMetadata { control_type: "button".into(), properties: props });
+            .insert((self.dashboard, row, col), ControlMetadata { control_type: "button".into(), uid: String::new(), properties: props });
     }
 
     /// The publish carrier as `assemble_publish_workbook` builds it for this

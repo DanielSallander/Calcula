@@ -146,6 +146,9 @@ pub struct WorkbookStateDigest {
     pub controls: BTreeMap<String, Value>,
     /// Sheet index -> SheetComputedProperties.
     pub computed_properties: BTreeMap<String, Value>,
+    /// "kind:id path" -> `{ formula, model }`: the object property BINDINGS
+    /// (persisted, undoable). Resolved values are transient and excluded.
+    pub object_bindings: BTreeMap<String, Value>,
     /// Sheet index -> SheetProtection.
     pub sheet_protection: BTreeMap<String, Value>,
     // NOTE: no `cell_protection` field. Cell lock state is a CellStyle
@@ -186,6 +189,11 @@ fn cell_key(row: u32, col: u32) -> String {
 
 fn sheet_cell_key(sheet: usize, row: u32, col: u32) -> String {
     format!("{}:{}:{}", sheet, row, col)
+}
+
+/// "kind:id path" -- the digest key of one object property binding.
+pub(crate) fn object_binding_digest_key(row: &::persistence::SavedObjectBinding) -> String {
+    format!("{}:{} {}", row.object.kind, row.object.id, row.path)
 }
 
 /// Build the cell map for one grid and record used style indices.
@@ -595,6 +603,7 @@ pub(crate) fn build_workbook_state_digest(
         scenarios: BTreeMap::new(),
         controls: BTreeMap::new(),
         computed_properties: BTreeMap::new(),
+        object_bindings: BTreeMap::new(),
         sheet_protection: BTreeMap::new(),
         workbook_protection: Value::Null,
         advanced_filter_hidden_rows: BTreeMap::new(),
@@ -810,6 +819,17 @@ pub(crate) fn build_workbook_state_digest(
             digest.computed_properties.insert(
                 sheet.to_string(),
                 serde_json::json!({ "columns": cols, "rows": rows, "cells": cells }),
+            );
+        }
+    }
+    // The binding store is a LEAF lock and nothing else is held here. Digested
+    // through its SEQUENCE snapshot (the map's struct key is not serialisable),
+    // keyed by the on-disk spelling so a save/reload round trip compares equal.
+    if let Ok(store) = state.object_bindings.read() {
+        for row in store.snapshot().rows {
+            digest.object_bindings.insert(
+                object_binding_digest_key(&row),
+                serde_json::json!({ "formula": row.formula, "model": row.model }),
             );
         }
     }

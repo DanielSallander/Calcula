@@ -2,17 +2,32 @@
 // PURPOSE: Helper functions for pivot context menu visibility and dynamic labels.
 // CONTEXT: Provides synchronous helpers that use cached pivot view data,
 //          plus async helpers for click handlers.
+//
+//          Every cell is read WINDOWED-AWARE (`getPivotViewRow`): a pivot of
+//          more than 500 rows carries cells for its first window only, the
+//          rest live in the cell-window cache, so reading `view.rows[viewRow]`
+//          answered nothing past the first window and every header item did
+//          nothing there (BUG-0455). Bounds are the view's row COUNT
+//          (`viewRowCount`), never `view.rows.length`.
+//
+//          Items NAME an item by `pivotCellLabel` (formattedValue, else the
+//          value as text), so an unformatted numeric header is never "" (BUG-0454).
 
 import type { GridMenuContext } from "@api";
+import { getGridStateSnapshot } from "@api/grid";
 import { findPivotRegionAtCell } from "./selectionHandler";
-import { getCachedPivotView } from "../index";
+import { getCachedPivotView } from "../lib/pivotViewStore";
 import {
   getPivotAtCell,
   getPivotView,
+  isTotalCell,
   type PivotRegionInfo,
   type PivotCellData,
+  type PivotRowData,
   type PivotViewResponse,
 } from "../lib/pivot-api";
+import { getPivotViewRow, governingRowHeader, pivotCellLabel } from "../lib/pivotChromeActions";
+import { viewRowCount } from "../rendering/pivotVisualRenderer";
 import type { PivotRegionData } from "../types";
 
 // ============================================================================
@@ -37,16 +52,30 @@ export function isInPivotRegion(ctx: GridMenuContext): boolean {
 }
 
 /**
- * Get the cached cell data for the clicked cell (synchronous).
- * Returns null if the cell is not in a pivot, no cached view exists,
- * or the coordinates are out of bounds.
+ * Whether the menu was opened on a CANVAS pivot box (the active sheet is a
+ * canvas and the clicked cell is in a pivot region). The worksheet already
+ * has Core's own cell items (Copy ...); a canvas box has only the pivot's.
  */
-export function getCachedCellData(ctx: GridMenuContext): {
+export function isCanvasPivotContext(ctx: GridMenuContext): boolean {
+  return getGridStateSnapshot()?.surface === "canvas" && isInPivotRegion(ctx);
+}
+
+/** The cached cell under the menu, with the view and row it was read from. */
+export interface CachedPivotMenuCell {
   region: PivotRegionData;
+  view: PivotViewResponse;
+  row: PivotRowData;
   cell: PivotCellData;
   viewRow: number;
   viewCol: number;
-} | null {
+}
+
+/**
+ * Get the cached cell data for the clicked cell (synchronous, windowed-aware).
+ * Returns null if the cell is not in a pivot, no cached view exists, the row
+ * is not cached yet, or the coordinates are out of bounds.
+ */
+export function getCachedCellData(ctx: GridMenuContext): CachedPivotMenuCell | null {
   if (!ctx.clickedCell) return null;
 
   const region = findPivotRegionAtCell(ctx.clickedCell.row, ctx.clickedCell.col);
@@ -57,15 +86,13 @@ export function getCachedCellData(ctx: GridMenuContext): {
 
   const viewRow = ctx.clickedCell.row - region.startRow;
   const viewCol = ctx.clickedCell.col - region.startCol;
+  if (viewRow < 0 || viewRow >= viewRowCount(view) || viewCol < 0) return null;
 
-  if (viewRow >= 0 && viewRow < view.rows.length) {
-    const row = view.rows[viewRow];
-    if (viewCol >= 0 && viewCol < row.cells.length) {
-      return { region, cell: row.cells[viewCol], viewRow, viewCol };
-    }
-  }
-
-  return null;
+  const row = getPivotViewRow(region.pivotId, view, viewRow);
+  if (!row || viewCol >= row.cells.length) return null;
+  const cell = row.cells[viewCol];
+  if (!cell) return null;
+  return { region, view, row, cell, viewRow, viewCol };
 }
 
 /**
@@ -80,6 +107,52 @@ export function isDimensionHeader(ctx: GridMenuContext): boolean {
 }
 
 /**
+ * Whether the clicked cell shows a VALUE: a data cell, or a subtotal / grand
+ * total cell in the value area. A total cell in the row-label columns (the
+ * "Grand Total" label) or in a column-header row (the "Grand Total" column
+ * caption) is a label, not a value.
+ */
+export function isValueCell(ctx: GridMenuContext): boolean {
+  const cached = getCachedCellData(ctx);
+  if (!cached) return false;
+  const { cell, row, view, viewCol } = cached;
+  if (cell.cellType === "Data") return true;
+  if (!isTotalCell(cell.cellType)) return false;
+  if (row.rowType === "ColumnHeader" || row.rowType === "FilterRow") return false;
+  return viewCol >= (view.rowLabelColCount ?? 0);
+}
+
+/**
+ * The value field (index into `view.valueFieldNames`) the clicked value cell
+ * shows: the cell's own `valueFieldIndex`, or 0 when the pivot has exactly one
+ * value field; null when it cannot be known (not a value cell, or several
+ * value fields and the cell names none).
+ */
+export function valueFieldIndexFor(ctx: GridMenuContext): number | null {
+  if (!isValueCell(ctx)) return null;
+  const cached = getCachedCellData(ctx);
+  if (!cached) return null;
+  if (typeof cached.cell.valueFieldIndex === "number") return cached.cell.valueFieldIndex;
+  const names = cached.view.valueFieldNames ?? [];
+  return names.length === 1 ? 0 : null;
+}
+
+/** A value field's name for display: a model measure's outer `[...]` stripped. */
+export function displayValueFieldName(name: string): string {
+  const m = /^\[(.*)\]$/.exec(name.trim());
+  return m ? m[1] : name;
+}
+
+/** The display name of the value field the clicked value cell shows, or null. */
+export function valueFieldNameFor(ctx: GridMenuContext): string | null {
+  const index = valueFieldIndexFor(ctx);
+  if (index === null) return null;
+  const cached = getCachedCellData(ctx);
+  const name = cached?.view.valueFieldNames?.[index];
+  return name ? displayValueFieldName(name) : null;
+}
+
+/**
  * Get the field name for the clicked dimension header cell (synchronous).
  * Returns null if not a dimension header or no cached data.
  *
@@ -90,37 +163,18 @@ export function getFieldNameForCell(ctx: GridMenuContext): string | null {
   const cached = getCachedCellData(ctx);
   if (!cached) return null;
 
-  const { cell, region } = cached;
+  const { cell, view } = cached;
   if (cell.cellType !== "RowHeader" && cell.cellType !== "ColumnHeader") return null;
-
-  // Use the cached view to look up field name via fieldConfiguration
-  const view = getCachedPivotView(region.pivotId);
-  if (!view) return null;
 
   // The groupPath gives us [fieldIndex, valueId] pairs.
   // The last entry's fieldIndex identifies which field this cell belongs to.
   const groupPath = cell.groupPath;
   if (!groupPath || groupPath.length === 0) return null;
 
-  const fieldIndex = groupPath[groupPath.length - 1][0];
-
-  // Look up the field name from column headers.
-  // First, try looking in the column header rows for a matching header label.
-  // The simplest approach: use the formattedValue of header cells in the first
-  // row that spans this field index. But for a reliable lookup, we use the
-  // view's column metadata.
-  //
-  // For RowHeader: the field index refers to row fields
-  // For ColumnHeader: the field index refers to column fields
-  //
-  // We'll return the formattedValue of the cell itself as a fallback for
-  // the "item" name, but for the "field" name we need the field config.
-  // Since we don't have direct access to fieldConfiguration from the view,
-  // we look in the column header row or use the cell's indent/position.
-
-  // Heuristic: scan the column header rows for the field label
+  // Heuristic: scan the column header rows for the field label.
   // In compact layout, the first column header cell in the row label area
   // contains the field name. In tabular/outline, each column has its field name.
+  // Column-header rows lead the view, so they are in its first window.
   if (cell.cellType === "RowHeader") {
     // For row headers, find the label from the column header row for this column
     for (const row of view.rows) {
@@ -153,8 +207,8 @@ export function getFieldNameForCell(ctx: GridMenuContext): string | null {
     }
   }
 
-  // Fallback: return the cell's formatted value (this is the item label, not the field name)
-  return cell.formattedValue || null;
+  // Fallback: the cell's own label (this is the item label, not the field name)
+  return pivotCellLabel(cell) || null;
 }
 
 /**
@@ -180,7 +234,80 @@ export function getFieldIndexForCell(ctx: GridMenuContext): number | null {
 export function getItemLabelForCell(ctx: GridMenuContext): string | null {
   const cached = getCachedCellData(ctx);
   if (!cached) return null;
-  return cached.cell.formattedValue || null;
+  return pivotCellLabel(cached.cell) || null;
+}
+
+// ============================================================================
+// Expand / Collapse targets
+// ============================================================================
+
+/** The header an Expand / Collapse item acts on. */
+export interface PivotExpandTarget {
+  pivotId: string;
+  header: PivotCellData;
+  isRow: boolean;
+}
+
+/**
+ * The header Expand / Collapse acts on: the clicked cell itself when it is a
+ * row or column header; for a value cell the ROW item that governs its row
+ * (Excel's rule: Expand on a value expands the row item it belongs to); null
+ * anywhere else (a corner, a label total, a filter row, an uncached row).
+ */
+export function expandTargetFor(ctx: GridMenuContext): PivotExpandTarget | null {
+  const cached = getCachedCellData(ctx);
+  if (!cached) return null;
+  const { cell, region, viewRow } = cached;
+  if (cell.cellType === "RowHeader" || cell.cellType === "ColumnHeader") {
+    return { pivotId: region.pivotId, header: cell, isRow: cell.cellType === "RowHeader" };
+  }
+  if (!isValueCell(ctx)) return null;
+  const governing = governingRowHeader(region.pivotId, viewRow);
+  return governing ? { pivotId: region.pivotId, header: governing.cell, isRow: true } : null;
+}
+
+/**
+ * Why Expand (`expand` true) or Collapse cannot act here, or null when it can.
+ * The menu shows the item DISABLED with this reason rather than letting a
+ * click do nothing.
+ */
+export function expandDisabledReason(ctx: GridMenuContext, expand: boolean): string | null {
+  const target = expandTargetFor(ctx);
+  const verb = expand ? "expand" : "collapse";
+  if (!target) return `Nothing to ${verb} here.`;
+  const label = pivotCellLabel(target.header);
+  if (!target.header.isExpandable) {
+    return label ? `"${label}" has nothing to ${verb}.` : `Nothing to ${verb} here.`;
+  }
+  const collapsed = target.header.isCollapsed === true;
+  if (expand && !collapsed) return "Already expanded.";
+  if (!expand && collapsed) return "Already collapsed.";
+  return null;
+}
+
+/** The field Expand / Collapse Entire Field acts on. */
+export interface PivotFieldTarget {
+  pivotId: string;
+  isRow: boolean;
+  /** The field's SOURCE index (the last entry of the header's group path). */
+  fieldIndex: number;
+}
+
+/**
+ * The field "Expand/Collapse Entire Field" acts on: the clicked header's
+ * field, or -- on a value cell -- the field of the row item that governs it.
+ */
+export function entireFieldTargetFor(ctx: GridMenuContext): PivotFieldTarget | null {
+  const target = expandTargetFor(ctx);
+  if (!target) return null;
+  const path = target.header.groupPath;
+  if (!path || path.length === 0) return null;
+  return { pivotId: target.pivotId, isRow: target.isRow, fieldIndex: path[path.length - 1][0] };
+}
+
+/** Why an Entire Field item cannot act here, or null when it can. */
+export function entireFieldDisabledReason(ctx: GridMenuContext, expand: boolean): string | null {
+  return entireFieldTargetFor(ctx) ? null : `No field to ${expand ? "expand" : "collapse"} here.`;
 }
 
 // ============================================================================
@@ -189,7 +316,8 @@ export function getItemLabelForCell(ctx: GridMenuContext): string | null {
 
 /**
  * Get full pivot cell data for the clicked cell (async - fetches from backend).
- * Returns null if the cell is not in a pivot or has no view data.
+ * Returns null if the cell is not in a pivot or has no view data. Windowed-aware:
+ * a row past the view's first window is read from the cell-window cache.
  */
 export async function getClickedCellData(
   ctx: GridMenuContext,
@@ -212,10 +340,11 @@ export async function getClickedCellData(
     const viewRow = ctx.clickedCell.row - region.startRow;
     const viewCol = ctx.clickedCell.col - region.startCol;
 
-    if (viewRow >= 0 && viewRow < view.rows.length) {
-      const row = view.rows[viewRow];
-      if (viewCol >= 0 && viewCol < row.cells.length) {
-        return { pivotInfo, cell: row.cells[viewCol], viewRow, viewCol };
+    if (viewRow >= 0 && viewRow < viewRowCount(view) && viewCol >= 0) {
+      const row = getPivotViewRow(pivotInfo.pivotId, view, viewRow);
+      const cell = row?.cells[viewCol];
+      if (cell) {
+        return { pivotInfo, cell, viewRow, viewCol };
       }
     }
   } catch {

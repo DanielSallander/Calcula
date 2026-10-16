@@ -19,6 +19,7 @@ import path from "path";
 
 const API_EXTENSIONS = path.resolve(__dirname, "../extensions.ts");
 const CORE_GRID = path.resolve(__dirname, "../../core/lib/gridCommands.ts");
+const SHELL_GRID_EXTENSIONS = path.resolve(__dirname, "../../shell/registries/gridExtensions.ts");
 
 describe("@api GridMenuContext is DERIVED from Core", () => {
   it("api/extensions.ts declares no GridMenuContext of its own and re-exports Core's", () => {
@@ -28,6 +29,26 @@ describe("@api GridMenuContext is DERIVED from Core", () => {
     );
     expect(source).toMatch(
       /export\s+type\s*\{[^}]*\bGridMenuContext\b[^}]*\}\s*from\s*"\.\.\/core\/lib\/gridCommands"/,
+    );
+  });
+
+  it("the shell declares no GridContextMenuItem of its own and re-exports @api/extensions'", () => {
+    // WP-A S9: the shell's registry carried a hand-written copy with an
+    // identical body; a field added to one (`disabledReason`) would not exist
+    // for the other, and the registry would drop it without a type error.
+    const source = readFileSync(SHELL_GRID_EXTENSIONS, "utf8");
+    expect(source, "a hand-written GridContextMenuItem is back in the shell").not.toMatch(
+      /\binterface\s+GridContextMenuItem\b/,
+    );
+    expect(source).toMatch(
+      /export\s+type\s*\{[^}]*\bGridContextMenuItem\b[^}]*\}\s*from\s*"@api\/extensions"/,
+    );
+    // @api's own declaration is where the field lives.
+    const api = readFileSync(API_EXTENSIONS, "utf8");
+    const body = api.match(/export\s+interface\s+GridContextMenuItem\s*\{([\s\S]*?)\r?\n\}/);
+    expect(body, "@api's GridContextMenuItem was not found -- this guard reads nothing").not.toBeNull();
+    expect(body![1]).toMatch(
+      /\bdisabledReason\?\s*:\s*string\s*\|\s*\(\(context:\s*GridMenuContext\)\s*=>\s*string\s*\|\s*null\)\s*;/,
     );
   });
 

@@ -57,6 +57,14 @@ interface DropZoneProps {
   onDragStart: (field: DragField) => void;
   onDragEnd: () => void;
   placeholder?: string;
+  /**
+   * The zone's own name in the drag registry, when several live zones share
+   * one DropZoneType (a chart's wells: a gauge's Value, Target, Minimum and
+   * Maximum are all "values"). Its pills carry it as `fromKey`, so a drop
+   * from ANOTHER zone of the same type is a move, never a reorder. Absent
+   * (the pivot editor) the zone is keyed by its type, as always.
+   */
+  dropKey?: string;
 }
 
 export function DropZone({
@@ -74,6 +82,7 @@ export function DropZone({
   onDragStart,
   onDragEnd,
   placeholder: customPlaceholder,
+  dropKey,
 }: DropZoneProps): React.ReactElement {
   const contentRef = useRef<HTMLDivElement>(null);
   const [insertIndicatorIndex, setInsertIndicatorIndex] = useState<number | null>(null);
@@ -83,7 +92,9 @@ export function DropZone({
   const handleDrop = useCallback(
     (dragField: DragField, insertIndex?: number) => {
       setInsertIndicatorIndex(null);
-      if (dragField.fromZone === zone && dragField.fromIndex !== undefined) {
+      const sameZone =
+        dragField.fromZone === zone && (dragField.fromKey ?? dragField.fromZone) === (dropKey ?? zone);
+      if (sameZone && dragField.fromIndex !== undefined) {
         // Reordering within the same zone
         const targetIndex = insertIndex ?? fields.length;
         if (targetIndex !== dragField.fromIndex) {
@@ -94,7 +105,7 @@ export function DropZone({
         onDrop(zone, dragField, insertIndex);
       }
     },
-    [zone, fields.length, onDrop, onReorder]
+    [zone, dropKey, fields.length, onDrop, onReorder]
   );
 
   // Calculate insert index based on Y position
@@ -120,7 +131,7 @@ export function DropZone({
     [fields.length]
   );
 
-  const { isDragOver, dropZoneProps } = useDropZone(zone, handleDrop, getInsertIndex);
+  const { isDragOver, dropZoneProps } = useDropZone(zone, handleDrop, getInsertIndex, dropKey);
 
   // Update insert indicator position during drag
   useEffect(() => {
@@ -173,6 +184,7 @@ export function DropZone({
   return (
     <div
       {...dropZoneProps}
+      data-drop-key={dropKey}
       className={`${styles.dropZone} ${isDragOver ? 'drag-over' : ''} ${
         fullWidth ? 'full-width' : ''
       }`}
@@ -211,6 +223,7 @@ export function DropZone({
               }
               onDragStart={onDragStart}
               onDragEnd={onDragEnd}
+              dropKey={dropKey}
             />
           ))
         )}

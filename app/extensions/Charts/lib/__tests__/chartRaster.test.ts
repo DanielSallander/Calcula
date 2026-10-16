@@ -96,6 +96,19 @@ describe("renderChartPng", () => {
     expect(calls).not.toContain("ellipse");
   });
 
+  it("export: the chart inside its visual container -- the background first, the border last (D-FORMAT, R4)", async () => {
+    // The painters fill no background of their own any more; the export paints
+    // the container itself (paintChartWithContainer), or the PNG would be
+    // transparent and frameless.
+    const calls = installFakeOffscreen();
+    await renderChartPng("c1", { withOverlay: false });
+    const firstPaint = calls.findIndex((c) => ["fill", "fillRect", "fillText", "stroke", "strokeRect"].includes(c));
+    expect(calls[firstPaint]).toBe("fill"); // the container background
+    const lastStroke = calls.lastIndexOf("stroke"); // the container border
+    expect(lastStroke).toBeGreaterThan(firstPaint);
+    expect(calls.slice(lastStroke + 1).filter((c) => ["fill", "fillRect", "fillText"].includes(c))).toEqual([]);
+  });
+
   it("throws for a chart that does not exist", async () => {
     installFakeOffscreen();
     h.getChartById.mockReturnValue(undefined);

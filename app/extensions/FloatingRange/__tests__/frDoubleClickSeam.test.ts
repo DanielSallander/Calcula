@@ -34,6 +34,12 @@ vi.mock("@api/editing", () => ({
   getGlobalIsEditing: () => false,
   insertTextIntoActiveFormula: vi.fn(),
   getExternalFormulaTarget: () => getExternalFormulaTarget(),
+  // Core's one predicate (core/lib/referencePickState.ts): the grid probe OR
+  // an external target expecting a reference -- driven here by the two doubles.
+  isFormulaReferencePickActive: () =>
+    isGlobalFormulaMode() ||
+    (getExternalFormulaTarget() as { isExpectingReference?: () => boolean } | null)?.isExpectingReference?.() ===
+      true,
 }));
 
 import { handleFrDoubleClick } from "../index";

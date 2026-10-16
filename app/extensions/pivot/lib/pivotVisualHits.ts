@@ -22,14 +22,22 @@ import type {
   PivotVisualScroll,
 } from "../rendering/pivotVisualRenderer";
 import { viewCellAtLocal } from "../rendering/pivotVisualRenderer";
+import { clearPivotCellSelection, getPivotCellSelection } from "./pivotVisualCellSelection";
 
 /** Extra pixels around the 12px +/- icon (the worksheet overlay uses the same). */
 export const VISUAL_ICON_HIT_PADDING = 4;
 
 export interface PivotVisualRecord {
   pivotId: string;
-  /** The box in canvas coordinates at the last paint. */
+  /**
+   * The CONTENT box in canvas coordinates at the last paint: the part of the
+   * object the cells live in, inside the visual container's padding, border
+   * and Core-painted title bands (WP-C). Every cell / chrome hit and the
+   * scroll read it -- paint == hit.
+   */
   box: PivotVisualBox;
+  /** The whole object (the frame) in canvas coordinates at the last paint; absent = `box`. */
+  outer?: PivotVisualBox;
   /** Box-local chrome bounds (after scroll); null for an empty / unloaded pivot. */
   bounds: PivotInteractiveBounds | null;
   /** The Cancel button of the loading indicator, in canvas coordinates. */
@@ -67,7 +75,11 @@ export function pivotVisualRecordCount(): number {
   return records.size;
 }
 
-/** Drop the records of boxes that are no longer published. */
+/**
+ * Drop the records of boxes that are no longer published -- and the inner
+ * cell selection (D-CELLS) when its box is one of them (a deleted pivot, a
+ * page left).
+ */
 export function prunePivotVisualRecords(livePivotIds: ReadonlySet<string>): void {
   for (const id of [...records.keys()]) {
     if (!livePivotIds.has(id)) records.delete(id);
@@ -75,6 +87,8 @@ export function prunePivotVisualRecords(livePivotIds: ReadonlySet<string>): void
   for (const id of [...hovers.keys()]) {
     if (!livePivotIds.has(id)) hovers.delete(id);
   }
+  const cells = getPivotCellSelection();
+  if (cells !== null && !livePivotIds.has(cells.pivotId)) clearPivotCellSelection();
 }
 
 function inside(px: number, py: number, b: { x: number; y: number; width: number; height: number }, pad = 0): boolean {

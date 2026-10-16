@@ -128,7 +128,7 @@ Each series maps a column (or row) from the data range to visual marks.
 ]
 \`\`\`
 
-- **name**: Display name (legend, tooltip). Supports cell refs like \`"=B1"\`
+- **name**: Display name (legend, tooltip). Literal text; to follow a cell, bind \`/spec/series/<i>/name\` (see Bound Properties)
 - **sourceIndex**: Column/row index in the data range
 - **color**: Override hex color, or \`null\` to use the palette
 - **encoding**: Per-data-point visual overrides (see Conditional Encoding)
@@ -311,17 +311,22 @@ v1: single (non-composed) charts; the chart must be selected first, then
 interact. Brush works in the plot area (drag the title/border still moves the
 chart).
 
-## Cell References
+## Bound Properties
 
-String fields support cell references for dynamic content:
+Every string in the spec is a LITERAL: \`"title": "=A1"\` paints the text =A1.
+A title, axis title or min/max, series name or colour, param value, KPI goal ...
+that should FOLLOW a cell or a model measure is a BINDING, stored outside the
+spec in the workbook's binding store and evaluated live:
 
-\`\`\`json
-"title": "=A1",
-"xAxis": { "title": "=Sheet1!B1" },
-"series": [{ "name": "='My Sheet'!C1", "sourceIndex": 1, "color": null }]
-\`\`\`
+- in the Format pane: the property's fx button (or type \`=Sheet1!A1\` into the
+  chart title in place);
+- in a script: \`api.object("chart", chartId).bindProperty("/spec/title", "=Sheet1!A1")\`;
+- for the AI: the \`set_object_binding\` tool.
 
-The referenced cell's display value is used at render time.
+Pointers start at the chart's definition: \`/spec/title\`, \`/spec/xAxis/title\`,
+\`/spec/series/0/name\`, \`/spec/markOptions/goal\`. A formula may read cells
+(\`=Sheet1!B1\`), names, or the page's model measures (\`=[Revenue]\`), and a measure
+follows the page's slicers.
 `);
 
   // ── Mark Options ─────────────────────────────────────────────────────
@@ -448,7 +453,7 @@ Configure the X and Y axes with \`xAxis\` and \`yAxis\`:
 }
 \`\`\`
 
-- **title**: Axis title text (null = none). Supports cell refs
+- **title**: Axis title text (null = none). Literal text; bindable (see Bound Properties)
 - **gridLines**: Show grid lines
 - **showLabels**: Show tick labels
 - **labelAngle**: 0 (horizontal), 45 (diagonal), or 90 (vertical)
@@ -810,10 +815,11 @@ Override any visual property via \`config.theme\`.
 Only the properties you specify are changed — everything else keeps the default.
 
 ### Dark Theme Example
+The chart's OUTER background is its visual container's (\`container.background.color\`), not a theme key.
 \`\`\`json
+"container": { "background": { "color": "#1e1e1e" } },
 "config": {
   "theme": {
-    "background": "#1e1e1e",
     "plotBackground": "#2d2d2d",
     "gridLineColor": "#444444",
     "axisColor": "#666666",
@@ -842,7 +848,6 @@ Only the properties you specify are changed — everything else keeps the defaul
 
 | Property | Default | Description |
 |----------|---------|-------------|
-| background | #ffffff | Chart background |
 | plotBackground | #fafafa | Plot area background |
 | gridLineColor | #e8e8e8 | Grid line color |
 | gridLineWidth | 1 | Grid line width (px) |
@@ -1023,9 +1028,9 @@ Individual series colors can override the palette:
   },
   "legend": { "visible": false, "position": "top" },
   "palette": "default",
+  "container": { "background": { "color": "#1a1a2e" } },
   "config": {
     "theme": {
-      "background": "#1a1a2e",
       "plotBackground": "#16213e",
       "gridLineColor": "#2a3a5c",
       "axisColor": "#4a5a7c",

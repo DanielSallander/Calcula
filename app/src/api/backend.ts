@@ -10,6 +10,7 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import type { CellData, DimensionData, FormattingResult } from "../core/types";
 import type { PivotOverwriteUndoResponse } from "./pivotTypes";
+import type { TraceBoundObject } from "./types";
 // The macro recorder observes the IPC bridge, and the sort family invokes Tauri
 // from HERE rather than from core/lib/tauri-api.ts. Reporting to the same single
 // hook is what keeps a recording complete: an omitted sort produces a macro that
@@ -3077,6 +3078,12 @@ export interface TraceResult {
   crossSheetRefs: TraceCrossSheetRef[];
   /** Whether the source cell itself is in error */
   sourceIsError: boolean;
+  /**
+   * Objects with a property BOUND to a formula that reads the traced cell
+   * (`trace_dependents`; always empty for `trace_precedents`). The wire type is
+   * the binding seam's (`./types`, Rust `TraceBoundObject`).
+   */
+  boundObjects: TraceBoundObject[];
 }
 
 /**

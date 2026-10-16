@@ -15,6 +15,8 @@ import {
 import { resolveControlProperties } from "../lib/controlApi";
 import { beginControlGeometryRead, controlGeometryWritesInFlight } from "../lib/geometryWriteOrder";
 import { dataUrlToBlob, mediaHashOf } from "./mediaRefs";
+import { noteControlProperties } from "../lib/controlContainer";
+import { visualContentRectFor, withContainerContentClip, type ContainerRegion } from "@api/visualContainerPaint";
 
 // ============================================================================
 // Cached Metadata (async fetch with sync render)
@@ -315,54 +317,74 @@ export function renderFloatingImage(overlayCtx: OverlayRenderContext): void {
     };
   }
 
-  // Apply opacity
-  const prevAlpha = ctx.globalAlpha;
-  ctx.globalAlpha = Math.max(0, Math.min(1, data.opacity));
+  // WP-C D-FORMAT: Core paints the picture's container -- its background,
+  // border, title and shadow -- round the CONTENT RECT, and the picture is
+  // drawn inside that rect, clipped to it (a rounded border clips the
+  // picture's corners too). A picture with no border, padding, title or
+  // radius has a content rect that IS its box and is drawn unclipped, exactly
+  // as before (a rotated picture keeps its corners).
+  const containerRegion = region as ContainerRegion;
+  const outer = { x: canvasX, y: canvasY, width: imgWidth, height: imgHeight };
+  const content = visualContentRectFor(region.id, outer, containerRegion.container);
+  const picture = data;
+  const framed =
+    (containerRegion.container?.border.radius ?? 0) > 0 ||
+    content.x !== outer.x ||
+    content.y !== outer.y ||
+    content.width !== outer.width ||
+    content.height !== outer.height;
+  const paintPicture = (): void => {
+    // Apply opacity
+    const prevAlpha = ctx.globalAlpha;
+    ctx.globalAlpha = Math.max(0, Math.min(1, picture.opacity));
 
-  // Apply rotation around center
-  if (data.rotation !== 0) {
-    const cx = canvasX + imgWidth / 2;
-    const cy = canvasY + imgHeight / 2;
-    ctx.translate(cx, cy);
-    ctx.rotate((data.rotation * Math.PI) / 180);
-    ctx.translate(-cx, -cy);
-  }
-
-  // Apply flip transforms around center
-  if (data.flipH || data.flipV) {
-    const cx = canvasX + imgWidth / 2;
-    const cy = canvasY + imgHeight / 2;
-    ctx.translate(cx, cy);
-    ctx.scale(data.flipH ? -1 : 1, data.flipV ? -1 : 1);
-    ctx.translate(-cx, -cy);
-  }
-
-  // Draw the image
-  if (data.src) {
-    const { url, failed } = paintableUrl(data.src);
-    const imgEl = url ? getImageElement(controlId, url) : null;
-    if (imgEl) {
-      ctx.drawImage(imgEl, canvasX, canvasY, imgWidth, imgHeight);
-    } else {
-      // "Image Unavailable" is not the same statement as "Loading...": the
-      // first means this document points at media it does not carry, which the
-      // user needs to see rather than watch a spinner forever.
-      drawPlaceholder(
-        ctx,
-        canvasX,
-        canvasY,
-        imgWidth,
-        imgHeight,
-        failed ? "Image Unavailable" : "Loading...",
-      );
+    // Apply rotation around center
+    if (picture.rotation !== 0) {
+      const cx = content.x + content.width / 2;
+      const cy = content.y + content.height / 2;
+      ctx.translate(cx, cy);
+      ctx.rotate((picture.rotation * Math.PI) / 180);
+      ctx.translate(-cx, -cy);
     }
-  } else {
-    // No source set
-    drawPlaceholder(ctx, canvasX, canvasY, imgWidth, imgHeight, "No Image");
-  }
 
-  // Restore opacity
-  ctx.globalAlpha = prevAlpha;
+    // Apply flip transforms around center
+    if (picture.flipH || picture.flipV) {
+      const cx = content.x + content.width / 2;
+      const cy = content.y + content.height / 2;
+      ctx.translate(cx, cy);
+      ctx.scale(picture.flipH ? -1 : 1, picture.flipV ? -1 : 1);
+      ctx.translate(-cx, -cy);
+    }
+
+    // Draw the image
+    if (picture.src) {
+      const { url, failed } = paintableUrl(picture.src);
+      const imgEl = url ? getImageElement(controlId, url) : null;
+      if (imgEl) {
+        ctx.drawImage(imgEl, content.x, content.y, content.width, content.height);
+      } else {
+        // "Image Unavailable" is not the same statement as "Loading...": the
+        // first means this document points at media it does not carry, which the
+        // user needs to see rather than watch a spinner forever.
+        drawPlaceholder(
+          ctx,
+          content.x,
+          content.y,
+          content.width,
+          content.height,
+          failed ? "Image Unavailable" : "Loading...",
+        );
+      }
+    } else {
+      // No source set
+      drawPlaceholder(ctx, content.x, content.y, content.width, content.height, "No Image");
+    }
+
+    // Restore opacity
+    ctx.globalAlpha = prevAlpha;
+  };
+  if (framed) withContainerContentClip(ctx, containerRegion, outer, content, paintPicture);
+  else paintPicture();
 
   // A selected picture's outline and its EIGHT resize handles are Core's
   // (core/lib/gridRenderer/rendering/floatingObjectChrome.ts, BUG-0258 design
@@ -423,6 +445,8 @@ async function fetchImageData(
       flipV: resolved.flipV === "true",
     });
     staleEntries.delete(controlId);
+    // The same read is the picture's visual container (WP-C D-FORMAT).
+    noteControlProperties(controlId, "image", resolved);
     // The src may have moved to a different picture (property edit, undo, a
     // package refresh). Whatever the old one was, nothing points at it now.
     releaseUnreferencedMedia();

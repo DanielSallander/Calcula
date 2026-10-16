@@ -3,11 +3,19 @@
 // CONTEXT: Re-exports types from API and defines extension-specific types.
 
 import type { LayoutConfig, AggregationType } from "@api";
-import type { CalculatedFieldDef } from "./components/types";
-import type { BiPivotModelInfo, ShowValuesAs, CanvasFrameConfig } from "@api/pivot";
+import type { CalculatedFieldDef, ValueColumnRefDef } from "./components/types";
+import type { BiPivotModelInfo, ShowValuesAs, CanvasFrameConfig, PivotRegionData } from "@api/pivot";
 
 // Re-export types from API that the extension uses
 export type { LayoutConfig, AggregationType, BiPivotModelInfo, ShowValuesAs, CanvasFrameConfig };
+
+/**
+ * Pivot region data for rendering: the facade's mirror of Rust
+ * `PivotRegionData`, re-exported -- this file held a hand-written second copy,
+ * and a field added to the wire (`isModel`) would have been invisible to every
+ * consumer typed through it.
+ */
+export type { PivotRegionData };
 
 /**
  * Source field from the pivot table's data source.
@@ -29,6 +37,8 @@ export interface ZoneField {
   customName?: string;
   showValuesAs?: ShowValuesAs;
   numberFormat?: string;
+  /** True when `numberFormat` was ADOPTED from the BI model, not chosen by the user. */
+  numberFormatFromModel?: boolean;
   baseField?: string;
   baseItem?: string;
   /** Whether this is a LOOKUP (attribute) field rather than GROUP. BI pivots only. */
@@ -49,21 +59,13 @@ export interface PivotEditorViewData {
   initialFilters: ZoneField[];
   initialLayout: Partial<LayoutConfig>;
   initialCalculatedFields?: CalculatedFieldDef[];
+  /**
+   * How the value and calculated columns interleave (definition.value_column_order,
+   * transported in `fieldConfiguration.valueColumnOrder`). Absent = values first,
+   * then the calculated fields. The editor places each calculated field by it
+   * (`mergeCalculatedIntoValues`), so its first edit keeps the interleaving.
+   */
+  initialValueColumnOrder?: ValueColumnRefDef[];
   biModel?: BiPivotModelInfo;
   sourceTableName?: string;
-}
-
-/**
- * Pivot region data for rendering.
- */
-export interface PivotRegionData {
-  pivotId: string;
-  name: string;
-  startRow: number;
-  startCol: number;
-  endRow: number;
-  endCol: number;
-  isEmpty: boolean;
-  /** Present only for a canvas pivot: the box its view is shown in. */
-  canvasFrame?: CanvasFrameConfig;
 }

@@ -167,10 +167,12 @@ test.describe("the status bar's code-and-scripts indicator", () => {
 
     await indicator(page).click();
     await expect(popoverMenu(page)).toBeVisible();
-    const pop = await popoverMenu(page).locator("xpath=..").boundingBox();
+    // Settled: read during the 140 ms rise (cardEnterUp, translateY 4px -> 0)
+    // the card's bottom is up to 4px low, and C2 failed live by 1.07px on it.
+    const pop = await settledBox(popoverMenu(page).locator("xpath=.."));
     const item = await indicator(page).boundingBox();
-    expect(pop!.y + pop!.height, "the popover ends above the indicator").toBeLessThanOrEqual(item!.y);
-    expect(pop!.y, "and starts inside the window").toBeGreaterThanOrEqual(0);
+    expect(pop.y + pop.height, "the popover ends above the indicator").toBeLessThanOrEqual(item!.y);
+    expect(pop.y, "and starts inside the window").toBeGreaterThanOrEqual(0);
     await expect(page.locator('[data-code-status-fact="code"]')).toHaveText(/No code in this file/);
 
     await page.getByTestId("code-status-open-code").click();

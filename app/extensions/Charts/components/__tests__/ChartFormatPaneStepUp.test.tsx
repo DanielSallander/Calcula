@@ -65,7 +65,7 @@ vi.mock("@api/events", () => ({
   onAppEvent: vi.fn(() => () => undefined),
 }));
 
-import { ChartFormatPane } from "../ChartFormatPane";
+import { ChartElementFormatCard } from "../ChartFormatPane";
 
 Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
 
@@ -124,7 +124,7 @@ let root: Root;
 
 async function mount(): Promise<void> {
   await act(async () => {
-    root.render(React.createElement(ChartFormatPane, {}));
+    root.render(React.createElement(ChartElementFormatCard, {}));
   });
 }
 

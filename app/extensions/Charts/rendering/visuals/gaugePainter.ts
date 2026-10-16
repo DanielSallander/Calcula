@@ -23,7 +23,7 @@ import type { ChartSpec, ParsedChartData, ChartLayout, BarRect, GaugeMarkOptions
 import type { ChartRenderTheme } from "../chartTheme";
 import { getSeriesColor } from "../chartTheme";
 import { resolveDatumStyle } from "../../lib/dataPointOverrides";
-import { aggregateSeries, formatVisualNumber, formatVisualValue } from "./visualValues";
+import { aggregateSeries, formatVisualNumber, formatVisualValue, visualFormatFor } from "./visualValues";
 import { computeVisualLayout, drawVisualFrame, fitFontSize } from "./visualLayout";
 
 /** The unfilled track. Categorical colour data, so it lives in this module. */
@@ -169,7 +169,7 @@ export function paintGaugeChart(
   }
 
   // 3. Target needle: a line ACROSS the track at the target's angle.
-  const fmt = { displayUnits: opts.displayUnits, decimals: opts.decimals };
+  const fmt = visualFormatFor(spec, opts, data.series[0]?.name);
   // The target, minimum and maximum are written in the VALUE's format (its
   // currency, its percent sign), as Power BI writes them.
   const scaleFmt = { ...fmt, formatSource: shown.text ?? shown.formatSource ?? null };

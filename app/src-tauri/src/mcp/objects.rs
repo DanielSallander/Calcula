@@ -88,6 +88,14 @@ pub(crate) fn required_tier(tool: &str) -> Option<McpAccessTier> {
         // to get a macro DRAFT reviewed).
         "draft_object_script" => Some(McpAccessTier::Mutate),
 
+        // ---- object property bindings (WP-D, mcp/bindings.rs) ----
+        // Reading an object's JSON, its bindable paths and its bindings' values.
+        "list_object_properties" => None,
+        // A literal write and a binding edit change what an object shows and
+        // are saved: workbook mutations, never script execution (a binding is
+        // EVALUATED by the engine, it is not code).
+        "set_object_property" | "set_object_binding" => Some(McpAccessTier::Mutate),
+
         // Arbitrary JS.
         "run_script" => Some(McpAccessTier::Script),
 
@@ -359,6 +367,13 @@ pub(crate) fn delete_chart_core(
     // is one Ctrl+Z, exactly like the user's.
     let pruned_controls =
         crate::object_deps::cascade_deleted_charts(pane_control_state, &[id]);
+    // WP-D: the chart's object property bindings go with it, in the same step
+    // (the cascade `chart_commands::delete_chart` runs).
+    let dropped_bindings = crate::object_bindings::cascade::drop_bindings_for_objects(
+        state,
+        effect,
+        &[crate::api_types::ObjectBindingRef { kind: crate::api_types::ObjectBindingKind::Chart, id: id.to_string() }],
+    );
     let opened_transaction = {
         let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
         let opened = !undo_stack.has_open_transaction();
@@ -367,6 +382,9 @@ pub(crate) fn delete_chart_core(
         }
         opened
     };
+    if let Some(previous_bindings) = dropped_bindings {
+        crate::undo_commands::record_bindings_undo(state, previous_bindings, "Delete chart (AI)");
+    }
     crate::object_deps::record_pane_control_prune_undo(
         state,
         &pruned_controls,
@@ -1058,6 +1076,7 @@ pub fn update_pivot(
                 refresh_on_open: None,
                 use_custom_sort_lists: None,
                 canvas_frame: None,
+                style: None,
             },
         )?;
         applied.push(format!("renamed to \"{}\"", n));
@@ -1443,9 +1462,11 @@ mod tests {
         "delete_sheet",
         "move_sheet",
         "draft_object_script",
+        "set_object_property",
+        "set_object_binding",
     ];
 
-    const READ_TOOLS: &[&str] = &["list_sheets", "list_script_drafts", "get_script_draft"];
+    const READ_TOOLS: &[&str] = &["list_sheets", "list_script_drafts", "get_script_draft", "list_object_properties"];
 
     /// ScriptState with Script Security "enabled" (so only the AI ceiling
     /// gates) and the given ceiling.

@@ -85,11 +85,12 @@ every title-less grid's cells unselectable). These are the grid's ZONES, answere
 Core derives the press, the pointer and Ctrl/Shift: the title, the band and the Design-Mode body are
 FRAME (Core selects, and moves the grid when it can move; one that cannot shows `default` and only
 selects), cells, headers and a live edge ball are CONTENT (the grid's own work, on a locked or
-subscribed grid too), and while a formula picks a reference the whole grid is content that picks and
-never selects. Core asks once per press BEFORE the press selects anything, so the answer carries the
-two facts the handlers must never re-derive: that the press is a reference pick (after the insertion
-the text no longer expects one), and that the balls were live before the press's commit closed the
-editor. The corner handles and edge balls exist only on a SELECTED
+subscribed grid too). A reference pick is NOT part of this answer: while a formula picks a reference,
+Core decides the press itself, once, BEFORE the zone grammar (`referenceAt`, §2a "Reference picks come
+first"), and the grid's zone answer no longer knows about picks (its own `referencePick` zone, part and
+insertion were deleted, 2026-10-15). Core asks the zone once per press BEFORE the press selects
+anything, so the answer carries the fact the handlers must never re-derive: that the balls were live
+before the press's commit closed the editor. The corner handles and edge balls exist only on a SELECTED
 grid (`resizable = geometry && selected`), and are neither painted nor grabbable while its cell
 editor is open: the editor announces open and teardown through `lib/frEditingRange.ts`, and the
 store re-publishes `resizable` (`syncFloatingRangeRegions`, `installFrRegionResyncs`), which Core's
@@ -138,6 +139,36 @@ part. Core resolves it ONCE per press, BEFORE the press selects anything (`resol
   (the backend's, a script's) extends by position instead -- and does not toggle the timeline out of a
   canvas selection. Excel's own timeline was not checked.
 
+**Reference picks come first (D-PICK, owner finding F3, 2026-10-15).** While a formula is picking a
+reference -- Core's cell editor in formula mode, or an external editor (a floating grid's cell) that
+expects one; ONE predicate, `isFormulaReferencePickActive` (`@api/editing`) -- Core decides a press on
+ANY floating object in its own branch of `handleOverlayMoveMouseDown` (`overlayMoveHandlers.ts`), after
+the right-button and editable-target guards and BEFORE `pressZone`. It asks the family's
+`OverlayRegistration.referenceAt`, which is PURE exactly like `zoneAt` and answers the CELL a pick names
+at the point: `{ space: "sheet", row, col }` for a cell of the shown sheet's own grid (a canvas pivot's
+hidden-grid cell) or `{ space: "object", name, row, col }` for a cell of a named A1 space (a floating
+grid). Where it answers, the press starts a pick session (`floatingReferencePickSession.ts`): a drag
+re-asks on every move and extends only within the same space and the same object, the owning family
+paints the dashed preview (`getFloatingReferencePickPreview`, `_shared/lib/innerSelectionPaint.ts`
+`paintPickPreview`), and the release hands the cell or rectangle to
+`useSpreadsheetSelection.handleFloatingReferencePick`. A single SHEET cell is routed exactly like a grid
+cell pick -- the formula-reference interceptors (GETPIVOTDATA, §5) and then the active sheet's name; a
+range is inserted as a plain range, never GETPIVOTDATA; an OBJECT cell inserts `Float2!C3` and never
+asks the interceptors (their row and col are the shown sheet's). Where `referenceAt` answers null, and on
+every object whose family registers none (charts, cards, KPIs, gauges, slicers, timelines, controls,
+pictures, the empty page), the press is INERT. Either way the press calls `preventDefault` (the editor
+keeps its focus: no blur, no commit) and never calls `noteObjectPress`, never dispatches
+`floatingObject:selected` or `floatingObject:bodyDragStart` and never arms a move, so no family sees a
+pick press at all. The double-click that started as a pick is its ECHO: for 500 ms within 4 px of the
+finished pick (measured from the press point for a click, the release point for a drag), the second
+press and the `dblclick` on the same object are swallowed (`referencePickState.ts`), and the echo is
+checked before the pick so an asynchronous GETPIVOTDATA insertion still in flight cannot start a second
+pick. The pointer comes from the same answer: during a pick the hover is `cell` where `referenceAt`
+answers and `default` elsewhere (unless a content gesture holds the pointer), and neither the grip nor
+the handles show. `app/src/api/__tests__/overlayZoneCensus.test.ts` pins who answers: exactly the
+floating grid (`frReferenceAt`) and the pivot box (`pivotVisualReferenceAt`) register `referenceAt`, each
+beside its `zoneAt`.
+
 **The order.** A floating object is painted over the cells, the selection and its fill handle, so it
 answers first: the mouse-down wrapper (`useSpreadsheetSelection.ts`) hands a press on a LIVE handle of
 a selected object or on an object's body to the object BEFORE the fill handle and the cell click
@@ -169,16 +200,17 @@ AutoFilter and validation chevrons). `app/src/api/__tests__/overlayZoneCensus.te
 source names the old claim, no overlay registration carries `getCursor:` (an `as
 OverlayRegistration` cast would hide one from the compiler), and every family that publishes a
 `floating` box registers `zoneAt` and nothing beside it -- found by what it publishes, so a new family
-cannot slip past.
+cannot slip past -- and publishes its visual `container` on the same region literal (§14.2).
 
 | Family | Content: its own work (pointer) | Frame: Core selects, moves when it can |
 |---|---|---|
+| Every family -- Core, BEFORE `zoneAt` (WP-C, §14.2) | -- | the CONTAINER BAND: a point inside the box but outside its content rect (`visualContentRect`: the shown border, the padding, Core-painted title / subtitle / divider bands) answers `{ kind: "frame", part: "container" }` and the family's `zoneAt` is not asked; it sees only content points (and points outside the box, such as a chart's quick-access buttons) |
 | Timeline (`lib/timelineZones.ts`) | the month tiles (`pointer`); the two range-end markers (`ew-resize`); the clear button while there is a filter and the level buttons (`pointer`, they act on release over themselves); the scrollbar (`default`) | the header (with the dimmed clear button while unfiltered), the year-label strip, the empty space, the gaps in the level row |
 | Slicer (`slicerZoneAt`) | its items, "Select all", and the clear button while the slicer filters (`pointer`); the scrollbar (`default`) -- §2c | the header (with the dimmed clear button while unfiltered), the padding and the gaps between items; with the header hidden, a 4px band at its edges |
 | Chart (`lib/chartZoneAt.ts`) | the plot area of a brushable, non-composed chart, off its param widgets (`crosshair`: the interval brush); a selected chart's quick-access buttons and param-widget controls, and a pivot chart's field buttons (`pointer`; they act on release over themselves, §2c) | everything else -- its bars and axes too (`move`); the widget strip off its controls; the insight cue stepper and comment boxes |
-| Pivot box (`pivotVisualZoneAt`) | the +/- icons, the filter buttons and report-filter combos, and the loading indicator's Cancel (`pointer`; they act on release over themselves, §2c) | its cells and blank space |
-| Floating grid (`frZoneAt`) | cells and row/column headers (`cell`); a live edge ball (`ew-resize` / `ns-resize`); the near-miss margin just outside the frame (`default`, inert); while a formula picks a reference, the whole grid (`cell`: it picks, never selects) | the title bar; with no title, the 4px border band (when it can move) and, in Design Mode, the whole body |
-| Controls (`lib/controlZoneAt.ts`) | a run-mode button's whole body (`pointer`, part `button`; it runs on release inside it, §2c) | a Design-Mode button, and every shape and picture |
+| Pivot box (`pivotVisualZoneAt`) | the +/- icons, the filter buttons and report-filter combos, and the loading indicator's Cancel (`pointer`; they act on release over themselves, §2c); its CELLS (`cell`, part `cell`: a press selects cells, D-CELLS, §5) | the 4px border band inside its edge (part `border`), blank space past the content (`blank`) and, in Design Mode, the whole body (`bodyGrab`; the chrome still acts); the box also moves by Core's six-dot grip, published on hover |
+| Floating grid (`frZoneAt`) | cells and row/column headers (`cell`); a live edge ball (`ew-resize` / `ns-resize`); the near-miss margin just outside the frame (`default`, inert) | the title bar; with no title, the 4px border band (when it can move) and, in Design Mode, the whole body |
+| Controls (`lib/controlZoneAt.ts`) | a run-mode button's whole body (`pointer`, part `button`; it runs on release inside it, §2c); a run-mode Page Navigator ITEM (`pointer`, part `navItem:<sheetId>`, or `navItem:name:<name>` for a page with no id; it opens on release over the same item, §2c) -- the gaps between its items answer `default`, part `navGap`, and a press there does nothing | a Design-Mode button; a Design-Mode Page Navigator as a whole (frame, with the item part still carried, so a second press can select one item, §13.4); every shape and picture |
 
 **The release.** Core also ENDS a frame move before any family hears the release: arming a move binds
 a capture-phase window mouseup (`armMove`), so a release over the ribbon, the formula bar or a task pane
@@ -312,6 +344,13 @@ Two more rules (M7 review, 2026-10-01):
   its macro link, application approval and audit, called unchanged, only later. Sliding off, Escape,
   a blur, a lost release, the next press and deactivation run nothing. In Design Mode a button is frame
   and moves; shapes and pictures are frame in both modes. A right-press never runs a button.
+- **Page Navigator items** (`app/extensions/Controls/PageNavigator/navigatorPress.ts`). The button rule,
+  plus "the SAME item": the press arms the item under it and paints it pressed; the release opens that
+  page only when it lands on the same item of the same navigator, topmost there -- A pressed and B
+  released opens nothing. Hit-test, paint and press lay the items out with the one pure
+  `navigatorItemArea` + `layoutNavigatorItems` (`PageNavigator/navigatorModel.ts`), so the item painted
+  under the pointer is the item pressed. A run-mode press selects nothing in the Controls family, so it
+  opens no pane.
 - **A grip press never acts.** A press on an object's grip (§2d) is a frame press with part `grip`. The
   Slicer, Timeline, Charts and Controls listeners of `floatingObject:selected` skip it (no pending
   click, no `shape:clicked`); the floating grid and the pivot box treat it as any frame press, which
@@ -545,6 +584,36 @@ door spells the kind, hands the seam a kind, or borrows the Controls helper. A f
 the grid selected whole) admits nothing and still refuses them. On a canvas the same Delete now deletes ONE selected slicer, timeline or pivot box
 (a dead key before).
 
+**Cells selected inside a canvas pivot box (D-CELLS, 2026-10-15).** The box's selected cells (§5) are an
+INNER selection, like a floating grid's cell, and own their keys. They are ordinary keybindings
+(category "PivotTable", context `not-editing`, ids `ext.pivot.canvasCells.<slug>`), registered by
+`app/extensions/Pivot/lib/pivotCanvasCellKeys.ts`, so a user's own shortcut and Settings see them:
+
+- **Arrows** move the active cell and **Shift+arrows** extend the rectangle, skipping rows the box
+  shows 0 px high (a collapsed group's, a filtered row's); the body scrolls to keep the cell in view
+  (`ensurePivotCellVisible`). A box not painted yet steps by its cached view.
+- **Escape is a ladder:** the first Escape clears the cells and leaves the box selected; the next is
+  the canvas's and deselects the box.
+- **Ctrl+A** selects the box's whole content (first shown row to last shown row, every column) while
+  a box is selected, with or without cells.
+- **Edits refuse** with one toast, "You can't change this part of the PivotTable.": Delete, Backspace,
+  Ctrl+X, Shift+Delete, Ctrl+V, Shift+Insert and Ctrl+D. Home > Paste and Edit > Paste run the same
+  refusal. Delete NEVER reaches the generic object Delete, which for a pivot box deletes the whole
+  PivotTable (the DELETE HAZARD, pinned by `selectedObjectKeys.test.ts` T17).
+- **Ctrl+C and Ctrl+Insert** copy the cells (§5); a real DOM text selection makes them the browser's
+  (`hasDomTextSelection`, `@api/keybindings`, the dispatcher's own rule).
+- **Tab is not claimed:** it keeps cycling the canvas's objects.
+
+The pivot's `ObjectSelectionProvider` (`lib/pivotVisualSelection.ts`) owns `"Arrow"`, `"Escape"`,
+`"Clipboard"` and `"Delete"` while cells are selected, so the canvas's nudge, Escape, object copy and
+the generic Delete stand down; it also owns `"Escape"` and `"Delete"` while its right-click menu is open
+or a chrome or cell press is held. Its `innerClipboardCommand` answers the Copy and Paste DOORS
+(`clipboardDoorCommand`, `@api/objectClipboard`): Copy runs `pivot.canvasCells.copy`, Paste runs the
+refusal. The guards differ on purpose: the arrows, Escape and Ctrl+A stand down while the box's menu is
+open or a press is held (the dispatcher's window-capture listener runs before the menu's and the drag's
+own Escape), but the refusals and the copy do not -- a refused key must never fall through to the grid
+or the generic Delete, and a copy behind the open menu copies the same cells.
+
 **Found and fixed before shipping (the M8 review), so not in the ledger:** a key the inner focus did
 not claim reached the hidden cell; a held arrow flooded the live region; Alt+C said "Filter cleared"
 with nothing filtered, and a Shift+Space run was said as one item; a stale focus swallowed the next
@@ -576,6 +645,11 @@ sketched in `docs/design/open-items.md` (the touch and pen row).
   Chart data is read with `getRangeCellsTyped(sheetIndex)` rather than the
   active-sheet viewport, and invalidation is keyed on the SOURCE sheet, so a chart on a canvas repaints
   when its Sheet1 source changes while the canvas is on screen.
+- **A chart title no longer reads `=A1` inline** (2026-10-15). A string field starting with `=` is text;
+  a title, axis title, series name or KPI goal that follows a cell is a BINDING, sheet-qualified when it is
+  made -- an unqualified reference on a canvas reads the chart's data sheet, else the first visible
+  worksheet, and says so (§15.3). A chart parameter's `cellRef` is unchanged: it reads, and writes back
+  to, the cell on the chart's data sheet (`locateParamCell`).
 - **Off-sheet writes announce themselves**: script and control writes to a non-active sheet emit a
   sheet-tagged `CELLS_UPDATED`.
 - **Inserting** goes through each family's own seam (`controlsService`, `floatingRangeService`,
@@ -604,6 +678,20 @@ The page's `wallpaper` and Lock Objects travel with the layout (sanitised on pul
 paints both colours from the sanitised layout), and a button's declarative action (`action`,
 `actionTarget`, `actionTargetName`) is neither code nor held, so a pull keeps it and published navigation
 buttons work for the subscriber (`BUTTON_ACTION_PROPERTIES`, `app/src-tauri/src/controls.rs`; §13).
+A pull remaps page-target IDS -- a static navigate button's `actionTarget` and a Page Navigator's
+`pageOverrides[].sheetId` -- to the subscriber's sheet ids (`remap_control_page_targets` in
+`app/src-tauri/src/controls.rs`, on subscribe, checkout, refresh and dev pull; a checkout's remap is a
+no-op because the ids are the application's own). Page-target NAMES (`actionTargetName`,
+`pageOverrides[].sheetName`) follow the one rename authority, `calp::sheet_renames`
+(`visit_control_page_target_names`), exactly as binding formulas do (`visit_binding_formulas`; a control
+property that follows a formula is a binding since 2026-10-15): collision and subscriber renames on pull,
+restored on push, a gone sheet's name becomes `#REF!`. The dev pull renames none of these names and
+carries no bindings yet (BUG-0449 fixed; BUG-0471 open; open-items §2.ak).
+**Bindings** (§15.7) travel in `bindings.json` with exactly the objects they bind; a publish that carries
+them stamps `min_app_version`; a pull remaps canvas-page ids and `pageOverrides/<sheetId>` path segments
+and lands a row only for an object it materialised; a refresh replaces the application's bindings and
+keeps the subscriber's own. A `[Measure]` binding names its model by the stable data-source id, so it
+reads the subscriber's connection of the same source, or shows "(model not connected)".
 
 ## 5. Pivot tables on a canvas
 
@@ -632,8 +720,58 @@ box — not a cell-less "pivot visual". So slicers, timelines, pivot charts, GET
   zone answer (`pivotVisualZoneAt`, §2a) and reach the box through `floatingObject:bodyDragStart`,
   because a press on a floating object is consumed before any cell interceptor runs; they act at the
   RELEASE over the same button, never on the press (§2c). Selecting the box
-  makes it the active pivot (field list, Design and
-  Analyze tabs).
+  makes it the active pivot (Design and Analyze ribbon tabs). Its field list is the OBJECT PANE (§14): a
+  click on the box opens it on Fields at the release, and Fields / Design are ONE lifted `PivotEditor`
+  (`components/CanvasPivotBuildBody.tsx`); the stacked `pivot-editor` pane is for worksheet pivots only.
+- **The box is a visual container** (§14.2): `canvasFrame.container` (padding, a Core-painted title, the
+  background, border and shadow; default white with a 1 px `#c8c8c8` border), and the box lays out, paints
+  and hit-tests its cells inside the content rect. **Its style is persisted** (`PivotDefinition.style`,
+  `{ styleId, themeOverrides }`, BUG-0486) through `update_pivot_properties` as one "PivotTable Style" step;
+  the gallery writes it, the painter reads it (`lib/pivotStylePersist.ts`, seeded from
+  `PivotRegionData.style` on every region refresh, so an undo comes back too).
+- **Its cells are content (D-CELLS, owner finding F4, 2026-10-15).** A click on a cell selects it,
+  Shift+click and a drag select a rectangle with auto-scroll at the box's edge
+  (`lib/pivotCellPress.ts`); there is one rectangle (Ctrl+click is a plain click). The selection is
+  view coordinates in ONE store (`lib/pivotVisualCellSelection.ts`), painted with the shared
+  inner-selection ink the floating grid uses (`_shared/lib/innerSelectionPaint.ts`), and it is cleared
+  when the box is deselected, another box is selected, the box is pruned, a new view loses its anchor,
+  or the ACTIVE sheet really changes (an announcement that leaves the same canvas active, such as a
+  hide of another page, keeps it). Keys: §2e. The right-click selects an unselected box first (no pane, BUG-0458) and
+  re-anchors when it lands outside the cells; on a value cell the menu is Excel's: Copy, Number
+  Format..., Sort (greyed, "Sorting by values is not available yet.", BUG-0459), Remove "<field>",
+  Summarize Values By (range pivots only), Show Values As, Show Details and Value Field Settings....
+  On a DATA-MODEL pivot Number Format..., Show Values As and Value Field Settings... are greyed with
+  "Not available on a data-model PivotTable yet.": `BiValueFieldRef` carries a measure and a name only
+  (open-items §2.ak). Every greyed item says why (`GridContextMenuItem.disabledReason`, shown as its
+  title). A double-click on a cell drills through to a new sheet (`runPivotDrillThrough`) or toggles a
+  header by its `groupPath` (BUG-0457); on the band, blank area or the Design-Mode body it does nothing,
+  because a double-click acts on what a press at that point acts on.
+- **Copy.** Ctrl+C, Ctrl+Insert, Home > Copy, Edit > Copy and the box menu's Copy all run
+  `pivot.canvasCells.copy`: Core's `copyCellRange` (`@api/cellClipboard`) over the HIDDEN-GRID rectangle
+  (the pivot's anchor plus the view offset, so a box in column block 1 copies from column 1024 on),
+  leaving out the rows the box shows 0 px high, in batched reads, capped at 200,000 cells (above it a
+  "too large" toast). It fills the same internal and system clipboard a worksheet Copy does, so Paste,
+  Paste Special and Paste Link work; no marching ants are shown. The values carry the hidden grid's
+  styles, and the hidden grid wears the box's persisted style: the presets are ONE data file,
+  `app/extensions/Pivot/styles/excelPivotStyles.json`, that the extension imports and Rust
+  `include_str!`s (`app/src-tauri/src/pivot/grid_theme.rs`), and a style change restyles the written cells
+  in place (WP-C S10b, ruling R3).
+- **The selection is shown everywhere a cell selection is** (`lib/pivotCellFormulaBar.ts`): the formula
+  bar shows the active cell's raw value READ-ONLY (a published external cell target whose edit is
+  refused), the Name Box its hidden-grid address (`Canvas1!B5` or `Canvas1!B5:D9`, quoted when the name
+  needs it), and the status bar aggregates the rectangle through `@api/statusBarRange` (owner
+  `pivot-canvas-cells`). All three are withdrawn, owner-scoped, when the cells clear.
+- **Moving the box** (its cells no longer move it): by the 4px border band inside its edge, blank space
+  past the content, Core's six-dot grip (published on hover, `grip: "hover"`) and, in Design Mode, its
+  whole body. Ctrl+click adds the box to a canvas multi-selection on the band, no longer on a cell.
+- **GETPIVOTDATA names the pivot's ANCHOR.** A reference pick on a value or total cell, on a worksheet
+  pivot or a canvas box (§2a), builds `=GETPIVOTDATA("<field>", <anchor>, ...)` with the pivot's
+  top-left cell (`definition.destination`) as the `pivot_table` argument, as Excel does
+  (`lib/getPivotDataPick.ts`; it used the clicked cell before). A canvas box in block 0 gives
+  `'Canvas1'!$A$1`, block 1 `$AMK$1`; `lookup_pivot_data` accepts any cell inside the pivot, so older
+  formulas keep answering. Proved in Rust on worksheet, floating-grid and model-shaped definitions; the
+  live proof on the AdventureWorks model pivot passed 2026-10-15 (canvas-pick-cells J1: GETPIVOTDATA on the
+  anchor, #REF! when the year is filtered out, the number again when the filter is cleared).
 - **Create flows**: the Canvas tab's PivotTable item, the Create PivotTable dialog in canvas mode
   (destination fixed to "this canvas", source must name a worksheet), and the Business Intelligence
   "PivotTable from Model" flows — all taking their default frame from
@@ -738,6 +876,20 @@ had to learn about a second owner. The answer is ONE Core module and ONE session
   and menu FORMATTING doors still read Core's selection (open-items 2.af).
 - The write stays the existing id-addressed, undoable `update_floating_range_cell`; no backend,
   `DocumentEffect` or format change was needed for the seam.
+- **Picks from floating objects (D-PICK, 2026-10-15).** A formula -- in a grid cell or in a floating
+  grid's cell -- picks a reference from a floating object on the SAME page by Core's rule (§2a). The
+  object's `referenceAt` names either a SHEET cell (a canvas pivot's hidden-grid cell: routed as a grid
+  pick, so the interceptors build GETPIVOTDATA and the text is qualified with the active sheet,
+  `'Canvas1'!B5`) or an OBJECT cell (`Float2!C3`, a self-reference included, inserted as is: the
+  interceptors are never asked, since their row and col would be read as the shown sheet's). The
+  floating grid no longer has a pick of its own: its `referencePick` zone and insertion were deleted,
+  and its own refusals ask the one predicate, `isFormulaReferencePickActive`. A PARKED session cannot
+  pick objects: while it is parked on another sheet the grid paints and hit-tests no floating object
+  (`getLiveGridRegions` answers none while `isPointModeOnForeignSheet()`), so another page's pivot box
+  or floating grid cannot be picked -- cross-sheet object picks are open (open-items §2.ak).
+- **A canvas pivot cell uses the same cell slot, read-only.** Selected pivot cells publish the cell
+  target (`publishExternalCellTarget`) like a selected floating-grid cell does, so the formula bar and
+  the Name Box follow them (§5); the target refuses an edit, so focusing the bar or fx opens nothing.
 
 ## 9. Slicers on a Calcula model
 
@@ -810,10 +962,10 @@ gauges and other visuals) on its own sheet or canvas through `@api/pageFilters`,
 | One zone answer per press: content is handed over (locked and subscribed too), a frame that cannot move only selects and shows `default`, the zone is asked before anything is selected | `overlayZones.test.ts`, `overlayContentClaim.test.ts`, `overlayZoneHoverWiring.test.tsx`, `gridOverlays.test.ts`; per family `timelineZones.test.ts`, `chartZoneAt.test.ts`, `slicerZoneAt.test.ts`, `pivotVisualOverlay.test.ts`, `controlZoneAt.test.ts`, `frMoveZones.test.ts` |
 | No second per-point answer can come back; every floating family answers `zoneAt` | `overlayZoneCensus.test.ts`; the type pin in `gridOverlays-interactions.test.ts` |
 | A move released outside the grid area saves every co-moved object (BUG-0265) | `overlayReleaseOrder.test.tsx` |
-| LIVE: a timeline range drag on an unselected timeline, a year-strip move, Shift+click, a locked timeline, a release over the ribbon, the chart brush pointer | `moving-objects.spec.ts` (written 2026-09-30; run by the main loop) |
+| LIVE: a timeline range drag on an unselected timeline, a year-strip move, Shift+click, a locked timeline, a release over the ribbon, the chart brush pointer | `moving-objects.spec.ts` steps 1-6 (written 2026-09-30) -- **passed live 2026-10-15** (the whole file 23/23, WP-A/WP-B regression sweep) |
 | Handles: live only on a selected object, eight that each drag their own sides, the pointer per handle, one geometry for paint and hit, handles topmost | `floatingHandles.test.ts`, `overlayHandles.test.ts`, `overlayHandleHover.test.tsx`, `overlayStacking.test.ts`; `timelineResizeGate.test.ts` (no family resize flag) |
 | Core paints the chrome (outline once per selected object, handles only while live, locked = outline only), and no family paints its own | `floatingChromePaint.test.ts` (incl. the family census); `selectionChromeAndLabel.test.ts` (the canvas paints only its padlock); `frEdgeBalls.test.ts` |
-| LIVE: an unselected corner selects and moves, a slicer's right-edge handle shows and resizes the width only, a shape's right-edge handle resizes, a locked shape shows the padlock and no handle, per-corner pointers on a chart | `moving-objects.spec.ts` steps 7-10 (written 2026-09-30; run by the main loop) |
+| LIVE: an unselected corner selects and moves, a slicer's right-edge handle shows and resizes the width only, a shape's right-edge handle resizes, a locked shape shows the padlock and no handle, per-corner pointers on a chart | `moving-objects.spec.ts` steps 7-10 (written 2026-09-30) -- **passed live 2026-10-15** (the whole file 23/23) |
 | A Core-handle resize leaves the control's region at its new size, whatever order the read and the write are served in (BUG-0268) | `resizeKeepsRegion.test.ts` (real `activate()`, a fake backend that serves out of order), `geometryWriteOrder.test.ts`; live: `moving-objects.spec.ts` step 9 |
 | Slicer items are content: a click filters, Ctrl+click toggles the item and keeps the slicer selected (BUG-0269), a drag selects the run as ONE queued commit, Select all and the clear button act on release over themselves, the thumb scrolls and writes nothing; paint == hit for items and thumb | `slicerZoneAt.test.ts`, `slicerItemDrag.test.ts`, `slicerClickSelection.run.test.ts`, `slicerPressWiring.test.ts` (real `activate()`), `slicerNoPhantomDrag.test.ts`, `slicerRunPreviewPaint.test.ts`, `slicerEscapeOwnership.test.ts`, `slicerMouseupLifetime.test.ts` |
 | The pivot box's chrome and a chart's buttons act on release over the same button; the 450 ms guard runs between releases; a drag from them moves nothing; a chart-button press cancels on Escape and blur and its provider owns Escape meanwhile | `pivotChromePress.test.ts`, `pivotVisualOverlay.test.ts`; `chartZoneAt.test.ts`, `chartButtonRelease.test.ts` (real `activate()`), `chartMouseupLifetime.test.ts`, `chartObjectSelection.test.ts` |
@@ -821,7 +973,7 @@ gauges and other visuals) on its own sheet or canvas through `@api/pageFilters`,
 | A run-mode button runs once at the release inside it and never on the press; sliding off, Escape, a blur and a lost release run nothing; it looks pressed while held inside | `controlZoneAt.test.ts`, `buttonPress.test.ts`, `buttonRunOnRelease.test.ts` (real `activate()`), `buttonPressNoPhantom.test.ts`, `buttonPressedPaint.test.ts`; `overlayMoveRightPress.test.ts` (a right-press runs nothing) |
 | The grip: 24 screen px at zoom 0.5, 1 and 2 with paint == hit, above / below / beside a narrow object's left edge (reachable from its body at zoom 0.5 and 1) / none, half-open on its object, the visibility rule, priority after the handles and before the bodies, `gripClick` only for a press that never moved, Core's hover and everything that clears it, the right-click, the probe | `floatingGrip.test.ts`, `objectHover.test.ts`, `overlayGripPress.test.ts`, `gripHoverWiring.test.tsx`, `gridHoverClear.test.ts`, `floatingChromePaint.test.ts`, `gridOverlays.test.ts`, `objectGrip.test.ts`; the families' grip flags in `slicerStoreGrip.test.ts`, `timelineStoreGrip.test.ts`, `floatingRangeStore.test.ts` |
 | Size and Position: the availability rule, ONE commit labelled "Size and Position" and none for Cancel or an unchanged OK, the read-only dialog, the page clamp and the 16px minimum, the grip menu (first row, keys, outside press), the canvas's grip items, a row in every family's menu, Arrange's button | `objectPosition.test.ts`, `sizePosition.test.ts`, `SizePositionDialog.test.tsx`, `gripMenu.test.tsx` (real `activate()`), `gripMenuItems.test.ts`, `gripMenuWiring.test.ts`, `objectMenuSizePositionCensus.test.ts` and the per-family `*MenuSizePosition*` tests, `canvasArrangeSection.test.tsx` |
-| LIVE: slicer items (run drag, Ctrl+click keeps the slicer selected, the thumb), the pivot box's +/- on release, a run-mode button on release, a chart's quick-access button on release, the grip (idle, hover, leaving the grid, a scroll, drag, click, below at y 0, a timeline and a floating grid), the grip menu and Size and Position, a selected canvas chart's grip and Lock, Size and Position in every family's menu and in Arrange | `moving-objects.spec.ts` steps 11-23, written 2026-09-30/10-01. Steps 11-14 and 16 passed in E2E run 9b on the M7 T1/T2 tree; all 23 runs passed in E2E run 10b (2026-10-01), before the cell-release change moved Core's press door, so every step runs again on the final tree with the sabotages in the spec's header (the main loop; none has run live yet) |
+| LIVE: slicer items (run drag, Ctrl+click keeps the slicer selected, the thumb), the pivot box's +/- on release, a run-mode button on release, a chart's quick-access button on release, the grip (idle, hover, leaving the grid, a scroll, drag, click, below at y 0, a timeline and a floating grid), the grip menu and Size and Position, a selected canvas chart's grip and Lock, Size and Position in every family's menu and in Arrange | `moving-objects.spec.ts` steps 11-23, written 2026-09-30/10-01. Steps 11-14 and 16 passed in E2E run 9b on the M7 T1/T2 tree; all 23 runs passed in E2E run 10b (2026-10-01), before the cell-release change moved Core's press door, so every step ran again on the final tree: **all 23 runs passed live on 2026-10-15** (the WP-A/WP-B regression sweep). The sabotages in the spec's header were NOT part of that sweep; none of them has run live yet |
 | The cell interceptors act on release: Core's press session (opened only by Core's mouse-down, before the interceptors answer; one run, on the same target, on the cells and the press's sheet; Escape, a blur, a lost release, the next press and a non-primary press run nothing), worksheet pivot chrome as one interceptor, in-cell buttons and button cells with their pressed look; zoom 1.5, a frozen row on a scrolled sheet, a sheet switch while held; Escape stays the held press's | `cellPressRelease.test.ts`, `cellClickInterceptors.test.ts`, `cellReleaseClaimWiring.test.tsx`, `pivotCellChrome.test.ts`, `inCellButtonRelease.test.ts`, `buttonCellRelease.test.ts`, `cellTypes.test.ts`, `keybindings.heldCellPress.test.ts`; `explicitMacroRun.test.ts` (a release claim runs only from Core's session) |
 | Checkbox cells (a checkbox CELL and a legacy style-flag checkbox) toggle on the release on their own cell: claimed at the press with the cell selected, the value read at the release, Space at once; a worksheet pivot's chrome drops a double-click's second release through the canvas box's own 450 ms guard (one module, Cancel unguarded) (owner questions 26 and 27, 2026-10-02) | `checkboxRelease.test.ts`, `checkboxCellRelease.test.ts`, `pivotCellChrome.test.ts` (the double-click and a one-guard pin), `pivotChromePress.test.ts`, `pivotVisualOverlay.test.ts` |
 | LIVE: a worksheet pivot's '-', report filter, Row Labels button and loading Cancel, an in-cell button control, a button cell, a checkbox cell and a legacy checkbox act at the release, and slid off run nothing; a worksheet +/- double-click toggles once | `release-acts.spec.ts` RA-1..RA-8 (RA-1..RA-5 written 2026-10-01, RA-6..RA-8 2026-10-02), NOT run yet (nine live sabotages in its header) |
@@ -831,8 +983,14 @@ gauges and other visuals) on its own sheet or canvas through `@api/pageFilters`,
 | A user shortcut on a BARE Space, Enter or printable character is refused, at both write doors and in Settings (owner call 23) | `keybindings.bareKeyRefusal.test.ts`, `KeybindingsPage.bareKey.test.tsx` |
 | A selected object owns the keyboard on a worksheet (BUG-0270): the fallback claim, Delete as one undo step, Escape, the press parity, the formula bar and the Name Box, Design Mode ending | `selectedObjectKeys.test.ts`, `selectionOwner.test.ts`, `objectSelectionReadOnlyDelete.test.ts`, `objectSelectionWorksheetPress.test.ts`, `formulaInputSelectionOwner.test.tsx`, `formulaBarFxSelectionOwner.test.tsx`, `controlDesignModeDeselect.test.ts` |
 | The object inserts (Insert Shape, Insert > Controls > Button, Insert Image) are not refused while an object is selected, through the real Insert menu; a door KIND an owner admits (owner call 25) | `insertWithObjectSelected.test.ts`, `controlInsertSelectionOwner.test.ts`, `selectedObjectKeys.test.ts` T16, `selectionOwner.test.ts` |
-| LIVE: the keyboard inside (K-1..K-5) and a selected object's keys (SK-1..SK-8) | `object-keyboard.spec.ts` passed in E2E run 10f and `selected-object-keys.spec.ts` in run 10 (2026-10-01), before the cell-release change and a change to the Escape dispatcher; both run again, with their headers' sabotages. K-6 (a bare key refused) and SK-9 (Insert > Controls > Button with a slicer selected) were added 2026-10-02 and have NOT run |
+| LIVE: the keyboard inside (K-1..K-6) and a selected object's keys (SK-1..SK-9) | `object-keyboard.spec.ts` passed in E2E run 10f and `selected-object-keys.spec.ts` in run 10 (2026-10-01), before the cell-release change and a change to the Escape dispatcher. **Both passed live again on 2026-10-15** (the WP-A/WP-B regression sweep): `object-keyboard.spec.ts` 6/6 and `selected-object-keys.spec.ts` 9/9, including K-6 (a bare key refused) and SK-9 (Insert > Controls > Button with a slicer selected), added 2026-10-02. Their headers' sabotages were not part of that sweep |
 | Touch and pen are MEASURED, nothing changed | `touch-pen-measure.spec.ts` (written, NOT run); its instrument `touchInstrument.test.ts` |
+| Reference picks (§2a): decided before anything selects, inert without `referenceAt`, no family hears a pick press, the drag and its preview, the echo of a double-click, the pick pointer, the routing of sheet vs object cells (2026-10-15) | `overlayReferencePick.test.ts`, `referencePickState.test.ts`, `floatingReferencePickRouting.test.tsx`, `canvasBackgroundPick.test.tsx`, `gridOverlays-interactions.test.ts` (the `referenceAt` type pin); the floating grid `frReferenceAt.test.ts`, `frPickPreview.test.ts`, `frMoveZones.test.ts`, `frSheetChange.test.ts`; the pivot box `pivotVisualOverlay.test.ts`, `pivotVisualZoneHover.test.ts`, `pivotVisualRenderer.test.ts` (`selectionPiecesInBox`); `innerSelectionPaint.test.ts`; who answers: `overlayZoneCensus.test.ts` |
+| GETPIVOTDATA names the anchor and answers the picked value from a worksheet and from a floating-grid cell, and round-trips on a model-shaped definition | `getpivotdata_built_on_the_anchor_answers_the_picked_value`, `getpivotdata_round_trips_on_a_model_shaped_definition` (`canvas_sheet_tests.rs`); `getPivotDataPick.test.ts`, `formulaReferenceInterceptors.test.ts`; the transport (`valueFieldIndex`, `valueFieldNames`, `isModel`, `valueColumnOrder`) in `pivot/regression_tests.rs` and `pivotTransportMirror.test.ts` |
+| Canvas pivot cells (§5, §2e): the store and its clearing rules, click / Shift / drag with auto-scroll, arrows and the Escape ladder, Ctrl+A, every refusal (Delete never deletes the PivotTable), copy through the real dispatcher and the doors, drill and toggle, the box menu and right-click select, the formula bar / Name Box / status bar | `pivotVisualCellSelection.test.ts`, `pivotCellPress.test.ts`, `pivotCellNavigation.test.ts`, `pivotCanvasCellKeys.test.ts`, `pivotVisualSelectionRef.test.ts`, `selectedObjectKeys.test.ts` T17, `copyCellRange.test.ts`, `objectClipboardDoorRule.test.ts`, `objectClipboardWorksheetDoor.test.ts`, `canvasClipboard.test.ts`, `pivotCellDoubleClick.test.ts`, `pivotVisualContextMenu.test.ts`, `sheetChangeRecheck.test.ts`, `pivotCellFormulaBar.test.ts`, `statusBarRange.test.ts`, `useSelectionAggregation.test.tsx` |
+| The pivot menus on both surfaces: windowed readers, item labels, Expand/Collapse on a value cell, every failure toasted, the value-cell items and the model-pivot rule, one fields-request recipe, the value-field dialog door; a greyed item says why | `pivotContextMenuFixes.test.ts`, `pivotValueCellMenu.test.ts`, `pivotFieldsRequest.test.ts`, `valueFieldEdits.test.ts`, `valueFieldDialogRequest.test.ts`, `valueFieldDialogListener.test.tsx`, `openPivotPaneForPivot.test.ts`; `gridContextMenuDisabledReason.test.ts`, `contextMenuDisabledTitle.test.tsx`, `gridMenuContextDrift.test.ts` |
+| The object pane and the visual container (WP-C): the record and its drift tests, Core's paint order and container band, every family's provider, the "Format..." menu census and the container census | §14.5 |
+| LIVE: picks and pivot cells on the AdventureWorks model (J1 a GETPIVOTDATA pick with its staleness check ... J15 a windowed pivot and the copy bound) | `app/e2e/journeys/canvas-pick-cells.spec.ts` with its helper `app/e2e/helpers/adventureworks-live.ts` -- **passed live 15/15 on 2026-10-15** (the WP-A plan's section 5, open-items §2.ak; the first run found BUG-0467, fixed, and a journey defect in J10's path to the hover grip). `fixall-canvas.spec.ts` 36/36 (W26 Ctrl+click on the border band, P8 Copy in the box menu), `fixall-edit.spec.ts` 50 passed and `fixall-pivot.spec.ts` 59/59 the same day |
 
 
 ## 12. The fix-all programme (2026-09-28/29)
@@ -958,7 +1116,9 @@ that changed. The backend runs page filters -- and a chart's own FILTERS -- INSI
 GROUP BY, so an AVERAGE or a distinct count under a multi-item slicer is the model's exact answer; a pinned
 slicer keeps its level; a share measure the engine refuses under a filter falls back to the host mask; a
 Float64 column's items are re-spelled the engine's way. A grid REPORT keeps its filter-area rows (the old
-host mask). Clear All Slicers and an undo re-publish through the Slicer store.
+host mask). Clear All Slicers and an undo re-publish through the Slicer store. A `[Measure]` in a bound
+property (§15.3) follows the page's slicers exactly like a Card -- the same measure-only query with the
+same page filters, mirrored to Rust -- while a CUBEVALUE in a binding, as in a cell, does not.
 
 ### 13.4 Buttons that navigate
 
@@ -968,9 +1128,61 @@ then by name), `back` (`@api/sheetHistory`, the last 50 visible pages) or `clear
 one runs no `onSelect`, macro or bound object script, the Script Door is not asked, scripts cannot write the
 three keys, and a pull keeps them -- so navigation works with Script Security off and on a subscribed
 canvas. Choosing an action for a coded button asks first and removes the code (one undo step restores the
-code without the action). **Page Navigator** inserts one navigate button per visible canvas in tab order,
-wrapping inside the page, as ONE undo step; the button of the page on screen paints pressed. Actions are
-set in the Properties pane's Action section.
+code without the action). Actions are set in the Properties pane's Action section. A navigate button
+paints the "current page" wash when its target is the sheet on screen, decided by sheet ID (a rename of
+the page keeps the wash; BUG-0463), by case-folded name only when one side has no id
+(`isCurrentPageButton`, `app/extensions/Controls/Button/actionGlyph.ts`).
+
+**Page Navigator** (owner finding F2, 2026-10-15; this answered owner question 5 of open-items §2.aj) is ONE
+live control of type `pageNavigator`, owned by Controls and created through the seam
+`@api/buttonControlService` `createPageNavigator` (Elements > Buttons > Page Navigator: one control, one
+undo step "Insert Page Navigator", sized `pageNavigatorNaturalSize(n)` for the n pages it will list and
+clamped to the page).
+
+- **Its items are never stored.** They are derived at paint, hit-test, press and pane time from
+  `@api/reportPages` (§13.7): every canvas page in tab order -- a page added, renamed, moved, hidden,
+  unhidden, deleted, undone or pulled later shows up with no re-insert. veryHidden pages are never listed;
+  hidden pages only with **Show hidden pages**, and then painted faded (alpha 0.45) and still not
+  openable -- a press gives the navigate action's info toast, because `activate_sheet` refuses a
+  user-hidden sheet (Excel's rule; Power BI would open it -- decision conflict C1, ruling R9); Tooltip pages
+  only with **Show tooltip pages**. Items divide the box (`layoutNavigatorItems`); with no pages it paints
+  "No pages".
+- **Container properties** (`PageNavigator/pageNavigatorProperties.ts`, defaults in
+  `pageNavigatorRecipe.ts` `PAGE_NAVIGATOR_DEFAULTS`): Navigator -- `orientation` (horizontal / vertical),
+  `gap`, `padding` (the one inset between the box and its items, applied only in `navigatorItemArea`);
+  Button style -- `fill`, `color`, `borderColor`, `fontSize`; Selected page -- `selectedFill`,
+  `selectedColor`; Pages -- `showHiddenPages`, `showTooltipPages`; Size. A new navigator writes `embedded`
+  and `pinToGrid` explicitly as "false".
+- **Per-button overrides** live in ONE static property, `pageOverrides`: a JSON array of
+  `{ sheetId, sheetName, text?, hidden?, fill?, color?, borderColor? }` (caption, leave this page out, and
+  three colours), matched to a page by `sheetId` first, then by name for an orphaned entry
+  (`matchPageNavigatorOverride`). An override carries NO target: which page an item opens is structural,
+  so no stored value can re-aim a click. The TS strict check (`checkPageNavigatorOverrides`: at most 256
+  entries, captions up to 255 characters, `#rgb` / `#rrggbb` / `#rrggbbaa`, unknown fields refused, 64 Ki
+  characters in all) and the Rust parser (`calcula_format::page_navigator`) share one wire fixture.
+- **The current page is decided by sheet id** (`currentPageKey`), so renaming the page on screen keeps
+  its item current.
+- **Run mode:** an item opens its page on release over the same item (§2c). **Design Mode** is the chart
+  ladder: a first press selects the whole navigator (it moves, resizes, copies and deletes as one
+  object); a second plain press-and-release on an item of the selected navigator, within 3 px and on the
+  same item, selects that ITEM (`navigatorItemSelection.ts`; a drag selects none, also on a locked or
+  subscribed page, where Core arms no move and the session measures the drag itself); Escape climbs one rung (item, then navigator); Delete, Tab, the arrows and the clipboard
+  keys always act on the whole navigator. The selection is view state, never a write.
+- **Properties pane:** header "Page navigator Properties"; sections Navigator, Button style, Selected page,
+  Pages, Size, then **Buttons** (`PropertiesPane/PageNavigatorButtonsSection.tsx`): one row per item,
+  expanded for the selected item, with caption, Show, fill, text colour and border colour; an override
+  whose fields are all cleared is removed.
+- **Never code:** none of its keys is executable, a pull keeps them (`PAGE_NAVIGATOR_PROPERTIES`,
+  `app/src-tauri/src/controls.rs`; `held_button_code_tests.rs`), and the remap of §4 covers
+  `pageOverrides[].sheetId`. Scripts may write `pageOverrides` only through the strict check
+  (`validators.ts`); the `shape.setProperty` door keeps the control's type since WP-D (it used to send
+  `"shape"`, which Rust refuses for a navigator), and one page's caption or colours can be set or bound by
+  path through the object handle (§15.9).
+- **Saved shape:** an ordinary control in `controls.json`; a workbook that has one declares the manifest
+  FEATURE ID `page_navigator` (`calcula_format::manifest::PAGE_NAVIGATOR_FEATURE`) with no format-version
+  link -- an older reader paints the unknown control type as a grey button that does nothing, a visible
+  loss, never a lie, so a navigator raises no format version (pinned by `zip_io.rs`
+  `page_navigator_declares_a_feature_id_but_never_raises_the_version`).
 
 ### 13.5 Page: sizes, wallpaper, Lock Objects
 
@@ -983,8 +1195,9 @@ sentence naming "Canvas > View > Lock Objects" -- while select, format, delete, 
 It is per page, persisted and not undoable (like the background); the UI shows ONE toast per gesture (not
 on a subscribed page, where the reader cannot turn it off). Scripts may set `wallpaper`; `objectsLocked` is
 read-only to them. Both fields are manifest FEATURE IDS with no format-version link (`canvas_wallpaper`,
-`canvas_objects_locked`): an older reader loses a colour or a drag lock, a visible loss, so `.cala` stays at
-v9.
+`canvas_objects_locked`): an older reader loses a colour or a drag lock, a visible loss, so neither raises
+the format version. (A page with a chart is version 10 anyway since 2026-10-15, because `charts.json` now
+embeds the spec as a JSON object, §15.7.) Both can be BOUND to a formula (`/background`, `/wallpaper`, §15).
 
 ### 13.6 Where the proofs are
 
@@ -996,4 +1209,422 @@ v9.
 | Measure-only queries, page filters inside the engine, the share fallback, Float64 spelling | `app/src-tauri/src/pivot/design_query_measure_only_tests.rs`; `pageFilters.test.ts`, `modelSlicerFiltersDesignQueryCharts.test.ts`, `slicerPageFilters*.test.ts` |
 | Button actions: create, perform, paint, pane, refusal to scripts, pull survival, undo | `buttonAction{Create,Perform,Paint}.test.ts`, `buttonActionSection.test.tsx`, `buttonActionRefusal.test.ts`, `held_button_code_tests.rs`; `pageNavigator.test.ts`, `sheetHistory.test.ts`, `slicerClearService.test.ts` |
 | Lock Objects at every backend door; the UI notice; wallpaper; presets | `commands/canvas_objects_lock_tests.rs`, `objectsLock.test.ts`, `objectsLockWiring.test.ts`, `canvasSheet.test.ts`, `canvasSheetConstantsDrift.test.ts`, `canvasSheetScriptRows.test.ts` |
-| LIVE: P1 tab at 1280 and 1920, P2 presets, P3 Card from a cell, P4 KPI and Gauge with undo/redo pixels, P5 a measure-only Card refiltered by a model slicer and Clear All Slicers, P6 Shapes, P7 Page Navigator and Back, P8 Tooltip / wallpaper / Lock Objects, P9 Page View and Themes, P10 LPAD/RPAD | `app/e2e/journeys/canvas-powerbi.spec.ts`, 10/10 on 2026-10-08 (three live sabotages turned P5, P2 and P1 red) |
+| LIVE: P1 tab at 1280 and 1920, P2 presets, P3 Card from a cell, P4 KPI and Gauge with undo/redo pixels, P5 a measure-only Card refiltered by a model slicer and Clear All Slicers, P6 Shapes, P7 Page Navigator and Back, P8 Tooltip / wallpaper / Lock Objects, P9 Page View and Themes, P10 LPAD/RPAD | `app/e2e/journeys/canvas-powerbi.spec.ts`, 10/10 on 2026-10-08 (three live sabotages turned P5, P2 and P1 red). P7 was rewritten on 2026-10-15 for the live control (one `pageNavigator` control and no `button`, "Insert Page Navigator", no stored `action`, the box = `pageNavigatorNaturalSize(2)` clamped to the page, an item press switches pages, Back returns); **the whole file passed 10/10 live on 2026-10-15** |
+| LIVE object pane and Format tab (WP-C): the auto-open at release, the doors, every family's build tabs, Format commits as one step each, fx on container fields, Lock Objects vs format, the text box, paint == hit with padding | `app/e2e/journeys/object-pane-format.spec.ts` -- **passed live 26/26 on 2026-10-16** (J0-J24 + "J10 (reopen)", AdventureWorks; its three header sabotages turned J2, J9 and J11 red, §14.5); the same day `fixall-canvas` 36/36 (after a B8 journey fix), `canvas.spec` 11/11, `canvas-powerbi` 10/10, `canvas-pick-cells` 15/15, `canvas-page-navigator` 12/12; group 2 the same day: `moving-objects` 23/23, `selected-object-keys` 9/9, `object-keyboard` 6/6, `touch-pen-measure` 18/18, `owner-followups` 4/4, `fixall-pivot` 59/59, `fixall-edit` 50/50, `fixall-calp` 39/39, `fixall-lifecycle` 23/23, `pivot-undo-fidelity` 2/2 after fixing BUG-0492 (grip-menu order) and BUG-0493 (Ctrl+1 on a floating-grid cell); group 4 the same day: `chart-interaction` 15/15, `floating-range` 9/9, `on-grid-forms` 4/4, `object-bindings` 13/13, `shapes-hometab` 8/8, `calp-inline-buttons` 3/3, `calp-macro-buttons` 8/8, `calp-button-commands` 3/3, `cascade-announcement-live` 2/2, `computed-property-restore` 1/1, `live-parity-proofs` 10/10, `release-acts` 8/8, `zz-persisted-residue` 1/1 after fixing BUG-0494 (an object-pane checkbox bounced back until the backend answered); group 5 (`tests/`) the same day: `charts` 3/3, `animation` 9/9, `pivot` 8/8, `scriptable-shapes` 40/40, `scriptable-objects` 26/26 (+1 fixme), `button-onclick` 1/1, `panel-placement` 1/1, `macro-recorder-journey` 1/1, `worker-realm-blit` 2/2, `state-consistency` 2/2 after a harness fix (the save/reload oracle compared a chart's `specJson` as text, and `.cala` v10 hands it back with sorted keys); `chart-design-ribbon` and `sidebar-chrome` fail only stale goldens (R14) (open-items §2.ak) |
+| The page list: the snapshot, the one membership rule, coalesced re-reads, out-of-order answers, change-only publish, a malformed answer (BUG-0461); hide/unhide announce `"sheets"` only when the active sheet stayed put (BUG-0462) | `app/src/api/__tests__/reportPages.test.ts`; `app/src/core/lib/__tests__/lifecycleEmitters.test.ts` |
+| The navigator contract: overrides parse / strict check / serialize, the shared wire fixture, the create request check, natural size | `app/src/api/__tests__/buttonControlService.test.ts`; Rust `core/calcula-format/src/page_navigator.rs` (`the_wire_round_trips_the_ts_serializers_bytes`) |
+| The navigator: items, layout, hit, current page by id, paint (faded hidden, "No pages", pressed, selected outline), the read-only describe, the props cache, the recipe, create, the run-mode press and slide-off, the Design-Mode ladder and Escape, the Buttons section, the pane header | `Controls/PageNavigator/__tests__/{navigatorModel,navigatorRenderer,describe,navigatorCache,pageNavigatorRecipe,navigatorItemSelection}.test.ts`; `Controls/__tests__/{pageNavigatorCreate,pageNavigatorPress,pageNavigatorDesignPress,controlZoneAt}.test.ts`; `Controls/lib/__tests__/{controlKinds,buttonPress}.test.ts`; `Controls/PropertiesPane/__tests__/{pageNavigatorButtonsSection,propertiesPaneHeader}.test.tsx`; the insert, `CanvasSheet/__tests__/pageNavigator.test.ts`; the current-page wash by id (BUG-0463), `buttonActionPaint.test.ts` |
+| Scripts: `pageOverrides` only through the strict check; the navigator's keys in the script census | `app/src/api/scriptHost/__tests__/pageNavigatorSetProperty.test.ts`, `mediaHandles.test.ts` |
+| Never code; admission keeps a navigator live; page-target remap and names on every pull door (BUG-0449); feature id without a version | `held_button_code_tests.rs` (`page_navigator_*`, `every_admission_door_keeps_a_page_navigator_live`); `controls.rs` remap tests; `calp_materialize_tests.rs` (`bug_0449_*`, `a_refreshed_navigate_button_and_navigator_keep_their_local_page_targets`, `no_pull_door_materializes_controls_with_an_identity_page_remap`, `an_untouched_checkout_push_republishes_navigator_targets_byte_for_byte`); `core/calp/src/sheet_renames.rs` (`rename_control_entries_moves_static_page_target_names`); `zip_io.rs` (`page_navigator_*`) |
+| LIVE Page Navigator: N1 insert one live object ... N12 a subscriber after a collision rename and a refresh | `app/e2e/journeys/canvas-page-navigator.spec.ts` -- **12/12 live on 2026-10-15.** The first run failed N10 on a product defect, BUG-0468: the Buttons section's "Show this page's button" box snapped back to its old tick until the backend write answered, and Playwright's `uncheck()` reported "Clicking the checkbox did not change its state". The box now shows the click at once, and a refused write puts the old tick back (`ShowCheckbox`, unit-tested in `pageNavigatorButtonsSection.test.tsx`). N10 then passed with its assertion unchanged. The live run also settles two questions the verifier left open: the Escape climb works on a canvas (the key reaches the window-level listener), and the Developer menu's Design Mode check shows the state that Controls changes. **Live sabotage, run once on 2026-10-15:** the `emitAppEvent` in `announceVisibilityChange` (`app/src/core/lib/tauri-api.ts`) was commented out, and the served Vite module was checked to have no emit. Result: N7 failed at "B's item did not disappear when B was hidden" (N1-N6 passed; N8-N12 did not run because the file is serial). The file was restored byte-identical (`cmp`), the served module showed the emit again, and the re-run was 12/12. The pull doors the navigator changed also passed live the same day: `fixall-calp.spec.ts` 39/39, `calp-macro-buttons.spec.ts` 8/8, `calp-inline-buttons.spec.ts` 3/3. Three steps deliberately differ from the plan: N9 asserts that deleting a page ENDS the undo history (BUG-0005, Excel parity: `canUndo` false, Ctrl+Z brings back neither the page nor its item) instead of "undo brings the item back"; N5 builds its A-to-A navigate button through the seam (the pane's Destination lists only OTHER pages) with a twin aimed at B as the pixel control; N11 compares two saves of the same workbook (with and without the navigator: same formatVersion, `page_navigator` only with it) instead of asserting the literal version 9, because the fixture's Card is a chart and charts stamp their own version |
+
+### 13.7 The page list seam
+
+`@api/reportPages` (`app/src/api/reportPages.ts`) is the report's page list: every CANVAS page in tab order
+(`sheetId`, name, true index, visibility, whether it is a Tooltip page), plus every sheet's id by index, as
+ONE synchronous snapshot that paint, hit-test and a pointer gesture can read with no IPC
+(`getReportPagesSnapshot`). `startReportPages()` is reference-counted like `startSheetHistory`; Controls
+starts it on activation and redraws on `onReportPagesChanged`, which fires only when the pages, the ids or
+the active index really changed. Membership is ONE rule, `selectReportPages(pages, { showHiddenPages,
+showTooltipPages })`; `sheetIdAt(snapshot, sheetContext.activeSheetIndex)` names the sheet on screen by id
+whatever its kind; `reportPagesFrom(await getSheets())` is the pure form an insert uses. It re-reads on
+every announcement that can change the list (sheet added / deleted / renamed / changed, a canvas layout
+change, open / new, a pull, and the Shell's `"sheets:refresh"`), coalesces requests made in one task into
+one `get_sheets`, applies only the newest answer, and keeps the previous snapshot on a failed or malformed
+read.
+
+For it to see a hide or an unhide, Core now announces them: `hideSheet` / `unhideSheet`
+(`app/src/core/lib/tauri-api.ts`) emit `MUTATION_REFRESH { domains: ["sheets"] }` -- the announcement
+move, copy and undo already make -- when the call left the active sheet where it was (a non-active hide,
+every unhide). A hide of the ACTIVE sheet announces nothing from the wrapper: the caller that applies the
+switch (the tab strip's `applySheetsResult`, the script host's `announceSheetsChanged`) announces
+SHEET_CHANGED with its detail after the frontend switched, so no cache keyed on the backend's active sheet
+loads the new sheet's objects while the grid still paints the old one (BUG-0462). The command line does
+not apply that switch (BUG-0464, open).
+
+## 14. The object pane and the visual container (F1 + F5, WP-C, 2026-10-16)
+
+Owner findings F1 and F5: selecting any canvas object should show ONE side pane like the pivot's -- the
+object's own "build" tabs plus a Power BI-style Format tab whose fields (Properties, Title, Effects, Data
+format) all carry fx. Built as WP-C (open-items §2.ak, `#### WP-C object pane and format`). Bindings
+themselves are §15.
+
+### 14.1 One pane, many families (D-PANE)
+
+- **The host and the seams.** `app/extensions/BuiltIn/ObjectPane` is the only pane (task-pane id
+  `object-pane`, context key `"object"`). Families contribute through two `@api` seams and never import it:
+  `@api/objectPane` (`registerObjectPaneProvider`: the BUILD tabs for a region type, `defaultTab`,
+  `opensOnPress`, `beforeShowFormat`) and `@api/objectFormat` (`registerObjectFormatProvider`: what the
+  Format tab reads, previews and commits). `openObjectPane({ region, tab, reason })`,
+  `getObjectPaneState()` and `objectPaneMenuEntry(region, tab?)` are the doors every caller uses.
+- **Tab sets** (the Format tab is always last):
+
+  | Object | Build tabs |
+  |---|---|
+  | Chart over a design query (Card, KPI, Gauge, model charts) | Fields, Design |
+  | Chart over a range, or over a pivot | Data |
+  | Pivot box | Fields, Design (ONE lifted `PivotEditor` instance behind both, `CanvasPivotBuildBody`) |
+  | Slicer / timeline | Settings |
+  | Floating grid | Properties (rows, columns, header strips -- the old Properties dialog is deleted) |
+  | Controls (shape, text box, button, picture, Page Navigator) | Properties (the `PropertiesPane` body) |
+
+- **When it opens by itself** (`lib/objectPanePolicy.ts`): only on a CANVAS page, at the RELEASE of a press
+  that did not move (no completed move or resize and no travel past `OBJECT_DRAG_THRESHOLD_PX`, 3 px), one
+  task after the mouseup, and only while the object is still the primary selection. Never on a worksheet,
+  never from the grip, never on a Ctrl/Shift press, and never for an object whose family says a press must
+  not open it (`opensOnPress`: a run-mode button or Page Navigator). A pane the reader closed by hand stays
+  closed (`manuallyClosed`) until a door opens it. Keyboard selection (Tab) and every other selection change
+  only RETARGET an open pane, keeping the tab when the new object offers it; deselecting everything with a
+  pane closes it; File > New / Open closes it.
+- **Doors:** Ctrl+1 (`objectPane.format`, only while the primary object has a pane provider and the grid has
+  the keyboard -- otherwise Ctrl+1 is still Format Cells; the chart's own Ctrl+1 binding is deleted); every
+  floating family's right-click "Format..." (and build-tab rows such as a chart's "Edit data..." or a control's
+  "Properties..."), pinned by `objectMenuFormatCensus.test.ts`; the grip menu's "Format..."; View > Show
+  "Object pane" (`taskpane:requestReopen`). The pivot's `openPivotPaneForPivot` canvas branch, the "Show
+  Field List" item and a chart's "Select PivotTable" open the pane on Fields (ruling R4); the value-cell
+  "Value Field Settings..." opens it on Fields and the dialog through the lifted editor.
+- **Focus.** The pane never takes the keyboard when it opens; Escape inside it returns focus to the grid
+  (`restoreFocusToGrid`), and Delete inside it never deletes the object (`objectPaneDeleteGuard.test.tsx`).
+- **Tab memory** remembers only a tab the reader picked in the strip; a door's tab (Ctrl+1 = Format) is the
+  door's choice. On open: the request, else (on a follow) the current tab when offered, else the provider's
+  `defaultTab`, else memory, else the first build tab, else Format.
+
+### 14.2 The visual container (D-FORMAT)
+
+- **One record, 51 fields.** `VisualContainerFormat` (Rust leaf crate `core/visual-format`, mirrored by
+  `@api/visualContainer`; the limits, the field table and the control key table are drift-tested both
+  ways by `visualContainerLimitsDrift.test.ts` and `controlContainerKeysDrift.test.ts`): padding (four
+  sides), lockAspect, title (show, text, headingLevel, font family / size, bold, italic, underline, colour,
+  background, align, wrap), subtitle (the same minus heading level), divider (show, colour, style, width,
+  ignorePadding), spacing (custom, below title / subtitle / divider), background (show, colour,
+  transparency, plus a structured `gradient` that is never a field and never bound -- the chart's old
+  `theme.backgroundGradient` moved there, ruling R10), border (show, colour, width, radius) and shadow
+  (show, colour, transparency, outside/inside, nine positions, blur, distance), and a `paint` split saying
+  who paints what. Every leaf has one rule (`checkContainerFieldValue` = Rust `validate`), with the same
+  refusal sentence on both sides. A stored container is SANITISED on load (`from_value_lenient`): a bad
+  heading level, a wrong type or an unknown enum value is repaired or dropped, never the parent record.
+- **One spelling per fact.** A family maps each field to where that fact already lives; it never gets a
+  second copy:
+
+  | Family | Stored where | Facts that keep their own spelling |
+  |---|---|---|
+  | Chart | `spec.container` | title text = `spec.title`; title colour / size = `spec.config.theme.titleColor` / `titleFontSize` (`container.title.text/color/fontSize` are refused in TS and in Rust, `forbid_chart_title_leaves`); the old `theme.background` is migrated into `container.background` on load |
+  | Pivot box | `canvasFrame.container`; the style is `definition.style` | -- |
+  | Slicer / timeline | `container` on the record | title text / show = `headerText` / `showHeader` |
+  | Floating grid | `container` on the record | title text = the grid's NAME (a rename, editable but never bound -- it is the A1 space a formula names, ruling R10), title show = `showTitle` |
+  | Controls | flat `container*` property keys (51, `CONTROL_CONTAINER_PROPERTY_KEYS`) | shape / text box / picture: background = `fill`, border = `stroke` / `strokeWidth`; button: background = `fill`, border = `borderColor` / `strokeWidth`, and no title; Page Navigator: background / border = `containerBackgroundColor` / `containerBorder*` (never the ITEM style `fill` / `borderColor`), padding = WP-B's `padding` key, read-only here (one editor per fact) |
+
+- **Who paints.** `paint.{background, border, title, shadow}` is `"core"`, `"family"` or `"none"` per family:
+  Core paints the shadow, background and border of every family except shapes and buttons (which paint their
+  own face); the chart, slicer, timeline and floating grid paint their own title (chart title block, header
+  bar, title bar) inside their content, the pivot box and the shape / picture / navigator titles are
+  Core's, a button has none.
+- **Core's paint order** (`gridRenderer/core.ts` `renderOverlayRegion`): measure the layout
+  (`measureVisualContainerLayout`) and record it (`recordPaintedContainerLayout`), paint UNDER (outside
+  shadow, background, inside shadow) clipped to the cell area, call the family's `render` with NO Core clip
+  (a chart's quick-access buttons paint outside its box), then paint OVER (Core's title, subtitle, divider,
+  border). A family clips only its content, with `withContainerContentClip`.
+- **Paint == hit.** The content rect is ONE function, `visualContentRectFor(regionId, outer, container)`, fed
+  by the layout Core recorded at paint (the cache key is position-independent, so a drag hit-tests what is on
+  screen). Every family lays out AND hit-tests inside it -- the chart's element hit tests and text editing,
+  the pivot's cells and chrome, the slicer's items, the timeline's tiles, the floating grid's cells, the
+  controls' captions and the navigator's items (`navigatorItemArea` IS that rect now). The families' own
+  object hit test still answers the OUTER box, because the band selects, moves and opens the menu.
+- **The container band is frame.** Core answers every point inside the box but outside the content rect
+  (the shown border, the padding, Core-painted title bands) as `{ kind: "frame", part: "container" }`
+  BEFORE it asks the family's `zoneAt` (§2a). `overlayZoneCensus.test.ts` pins that every floating family
+  publishes `container` on the same region literal as its `floating` box.
+- **Default looks.** Charts, pivot boxes, slicers, timelines, shapes and buttons now show a 1 px inset
+  border, so their content starts 1 px inside the frame (a stale golden near an edge is not a regression,
+  ruling R14). A text box is a shape with fill and stroke `none`, `strokeWidth "0"`, text `#252423`,
+  left-aligned (BUG-0483: `strokeWidth "0"` used to paint 1 px).
+
+### 14.3 The Format tab
+
+- **Cards.** General: Properties (X / Y / W / H through `@api/objectGeometry`, Lock aspect, Padding), Title
+  (and subtitle, divider, spacing), Effects (background, border, shadow), Data format (when the family
+  offers `dataFormats` + `setDataFormat`: a chart's value fields write `spec.fieldFormats[measure]`, a pivot's
+  value fields write `BiValueFieldRef.numberFormat` / `ValueField.number_format`; "Use source format"
+  clears). Visual: the family's own cards (the chart's element card, the pivot's Style and Layout, the
+  slicer's Styles and Buttons, the timeline's Style). A row a family's `capabilities` hide is not shown.
+- **fx.** Every row whose field the family maps to a catalog pointer (`CONTAINER_BINDING_PATHS`, checked
+  against WP-D's catalog by `objectFormatBindingPaths.test.ts`) is a `BindableField`. Container pointers are
+  real catalog rows (`O::Container`, 237 rows; a control's `container*` keys are 50 Family rows --
+  `containerLockAspect` is never bindable, nor is a floating grid's title text / show or padding). A bound
+  value that fails its leaf check is ignored and the stored literal shows; a bound or literal `rgb()` /
+  `rgba()` colour on a container path is stored and resolved as hex (`container_literal::normalize_if_container_colour`).
+- **One commit, one step.** `commitObjectFormat([{ region, patch }], label)` ends any preview, checks the
+  patch, refuses a subscribed page (`SIZE_POSITION_SUBSCRIBED`), and runs every provider's write plus its
+  `flush` (a chart's debounced save) inside ONE `runInUndoTransaction` ("Format Object"). Controls write
+  through the 831st command, `set_control_appearance` (several keys on several controls as ONE "Format
+  control" entry that joins the transaction; BUG-0487); a pivot's style through `update_pivot_properties`
+  ("PivotTable Style"); unchanged values send nothing (BUG-0477 is still open at the pivot door). Previews
+  (a colour picker drag, a slider) are transient: no write, no undo, no dirty.
+- **Lock Objects vs format.** Lock Objects freezes POSITION: the geometry rows are disabled with its
+  sentence, while every format field -- padding and a floating grid's title toggle and header strips
+  included -- still commits (§2.aj owner question 1 is now enforced by `commitObjectFormat` and the Rust
+  doors). A SUBSCRIBED page shows the whole tab read-only.
+- **Lock aspect** (`container.lockAspect`, never bindable) makes Core's corner and edge resize keep the
+  ratio (`@api/aspectLock` `applyAspectLock`; the ratio wins over snapping), and the Size and Position
+  dialog and the Properties card's W / H rows follow it.
+
+### 14.4 Saved shape, scripts, what is omitted
+
+- `.cala`: two manifest FEATURE ids, `visual_container` (a non-empty container on any object, or a non-empty
+  `container*` key on a control) and `pivot_style` (a pivot with a persisted style). No format-version link:
+  an older reader drops the look, which is visible loss, never a lie (pinned by
+  `visual_container_and_pivot_style_declare_feature_ids_but_never_raise_the_version`). Empty containers are
+  not written, so a signed `.calp` manifest of an unformatted object is unchanged.
+- The pivot style is persisted (`PivotDefinition.style`: `{ styleId, themeOverrides }`, BUG-0486) and the
+  hidden grid -- and therefore a copy -- wears it (one preset file, `Pivot/styles/excelPivotStyles.json`,
+  shared by TS and Rust, §5).
+- Scripts reach container fields only through WP-D's doors (`property.set` / a handle's `setProperty(path)`,
+  §15.8) and, for a control, the existing `shape.setProperty("container…", value)`; there is no
+  `container.set` aspect. See `scriptable-objects.md`.
+- Not built (by decision or deferred, open-items §2.ak): formatting several objects at once, Power BI's
+  "Responsive" and "Maintain layer order" toggles, a text box's vertical alignment, shadows that follow a
+  non-rectangular shape.
+
+### 14.5 Where the proofs are
+
+| Claim | Test |
+|---|---|
+| The record, its limits and sentences, Rust <-> TS both ways | `core/visual-format` lib tests; `visualContainer.test.ts`, `visualContainerLimitsDrift.test.ts`, `controlContainerKeysDrift.test.ts` |
+| Core's paint order, no clip around render, the zone band, the aspect lock | `visualContainerPaint.test.ts`, `floatingChromePaint.test.ts`, `overlayZones.test.ts`, `aspectLock.test.ts`, `overlayAspectLock.test.ts` |
+| Every floating family publishes a container and has a "Format..." row | `overlayZoneCensus.test.ts` (6th block), `objectMenuFormatCensus.test.ts` |
+| The seams: format read / preview / one-step commit / refusals; the pane provider registry and menu rows | `objectFormat.test.ts`, `objectPane.test.ts`, `taskPaneUpdate.test.tsx` (BUG-0484) |
+| The pane: policy (release, travel, run-mode, manuallyClosed, follow, New/Open), view and tabs, cards, Ctrl+1, Delete guard, every fx pointer is a catalog row | `BuiltIn/ObjectPane/__tests__/{objectPanePolicy,objectPaneView,formatCards,formatValues,objectPaneKeybinding,objectPaneDeleteGuard,objectFormatBindingPaths}`; `cascadeAnnouncementCensus.test.ts` (`PANE_CONTEXT_OWNERS`, BUG-0485) |
+| Charts: provider, tabs, the container composite on every raster route, paint == hit, data formats, Fields / Design / Data tabs | `Charts/lib/__tests__/{chartObjectFormat,chartObjectPane,paintChartWithContainer,chartDataFormats,chartJsonPaneReopen,designQueryWells,designQueryCommit,chartDataTabRouting}`, `rendering/__tests__/chartContainerPaintHit.test.ts`, `components/__tests__/{elementCardOneStep,ChartFieldsTab,ChartDesignQueryBuild}`, `components/pane/__tests__/{ChartRangeDataTab,ChartPivotDataTab}`, `components/data/__tests__/useRangeSource.test.tsx` |
+| Pivot box: container, provider, lifted editor, style persisted and shared with Rust, data format kept over a field edit | `Pivot/lib/__tests__/{pivotBoxContainer,pivotObjectFormat,pivotObjectPane,pivotStylePersist,pivotLayoutEdits}`, `components/__tests__/canvasPivotPaneDoor.test.tsx`, `__tests__/{pivotThemeOverrideKeysDrift,pivotStyleSourceDrift}.test.ts`; Rust `pivot::grid_theme` tests, `canvas_sheet_tests.rs` (`a_pivot_style_*`, `a_worksheet_pivot_style_*`), `pivot::commands` `number_format_origin_tests` / `blank_member_tests` (BUG-0478) |
+| Slicer, timeline, floating grid, controls | `slicerObjectFormat`, `SlicerSettingsTab`, `timelineObjectFormat`, `TimelineSettingsTab`, `frObjectFormat`, `frContainerPaint`, `FloatingRangePropertiesBody`, `controlObjectFormat`, `controlPressOpensObjectPane`, `shapeRendererNoFill` (BUG-0483) |
+| Rust doors: persistence, sanitising, the container literal through WP-D, `set_control_appearance`, feature ids | `commands/visual_container_tests.rs`, `object_bindings/container_literal_tests.rs`, `object_bindings/catalog_tests.rs`, `zip_io.rs` |
+| Scripts: the key door and the pointer door refuse with one sentence; no `container.set` aspect | `scriptHost/__tests__/{validators,mediaHandles,setStateAspectRows}.test.ts`, `Controls/__tests__/containerKeyScriptDoors.test.ts`, `both_control_container_doors_refuse_with_one_sentence` |
+| LIVE | `app/e2e/journeys/object-pane-format.spec.ts` (J0-J24 + "J10 (reopen)" on the AdventureWorks model) -- **passed live 26/26 on 2026-10-16**, with a binary built after WP-C (831 commands, started without a stack overflow). The three header sabotages each turned their step red and were then restored: `armPress` finishing at the press made J2 red, the band answering content made J9 red, and `expand_bi_value_fields` dropping `number_format` made J11 red (and J6 too, through `pivot/headless.rs`). The canvas journeys the auto-open pane affects passed the same day (`fixall-canvas` 36/36, `canvas` 11/11, `canvas-powerbi` 10/10, `canvas-pick-cells` 15/15, `canvas-page-navigator` 12/12). Group 2 (the same day): `moving-objects` 23/23, `selected-object-keys` 9/9, `object-keyboard` 6/6, `touch-pen-measure` 18/18, `owner-followups` 4/4, `fixall-pivot` 59/59, `fixall-edit` 50/50, `fixall-calp` 39/39, `fixall-lifecycle` 23/23 and `pivot-undo-fidelity` 2/2. Two product defects were found and fixed: BUG-0492, where the grip menu put "Format..." between Bring Forward and Send Backward, and BUG-0493, where Ctrl+1 on a floating-grid cell opened the box Format tab instead of refusing. The insight-overlays journeys stop at stale goldens (R14). Group 4 (the same day): `chart-interaction` 15/15, `floating-range` 9/9, `on-grid-forms` 4/4, `object-bindings` 13/13, `shapes-hometab` 8/8, `calp-inline-buttons` 3/3, `calp-macro-buttons` 8/8, `calp-button-commands` 3/3, `cascade-announcement-live` 2/2, `computed-property-restore` 1/1, `live-parity-proofs` 10/10, `release-acts` 8/8 and `zz-persisted-residue` 1/1. One product defect was found and fixed: BUG-0494, where an object-pane checkbox (a Format on/off row, or a floating grid's strips) bounced back until the backend answered. Two journeys were corrected: the swatch step is named "Format Chart", and the slicer header clip now allows for the header gutters. Group 5, the `tests/` specs (the same day, the last group): `charts` 3/3, `animation` 9/9 (the GIF frame capture changed), `pivot` 8/8, `scriptable-shapes` 40/40, `scriptable-objects` 26/26 (+1 `test.fixme`), `button-onclick` 1/1, `panel-placement` 1/1, `macro-recorder-journey` 1/1, `worker-realm-blit` 2/2 and `state-consistency` 2/2 (project `invariant`). That last one passed after a harness fix: the save/reload oracle compared a chart's `specJson` as text, and `.cala` v10 hands the definition back deep-equal but with sorted keys, so `oracles/digest.ts` now compares it parsed. `chart-design-ribbon` (icon artwork) and `sidebar-chrome` (the rail icons the status-bar shield replaced) fail only stale goldens (R14). No product defect was found in group 5 (open-items §2.ak) |
+
+## 15. Dynamic properties: bindings (F6, 2026-10-15)
+
+Owner finding F6: a report object's properties -- a Card's title, a button's caption, a KPI's goal, a
+page's background -- should be able to FOLLOW a formula, the way Power BI's "fx" conditional formatting
+follows a measure. Built as WP-D (open-items §2.ak, `#### WP-D bindings`).
+
+### 15.1 The model: a literal, plus an overlay
+
+- **A property keeps its literal where it always lived** (the chart spec, the control's properties, the
+  slicer record, the canvas layout). A **binding** is one extra row in ONE workbook store,
+  `AppState.object_bindings` (a `Persisted<T>`, saved as `bindings.json`): `{ object: {kind, id}, path,
+  formula, model? }`. `path` is a JSON Pointer into the object's AI-visible JSON (`/spec/title`,
+  `/properties/text`, `/headerText`, `/background`). There is never a second literal copy: the literal is
+  what an export, an older reader or a removed binding shows.
+- **Kinds** (`ObjectBindingKind`): `chart`, `control` (by its new `uid`, see 15.6), `slicer`,
+  `timelineSlicer`, `pivot`, `floatingRange`, `canvasPage` (by SheetId). Pivots and floating grids bind
+  only their visual-container fields (WP-C, §14.3); their geometry is never bindable.
+- **Resolved values are transient.** Rust evaluates each binding, keeps the result in a runtime cache
+  (`object_binding_runtime`, a bare `Mutex` beside the other derived maps) and announces changes on ONE
+  Tauri event, `object-bindings:changed`. A resolved value never dirties the document, never enters undo
+  and never writes the literal (the transient-write rule). Families PAINT literal + resolved: charts,
+  slicers, timelines and the canvas page through `overlayResolved`, controls (including the Page
+  Navigator's per-button fields) through Rust's own overlay in `resolve_control_properties`.
+- **One command.** The whole surface is `object_bindings::object_bindings` with an op enum (list / set /
+  clear / setLiteral / resolveAll / cellsChanged / setPageFilters / refreshMeasures / analyze / objectJson /
+  measures / locate): the command count went from 829 to 830 and nothing else.
+- **Families register, the seam answers.** Each family registers its kind ONCE with
+  `registerBindableProperties` (Controls, Charts, Slicer, TimelineSlicer, CanvasSheet), answering which
+  object a region or a script instance is (`bindingRefForRegion`, `bindingRefForInstance`) and which
+  properties it offers (`getBindableProperties`, every pointer checked against the catalog). A canvas page
+  is a grid layer, not a published region, so `@api/canvasSheet` exports `CANVAS_PAGE_REGION_TYPE` and
+  `canvasPageRegion(sheetIndex, sheetId?)` for a pane to build the page's descriptor. A control's binding
+  id is its `uid`, read from the backend by anchor, never from the floating store. A slicer's or
+  timeline's hit test reads the same overlaid record its painter does (paint equals hit).
+
+### 15.2 The catalog: what can be bound
+
+ONE bindable-path catalog in Rust (`object_bindings/catalog.rs`, 357 rows on 2026-10-16: WP-D's 70, plus
+WP-C's 237 visual-container rows and 50 control `container*` rows), mirrored for the UI and
+the script validator in `app/src/api/objectBindings/catalog.ts`; `objectBindingsCatalogDrift.test.ts` reads
+the Rust file at test time and fails on any difference, in either direction (the authority is Rust, as
+for `interpreterReachDrift`). Each row is a kind, a path pattern, a value type (Text, Number, Integer,
+Boolean, Color, Enum, Scalar, Media), an origin (Family, or Container: a field under the kind's
+`container_root` -- `/spec/container` for a chart, `/canvasFrame/container` for a pivot, `/container` for a
+slicer, timeline or floating grid -- written through `container_literal.rs` and the family's own door) and
+two gate flags, `protect_edit_objects` and `lock_objects_position`. A container COLOUR given as `rgb()` /
+`rgba()` is stored and resolved as hex on both the literal and the binding path (`normalize_if_container_colour`),
+so it is never silently ignored by the container's own colour rule.
+
+- **Charts:** titles and axis titles, axis min/max, each series' name (`/spec/series/*/name`), series
+  colours by name (`/spec/seriesColors/*`), parameter values (`/spec/params/*/value`), the Card / KPI /
+  Gauge `markOptions` (goal, min, max, target, decimals, display units, the good/bad/neutral/track/target
+  colours, callout font size) and the chart theme's colours and font sizes.
+- **Controls:** caption, tooltip, the colours, font size and style, stroke, opacity, rotation, flips, text
+  alignment, a picture's `src` (Media: it must be a `media:{sha256}` already in the document, re-checked on
+  every evaluation -- a binding REFERENCES media, never introduces bytes), width and height, the Page
+  Navigator's container keys, and its per-button fields `/properties/pageOverrides/<page>/{text, fill,
+  color, borderColor, hidden}` (15.9).
+- **Slicers and timelines:** `/headerText`, `/showHeader`. **Canvas page:** `/background`, `/wallpaper`.
+- **Visual containers (WP-C, §14):** every container field of every kind except `lockAspect`, a chart's
+  title text / colour / size (they bind at `/spec/title` and the theme), a slicer's or timeline's title
+  text / show (they bind at `/headerText` / `/showHeader`) and a floating grid's title text / show and
+  padding; a control's are its flat `/properties/container*` keys.
+- **Never bindable:** code (`onSelect`, macros, held code), a button's declarative action wiring,
+  identity keys (`name`), placement (`x`, `y`, `pinToGrid`, `embedded`) and the position of any object --
+  refused at Rust's door with a sentence that says why ("'onSelect' is code; code is never bound."), never
+  offered by the UI, refused by the script validator. Script-declared custom control keys are not bindable
+  in v1 (Rust cannot see their declaration; there is no `/properties/*` wildcard).
+
+### 15.3 Formula rules
+
+- **Stored invariant, shown localised**, exactly like a cell formula: `=Inputs!B1&TEXT([Revenue],"#,##0")`
+  is stored with `,` separators and shown with `;` to an sv-SE user (`displayFormula`). People's editors
+  send localised text; scripts, MCP and the in-app AI send invariant text.
+- **Every reference is sheet-qualified at bind time.** An unqualified `=A1` on a worksheet object reads
+  that worksheet; on a CANVAS it reads the chart's data sheet for a chart, else the first visible
+  worksheet -- and the analysis says so ("A1 on a canvas reads Sheet1!A1 -- the page has no cells"). Sheet
+  names are stored in the workbook's own spelling, so a rename or a delete repairs them (15.5).
+- **`[Measure]`** names a measure of the binding's MODEL: the explicit model, else the page's only model
+  (the models used on that page by design-query charts, model slicers and BI pivots), else the workbook's
+  only model; two candidates are refused with "say which one". A name that is also a table column is
+  refused as ambiguous. Measure values are queried ONCE per (page, connection) with every measure the
+  page's bindings read, as a measure-only design query under the page's slicers -- the Card path of §13.3
+  -- and cached by the page's filter signature; a slicer click re-queries only pages whose filters
+  changed, and a cell edit never re-queries. A measure whose model is not connected shows "(model not
+  connected)"; one the engine refuses (row-level security) shows "(Refused)"; a value not fetched yet is
+  PENDING and the literal stays on screen -- never a stale number.
+- **CUBE functions** are allowed with literal arguments only (a cell-reference argument is refused: use
+  `[Measure]`), are NOT filtered by the page's slicers (as in a cell), and are prefetched through the same
+  resolvers a CUBE cell uses.
+- **Coercion** follows the catalog type. A Text value is the display string (a single-cell formula shows
+  the cell's formatted text, a single measure its `format_string`), capped at 1,024 characters. An error
+  shows as `#REF!`-style text in a Text slot; any other slot keeps its literal while in error.
+
+### 15.4 When bindings re-evaluate
+
+Rust owns the evaluation, the dependency maps (cells, ranges, names, volatile) and ONE entry point,
+`eval::reevaluate`, whose callers are pinned by a census (the command module and `mcp/bindings.rs` only).
+The TRIGGER is the frontend seam's one flush: `@api/objectBindings`'s bridge (`installObjectBindingsBridge`,
+installed in `shell/bootstrap.ts`) listens to every announcement Core and the Shell already make --
+`CELLS_UPDATED`, the backend `"grid:refresh"` window event, `MUTATION_REFRESH`, named ranges, sheets,
+recalculation, structural undo -- and sends ONE `CellsChanged` per animation frame (more than 2,000
+distinct cells become one full pass). That is the "one shared post-mutation tail": computed properties,
+hooked into one command, miss paste, fill, sort and undo; this cannot. A raw backend write that announces
+nothing leaves bindings stale until the next announcement -- an announcement defect in that command, to be
+fixed there. `AppEvents.GRID_REFRESH` (a repaint request) is deliberately NOT a trigger, and families
+repaint with `requestOverlayRedraw()`, so a volatile binding cannot loop. The seam mirrors
+`@api/pageFilters` to Rust (`SetPageFilters`, always the full snapshot, also sent before every `Set`) and
+sends `RefreshMeasures` on open, new, model change and model refresh.
+
+### 15.5 Undo, dirty, structure, deletes
+
+- Set / Clear: one undo step ("Bind property" / "Remove property binding"), dirty only when the row really
+  changed, and never a laxer door than the literal: the same protection ("edit objects") and Lock Objects
+  gates the family's own write applies to that path, on Set AND Clear (pinned by
+  `a_binding_is_never_a_laxer_door_than_its_literal`). A literal write through the same command
+  (`SetLiteral`) is delegated to the family's own write core; a control's records one "Set property" step.
+- Insert/delete rows, columns and cells shift binding references like any formula; a sheet rename
+  rewrites them (`=Data!B2` -> `='Data 2'!B2`); a sheet delete turns them into `#REF!`. A CUT-paste of the
+  cells a binding reads does not move the reference (as for a conditional-format rule).
+- Deleting an object drops its bindings in the SAME undo step, so one Ctrl+Z brings back the object and
+  its bindings; deleting a sheet drops the page's and its objects' bindings (a sheet delete ends the undo
+  history, BUG-0005). Copy, paste and duplicate do NOT copy bindings (a pasted control gets a fresh uid).
+- Trace Dependents lists the bound objects that read the traced cell (`TraceResult.boundObjects`).
+
+### 15.6 Controls and charts: one spelling
+
+- Controls gained a stable `uid` (minted at creation, kept across moves and structural shifts, re-minted
+  on a collision so a paste is a new object). `set_control_property`, `set_control_metadata` and
+  `move_control` REFUSE `valueType: "formula"` ("A property formula is a binding now: use Bind (fx) in the
+  Properties pane, or bindProperty() in a script."); code slots keep their value types byte-identical.
+  The Properties pane's fx writes a binding through the seam; point-mode picks insert a SHEET-QUALIFIED
+  reference (`Data!B3`); Escape cancels the edit; a bound row shows fx even when its definition is not
+  `supportsFormula`, so a binding a script or the AI made is never hidden. A script's
+  `shape.setProperty` keeps the control's type and stores `=...` as text.
+- A chart string field starting with `=` is now TEXT everywhere: the in-spec resolver
+  (`resolveSpecReferences`) and its unbounded invalidation rule are deleted. The in-place title editor
+  turns a typed `=...` into a binding and plain text into a literal (on a bound title: clear + literal in
+  one "Edit chart text" step). A chart parameter's `cellRef` (two-way write-back) is unchanged; a binding
+  on `/spec/params/*/value` acts as the parameter's literal tier.
+- **Migration on load and on every pull** (`object_bindings/migrate.rs`, idempotent): a control's
+  formula-typed property becomes a binding (qualified with the control's own sheet, as the old evaluator
+  read it) and its literal is emptied; a chart's `=Sheet1!A1` title, axis title or series name becomes a
+  binding (unqualified refs use the data sheet). Code slots are carried byte-identical; a non-catalog key
+  becomes static text of the original.
+
+### 15.7 Saved shape and collaboration
+
+- `.cala` **format version 10** is stamped when a binding exists (`OBJECT_BINDINGS_MIN_FORMAT_VERSION`,
+  the lie case: an older reader would show a stale literal as live) AND whenever `charts.json` is
+  non-empty (`CHART_SPEC_OBJECT_MIN_FORMAT_VERSION`: `SavedChart.spec` is now an embedded JSON object, not
+  the `specJson` string; the reader upgrades an old row in place). Orphan bindings (their object gone) are
+  not saved. The manifest also declares the feature id `object_bindings`.
+- `.calp`: `bindings.json` travels with exactly the objects it binds (one predicate,
+  `calp::publish::published_object_bindings`, shared by the writer, the version stamp and the publish
+  report's "objectBindings" line); a publish that carries bindings stamps `min_app_version`, so an older
+  subscriber refuses the pull honestly. A pull lands a row only for an object the pull carried and
+  materialised; canvas-page ids and `pageOverrides/<sheetId>` path segments are remapped to the
+  subscriber's pages; a collision rename reaches binding formulas; a refresh REPLACES the application's
+  bindings and keeps the subscriber's own. A model is stored by its stable key (the data-source id), so it
+  resolves on the subscriber's connection of the same source, else "(model not connected)". The version
+  diff reports a binding change spelling-blind; a binding-only push is not a code change. The dev pull
+  does not carry bindings yet (BUG-0471).
+
+### 15.8 Scripts, the AI, and seeing every binding
+
+- **Scripts** get a handle on any bindable object: `context.self` (restricted, the script's own object)
+  and `api.object(kind, id)` (unlocked), with `getProperty` (resolved, else literal), `getLiteral`,
+  `getBinding`, `setProperty` (a literal), `bindProperty` and `unbindProperty`; `getLiteral("")` returns
+  the whole object JSON. Three setState aspects (`binding.set`, `binding.clear`, `property.set`) each have
+  their own validator row. A restricted script may bind only to cells on the sheet in front of the user,
+  with no names, table refs or INDIRECT; a binding that reads a measure or a CUBE function needs
+  `bi.query`. The TypeScript executor is THE gate for that clamp; Rust re-checks it only as defence in
+  depth (the tier label comes from the renderer). A binding is EVALUATED, never executed: it is not code
+  and is not in codeInventory. Details: `scriptable-objects.md`, `wave3-scripting-security.md`.
+- **The AI** (MCP and the in-app chat): `list_object_properties` (read), `set_object_property` and
+  `set_object_binding` (Mutate tier, one undo step and an audit row each), with invariant formulas.
+  `get_sheet_summary` adds "## Canvas objects" (every object on each canvas, its literals at catalog paths
+  as `path = value` and its bindings as `path := formula -> "display"`) and "## Bound properties
+  (worksheets)"; the chart inventory shows `title=`.
+- **Formulas > Bound Properties...** (`objectBindings.showBoundProperties`,
+  `app/extensions/BuiltIn/BoundProperties`) is a modeless dialog listing EVERY binding in the workbook --
+  object, property, formula, value or error -- with Go to, Edit (the shared formula editor in place) and
+  Remove (one undo step). An object that no longer exists is listed as "(no longer in this workbook)" and
+  can be removed.
+
+### 15.9 Page Navigator per-button bindings
+
+A navigator button's caption, colours and "leave this page out" flag can be bound per page:
+`/properties/pageOverrides/<page key>/text` (and `fill`, `color`, `borderColor`, `hidden`), where the page
+key is the page's SheetId (or `name:<sheet>` for an entry with no id). Rust overlays them in
+`resolve_control_properties` (ruling R7), writing colours as hex. Set and SetLiteral refuse a per-button
+path on anything but a navigator, or for a key that names no live report page; a binding whose page later
+goes stays DORMANT (never evaluated, nothing painted) and works again if a page with that id returns.
+`/properties/pageOverrides` itself and the `sheetId` / `sheetName` fields are never bound. In the Buttons
+section the caption and the three colours carry fx; "Show this page's button" does not (its sense is the
+inverse of `hidden`, which scripts and the AI can still bind).
+
+### 15.10 What it does not do (v1)
+
+Positions are not bindable; copy/paste does not copy bindings; a cut-paste does not move the references;
+exports (`.calp` HTML export, xlsx, PDF) use the literals; CUBE functions take literal arguments only and
+ignore the page's slicers; script-declared custom control keys are not bindable; the binding editor offers
+point-mode picks on worksheet cells only (not on a floating grid's or a canvas pivot's cells); the
+restricted-tier clamp is enforced in TypeScript only. Each has a row in open-items §2.ak.
+
+### 15.11 Where the proofs are
+
+| Claim | Test |
+|---|---|
+| Store, snapshot, save/load, digest, reset on New/Open | `object_bindings/store_tests.rs`, `document_store_reset_tests.rs`, `document_effect.rs` (`the_appstate_lock_census_reconciles`) |
+| The catalog, never-bindable keys, wildcard segments; Rust <-> TS drift | `object_bindings/catalog_tests.rs`; `app/src/api/__tests__/objectBindingsCatalogDrift.test.ts` |
+| The object JSON projection and locating an object | `object_bindings/object_json_tests.rs` |
+| Formula rules: invariant storage, qualification, the canvas fallback, measures, CUBE | `object_bindings/formula_tests.rs` |
+| The evaluator, coercion, volatile bindings, lock leaves, the caller census | `object_bindings/eval_tests.rs` |
+| Measures under page filters, the cache, CUBE prefetch, page models | `object_bindings/measures_tests.rs` |
+| The command: one undo step, dirty only on change, the laxer-door test, audit | `object_bindings/command_tests.rs` |
+| Cascades, structural shift, rename/delete repair, one-step deletes | `object_bindings/cascade_tests.rs`, `sheet_structure_repair_tests.rs`, `sheet_rename_repair_tests.rs`, `object_deps_census_tests.rs` |
+| Control uid, the formula refusal at three doors, migration | `controls_uid_tests.rs`, `object_bindings/migrate_tests.rs`, `held_button_code_tests.rs` |
+| `.calp` carriage | `object_bindings/carriage_tests.rs`; `core/calp` (`publish.rs`, `pull.rs`, `diff.rs`, `sheet_renames.rs`, `tests/version_diff.rs`) |
+| `.cala` v10 and the chart spec as JSON | `core/calcula-format/src/zip_io.rs`, `core/calp/src/chart_refs.rs` |
+| Page Navigator per-button bindings | `object_bindings/page_overrides_tests.rs`; `Controls/PropertiesPane/__tests__/pageNavigatorButtonsBinding.test.tsx` |
+| The seam: cache, bridge (one flush per frame, filters first, no loop), overlay | `app/src/api/__tests__/objectBindings.{cache,bridge,overlay}.test.ts` |
+| fx widgets and the Controls / Charts / Slicer / Timeline / Canvas integrations | `_shared/components/bindings/__tests__/bindableField.test.tsx`; `Controls/PropertiesPane/__tests__/propertyRowBinding.test.tsx`, `Controls/__tests__/controlBindingsWiring.test.tsx`; `Charts/lib/__tests__/chartBindingsRegistration.test.ts`, `Charts/handlers/__tests__/chartTextEditing.test.ts`; `Slicer/__tests__/slicerBindings.test.ts`, `TimelineSlicer/__tests__/timelineBindings.test.ts`, `CanvasSheet/__tests__/canvasPageBindings.test.ts` |
+| Scripts: validator rows, the handle doors, typings | `scriptHost/__tests__/setStateAspectRows.test.ts`, `scriptObjectHandleDoor.test.ts`, `mediaHandles.test.ts`; `ScriptableObjects/__tests__/objectContextsTypings.test.ts` |
+| AI tools, the summary, the Bound Properties view | `mcp/bindings_tests.rs`; `AIChat/__tests__/chatToolSurface.test.ts`, `crossLayerConstantDrift.test.ts`; `BuiltIn/BoundProperties/__tests__/boundPropertiesDialog.test.tsx` |
+| LIVE | `app/e2e/journeys/object-bindings.spec.ts` (WP-D S12, on the owner's AdventureWorks model) -- **13/13 live 2026-10-15**; B3's dirty/undo assertions proved to have teeth by the `SetPageFilters` sabotage its header names (failed on "SetPageFilters (Europe) dirtied the document", reverted, 13/13). The ported journeys passed the same day: `fixall-calp` 39/39, `tests/scriptable-shapes` 40/40, `chart-interaction` 15/15, `canvas-page-navigator` 12/12, `canvas-powerbi` 10/10 (open-items §2.ak, `#### WP-D bindings`) |

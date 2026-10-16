@@ -218,8 +218,17 @@ pub struct ValueField {
     /// The aggregation function to apply.
     pub aggregation: AggregationType,
 
-    /// Number format string (e.g., "#,##0.00", "0%").
+    /// Number format string (e.g., "#,##0.00", "0%"). The EFFECTIVE render
+    /// format: a user override, or (BI pivots) the model's format adopted on
+    /// the last query -- `number_format_from_model` says which.
     pub number_format: Option<String>,
+
+    /// true = `number_format` was ADOPTED from the BI model (not chosen by the
+    /// user). A model format is re-adopted on every BI query; a user override
+    /// (false + Some) is never overwritten and is the only format a request
+    /// carries back (`BiValueFieldRef.number_format`). Grid pivots: always false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub number_format_from_model: bool,
 
     /// Show values as (normal, % of grand total, % of row, etc.).
     pub show_values_as: ShowValuesAs,
@@ -254,6 +263,7 @@ impl ValueField {
             name,
             aggregation,
             number_format: None,
+            number_format_from_model: false,
             show_values_as: ShowValuesAs::Normal,
             custom_name: None,
             base_field_index: None,
@@ -764,6 +774,123 @@ pub struct PivotDefinition {
     /// worksheet destination and a frameless pivot on a canvas.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canvas_frame: Option<CanvasFrame>,
+
+    /// The PivotTable STYLE chosen in the Design tab gallery (D-FORMAT, WP-C),
+    /// for EVERY pivot, worksheet and canvas alike. `None` = the default style
+    /// (PivotStyleLight16) and then no key is written, so a pivot nobody styled
+    /// serializes exactly as it did before styles were persisted (they were
+    /// session-only until 2026-10-15). Read leniently: a damaged style becomes
+    /// `None` (the default) rather than dropping the pivot.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_style_lenient")]
+    pub style: Option<PivotStyleChoice>,
+}
+
+// ============================================================================
+// PIVOT STYLE
+// ============================================================================
+
+/// The colour keys a style may override, named as the TypeScript `PivotTheme`
+/// fields they set (`app/extensions/Pivot/rendering/pivot.ts`). They are map
+/// KEYS, not struct fields, so no serde attribute is involved; the vitest
+/// `pivotThemeOverrideKeysDrift.test.ts` reads THIS array as text and checks
+/// every key is a colour field of `PivotTheme` (direction Rust -> TS). ONE KEY
+/// PER LINE.
+pub const PIVOT_THEME_OVERRIDE_KEYS: &[&str] = &[
+    "headerText",
+    "labelText",
+    "valueText",
+    "totalText",
+    "grandTotalText",
+    "headerBackground",
+    "labelBackground",
+    "valueBackground",
+    "totalBackground",
+    "grandTotalBackground",
+    "alternateRowBackground",
+    "borderColor",
+    "headerBorderColor",
+];
+
+/// Longest style id accepted (`PivotStyleMedium28` is 18).
+pub const PIVOT_STYLE_ID_MAX_CHARS: usize = 64;
+
+/// The PivotTable style chosen in the gallery: an Excel style name plus
+/// optional per-colour overrides. Snake_case on disk like the rest of the crate.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct PivotStyleChoice {
+    /// `"PivotStyleMedium9"` etc. `""` paints the DEFAULT style, exactly like an
+    /// absent choice, in the box and in the hidden grid alike (the one rule:
+    /// `resolvePivotStyleOverrides` in the Pivot extension, mirrored by the
+    /// app's `pivot/grid_theme.rs`); the catalogue has no plain "None" style.
+    pub style_id: String,
+    /// `PivotTheme` colour key -> `#rrggbb`; keys limited to
+    /// [`PIVOT_THEME_OVERRIDE_KEYS`].
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub theme_overrides: std::collections::BTreeMap<String, String>,
+}
+
+fn is_valid_style_id(id: &str) -> bool {
+    id.len() <= PIVOT_STYLE_ID_MAX_CHARS && id.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+fn is_rrggbb(s: &str) -> bool {
+    s.len() == 7 && s.starts_with('#') && s[1..].chars().all(|c| c.is_ascii_hexdigit())
+}
+
+impl PivotStyleChoice {
+    /// The EDIT-path check: `Err` naming the first bad value. A style id is
+    /// `""` or up to 64 ASCII letters/digits; every override key must be one of
+    /// [`PIVOT_THEME_OVERRIDE_KEYS`] and every value a `#rrggbb` colour.
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_valid_style_id(&self.style_id) {
+            return Err(format!(
+                "Invalid PivotTable style: the style id must be empty or at most {} letters and digits (got {:?}).",
+                PIVOT_STYLE_ID_MAX_CHARS, self.style_id
+            ));
+        }
+        for (key, value) in &self.theme_overrides {
+            if !PIVOT_THEME_OVERRIDE_KEYS.contains(&key.as_str()) {
+                return Err(format!(
+                    "Invalid PivotTable style: {:?} is not a style colour that can be overridden.",
+                    key
+                ));
+            }
+            if !is_rrggbb(value) {
+                return Err(format!(
+                    "Invalid PivotTable style: {} must be a #rrggbb colour (got {:?}).",
+                    key, value
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The LOAD-path repair: unknown override keys and bad colours are dropped;
+    /// a style id that is not one drops the whole choice (`None` = the default
+    /// style), never the pivot.
+    pub fn sanitized(self) -> Option<PivotStyleChoice> {
+        if !is_valid_style_id(&self.style_id) {
+            return None;
+        }
+        let theme_overrides = self
+            .theme_overrides
+            .into_iter()
+            .filter(|(k, v)| PIVOT_THEME_OVERRIDE_KEYS.contains(&k.as_str()) && is_rrggbb(v))
+            .collect();
+        Some(PivotStyleChoice { style_id: self.style_id, theme_overrides })
+    }
+}
+
+/// Serde LOAD path of `PivotDefinition::style`: anything unreadable becomes
+/// `None` (the default style); a readable one is `sanitized`.
+fn deserialize_style_lenient<'de, D>(deserializer: D) -> Result<Option<PivotStyleChoice>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw
+        .and_then(|v| serde_json::from_value::<PivotStyleChoice>(v).ok())
+        .and_then(PivotStyleChoice::sanitized))
 }
 
 // ============================================================================
@@ -784,7 +911,10 @@ pub const CANVAS_FRAME_DEFAULT_HEIGHT_PX: f64 = 320.0;
 /// LOGICAL px on the canvas page (the same units as every other floating
 /// object on a canvas), plus whether the header rows/columns stay fixed while
 /// the body scrolls. Snake_case on disk like the rest of this crate.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+///
+/// Not `Copy` since WP-C: the frame also carries the box's visual container
+/// (Strings inside), so call sites clone it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CanvasFrame {
     pub x: f64,
     pub y: f64,
@@ -793,6 +923,17 @@ pub struct CanvasFrame {
     /// Keep the header rows/columns fixed while the body scrolls.
     #[serde(default)]
     pub frozen_headers: bool,
+    /// The box's visual container (D-FORMAT: padding, title, background,
+    /// border, shadow...). Formatting, not geometry: Lock Objects never refuses
+    /// a change to it. No key when `None`, so a frame nobody formatted writes
+    /// exactly what it did before; read leniently (a damaged container is
+    /// repaired or dropped, never the pivot).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "visual_format::deserialize_container_lenient"
+    )]
+    pub container: Option<visual_format::VisualContainerFormat>,
 }
 
 impl CanvasFrame {
@@ -817,6 +958,7 @@ impl CanvasFrame {
             width: edge(self.width, CANVAS_FRAME_DEFAULT_WIDTH_PX),
             height: edge(self.height, CANVAS_FRAME_DEFAULT_HEIGHT_PX),
             frozen_headers: self.frozen_headers,
+            container: self.container.and_then(|c| c.sanitized()),
         }
     }
 
@@ -845,7 +987,17 @@ impl CanvasFrame {
                 ));
             }
         }
+        if let Some(container) = &self.container {
+            container.validate()?;
+        }
         Ok(())
+    }
+
+    /// True when `other` differs from this frame in GEOMETRY (origin or size).
+    /// The header freeze and the visual container are formatting: a locked
+    /// page (Lock Objects) refuses only a geometry change.
+    pub fn geometry_differs(&self, other: &CanvasFrame) -> bool {
+        self.x != other.x || self.y != other.y || self.width != other.width || self.height != other.height
     }
 }
 
@@ -928,6 +1080,7 @@ impl PivotDefinition {
             value_column_order: Vec::new(),
             hierarchy_configs: Vec::new(),
             canvas_frame: None,
+            style: None,
         }
     }
     
@@ -1055,7 +1208,7 @@ mod canvas_frame_tests {
     }
 
     fn frame() -> CanvasFrame {
-        CanvasFrame { x: 32.0, y: 48.0, width: 400.0, height: 240.0, frozen_headers: true }
+        CanvasFrame { x: 32.0, y: 48.0, width: 400.0, height: 240.0, frozen_headers: true, container: None }
     }
 
     /// A worksheet pivot writes NO `canvas_frame` key: every definition in
@@ -1101,8 +1254,9 @@ mod canvas_frame_tests {
             width: 1.0,
             height: 1.0e9,
             frozen_headers: true,
+            container: None,
         };
-        let s = wild.sanitized();
+        let s = wild.clone().sanitized();
         assert_eq!((s.x, s.y), (0.0, 0.0), "negative and non-finite origins become 0");
         assert_eq!(s.width, CANVAS_FRAME_MIN_EDGE_PX);
         assert_eq!(s.height, CANVAS_FRAME_MAX_EDGE_PX);
@@ -1114,6 +1268,7 @@ mod canvas_frame_tests {
             width: f64::NAN,
             height: f64::NEG_INFINITY,
             frozen_headers: false,
+            container: None,
         }
         .sanitized();
         assert_eq!(infinite.x, 0.0);
@@ -1147,6 +1302,158 @@ mod canvas_frame_tests {
             "both bounds are inclusive"
         );
     }
+
+    fn container() -> visual_format::VisualContainerFormat {
+        serde_json::from_value(serde_json::json!({
+            "title": {"show": true, "text": "Sales by region", "headingLevel": 2},
+            "border": {"show": true, "color": "#336699", "radius": 8},
+            "padding": {"top": 6}
+        }))
+        .unwrap()
+    }
+
+    /// The frame's container is written snake_case-free (it is one word) with
+    /// the container's own camelCase leaves, and reads back unchanged; a frame
+    /// without one writes no key (pinned by a literal).
+    #[test]
+    fn the_container_round_trips_and_is_absent_when_none() {
+        let plain = serde_json::to_string(&frame()).unwrap();
+        assert_eq!(plain, r#"{"x":32.0,"y":48.0,"width":400.0,"height":240.0,"frozen_headers":true}"#);
+
+        let mut def = definition();
+        def.canvas_frame = Some(CanvasFrame { container: Some(container()), ..frame() });
+        let value = serde_json::to_value(&def).unwrap();
+        assert_eq!(
+            value["canvas_frame"]["container"],
+            serde_json::json!({
+                "padding": {"top": 6.0},
+                "title": {"show": true, "text": "Sales by region", "headingLevel": 2},
+                "border": {"show": true, "color": "#336699", "radius": 8.0}
+            })
+        );
+        let back: PivotDefinition = serde_json::from_value(value).unwrap();
+        assert_eq!(back.canvas_frame.unwrap().container, Some(container()));
+    }
+
+    /// LOAD: a damaged container never drops the pivot -- an unreadable leaf
+    /// (a heading level a u8 cannot hold, a colour that is not one) is repaired
+    /// or dropped; EDIT: `validate` refuses the same values with a sentence.
+    #[test]
+    fn a_damaged_container_is_repaired_on_load_and_refused_on_edit() {
+        let mut value = serde_json::to_value(CanvasFrame { container: Some(container()), ..frame() }).unwrap();
+        value["container"]["title"]["headingLevel"] = serde_json::json!(300);
+        value["container"]["border"]["color"] = serde_json::json!("red");
+        let loaded: CanvasFrame = serde_json::from_value(value).expect("the frame still loads");
+        let c = loaded.container.clone().expect("the rest of the container is kept");
+        assert_eq!(c.title.as_ref().unwrap().heading_level, Some(6));
+        assert_eq!(c.border.as_ref().unwrap().color, None);
+        assert_eq!(c.border.as_ref().unwrap().radius, Some(8.0));
+
+        let unreadable = serde_json::json!({"x": 1, "y": 2, "width": 300, "height": 200, "container": 7});
+        let f: CanvasFrame = serde_json::from_value(unreadable).unwrap();
+        assert_eq!(f.container, None);
+
+        let mut bad = container();
+        bad.border.as_mut().unwrap().radius = Some(101.0);
+        let e = CanvasFrame { container: Some(bad.clone()), ..frame() }.validate().unwrap_err();
+        assert_eq!(e, "border.radius must be a number from 0 to 100.");
+        // sanitized() repairs the same container.
+        let s = CanvasFrame { container: Some(bad), ..frame() }.sanitized();
+        assert_eq!(s.container.unwrap().border.unwrap().radius, Some(100.0));
+    }
+
+    #[test]
+    fn geometry_differs_ignores_formatting() {
+        let a = frame();
+        assert!(!a.geometry_differs(&CanvasFrame { frozen_headers: false, container: Some(container()), ..frame() }));
+        assert!(a.geometry_differs(&CanvasFrame { x: 33.0, ..frame() }));
+        assert!(a.geometry_differs(&CanvasFrame { height: 241.0, ..frame() }));
+    }
+}
+
+#[cfg(test)]
+mod pivot_style_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn definition() -> PivotDefinition {
+        PivotDefinition::new(identity::EntityId::from_bytes(identity::generate_uuid_v7()), (0, 0), (4, 2))
+    }
+
+    fn choice(id: &str, overrides: &[(&str, &str)]) -> PivotStyleChoice {
+        PivotStyleChoice {
+            style_id: id.to_string(),
+            theme_overrides: overrides.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        }
+    }
+
+    /// The on-disk spelling, pinned by a literal: snake_case like the crate,
+    /// overrides only when present; a pivot with no style writes NO key.
+    #[test]
+    fn the_style_is_snake_case_on_disk_and_absent_when_none() {
+        let value = serde_json::to_value(definition()).unwrap();
+        assert!(!value.as_object().unwrap().contains_key("style"), "{value}");
+
+        let mut def = definition();
+        def.style = Some(choice("PivotStyleMedium9", &[]));
+        assert_eq!(serde_json::to_value(&def).unwrap()["style"], serde_json::json!({"style_id": "PivotStyleMedium9"}));
+        def.style = Some(choice("PivotStyleDark2", &[("headerBackground", "#112233")]));
+        let value = serde_json::to_value(&def).unwrap();
+        assert_eq!(
+            serde_json::to_string(&value["style"]).unwrap(),
+            r##"{"style_id":"PivotStyleDark2","theme_overrides":{"headerBackground":"#112233"}}"##
+        );
+        let back: PivotDefinition = serde_json::from_value(value).unwrap();
+        assert_eq!(back.style, def.style);
+    }
+
+    #[test]
+    fn validate_refuses_unknown_keys_bad_colours_and_bad_ids() {
+        assert!(choice("PivotStyleLight16", &[]).validate().is_ok());
+        assert!(choice("", &[]).validate().is_ok(), "\"\" is Excel's None style");
+        assert!(choice("PivotStyleMedium2", &[("borderColor", "#AABBCC")]).validate().is_ok());
+        let e = choice("PivotStyleMedium2", &[("fontFamily", "#000000")]).validate().unwrap_err();
+        assert!(e.contains("\"fontFamily\" is not a style colour"), "{e}");
+        let e = choice("PivotStyleMedium2", &[("headerText", "red")]).validate().unwrap_err();
+        assert!(e.contains("headerText must be a #rrggbb colour"), "{e}");
+        assert!(choice("PivotStyleMedium2", &[("headerText", "#fff")]).validate().is_err());
+        assert!(choice("PivotStyleMedium2", &[("headerText", "#11223344")]).validate().is_err());
+        assert!(choice("Pivot Style; x", &[]).validate().is_err());
+        assert!(choice(&"A".repeat(65), &[]).validate().is_err());
+    }
+
+    #[test]
+    fn sanitized_drops_bad_overrides_and_a_bad_id_drops_the_choice() {
+        let s = choice("PivotStyleDark1", &[("headerText", "#000000"), ("nope", "#000000"), ("labelText", "blue")])
+            .sanitized()
+            .unwrap();
+        assert_eq!(s.theme_overrides, BTreeMap::from([("headerText".to_string(), "#000000".to_string())]));
+        assert_eq!(choice("not valid!", &[("headerText", "#000000")]).sanitized(), None);
+        let ok = choice("PivotStyleLight1", &[("valueText", "#123456")]);
+        assert_eq!(ok.clone().sanitized(), Some(ok.clone()));
+        assert!(ok.sanitized().unwrap().validate().is_ok());
+    }
+
+    /// LOAD: a damaged style never drops the pivot.
+    #[test]
+    fn a_damaged_style_loads_as_the_default_style() {
+        let mut value = serde_json::to_value(definition()).unwrap();
+        value["style"] = serde_json::json!({"style_id": 42});
+        let back: PivotDefinition = serde_json::from_value(value.clone()).expect("the pivot still loads");
+        assert_eq!(back.style, None);
+        value["style"] = serde_json::json!({"style_id": "PivotStyleMedium3", "theme_overrides": {"headerText": "red", "labelText": "#010203"}});
+        let back: PivotDefinition = serde_json::from_value(value).unwrap();
+        assert_eq!(back.style, Some(choice("PivotStyleMedium3", &[("labelText", "#010203")])));
+    }
+
+    #[test]
+    fn the_override_keys_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for k in PIVOT_THEME_OVERRIDE_KEYS {
+            assert!(seen.insert(*k), "duplicate {k}");
+        }
+        assert_eq!(PIVOT_THEME_OVERRIDE_KEYS.len(), 13);
+    }
 }
 #[cfg(test)]
 mod slicer_filter_model_key_tests {
@@ -1168,5 +1475,34 @@ mod slicer_filter_model_key_tests {
         let keyed = SlicerFilter { model_key: Some("Products.name".to_string()), ..keyless };
         let back: SlicerFilter = serde_json::from_value(serde_json::to_value(&keyed).unwrap()).unwrap();
         assert_eq!(back.model_key.as_deref(), Some("Products.name"));
+    }
+}
+
+#[cfg(test)]
+mod value_field_format_origin_tests {
+    use super::*;
+
+    /// `number_format_from_model` is snake_case on disk, written only when
+    /// true (every grid pivot and every user override writes no key), and a
+    /// value field saved before it existed reads back as a user format.
+    #[test]
+    fn the_model_format_flag_is_absent_when_false_and_round_trips_when_true() {
+        let mut field = ValueField::new(3, "[Revenue]".to_string(), AggregationType::Sum);
+        field.number_format = Some("#,##0.00".to_string());
+        let value = serde_json::to_value(&field).unwrap();
+        assert!(!value.as_object().unwrap().contains_key("number_format_from_model"), "{value}");
+
+        field.number_format_from_model = true;
+        let value = serde_json::to_value(&field).unwrap();
+        assert_eq!(value["number_format_from_model"], serde_json::Value::Bool(true), "{value}");
+        let back: ValueField = serde_json::from_value(value).unwrap();
+        assert!(back.number_format_from_model);
+        assert_eq!(back.number_format.as_deref(), Some("#,##0.00"));
+
+        let mut old = serde_json::to_value(ValueField::new(0, "Sum of x".to_string(), AggregationType::Sum)).unwrap();
+        old.as_object_mut().unwrap().remove("number_format_from_model");
+        old["number_format"] = serde_json::Value::String("0%".to_string());
+        let old: ValueField = serde_json::from_value(old).unwrap();
+        assert!(!old.number_format_from_model, "a format saved before the flag is the user's");
     }
 }

@@ -37,7 +37,8 @@ import type {
   TidyField,
 } from "../types";
 import { isPivotDataSource, isDesignQueryDataSource } from "../types";
-import { resolveDataSource, resolveRangeRefSheet, resolveSpecReferences } from "./dataSourceResolver";
+import { resolveDataSource, resolveRangeRefSheet } from "./dataSourceResolver";
+import { overlayChartBindings } from "./chartBindings";
 import { applyTransformsAsync, type SandboxTransformRunner } from "./chartTransforms";
 import { resolveParams, selectionFilterCategories, applyAxisParamBindings } from "./chartParams";
 import { getPointSelection } from "../handlers/chartPointSelection";
@@ -254,11 +255,13 @@ export async function readChartData(spec: ChartSpec): Promise<ParsedChartData> {
 }
 
 /**
- * Read chart data AND resolve cell references in the spec (title, axis titles,
- * series names). Returns both the resolved spec and the parsed data.
+ * Read chart data AND the spec the chart PAINTS. Returns both.
  *
- * Use this when you need the resolved spec for rendering (e.g., "=A1" in title
- * resolves to the cell value).
+ * The painted spec is the literal spec with the chart's BOUND properties laid
+ * over it (a title, axis title, series name, KPI goal ... whose value is a
+ * formula Rust evaluates -- @api/objectBindings, lib/chartBindings.ts). Only a
+ * placed chart (`chartId`) has bindings. A literal that starts with "=" is
+ * text and paints as typed: there is no second, in-spec spelling of a link.
  */
 export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?: string): Promise<{
   spec: ChartSpec;
@@ -270,8 +273,9 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
   /** Resolved param name -> value map (for on-canvas widget display/stepping). */
   params: ReadonlyMap<string, FormulaValue>;
 }> {
-  // Resolve cell references (=A1, =Sheet1!B5) in string fields
-  let resolvedSpec = await resolveSpecReferences(spec);
+  // The chart's bound properties, laid over its literal spec (synchronous: the
+  // seam's cache). Concat children are not placed charts and have none.
+  let resolvedSpec = overlayChartBindings(depth === 0 ? chartId : undefined, spec);
   const diagnostics: TransformDiagnostic[] = [];
 
   // Concatenation: read each child chart independently and tile them. The
@@ -307,8 +311,12 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
     let parsedData = isPivotDataSource(resolvedSpec.data)
       ? await readPivotChartData(resolvedSpec.data)
       // The chart id lets the design-query reader find the chart's PAGE, and
-      // so the model slicers on it (@api/pageFilters, model lane).
-      : await readDesignQueryData(resolvedSpec.data, chartId ? { chartId } : undefined);
+      // so the model slicers on it (@api/pageFilters, model lane). The data
+      // formats are the ones of the spec being DRAWN (a preview included).
+      : await readDesignQueryData(resolvedSpec.data, {
+          ...(chartId ? { chartId } : {}),
+          fieldFormats: resolvedSpec.fieldFormats,
+        });
 
     // Apply data transforms if specified
     if (resolvedSpec.transform && resolvedSpec.transform.length > 0) {

@@ -98,6 +98,10 @@ Already present and working:
 - Right-click > Format Axis (`components/AxisContextMenu.tsx`).
 - Cell-linked titles already RESOLVE (`lib/dataSourceResolver.ts` `resolveSpecReferences`) and are
   already watched for invalidation. Only the *gesture* to set one was missing.
+  **[SUPERSEDED 2026-10-15, WP-D]** `resolveSpecReferences` and its unbounded `"="` invalidation rule are
+  deleted: a chart string starting with `=` is text, and a title that follows a cell is a BINDING on
+  `/spec/title`, evaluated by Rust and painted through `overlayChartBindings` (`lib/chartBindings.ts`);
+  see `canvas-sheets.md` §15.
 
 Missing or broken:
 
@@ -207,6 +211,11 @@ user-facing workbook switch — Excel's is a symptom of not having solved it.
   reaches the painters. Seeding the editor from it would show `Revenue` for a title stored as
   `=Sheet1!A1` and commit the literal — silently destroying the link. `initialText` comes from
   `getChartById(id).spec.title`; `getRect()` reads the resolved layout.
+  **[UPDATED 2026-10-15, WP-D]** The rule survives with a new subject: the painted title is the
+  binding's resolved value (`overlayChartBindings`), so the editor is seeded from the BINDING's
+  formula when the title is bound, else from the stored literal (`chartTextEditorSeed`,
+  `handlers/chartTextEditing.ts`); a committed `=...` becomes a binding, plain text a literal, and plain
+  text on a bound title clears the binding and writes the literal in ONE "Edit chart text" step.
 - **`layout` is mutated after computation** by the combo painter, the horizontal-bar painter, the
   Pareto painter, the data-table height fold, and the pivot-button adjust. Element rects must be
   offset or recomputed after each, or a title rect is stale by exactly the height that was added and
@@ -416,8 +425,12 @@ serialises a binding.
 3. **A predicate that THROWS counts as "does not apply"** (`keybindings.ts:841-850`). A broken
    extension must not be able to take a key away from the app by failing.
 
-Charts' own use is one line — `() => getCurrentChartId() !== null`, passed as the second argument
-to `registerKeybinding` for `ext.charts.formatSelection` in `index.ts`.
+Charts used this for their own Ctrl+1 (`ext.charts.formatSelection`, guarded by "a chart is
+selected"). Since WP-C S9a (2026-10-15) that binding is gone: Ctrl+1 on ANY floating object is the
+object pane's (`ext.objectPane.format`, BuiltIn/ObjectPane, guarded by "an object with a pane is the
+primary selection and the grid has the keyboard"), and the chart takes part through its pane
+provider's `beforeShowFormat`, which publishes the ladder's rung before the Format tab shows the
+"Chart elements" card (`Charts/lib/chartObjectPane.ts`). One key, one owner.
 
 ### 6.5 Composed charts carry no panel index
 

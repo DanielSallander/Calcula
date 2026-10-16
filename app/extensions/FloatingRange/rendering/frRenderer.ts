@@ -37,6 +37,7 @@ import type {
   OverlayHitTestContext,
 } from "@api/gridOverlays";
 import {
+  getFloatingReferencePickPreview,
   getLiveGridRegions,
   overlayGetRowHeaderWidth,
   overlayGetColHeaderHeight,
@@ -45,8 +46,15 @@ import {
   topFloatingRegionAt,
 } from "@api/gridOverlays";
 import { columnToLetter, type GridLayerContext } from "@api";
+import { withContainerContentClip } from "@api/visualContainerPaint";
+import type { ResolvedVisualText } from "@api/visualContainer";
 import type { TypedCellData } from "@api/lib";
 import { paintScrollIndicators } from "../../_shared/lib/scrollIndicators";
+import {
+  INNER_SELECTION_BORDER,
+  INNER_SELECTION_FILL,
+  paintPickPreview,
+} from "../../_shared/lib/innerSelectionPaint";
 import {
   getFloatingRangeById,
   frRangeInSelection,
@@ -59,7 +67,7 @@ import {
   frTitleH,
   frColHdrH,
   frRowHdrW,
-  frCellsTop,
+  frInnerBox,
   frColWidth,
   frRowHeight,
   frameWidth,
@@ -89,6 +97,7 @@ import {
   resetFrExtents,
 } from "../lib/frExtent";
 import { getFrView, commitFrViewClamp } from "../lib/frView";
+import { frContainerOf } from "../lib/frObjectFormat";
 import { layoutFrEditorForFrame, getFrEditorCell } from "../editor/frEditor";
 
 // ============================================================================
@@ -299,20 +308,55 @@ export function setFrResizeGhost(ghost: FrResizeGhost | null): void {
 }
 
 // ============================================================================
+// A reference pick's drag preview (D-PICK)
+// ============================================================================
+
+/**
+ * The local cells a reference pick's drag covers on THIS range right now, or
+ * null: Core publishes the preview (@api/gridOverlays,
+ * `getFloatingReferencePickPreview`) and the range paints it when the preview
+ * is its region's, in the object space, under its own name. Normalized and
+ * clamped to the content extent the paint can reach (a range shrunk under a
+ * live drag never indexes past its offsets). Exported for the unit tier.
+ */
+export function frPickPreviewCells(
+  regionId: string,
+  entry: FloatingRangeEntry,
+  view: FrView,
+): FrCellRange | null {
+  const preview = getFloatingReferencePickPreview();
+  if (!preview || preview.regionId !== regionId) return null;
+  const r = preview.range;
+  if (r.space !== "object" || r.name !== entry.name) return null;
+  if (view.rows <= 0 || view.cols <= 0) return null;
+  const startRow = Math.min(r.startRow, r.endRow);
+  const startCol = Math.min(r.startCol, r.endCol);
+  if (startRow > view.rows - 1 || startCol > view.cols - 1) return null;
+  return {
+    startRow: Math.max(0, startRow),
+    startCol: Math.max(0, startCol),
+    endRow: Math.min(Math.max(r.startRow, r.endRow), view.rows - 1),
+    endCol: Math.min(Math.max(r.startCol, r.endCol), view.cols - 1),
+  };
+}
+
+// ============================================================================
 // Colors (deliberately plain; FR cells carry no formatting in v1)
 // ============================================================================
 
 const COLORS = {
   frameBg: "#ffffff",
   frameBorder: "#8a8a8a",
-  titleBg: "#f0f0f0",
-  titleText: "#333333",
+  // The title bar's fill and ink are the RESOLVED container title's
+  // (lib/frObjectFormat.ts: #f0f0f0 / #333333 by default), never constants.
   headerBg: "#f7f7f7",
   headerText: "#666666",
   gridline: "#d8d8d8",
   cellText: "#1a1a1a",
-  selectionFill: "rgba(33, 115, 70, 0.14)",
-  selectionBorder: "#217346",
+  /** The shared inner-selection ink (_shared/lib/innerSelectionPaint.ts):
+   *  a canvas pivot's cell selection looks exactly like this range's. */
+  selectionFill: INNER_SELECTION_FILL,
+  selectionBorder: INNER_SELECTION_BORDER,
   objectChrome: "#0e639c",
   ghost: "#0e639c",
   /** Edge (cell-scale) handles. Deliberately NOT the object-chrome blue: the
@@ -324,6 +368,67 @@ const COLORS = {
 
 const CELL_FONT = "11px 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif";
 const CELL_PAD_X = 3;
+/** The title text's inset from the bar's left / right end. */
+const TITLE_PAD_X = 6;
+
+/**
+ * The title bar's font from the resolved title style. Bold is the bar's own
+ * semibold (600) -- today's look -- not the browser's 700. Exported for the
+ * unit tier.
+ */
+export function frTitleFont(t: Pick<ResolvedVisualText, "italic" | "bold" | "fontSize" | "fontFamily">): string {
+  return `${t.italic ? "italic " : ""}${t.bold ? 600 : 400} ${t.fontSize}px ${t.fontFamily}`;
+}
+
+/**
+ * Paint the title bar (the range's NAME) at canvas (x, y), `w` x `h`, in the
+ * RESOLVED title style: its background, ink, font, alignment and underline.
+ * The text is clipped to the bar. Exported for the unit tier.
+ */
+export function paintFrTitleBar(
+  ctx: CanvasRenderingContext2D,
+  title: ResolvedVisualText,
+  name: string,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+): void {
+  if (title.background !== "") {
+    ctx.fillStyle = title.background;
+    ctx.fillRect(x, y, w, h);
+  }
+  ctx.strokeStyle = COLORS.frameBorder;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(x, y + h + 0.5);
+  ctx.lineTo(x + w, y + h + 0.5);
+  ctx.stroke();
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x + 2, y, Math.max(0, w - 4), h);
+  ctx.clip();
+  ctx.font = frTitleFont(title);
+  ctx.fillStyle = title.color;
+  ctx.textAlign = title.align;
+  ctx.textBaseline = "middle";
+  const tx =
+    title.align === "right" ? x + w - TITLE_PAD_X : title.align === "center" ? x + w / 2 : x + TITLE_PAD_X;
+  const ty = y + h / 2 + 0.5;
+  ctx.fillText(name, tx, ty);
+  if (title.underline && name !== "") {
+    const tw = ctx.measureText(name).width;
+    const x0 = title.align === "right" ? tx - tw : title.align === "center" ? tx - tw / 2 : tx;
+    const uy = Math.round(ty + title.fontSize * 0.5) + 0.5;
+    ctx.strokeStyle = title.color;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x0, uy);
+    ctx.lineTo(x0 + tw, uy);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
 
 // ============================================================================
 // Render
@@ -340,25 +445,30 @@ export function renderFloatingRange(overlayCtx: OverlayRenderContext): void {
   const rowHeaderWidth = overlayGetRowHeaderWidth(overlayCtx);
   const colHeaderHeight = overlayGetColHeaderHeight(overlayCtx);
 
-  const { canvasX, canvasY } = overlaySheetToCanvas(
-    overlayCtx,
-    region.floating.x,
-    region.floating.y,
-  );
-  const w = frameWidth(entry);
-  const h = frameHeight(entry);
+  // The OUTER frame (what Core moves, selects and paints the container around)
+  // and, inside the container's border and padding, the grid's OWN frame --
+  // the content rect, where the title bar, the strips and the cells live.
+  const outer = overlaySheetToCanvas(overlayCtx, region.floating.x, region.floating.y);
+  const outerW = frameWidth(entry);
+  const outerH = frameHeight(entry);
+  const inner = frInnerBox(entry);
+  const canvasX = outer.canvasX + inner.x;
+  const canvasY = outer.canvasY + inner.y;
+  const w = inner.width;
+  const h = inner.height;
 
   // The live view (content extent + session scroll, clamped) — the SAME read
   // the hit router and the editor layout make, so paint and click agree.
   const view = getFrView(entry);
 
   // The editor is repositioned every render frame (DOM-over-canvas contract) —
-  // including when the frame is clipped/off-screen, which HIDES it.
-  layoutFrEditorForFrame(entry, canvasX, canvasY, overlayCtx, view);
+  // including when the frame is clipped/off-screen, which HIDES it. Its cell
+  // origins are frame-relative (they include the container inset).
+  layoutFrEditorForFrame(entry, outer.canvasX, outer.canvasY, overlayCtx, view);
 
   // Skip paint if fully invisible.
-  if (canvasX + w < rowHeaderWidth || canvasY + h < colHeaderHeight) return;
-  if (canvasX > overlayCtx.canvasWidth || canvasY > overlayCtx.canvasHeight) return;
+  if (outer.canvasX + outerW < rowHeaderWidth || outer.canvasY + outerH < colHeaderHeight) return;
+  if (outer.canvasX > overlayCtx.canvasWidth || outer.canvasY > overlayCtx.canvasHeight) return;
 
   // The content extent is read lazily, for on-screen ranges only; once it is
   // known, a scroll left past a shrunken end is clamped for good.
@@ -373,7 +483,7 @@ export function renderFloatingRange(overlayCtx: OverlayRenderContext): void {
   const rowHdrW = frRowHdrW(entry);
 
   const hdrTop = canvasY + titleH;
-  const cellsTop = canvasY + frCellsTop(entry);
+  const cellsTop = canvasY + titleH + colHdrH;
   const cellsLeft = canvasX + rowHdrW;
   // The cell VIEWPORT: the window's cells, whatever the content behind it.
   const vpW = contentWidth(entry);
@@ -415,176 +525,189 @@ export function renderFloatingRange(overlayCtx: OverlayRenderContext): void {
   );
   ctx.clip();
 
-  // ---- 1. Opaque frame background + border ----
-  ctx.fillStyle = COLORS.frameBg;
-  ctx.fillRect(canvasX, canvasY, w, h);
-  ctx.strokeStyle = COLORS.frameBorder;
-  ctx.lineWidth = 1;
-  ctx.strokeRect(canvasX + 0.5, canvasY + 0.5, w - 1, h - 1);
+  // ---- 1-6. The grid's own frame, clipped to the container's CONTENT rect
+  // (and its rounded corners): Core painted the container's shadow and
+  // background under this and paints its border over it.
+  withContainerContentClip(
+    ctx,
+    region,
+    { x: outer.canvasX, y: outer.canvasY, width: outerW, height: outerH },
+    { x: canvasX, y: canvasY, width: w, height: h },
+    () => {
+      // ---- 1. Opaque frame background + border ----
+      ctx.fillStyle = COLORS.frameBg;
+      ctx.fillRect(canvasX, canvasY, w, h);
+      ctx.strokeStyle = COLORS.frameBorder;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(canvasX + 0.5, canvasY + 0.5, w - 1, h - 1);
 
-  // ---- 2. Title bar (the Core-move grab zone; optional; never scrolls) ----
-  if (titleH > 0) {
-    ctx.fillStyle = COLORS.titleBg;
-    ctx.fillRect(canvasX, canvasY, w, titleH);
-    ctx.strokeStyle = COLORS.frameBorder;
-    ctx.beginPath();
-    ctx.moveTo(canvasX, canvasY + titleH + 0.5);
-    ctx.lineTo(canvasX + w, canvasY + titleH + 0.5);
-    ctx.stroke();
-    ctx.font = `600 ${CELL_FONT}`;
-    ctx.fillStyle = COLORS.titleText;
-    ctx.textAlign = "left";
-    ctx.textBaseline = "middle";
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(canvasX + 2, canvasY, w - 4, titleH);
-    ctx.clip();
-    ctx.fillText(entry.name, canvasX + 6, canvasY + titleH / 2 + 0.5);
-    ctx.restore();
-  }
+      // ---- 2. Title bar (the Core-move grab zone; optional; never scrolls) ----
+      // Painted by the grid itself (`paint.title` "family") from the RESOLVED
+      // title: a formatted or bound colour, size or alignment paints here.
+      if (titleH > 0) {
+        paintFrTitleBar(ctx, frContainerOf(entry).title, entry.name, canvasX, canvasY, w, titleH);
+      }
 
-  // ---- 3. Local headers (optional — they advertise the private A1 space) ----
-  // STICKY: the strips stay put and carry the SCROLLED labels, each clipped to
-  // its own strip so a label never slides over the corner or out of the frame.
-  ctx.fillStyle = COLORS.headerBg;
-  if (colHdrH > 0) {
-    ctx.fillRect(canvasX, hdrTop, w, colHdrH); // col header strip (incl. corner)
-  }
-  if (rowHdrW > 0) {
-    ctx.fillRect(canvasX, cellsTop, rowHdrW, h - frCellsTop(entry));
-  }
+      // ---- 3. Local headers (optional — they advertise the private A1 space) ----
+      // STICKY: the strips stay put and carry the SCROLLED labels, each clipped to
+      // its own strip so a label never slides over the corner or out of the frame.
+      ctx.fillStyle = COLORS.headerBg;
+      if (colHdrH > 0) {
+        ctx.fillRect(canvasX, hdrTop, w, colHdrH); // col header strip (incl. corner)
+      }
+      if (rowHdrW > 0) {
+        ctx.fillRect(canvasX, cellsTop, rowHdrW, h - titleH - colHdrH);
+      }
 
-  ctx.font = `10px 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif`;
-  ctx.fillStyle = COLORS.headerText;
-  ctx.textBaseline = "middle";
+      ctx.font = `10px 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif`;
+      ctx.fillStyle = COLORS.headerText;
+      ctx.textBaseline = "middle";
 
-  // Column letters.
-  ctx.textAlign = "center";
-  if (colHdrH > 0 && colsShown) {
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(cellsLeft, hdrTop, vpW, colHdrH);
-    ctx.clip();
-    for (let c = range.startCol; c <= range.endCol; c++) {
-      const cw = frColWidth(entry, c);
-      ctx.fillText(columnToLetter(c), colLeft(c) + cw / 2, hdrTop + colHdrH / 2 + 0.5);
-    }
-    ctx.restore();
-  }
-  // Row numbers.
-  if (rowHdrW > 0 && rowsShown) {
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(canvasX, cellsTop, rowHdrW, vpH);
-    ctx.clip();
-    for (let r = range.startRow; r <= range.endRow; r++) {
-      const rh = frRowHeight(entry, r);
-      ctx.fillText(String(r + 1), canvasX + rowHdrW / 2, rowTopY(r) + rh / 2 + 0.5);
-    }
-    ctx.restore();
-  }
-
-  // Header separators — one per strip that is actually there.
-  ctx.strokeStyle = COLORS.gridline;
-  ctx.beginPath();
-  if (colHdrH > 0) {
-    ctx.moveTo(canvasX, cellsTop + 0.5 - 1);
-    ctx.lineTo(canvasX + w, cellsTop + 0.5 - 1);
-  }
-  if (rowHdrW > 0) {
-    ctx.moveTo(cellsLeft + 0.5 - 1, hdrTop);
-    ctx.lineTo(cellsLeft + 0.5 - 1, canvasY + h);
-  }
-  ctx.stroke();
-
-  // ---- 4-6. The cell viewport: clipped, scrolled, visible cells only ----
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(cellsLeft, cellsTop, vpW, vpH);
-  ctx.clip();
-
-  // ---- 4. Gridlines (each shown cell's right / bottom edge) ----
-  ctx.strokeStyle = COLORS.gridline;
-  ctx.beginPath();
-  if (colsShown) {
-    for (let c = range.startCol; c <= range.endCol; c++) {
-      const x = colLeft(c + 1);
-      ctx.moveTo(x + 0.5 - 1, cellsTop);
-      ctx.lineTo(x + 0.5 - 1, cellsTop + vpH);
-    }
-  }
-  if (rowsShown) {
-    for (let r = range.startRow; r <= range.endRow; r++) {
-      const y = rowTopY(r + 1);
-      ctx.moveTo(cellsLeft, y + 0.5 - 1);
-      ctx.lineTo(cellsLeft + vpW, y + 0.5 - 1);
-    }
-  }
-  ctx.stroke();
-
-  // ---- 5. FR-local selection (under the values' ink is fine — it is a fill) ----
-  // Clamped to the EXTENT, not the window: a selection may reach cells that
-  // only scrolling shows. The viewport clip trims what is scrolled away.
-  const localSel = getLocalSelection();
-  if (localSel && localSel.frId === frId) {
-    const rect = localSelectionRect(localSel);
-    const minRow = Math.min(rect.minRow, view.rows - 1);
-    const minCol = Math.min(rect.minCol, view.cols - 1);
-    const maxRow = Math.min(rect.maxRow, view.rows - 1);
-    const maxCol = Math.min(rect.maxCol, view.cols - 1);
-    const sx = colLeft(minCol);
-    const sy = rowTopY(minRow);
-    const selW = colOff[maxCol + 1] - colOff[minCol];
-    const selH = rowOff[maxRow + 1] - rowOff[minRow];
-    ctx.fillStyle = COLORS.selectionFill;
-    ctx.fillRect(sx, sy, selW, selH);
-    ctx.strokeStyle = COLORS.selectionBorder;
-    ctx.lineWidth = 2;
-    ctx.strokeRect(sx + 1, sy + 1, selW - 2, selH - 2);
-    ctx.lineWidth = 1;
-  }
-
-  // ---- 6. Cell values (single line, clipped per cell, type alignment) ----
-  ctx.font = CELL_FONT;
-  ctx.textBaseline = "middle";
-  if (cached && colsShown && rowsShown) {
-    for (let r = range.startRow; r <= range.endRow; r++) {
-      const rh = frRowHeight(entry, r);
-      const y = rowTopY(r);
-      for (let c = range.startCol; c <= range.endCol; c++) {
-        const cell = cached.cells.get(`${r},${c}`);
-        if (!cell || cell.display === "") continue;
-        const cw = frColWidth(entry, c);
-        const x = colLeft(c);
+      // Column letters.
+      ctx.textAlign = "center";
+      if (colHdrH > 0 && colsShown) {
         ctx.save();
         ctx.beginPath();
-        ctx.rect(x, y, cw, rh);
+        ctx.rect(cellsLeft, hdrTop, vpW, colHdrH);
         ctx.clip();
-        ctx.fillStyle = COLORS.cellText;
-        ctx.textAlign = cell.align;
-        const tx =
-          cell.align === "right"
-            ? x + cw - CELL_PAD_X
-            : cell.align === "center"
-              ? x + cw / 2
-              : x + CELL_PAD_X;
-        ctx.fillText(cell.display, tx, y + rh / 2 + 0.5);
+        for (let c = range.startCol; c <= range.endCol; c++) {
+          const cw = frColWidth(entry, c);
+          ctx.fillText(columnToLetter(c), colLeft(c) + cw / 2, hdrTop + colHdrH / 2 + 0.5);
+        }
         ctx.restore();
       }
-    }
-  }
+      // Row numbers.
+      if (rowHdrW > 0 && rowsShown) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(canvasX, cellsTop, rowHdrW, vpH);
+        ctx.clip();
+        for (let r = range.startRow; r <= range.endRow; r++) {
+          const rh = frRowHeight(entry, r);
+          ctx.fillText(String(r + 1), canvasX + rowHdrW / 2, rowTopY(r) + rh / 2 + 0.5);
+        }
+        ctx.restore();
+      }
 
-  // Overlay scroll indicators on each axis whose content overflows the window.
-  const { maxLeft, maxTop } = frMaxScroll(entry, view.rows, view.cols);
-  if (maxLeft > 0 || maxTop > 0) {
-    paintScrollIndicators(ctx, {
-      box: { x: cellsLeft, y: cellsTop, width: vpW, height: vpH },
-      scroll: { left: view.scrollLeft, top: view.scrollTop },
-      maxScroll: { maxLeft, maxTop },
-      content: { width: colOff[view.cols], height: rowOff[view.rows] },
-    });
-  }
-  ctx.restore(); // the cell viewport clip
+      // Header separators — one per strip that is actually there.
+      ctx.strokeStyle = COLORS.gridline;
+      ctx.beginPath();
+      if (colHdrH > 0) {
+        ctx.moveTo(canvasX, cellsTop + 0.5 - 1);
+        ctx.lineTo(canvasX + w, cellsTop + 0.5 - 1);
+      }
+      if (rowHdrW > 0) {
+        ctx.moveTo(cellsLeft + 0.5 - 1, hdrTop);
+        ctx.lineTo(cellsLeft + 0.5 - 1, canvasY + h);
+      }
+      ctx.stroke();
+
+      // ---- 4-6. The cell viewport: clipped, scrolled, visible cells only ----
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(cellsLeft, cellsTop, vpW, vpH);
+      ctx.clip();
+
+      // ---- 4. Gridlines (each shown cell's right / bottom edge) ----
+      ctx.strokeStyle = COLORS.gridline;
+      ctx.beginPath();
+      if (colsShown) {
+        for (let c = range.startCol; c <= range.endCol; c++) {
+          const x = colLeft(c + 1);
+          ctx.moveTo(x + 0.5 - 1, cellsTop);
+          ctx.lineTo(x + 0.5 - 1, cellsTop + vpH);
+        }
+      }
+      if (rowsShown) {
+        for (let r = range.startRow; r <= range.endRow; r++) {
+          const y = rowTopY(r + 1);
+          ctx.moveTo(cellsLeft, y + 0.5 - 1);
+          ctx.lineTo(cellsLeft + vpW, y + 0.5 - 1);
+        }
+      }
+      ctx.stroke();
+
+      // ---- 5. FR-local selection (under the values' ink is fine — it is a fill) ----
+      // Clamped to the EXTENT, not the window: a selection may reach cells that
+      // only scrolling shows. The viewport clip trims what is scrolled away.
+      const localSel = getLocalSelection();
+      if (localSel && localSel.frId === frId) {
+        const rect = localSelectionRect(localSel);
+        const minRow = Math.min(rect.minRow, view.rows - 1);
+        const minCol = Math.min(rect.minCol, view.cols - 1);
+        const maxRow = Math.min(rect.maxRow, view.rows - 1);
+        const maxCol = Math.min(rect.maxCol, view.cols - 1);
+        const sx = colLeft(minCol);
+        const sy = rowTopY(minRow);
+        const selW = colOff[maxCol + 1] - colOff[minCol];
+        const selH = rowOff[maxRow + 1] - rowOff[minRow];
+        ctx.fillStyle = COLORS.selectionFill;
+        ctx.fillRect(sx, sy, selW, selH);
+        ctx.strokeStyle = COLORS.selectionBorder;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(sx + 1, sy + 1, selW - 2, selH - 2);
+        ctx.lineWidth = 1;
+      }
+
+      // ---- 5b. A reference pick's drag over THIS range (D-PICK) ----
+      // Core runs the pick and inserts "<name>!A1:B3" itself; the range only shows
+      // what the drag covers, dashed, in the same scrolled cell space as the
+      // selection above (the viewport clip trims what is scrolled away).
+      const pick = frPickPreviewCells(region.id, entry, view);
+      if (pick) {
+        paintPickPreview(ctx, [
+          {
+            x: colLeft(pick.startCol),
+            y: rowTopY(pick.startRow),
+            width: colOff[pick.endCol + 1] - colOff[pick.startCol],
+            height: rowOff[pick.endRow + 1] - rowOff[pick.startRow],
+          },
+        ]);
+      }
+
+      // ---- 6. Cell values (single line, clipped per cell, type alignment) ----
+      ctx.font = CELL_FONT;
+      ctx.textBaseline = "middle";
+      if (cached && colsShown && rowsShown) {
+        for (let r = range.startRow; r <= range.endRow; r++) {
+          const rh = frRowHeight(entry, r);
+          const y = rowTopY(r);
+          for (let c = range.startCol; c <= range.endCol; c++) {
+            const cell = cached.cells.get(`${r},${c}`);
+            if (!cell || cell.display === "") continue;
+            const cw = frColWidth(entry, c);
+            const x = colLeft(c);
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(x, y, cw, rh);
+            ctx.clip();
+            ctx.fillStyle = COLORS.cellText;
+            ctx.textAlign = cell.align;
+            const tx =
+              cell.align === "right"
+                ? x + cw - CELL_PAD_X
+                : cell.align === "center"
+                  ? x + cw / 2
+                  : x + CELL_PAD_X;
+            ctx.fillText(cell.display, tx, y + rh / 2 + 0.5);
+            ctx.restore();
+          }
+        }
+      }
+
+      // Overlay scroll indicators on each axis whose content overflows the window.
+      const { maxLeft, maxTop } = frMaxScroll(entry, view.rows, view.cols);
+      if (maxLeft > 0 || maxTop > 0) {
+        paintScrollIndicators(ctx, {
+          box: { x: cellsLeft, y: cellsTop, width: vpW, height: vpH },
+          scroll: { left: view.scrollLeft, top: view.scrollTop },
+          maxScroll: { maxLeft, maxTop },
+          content: { width: colOff[view.cols], height: rowOff[view.rows] },
+        });
+      }
+      ctx.restore(); // the cell viewport clip
+    },
+  ); // the container's content clip
 
   // ---- 7. Object-selection chrome: NONE here. ----
   // The selection outline and the four corner handles (they change the

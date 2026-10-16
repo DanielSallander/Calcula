@@ -5,7 +5,8 @@
 //          const, enum, properties + required + additionalProperties:false,
 //          items, oneOf/anyOf, allOf, if/then/else, and the BOUNDS --
 //          minimum/maximum (+ exclusive), minLength/maxLength, pattern,
-//          minItems/maxItems. Pure, no deps.
+//          minItems/maxItems, and a schema-valued additionalProperties (a
+//          typed map). Pure, no deps.
 //
 //          THE BOUNDS ARE ENFORCED. They used to be advisory: the checker read
 //          none of them, so a script could store a Card with decimals 99 or a
@@ -120,6 +121,11 @@ export function schemaViolations(value: unknown, schema: any): string[] {
         if (value[key] === undefined) continue;
         if (props[key] !== undefined) out.push(...viol(value[key], props[key], `${path}.${key}`));
         else if (s.additionalProperties === false) out.push(`${path}: unknown property '${key}'`);
+        // A SCHEMA-valued additionalProperties types every undeclared member
+        // (a map such as fieldFormats: measure -> format code).
+        else if (s.additionalProperties && typeof s.additionalProperties === "object") {
+          out.push(...viol(value[key], s.additionalProperties, `${path}.${key}`));
+        }
       }
     }
 

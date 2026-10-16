@@ -47,6 +47,7 @@ import { readHeldButtonCode, type HeldButtonCode } from "@api/heldButtonCode";
 import { getGridRegions } from "@api/gridOverlays";
 import { getObjectStackingService, type ObjectStackingCommand } from "@api/objectStacking";
 import { sizeAndPositionMenuEntry } from "@api/objectPosition";
+import { objectPaneMenuEntry } from "@api/objectPane";
 import type { GridContextMenuItem, GridMenuContext } from "@api/extensions";
 import {
   getSelectedFloatingControls,
@@ -567,12 +568,27 @@ export function buildControlObjectMenu(controlId: string, facts: ControlMenuFact
     });
   }
 
+  const region = getGridRegions().find((r) => r.id === controlId);
+
+  // The OBJECT PANE (@api/objectPane, WP-C D-PANE; review R2-15b): "Format..."
+  // opens its Format tab (the control's visual container) and "Properties..."
+  // its Properties tab -- the doors that work on a worksheet too, where a
+  // press opens no pane. Omitted (this menu greys nothing out) when the pane
+  // cannot open for this control.
+  const format = region ? objectPaneMenuEntry(region) : null;
+  if (format && !format.disabled) {
+    items.push({ id: "controls.format", label: format.label, run: format.run });
+  }
+  const properties = region ? objectPaneMenuEntry(region, "properties") : null;
+  if (properties && !properties.disabled) {
+    items.push({ id: "controls.properties", label: properties.label, run: properties.run });
+  }
+
   // Size and Position (@api/objectPosition; BUG-0258 design phase 5b): the
   // no-drag route to place and size the control, the row every object menu
   // carries. Omitted (this menu greys nothing out) only when no dialog can
   // open for it; a RUN-MODE button opens it read-only, saying that Design Mode
   // is what lets it move.
-  const region = getGridRegions().find((r) => r.id === controlId);
   const sizePos = region ? sizeAndPositionMenuEntry(region) : null;
   if (sizePos && !sizePos.disabled) {
     items.push({

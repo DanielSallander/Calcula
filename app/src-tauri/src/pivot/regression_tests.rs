@@ -22,6 +22,10 @@
 //!             WILL take (`check_pivot_extent_excludes_source`).
 //!   open-items 2.af "the pivot listing has no sheet": `get_all_pivot_tables`
 //!             now says which sheet each pivot is on.
+//!   WP-A S1   the transport canvas pivot cells and reference picks read: a
+//!             value cell's `value_field_index`, the view's
+//!             `value_field_names` (BOTH response literals), the region's
+//!             `is_model`, and the configuration's `value_column_order`.
 
 use super::commands::{get_all_pivot_tables_core, pivot_data_formula_at};
 use super::operations::{
@@ -889,22 +893,7 @@ fn a_refused_change_data_source_leaves_the_pivot_and_the_document_untouched() {
     change_source(&fx, id, "Sheet1!A1").expect_err("not a range");
     assert!(!fx.file.is_dirty(), "a mistyped range dirtied the document");
 
-    let meta = super::types::BiPivotMetadata {
-        connection_id: new_id(),
-        data_source_id: None,
-        model_tables: vec![],
-        measures: vec![],
-        hierarchies: vec![],
-        calculation_groups: vec![],
-        data_as_of: None,
-        last_query: None,
-        lookup_columns: std::collections::HashSet::new(),
-        drill_through: None,
-        perspectives: vec![],
-        selected_perspective: None,
-        cultures: vec![],
-    };
-    fx.pivots.bi_metadata.write(&test_seed_effect()).unwrap().insert(id, meta);
+    fx.pivots.bi_metadata.write(&test_seed_effect()).unwrap().insert(id, bi_meta_stub());
     let err = change_source(&fx, id, "Sheet1!A1:C3").expect_err("a data-model pivot");
     assert!(err.contains("data model"), "{err}");
 
@@ -1833,7 +1822,7 @@ fn an_empty_pivots_first_field_change_keeps_the_users_cells_under_its_placeholde
     };
     let saved = super::operations::save_overwritten_cells(&fx.state, id, 0, (0, 4), &view);
     let count = super::operations::count_overwritten_cells(&fx.state, id, 0, (0, 4), &view);
-    super::operations::update_pivot_in_grid(&fx.state, &effect, id, 0, (0, 4), &view, false).expect("the write");
+    super::operations::update_pivot_in_grid(&fx.state, &effect, id, 0, (0, 4), &view, false, None).expect("the write");
     super::operations::update_pivot_region(&fx.state, id, 0, (0, 4), &view);
 
     assert_eq!(
@@ -1926,4 +1915,190 @@ fn every_door_that_clears_a_pivots_block_clears_only_what_it_wrote() {
         calp.contains("if !region.reserved_only {"),
         "a pull's withdrawn pivot clears its placeholder again, erasing the subscriber's cells under it"
     );
+}
+
+// ============================================================================
+// WP-A S1: the pivot transport canvas pivot cells and reference picks read
+// (value field per cell, value field names, the region's model flag, the
+// value-column order). No new command and no persisted change: fields on the
+// existing responses only.
+// ============================================================================
+
+/// Sum of Sales (value field 0) and Count of Sales (value field 1) by Region.
+fn two_value_definition(destination: (u32, u32)) -> PivotDefinition {
+    let mut def = sales_definition("Sheet1", destination, &[(0, "Region")]);
+    def.value_fields.push(ValueField::new(2, "Count of Sales".to_string(), AggregationType::Count));
+    def
+}
+
+/// Every cell of every DATA row, with its view column, as serialized JSON.
+fn data_row_cells(rows: &[super::types::PivotRowData]) -> Vec<(usize, serde_json::Value)> {
+    rows.iter()
+        .filter(|r| r.row_type == pivot_engine::PivotRowType::Data)
+        .flat_map(|r| r.cells.iter().enumerate().map(|(c, cell)| (c, serde_json::to_value(cell).unwrap())))
+        .collect()
+}
+
+fn assert_cells_name_their_value_field(cells: &[(usize, serde_json::Value)], context: &str) {
+    assert!(cells.len() >= 6, "{context}: fixture: two data rows of three cells, got {}", cells.len());
+    for (col, json) in cells {
+        match col {
+            0 => assert!(
+                json.get("valueFieldIndex").is_none(),
+                "{context}: a row label carries no value field: {json}"
+            ),
+            1 => assert_eq!(json["valueFieldIndex"], serde_json::json!(0), "{context}: Sum of Sales column: {json}"),
+            2 => assert_eq!(json["valueFieldIndex"], serde_json::json!(1), "{context}: Count of Sales column: {json}"),
+            _ => panic!("{context}: unexpected column {col}: {json}"),
+        }
+    }
+}
+
+#[test]
+fn a_data_cell_carries_its_value_field_index_and_a_label_does_not() {
+    let fx = fx(1);
+    let grid = put(&fx, 0, SALES);
+    let mut cache = cache_of(&grid, (3, 2));
+    let def = two_value_definition((0, 5));
+    let view = safe_calculate_pivot(&def, &mut cache);
+
+    let response = super::utils::view_to_response(&view, &def, &mut cache);
+    assert!(!response.is_windowed, "fixture: a small pivot");
+    assert_cells_name_their_value_field(&data_row_cells(&response.rows), "view_to_response");
+
+    // The scroll-triggered window converts through the same function.
+    let window = super::utils::extract_cell_window(&view, 0, view.rows.len());
+    assert_cells_name_their_value_field(&data_row_cells(&window), "extract_cell_window");
+}
+
+/// A Region | Units source with `n` distinct regions (one record each).
+fn many_regions(fx: &Fx, n: usize) -> engine::grid::Grid {
+    let owned: Vec<Vec<String>> = std::iter::once(vec!["Region".to_string(), "Units".to_string()])
+        .chain((0..n).map(|i| vec![format!("R{:04}", i), format!("{}", i + 1)]))
+        .collect();
+    let rows: Vec<Vec<&str>> = owned.iter().map(|r| r.iter().map(String::as_str).collect()).collect();
+    let refs: Vec<&[&str]> = rows.iter().map(Vec::as_slice).collect();
+    put(fx, 0, &refs)
+}
+
+#[test]
+fn the_view_lists_its_value_field_names_in_definition_order() {
+    let expected = serde_json::json!(["Sum of Units", "Count of Units"]);
+    let units_definition = |rows: u32| {
+        let mut def = PivotDefinition::new(new_id(), (0, 0), (rows, 1));
+        def.source_has_headers = true;
+        def.source_sheet = Some("Sheet1".to_string());
+        def.destination_sheet = Some("Sheet1".to_string());
+        def.destination = (0, 5);
+        def.row_fields.push(PivotField::new(0, "Region".to_string()));
+        def.value_fields.push(ValueField::new(1, "Sum of Units".to_string(), AggregationType::Sum));
+        def.value_fields.push(ValueField::new(1, "Count of Units".to_string(), AggregationType::Count));
+        def
+    };
+
+    // The ordinary branch: a pivot of 500 rows or fewer (most pivots).
+    let fx_small = fx(1);
+    let grid = many_regions(&fx_small, 3);
+    let mut cache = cache_of(&grid, (3, 1));
+    let def = units_definition(3);
+    let view = safe_calculate_pivot(&def, &mut cache);
+    let small = super::utils::view_to_response(&view, &def, &mut cache);
+    assert!(!small.is_windowed, "fixture: the small half is not windowed");
+    assert_eq!(serde_json::to_value(&small).unwrap()["valueFieldNames"], expected, "the ordinary literal");
+
+    // The windowed branch: more than 500 visible rows.
+    let fx_big = fx(1);
+    let grid = many_regions(&fx_big, 600);
+    let mut cache = cache_of(&grid, (600, 1));
+    let def = units_definition(600);
+    let view = safe_calculate_pivot(&def, &mut cache);
+    let big = super::utils::view_to_response(&view, &def, &mut cache);
+    assert!(big.is_windowed, "fixture: 600 row items must take the windowed branch");
+    assert_eq!(serde_json::to_value(&big).unwrap()["valueFieldNames"], expected, "the windowed literal");
+
+    // No value fields: the key is absent, not an empty list.
+    let mut bare = units_definition(3);
+    bare.value_fields.clear();
+    let grid = many_regions(&fx_small, 3);
+    let mut cache = cache_of(&grid, (3, 1));
+    let view = safe_calculate_pivot(&bare, &mut cache);
+    let json = serde_json::to_value(super::utils::view_to_response(&view, &bare, &mut cache)).unwrap();
+    assert!(json.get("valueFieldNames").is_none(), "a pivot without value fields sends no key: {json}");
+}
+
+/// A data-model pivot's metadata with nothing in it: only its PRESENCE in
+/// `bi_metadata` is what makes a pivot a model pivot.
+fn bi_meta_stub() -> super::types::BiPivotMetadata {
+    super::types::BiPivotMetadata {
+        connection_id: new_id(),
+        data_source_id: None,
+        model_tables: vec![],
+        measures: vec![],
+        hierarchies: vec![],
+        calculation_groups: vec![],
+        data_as_of: None,
+        last_query: None,
+        lookup_columns: std::collections::HashSet::new(),
+        drill_through: None,
+        perspectives: vec![],
+        selected_perspective: None,
+        cultures: vec![],
+    }
+}
+
+#[test]
+fn a_region_says_whether_its_pivot_is_a_model_pivot() {
+    let fx = fx(1);
+    put(&fx, 0, SALES);
+    let id = placed_pivot(&fx, sales_definition("Sheet1", (0, 5), &[(0, "Region")]), 0);
+
+    let regions = super::commands::pivot_regions_for_sheet(&fx.state, &fx.pivots, 0);
+    let region = regions.iter().find(|r| r.pivot_id == id).expect("fixture: the region is listed");
+    assert!(!region.is_model, "a range pivot is not a model pivot");
+    assert_eq!(serde_json::to_value(region).unwrap()["isModel"], serde_json::json!(false), "the key is always sent");
+
+    fx.pivots.bi_metadata.write(&test_seed_effect()).unwrap().insert(id, bi_meta_stub());
+    let regions = super::commands::pivot_regions_for_sheet(&fx.state, &fx.pivots, 0);
+    let region = regions.iter().find(|r| r.pivot_id == id).unwrap();
+    assert!(region.is_model, "a pivot with data-model metadata is a model pivot");
+    assert_eq!(serde_json::to_value(region).unwrap()["isModel"], serde_json::json!(true));
+
+    // Another sheet's listing does not see it at all.
+    assert!(super::commands::pivot_regions_for_sheet(&fx.state, &fx.pivots, 1).iter().all(|r| r.pivot_id != id));
+}
+
+#[test]
+fn the_field_configuration_carries_the_value_column_order() {
+    let fx = fx(1);
+    let grid = put(&fx, 0, SALES);
+    let cache = cache_of(&grid, (3, 2));
+    let mut def = two_value_definition((10, 4));
+    def.calculated_fields.push(pivot_engine::CalculatedField {
+        name: "Double".to_string(),
+        formula: "'Sum of Sales'*2".to_string(),
+        number_format: None,
+    });
+    def.value_column_order = vec![
+        pivot_engine::ValueColumnRef::Value(0),
+        pivot_engine::ValueColumnRef::Calculated(0),
+        pivot_engine::ValueColumnRef::Value(1),
+    ];
+
+    let config = super::commands::pivot_field_configuration(&def, &cache);
+    let json = serde_json::to_value(&config).unwrap();
+    assert_eq!(
+        json["valueColumnOrder"],
+        serde_json::json!([
+            { "type": "value", "index": 0 },
+            { "type": "calculated", "index": 0 },
+            { "type": "value", "index": 1 }
+        ]),
+        "{json}"
+    );
+    assert_eq!(json["calculatedFields"][0]["name"], serde_json::json!("Double"), "the calculated field rides along");
+
+    // The engine's default order (values first) is sent as no key at all.
+    def.value_column_order.clear();
+    let json = serde_json::to_value(super::commands::pivot_field_configuration(&def, &cache)).unwrap();
+    assert!(json.get("valueColumnOrder").is_none(), "an empty order serializes no key: {json}");
 }

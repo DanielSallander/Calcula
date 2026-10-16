@@ -57,7 +57,8 @@
  * session before it forgets, which `resetEmbeddedFormPlacements` deliberately
  * does not), resets the pane registry and the hit-region store, deletes every
  * control this file made, unmounts every script, turns Design Mode off and
- * closes the control-properties task pane a shape click opens. The rig is
+ * closes the control-properties task pane (an EMBEDDED control's) and the ONE
+ * object pane (a floating control's since WP-C, D-PANE). The rig is
  * handed to `afterEach` BEFORE anything is created (`adopt`), so a failure
  * half-way through a build cannot strand a control on a cell the next test
  * needs.
@@ -1004,14 +1005,16 @@ async function deselectControls(page: Page): Promise<void> {
 }
 
 /**
- * Put away the side effect of a click that SELECTED a shape: Controls opens the
- * control-properties task pane on every such click, and a sidebar appearing
- * NARROWS the grid — so every pixel measured before it is stale. Callers pair
+ * Put away any pane a click that SELECTED a shape opened: the control-properties
+ * task pane (an embedded control) or, since WP-C (D-PANE), the ONE object pane
+ * (a floating control; on a worksheet a press opens it no longer, a door still
+ * can) -- a sidebar appearing NARROWS the grid — so every pixel measured before it is stale. Callers pair
  * this with `deselectControls` and a fresh `bringIntoView`, which together keep
  * the next measurement about hit rectangles rather than about layout.
  */
 async function closeControlProperties(page: Page): Promise<void> {
   await callApi(page, "closeTaskPane", [CONTROL_PROPERTIES_PANE]).catch(() => undefined);
+  await callApi(page, "closeObjectPane").catch(() => undefined);
   await page.waitForTimeout(300);
 }
 
@@ -1096,6 +1099,7 @@ test.describe("On the grid — the control menu, declared hit rectangles, and an
     await repairRowGeometry(page);
     await callApi(page, "setDesignMode", [false]).catch(() => undefined);
     await callApi(page, "closeTaskPane", [CONTROL_PROPERTIES_PANE]).catch(() => undefined);
+    await callApi(page, "closeObjectPane").catch(() => undefined);
     if (rig) {
       for (const controlId of rig.controlIds) await deleteControl(page, controlId);
       for (const scriptId of rig.scriptIds) await unmountScript(page, scriptId);
@@ -1192,9 +1196,9 @@ test.describe("On the grid — the control menu, declared hit rectangles, and an
     }
     await page.keyboard.press("Escape");
     await expect(menu).toHaveCount(0, { timeout: 5_000 });
-    // A right-click on a shape also SELECTS it, which opens the
-    // control-properties task pane and narrows the grid; put it away before the
-    // next measurement so no coordinate below is stale.
+    // A right-click on a shape also SELECTS it, and a pane that opens on a
+    // selection narrows the grid; put any away before the next measurement so
+    // no coordinate below is stale.
     await deselectControls(page);
     await closeControlProperties(page);
 
@@ -1318,8 +1322,8 @@ test.describe("On the grid — the control menu, declared hit rectangles, and an
       "the on-grid script frame must be inert, or Tab reaches the script's page",
     ).toHaveAttribute("inert", "");
     // EVERY POINT IS RE-MEASURED, never cached. A click that selects the shape
-    // opens the control-properties task pane, and a sidebar appearing narrows
-    // the grid — so a coordinate taken before such a click is wrong after it.
+    // may open a pane (control-properties, or the object pane through a door),
+    // and a sidebar appearing narrows the grid — so a coordinate taken before such a click is wrong after it.
     const framePoint = async (fx: number, fy: number): Promise<{ x: number; y: number }> => {
       const box = await shapeFrame(page, shapeId).boundingBox();
       expect(box, "the shape's html frame reports no box").not.toBeNull();

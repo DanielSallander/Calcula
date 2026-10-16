@@ -71,6 +71,8 @@ import { noteChartMenuMounted } from "../lib/chartMenuState";
 import { chartIdOfRegion } from "../lib/chartObjectSelection";
 import { getGridRegions } from "@api/gridOverlays";
 import { sizeAndPositionMenuEntry } from "@api/objectPosition";
+import { objectPaneMenuEntry } from "@api/objectPane";
+import { chartEditDataTab } from "../lib/chartObjectPane";
 import { getCachedChartData, invalidateChartCache } from "../rendering/chartRenderer";
 // The ONE answer to "where do this chart's error-bar options live?" — a
 // mark-dependent switch that the painter owns and this file must not re-spell.
@@ -946,6 +948,19 @@ export function ChartContextMenu({ onClose, data }: OverlayProps): React.ReactEl
   const sizePos = chartRegion ? sizeAndPositionMenuEntry(chartRegion) : null;
   if (sizePos && !sizePos.disabled) {
     rows.push({ id: "sizeAndPosition", label: sizePos.label, run: sizePos.run });
+  }
+
+  // The ONE object pane (@api/objectPane, WP-C D-PANE): "Format..." opens it
+  // on the Format tab (the chart's container: padding, title, effects -- and
+  // the "Chart elements" card), "Edit data..." on the chart's build tab
+  // (Fields for a design query, Data otherwise). Both are doors, so they open
+  // even when the reader closed the pane. Omitted, like every row here, when
+  // the pane cannot open for this chart.
+  if (chartRegion) {
+    const formatEntry = objectPaneMenuEntry(chartRegion);
+    if (!formatEntry.disabled) rows.push({ id: formatEntry.id, label: formatEntry.label, run: formatEntry.run });
+    const dataEntry = objectPaneMenuEntry(chartRegion, chartEditDataTab(spec));
+    if (!dataEntry.disabled) rows.push({ id: "editData", label: "Edit data...", run: dataEntry.run });
   }
 
   rows.push({

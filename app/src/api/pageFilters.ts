@@ -182,6 +182,25 @@ export function getPageFilters(sheetIndex: number, connectionId?: string): PageF
   );
 }
 
+/**
+ * Every (page, model) that currently holds at least one filter, ordered by
+ * page then connection. What a consumer that mirrors the WHOLE state needs
+ * (`@api/objectBindings` sends Rust the full snapshot, D §3.8): without it a
+ * mirror could only learn about pages whose filters changed after it started.
+ */
+export function listPageFilterPages(): PageFilterPage[] {
+  const seen = new Map<string, PageFilterPage>();
+  for (const filters of byPublisher.values()) {
+    for (const f of filters) {
+      const key = pageKey(f.sheetIndex, f.connectionId);
+      if (!seen.has(key)) seen.set(key, { sheetIndex: f.sheetIndex, connectionId: f.connectionId });
+    }
+  }
+  return [...seen.values()].sort((a, b) =>
+    a.sheetIndex === b.sheetIndex ? a.connectionId.localeCompare(b.connectionId) : a.sheetIndex - b.sheetIndex,
+  );
+}
+
 /** Subscribe to page-filter changes. Returns an unsubscribe function. */
 export function onPageFiltersChange(cb: (change: PageFiltersChange) => void): () => void {
   listeners.add(cb);

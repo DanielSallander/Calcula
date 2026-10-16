@@ -56,7 +56,7 @@ import {
 } from "@api/objectSelection";
 import { hasObjectClipboard, objectClipboardSize, resetObjectClipboard } from "@api/objectClipboard";
 import { canvasObjectRef } from "@api/canvasSheet";
-import { installCanvasObjectClipboard } from "../lib/canvasClipboard";
+import { canvasCopyApplies, installCanvasObjectClipboard } from "../lib/canvasClipboard";
 import { SUBSCRIBED_NOTE } from "../lib/canvasNotes";
 import { installControlClipboardKeys } from "../../Controls/lib/controlKeys";
 
@@ -258,7 +258,11 @@ describe("Ctrl+C / Ctrl+V / Ctrl+D on a canvas multi-selection", () => {
 
   it("control: an INNER selection that owns the clipboard keys (a floating grid's cell) keeps them", async () => {
     setObjectSelectionSet([r1, c1], r1);
+    expect(canvasCopyApplies(), "control: no inner selection, the canvas copies the objects").toBe(true);
     innerOwnsClipboard = true;
+    // The canvas's Ctrl+C guard itself stands down (a canvas pivot box's
+    // cells claim "Clipboard" the same way: pivotCanvasCellKeys.test.ts).
+    expect(canvasCopyApplies(), "the canvas's copy applied under an inner selection that owns the clipboard").toBe(false);
     press("c");
     await settle();
     expect(objectClipboardSize(), "the canvas copied objects from under a cell selection").toBe(0);

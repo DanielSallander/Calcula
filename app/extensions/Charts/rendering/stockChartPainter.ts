@@ -10,7 +10,6 @@ import { applyFillStyle } from "./gradientFill";
 import { createLinearScale, createBandScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
-  drawChartBackground,
   drawPlotBackground,
   drawHorizontalGridLines,
   drawCartesianAxes,
@@ -56,7 +55,6 @@ export function paintStockChart(
 
   // Need at least 4 series for OHLC
   if (data.series.length < 4) {
-    drawChartBackground(ctx, layout, theme);
     // Draw informative message
     ctx.fillStyle = "#999";
     ctx.font = `${theme.labelFontSize}px ${theme.fontFamily}`;
@@ -77,7 +75,6 @@ export function paintStockChart(
 
   const n = data.categories.length;
   if (n === 0) {
-    drawChartBackground(ctx, layout, theme);
     return;
   }
 
@@ -111,7 +108,6 @@ export function paintStockChart(
   );
 
   // 1. Background
-  drawChartBackground(ctx, layout, theme);
 
   // 2. Plot background
   drawPlotBackground(ctx, plotArea, theme);
@@ -208,9 +204,7 @@ export function paintStockChart(
   }
 
   // 6. Title
-  if (spec.title) {
-    drawTitle(ctx, spec.title, layout, theme);
-  }
+  drawTitle(ctx, spec.title, layout, theme);
 
   // 7. Legend
   if (spec.legend.visible && data.series.length > 0) {

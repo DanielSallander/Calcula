@@ -68,13 +68,19 @@ import {
   getExternalFormulaTarget,
   isExternalEditLive,
 } from "../../lib/formulaEditTarget";
-import { qualifyInterceptedCellRef } from "../../lib/formulaReferenceInterceptors";
+import {
+  checkFormulaReferenceInterceptors,
+  qualifyInterceptedCellRef,
+} from "../../lib/formulaReferenceInterceptors";
 import {
   columnToReference,
   columnRangeToReference,
   rowToReference,
   rowRangeToReference,
+  rangeToReference,
 } from "../../lib/gridRenderer/references/conversion";
+import { insertTextIntoActiveFormula } from "../../hooks/useEditing";
+import type { FloatingReferencePickRange } from "../../../api/gridOverlays";
 import { applyRowsHidden, applyColsHidden, refreshUserHidden } from "../../lib/hiddenRowsCols";
 import { primeSheetSwitch } from "../../lib/sheetSwitchPrefetch";
 import { cellEvents, cellToChange } from "../../lib/cellEvents";
@@ -1211,6 +1217,51 @@ export function useSpreadsheetSelection({
     [insertFormulaText, dispatch, sheetContext.activeSheetName]
   );
 
+  // A REFERENCE PICK on a floating object (D-PICK; Core's overlay door decided
+  // the press, floatingReferencePickSession.ts followed the drag). ONE router
+  // for every family:
+  //   sheet   a cell of the SHOWN sheet's grid (a canvas pivot's hidden grid):
+  //           routed exactly like a grid pick. A single cell asks the formula
+  //           reference interceptors first (GETPIVOTDATA), here, explicitly --
+  //           the cell-click registry is not this one; a dragged range is a
+  //           plain range and never GETPIVOTDATA.
+  //   object  a cell of a NAMED A1 space (a floating grid "Float2"): `Float2!C3`
+  //           (self-reference is legal; cycles are the engine's job). The
+  //           interceptors are NEVER asked -- their row/col are the shown
+  //           sheet's, and (0,0) of Float2 is not the pivot cell at A1.
+  const handleFloatingReferencePick = useCallback(
+    (range: FloatingReferencePickRange) => {
+      if (range.space === "sheet") {
+        const single = range.startRow === range.endRow && range.startCol === range.endCol;
+        if (!single) {
+          handleInsertRangeReference(range.startRow, range.startCol, range.endRow, range.endCol);
+          return;
+        }
+        void checkFormulaReferenceInterceptors(range.startRow, range.startCol).then((override) => {
+          if (override) handleInsertFormulaText(override.text, override.highlightRow, override.highlightCol);
+          else handleInsertReference(range.startRow, range.startCol);
+        });
+        return;
+      }
+      const target = getExternalFormulaTarget();
+      if (target?.isExpectingReference()) {
+        target.insertReference({
+          sheetName: range.name,
+          startRow: range.startRow,
+          startCol: range.startCol,
+          endRow: range.endRow,
+          endCol: range.endCol,
+        });
+        dispatch(clearFormulaReferences());
+        return;
+      }
+      insertTextIntoActiveFormula(
+        rangeToReference(range.startRow, range.startCol, range.endRow, range.endCol, range.name, null),
+      );
+    },
+    [handleInsertRangeReference, handleInsertFormulaText, handleInsertReference, dispatch]
+  );
+
   const {
     isDragging,
     isFormulaDragging,
@@ -1249,6 +1300,7 @@ export function useSpreadsheetSelection({
     onDragEnd: handleDragEnd,
     onInsertReference: handleInsertReference,
     onInsertFormulaText: handleInsertFormulaText,
+    onFloatingReferencePick: handleFloatingReferencePick,
     onInsertRangeReference: handleInsertRangeReference,
     onInsertColumnReference: handleInsertColumnReference,
     onInsertColumnRangeReference: handleInsertColumnRangeReference,

@@ -35,6 +35,7 @@ import { emitAppEvent, AppEvents } from "@api/events";
 import { runInUndoTransaction } from "@api/objectGeometry";
 import { showToast } from "@api/notifications";
 import { confirmPivotOverwriteOrUndo } from "@api/pivotOverwrite";
+import { resolveSlicerContainer, slicerRegionId } from "./slicerObjectFormat";
 
 // ============================================================================
 // Module-level cache
@@ -225,14 +226,23 @@ export async function updateSlicerAsync(
   params: UpdateSlicerParams,
 ): Promise<Slicer | null> {
   try {
-    const updated = await api.updateSlicer(slicerId, params);
-    await refreshCache();
-    window.dispatchEvent(new CustomEvent(SlicerEvents.SLICER_UPDATED, { detail: updated }));
-    return updated;
+    return await updateSlicerOrThrow(slicerId, params);
   } catch (err) {
     console.error("[Slicer] Failed to update slicer:", err);
     return null;
   }
+}
+
+/**
+ * `updateSlicerAsync` that REJECTS with the backend's sentence instead of
+ * logging it: for a caller that must report a refusal (the object pane's
+ * Format commit, whose refusals reach ONE toast through commitObjectFormat).
+ */
+export async function updateSlicerOrThrow(slicerId: string, params: UpdateSlicerParams): Promise<Slicer> {
+  const updated = await api.updateSlicer(slicerId, params);
+  await refreshCache();
+  window.dispatchEvent(new CustomEvent(SlicerEvents.SLICER_UPDATED, { detail: updated }));
+  return updated;
 }
 
 export async function updateSlicerPositionAsync(
@@ -837,8 +847,13 @@ export function syncSlicerRegions(): void {
 
   const regions: GridRegion[] = cachedSlicers
     .filter((slicer) => slicer.sheetIndex === activeSheet)
-    .map((slicer) => ({
-      id: `slicer-${slicer.id}`,
+    .map((slicer) => {
+      // The RESOLVED visual container (WP-C D-FORMAT): bound > stored >
+      // defaults, a Format-tab preview over the stored literal. Core paints its
+      // shadow, background and border; the slicer lays out inside its content.
+      const container = resolveSlicerContainer(slicer);
+      return {
+      id: slicerRegionId(slicer.id),
       type: "slicer",
       startRow: 0,
       startCol: 0,
@@ -850,11 +865,15 @@ export function syncSlicerRegions(): void {
         width: slicer.width,
         height: slicer.height,
       },
+      container,
       // A slicer with its header HIDDEN has only a thin border and padding to
       // grab (its items are content): Core shows its six-dot grip while it is
       // hovered or selected (@api/gridOverlays, BUG-0258 design phase 5).
-      data: { slicerId: slicer.id, ...(slicer.showHeader === false ? { grip: "hover" } : {}) },
-    }));
+      // The header as SHOWN -- the resolved title: a binding (or a preview)
+      // that hides it leaves the grip to grab.
+      data: { slicerId: slicer.id, ...(container.title.show === false ? { grip: "hover" } : {}) },
+      };
+    });
 
   replaceGridRegionsByType("slicer", regions);
 }

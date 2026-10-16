@@ -11,7 +11,11 @@
 //            asks first), and Escape closes it;
 //          - under the pivot's items, the "Size and Position..." row every
 //            object menu carries (BUG-0258 phase 5b): it opens the dialog for
-//            the BOX's region, and is greyed when nothing can open one.
+//            the BOX's region, and is greyed when nothing can open one;
+//          - and "Format...", the object pane's door every family menu
+//            carries (WP-C review R2-15b): it opens the ONE object pane on the
+//            BOX's Format tab as a command, greyed with the reason when no
+//            pane can show the box.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
@@ -78,10 +82,25 @@ import { installPivotVisual } from "../pivotVisualOverlay";
 import { setPivotVisualRecord, resetPivotVisualHits } from "../pivotVisualHits";
 import { resetPivotVisualRegionState, PIVOT_VISUAL_REGION_TYPE } from "../pivotVisualRegions";
 import { resetObjectSelectionProviders, objectOwnsKey } from "@api/objectSelection";
-import { resetSelectionHandlerState } from "../../handlers/selectionHandler";
-import { closePivotBoxMenu } from "../pivotVisualContextMenu";
+import { resetSelectionHandlerState, isPivotVisualSelected, updateCachedRegions } from "../../handlers/selectionHandler";
+import { closePivotBoxMenu, pivotBoxMenuTargetAt } from "../pivotVisualContextMenu";
+import {
+  extendPivotCellSelection,
+  getPivotCellSelection,
+  resetPivotCellSelection,
+  setPivotCellAnchor,
+} from "../pivotVisualCellSelection";
+import { openTaskPane, showToast } from "@api";
 import { buildPivotVisualGeometry } from "../../rendering/pivotVisualRenderer";
 import { registerSizeAndPositionOpener, resetObjectPosition, SIZE_AND_POSITION_LABEL } from "@api/objectPosition";
+import {
+  OBJECT_PANE_FORMAT_LABEL,
+  OBJECT_PANE_NO_PROVIDER,
+  registerObjectPaneHost,
+  registerObjectPaneProvider,
+  resetObjectPane,
+  type ObjectPaneOpenRequest,
+} from "@api/objectPane";
 import { DEFAULT_PIVOT_THEME } from "../../rendering/pivot";
 import type { PivotViewResponse } from "../pivot-api";
 
@@ -165,6 +184,11 @@ beforeEach(() => {
   resetPivotVisualRegionState();
   resetPivotVisualHits();
   resetObjectPosition();
+  resetPivotCellSelection();
+  vi.mocked(openTaskPane).mockClear();
+  updateCachedRegions([
+    { pivotId: "cp1", name: "Sales", startRow: 0, startCol: 1024, endRow: 49, endCol: 1026, isEmpty: false, isModel: false },
+  ]);
   cleanups = installPivotVisual({ getTheme: () => DEFAULT_PIVOT_THEME }, () => () => undefined);
   paintedBox();
 });
@@ -182,7 +206,7 @@ describe("a canvas pivot box's right-click menu", () => {
     const e = rightClick(250, 110);
 
     expect(e.defaultPrevented, "the grid's own menu handler must stand down").toBe(true);
-    expect(menuRows().map((r) => r.textContent)).toEqual(["Refresh", "Sort>", SIZE_AND_POSITION_LABEL]);
+    expect(menuRows().map((r) => r.textContent)).toEqual(["Refresh", "Sort>", SIZE_AND_POSITION_LABEL, OBJECT_PANE_FORMAT_LABEL]);
     expect(h.contexts[0]).toMatchObject({
       clickedCell: { row: 6, col: 1025 },
       selection: { startRow: 6, startCol: 1025, endRow: 6, endCol: 1025, type: "cells" },
@@ -244,6 +268,44 @@ describe("a canvas pivot box's right-click menu", () => {
     expect(document.querySelector("[data-pivot-box-menu]"), "a click closes the menu").toBeNull();
   });
 
+  it("Format... opens the ONE object pane on the BOX's Format tab, as a command (review R2-15b)", async () => {
+    resetObjectPane();
+    const box = { ...BOX_REGION, floating: { x: 100, y: 80, width: 300, height: 200 } };
+    h.top = box;
+    const opened: ObjectPaneOpenRequest[] = [];
+    cleanups.push(registerObjectPaneProvider({ types: [PIVOT_VISUAL_REGION_TYPE], tabs: () => [] }));
+    cleanups.push(
+      registerObjectPaneHost({
+        open: (req) => {
+          opened.push(req);
+          return true;
+        },
+        close: () => undefined,
+        state: () => ({ open: false, regionId: null, regionType: null, tabId: null }),
+      }),
+    );
+    rightClick(250, 110);
+    const row = menuRows().find((r) => r.textContent === OBJECT_PANE_FORMAT_LABEL);
+    expect(row, "the box menu has no Format... row").toBeTruthy();
+    expect(row!.dataset.itemId).toBe("pivot.box.format");
+    expect(row!.getAttribute("aria-disabled")).toBe("false");
+    row!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(opened).toEqual([{ region: box, tab: "format", reason: "command" }]);
+    expect(h.clicked, "no pivot item ran").toEqual([]);
+    resetObjectPane();
+  });
+
+  it("Format... with no pane provider for the box is there, greyed WITH the reason, and runs nothing", async () => {
+    resetObjectPane();
+    h.top = { ...BOX_REGION, floating: { x: 100, y: 80, width: 300, height: 200 } };
+    rightClick(250, 110);
+    const row = menuRows().find((r) => r.textContent === OBJECT_PANE_FORMAT_LABEL);
+    expect(row!.getAttribute("aria-disabled")).toBe("true");
+    expect(row!.title).toBe(OBJECT_PANE_NO_PROVIDER);
+  });
+
   it("with no dialog installed the row is there, greyed, and runs nothing", async () => {
     h.top = { ...BOX_REGION, floating: { x: 100, y: 80, width: 300, height: 200 } };
     rightClick(250, 110);
@@ -254,12 +316,109 @@ describe("a canvas pivot box's right-click menu", () => {
     expect(document.querySelector("[data-pivot-box-menu]"), "a greyed row does not close the menu").not.toBeNull();
   });
 
+  it("SELECTS an unselected box first (no pane: keyboard semantics), as every other family does", () => {
+    expect(isPivotVisualSelected("cp1")).toBe(false);
+    rightClick(250, 110);
+    expect(isPivotVisualSelected("cp1"), "the right-click left the box unselected").toBe(true);
+    expect(openTaskPane).not.toHaveBeenCalled();
+    expect(menuRows().length).toBeGreaterThan(0);
+  });
+
+  it("on a cell OUTSIDE the box's cell selection it re-anchors there; the menu's selection is that cell", () => {
+    setPivotCellAnchor("cp1", 1, 0);
+    rightClick(250, 110); // view row 6, column 1
+    expect(getPivotCellSelection()).toEqual({ pivotId: "cp1", anchorRow: 6, anchorCol: 1, endRow: 6, endCol: 1 });
+    expect(h.contexts[0]).toMatchObject({
+      clickedCell: { row: 6, col: 1025 },
+      selection: { startRow: 6, startCol: 1025, endRow: 6, endCol: 1025, type: "cells" },
+    });
+  });
+
+  it("on a cell INSIDE the selection it keeps it; the menu's selection is the whole rectangle in the hidden grid", () => {
+    setPivotCellAnchor("cp1", 5, 1);
+    extendPivotCellSelection(8, 2);
+    rightClick(250, 110); // view row 6, column 1: inside 5..8 x 1..2
+    expect(getPivotCellSelection()).toEqual({ pivotId: "cp1", anchorRow: 5, anchorCol: 1, endRow: 8, endCol: 2 });
+    expect(h.contexts[0]).toMatchObject({
+      clickedCell: { row: 6, col: 1025 },
+      selection: { startRow: 5, startCol: 1025, endRow: 8, endCol: 1026, type: "cells" },
+      isWithinSelection: true,
+    });
+  });
+
+  it("another box's cells do not count as inside: the right-click anchors in THIS box", () => {
+    setPivotCellAnchor("cp2", 6, 1);
+    extendPivotCellSelection(9, 2);
+    rightClick(250, 110);
+    expect(getPivotCellSelection()).toEqual({ pivotId: "cp1", anchorRow: 6, anchorCol: 1, endRow: 6, endCol: 1 });
+  });
+
+  it("a point on no cell leaves the cells alone (the menu targets the anchor cell)", () => {
+    paintedBox(500);
+    setPivotCellAnchor("cp1", 3, 1);
+    rightClick(550, 110);
+    expect(getPivotCellSelection()).toMatchObject({ anchorRow: 3, anchorCol: 1 });
+  });
+
+  it("pivotBoxMenuTargetAt itself is PURE: it selects nothing and anchors nothing", () => {
+    setPivotCellAnchor("cp1", 1, 0);
+    const target = pivotBoxMenuTargetAt(250, 110);
+    expect(target?.viewCell).toEqual({ viewRow: 6, viewCol: 1 });
+    expect(getPivotCellSelection()).toMatchObject({ anchorRow: 1, anchorCol: 0 });
+    expect(isPivotVisualSelected("cp1")).toBe(false);
+  });
+
+  it("a disabled row says WHY: its reason is the row's tooltip and accessible description (WP-A S9)", () => {
+    h.items = [
+      {
+        id: "pivot:ec:expand",
+        label: "Expand",
+        group: "pivot",
+        disabled: true,
+        disabledReason: "Already expanded.",
+        onClick: () => {},
+      },
+      { id: "pivot:refresh", label: "Refresh", group: "pivot", onClick: () => {} },
+    ];
+    rightClick(250, 110);
+    const [expand, refresh] = menuRows();
+    expect(expand.getAttribute("aria-disabled")).toBe("true");
+    expect(expand.title).toBe("Already expanded.");
+    expect(expand.getAttribute("aria-description")).toBe("Already expanded.");
+    // An enabled row carries no reason.
+    expect(refresh.title).toBe("");
+    expect(refresh.hasAttribute("aria-description")).toBe(false);
+  });
+
+  it("a row whose action fails tells the USER with a toast, never the console alone (BUG-0096)", async () => {
+    vi.mocked(showToast).mockClear();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    h.items = [
+      {
+        id: "pivot:refresh",
+        label: "Refresh",
+        group: "pivot",
+        onClick: () => Promise.reject(new Error("Not reachable")),
+      },
+    ];
+    rightClick(250, 110);
+    menuRows()[0].click();
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(showToast).toHaveBeenCalledWith("Refresh failed: Not reachable", { variant: "error" });
+    error.mockRestore();
+  });
+
   it("owns Escape while open (the canvas's Escape binding asks first), and Escape closes it", () => {
     expect(objectOwnsKey("Escape"), "no menu: Escape is the canvas's").toBe(false);
     rightClick(250, 110);
     expect(objectOwnsKey("Escape")).toBe(true);
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     expect(document.querySelector("[data-pivot-box-menu]")).toBeNull();
-    expect(objectOwnsKey("Escape")).toBe(false);
+    // The right-click anchored a cell (D-CELLS): the SELECTED CELLS keep
+    // Escape (S6) -- it clears them first -- until they are gone.
+    expect(getPivotCellSelection(), "fixture: the right-click on a cell anchored it").not.toBeNull();
+    expect(objectOwnsKey("Escape"), "the cells the right-click selected own Escape").toBe(true);
+    resetPivotCellSelection();
+    expect(objectOwnsKey("Escape"), "menu closed, no cells: Escape is the canvas's").toBe(false);
   });
 });

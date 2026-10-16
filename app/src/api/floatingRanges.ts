@@ -17,6 +17,7 @@ import { invokeBackend } from "./backend";
 import { AppEvents, emitAppEvent } from "./events";
 import { refreshGridData } from "./grid";
 import type { TypedCellData } from "../core/types";
+import type { VisualContainerFormat } from "./visualContainer";
 
 // ============================================================================
 // Types (mirror Rust FloatingRangeInfo / FloatingRangePatch in api_types.rs)
@@ -50,6 +51,9 @@ export interface FloatingRangeInfo {
   showTitle: boolean;
   showColumnHeaders: boolean;
   showRowHeaders: boolean;
+  /** The visual container (D-FORMAT). The title TEXT is the FR's name and its
+   *  visibility `showTitle` -- one spelling per fact. Absent = defaults. */
+  container?: VisualContainerFormat;
   /** The FR's name — lives in the SHARED sheet namespace (=Name!A1 works). */
   name: string;
   /** Live index of the backing sheet. For event filtering and for ONE read-only
@@ -79,6 +83,9 @@ export interface FloatingRangePatch {
    *  absent leaves alone — an empty object CLEARS every override. */
   colWidths?: Record<number, number>;
   rowHeights?: Record<number, number>;
+  /** The visual container: absent = keep, null = clear, a value = set
+   *  (formatting: a locked page lets it through, like the chrome flags). */
+  container?: VisualContainerFormat | null;
 }
 
 /** Backend-enforced window bounds (1..MAX each). */

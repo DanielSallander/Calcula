@@ -737,6 +737,9 @@ impl DiffContext<'_, '_> {
             ("ribbon_filters.json", "ribbonFilter"),
             ("pivot_layouts.json", "pivotLayout"),
             ("controls.json", "control"),
+            // One item per binding ROW, keyed by (object, path) and compared
+            // spelling-blind (`comparable_rule_payload("binding", ..)`).
+            ("bindings.json", "binding"),
             ("pane_controls.json", "paneControl"),
             ("sparklines.json", "sparkline"),
             ("conditional_formats.json", "conditionalFormat"),
@@ -1343,6 +1346,9 @@ fn keyed_domain_items<'a>(
     let arr = value?.as_array()?;
     let mut out = BTreeMap::new();
     for (i, item) in arr.iter().enumerate() {
+        // A binding row has no id of its own: it IS the (object, path) pair,
+        // and that pair -- not its position -- is what a version keeps.
+        let binding_key = (domain == "binding").then(|| binding_item_key(item)).flatten();
         let named_range_key = (domain == "namedRange")
             .then(|| item.get("name").and_then(|v| v.as_str()))
             .flatten()
@@ -1350,7 +1356,8 @@ fn keyed_domain_items<'a>(
                 Some(scope) => format!("{scope}/{name}"),
                 None => name.to_string(),
             });
-        let key = named_range_key
+        let key = binding_key
+            .or(named_range_key)
             .or_else(|| {
                 item.get("id")
                     .and_then(|v| v.as_str())
@@ -1366,6 +1373,18 @@ fn keyed_domain_items<'a>(
         out.insert(key, item);
     }
     Some(out)
+}
+
+/// The key of one `bindings.json` row: `<kind>:<object id><path>` (a JSON
+/// Pointer starts with `/`, so the two never run together ambiguously).
+/// `None` for a row without an object or a path, which then falls back to
+/// the generic keys like any other keyless element.
+fn binding_item_key(item: &serde_json::Value) -> Option<String> {
+    let object = item.get("object")?;
+    let kind = object.get("kind")?.as_str()?;
+    let id = object.get("id")?.as_str()?;
+    let path = item.get("path")?.as_str()?;
+    Some(format!("{kind}:{id}{path}"))
 }
 
 /// Name, one-line detail, and (where it exists) the source text a reader wants
@@ -1928,16 +1947,17 @@ fn same_formula(a: &Option<String>, b: &Option<String>) -> bool {
 /// Are these two versions of one object the SAME object?
 ///
 /// JSON equality, except for the two fields a rename round trip re-spells
-/// without anybody editing them (BUG-0151): a chart's `specJson` STRING (the
-/// round trip re-serializes it with its keys sorted, and re-spells its string
-/// sources' sheet prefixes -- `chart_refs::comparable_chart_spec`) and a defined
-/// name's `refersTo` formula (`sheet_renames::same_formula_text`).
+/// without anybody editing them (BUG-0151): a chart's `spec` (an embedded JSON
+/// value since `.cala` v10; the round trip re-spells its string sources' sheet
+/// prefixes -- `chart_refs::comparable_chart_spec`) and a defined name's
+/// `refersTo` formula (`sheet_renames::same_formula_text`).
 fn same_object(domain: &str, a: &serde_json::Value, b: &serde_json::Value) -> bool {
     if a == b {
         return true;
     }
-    // The RULE payloads (conditional formats, validations, controls, pane
-    // controls) are renamed at checkout and back at push too (wave-B B4):
+    // The RULE payloads (conditional formats, validations, pane controls,
+    // slicer formulas, object property bindings) are renamed at checkout and
+    // back at push too (wave-B B4):
     // compared with every formula slot in its spelling-blind form.
     if let (Some(x), Some(y)) = (
         crate::sheet_renames::comparable_rule_payload(domain, a),
@@ -1946,7 +1966,7 @@ fn same_object(domain: &str, a: &serde_json::Value, b: &serde_json::Value) -> bo
         return x == y;
     }
     let field = match domain {
-        "chart" => "specJson",
+        "chart" => "spec",
         "namedRange" => "refersTo",
         _ => return false,
     };
@@ -1957,22 +1977,23 @@ fn same_object(domain: &str, a: &serde_json::Value, b: &serde_json::Value) -> bo
     if ao.len() != bo.len() || ao.iter().any(|(k, v)| k != field && bo.get(k) != Some(v)) {
         return false;
     }
+    if domain == "chart" {
+        // The spec is a JSON VALUE (an object; a string only when it could not
+        // be parsed at save). Never read it with `as_str`: an object would
+        // read as "absent" and every chart would compare as edited.
+        let (Some(x), Some(y)) = (ao.get(field), bo.get(field)) else {
+            return false;
+        };
+        return crate::chart_refs::comparable_chart_spec(x)
+            == crate::chart_refs::comparable_chart_spec(y);
+    }
     let (Some(x), Some(y)) = (
         ao.get(field).and_then(|v| v.as_str()),
         bo.get(field).and_then(|v| v.as_str()),
     ) else {
         return false;
     };
-    match domain {
-        "chart" => match (
-            crate::chart_refs::comparable_chart_spec(x),
-            crate::chart_refs::comparable_chart_spec(y),
-        ) {
-            (Some(cx), Some(cy)) => cx == cy,
-            _ => x == y,
-        },
-        _ => crate::sheet_renames::same_formula_text(x, y),
-    }
+    crate::sheet_renames::same_formula_text(x, y)
 }
 
 /// Cells that are the OUTPUT of a dynamic array whose origin did not change.
@@ -2120,11 +2141,63 @@ mod tests {
 
         let dv = |formula: &str| json!({ "sheetId": "s", "ranges": [ { "validation": { "rule": { "custom": { "formula": formula } } } } ] });
         assert!(same_object("dataValidation", &dv("=countif(data!a:a,a1)=1"), &dv("=COUNTIF(Data!A:A,A1)=1")));
-        let ctl = |value: &str| json!({ "sheetId": "s", "controls": [ { "row": 0, "col": 0, "properties": { "text": { "valueType": "formula", "value": value } } } ] });
-        assert!(same_object("control", &ctl("=data!a1"), &ctl("='Data'!A1")));
+        // A control holds no formula of its own (WP-D): its formula is a
+        // binding row, compared spelling-blind; the control payload is bytes.
+        let binding = |formula: &str| json!({ "object": { "kind": "control", "id": "u-1" }, "path": "/properties/text", "formula": formula, "model": null });
+        assert!(same_object("binding", &binding("=data!a1"), &binding("='Data'!A1")));
+        assert!(!same_object("binding", &binding("=Data!A1"), &binding("=Data!A2")));
+        let ctl = |value: &str| json!({ "sheetId": "s", "controls": [ { "row": 0, "col": 0, "properties": { "text": { "valueType": "static", "value": value } } } ] });
+        assert!(!same_object("control", &ctl("=data!a1"), &ctl("='Data'!A1")), "a control's literal is data");
         let pane = |reference: &str| json!({ "id": "p", "config": { "type": "dropdown", "source": { "type": "cellRange", "reference": reference } } });
         assert!(same_object("paneControl", &pane("data!a1:a5"), &pane("'Data'!A1:A5")));
         assert!(!same_object("paneControl", &pane("Data!A1:A5"), &pane("Data!A1:A6")));
+    }
+
+    /// A chart's `spec` is an embedded JSON OBJECT since `.cala` v10. The
+    /// comparison must read it as a value: read with `as_str` (as the old
+    /// `specJson` string was) an object is "absent" and EVERY chart compares as
+    /// edited -- silently undoing BUG-0151 with no compile error. Key order and
+    /// the spelling of a source's sheet prefix are not edits; a real edit, or a
+    /// changed field beside the spec, is.
+    ///
+    /// SABOTAGE: read `ao.get(field).and_then(|v| v.as_str())` in the chart
+    /// arm -- the first assertion fails.
+    #[test]
+    fn same_object_matches_a_chart_whose_spec_differs_only_in_key_order_and_sheet_spelling() {
+        let chart = |id: &str, spec: &str| -> serde_json::Value {
+            serde_json::json!({
+                "id": id,
+                "sheetId": "s1",
+                "spec": serde_json::from_str::<serde_json::Value>(spec).unwrap(),
+            })
+        };
+        let ts_order = chart(
+            "c1",
+            r#"{"chartId":"c1","name":"Sales","spec":{"mark":"bar","data":"Data!A1:B5","layers":[{"data":"'My Data'!$a$1:$b$5"}]}}"#,
+        );
+        let re_spelled = chart(
+            "c1",
+            r#"{"spec":{"layers":[{"data":"'my data'!$A$1:$B$5"}],"data":"'DATA'!A1:B5","mark":"bar"},"name":"Sales","chartId":"c1"}"#,
+        );
+        assert!(
+            same_object("chart", &ts_order, &re_spelled),
+            "key order and sheet-prefix spelling read as a changed chart"
+        );
+        let edited = chart(
+            "c1",
+            r#"{"chartId":"c1","name":"Sales","spec":{"mark":"line","data":"Data!A1:B5","layers":[{"data":"'My Data'!$a$1:$b$5"}]}}"#,
+        );
+        assert!(!same_object("chart", &ts_order, &edited), "a real edit is a change");
+        let moved = {
+            let mut v = re_spelled.clone();
+            v["sheetId"] = serde_json::Value::String("s2".to_string());
+            v
+        };
+        assert!(!same_object("chart", &ts_order, &moved), "a changed field beside the spec is a change");
+        // An unparseable spec kept as a string compares as that string.
+        let raw = |s: &str| serde_json::json!({ "id": "c2", "sheetId": "s1", "spec": s });
+        assert!(same_object("chart", &raw("{oops"), &raw("{oops")));
+        assert!(!same_object("chart", &raw("{oops"), &raw("{oops!")));
     }
 
     /// BUG-0257: the push preview named a changed button only as "control

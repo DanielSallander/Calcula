@@ -15,7 +15,13 @@ import { invalidateChartCache, getCachedChartData } from "../rendering/chartRend
 import { closePopup } from "../rendering/quickAccessButtons";
 import { PALETTES, PALETTE_NAMES } from "../rendering/chartTheme";
 import { ChartEvents } from "../lib/chartEvents";
-import { CHART_STYLE_PRESETS, getPresetColors, buildPresetUpdates, type ChartStylePreset } from "../lib/chartStylePresets";
+import {
+  CHART_STYLE_PRESETS,
+  getPresetColors,
+  buildPresetUpdates,
+  specHasPresetBackground,
+  type ChartStylePreset,
+} from "../lib/chartStylePresets";
 
 // ============================================================================
 // Styles
@@ -373,9 +379,10 @@ function StylesPanel({
             <div style={{ display: "flex", flexWrap: "wrap", gap: 4, padding: "2px 12px 6px" }}>
               {presets.map((preset) => {
                 const colors = getPresetColors(preset);
-                const bg = preset.theme.background ?? "#fff";
-                const isActive = spec.palette === preset.palette &&
-                  spec.config?.theme?.background === preset.theme.background;
+                // The preset's background is the chart's CONTAINER background
+                // (D-FORMAT), so that is what the swatch shows and compares.
+                const bg = preset.background;
+                const isActive = spec.palette === preset.palette && specHasPresetBackground(spec, preset);
                 return (
                   <div
                     key={preset.id}

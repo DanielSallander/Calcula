@@ -35,9 +35,10 @@ vi.mock("@api/dialogs", async (importOriginal) => ({
   alertAsync: (...a: unknown[]) => alertAsync(...a),
 }));
 const createButton = vi.fn();
+const createPageNavigator = vi.fn();
 vi.mock("@api/buttonControlService", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@api/buttonControlService")>()),
-  requireButtonControlProvider: () => ({ createButton }),
+  requireButtonControlProvider: () => ({ createButton, createPageNavigator }),
 }));
 const createPicture = vi.fn();
 vi.mock("@api/pictureControlService", async (importOriginal) => ({
@@ -74,7 +75,7 @@ beforeEach(() => {
     viewportDimensions: { width: 1000, height: 600 },
     zoom: 1,
   };
-  for (const f of [showDialog, createShape, createButton, createPicture, createFloating, importImageViaPicker, alertAsync]) f.mockReset();
+  for (const f of [showDialog, createShape, createButton, createPageNavigator, createPicture, createFloating, importImageViaPicker, alertAsync]) f.mockReset();
 });
 
 describe("where a new object lands", () => {

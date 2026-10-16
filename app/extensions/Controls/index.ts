@@ -26,6 +26,7 @@ import type {
 import {
   registerButtonControlProvider,
   MACRO_REF_PROPERTY,
+  PAGE_NAVIGATOR_CONTROL_TYPE,
   buttonActionProperties,
   checkCreateButtonAction,
 } from "@api/buttonControlService";
@@ -51,6 +52,7 @@ import {
   overlayGetRowHeaderWidth,
   overlayGetColHeaderHeight,
   overlaySheetToCanvas,
+  requestOverlayRedraw,
   topFloatingRegionAtClient,
 } from "@api/gridOverlays";
 import { runFloatingControlDelete } from "./lib/controlDelete";
@@ -176,8 +178,13 @@ import {
   getAllControls,
   setControlProperty,
   setControlGeometry,
+  setControlAppearance,
+  readControlLiteral,
 } from "./lib/controlApi";
 import { registerObjectGeometryProvider, joinUndoTransaction } from "@api/objectGeometry";
+import { registerObjectFormatProvider } from "@api/objectFormat";
+import { openObjectPane, registerObjectPaneProvider } from "@api/objectPane";
+import { addTaskPaneContextKey, closeTaskPane, openTaskPane, removeTaskPaneContextKey } from "@api/ui";
 import { deleteSelectedObjects, shouldActOnWholeObjectSelection } from "@api/objectSelection";
 import { controlGeometryChangesOf, createControlGeometryProvider } from "./lib/controlGeometry";
 import { setShapePropertyAsOneStep } from "./lib/shapePropertyStep";
@@ -186,14 +193,40 @@ import { registerControlObjectSelection } from "./lib/controlObjectSelection";
 import { installControlClipboardKeys } from "./lib/controlKeys";
 import { controlsBackend } from "./lib/controlsBackend";
 import { PropertiesPane } from "./PropertiesPane/PropertiesPane";
+import {
+  controlBindingRefAt,
+  installControlBindingRepaint,
+  registerControlBindableProperties,
+} from "./lib/controlBindings";
+import { createControlObjectFormatProvider } from "./lib/controlObjectFormat";
+import { createControlObjectPaneProvider } from "./lib/controlObjectPane";
+import {
+  forgetControlContainer,
+  migrateControlContainer,
+  resetControlContainers,
+  setControlContainerResync,
+} from "./lib/controlContainer";
+import { shapeRecipePaint } from "./Shape/shapeRecipe";
 import { registerControlContextMenu } from "./lib/controlContextMenu";
 import { isEmbeddedControl, forgetInCellButtons, noteControlAt } from "./lib/heldEmbeddedButtons";
 import { installControlObjectMenu } from "./lib/controlObjectMenu";
-import { hitTestFloatingControl } from "./lib/controlHitTest";
+import { FLOATING_CONTROL_REGION_TYPE, hitTestFloatingControl } from "./lib/controlHitTest";
 import { floatingControlZoneAt } from "./lib/controlZoneAt";
 import { beginFloatingButtonPress, cancelFloatingButtonPress } from "./lib/buttonPress";
 import { buttonActionOfControl, tryStoredButtonAction } from "./lib/buttonActions";
+import { createPageNavigatorAt } from "./PageNavigator/createPageNavigator";
+import { renderFloatingPageNavigator } from "./PageNavigator/navigatorRenderer";
+import { pressPageNavigatorItem } from "./PageNavigator/navigatorPress";
+import {
+  armNavigatorItemClick,
+  cancelNavigatorItemClick,
+  setSelectedNavigatorItem,
+  startNavigatorItemSelection,
+} from "./PageNavigator/navigatorItemSelection";
+import { parseNavItemPart } from "./PageNavigator/navigatorModel";
+import { isDesignModeOnlyControl } from "./lib/controlKinds";
 import { startSheetHistory } from "@api/sheetHistory";
+import { startReportPages, onReportPagesChanged } from "@api/reportPages";
 import {
   copyControls,
   pasteControl,
@@ -270,6 +303,8 @@ function renderFloatingControl(overlayCtx: OverlayRenderContext): void {
     renderFloatingShape(overlayCtx);
   } else if (controlType === "image") {
     renderFloatingImage(overlayCtx);
+  } else if (controlType === PAGE_NAVIGATOR_CONTROL_TYPE) {
+    renderFloatingPageNavigator(overlayCtx);
   } else {
     renderFloatingButton(overlayCtx);
   }
@@ -493,6 +528,7 @@ function activate(context: ExtensionContext): void {
     registerButtonControlProvider({
       createButton: createButtonControlAt,
       removeButton: removeButtonControlAt,
+      createPageNavigator: createPageNavigatorAt,
     }),
   );
 
@@ -510,7 +546,8 @@ function activate(context: ExtensionContext): void {
   // 0d. Keyboard / programmatic SELECTION (@api/objectSelection). A canvas
   //     sheet cycles its objects with Tab, and `floatingObject:selected` cannot
   //     be the route: that event means "a left press landed here", and its
-  //     handler below emits shape:clicked and opens the Properties pane. (A
+  //     handler below emits shape:clicked (the object pane opens at the release
+  //     of such a press, BuiltIn/ObjectPane's policy). (A
   //     run-mode button's script does not run from it: it runs from Core's
   //     content press, `floatingObject:bodyDragStart`, at a primary release
   //     inside the button -- lib/buttonPress.ts, BUG-0258 phase 4c.) The
@@ -539,6 +576,50 @@ function activate(context: ExtensionContext): void {
         },
         refresh: () => emitAppEvent(AppEvents.GRID_REFRESH),
         afterPersist: (controlIds) => announceMetadataRefresh(controlIds),
+      }),
+    ),
+  );
+
+  // 0f. THE OBJECT PANE and its FORMAT tab (WP-C D-PANE / D-FORMAT). A
+  //     floating control's Properties are a BUILD tab of the one object pane
+  //     (lib/controlObjectPane.ts) -- the pane's policy opens it at the
+  //     release of a canvas press, and the doors (Ctrl+1, "Format..." /
+  //     "Properties..." in the control's menu) anywhere -- and its visual
+  //     container (title, padding, background = fill, border = outline,
+  //     shadow) is formatted through lib/controlObjectFormat.ts as ONE
+  //     `set_control_appearance` undo step. The container cache
+  //     (lib/controlContainer.ts) re-publishes the regions when a properties
+  //     read changes what Core paints round a control.
+  setControlContainerResync(() => {
+    syncFloatingControlRegions();
+    requestOverlayRedraw();
+  });
+  cleanupFns.push(() => setControlContainerResync(null));
+  cleanupFns.push(
+    registerObjectPaneProvider(
+      createControlObjectPaneProvider({
+        regionType: FLOATING_CONTROL_REGION_TYPE,
+        PropertiesComponent: PropertiesPane,
+        isDesignMode: getDesignMode,
+      }),
+    ),
+  );
+  cleanupFns.push(
+    registerObjectFormatProvider(
+      createControlObjectFormatProvider({
+        regionType: FLOATING_CONTROL_REGION_TYPE,
+        // Lambdas, not references: resolved at the call, not at activation.
+        readLiteral: (sheetIndex, row, col) => readControlLiteral(sheetIndex, row, col),
+        setAppearance: (changes) => setControlAppearance(changes),
+        afterWrite: ({ controlId, sheetIndex, row, col }) => {
+          invalidateFloatingButtonCache(controlId);
+          invalidateShapeCache(controlId);
+          invalidateImageCache(controlId);
+          // An open Properties tab on this control reads it again.
+          window.dispatchEvent(new CustomEvent("controls:metadata-refresh", { detail: { sheetIndex, row, col } }));
+          requestOverlayRedraw();
+        },
+        bindingRefAt: (sheetIndex, row, col) => controlBindingRefAt(sheetIndex, row, col),
       }),
     ),
   );
@@ -589,27 +670,41 @@ function activate(context: ExtensionContext): void {
   );
   cleanupFns.push(unregCellChange);
 
-  // 6. Re-evaluate formula-driven properties whenever cells are updated.
-  //    CELLS_UPDATED fires reliably on every cell change (typing, paste,
-  //    undo/redo, fill, delete, scripts, etc.) via the Core cellEvents system.
+  // 6. Cells changed: in-cell buttons read their look from the STYLE cache
+  //    (Button/interceptors `cachedStyles`), so it is refreshed here. Nothing
+  //    else: a property that follows cells is a BINDING (D-BIND), evaluated
+  //    by Rust, and a control repaints when ITS binding's value changes (6b).
+  //    The blanket "invalidate every control and GRID_REFRESH on every cell
+  //    change" this replaced re-fetched every control on every keystroke.
   const unregCellsUpdated = context.events.on(AppEvents.CELLS_UPDATED, () => {
     refreshStyleCache();
-    invalidateAllFloatingButtonCaches();
-    invalidateAllShapeCaches();
-    invalidateAllImageCaches();
-    emitAppEvent(AppEvents.GRID_REFRESH);
   });
   cleanupFns.push(unregCellsUpdated);
 
-  // 6b. Re-evaluate formula-driven properties whenever named ranges change.
-  //     Named ranges can be referenced in control property formulas (e.g., =test).
-  const unregNamedRangesChanged = context.events.on(AppEvents.NAMED_RANGES_CHANGED, () => {
-    invalidateAllFloatingButtonCaches();
-    invalidateAllShapeCaches();
-    invalidateAllImageCaches();
-    emitAppEvent(AppEvents.GRID_REFRESH);
-  });
-  cleanupFns.push(unregNamedRangesChanged);
+  // 6b. PROPERTY BINDINGS (@api/objectBindings, WP-D S8a). The `control` kind
+  //     is registered here (a region or a script instance -> its uid, read
+  //     from the backend by anchor), and a binding change drops the paint
+  //     caches of exactly the controls it names -- all of them on a reload --
+  //     then repaints the overlay. Rust overlays the resolved values in
+  //     `resolve_control_properties`, which the painters already read. Never
+  //     GRID_REFRESH here: that would feed the binding bridge a trigger for
+  //     every value it announced (a volatile binding would loop).
+  cleanupFns.push(registerControlBindableProperties());
+  cleanupFns.push(
+    installControlBindingRepaint({
+      invalidate: (controlId) => {
+        invalidateFloatingButtonCache(controlId);
+        invalidateShapeCache(controlId);
+        invalidateImageCache(controlId);
+      },
+      invalidateAll: () => {
+        invalidateAllFloatingButtonCaches();
+        invalidateAllShapeCaches();
+        invalidateAllImageCaches();
+      },
+      redraw: () => requestOverlayRedraw(),
+    }),
+  );
 
     // 6b-4. Pinned controls follow a row/column RESIZE too.
   //
@@ -719,6 +814,18 @@ function activate(context: ExtensionContext): void {
   //     report has the page the reader came from.
   cleanupFns.push(startSheetHistory());
 
+  // 6b-6. The live page list a Page Navigator derives its items from
+  //     (@api/reportPages, WP-B D-NAV): followed from the moment Controls is
+  //     up, and every APPLIED change -- a page added, renamed, moved, hidden,
+  //     re-sized to a Tooltip page, or the active page switching -- repaints,
+  //     so a navigator shows it without being re-inserted.
+  cleanupFns.push(startReportPages());
+  cleanupFns.push(onReportPagesChanged(() => requestOverlayRedraw()));
+  // 6b2. A Page Navigator ITEM selected in Design Mode (the second rung,
+  //      PageNavigator/navigatorItemSelection.ts) is dropped when its navigator
+  //      leaves the selection or its page leaves the list; the cleanup clears it.
+  cleanupFns.push(startNavigatorItemSelection());
+
   // 6c. STRUCTURAL EDITS. Controls are anchored to a cell, and the backend
   //     shifts that anchor when rows/columns are inserted or deleted — but this
   //     extension had NO structural subscription at all, so the floating store
@@ -779,11 +886,13 @@ function activate(context: ExtensionContext): void {
         onRename: (oldId, newId) => {
           migrateShapeInstanceId(oldId, newId);
           migrateDeclaredProperties(oldId, newId);
+          migrateControlContainer(oldId, newId);
         },
         onRemove: (id) => {
           removeShapeHtmlOverlay(id);
           removeCustomCanvasRenderer(id);
           clearDeclaredProperties(id);
+          forgetControlContainer(id);
         },
       });
       // Pinned controls must FOLLOW the edit visually, not merely re-anchor:
@@ -908,6 +1017,11 @@ function activate(context: ExtensionContext): void {
     if (designModeMenuItem) {
       designModeMenuItem.checked = _isDesignMode;
       context.ui.menus.notifyChanged();
+    }
+    // Design Mode ending ends the navigator item rung with it.
+    if (!_isDesignMode) {
+      cancelNavigatorItemClick();
+      setSelectedNavigatorItem(null);
     }
     // Re-evaluate whether properties pane should be open
     evaluatePropertiesPaneVisibility();
@@ -1104,6 +1218,9 @@ function activate(context: ExtensionContext): void {
       // its anchor cell, an ordinary shape in the new document at a matching
       // anchor would paint the old document's html.
       releaseAllShapeHtmlOverlays();
+      // The containers belong to the document that just closed (ids are
+      // anchor-derived: a new control at a matching anchor must not paint them).
+      resetControlContainers();
       reportedLegacyInlineImages.clear();
       invalidateAllFloatingButtonCaches();
       invalidateAllShapeCaches();
@@ -1152,9 +1269,9 @@ function activate(context: ExtensionContext): void {
       const purged = removeFloatingControlsNotOnSheet(nextSheet);
       if (nextSheet === loadedSheetIndex && purged.length === 0) return;
       deselectFloatingControl();
-      const { closeTaskPane: closeTP } = await import("../../src/api/ui");
-      closeTP(PROPERTIES_PANE_ID);
-      lastPropertiesCell = null;
+      cancelNavigatorItemClick();
+      setSelectedNavigatorItem(null);
+      await closePropertiesIfOpen();
       invalidateAllFloatingButtonCaches();
       invalidateAllShapeCaches();
       invalidateAllImageCaches();
@@ -1307,9 +1424,15 @@ function activate(context: ExtensionContext): void {
     // this handler opened it, and closing NOTHING when the script that set the
     // property holds its own open batch: the write joins that batch and the
     // script closes it (wave F, Z6; lib/shapePropertyStep.ts).
+    //
+    // The control type is "" -- KEEP whatever this control is. It used to be
+    // hard-coded "shape", which the backend refuses against any other kind
+    // (a type is immutable after creation), so a script's write to a button
+    // or a picture through this door failed. The value is static text: a
+    // `=...` is stored as typed; following a formula is `bindProperty()`.
     try {
       await setShapePropertyAsOneStep(d.key, () =>
-        setControlProperty(si, r, c, "shape", d.key, "static", d.value),
+        setControlProperty(si, r, c, "", d.key, "static", d.value),
       );
     } catch (err) {
       // Property write (or commit) failed: skip the refresh/propertyChanged
@@ -2018,21 +2141,27 @@ export async function createShapeControlAt(
     const shapeWidth = request.width ?? shapeDef.defaultWidth;
     const shapeHeight = request.height ?? shapeDef.defaultHeight;
 
+    // The paint / text keys by shape type (Shape/shapeRecipe.ts): today's blue
+    // box with a white centred caption for every shape type, and a TEXT BOX
+    // with no fill, no outline and dark left-aligned text (WP-C 2.10.2). Every
+    // other key is the same for every shape type.
+    const paint = shapeRecipePaint(shapeType);
+
     // Create control metadata for the shape
     await setControlMetadata(sheetIndex, row, col, {
       controlType: "shape",
       properties: {
         shapeType: { valueType: "static", value: shapeType },
-        fill: { valueType: "static", value: "#4472C4" },
-        stroke: { valueType: "static", value: "#2F528F" },
-        strokeWidth: { valueType: "static", value: "1" },
+        fill: { valueType: "static", value: paint.fill },
+        stroke: { valueType: "static", value: paint.stroke },
+        strokeWidth: { valueType: "static", value: paint.strokeWidth },
         // `text`, never `label` — see the header.
         text: { valueType: "static", value: request.text ?? "" },
-        textColor: { valueType: "static", value: "#FFFFFF" },
+        textColor: { valueType: "static", value: paint.textColor },
         fontSize: { valueType: "static", value: "11" },
         fontBold: { valueType: "static", value: "false" },
         fontItalic: { valueType: "static", value: "false" },
-        textAlign: { valueType: "static", value: "center" },
+        textAlign: { valueType: "static", value: paint.textAlign },
         opacity: { valueType: "static", value: "1" },
         rotation: { valueType: "static", value: "0" },
         // Explicit unpinned — see the floating-button creation above.
@@ -2366,11 +2495,11 @@ async function deleteFloatingControl(controlId: string): Promise<void> {
       // Remove from in-memory store
       removeFloatingControl(controlId);
 
-      // Clear selection and close properties pane
+      // Clear selection and close properties pane (an in-cell button's; a
+      // floating control's object pane follows the selection by itself).
       deselectFloatingControl();
-      const { closeTaskPane: closeTP } = await import("../../src/api/ui");
-      closeTP(PROPERTIES_PANE_ID);
-      lastPropertiesCell = null;
+      await closePropertiesIfOpen();
+      forgetControlContainer(controlId);
 
       // Invalidate caches and refresh. The image cache is FORGOTTEN rather than
       // marked stale: the control is gone, so the blob URL held for its picture has
@@ -2490,15 +2619,19 @@ function setupFloatingObjectEvents(): void {
     if (detail.regionType !== "floating-control") return;
 
     const controlId = detail.regionId as string;
-    const controlRow = detail.data?.row as number;
-    const controlCol = detail.data?.col as number;
-    const controlSheet = detail.data?.sheetIndex as number;
     const ctrlKey = detail.ctrlKey === true;
 
     const ctrlType = detail.data?.controlType ?? "button";
+    // Read BEFORE the selection logic below changes it: a Page Navigator
+    // pressed in Design Mode climbs the chart ladder -- a first press selects
+    // the whole navigator, a plain second press on the navigator that was
+    // ALREADY selected arms the selection of the item under it
+    // (PageNavigator/navigatorItemSelection.ts), decided at the release.
+    const wasSelected = isFloatingControlSelected(controlId);
 
     if (getDesignMode() || ctrlType === "shape" || ctrlType === "image") {
-      // Design mode, shape, or image: select the control and show properties
+      // Design mode, shape, or image: select the control (the object pane's
+      // policy shows its Properties / Format at the release)
       // (shapes and images are always selectable regardless of design mode)
 
       // A button clicked in Design Mode gets SELECTED, not run. That branch was
@@ -2506,8 +2639,8 @@ function setupFloatingObjectEvents(): void {
       // button and sees nothing happen — with no way to guess why. A save-time
       // hint cannot reach them; the click has to say it. Throttled, because
       // arranging controls is a legitimate reason to click many of them.
-      if (ctrlType === "button" && getDesignMode()) {
-        announceDesignModeClick();
+      if (isDesignModeOnlyControl(ctrlType) && getDesignMode()) {
+        announceDesignModeClick(ctrlType);
       }
 
       if (ctrlKey) {
@@ -2527,16 +2660,27 @@ function setupFloatingObjectEvents(): void {
         // If already selected (and no Ctrl), keep selection as is for dragging
       }
 
-      // Show properties pane for the clicked control (even in multi-select)
-      lastPropertiesCell = { row: controlRow, col: controlCol };
-      import("../../src/api/ui").then(({ openTaskPane: openTP }) => {
-        openTP(PROPERTIES_PANE_ID, {
-          row: controlRow,
-          col: controlCol,
-          sheetIndex: controlSheet,
-          controlType: ctrlType,
-        });
-      });
+      if (ctrlType === PAGE_NAVIGATOR_CONTROL_TYPE && getDesignMode()) {
+        const plainPress = !ctrlKey && detail.shiftKey !== true;
+        if (wasSelected && plainPress && detail.part !== "grip") {
+          armNavigatorItemClick(controlId, parseNavItemPart(detail.part), {
+            x: Number(detail.canvasX),
+            y: Number(detail.canvasY),
+          });
+        } else if (!wasSelected) {
+          // A first press selects the WHOLE navigator: no item.
+          cancelNavigatorItemClick();
+          setSelectedNavigatorItem(null);
+        }
+      }
+
+      // NO Properties pane here (WP-C D-PANE). A floating control's Properties
+      // are a tab of the ONE object pane, which its policy opens at the RELEASE
+      // of a press that did not move, on a canvas page (BuiltIn/ObjectPane); on
+      // a worksheet the doors open it (Ctrl+1, "Format..." / "Properties..." in
+      // the control's menu). An in-cell button's `control-properties` pane,
+      // left open from the cell it was on, goes: the selection is an object now.
+      void closePropertiesIfOpen();
       emitAppEvent(AppEvents.GRID_REFRESH);
       // Emit shape click event for scriptable objects. A press on the object's
       // GRIP (BUG-0258 phase 5) is a frame press that never acts: no click.
@@ -2571,6 +2715,23 @@ function setupFloatingObjectEvents(): void {
   // is frame, and never reaches this listener).
   const handleButtonPress = (e: Event) => {
     const detail = (e as CustomEvent).detail;
+    // A run-mode PAGE NAVIGATOR item (WP-B, D-NAV): the same press rule, with
+    // the release required over the SAME item, and the item's page opened by
+    // the declarative navigate action -- never `button:clicked`, never the
+    // script door (PageNavigator/navigatorPress.ts). A press on the space
+    // between items (`navGap`) arms nothing.
+    if (
+      detail?.regionType === "floating-control" &&
+      detail.data?.controlType === PAGE_NAVIGATOR_CONTROL_TYPE
+    ) {
+      pressPageNavigatorItem({
+        controlId: detail.regionId as string,
+        regionId: detail.regionId as string,
+        sheetIndex: detail.data?.sheetIndex as number,
+        part: detail.part as string | null | undefined,
+      });
+      return;
+    }
     if (detail?.regionType !== "floating-control" || detail.part !== "button") return;
     const controlId = detail.regionId as string;
     const controlRow = detail.data?.row as number;
@@ -2927,13 +3088,16 @@ let lastDesignModeNoticeAt = 0;
 
 /** Tell the user, at most once every few seconds, why their click selected
  *  instead of ran. */
-function announceDesignModeClick(): void {
+function announceDesignModeClick(controlType: string): void {
   const now = Date.now();
   if (now - lastDesignModeNoticeAt < 4000) return;
   lastDesignModeNoticeAt = now;
   showToast(
-    "Design Mode is on, so clicking a button selects it instead of running it. " +
-      "Turn it off (Developer ▸ Design Mode) to run the button's macro.",
+    controlType === PAGE_NAVIGATOR_CONTROL_TYPE
+      ? "Design Mode is on, so clicking a page navigator selects it instead of opening a page. " +
+          "Turn it off (Developer ▸ Design Mode) to use it."
+      : "Design Mode is on, so clicking a button selects it instead of running it. " +
+          "Turn it off (Developer ▸ Design Mode) to run the button's macro.",
     { type: "info" },
   );
 }
@@ -3002,7 +3166,6 @@ async function handleEmbeddedToggle(
   const { getGridStateSnapshot, getCellFromPixel } = await import("../../src/api/grid");
   const { getColumnWidth, getRowHeight } = await import("../../src/api/dimensions");
   const { setControlProperty } = await import("./lib/controlApi");
-  const { openTaskPane: openTP } = await import("../../src/api/ui");
 
   const controlId = makeFloatingControlId(sheetIndex, row, col);
 
@@ -3075,13 +3238,15 @@ async function handleEmbeddedToggle(
     window.dispatchEvent(new CustomEvent("styles:refresh"));
     emitAppEvent(AppEvents.GRID_REFRESH);
 
-    // Re-open properties pane at new location
-    openTP(PROPERTIES_PANE_ID, {
+    // Re-open properties pane at new location: an IN-CELL button keeps the
+    // `control-properties` task pane (the object pane follows floating objects).
+    openTaskPane(PROPERTIES_PANE_ID, {
       row: targetRow,
       col: targetCol,
       sheetIndex,
       controlType: "button",
     });
+    addTaskPaneContextKey("properties");
     lastPropertiesCell = { row: targetRow, col: targetCol };
   } else {
     // ---- EMBEDDED -> FLOATING ----
@@ -3143,15 +3308,15 @@ async function handleEmbeddedToggle(
     window.dispatchEvent(new CustomEvent("styles:refresh"));
     emitAppEvent(AppEvents.GRID_REFRESH);
 
-    // Select the floating control and re-open properties pane
+    // Select the floating control and show its Properties in the OBJECT PANE
+    // (WP-C D-PANE): the in-cell `control-properties` pane goes, and the
+    // floating button's Properties tab takes its place.
+    await closePropertiesIfOpen();
     selectFloatingControl(controlId);
-    openTP(PROPERTIES_PANE_ID, {
-      row,
-      col,
-      sheetIndex,
-      controlType: "button",
-    });
-    lastPropertiesCell = { row, col };
+    const floatingRegion = getGridRegions().find((r) => r.id === controlId);
+    if (floatingRegion) {
+      openObjectPane({ region: floatingRegion, tab: "properties", reason: "command" });
+    }
   }
 }
 
@@ -3369,28 +3534,37 @@ async function evaluatePropertiesPaneVisibility(
       lastPropertiesCell = { row, col };
 
       const { getGridStateSnapshot } = await import("../../src/api/grid");
-      const { openTaskPane: openTP } = await import("../../src/api/ui");
       const gridState = getGridStateSnapshot();
       const sheetIndex = gridState?.sheetContext?.activeSheetIndex ?? 0;
 
-      openTP(PROPERTIES_PANE_ID, {
+      openTaskPane(PROPERTIES_PANE_ID, {
         row,
         col,
         sheetIndex,
         controlType: "button",
       });
+      // View > Show lists the pane while its button is selected; the
+      // reconciliation (closePropertiesIfOpen) takes the key down again.
+      addTaskPaneContextKey("properties");
     }
   } else {
     closePropertiesIfOpen();
   }
 }
 
+/**
+ * Close the in-cell button's `control-properties` pane, if it is open, and
+ * take its "properties" context key down with it (the census reconciliation
+ * for that key: cascadeAnnouncementCensus PANE_CONTEXT_OWNERS). Only an
+ * EMBEDDED button opens this pane now; a floating control's Properties are a
+ * tab of the object pane.
+ */
 async function closePropertiesIfOpen(): Promise<void> {
   if (lastPropertiesCell) {
     lastPropertiesCell = null;
-    const { closeTaskPane: closeTP } = await import("../../src/api/ui");
-    closeTP(PROPERTIES_PANE_ID);
+    closeTaskPane(PROPERTIES_PANE_ID);
   }
+  removeTaskPaneContextKey("properties");
 }
 
 // ============================================================================
@@ -3517,6 +3691,7 @@ function deactivate(): void {
   invalidateAllImageCaches();
   // Teardown, not invalidation: revoke every object URL this session created.
   releaseAllImageMedia();
+  resetControlContainers();
   isActivated = false;
   console.log("[Controls] Deactivated.");
 }

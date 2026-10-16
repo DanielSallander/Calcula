@@ -89,7 +89,7 @@ import { markOffersPerPointFormatting } from "../../lib/dataPointOverrides";
 // that has nothing to do with the gate, and "bar" would look like a mark that
 // declines per-point formatting.
 import "../../rendering/chartDispatch";
-import { ChartFormatPane } from "../ChartFormatPane";
+import { ChartElementFormatCard } from "../ChartFormatPane";
 import { ChartContextMenu } from "../ChartContextMenu";
 
 // ---------------------------------------------------------------------------
@@ -156,7 +156,7 @@ let root: Root;
 
 async function mountPane(): Promise<void> {
   await act(async () => {
-    root.render(React.createElement(ChartFormatPane, {}));
+    root.render(React.createElement(ChartElementFormatCard, {}));
   });
 }
 

@@ -3107,6 +3107,121 @@ declare interface ScriptShapeHandle {
   sendMessage(type: string, data?: unknown): Promise<void>;
 }
 
+/**
+ * A handle on ONE object's properties, addressed by JSON Pointer — the paths
+ * the object's JSON uses: a chart's `/spec/title` or `/spec/series/0/name`, a
+ * control's `/properties/text` or `/properties/fill`, a slicer's
+ * `/headerText`, a canvas page's `/background`. `context.self` is your own
+ * object; `api.object(kind, id)` is any object (unlocked scripts).
+ *
+ * A property holds a LITERAL (its stored value), and may also carry a BINDING:
+ * a formula — cells, names, a model `[Measure]` of the page's model filtered
+ * by the page's slicers, literal CUBE functions — that Calcula re-evaluates
+ * whenever what it reads changes. A binding is shown instead of the literal;
+ * removing it shows the literal again.
+ *
+ * ```js
+ * await context.self.bindProperty("/properties/text", '="Sales: "&TEXT(Inputs!B2,"#,##0")');
+ * const shown = await context.self.getProperty("/properties/text");   // what the user sees
+ * await context.self.unbindProperty("/properties/text");             // the literal is back
+ * ```
+ *
+ * Code is never bound: a button's `onSelect` / `macroRef`, its action wiring,
+ * its position and its identity are refused with the reason. Every write is one
+ * undo step, recorded in the workbook's audit trail as this script's.
+ */
+declare interface ScriptObjectHandle {
+  /**
+   * How this handle addresses its object: for `api.object(kind, id)` the
+   * binding kind you passed ("chart", "control", "slicer", "timelineSlicer",
+   * "pivot", "floatingRange", "canvasPage"); for `context.self` your own
+   * object type ("chart", "shape", ...).
+   */
+  readonly kind: string;
+  /** The object's id: what you passed to `api.object`, or your own instance id. */
+  readonly id: string;
+  /**
+   * The value the user SEES at `path`: the binding's current result when the
+   * property is bound (a pending or failed result keeps the literal, except a
+   * text property, which shows the error), else the literal. `""` returns the
+   * whole object. Resolves to `null` when the object has nothing at `path`.
+   * @param path A JSON Pointer such as "/spec/title".
+   *
+   * Calcula policy (generated): Read its own object's properties / selection / spec.
+   * Reach: broker `object.getState`, aspect `property.get`, restricted tier, class read.
+   */
+  getProperty(path: string): Promise<unknown>;
+  /**
+   * The LITERAL stored at `path`, ignoring any binding. `""` returns the whole
+   * object's JSON — the quickest way to see which paths it has. Resolves to
+   * `null` when the object has nothing at `path`.
+   * @param path A JSON Pointer such as "/properties/fill".
+   *
+   * Calcula policy (generated): Read its own object's properties / selection / spec.
+   * Reach: broker `object.getState`, aspect `literal.get`, restricted tier, class read.
+   */
+  getLiteral(path: string): Promise<unknown>;
+  /**
+   * The binding at `path` — its formula, in the same invariant form
+   * `bindProperty` takes, and the model it reads (null = the page's own) — or
+   * `null` when the property is not bound.
+   * @param path A JSON Pointer such as "/spec/title".
+   *
+   * Calcula policy (generated): Read its own object's properties / selection / spec.
+   * Reach: broker `object.getState`, aspect `binding.get`, restricted tier, class read.
+   */
+  getBinding(path: string): Promise<{ formula: string; model: string | null } | null>;
+  /**
+   * Write the LITERAL at `path` (any binding stays and is still shown). The
+   * value is ONE JSON value of the property's type: text, a number, true/false,
+   * a colour ("#336699"), a media handle ("media:…") for a picture — never a
+   * data: URI. The object's own rules apply: a protected sheet or a locked
+   * canvas refuses what it would refuse in the Properties pane.
+   * @param path A JSON Pointer the object lets you set, e.g. "/properties/text".
+   * @param value The new literal.
+   *
+   * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
+   * Reach: broker `object.setState`, aspect `property.set`, restricted tier, class mutate.
+   */
+  setProperty(path: string, value: unknown): Promise<void>;
+  /**
+   * Bind `path` to a formula that Calcula re-evaluates whenever what it reads
+   * changes. Write the formula INVARIANT, whatever the user's locale: `,`
+   * between arguments and `.` for decimals — `=ROUND(Inputs!B2*1.25, 0)`.
+   *
+   * A formula that reads a model measure (`=[Revenue]`) or a CUBE function
+   * reaches the BI engine, so it needs the `bi.query` capability — declared in
+   * your script, and granted — even though this method itself names none. A
+   * RESTRICTED script may bind only to cells of the sheet in front of the user
+   * (no other sheet, no defined name, no table, nothing indirect).
+   * @param path A bindable JSON Pointer, e.g. "/spec/title".
+   * @param formula A formula starting with "=", at most 8,192 characters.
+   * @param opts `model`: which model a `[Measure]` is read from, when the page
+   *             uses more than one (omit it to use the page's own).
+   *
+   * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
+   * Reach: broker `object.setState`, aspect `binding.set`, restricted tier, class mutate.
+   */
+  bindProperty(path: string, formula: string, opts?: { model?: string }): Promise<void>;
+  /**
+   * Remove the binding at `path`; the literal is shown again. Resolves even
+   * when the property was not bound.
+   * @param path The bound JSON Pointer.
+   *
+   * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
+   * Reach: broker `object.setState`, aspect `binding.clear`, restricted tier, class mutate.
+   */
+  unbindProperty(path: string): Promise<void>;
+}
+
+/**
+ * The {@link ScriptObjectHandle} `api.object(kind, id)` returns: the same six
+ * methods, aimed at ANY object of the workbook rather than your own, through
+ * the unlocked cross-object door (`api.objectGetState` / `api.objectSetState`).
+ * Every rule of ScriptObjectHandle applies unchanged.
+ */
+declare interface ScriptTargetObjectHandle extends ScriptObjectHandle {}
+
 /** A namedRange.update patch. An ABSENT key keeps the stored value;
  *  `sheetIndex: null` clears the scope to workbook; a sheet ref (index or
  *  name) scopes the name to that sheet. */
@@ -5654,6 +5769,16 @@ declare interface UnlockedAPI {
   shape(shapeId: string): ScriptShapeHandle;
   /** A handle on any named range. */
   namedRange(name: string): ScriptNamedRangeHandle;
+  /**
+   * A handle on any object's PROPERTIES by JSON Pointer — read them, set a
+   * literal, bind one to a formula: `await api.object("chart", id).bindProperty("/spec/title", "=Inputs!B1")`.
+   * @param kind The binding kind: "chart", "control", "slicer",
+   *             "timelineSlicer", "pivot", "floatingRange" or "canvasPage" (or
+   *             a script object type such as "shape", with that object's
+   *             instance id).
+   * @param id The object's id (a control's is its uid).
+   */
+  object(kind: string, id: string): ScriptTargetObjectHandle;
 }
 
 /**
@@ -5758,6 +5883,13 @@ declare interface BaseObjectContext {
   notify(message: string, type?: "info" | "success" | "warning" | "error"): void;
   /** Sandboxed capability surface (see {@link ScriptCapabilities}). */
   caps: ScriptCapabilities;
+  /**
+   * Your OWN object's properties by JSON Pointer (see {@link ScriptObjectHandle}):
+   * `await context.self.bindProperty("/spec/title", "=B1")`. Every tier has it;
+   * an object type with no bindable properties (a sheet, a cell) refuses each
+   * call with the reason.
+   */
+  readonly self: ScriptObjectHandle;
   /**
    * Full extension API access (only available in "unlocked" mode).
    * In "restricted" mode, this is null.

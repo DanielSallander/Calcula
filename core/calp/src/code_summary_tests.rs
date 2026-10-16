@@ -713,7 +713,7 @@ fn cells_charts_media_and_captions_produce_no_rows() {
         V::new(version)
             .module("mod-1", "Report", "return 1;")
             .put(&format!("sheets/{SHEET}/data.json"), json!({ "cells": { "A1": { "t": "n", "v": value } } }))
-            .put("charts.json", json!([{ "id": "c1", "specJson": format!("{{\"v\":{value}}}") }]))
+            .put("charts.json", json!([{ "id": "c1", "spec": { "v": value } }]))
             .put("media/abc", json!({ "bytes": value }))
             .put("models/ds/model.json", json!({ "measures": [{ "name": "M", "source": format!("{value}") }] }))
             .controls(json!([
@@ -724,6 +724,48 @@ fn cells_charts_media_and_captions_produce_no_rows() {
     let s = summary(Some(&base("1.0.0", 1.0, "Go")), &base("1.1.0", 2.0, "Run"));
     assert!(s.changes.is_empty(), "nothing here is code:\n{}", listing(&s));
     assert!(!s.asks_approval_again);
+}
+
+/// An object property BINDING is not code (WP-D): it is a formula the
+/// evaluator reads, never something that runs, and no binding can sit on a
+/// code slot (`onSelect`, `macroRef`, an action key -- the catalog refuses
+/// them). A version pair whose ONLY change is `bindings.json` -- a binding
+/// edited, one added, one removed -- produces no row and asks nobody again;
+/// the same pair with a button's code changed still does.
+///
+/// SABOTAGE: have `code_summary` list `bindings.json` rows as code -- the first
+/// assertion fails. (It is a pin: the summary reads no `bindings.json` today,
+/// and this keeps a later "bindings are code" reading from slipping in
+/// unnoticed.)
+#[test]
+fn a_binding_only_push_reports_no_code_change() {
+    let binding = |path: &str, formula: &str| {
+        json!({ "object": { "kind": "control", "id": "uid-1" }, "path": path, "formula": formula })
+    };
+    let base = |version: &str, bindings: Value, code: &str| {
+        V::new(version)
+            .controls(json!([button(0, 0, json!({ "onSelect": stat(code), "text": stat("") }))]))
+            .put("bindings.json", bindings)
+    };
+    let before = base("1.0.0", json!([binding("/properties/text", "=Data!A1")]), "Report();");
+    let after = base(
+        "1.1.0",
+        json!([binding("/properties/text", "=Data!A2"), binding("/properties/fill", "=Data!B1")]),
+        "Report();",
+    );
+    let s = summary(Some(&before), &after);
+    assert!(s.changes.is_empty(), "a binding is not code:\n{}", listing(&s));
+    assert!(!s.asks_approval_again);
+
+    let removed = base("1.1.0", json!([]), "Report();");
+    assert!(summary(Some(&before), &removed).changes.is_empty(), "nor is removing one");
+
+    // Positive control: the same pair with the button's CODE changed is a row.
+    let recoded = base("1.1.0", json!([binding("/properties/text", "=Data!A2")]), "Other();");
+    assert!(
+        !summary(Some(&before), &recoded).changes.is_empty(),
+        "the harness must still see a real code change"
+    );
 }
 
 /// Through a CHECKED side every read is held to the signed checksum: bytes

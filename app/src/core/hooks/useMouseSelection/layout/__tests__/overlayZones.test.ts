@@ -22,8 +22,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type React from "react";
 
-const snapshot: { surface: "grid" | "canvas"; sheetContext: { activeSheetIndex: number } } = {
+const snapshot: { surface: "grid" | "canvas"; zoom: number; sheetContext: { activeSheetIndex: number } } = {
   surface: "grid",
+  zoom: 1,
   sheetContext: { activeSheetIndex: 1 },
 };
 vi.mock("../../../../state/GridContext", async (importOriginal) => ({
@@ -49,6 +50,8 @@ import {
 } from "../../../../../api/objectSelection";
 import { registerLayoutSurfaceProvider, type LayoutSurface } from "../../../../lib/layoutSurface";
 import { DEFAULT_GRID_CONFIG, type Viewport } from "../../../../types";
+import { BASE_CONTAINER_DEFAULTS, type ResolvedVisualContainer } from "../../../../../api/visualContainer";
+import { resetPaintedContainerLayouts } from "../../../../../api/visualContainerPaint";
 
 const ACTIVE = 1;
 const VIEWPORT: Viewport = { scrollX: 0, scrollY: 0, startRow: 0, startCol: 0, rowCount: 30, colCount: 10 };
@@ -119,6 +122,7 @@ let unregisterSurface: (() => void) | null = null;
 beforeEach(() => {
   locked = false;
   snapshot.surface = "grid";
+  snapshot.zoom = 1;
   events = [];
   details = [];
   for (const t of EVENTS) window.addEventListener(t, record);
@@ -460,5 +464,125 @@ describe("a registration WITHOUT zoneAt is all frame (M5 T6: there is no legacy 
     const hit = handlers().h.checkOverlayBody(FRAME.x, FRAME.y);
     expect(hit?.cursor).toBe("move");
     expect(leftover).not.toHaveBeenCalled();
+  });
+});
+
+describe("the CONTAINER band is frame BEFORE the family's zoneAt is asked (D-FORMAT, paint == hit)", () => {
+  /** The region of this file with a resolved container: padding `pad` on every side, optional Core title. */
+  function framedRegion(pad: number, over: Partial<ResolvedVisualContainer> = {}, data: Record<string, unknown> = {}): GridRegion {
+    return {
+      ...region(data),
+      container: { ...BASE_CONTAINER_DEFAULTS, padding: { top: pad, right: pad, bottom: pad, left: pad }, ...over },
+    };
+  }
+
+  /** A point at (dx, dy) from the object's top-left corner, in logical canvas px. */
+  const at = (dx: number, dy: number) => ({ x: RHW + 60 + dx, y: CHH + 60 + dy });
+
+  afterEach(() => {
+    resetPaintedContainerLayouts();
+  });
+
+  it("a PADDING point is frame (part 'container') and moves; the family's zoneAt is NOT called", () => {
+    const zoneAt = vi.fn(leftHalf);
+    registerGridOverlay({ type: TYPE, render: () => {}, zoneAt });
+    setGridRegions([framedRegion(12)]);
+    useSurface(surface(true));
+
+    const t = pressAndDrag(at(5, 50));
+    expect(t.events).toEqual(SELECTED_THEN_MOVE);
+    expect(zoneAt, "the family was asked about a point in Core's band").not.toHaveBeenCalled();
+    const selected = details.find((d) => d.type === "floatingObject:selected")!.detail;
+    expect(selected).toMatchObject({ zone: "frame", part: "container" });
+    expect(handlers().h.checkOverlayBody(at(5, 50).x, at(5, 50).y)?.cursor).toBe("move");
+  });
+
+  it("a CONTENT point still gets the family's answer (here: content)", () => {
+    const zoneAt = vi.fn(leftHalf);
+    registerGridOverlay({ type: TYPE, render: () => {}, zoneAt });
+    setGridRegions([framedRegion(12)]);
+    useSurface(surface(true));
+
+    expect(pressAndDrag(at(40, 50)).events).toEqual(SELECTED_THEN_CONTENT);
+    expect(zoneAt).toHaveBeenCalled();
+  });
+
+  it("each side of the band, and the corner: frame; one pixel inside the padding: the family", () => {
+    const zoneAt = vi.fn(() => ({ kind: "content" as const, cursor: "pointer" }));
+    registerGridOverlay({ type: TYPE, render: () => {}, zoneAt });
+    setGridRegions([framedRegion(12)]);
+    useSurface(surface(true));
+    const h = handlers().h;
+    for (const [dx, dy] of [[11, 50], [189, 50], [100, 11], [100, 89], [0, 0], [200, 100]]) {
+      expect(h.checkOverlayBody(at(dx, dy).x, at(dx, dy).y)?.zone, `(${dx}, ${dy})`).toMatchObject({ kind: "frame", part: "container" });
+    }
+    expect(zoneAt).not.toHaveBeenCalled();
+    for (const [dx, dy] of [[13, 50], [187, 50], [100, 13], [100, 87]]) {
+      expect(h.checkOverlayBody(at(dx, dy).x, at(dx, dy).y)?.zone.kind, `(${dx}, ${dy})`).toBe("content");
+    }
+  });
+
+  it("a Core-painted TITLE band is frame too; the content starts below it", () => {
+    const zoneAt = vi.fn(() => ({ kind: "content" as const, cursor: "pointer" }));
+    registerGridOverlay({ type: TYPE, render: () => {}, zoneAt });
+    // Title 14 px -> one 18 px line + 4 px below: the content starts 22 px down.
+    setGridRegions([framedRegion(0, { title: { ...BASE_CONTAINER_DEFAULTS.title, show: true, text: "T", wrap: false } })]);
+    useSurface(surface(true));
+    const h = handlers().h;
+    expect(h.checkOverlayBody(at(100, 10).x, at(100, 10).y)?.zone).toMatchObject({ kind: "frame", part: "container" });
+    expect(h.checkOverlayBody(at(100, 30).x, at(100, 30).y)?.zone.kind).toBe("content");
+  });
+
+  it("LOCKED: the band only selects ('default' pointer, no move armed)", () => {
+    registerGridOverlay({ type: TYPE, render: () => {}, zoneAt: leftHalf });
+    locked = true;
+    setGridRegions([framedRegion(12)]);
+    useSurface(surface(true));
+    const t = pressAndDrag(at(5, 50));
+    expect(t.events).toEqual(["floatingObject:selected"]);
+    expect(t.setIsOverlayMoving).not.toHaveBeenCalled();
+    expect(handlers().h.checkOverlayBody(at(5, 50).x, at(5, 50).y)?.cursor).toBe("default");
+  });
+
+  it("zoom 2: the band is in LOGICAL px -- the same logical points answer the same (never scaled twice)", () => {
+    const zoneAt = vi.fn(() => ({ kind: "content" as const, cursor: "pointer" }));
+    registerGridOverlay({ type: TYPE, render: () => {}, zoneAt });
+    setGridRegions([framedRegion(6)]);
+    useSurface(surface(true));
+    for (const zoom of [1, 2]) {
+      snapshot.zoom = zoom;
+      const h = handlers().h;
+      expect(h.checkOverlayBody(at(4, 50).x, at(4, 50).y)?.zone, `zoom ${zoom}`).toMatchObject({ kind: "frame", part: "container" });
+      // A band scaled by the zoom (12 px) would swallow this point.
+      expect(h.checkOverlayBody(at(8, 50).x, at(8, 50).y)?.zone.kind, `zoom ${zoom}`).toBe("content");
+    }
+  });
+
+  it("a point OUTSIDE the box (an extended hit, e.g. a chart's Quick Access buttons) still goes to the family", () => {
+    const zoneAt = vi.fn(() => ({ kind: "content" as const, cursor: "pointer", part: "qa" }));
+    registerGridOverlay({
+      type: TYPE,
+      render: () => {},
+      zoneAt,
+      // Claims a 20 px strip to the RIGHT of the box.
+      hitTest: (ctx) => {
+        const b = ctx.floatingCanvasBounds!;
+        return ctx.canvasX > b.x + b.width && ctx.canvasX <= b.x + b.width + 20 && ctx.canvasY >= b.y && ctx.canvasY <= b.y + b.height;
+      },
+    });
+    setGridRegions([framedRegion(12)]);
+    useSurface(surface(true));
+    const hit = handlers().h.checkOverlayBody(at(210, 50).x, at(210, 50).y);
+    expect(hit?.zone).toMatchObject({ kind: "content", part: "qa" });
+    expect(zoneAt).toHaveBeenCalled();
+  });
+
+  it("a region WITHOUT a container: the family answers everywhere, padding-sized edges included", () => {
+    const zoneAt = vi.fn(() => ({ kind: "content" as const, cursor: "pointer" }));
+    registerGridOverlay({ type: TYPE, render: () => {}, zoneAt });
+    setGridRegions([region()]);
+    useSurface(surface(true));
+    expect(handlers().h.checkOverlayBody(at(5, 50).x, at(5, 50).y)?.zone.kind).toBe("content");
+    expect(zoneAt).toHaveBeenCalled();
   });
 });

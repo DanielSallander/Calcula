@@ -1771,14 +1771,24 @@ pub(crate) fn insert_rows_impl(
             .ok()
             .and_then(|n| n.get(active_sheet).cloned())
             .unwrap_or_default();
-        shift_named_ranges(
+        let rewritten = shift_named_ranges(
             &state,
             &effect,
             &mut undo_stack,
             active_sheet,
             &sheet_name,
             calp::writeback::StructuralEdit::RowInsert { at: row, count },
-        )
+        );
+        // Object property BINDING formulas are coordinate holders too (WP-D):
+        // store only, recorded into this transaction, announced as a reload.
+        crate::object_bindings::cascade::shift_object_bindings(
+            &state,
+            &effect,
+            &mut undo_stack,
+            &sheet_name,
+            calp::writeback::StructuralEdit::RowInsert { at: row, count },
+        );
+        rewritten
     };
     // Print area and scroll area are A1 range STRINGS on this sheet.
     shift_sheet_range_strings(
@@ -2252,14 +2262,23 @@ pub(crate) fn insert_columns_impl(
             .ok()
             .and_then(|n| n.get(active_sheet).cloned())
             .unwrap_or_default();
-        shift_named_ranges(
+        let rewritten = shift_named_ranges(
             &state,
             &effect,
             &mut undo_stack,
             active_sheet,
             &sheet_name,
             calp::writeback::StructuralEdit::ColInsert { at: col, count },
-        )
+        );
+        // Object property BINDING formulas are coordinate holders too (WP-D).
+        crate::object_bindings::cascade::shift_object_bindings(
+            &state,
+            &effect,
+            &mut undo_stack,
+            &sheet_name,
+            calp::writeback::StructuralEdit::ColInsert { at: col, count },
+        );
+        rewritten
     };
     // Print area and scroll area are A1 range STRINGS on this sheet.
     shift_sheet_range_strings(
@@ -3749,14 +3768,24 @@ pub(crate) fn delete_rows_impl(
             .ok()
             .and_then(|n| n.get(active_sheet).cloned())
             .unwrap_or_default();
-        shift_named_ranges(
+        let rewritten = shift_named_ranges(
             &state,
             &effect,
             &mut undo_stack,
             active_sheet,
             &sheet_name,
             calp::writeback::StructuralEdit::RowDelete { at: row, count },
-        )
+        );
+        // Object property BINDING formulas are coordinate holders too (WP-D):
+        // a reference into the deleted rows becomes #REF!, as a cell's does.
+        crate::object_bindings::cascade::shift_object_bindings(
+            &state,
+            &effect,
+            &mut undo_stack,
+            &sheet_name,
+            calp::writeback::StructuralEdit::RowDelete { at: row, count },
+        );
+        rewritten
     };
     // Print area and scroll area are A1 range STRINGS on this sheet.
     shift_sheet_range_strings(
@@ -4285,14 +4314,23 @@ pub(crate) fn delete_columns_impl(
             .ok()
             .and_then(|n| n.get(active_sheet).cloned())
             .unwrap_or_default();
-        shift_named_ranges(
+        let rewritten = shift_named_ranges(
             &state,
             &effect,
             &mut undo_stack,
             active_sheet,
             &sheet_name,
             calp::writeback::StructuralEdit::ColDelete { at: col, count },
-        )
+        );
+        // Object property BINDING formulas are coordinate holders too (WP-D).
+        crate::object_bindings::cascade::shift_object_bindings(
+            &state,
+            &effect,
+            &mut undo_stack,
+            &sheet_name,
+            calp::writeback::StructuralEdit::ColDelete { at: col, count },
+        );
+        rewritten
     };
     // Print area and scroll area are A1 range STRINGS on this sheet.
     shift_sheet_range_strings(
@@ -7546,6 +7584,8 @@ pub(crate) fn off_sheet_structural_edit(
 
         names_rewritten =
             shift_named_ranges(state, &effect, &mut undo_stack, target, &edited_sheet_name, edit);
+        // Object property BINDING formulas that read the edited sheet (WP-D).
+        crate::object_bindings::cascade::shift_object_bindings(state, &effect, &mut undo_stack, &edited_sheet_name, edit);
         shift_sheet_range_strings(state, &effect, &mut undo_stack, target, edit);
         shift_controls(state, &effect, &mut undo_stack, target, edit);
         shift_per_sheet_range_stores(state, &effect, &mut undo_stack, target, edit);

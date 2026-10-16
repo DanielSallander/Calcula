@@ -20,6 +20,8 @@ use crate::features::script_authoring::{SCRIPT_AUTHORING_FEATURE, SCRIPT_AUTHORI
 use crate::manifest::{
     stamp_feature_format_version, Manifest, CALA_BASE_FORMAT_VERSION, PINNED_FILTER_MIN_FORMAT_VERSION,
     CANVAS_OBJECTS_LOCKED_FEATURE, CANVAS_SHEET_MIN_FORMAT_VERSION, CANVAS_WALLPAPER_FEATURE,
+    CHART_SPEC_OBJECT_MIN_FORMAT_VERSION, OBJECT_BINDINGS_FEATURE,
+    OBJECT_BINDINGS_MIN_FORMAT_VERSION, PAGE_NAVIGATOR_FEATURE, PIVOT_STYLE_FEATURE, VISUAL_CONTAINER_FEATURE,
     PENDING_RECALC_MIN_FORMAT_VERSION, SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION,
     SHEET_VIEW_MIN_FORMAT_VERSION,
     SPILL_EXTENT_MIN_FORMAT_VERSION,
@@ -40,6 +42,38 @@ use persistence::{SavedChart, SavedNotebook, SavedObjectScript, SavedPaneControl
 use std::io::{Read, Write};
 use zip::write::FileOptions;
 use zip::CompressionMethod;
+
+/// Does any object in `workbook` carry a VISUAL CONTAINER (D-FORMAT)? A
+/// slicer / timeline / floating grid with `container`; a pivot definition
+/// (opaque JSON) with a non-null `canvas_frame.container`; a chart whose spec
+/// (the ChartDefinition envelope, `{"spec": {...}}`) has a non-null
+/// `spec.container`; a control with a NON-EMPTY `container*` property (an
+/// empty value is the family default, so an older reader loses nothing --
+/// and a default text box, whose create recipe uses only ordinary keys,
+/// declares nothing).
+fn workbook_carries_a_visual_container(workbook: &Workbook) -> bool {
+    let non_null = |v: Option<&serde_json::Value>| v.is_some_and(|v| !v.is_null());
+    workbook.slicers.iter().any(|s| s.container.is_some())
+        || workbook.timeline_slicers.iter().any(|t| t.container.is_some())
+        || workbook.floating_ranges.iter().any(|f| f.container.is_some())
+        || workbook
+            .pivot_definitions
+            .iter()
+            .any(|d| non_null(d.definition.pointer("/canvas_frame/container")))
+        || workbook.charts.iter().any(|c| non_null(c.spec.pointer("/spec/container")))
+        || workbook.controls.iter().any(|sheet| {
+            sheet.controls.as_array().is_some_and(|entries| {
+                entries.iter().any(|c| {
+                    c.get("properties").and_then(|p| p.as_object()).is_some_and(|props| {
+                        props.iter().any(|(key, prop)| {
+                            visual_format::CONTROL_CONTAINER_PROPERTY_KEYS.contains(&key.as_str())
+                                && prop.get("value").and_then(|v| v.as_str()).is_some_and(|v| !v.is_empty())
+                        })
+                    })
+                })
+            })
+        })
+}
 
 /// Build the complete `.cala` ZIP into a byte buffer (no file I/O). The host
 /// wraps this — optionally encrypting it — and writes it atomically.
@@ -272,6 +306,54 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     }
     if layouts().any(|l| l.objects_locked) {
         manifest.features.push(CANVAS_OBJECTS_LOCKED_FEATURE.to_string());
+    }
+    // A PAGE NAVIGATOR control (D-NAV): a feature id and DELIBERATELY NO
+    // version link -- an older reader paints the unknown control type as a
+    // grey button that does nothing, a visible loss, never a lie (see
+    // PAGE_NAVIGATOR_FEATURE). Declared only when some control actually is
+    // one; controls.json is read unconditionally either way.
+    if workbook.controls.iter().any(|s| {
+        s.controls.as_array().is_some_and(|entries| {
+            entries.iter().any(|c| {
+                c.get("controlType").and_then(|t| t.as_str())
+                    == Some(crate::page_navigator::PAGE_NAVIGATOR_CONTROL_TYPE)
+            })
+        })
+    }) {
+        manifest.features.push(PAGE_NAVIGATOR_FEATURE.to_string());
+    }
+    // The VISUAL CONTAINER (D-FORMAT) and the persisted PIVOT STYLE: feature
+    // ids and DELIBERATELY NO version link -- an older reader drops a border,
+    // a title, a shadow or a gallery style, a visible cosmetic loss, never a
+    // lie (see VISUAL_CONTAINER_FEATURE). Each is declared only when some
+    // object actually carries one; every field rides its own record, so the
+    // read is unconditional.
+    if workbook_carries_a_visual_container(workbook) {
+        manifest.features.push(VISUAL_CONTAINER_FEATURE.to_string());
+    }
+    if workbook
+        .pivot_definitions
+        .iter()
+        .any(|d| d.definition.get("style").is_some_and(|v| !v.is_null()))
+    {
+        manifest.features.push(PIVOT_STYLE_FEATURE.to_string());
+    }
+    // Object property BINDINGS (D-BIND): a feature id AND a version link. The
+    // literal stays on each object's own record, so an older reader that
+    // dropped bindings.json would paint the FROZEN literal of a property that
+    // looks live -- the lie class (see OBJECT_BINDINGS_MIN_FORMAT_VERSION).
+    // Stamped only when some binding exists.
+    if !workbook.object_bindings.is_empty() {
+        manifest.features.push(OBJECT_BINDINGS_FEATURE.to_string());
+        stamp_feature_format_version(&mut manifest, OBJECT_BINDINGS_MIN_FORMAT_VERSION);
+    }
+    // charts.json rows embed the spec as a JSON OBJECT since v10. An older
+    // reader cannot parse such a row at all (it requires the `specJson`
+    // string), so the version link turns a raw serde failure into the clean
+    // "newer version" refusal (see CHART_SPEC_OBJECT_MIN_FORMAT_VERSION). No
+    // feature id: the shape change is not an optional feature.
+    if !workbook.charts.is_empty() {
+        stamp_feature_format_version(&mut manifest, CHART_SPEC_OBJECT_MIN_FORMAT_VERSION);
     }
     manifest.features.push("theme".to_string());
 
@@ -508,6 +590,18 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
         let charts_json = serde_json::to_string_pretty(&workbook.charts)?;
         zip.start_file("charts.json", options.clone())?;
         zip.write_all(charts_json.as_bytes())?;
+    }
+
+    // Object property bindings (v10; feature id + version link above). Written
+    // sorted by (object, path) so an unchanged store is byte-stable whatever
+    // order the host collected it in. Read unconditionally below.
+    if !workbook.object_bindings.is_empty() {
+        let mut bindings: Vec<&persistence::SavedObjectBinding> =
+            workbook.object_bindings.iter().collect();
+        bindings.sort_by(|a, b| (&a.object, &a.path).cmp(&(&b.object, &b.path)));
+        let json = serde_json::to_string_pretty(&bindings)?;
+        zip.start_file("bindings.json", options.clone())?;
+        zip.write_all(json.as_bytes())?;
     }
 
     // Floating range object rows. A manifest FEATURE ID with NO format-version
@@ -1102,13 +1196,19 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         }
     }
 
-    // Read charts
+    // Read charts (rows whose `spec` is an embedded object since v10; a
+    // pre-v10 row's `specJson` string is upgraded in place -- read_saved_charts).
     let charts: Vec<SavedChart> = if manifest.features.contains(&"charts".to_string()) {
-        read_optional_json::<Vec<SavedChart>>(&mut archive, "charts.json")?
-            .unwrap_or_default()
+        read_saved_charts(&mut archive)?
     } else {
         Vec::new()
     };
+
+    // Object property bindings (v10) -- UNCONDITIONALLY, the named_ranges
+    // precedent: a build that wrote the section but forgot the feature id
+    // still gets its bindings back.
+    let object_bindings: Vec<persistence::SavedObjectBinding> =
+        read_optional_json(&mut archive, "bindings.json")?.unwrap_or_default();
 
     // Read floating range rows — UNCONDITIONALLY (the named_ranges/sparklines
     // precedent): a build that wrote the section but forgot the feature id
@@ -1249,7 +1349,67 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         // load path can run a one-time recovery for anything a pre-feature
         // writer could not record. Never read by the writer.
         format_version: manifest.format_version,
+        object_bindings,
     })
+}
+
+/// The sentence every `charts.json` read failure starts with. Never the bare
+/// serde text: a user opening a workbook must learn WHICH part of the file
+/// could not be read.
+const CHARTS_JSON_UNREADABLE: &str = "charts.json in this file could not be read";
+
+/// Read `charts.json` (absent -> empty). Reads the rows as plain JSON values
+/// first and upgrades any pre-v10 row in place ([`upgrade_saved_chart_rows`])
+/// before the typed deserialise, so a workbook saved before the spec became an
+/// embedded object still opens. Any failure is reported as
+/// "charts.json in this file could not be read: <reason>".
+fn read_saved_charts(
+    archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>,
+) -> Result<Vec<SavedChart>, FormatError> {
+    let rows: Option<Vec<serde_json::Value>> = match read_optional_json(archive, "charts.json") {
+        Ok(rows) => rows,
+        Err(FormatError::Json(e)) => {
+            return Err(FormatError::InvalidFormat(format!("{CHARTS_JSON_UNREADABLE}: {e}")));
+        }
+        Err(other) => return Err(other),
+    };
+    match rows {
+        None => Ok(Vec::new()),
+        Some(rows) => upgrade_saved_chart_rows(rows).map_err(FormatError::InvalidFormat),
+    }
+}
+
+/// Pure: turn raw `charts.json` rows into `SavedChart`s. A row that carries
+/// the pre-v10 `specJson` STRING and no `spec` is upgraded in place: `spec`
+/// becomes the parsed JSON, or -- when the string is not JSON -- a
+/// `Value::String` of the raw text (logged, never dropped). Any row that still
+/// fails the typed deserialise yields the "charts.json in this file could not
+/// be read: <reason>" sentence (the `Err` text, ready for `InvalidFormat`).
+pub(crate) fn upgrade_saved_chart_rows(
+    rows: Vec<serde_json::Value>,
+) -> Result<Vec<SavedChart>, String> {
+    rows.into_iter()
+        .enumerate()
+        .map(|(index, mut row)| {
+            if let Some(obj) = row.as_object_mut() {
+                if !obj.contains_key("spec") {
+                    if let Some(serde_json::Value::String(raw)) = obj.remove("specJson") {
+                        let spec = serde_json::from_str::<serde_json::Value>(&raw)
+                            .unwrap_or_else(|e| {
+                                eprintln!(
+                                    "[WARN] charts.json row {index}: specJson is not JSON ({e}); \
+                                     kept as a string"
+                                );
+                                serde_json::Value::String(raw)
+                            });
+                        obj.insert("spec".to_string(), spec);
+                    }
+                }
+            }
+            serde_json::from_value::<SavedChart>(row)
+                .map_err(|e| format!("{CHARTS_JSON_UNREADABLE}: chart {}: {e}", index + 1))
+        })
+        .collect()
 }
 
 /// Read an optional JSON file from the archive. Returns None if the file doesn't exist.
@@ -1430,6 +1590,7 @@ mod tests {
             pending_recalc: None,
             floating_ranges: Vec::new(),
             format_version: 0,
+            object_bindings: Vec::new(),
         }
     }
 
@@ -1764,6 +1925,7 @@ mod tests {
             // conditional v8 stamp (asserted below).
             filter_level: 2,
             data_source_id: None,
+            container: None,
         });
 
         let dir = tempfile::tempdir().unwrap();
@@ -2019,6 +2181,7 @@ mod tests {
             connected_sources: Vec::new(),
             filter_level: 1,
             data_source_id: None,
+            container: None,
         });
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ordinary-slicer.cala");
@@ -2310,6 +2473,96 @@ mod tests {
         assert_eq!(loaded.sheets[0].kind, persistence::SheetKind::Canvas(layout));
     }
 
+    /// One sheet's controls payload holding a single control of `control_type`.
+    fn controls_with(sheet: SheetId, control_type: &str) -> persistence::SavedSheetControls {
+        persistence::SavedSheetControls {
+            sheet_id: sheet,
+            controls: serde_json::json!([{
+                "row": 2, "col": 1, "controlType": control_type,
+                "properties": {
+                    "pinToGrid": { "valueType": "static", "value": "false" },
+                    "pageOverrides": { "valueType": "static", "value": "[]" }
+                }
+            }]),
+        }
+    }
+
+    /// D-NAV: a PAGE NAVIGATOR declares a manifest FEATURE ID and takes NO link
+    /// in the format-version chain -- an older reader paints it as a dead grey
+    /// button, a visible loss, never a lie. A canvas carrying one stamps exactly
+    /// what a plain canvas stamps (v9); a plain button declares no id.
+    ///
+    /// SABOTAGE: stamp CANVAS_SHEET_MIN_FORMAT_VERSION + 1 beside the push, or
+    /// drop the push.
+    #[test]
+    fn page_navigator_declares_a_feature_id_but_never_raises_the_version() {
+        let mut workbook = make_test_workbook();
+        workbook.sheets[0].kind = persistence::SheetKind::new_canvas();
+        let sheet = workbook.sheets[0].id;
+        workbook.controls = vec![controls_with(sheet, crate::page_navigator::PAGE_NAVIGATOR_CONTROL_TYPE)];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("navigator.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+        assert_eq!(loaded.controls.len(), 1);
+        assert_eq!(loaded.controls[0].controls[0]["controlType"], "pageNavigator");
+        let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(manifest.features.iter().any(|f| f == PAGE_NAVIGATOR_FEATURE), "{:?}", manifest.features);
+        assert_eq!(
+            manifest.format_version, CANVAS_SHEET_MIN_FORMAT_VERSION,
+            "a navigator must not raise the version above the canvas link itself"
+        );
+
+        // An ordinary button on the same canvas declares no id.
+        let mut plain = make_test_workbook();
+        plain.sheets[0].kind = persistence::SheetKind::new_canvas();
+        let sheet = plain.sheets[0].id;
+        plain.controls = vec![controls_with(sheet, "button")];
+        let path = dir.path().join("button.cala");
+        write_calcula(&plain, &path).unwrap();
+        let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(!manifest.features.iter().any(|f| f == PAGE_NAVIGATOR_FEATURE), "{:?}", manifest.features);
+        assert_eq!(manifest.format_version, CANVAS_SHEET_MIN_FORMAT_VERSION);
+    }
+
+    /// The READ is unconditional: controls.json is opaque per sheet, so a file
+    /// whose manifest forgot the id still loads the navigator.
+    #[test]
+    fn page_navigator_loads_without_its_feature_id() {
+        let mut workbook = make_test_workbook();
+        let sheet = workbook.sheets[0].id;
+        workbook.controls = vec![controls_with(sheet, crate::page_navigator::PAGE_NAVIGATOR_CONTROL_TYPE)];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("navigator-noid.cala");
+        write_calcula(&workbook, &path).unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let out_path = dir.path().join("navigator-noid-stripped.cala");
+        {
+            let mut out = zip::ZipWriter::new(std::fs::File::create(&out_path).unwrap());
+            for i in 0..archive.len() {
+                let mut entry = archive.by_index(i).unwrap();
+                let name = entry.name().to_string();
+                let mut data = Vec::new();
+                std::io::Read::read_to_end(&mut entry, &mut data).unwrap();
+                if name == "manifest.json" {
+                    let mut m: serde_json::Value = serde_json::from_slice(&data).unwrap();
+                    let features = m["features"].as_array_mut().unwrap();
+                    assert!(features.iter().any(|f| f == PAGE_NAVIGATOR_FEATURE), "precondition: the id was written");
+                    features.retain(|f| f != PAGE_NAVIGATOR_FEATURE);
+                    data = serde_json::to_vec(&m).unwrap();
+                }
+                out.start_file(name, FileOptions::<()>::default()).unwrap();
+                std::io::Write::write_all(&mut out, &data).unwrap();
+            }
+            out.finish().unwrap();
+        }
+        let loaded = read_calcula(&out_path).unwrap();
+        assert_eq!(loaded.controls.len(), 1);
+        assert_eq!(loaded.controls[0].controls, workbook.controls[0].controls);
+    }
+
     /// A canvas at the DEFAULT layout must still be written: its metadata.json
     /// is never omittable, or the sheet reloads as a worksheet.
     #[test]
@@ -2336,13 +2589,16 @@ mod tests {
         assert!(!manifest.features.iter().any(|f| f == "canvas_sheets"));
     }
 
-    /// The canvas link sits ABOVE every earlier link, so a build whose ceiling
-    /// is the previous maximum (v8) refuses a canvas workbook through the
-    /// reader gate rather than reading it as a worksheet.
+    /// The bindings link (v10) sits ABOVE every earlier link, so a build whose
+    /// ceiling is the previous maximum (v9, canvas) refuses a workbook with a
+    /// binding through the reader gate rather than painting frozen literals.
+    /// The chart-shape link shares v10: both changed in the same build.
     #[test]
-    fn test_the_canvas_link_is_above_every_earlier_link() {
+    fn the_bindings_link_is_above_every_earlier_link() {
         assert!(CANVAS_SHEET_MIN_FORMAT_VERSION > PINNED_FILTER_MIN_FORMAT_VERSION);
-        assert_eq!(CANVAS_SHEET_MIN_FORMAT_VERSION, CALA_MAX_SUPPORTED_FORMAT_VERSION);
+        assert!(CANVAS_SHEET_MIN_FORMAT_VERSION < OBJECT_BINDINGS_MIN_FORMAT_VERSION);
+        assert_eq!(OBJECT_BINDINGS_MIN_FORMAT_VERSION, CALA_MAX_SUPPORTED_FORMAT_VERSION);
+        assert_eq!(CHART_SPEC_OBJECT_MIN_FORMAT_VERSION, CALA_MAX_SUPPORTED_FORMAT_VERSION);
     }
 
     /// A split ALONE stamps it too: the split is as unrecoverable as the zoom.
@@ -2891,6 +3147,7 @@ mod tests {
             show_scrollbar: true,
             style_preset: "TimelineStyleDark2".to_string(),
             connected_pivot_ids: vec![pivot_id],
+            container: None,
         }];
 
         let dir = tempfile::tempdir().unwrap();
@@ -3149,5 +3406,530 @@ mod tests {
             "got: {}",
             err
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // v10: object bindings + the chart spec embedded as a JSON object
+    // -----------------------------------------------------------------------
+
+    /// Rebuild an archive, letting `edit` replace (Some) or keep (None) each
+    /// entry's bytes. Test-only plumbing for hand-shaping files an older or
+    /// newer writer would produce.
+    fn rewrite_archive(bytes: &[u8], edit: impl Fn(&str, &[u8]) -> Option<Vec<u8>>) -> Vec<u8> {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).unwrap();
+        let mut out = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut out));
+            let options = FileOptions::<()>::default().compression_method(CompressionMethod::Deflated);
+            for i in 0..archive.len() {
+                let mut entry = archive.by_index(i).unwrap();
+                let name = entry.name().to_string();
+                let mut content = Vec::new();
+                entry.read_to_end(&mut content).unwrap();
+                let content = edit(&name, &content).unwrap_or(content);
+                zip.start_file(name, options.clone()).unwrap();
+                zip.write_all(&content).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        out
+    }
+
+    fn manifest_of(bytes: &[u8]) -> Manifest {
+        read_calcula_manifest(bytes).unwrap()
+    }
+
+    fn entry_text(bytes: &[u8], name: &str) -> Option<String> {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).unwrap();
+        let mut entry = archive.by_name(name).ok()?;
+        let mut s = String::new();
+        entry.read_to_string(&mut s).unwrap();
+        Some(s)
+    }
+
+    fn binding(kind: &str, id: &str, path: &str, formula: &str) -> persistence::SavedObjectBinding {
+        persistence::SavedObjectBinding {
+            object: persistence::SavedObjectRef { kind: kind.to_string(), id: id.to_string() },
+            path: path.to_string(),
+            formula: formula.to_string(),
+            model: None,
+        }
+    }
+
+    fn a_chart(sheet_id: SheetId) -> SavedChart {
+        let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        SavedChart {
+            id,
+            sheet_id,
+            spec: serde_json::json!({
+                "chartId": id.to_string(),
+                "name": "Chart 1",
+                "sheetIndex": 0,
+                "x": 0, "y": 0, "width": 300, "height": 200,
+                "spec": { "mark": "bar", "data": "Sheet1!A1:B3", "title": "Sales" }
+            }),
+        }
+    }
+
+    /// Bindings round-trip exactly (sorted by object then path), declare their
+    /// feature id, and stamp v10 -- the lie-class link.
+    #[test]
+    fn object_bindings_roundtrip_and_stamp_v10() {
+        let mut workbook = make_test_workbook();
+        // Deliberately unsorted, with a model key on one row.
+        let mut measure = binding("chart", "c-2", "/spec/title", "=[Revenue]");
+        measure.model = Some("conn-uuid-1".to_string());
+        workbook.object_bindings = vec![
+            measure.clone(),
+            binding("control", "u-1", "/properties/text", "=Sheet1!A1"),
+            binding("chart", "c-1", "/spec/title", "=Data!B2&\" units\""),
+        ];
+        let bytes = write_calcula_bytes(&workbook).unwrap();
+
+        let manifest = manifest_of(&bytes);
+        assert_eq!(manifest.format_version, OBJECT_BINDINGS_MIN_FORMAT_VERSION);
+        assert!(manifest.features.iter().any(|f| f == OBJECT_BINDINGS_FEATURE));
+
+        let loaded = read_calcula_bytes(&bytes).unwrap();
+        assert_eq!(
+            loaded.object_bindings,
+            vec![
+                binding("chart", "c-1", "/spec/title", "=Data!B2&\" units\""),
+                measure,
+                binding("control", "u-1", "/properties/text", "=Sheet1!A1"),
+            ],
+            "bindings must round-trip exactly, sorted by (object, path)"
+        );
+        assert_eq!(loaded.format_version, OBJECT_BINDINGS_MIN_FORMAT_VERSION);
+
+        // The model key is omitted (not null) when absent.
+        let text = entry_text(&bytes, "bindings.json").unwrap();
+        assert_eq!(text.matches("\"model\"").count(), 1, "bindings.json: {text}");
+    }
+
+    /// No binding, no chart: no v10 stamp, no feature id, no bindings.json --
+    /// ordinary workbooks stay openable by older builds.
+    #[test]
+    fn no_bindings_means_no_v10_stamp() {
+        let workbook = make_test_workbook();
+        let bytes = write_calcula_bytes(&workbook).unwrap();
+        let manifest = manifest_of(&bytes);
+        assert!(manifest.format_version < OBJECT_BINDINGS_MIN_FORMAT_VERSION);
+        assert!(!manifest.features.iter().any(|f| f == OBJECT_BINDINGS_FEATURE));
+        assert!(entry_text(&bytes, "bindings.json").is_none());
+        assert!(read_calcula_bytes(&bytes).unwrap().object_bindings.is_empty());
+    }
+
+    /// The read is UNCONDITIONAL: a manifest that forgot the feature id still
+    /// gets its bindings back (the named_ranges precedent).
+    #[test]
+    fn bindings_load_even_without_their_feature_id() {
+        let mut workbook = make_test_workbook();
+        workbook.object_bindings = vec![binding("canvasPage", "s-1", "/background", "=A1")];
+        let bytes = write_calcula_bytes(&workbook).unwrap();
+        let stripped = rewrite_archive(&bytes, |name, content| {
+            (name == "manifest.json").then(|| {
+                let mut m: Manifest = serde_json::from_slice(content).unwrap();
+                m.features.retain(|f| f != OBJECT_BINDINGS_FEATURE);
+                serde_json::to_vec_pretty(&m).unwrap()
+            })
+        });
+        assert!(!manifest_of(&stripped).features.iter().any(|f| f == OBJECT_BINDINGS_FEATURE));
+        let loaded = read_calcula_bytes(&stripped).unwrap();
+        assert_eq!(loaded.object_bindings, workbook.object_bindings);
+    }
+
+    /// charts.json carries `spec` as an embedded JSON OBJECT (not a string
+    /// holding JSON), and the chart round-trips unchanged.
+    #[test]
+    fn charts_json_embeds_the_spec_as_an_object() {
+        let mut workbook = make_test_workbook();
+        let chart = a_chart(workbook.sheets[0].id);
+        workbook.charts.push(chart.clone());
+        let bytes = write_calcula_bytes(&workbook).unwrap();
+
+        let text = entry_text(&bytes, "charts.json").unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&text).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0]["spec"].is_object(), "spec must be an object: {text}");
+        assert!(rows[0].get("specJson").is_none(), "no string spelling may remain: {text}");
+        assert_eq!(rows[0]["spec"]["spec"]["mark"], "bar");
+
+        let loaded = read_calcula_bytes(&bytes).unwrap();
+        assert_eq!(loaded.charts.len(), 1);
+        assert_eq!(loaded.charts[0].id, chart.id);
+        assert_eq!(loaded.charts[0].sheet_id, chart.sheet_id);
+        assert_eq!(loaded.charts[0].spec, chart.spec);
+    }
+
+    /// A spec the host could not parse when saving is kept as a STRING value
+    /// and survives the round trip -- never dropped.
+    #[test]
+    fn an_unparseable_spec_is_kept_as_a_string_value() {
+        let mut workbook = make_test_workbook();
+        let mut chart = a_chart(workbook.sheets[0].id);
+        chart.spec = serde_json::Value::String("{\"chartId\": broken".to_string());
+        workbook.charts.push(chart.clone());
+        let bytes = write_calcula_bytes(&workbook).unwrap();
+        let loaded = read_calcula_bytes(&bytes).unwrap();
+        assert_eq!(loaded.charts.len(), 1);
+        assert_eq!(loaded.charts[0].spec, chart.spec);
+    }
+
+    /// Any chart stamps v10: an older reader cannot parse an object `spec`,
+    /// so it must refuse cleanly instead of failing with a serde sentence.
+    #[test]
+    fn a_workbook_with_a_chart_is_stamped_v10() {
+        let mut workbook = make_test_workbook();
+        workbook.charts.push(a_chart(workbook.sheets[0].id));
+        let bytes = write_calcula_bytes(&workbook).unwrap();
+        let manifest = manifest_of(&bytes);
+        assert_eq!(manifest.format_version, CHART_SPEC_OBJECT_MIN_FORMAT_VERSION);
+        // The shape change is not an optional feature: no bindings id for it.
+        assert!(!manifest.features.iter().any(|f| f == OBJECT_BINDINGS_FEATURE));
+    }
+
+    #[test]
+    fn a_workbook_without_charts_or_bindings_is_not() {
+        let workbook = make_test_workbook();
+        assert!(workbook.charts.is_empty() && workbook.object_bindings.is_empty());
+        let manifest = manifest_of(&write_calcula_bytes(&workbook).unwrap());
+        assert!(manifest.format_version < CHART_SPEC_OBJECT_MIN_FORMAT_VERSION);
+    }
+
+    /// A pre-v10 charts.json row (`specJson` STRING, no `spec`) opens: the
+    /// row is upgraded in place and the spec parsed into an object. An
+    /// unparseable old string is kept as a string value.
+    #[test]
+    fn an_old_shape_charts_json_is_upgraded_on_read() {
+        let mut workbook = make_test_workbook();
+        let chart = a_chart(workbook.sheets[0].id);
+        workbook.charts.push(chart.clone());
+        let bytes = write_calcula_bytes(&workbook).unwrap();
+        let broken_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        let old_shape = serde_json::to_vec_pretty(&serde_json::json!([
+            {
+                "id": chart.id,
+                "sheetId": chart.sheet_id,
+                "specJson": chart.spec.to_string(),
+            },
+            {
+                "id": broken_id,
+                "sheetId": chart.sheet_id,
+                "specJson": "{not json",
+            }
+        ]))
+        .unwrap();
+        let old = rewrite_archive(&bytes, |name, _| (name == "charts.json").then(|| old_shape.clone()));
+        let loaded = read_calcula_bytes(&old).unwrap();
+        assert_eq!(loaded.charts.len(), 2);
+        assert_eq!(loaded.charts[0].id, chart.id);
+        assert!(loaded.charts[0].spec.is_object());
+        assert_eq!(loaded.charts[0].spec, chart.spec);
+        assert_eq!(loaded.charts[1].id, broken_id);
+        assert_eq!(loaded.charts[1].spec, serde_json::Value::String("{not json".to_string()));
+    }
+
+    /// A charts.json that cannot be read names the FILE, never just the raw
+    /// serde message -- both for text that is not JSON and for a row of the
+    /// wrong shape.
+    #[test]
+    fn an_unreadable_charts_json_names_the_file() {
+        let mut workbook = make_test_workbook();
+        workbook.charts.push(a_chart(workbook.sheets[0].id));
+        let bytes = write_calcula_bytes(&workbook).unwrap();
+        let bad_inputs: [&[u8]; 2] = [b"{ this is not json", br#"[{"id": 5, "sheetId": "x"}]"#];
+        for bad in bad_inputs {
+            let broken = rewrite_archive(&bytes, |name, _| (name == "charts.json").then(|| bad.to_vec()));
+            match read_calcula_bytes(&broken).unwrap_err() {
+                FormatError::InvalidFormat(msg) => assert!(
+                    msg.starts_with("charts.json in this file could not be read"),
+                    "got: {msg}"
+                ),
+                other => panic!("expected the named-file sentence, got: {other}"),
+            }
+        }
+    }
+
+    /// The pure upgrade leaves a NEW-shape row alone and reports a row that
+    /// fails the typed read with the named-file sentence.
+    #[test]
+    fn upgrade_saved_chart_rows_is_pure_and_names_the_file() {
+        let sheet_id = SheetId::from_bytes(identity::generate_uuid_v7());
+        let chart = a_chart(sheet_id);
+        let rows = vec![serde_json::to_value(&chart).unwrap()];
+        let back = upgrade_saved_chart_rows(rows).unwrap();
+        assert_eq!(back[0].spec, chart.spec);
+        let err = upgrade_saved_chart_rows(vec![serde_json::json!({ "id": 1 })]).unwrap_err();
+        assert!(err.starts_with("charts.json in this file could not be read"), "{err}");
+    }
+
+    /// v11 -- one above this build -- is refused through the reader gate,
+    /// while a v10 file (a binding) opens.
+    #[test]
+    fn a_v11_file_is_refused() {
+        assert_eq!(CALA_MAX_SUPPORTED_FORMAT_VERSION + 1, 11);
+        let workbook = make_test_workbook();
+        let bytes = write_calcula_bytes(&workbook).unwrap();
+        let v11 = rewrite_archive(&bytes, |name, content| {
+            (name == "manifest.json").then(|| {
+                let mut m: Manifest = serde_json::from_slice(content).unwrap();
+                m.format_version = 11;
+                serde_json::to_vec_pretty(&m).unwrap()
+            })
+        });
+        let err = read_calcula_bytes(&v11).unwrap_err();
+        assert!(err.to_string().contains("Unsupported format version"), "got: {err}");
+
+        let mut with_binding = make_test_workbook();
+        with_binding.object_bindings = vec![binding("chart", "c", "/spec/title", "=A1")];
+        assert!(read_calcula_bytes(&write_calcula_bytes(&with_binding).unwrap()).is_ok());
+    }
+
+    // ---- WP-C: the visual container + the persisted pivot style ----
+
+    fn a_container() -> visual_format::VisualContainerFormat {
+        serde_json::from_value(serde_json::json!({
+            "padding": {"top": 8, "left": 8},
+            "title": {"show": true, "bold": true, "align": "left"},
+            "background": {"color": "#fff4e5", "transparency": 10},
+            "border": {"show": true, "color": "#336699", "width": 2, "radius": 8},
+            "shadow": {"show": true, "position": "bottomRight", "blur": 4}
+        }))
+        .unwrap()
+    }
+
+    fn a_slicer(sheet_id: SheetId) -> persistence::SavedSlicer {
+        let source = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        persistence::SavedSlicer {
+            id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            name: "Region".to_string(),
+            header_text: None,
+            sheet_id,
+            x: 0.0, y: 0.0, width: 200.0, height: 150.0,
+            source_type: persistence::SavedSlicerSourceType::Table,
+            cache_source_id: source,
+            field_name: "Region".to_string(),
+            selected_items: None,
+            show_header: true,
+            columns: 1,
+            style_preset: "default".to_string(),
+            selection_mode: Default::default(),
+            hide_no_data: false,
+            indicate_no_data: true,
+            sort_no_data_last: true,
+            force_selection: false,
+            show_select_all: false,
+            arrangement: Default::default(),
+            rows: 0,
+            item_gap: 4.0,
+            autogrid: true,
+            item_padding: 0.0,
+            button_radius: 4.0,
+            computed_properties: Vec::new(),
+            connected_sources: Vec::new(),
+            filter_level: 1,
+            data_source_id: None,
+            container: None,
+        }
+    }
+
+    fn a_timeline(sheet_id: SheetId) -> persistence::SavedTimelineSlicer {
+        persistence::SavedTimelineSlicer {
+            id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            name: "Order Date".to_string(),
+            header_text: None,
+            sheet_id,
+            x: 10.0, y: 20.0, width: 350.0, height: 100.0,
+            source_type: persistence::SavedTimelineSourceType::Pivot,
+            source_id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            field_name: "OrderDate".to_string(),
+            level: persistence::SavedTimelineLevel::Months,
+            selection_start: None,
+            selection_end: None,
+            show_header: true,
+            show_level_selector: true,
+            show_scrollbar: true,
+            style_preset: "TimelineStyleLight1".to_string(),
+            connected_pivot_ids: Vec::new(),
+            container: None,
+        }
+    }
+
+    fn a_floating_range(host: SheetId, backing: SheetId) -> persistence::SavedFloatingRange {
+        persistence::SavedFloatingRange {
+            id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            backing_sheet_id: backing,
+            host_sheet_id: host,
+            x: 40.0,
+            y: 60.0,
+            rotation: 0.0,
+            pin_to_grid: false,
+            row_count: 3,
+            col_count: 2,
+            col_widths: HashMap::new(),
+            row_heights: HashMap::new(),
+            show_title: true,
+            show_column_headers: true,
+            show_row_headers: true,
+            container: None,
+        }
+    }
+
+    fn a_pivot(frame_container: Option<serde_json::Value>, style: Option<serde_json::Value>) -> persistence::SavedPivotDefinition {
+        let mut frame = serde_json::json!({"x": 10.0, "y": 20.0, "width": 400.0, "height": 300.0});
+        if let Some(c) = frame_container {
+            frame["container"] = c;
+        }
+        let mut definition = serde_json::json!({"id": "pivot", "canvas_frame": frame});
+        if let Some(s) = style {
+            definition["style"] = s;
+        }
+        persistence::SavedPivotDefinition {
+            id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            source_type: "grid".to_string(),
+            source_sheet_index: Some(0),
+            definition,
+        }
+    }
+
+    fn a_control_sheet(sheet: SheetId, properties: serde_json::Value) -> persistence::SavedSheetControls {
+        persistence::SavedSheetControls {
+            sheet_id: sheet,
+            controls: serde_json::json!([{
+                "row": 2, "col": 1, "controlType": "shape", "properties": properties
+            }]),
+        }
+    }
+
+    fn written_manifest(workbook: &Workbook) -> (Manifest, Workbook) {
+        let bytes = write_calcula_bytes(workbook).unwrap();
+        (read_calcula_manifest(&bytes).unwrap(), read_calcula_bytes(&bytes).unwrap())
+    }
+
+    fn declares(manifest: &Manifest, id: &str) -> bool {
+        manifest.features.iter().any(|f| f == id)
+    }
+
+    /// One workbook per container SOURCE, with (`true`) or without (`false`)
+    /// a container on that source and nothing else changed.
+    fn with_source(what: &str, on: bool) -> Workbook {
+        let container = a_container();
+        let container_json = serde_json::to_value(&container).unwrap();
+        let mut wb = make_test_workbook();
+        let sheet = wb.sheets[0].id;
+        match what {
+            "slicer" => {
+                let mut s = a_slicer(sheet);
+                s.container = on.then(|| container.clone());
+                wb.slicers = vec![s];
+            }
+            "timeline" => {
+                let mut t = a_timeline(sheet);
+                t.container = on.then(|| container.clone());
+                wb.timeline_slicers = vec![t];
+            }
+            "floating grid" => {
+                let mut f = a_floating_range(sheet, sheet);
+                f.container = on.then(|| container.clone());
+                wb.floating_ranges = vec![f];
+            }
+            "pivot container" => {
+                wb.pivot_definitions = vec![a_pivot(on.then(|| container_json.clone()), None)];
+            }
+            "chart spec key" => {
+                let mut chart = a_chart(sheet);
+                if on {
+                    chart.spec["spec"]["container"] = container_json.clone();
+                }
+                wb.charts = vec![chart];
+            }
+            "control container key" => {
+                let mut props = serde_json::json!({"fill": {"valueType": "static", "value": "#4472C4"}});
+                if on {
+                    props["containerBorderRadius"] = serde_json::json!({"valueType": "static", "value": "8"});
+                }
+                wb.controls = vec![a_control_sheet(sheet, props)];
+            }
+            other => panic!("unknown source {other}"),
+        }
+        wb
+    }
+
+    /// D-FORMAT (CLAUDE.md ".cala Format Versioning"): the VISUAL CONTAINER and
+    /// the persisted PIVOT STYLE each declare a manifest FEATURE ID and take NO
+    /// link in the format-version chain -- an older reader drops a border, a
+    /// title or a gallery style, a visible cosmetic loss, never a lie. Each
+    /// source ALONE declares `visual_container`, at exactly the version the
+    /// same workbook without it stamps; every container survives the archive;
+    /// a plain workbook and a default text box declare neither id.
+    ///
+    /// SABOTAGE: stamp a version beside either push, or drop a source from
+    /// `workbook_carries_a_visual_container`.
+    #[test]
+    fn visual_container_and_pivot_style_declare_feature_ids_but_never_raise_the_version() {
+        let container = a_container();
+        let container_json = serde_json::to_value(&container).unwrap();
+
+        // A plain workbook declares neither.
+        let (plain, _) = written_manifest(&make_test_workbook());
+        assert!(!declares(&plain, VISUAL_CONTAINER_FEATURE), "{:?}", plain.features);
+        assert!(!declares(&plain, PIVOT_STYLE_FEATURE), "{:?}", plain.features);
+
+        for what in ["slicer", "timeline", "floating grid", "pivot container", "chart spec key", "control container key"] {
+            let (without, _) = written_manifest(&with_source(what, false));
+            let (with, loaded) = written_manifest(&with_source(what, true));
+            assert!(!declares(&without, VISUAL_CONTAINER_FEATURE), "{what} without a container: {:?}", without.features);
+            assert!(declares(&with, VISUAL_CONTAINER_FEATURE), "{what} alone must declare it: {:?}", with.features);
+            assert_eq!(
+                with.format_version, without.format_version,
+                "{what}: a container must never raise the format version"
+            );
+            assert!(!declares(&with, PIVOT_STYLE_FEATURE), "{what}");
+            // The container survives the archive.
+            match what {
+                "slicer" => assert_eq!(loaded.slicers[0].container, Some(container.clone())),
+                "timeline" => assert_eq!(loaded.timeline_slicers[0].container, Some(container.clone())),
+                "floating grid" => assert_eq!(loaded.floating_ranges[0].container, Some(container.clone())),
+                "pivot container" => assert_eq!(
+                    loaded.pivot_definitions[0].definition.pointer("/canvas_frame/container"),
+                    Some(&container_json)
+                ),
+                "chart spec key" => assert_eq!(loaded.charts[0].spec.pointer("/spec/container"), Some(&container_json)),
+                _ => assert_eq!(
+                    loaded.controls[0].controls[0]["properties"]["containerBorderRadius"]["value"],
+                    "8"
+                ),
+            }
+        }
+
+        // The pivot STYLE declares its own id, alone, with no version link.
+        let mut styled = make_test_workbook();
+        styled.pivot_definitions = vec![a_pivot(None, Some(serde_json::json!({"style_id": "PivotStyleMedium9"})))];
+        let mut unstyled = make_test_workbook();
+        unstyled.pivot_definitions = vec![a_pivot(None, None)];
+        let (with, loaded) = written_manifest(&styled);
+        let (without, _) = written_manifest(&unstyled);
+        assert!(declares(&with, PIVOT_STYLE_FEATURE), "{:?}", with.features);
+        assert!(!declares(&with, VISUAL_CONTAINER_FEATURE), "{:?}", with.features);
+        assert!(!declares(&without, PIVOT_STYLE_FEATURE), "{:?}", without.features);
+        assert_eq!(with.format_version, without.format_version);
+        assert_eq!(loaded.pivot_definitions[0].definition["style"]["style_id"], "PivotStyleMedium9");
+
+        // A default TEXT BOX (fill/stroke none, dark left text: ordinary keys)
+        // declares nothing; nor does a container key left at "" (the default).
+        let mut text_box = make_test_workbook();
+        let sheet = text_box.sheets[0].id;
+        text_box.controls = vec![a_control_sheet(sheet, serde_json::json!({
+            "shapeType": {"valueType": "static", "value": "textBox"},
+            "fill": {"valueType": "static", "value": "none"},
+            "stroke": {"valueType": "static", "value": "none"},
+            "strokeWidth": {"valueType": "static", "value": "0"},
+            "textColor": {"valueType": "static", "value": "#252423"},
+            "textAlign": {"valueType": "static", "value": "left"},
+            "containerTitleShow": {"valueType": "static", "value": ""}
+        }))];
+        let (m, _) = written_manifest(&text_box);
+        assert!(!declares(&m, VISUAL_CONTAINER_FEATURE), "{:?}", m.features);
     }
 }

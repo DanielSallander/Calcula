@@ -18,7 +18,13 @@ import { createEmptyDimensionOverrides } from "../../../types";
 import { getGridRegions, type GridRegion } from "../../../../api/gridOverlays";
 import { getCellFromPixel } from "../../../lib/gridRenderer";
 import { rowHeaderGutter, colHeaderGutter } from "../../../lib/gridRenderer/layout/headerVisibility";
-import { getLayoutSurface, applySurfaceToResize, type DraggedEdges } from "../../../lib/layoutSurface";
+import {
+  getLayoutSurface,
+  applySurfaceToResize,
+  clampResizeToPage,
+  type DraggedEdges,
+} from "../../../lib/layoutSurface";
+import { applyAspectLock, aspectLockedEdges } from "../../../../api/aspectLock";
 import { getGridStateSnapshot } from "../../../state/GridContext";
 import { isGlobalFormulaMode } from "../../useEditing";
 import {
@@ -328,6 +334,23 @@ export function createOverlayResizeHandlers(
       bounds.width = right - left;
       bounds.height = bottom - top;
 
+      // LOCK ASPECT RATIO (the object's container, D-FORMAT): the dragged
+      // handle's free size becomes a ratio-keeping one, anchored at the
+      // fixed edges -- the one rule the Size dialog and the Format pane use.
+      const lockAspect = resizeState.region.container?.lockAspect === true;
+      // The sides that move: under the lock an edge handle moves its
+      // FOLLOWING side too, so the snap and the page clamp below treat that
+      // side as dragged (a right-edge drag must not push the bottom past the
+      // page). Without the lock, exactly the dragged ones.
+      const movingEdges = lockAspect ? aspectLockedEdges(edges) : edges;
+      if (lockAspect) {
+        const locked = applyAspectLock(orig, bounds, edges, MIN_FLOATING_SIZE);
+        bounds.x = locked.x;
+        bounds.y = locked.y;
+        bounds.width = locked.width;
+        bounds.height = locked.height;
+      }
+
       // Clamp position to non-negative WITHOUT moving the fixed edge: a
       // left/top drag past the sheet origin shrinks the object at 0 instead of
       // pushing its right/bottom edge outward (the old clamp did the latter).
@@ -349,7 +372,7 @@ export function createOverlayResizeHandlers(
         const snapped = applySurfaceToResize(
           surface,
           { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height },
-          edges,
+          movingEdges,
           MIN_FLOATING_SIZE,
           {
             bypassSnap: altKey,
@@ -366,6 +389,19 @@ export function createOverlayResizeHandlers(
         bounds.y = snapped.y;
         bounds.width = snapped.width;
         bounds.height = snapped.height;
+      }
+
+      // A clamp (the sheet origin, the page border) or a snap that cut ONE
+      // dimension would break the ratio: re-fit with the smaller side
+      // driving (the other shrinks to match), then re-clamp ONCE -- the
+      // minimum size may still push a tiny object back over the page.
+      if (lockAspect) {
+        let fitted = applyAspectLock(orig, bounds, edges, MIN_FLOATING_SIZE, { fit: "shrink" });
+        if (surface) fitted = clampResizeToPage(fitted, movingEdges, surface.page, MIN_FLOATING_SIZE);
+        bounds.x = fitted.x;
+        bounds.y = fitted.y;
+        bounds.width = fitted.width;
+        bounds.height = fitted.height;
       }
 
       window.dispatchEvent(new CustomEvent("floatingObject:resizePreview", {

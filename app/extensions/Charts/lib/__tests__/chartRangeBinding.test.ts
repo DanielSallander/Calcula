@@ -222,7 +222,7 @@ describe("X15: the display text round-trips through the dialog's own reader", ()
     });
   }
 
-  it("the formatters' only callers are the binding module and the dialog (which puts the text in its field)", async () => {
+  it("the formatters' only callers are the binding module, the dialog and the pane's range Data tab (which put the text in their field)", async () => {
     const fs = await import("fs");
     const path = await import("path");
     const root = path.resolve(__dirname, "../../../..");
@@ -247,6 +247,12 @@ describe("X15: the display text round-trips through the dialog's own reader", ()
       callers.sort(),
       "a new caller of the chart dialog's range formatter: if its text can reach the formula parser, " +
         "quote with quoteSheetNameForFormula (@api/externalEdit) instead",
-    ).toEqual(["extensions/Charts/components/CreateChartDialog.tsx", "extensions/Charts/lib/chartRangeBinding.ts"]);
+    ).toEqual([
+      "extensions/Charts/components/CreateChartDialog.tsx",
+      // WP-C S9c: the object pane's range Data tab shows the stored reference in
+      // its range field and reads it back through bindRangeText, as the dialog does.
+      "extensions/Charts/components/pane/ChartRangeDataTab.tsx",
+      "extensions/Charts/lib/chartRangeBinding.ts",
+    ]);
   });
 });

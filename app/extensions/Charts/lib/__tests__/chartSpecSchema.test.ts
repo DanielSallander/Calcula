@@ -4,7 +4,8 @@
 import { describe, it, expect } from "vitest";
 import * as fs from "fs";
 import * as path from "path";
-import { chartSpecJsonSchema, generateSpecReference } from "../chartSpecSchema";
+import { chartSpecJsonSchema, generateSpecReference, CHART_CONTAINER_FORBIDDEN_TITLE_LEAVES } from "../chartSpecSchema";
+import { VISUAL_CONTAINER_JSON_SCHEMA } from "@api/visualContainer";
 import { buildDefaultSpec } from "../chartSpecDefaults";
 import { PALETTE_NAMES } from "../../rendering/chartTheme";
 import { schemaViolations, collectRefs } from "./schemaValidate";
@@ -187,9 +188,13 @@ describe("generateSpecReference", () => {
     expect(ref).toContain("### ValueCondition");
   });
 
-  it("documents cell references", () => {
-    expect(ref).toContain("## Cell References");
-    expect(ref).toContain("=A1");
+  // A link to a cell is a BINDING now (D-BIND): the reference must say so, and
+  // must never again promise that "=A1" in a string field reads a cell.
+  it("documents bound properties, and that an \"=\" string is a literal", () => {
+    expect(ref).toContain("## Bound Properties");
+    expect(ref).toContain("set_object_binding");
+    expect(ref).not.toContain("## Cell References");
+    expect(ref).not.toMatch(/supports cell ref/i);
   });
 });
 
@@ -212,7 +217,7 @@ const CHART_SPEC_KEYS: Array<keyof ChartSpec> = [
   "title", "xAxis", "yAxis", "legend", "palette", "markOptions", "layers",
   "transform", "config", "tooltip", "trendlines", "dataLabels", "dataTable",
   "seriesRefs", "filters", "dataPointOverrides", "encoding", "repeat", "facet", "concat", "params",
-  "plotHiddenCells",
+  "plotHiddenCells", "container", "fieldFormats",
 ];
 
 const ALL_CHART_TYPES: ChartType[] = [
@@ -403,9 +408,24 @@ describe("chartSpecJsonSchema drift guard", () => {
         { type: "lookup", from: "Targets!A1:B13", fields: ["Target"], default: 0 },
         { type: "pivot", category: "Region", key: "Month", value: "Sales", op: "sum" },
       ],
+      container: {
+        padding: { top: 8, right: 8, bottom: 8, left: 8 },
+        lockAspect: true,
+        title: { show: true, headingLevel: 2, fontFamily: "Segoe UI", bold: true, italic: false, underline: true, background: "#ffffff80", align: "left", wrap: true },
+        subtitle: { show: true, text: "Quarterly", fontSize: 10, color: "#605e5c", align: "left" },
+        divider: { show: true, color: "#c8c6c4", style: "dashed", width: 1, ignorePadding: true },
+        spacing: { custom: true, belowTitle: 4, belowSubtitle: 4, belowDivider: 8 },
+        background: {
+          show: true, color: "#1e1e1e", transparency: 10,
+          gradient: { type: "linear", direction: "topToBottom", stops: [{ offset: 0, color: "#000" }, { offset: 1, color: "#fff" }] },
+        },
+        border: { show: true, color: "#d0d0d0", width: 1, radius: 12 },
+        shadow: { show: true, color: "#000000", transparency: 70, offset: "outside", position: "bottomRight", blur: 10, distance: 4 },
+      },
+      fieldFormats: { Revenue: "#,##0.00" },
       config: {
         theme: {
-          background: "#1e1e1e", plotBackground: "#2d2d2d", gridLineColor: "#444444", gridLineWidth: 1,
+          plotBackground: "#2d2d2d", gridLineColor: "#444444", gridLineWidth: 1,
           axisColor: "#666666", axisLabelColor: "#aaaaaa", titleColor: "#eeeeee", titleFontSize: 16, labelFontSize: 12,
         },
       },
@@ -434,6 +454,48 @@ describe("chartSpecJsonSchema drift guard", () => {
     };
 
     expect(schemaViolations(spec, SCHEMA)).toEqual([]);
+  });
+
+  // --- The outer background has ONE spelling: the container (D-FORMAT) ---
+
+  it("refuses theme.background: the chart's outer background is container.background", () => {
+    const spec = buildDefaultSpec(dataRange, true, autoDetected, "bar");
+    const legacy = { ...spec, config: { theme: { background: "#1e1e1e" } } } as never;
+    expect(schemaViolations(legacy, SCHEMA).join(" ")).toContain("background");
+    const live = { ...spec, container: { background: { color: "#1e1e1e" } } };
+    expect(schemaViolations(live, SCHEMA)).toEqual([]);
+  });
+
+  it("refuses the three title leaves the chart spells elsewhere, inside container.title", () => {
+    const spec = buildDefaultSpec(dataRange, true, autoDetected, "bar");
+    for (const leaf of ["text", "color", "fontSize"]) {
+      const bad = { ...spec, container: { title: { [leaf]: leaf === "fontSize" ? 14 : "#123" } } } as never;
+      expect(schemaViolations(bad, SCHEMA).length, `container.title.${leaf}`).toBeGreaterThan(0);
+    }
+    const ok = { ...spec, container: { title: { bold: false, align: "right" } } } as never;
+    expect(schemaViolations(ok, SCHEMA)).toEqual([]);
+  });
+
+  it("checks container leaf values (colours, ranges, enums)", () => {
+    const spec = buildDefaultSpec(dataRange, true, autoDetected, "bar");
+    const cases: unknown[] = [
+      { background: { color: "red" } },
+      { border: { radius: 101 } },
+      { padding: { top: -1 } },
+      { shadow: { position: "middle" } },
+      { lockAspect: "yes" },
+      { nope: true },
+    ];
+    for (const container of cases) {
+      expect(schemaViolations({ ...spec, container } as never, SCHEMA).length, JSON.stringify(container)).toBeGreaterThan(0);
+    }
+  });
+
+  it("fieldFormats is an object of format-code strings, each at most 256 characters", () => {
+    const spec = buildDefaultSpec(dataRange, true, autoDetected, "bar");
+    expect(schemaViolations({ ...spec, fieldFormats: { Sales: "0.0%" } }, SCHEMA)).toEqual([]);
+    expect(schemaViolations({ ...spec, fieldFormats: { Sales: 3 } } as never, SCHEMA).length).toBeGreaterThan(0);
+    expect(schemaViolations({ ...spec, fieldFormats: { Sales: "0".repeat(257) } }, SCHEMA).length).toBeGreaterThan(0);
   });
 
   // --- Axis reversal has ONE spelling (BUG-0123) ---
@@ -558,6 +620,36 @@ const NESTED_MIRRORS: Array<{ definition: string; interfaceName: string }> = [
   { definition: "DataLabelPointRef", interfaceName: "DataLabelPointRef" },
   { definition: "ErrorBarOptions", interfaceName: "ErrorBarOptions" },
 ];
+
+describe("ChartContainerFormat mirrors the shared visual-container schema", () => {
+  // DERIVED, never retyped: the chart's container definition is the shared
+  // @api/visualContainer fragment minus exactly the three title leaves the
+  // chart spells elsewhere. A leaf added to the shared schema reaches the
+  // chart (broker gate, load canary and Monaco editor alike) with no edit here.
+  it("equals VISUAL_CONTAINER_JSON_SCHEMA minus title text / color / fontSize", () => {
+    const expected = JSON.parse(JSON.stringify(VISUAL_CONTAINER_JSON_SCHEMA));
+    for (const leaf of CHART_CONTAINER_FORBIDDEN_TITLE_LEAVES) delete expected.properties.title.properties[leaf];
+    const def = DEFS.ChartContainerFormat;
+    expect(def).toBeDefined();
+    const { description: _d1, ...defRest } = def;
+    const { description: _d2, ...expRest } = expected;
+    expect(defRest).toEqual(expRest);
+    expect(def.additionalProperties).toBe(false);
+    expect(Object.keys(def.properties.title.properties)).not.toContain("text");
+    expect(SCHEMA.properties.container.$ref).toBe("#/definitions/ChartContainerFormat");
+  });
+
+  it("the theme no longer declares an outer background", () => {
+    expect(DEFS.ThemeOverrides.properties.background).toBeUndefined();
+    expect(DEFS.ThemeOverrides.properties.backgroundGradient).toBeUndefined();
+  });
+
+  it("documents the container in the reference", () => {
+    const ref = generateSpecReference();
+    expect(ref).toContain("## Visual Container");
+    expect(ref).not.toContain("| background | string | \"#ffffff\" | Chart background |");
+  });
+});
 
 describe("chartSpecJsonSchema nested drift guard", () => {
   it("the parser actually finds properties (guard against a silently empty diff)", () => {

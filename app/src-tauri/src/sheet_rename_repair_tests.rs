@@ -256,14 +256,28 @@ fn renaming_a_sheet_repairs_conditional_formats_validations_and_control_formulas
             },
         }],
     );
+    // WP-D: a control holds no formula of its own -- its caption follows a
+    // formula through a BINDING row, which the rename must carry.
     {
         let mut properties = HashMap::new();
-        properties.insert("text".to_string(), control_prop("formula", "=Data!A1"));
+        properties.insert("text".to_string(), control_prop("static", ""));
         properties.insert("fill".to_string(), control_prop("static", "Data!A1"));
         state.controls.write(&seed).unwrap().insert(
             (0, 1, 1),
-            crate::controls::ControlMetadata { control_type: "button".to_string(), properties },
+            crate::controls::ControlMetadata { control_type: "button".to_string(), uid: "ctl-1".to_string(), properties },
         );
+        let mut store = state.object_bindings.write(&seed).unwrap();
+        store.bindings.insert(
+            crate::object_bindings::store::BindingKey {
+                object: crate::api_types::ObjectBindingRef {
+                    kind: crate::api_types::ObjectBindingKind::Control,
+                    id: "ctl-1".to_string(),
+                },
+                path: "/properties/text".to_string(),
+            },
+            crate::object_bindings::store::StoredBinding { formula: "=Data!A1".to_string(), model: None },
+        );
+        store.bump_generation();
     }
 
     rename_sheet_inner(&state, &file, &pivots, 1, "Facts".to_string(), false).expect("rename Data");
@@ -289,9 +303,18 @@ fn renaming_a_sheet_repairs_conditional_formats_validations_and_control_formulas
         }
         other => panic!("{:?}", other),
     }
+    let caption = state
+        .object_bindings
+        .read()
+        .unwrap()
+        .bindings
+        .values()
+        .next()
+        .map(|b| b.formula.clone())
+        .expect("the caption is still bound");
+    assert_eq!(caption, "=Facts!A1", "a control's bound caption kept the old sheet name");
     let controls = state.controls.read().unwrap();
     let props = &controls[&(0, 1, 1)].properties;
-    assert_eq!(props["text"].value, "=Facts!A1", "a control's formula property kept the old sheet name");
     assert_eq!(props["fill"].value, "Data!A1", "a STATIC control property is a literal");
 }
 

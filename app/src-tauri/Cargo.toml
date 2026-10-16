@@ -37,6 +37,9 @@ calcula-format = { path = "../../core/calcula-format" }
 calcula-crypto = { path = "../../core/calcula-crypto" }
 calp = { path = "../../core/calp" }
 pivot-engine = { path = "../../core/pivot-engine" }
+# The visual container (D-FORMAT): validated on every family door, persisted
+# on each object record (WP-C).
+visual-format = { path = "../../core/visual-format" }
 script-engine = { path = "../../core/script-engine" }
 # Deterministic statistics and narration for the Insights pane. Depends only on
 # `engine`, deliberately: the model-aware planner that calls `bi-engine` lives in

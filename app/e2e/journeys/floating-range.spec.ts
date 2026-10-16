@@ -97,6 +97,36 @@ async function frApi<T = unknown>(page: Page, fn: string, args: unknown[]): Prom
   ) as Promise<T>;
 }
 
+/** One function of the @api object-pane module (WP-C D-PANE), in the page. */
+async function objectPaneApi<T = unknown>(page: Page, fn: string, args: unknown[] = []): Promise<T> {
+  return page.evaluate(
+    async ({ fn, args }) => {
+      const mod = await (window as unknown as {
+        __calcImport: (u: string) => Promise<Record<string, (...a: unknown[]) => unknown>>;
+      }).__calcImport(new URL("/src/api/objectPane.ts", document.baseURI).href);
+      return (await mod[fn](...args)) as unknown;
+    },
+    { fn, args },
+  ) as Promise<T>;
+}
+
+/**
+ * Close the object pane AND prove it closed: it docks on the right and narrows
+ * the grid, so a pane this spec leaves open moves every later spec's objects
+ * under it (e2e memory: a leaked task pane narrows the grid for later specs).
+ */
+async function closeObjectPaneProved(page: Page): Promise<void> {
+  await objectPaneApi(page, "closeObjectPane").catch(() => undefined);
+  await page
+    .locator('[data-testid="object-pane"]')
+    .waitFor({ state: "hidden", timeout: 10_000 })
+    .catch(async () => {
+      throw new Error("the object pane is still open after closeObjectPane -- later specs would run against a narrowed grid");
+    });
+  const state = await objectPaneApi<{ open: boolean }>(page, "getObjectPaneState");
+  expect(state.open).toBe(false);
+}
+
 async function createFr(page: Page, name: string): Promise<FrInfo> {
   return frApi<FrInfo>(page, "createFloatingRange", [FR_X, FR_Y, name]);
 }
@@ -397,19 +427,22 @@ test.describe.serial("floating ranges, live", () => {
         menu.locator('[data-fr-menu-item="floatingRange.deleteLastRow"]'),
       ).toHaveCount(0);
 
+      // "Properties..." is the ONE object pane on the grid's Properties tab
+      // (WP-C D-PANE; the old dialog is gone), opened as a door on a worksheet.
       await menu.locator('[data-fr-menu-item="floatingRange.properties"]').click();
-      await expect(page.locator("[data-fr-properties-dialog]")).toBeVisible({
-        timeout: 3000,
-      });
-      await page.locator("[data-fr-properties-dialog] button", { hasText: "Cancel" }).click();
-      await expect(page.locator("[data-fr-properties-dialog]")).toHaveCount(0);
+      const pane = page.locator('[data-testid="object-pane"]');
+      await expect(pane).toBeVisible({ timeout: 3000 });
+      await expect(pane).toHaveAttribute("data-active-tab", "properties");
+      await expect(page.locator('[data-testid="fr-properties-tab"]')).toBeVisible();
+      await closeObjectPaneProved(page);
     } finally {
+      await closeObjectPaneProved(page).catch(() => undefined);
       await setDesignMode(page, false);
       await deleteFr(page, fr.id);
     }
   });
 
-  test("the properties dialog hides chrome, and the choice survives save/reopen", async ({
+  test("the object pane hides chrome (Properties strips, Format title bar), and the choice survives save/reopen", async ({
     appPage: page,
   }) => {
     const fr = await createFr(page, "FloatE2E");
@@ -425,15 +458,17 @@ test.describe.serial("floating ranges, live", () => {
       await page
         .locator('[data-fr-menu-item="floatingRange.properties"]')
         .click({ timeout: 3000 });
-      const dialog = page.locator("[data-fr-properties-dialog]");
-      await expect(dialog).toBeVisible({ timeout: 3000 });
+      const tab = page.locator('[data-testid="fr-properties-tab"]');
+      await expect(tab).toBeVisible({ timeout: 3000 });
 
       // A MIXED combination on purpose: all-false would also pass if the flags
-      // were dropped and re-derived from a bool's `false` default.
-      await dialog.locator("[data-fr-show-title]").uncheck();
-      await dialog.locator("[data-fr-show-row-headers]").uncheck();
-      await dialog.locator("[data-fr-apply-button]").click();
-      await expect(dialog).toHaveCount(0);
+      // were dropped and re-derived from a bool's `false` default. The strips
+      // are the Properties tab's; the title bar is the Format tab's Title
+      // on/off (WP-C: its text is the name, its toggle `showTitle`).
+      await tab.locator("[data-fr-show-row-headers]").uncheck();
+      await page.locator('[data-testid="object-pane-tabs"] [data-tab-id="format"]').click();
+      await page.locator('[data-testid="format-title.show"]').uncheck({ timeout: 3000 });
+      await closeObjectPaneProved(page);
 
       const applied = await eventually(
         () => listFrs(page),
@@ -461,6 +496,7 @@ test.describe.serial("floating ranges, live", () => {
       expect(restored[0].showColumnHeaders).toBe(true);
       expect(restored[0].showRowHeaders).toBe(false);
     } finally {
+      await closeObjectPaneProved(page).catch(() => undefined);
       await setDesignMode(page, false);
       if (reopened) {
         for (const fr2 of await listFrs(page)) await deleteFr(page, fr2.id);

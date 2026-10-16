@@ -1578,7 +1578,7 @@ mod tests {
     /// A sheet with a chart and a slicer, for the host tests.
     fn sheet_with_objects(name: &str) -> (persistence::Sheet, persistence::SavedChart) {
         let sheet = persistence::Sheet::new(name.to_string());
-        let chart = persistence::SavedChart { id: new_entity(), sheet_id: sheet.id, spec_json: "{}".to_string() };
+        let chart = persistence::SavedChart { id: new_entity(), sheet_id: sheet.id, spec: serde_json::json!({}) };
         (sheet, chart)
     }
 

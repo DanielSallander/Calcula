@@ -57,7 +57,11 @@ pub const CALA_BASE_FORMAT_VERSION: u32 = 1;
 ///
 /// v9 adds CANVAS SHEETS — the per-sheet `kind` in metadata.json
 /// (`CANVAS_SHEET_MIN_FORMAT_VERSION`).
-pub const CALA_MAX_SUPPORTED_FORMAT_VERSION: u32 = 9;
+///
+/// v10 adds OBJECT PROPERTY BINDINGS — `bindings.json`
+/// (`OBJECT_BINDINGS_MIN_FORMAT_VERSION`) — and the chart spec EMBEDDED as a
+/// JSON object in `charts.json` (`CHART_SPEC_OBJECT_MIN_FORMAT_VERSION`).
+pub const CALA_MAX_SUPPORTED_FORMAT_VERSION: u32 = 10;
 
 /// Minimum `.cala` format version a reader must be to handle
 /// `pending_recalc.json` — the record of which cells a cancelled
@@ -176,6 +180,39 @@ pub const PINNED_FILTER_MIN_FORMAT_VERSION: u32 = 8;
 /// keeps the lowest version that can express it.
 pub const CANVAS_SHEET_MIN_FORMAT_VERSION: u32 = 9;
 
+/// Minimum `.cala` format version a reader must be to handle OBJECT PROPERTY
+/// BINDINGS — `bindings.json`, the overlay that makes a property of a chart,
+/// control, slicer, timeline, pivot, floating range or canvas page a FORMULA
+/// (a KPI goal read from a cell, a title that follows a measure).
+///
+/// THE TEST THIS PASSES: would an older reader MISHANDLE the document? Yes, in
+/// the lie class. The literal stays on the object's own record, so an older
+/// reader that drops `bindings.json` still paints a value -- the FROZEN literal
+/// of a property that LOOKS live. A title that should read this month's figure
+/// shows last quarter's, with no error anywhere, and the next save drops the
+/// binding for good. Refusing the open is the honest failure.
+///
+/// Stamped ONLY when some binding exists, so a workbook without one keeps the
+/// lowest version that can express it.
+pub const OBJECT_BINDINGS_MIN_FORMAT_VERSION: u32 = 10;
+
+/// Manifest FEATURE ID declared when `bindings.json` is written. The READ is
+/// unconditional (the `named_ranges` precedent): a manifest that forgot the id
+/// loses nothing. The VERSION link above is what keeps older readers out.
+pub const OBJECT_BINDINGS_FEATURE: &str = "object_bindings";
+
+/// Minimum `.cala` format version a reader must be to read `charts.json` rows
+/// whose `spec` is a JSON OBJECT (before v10 it was the `specJson` STRING).
+///
+/// THE TEST THIS PASSES, in its strongest form: an older reader does not lose
+/// something, it cannot parse the row at all (its `SavedChart` requires
+/// `specJson` with no serde default, and the charts read propagates the error),
+/// so the WHOLE open would fail with a raw serde sentence. Stamping turns that
+/// into the reader's clean "saved by a newer version" refusal. Stamped whenever
+/// `charts.json` is non-empty. No feature id: the shape change is not an
+/// optional feature.
+pub const CHART_SPEC_OBJECT_MIN_FORMAT_VERSION: u32 = 10;
+
 /// Manifest FEATURE ID declared when some canvas carries a WALLPAPER (the
 /// colour of the area outside its page, `CanvasLayout::wallpaper`).
 ///
@@ -202,6 +239,43 @@ pub const CANVAS_WALLPAPER_FEATURE: &str = "canvas_wallpaper";
 /// convenience the user notices at the first drag -- never a document that
 /// silently says something it did not. Same unconditional read.
 pub const CANVAS_OBJECTS_LOCKED_FEATURE: &str = "canvas_objects_locked";
+
+// PAGE_NAVIGATOR_CONTROL_TYPE itself lives in crate::page_navigator; zip_io reads it there.
+
+/// Manifest FEATURE ID declared when some sheet carries a Page Navigator
+/// control (`controlType == "pageNavigator"`).
+///
+/// DELIBERATELY NO LINK IN THE FORMAT-VERSION CHAIN: an older build paints the
+/// unknown control type as a grey "Button" that does nothing (the Controls
+/// renderer falls through to the button painter) -- a visible loss, never a
+/// lie. Stamping a version would make every report with a navigator
+/// unopenable by that build instead, the strictly worse trade the `media`
+/// precedent in zip_io.rs records. The READ is unconditional: `controls.json`
+/// is an opaque per-sheet payload, so a manifest that forgot the id loses
+/// nothing.
+pub const PAGE_NAVIGATOR_FEATURE: &str = "page_navigator";
+
+/// Manifest FEATURE ID declared when some object carries a VISUAL CONTAINER
+/// (D-FORMAT: padding, title, subtitle, divider, background, border, shadow)
+/// -- a slicer / timeline / floating grid `container`, a canvas pivot's
+/// `canvas_frame.container`, a chart spec's `container`, or a control with a
+/// non-empty `container*` property.
+///
+/// Feature id, DELIBERATELY NO format-version link: an older reader drops a
+/// border, a shadow, a title or a background -- a visible, cosmetic loss,
+/// never a lie (the [`CANVAS_WALLPAPER_FEATURE`] reasoning). Stamping a version
+/// would make every formatted report unopenable by that build instead. The
+/// READ is unconditional: the container rides each object's own record.
+pub const VISUAL_CONTAINER_FEATURE: &str = "visual_container";
+
+/// Manifest FEATURE ID declared when some pivot definition carries a persisted
+/// PivotTable STYLE (`style`, the Design tab gallery choice; session-only
+/// before WP-C).
+///
+/// Feature id, DELIBERATELY NO format-version link: an older reader paints the
+/// pivot in the default style -- a visible, cosmetic loss, never a lie. The
+/// READ is unconditional: the style rides the pivot's own definition JSON.
+pub const PIVOT_STYLE_FEATURE: &str = "pivot_style";
 
 /// Raise (never lower) a manifest's `format_version` to the minimum a present
 /// feature requires. Idempotent, and safe to call once per feature.

@@ -17,6 +17,11 @@ export interface ContextMenuItem {
   shortcut?: string;
   icon?: React.ReactNode;
   disabled?: boolean;
+  /**
+   * Why the item is disabled: rendered as the row's `title` (tooltip) and
+   * `aria-description`, so a greyed row says why it cannot act.
+   */
+  title?: string;
   separatorAfter?: boolean;
   onClick: () => void | Promise<void>;
   /** Sub-menu items. When present, this item acts as a sub-menu trigger. */
@@ -134,6 +139,8 @@ function MenuItemWithSubMenu({
         aria-haspopup="true"
         aria-expanded={subMenuOpen}
         disabled={item.disabled}
+        title={item.title}
+        aria-description={item.title}
       >
         {item.icon && <S.IconWrapper>{item.icon}</S.IconWrapper>}
         <S.Label>{item.label}</S.Label>
@@ -308,6 +315,8 @@ export function ContextMenu({
                 role="menuitem"
                 onClick={() => handleItemClick(item)}
                 disabled={item.disabled}
+                title={item.title}
+                aria-description={item.title}
               >
                 {item.icon && <S.IconWrapper>{item.icon}</S.IconWrapper>}
                 <S.Label>{item.label}</S.Label>

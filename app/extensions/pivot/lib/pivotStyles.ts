@@ -32,16 +32,26 @@ import { requestOverlayRedraw } from "@api/gridOverlays";
 import {
   EXCEL_PIVOT_STYLES,
   EXCEL_PIVOT_STYLES_BY_NAME,
+  EXCEL_PIVOT_STYLE_THEMES,
+  FALLBACK_PIVOT_STYLE_THEME,
   DEFAULT_EXCEL_PIVOT_STYLE,
   type ExcelPivotStyle,
+  type PivotStyleTheme,
+  type PivotStyleThemeKey,
 } from "../styles/excelPivotStyles";
 
 // ============================================================================
 // The catalogue, under every name callers use
 // ============================================================================
 
-export { EXCEL_PIVOT_STYLES, EXCEL_PIVOT_STYLES_BY_NAME, DEFAULT_EXCEL_PIVOT_STYLE };
-export type { ExcelPivotStyle };
+export {
+  EXCEL_PIVOT_STYLES,
+  EXCEL_PIVOT_STYLES_BY_NAME,
+  EXCEL_PIVOT_STYLE_THEMES,
+  FALLBACK_PIVOT_STYLE_THEME,
+  DEFAULT_EXCEL_PIVOT_STYLE,
+};
+export type { ExcelPivotStyle, PivotStyleTheme, PivotStyleThemeKey };
 
 /** The Excel pivot style list (alias kept for existing importers). */
 export { EXCEL_PIVOT_STYLES as PIVOT_STYLES };
@@ -111,124 +121,47 @@ function isDarkColor(hex: string): boolean {
 // ============================================================================
 
 /**
- * Convert an ExcelPivotStyle into PivotTheme overrides.
- * Returns a Partial<PivotTheme> that should be merged with DEFAULT_PIVOT_THEME.
- */
-function excelStyleToThemeOverrides(style: ExcelPivotStyle): Partial<PivotTheme> {
-  // ---------------------------------------------------------------------------
-  // Extract raw values from the Excel style definition
-  // ---------------------------------------------------------------------------
-  const headerBg = style.headerRow?.bg || "";
-  const headerFg = style.headerRow?.fg || style.wholeTable?.fg || BLACK;
-  const hasColoredHeader = !!headerBg && !isWhite(headerBg);
-  const bodyBg = style.wholeTable?.bg || WHITE;
-  const bodyFg = style.wholeTable?.fg || BLACK;
-  const isDarkBody = !!bodyBg && !isWhite(bodyBg) && isDarkColor(bodyBg);
-
-  const bandBg = style.rowStripe1?.bg || "";
-
-  // Text color auto-detection for colored backgrounds
-  const headerTextColor = hasColoredHeader
-    ? (isDarkColor(headerBg) ? WHITE : BLACK)
-    : headerFg;
-  const labelText = isDarkBody ? (bodyFg || "#e0e0e0") : (bodyFg || "#1f2937");
-  const valueText = isDarkBody ? (bodyFg || "#d0d0d0") : (bodyFg || "#374151");
-
-  // ---------------------------------------------------------------------------
-  // Totals — use explicit totalRow, fall back to header color (Excel behavior)
-  // ---------------------------------------------------------------------------
-  const totalBg = style.totalRow?.bg || "";
-  const totalFg = style.totalRow?.fg || "";
-  const grandTotalBg = totalBg || (hasColoredHeader ? headerBg : (isDarkBody ? lighten(bodyBg, -0.1) : ""));
-  const grandTotalFg = totalFg || (hasColoredHeader && !totalBg ? headerTextColor : bodyFg);
-
-  // Subtotals — use explicit subtotalRow1, fall back to lighter total color
-  const subtotalBg = style.subtotalRow1?.bg || "";
-  const subtotalFg = style.subtotalRow1?.fg || bodyFg;
-  const subtotalResultBg = subtotalBg || (totalBg ? lighten(totalBg, 0.3) : "");
-
-  // ---------------------------------------------------------------------------
-  // Filter row — use explicit pageFieldLabels/pageFieldValues from Excel style
-  // These are Excel's names for filter label and filter dropdown cells
-  // ---------------------------------------------------------------------------
-  const pageLabels = style.pageFieldLabels;
-  const filterLabelBg = pageLabels?.bg || (hasColoredHeader ? headerBg : "");
-  const filterLabelFg = pageLabels?.fg || (filterLabelBg && isDarkColor(filterLabelBg) ? WHITE : headerFg);
-
-  // Border color: derive from the accent or banding
-  const borderColor = isDarkBody
-    ? lighten(bodyBg, 0.15)
-    : (bandBg && !isWhite(bandBg) ? lighten(bandBg, 0.3) : "#e8e8e8");
-
-  // Filter button appearance (the combo box inside filter dropdown cells)
-  const filterBtnBaseBg = filterLabelBg || (hasColoredHeader ? headerBg : "");
-  const filterButtonBorder = filterBtnBaseBg
-    ? lighten(filterBtnBaseBg, 0.3)
-    : "#C5CDE0";
-  const filterButtonHoverBg = filterBtnBaseBg
-    ? lighten(filterBtnBaseBg, 0.2)
-    : "#E8EEF7";
-  const filterDropdownArrow = filterBtnBaseBg && isDarkColor(filterBtnBaseBg)
-    ? WHITE
-    : "#4b5563";
-
-  // ---------------------------------------------------------------------------
-  // Build the overrides
-  // ---------------------------------------------------------------------------
-  const overrides: Partial<PivotTheme> = {};
-
-  // Header — always set so defaults don't bleed through when switching styles
-  overrides.headerBackground = hasColoredHeader ? headerBg : bodyBg;
-  overrides.headerBorderColor = hasColoredHeader ? headerBg : borderColor;
-  overrides.headerText = headerTextColor;
-  overrides.headerFontWeight = style.headerRow?.b ? "700" : "400";
-
-  // Body
-  overrides.valueBackground = bodyBg;
-  overrides.labelBackground = bodyBg;
-  overrides.labelText = labelText;
-  overrides.valueText = valueText;
-
-  // Banding
-  overrides.alternateRowBackground = bandBg || bodyBg;
-
-  // Grand total — always set; fall back to body bg for styles with no accent
-  overrides.grandTotalBackground = grandTotalBg || bodyBg;
-  overrides.grandTotalText = grandTotalFg;
-
-  // Subtotals
-  overrides.totalBackground = subtotalResultBg || bodyBg;
-  overrides.totalText = subtotalFg;
-
-  // Borders
-  overrides.borderColor = borderColor;
-
-  // Filter row — uses Excel's pageFieldLabels/pageFieldValues definitions
-  overrides.filterRowBackground = filterLabelBg || bodyBg;
-  overrides.filterText = filterLabelFg;
-
-  // Filter button
-  overrides.filterButtonBackground = filterBtnBaseBg || WHITE;
-  overrides.filterButtonBorder = filterButtonBorder;
-  overrides.filterButtonHoverBackground = filterButtonHoverBg;
-  overrides.filterDropdownArrow = filterDropdownArrow;
-
-  // Icons
-  overrides.iconColor = isDarkBody ? "#cccccc" : "#6b7280";
-  overrides.iconHoverColor = isDarkBody ? WHITE : "#1f2937";
-
-  return overrides;
-}
-
-/**
- * Get PivotTheme overrides for a given style ID (e.g. "PivotStyleLight16").
- * Returns empty object if style not found (will use default theme).
+ * PivotTheme overrides for a style ID (e.g. "PivotStyleLight16"): the style's
+ * `theme` from the ONE preset data file (styles/excelPivotStyles.json), which
+ * the backend reads too, so the hidden grid wears what the box wears. Returns
+ * an empty object for "" or an unknown style (the default theme applies). The
+ * values are the rule pinned in __tests__/pivotStyles.test.ts (legacyOverrides),
+ * precomputed into the file.
  */
 export function getThemeOverridesForStyle(styleId: string): Partial<PivotTheme> {
   if (!styleId) return {};
-  const style = EXCEL_PIVOT_STYLES_BY_NAME.get(styleId);
-  if (!style) return {};
-  return excelStyleToThemeOverrides(style);
+  const theme = EXCEL_PIVOT_STYLE_THEMES.get(styleId);
+  return theme ? { ...theme } : {};
+}
+
+/** A theme override value: Rust `PivotStyleChoice::validate` accepts #rrggbb only. */
+const OVERRIDE_COLOUR = /^#[0-9a-fA-F]{6}$/;
+
+/**
+ * THE resolution rule for a pivot's persisted style (`PivotRegionData.style`),
+ * mirrored by the backend's `PivotGridTheme::for_choice`
+ * (app/src-tauri/src/pivot/grid_theme.rs) so the box and the hidden grid -- and
+ * so a copy of the box's cells -- agree:
+ *   1. no style, or style id "" -> the default style (DEFAULT_PIVOT_STYLE_ID);
+ *   2. a style id the catalogue does not know -> no preset values (the
+ *      fallback theme, DEFAULT_PIVOT_THEME, shows);
+ *   3. the pivot's own theme overrides win, each only when it names a colour
+ *      key of the style theme (never headerFontWeight) and is a #rrggbb colour.
+ * Merge the result over DEFAULT_PIVOT_THEME (`createPivotTheme`).
+ */
+export function resolvePivotStyleOverrides(
+  styleId: string | null | undefined,
+  themeOverrides?: Readonly<Record<string, string>> | null,
+): Partial<PivotTheme> {
+  const out: Record<string, string> = { ...EXCEL_PIVOT_STYLE_THEMES.get(styleId || DEFAULT_PIVOT_STYLE_ID) };
+  if (themeOverrides) {
+    for (const [key, value] of Object.entries(themeOverrides)) {
+      if (key === "headerFontWeight" || !Object.prototype.hasOwnProperty.call(FALLBACK_PIVOT_STYLE_THEME, key)) continue;
+      if (typeof value !== "string" || !OVERRIDE_COLOUR.test(value)) continue;
+      out[key] = value;
+    }
+  }
+  return out as Partial<PivotTheme>;
 }
 
 // ============================================================================

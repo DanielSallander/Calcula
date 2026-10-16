@@ -61,6 +61,14 @@ import { hasCellTypes, getCellTypeAt, renderCellTypeCell } from "../../../api/ce
 import { hasGridLayers, paintGridLayers, type GridLayerAnchor, type GridLayerContext } from "../../../api/gridLayers";
 import type { CellDecorationContext } from "../../../api/cellDecorations";
 import { effectiveZ, hasStackingOrder } from "../../../api/gridOverlays";
+import type { ResolvedVisualContainer } from "../../../api/visualContainer";
+import {
+  measureVisualContainerLayout,
+  recordPaintedContainerLayout,
+  containerLayoutSignature,
+  paintVisualContainerUnder,
+  paintVisualContainerOver,
+} from "../../../api/visualContainerPaint";
 import { paintFloatingGrips, paintFloatingSelectionChrome } from "./rendering/floatingObjectChrome";
 
 // ============================================================================
@@ -98,6 +106,12 @@ export interface GridRegion {
   floating?: { x: number; y: number; width: number; height: number };
   /** Stacking position of a floating region (see @api/gridOverlays `GridRegion.z`). */
   z?: number;
+  /**
+   * The resolved visual container of a FLOATING region (see @api/gridOverlays
+   * `GridRegion.container`): `renderOverlayRegion` paints it around the
+   * family's render.
+   */
+  container?: ResolvedVisualContainer;
 }
 
 /** Context passed to overlay render functions during grid paint. */
@@ -1134,8 +1148,67 @@ export function renderGrid(
       ctx.save();
       ctx.translate(animOverlayOffsetX, animOverlayOffsetY);
     }
-    renderer.render({ ctx, region, config: effectiveConfig, viewport, dimensions: dims, canvasWidth: width, canvasHeight: height });
+    const container = region.floating ? region.container : undefined;
+    if (container && region.floating) {
+      renderFloatingRegionInContainer(renderer, region, region.floating, container);
+    } else {
+      renderer.render({ ctx, region, config: effectiveConfig, viewport, dimensions: dims, canvasWidth: width, canvasHeight: height });
+    }
     if (needsOffset) {
+      ctx.restore();
+    }
+  };
+
+  // THE VISUAL CONTAINER (D-FORMAT): Core paints the container of a floating
+  // region around its family's render -- the shadow and background UNDER it,
+  // the Core-painted title / subtitle / divider and the border OVER it -- and
+  // records the layout it painted, so every family's paint and hit test (and
+  // Core's own zone band) read the very same content rect (paint == hit).
+  // The outer box lands where the families put it: the painted gutters minus
+  // the scroll (overlaySheetToCanvas over the effective config). Both Core
+  // passes are clipped to the cell area like a family's own paint; the
+  // family's render runs BETWEEN them with no clip of Core's -- a family
+  // paints affordances outside its box (a chart's Quick Access buttons) and
+  // clips only its content itself (withContainerContentClip).
+  const renderFloatingRegionInContainer = (
+    renderer: OverlayRegistration,
+    region: GridRegion,
+    outer: { x: number; y: number; width: number; height: number },
+    container: ResolvedVisualContainer,
+  ) => {
+    const gutterX = rowHeaderGutter(effectiveConfig);
+    const gutterY = colHeaderGutter(effectiveConfig);
+    const origin = {
+      dx: gutterX + outer.x - (viewport.scrollX || 0),
+      dy: gutterY + outer.y - (viewport.scrollY || 0),
+    };
+    const clipToCellArea = () => {
+      ctx.beginPath();
+      ctx.rect(gutterX, gutterY, Math.max(0, width - gutterX), Math.max(0, height - gutterY));
+      ctx.clip();
+    };
+    let layout: ReturnType<typeof measureVisualContainerLayout> | null = null;
+    ctx.save();
+    try {
+      clipToCellArea();
+      layout = measureVisualContainerLayout(ctx, outer, container);
+      recordPaintedContainerLayout(region.id, containerLayoutSignature(outer, container), layout);
+      paintVisualContainerUnder(ctx, layout, container, origin);
+    } catch (err) {
+      // One broken container must not break the frame (the effectiveZ precedent).
+      console.error(`[gridRenderer] painting the container of ${region.id} threw:`, err);
+    } finally {
+      ctx.restore();
+    }
+    renderer.render({ ctx, region, config: effectiveConfig, viewport, dimensions: dims, canvasWidth: width, canvasHeight: height });
+    if (!layout) return;
+    ctx.save();
+    try {
+      clipToCellArea();
+      paintVisualContainerOver(ctx, layout, container, origin);
+    } catch (err) {
+      console.error(`[gridRenderer] painting the container of ${region.id} threw:`, err);
+    } finally {
       ctx.restore();
     }
   };

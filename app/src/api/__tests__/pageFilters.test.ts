@@ -13,6 +13,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import {
   getPageFilters,
+  listPageFilterPages,
   onPageFiltersChange,
   publishPageFilters,
   type PageFilterInput,
@@ -143,5 +144,22 @@ describe("@api/pageFilters", () => {
     publishPageFilters("slicer", []);
 
     expect(seen).toHaveLength(1);
+  });
+
+  it("lists every (page, model) holding a filter, once each, page then connection", () => {
+    expect(listPageFilterPages()).toEqual([]);
+    publishPageFilters("slicer", [
+      filter({ sheetIndex: 4, connectionId: "conn-b" }),
+      filter({ sourceId: "s-2", sheetIndex: 1, connectionId: "conn-b" }),
+      filter({ sourceId: "s-3", sheetIndex: 1, connectionId: "conn-a", field: "Geo.Country" }),
+    ]);
+    publishPageFilters("timeline", [filter({ sourceId: "t-1", sheetIndex: 1, connectionId: "conn-a" })]);
+    expect(listPageFilterPages()).toEqual([
+      { sheetIndex: 1, connectionId: "conn-a" },
+      { sheetIndex: 1, connectionId: "conn-b" },
+      { sheetIndex: 4, connectionId: "conn-b" },
+    ]);
+    publishPageFilters("slicer", []);
+    expect(listPageFilterPages()).toEqual([{ sheetIndex: 1, connectionId: "conn-a" }]);
   });
 });

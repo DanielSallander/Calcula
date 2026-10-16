@@ -325,6 +325,7 @@
  */
 import type { Page } from "@playwright/test";
 import { test, expect } from "../fixtures";
+import { closeObjectPaneForGood } from "../helpers/object-pane";
 import { readGridGeometry } from "../helpers/grid";
 import {
   MOD,
@@ -717,6 +718,15 @@ for (const surface of ["worksheet", "canvas"] as const) {
     });
   });
 }
+
+// WP-C (D-PANE): on a canvas a click opens the ONE object pane at its release,
+// and a docked pane narrows the grid. This journey predates the pane and asserts
+// nothing about it, so every test starts with the pane closed AS IF BY HAND
+// (helpers/object-pane.ts). Per test, not once: the fixture's per-test task-pane
+// reset clears the "closed by hand" mark, and Playwright runs this hook after it.
+test.beforeEach(async ({ appPage }) => {
+  await closeObjectPaneForGood(appPage);
+});
 
 // ---------------------------------------------------------------------------
 // 4. A locked timeline: its frame refuses the move, its content still works
@@ -1743,7 +1753,11 @@ test.describe("phase 5a: the six-dot grip of a header-less slicer (worksheet)", 
       const sheet = await objectSheet(page, "worksheet");
       // Clear of the data (A1:C7) and the pivot (E1:F8): nothing else is painted
       // where the grip's plate goes, so a grip-coloured pixel there is the grip's.
-      const sid = await createSlicer(page, pid, sheet.index, 640, 256);
+      // 184 tall, not the default 176: since WP-C the 1 px container border is
+      // Core's and the items are laid out INSIDE it (visualContentRectFor), so
+      // the six items need 2 px more than they did -- at 176 the header-less
+      // slicer scrolls by exactly 2 px and the wheel precondition below fails.
+      const sid = await createSlicer(page, pid, sheet.index, 640, 256, 184);
       await eventually(() => slicerItemValues(page, sid), (v) => v.length === 6, "the slicer never listed the six products", 15_000);
       const region = await headerlessSlicer(page, sid);
       expect(
@@ -2112,11 +2126,12 @@ test.describe("phase 5b: the grip of a SELECTED canvas object, and its menu (can
       const padlockPatch = () => chromeIn(page, lockX + 1, C.y + 10 + 6, 10, 6);
       const padlock0 = await padlockPatch();
 
-      // ---- The grip's menu: Size and Position, then the page's verbs.
+      // ---- The grip's menu: Size and Position, the object pane's "Format..." door
+      // (WP-C D-PANE), then the page's verbs.
       const g = await gripRect(page, region);
       await click(page, g.centre);
       await expect(gripMenu(page), "a click on the selected chart's grip opened no menu").toBeVisible();
-      expect(await gripMenuRows(page)).toEqual([SIZE_POS_LABEL, "Bring Forward", "Send Backward", "Lock"]);
+      expect(await gripMenuRows(page)).toEqual([SIZE_POS_LABEL, "Format...", "Bring Forward", "Send Backward", "Lock"]);
       await gripMenu(page).locator('[data-grip-menu-item="canvas.grip.lock"]').click();
       await expect(gripMenu(page)).toHaveCount(0);
 

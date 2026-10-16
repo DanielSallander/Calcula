@@ -832,7 +832,8 @@ pub(crate) fn create_pivot_core(
         }
 
         if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
-            let pivot_merges = write_pivot_to_grid(dest_grid, None, &view, destination, &mut styles);
+            let theme = crate::pivot::grid_theme::PivotGridTheme::for_choice(definition.style.as_ref());
+            let pivot_merges = write_pivot_to_grid(dest_grid, None, &view, destination, &mut styles, &theme);
             log_info!(
                 "PIVOT",
                 "wrote pivot output to grids[{}] at ({},{}) size {}x{}",
@@ -1372,6 +1373,7 @@ pub async fn update_pivot_fields(
     let auto_fit = definition.layout.auto_fit_column_widths;
     let destination = definition.destination;
     let framed = definition.canvas_frame.is_some();
+    let style = definition.style.clone();
 
     // 5. Put updated definition + cache back
     {
@@ -1411,7 +1413,7 @@ pub async fn update_pivot_fields(
 
     // Update pivot in grid (clears old region, writes new view)
     let t2 = Instant::now();
-    if let Err(refusal) = update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view, framed) {
+    if let Err(refusal) = update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view, framed, style.as_ref()) {
         // Nothing was written (a destination of the wrong kind, or a canvas
         // pivot wider than its block): put the definition back exactly as a
         // cancel does, and skip the region, fit and undo record.
@@ -1866,6 +1868,12 @@ pub fn delete_pivot_table(
         );
     }
 
+    // WP-D (D §3.12): the object property BINDINGS of the pivot AND of the
+    // slicers and timelines the cascade just deleted with it went with them,
+    // inside `cascade_deleted_sources` (the pivot is one of its removed
+    // sources), and `record_source_cascade_undo` records their restore FIRST so
+    // it replays LAST, after the objects exist again.
+
     // Get pivot info before removing
     let pivot_tables = pivot_state.pivot_tables.read().unwrap();
     let (definition, cache) = pivot_tables
@@ -1899,8 +1907,9 @@ pub fn delete_pivot_table(
             }
             opened
         };
-        // Cascade restores FIRST so the reverse replay puts the pivot back
-        // before the slicers that point at it.
+        // The cascade restores (the dropped bindings first among them), so the
+        // reverse replay puts the pivot back before the slicers that point at
+        // it, and every object back before its bindings.
         crate::object_deps::record_source_cascade_undo(&state, &cascade);
         let mut undo_stack = state.undo_stack.lock().unwrap();
         undo_stack.record_custom_restore("pivot_delete".to_string(), data, "Delete pivot table");
@@ -2076,6 +2085,7 @@ pub fn relocate_pivot(
         (new_row, new_col),
         &view,
         old_definition.canvas_frame.is_some(),
+        old_definition.style.as_ref(),
     ) {
         let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
         if let Some((definition, _)) = pivot_tables.get_mut(&pivot_id) {
@@ -2491,6 +2501,19 @@ fn pivot_has_no_fields(definition: &PivotDefinition) -> bool {
         && definition.filter_fields.is_empty()
 }
 
+/// The wire spelling of a definition's value-column order. ONE mapping, read
+/// by the BI request rebuild below and by the editor's field configuration
+/// (`pivot_field_configuration`), so the two cannot spell the order apart.
+pub(crate) fn value_column_order_to_defs(order: &[pivot_engine::ValueColumnRef]) -> Vec<ValueColumnRefDef> {
+    order
+        .iter()
+        .map(|v| match v {
+            pivot_engine::ValueColumnRef::Value(i) => ValueColumnRefDef::Value { index: *i },
+            pivot_engine::ValueColumnRef::Calculated(i) => ValueColumnRefDef::Calculated { index: *i },
+        })
+        .collect()
+}
+
 /// Rebuild the `update_bi_pivot_fields` request that reproduces a BI pivot's
 /// stored definition -- what a refresh re-runs and what an ensure extends.
 ///
@@ -2601,6 +2624,11 @@ pub(crate) fn bi_request_from_definition(
             .map(|v| BiValueFieldRef {
                 measure_name: v.name.trim_start_matches('[').trim_end_matches(']').to_string(),
                 custom_name: if v.calc_item.is_some() { None } else { v.custom_name.clone() },
+                // The user's override, never an adopted model format: the
+                // re-query re-adopts the model's (BUG-0478 -- without this
+                // the override was lost on every refresh and every
+                // model-slicer change that extends the pivot).
+                number_format: if v.number_format_from_model { None } else { v.number_format.clone() },
             })
             .collect()
     };
@@ -2632,16 +2660,7 @@ pub(crate) fn bi_request_from_definition(
     let value_column_order = if definition.value_column_order.is_empty() {
         None
     } else {
-        Some(
-            definition
-                .value_column_order
-                .iter()
-                .map(|v| match v {
-                    pivot_engine::ValueColumnRef::Value(i) => ValueColumnRefDef::Value { index: *i },
-                    pivot_engine::ValueColumnRef::Calculated(i) => ValueColumnRefDef::Calculated { index: *i },
-                })
-                .collect(),
-        )
+        Some(value_column_order_to_defs(&definition.value_column_order))
     };
 
     UpdateBiPivotFieldsRequest {
@@ -3481,6 +3500,7 @@ pub async fn refresh_pivot_cache(
     let mut response = view_to_response(&view, &definition, &mut cache);
     let serialize_ms = t1.elapsed().as_secs_f64() * 1000.0;
     let framed = definition.canvas_frame.is_some();
+    let style = definition.style.clone();
 
     // 5. Put updated definition + cache back
     {
@@ -3520,7 +3540,7 @@ pub async fn refresh_pivot_cache(
     // Update pivot in grid. A refusal (a destination of the wrong kind, or a
     // canvas pivot wider than its block) wrote nothing: put the definition back
     // exactly as a cancel does and skip the region.
-    if let Err(refusal) = update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view, framed) {
+    if let Err(refusal) = update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view, framed, style.as_ref()) {
         {
             let mut pivot_tables = pivot_state.pivot_tables.write(&effect).unwrap();
             if let Some((def, c)) = pivot_tables.get_mut(&pivot_id) {
@@ -3603,55 +3623,20 @@ pub(crate) fn value_zone_fields(
             hidden_items: None,
             custom_name: if f.calc_item.is_some() { None } else { f.custom_name.clone() },
             number_format: f.number_format.clone(),
+            number_format_from_model: f.number_format_from_model,
             show_as: show_values_as_to_api(f, &base_candidates),
         })
     }).collect()
 }
 
-/// Check if a cell is within a pivot region and return pivot info if so
-#[tauri::command]
-pub fn get_pivot_at_cell(
-    state: State<AppState>,
-    pivot_state: State<'_, PivotState>,
-    row: u32,
-    col: u32,
-) -> Result<Option<PivotRegionInfo>, String> {
-    use crate::pivot::utils::{aggregation_to_string, report_layout_to_string, values_position_to_string};
-    
-    let active_sheet = *state.active_sheet.read().unwrap();
-    
-    // Check if cell is in any pivot region (via the generic protected region system)
-    let pivot_id = match state.get_region_at_cell(active_sheet, row, col) {
-        Some(region) if region.region_type == "pivot" => region.owner_id,
-        _ => return Ok(None),
-    };
-    
-    log_debug!("PIVOT", "get_pivot_at_cell ({},{}) found pivot_id={}", row, col, pivot_id);
-    
-    // Get pivot info
-    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
-    let (definition, cache) = match pivot_tables.get(&pivot_id) {
-        Some(t) => t,
-        None => return Ok(None),
-    };
-    
-    let is_empty = !has_fields_configured(definition);
-    
-    // Build source field info from cache
-    let field_count = cache.field_count();
-    let source_fields: Vec<SourceFieldInfo> = (0..field_count)
-        .map(|i| {
-            let name = cache.field_name(i).unwrap_or_else(|| format!("Field{}", i + 1));
-            let is_numeric = cache.is_numeric_field(i);
-            SourceFieldInfo {
-                index: i,
-                name,
-                is_numeric,
-                table_name: None,
-            }
-        })
-        .collect();
-    
+/// The editor's field configuration of one pivot: which fields sit in which
+/// zone (with what the editor must send back unchanged), the layout, the
+/// calculated fields and the order the value and calculated columns
+/// interleave in. The body of `get_pivot_at_cell`'s configuration, over plain
+/// references so a test can drive it.
+pub(crate) fn pivot_field_configuration(definition: &PivotDefinition, cache: &PivotCache) -> PivotFieldConfiguration {
+    use crate::pivot::utils::{report_layout_to_string, values_position_to_string};
+
     // Build current field configuration from definition. Row/column fields
     // carry their hidden_items too so a placed calculation group's item
     // subset survives an editor reopen.
@@ -3666,6 +3651,7 @@ pub fn get_pivot_at_cell(
             hidden_items: if f.hidden_items.is_empty() { None } else { Some(f.hidden_items.clone()) },
             custom_name: None,
             number_format: None,
+            number_format_from_model: false,
             show_as: None,
         }
     }).collect();
@@ -3681,6 +3667,7 @@ pub fn get_pivot_at_cell(
             hidden_items: if f.hidden_items.is_empty() { None } else { Some(f.hidden_items.clone()) },
             custom_name: None,
             number_format: None,
+            number_format_from_model: false,
             show_as: None,
         }
     }).collect();
@@ -3703,6 +3690,7 @@ pub fn get_pivot_at_cell(
             hidden_items: hidden,
             custom_name: None,
             number_format: None,
+            number_format_from_model: false,
             show_as: None,
         }
     }).collect();
@@ -3745,21 +3733,67 @@ pub fn get_pivot_at_cell(
         })
         .collect();
 
-    let field_configuration = PivotFieldConfiguration {
+    PivotFieldConfiguration {
         row_fields,
         column_fields,
         value_fields,
-        filter_fields: filter_fields.clone(),
+        filter_fields,
         layout,
         calculated_fields: calc_fields,
         hierarchy_configs,
+        value_column_order: value_column_order_to_defs(&definition.value_column_order),
+    }
+}
+
+/// Check if a cell is within a pivot region and return pivot info if so
+#[tauri::command]
+pub fn get_pivot_at_cell(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    row: u32,
+    col: u32,
+) -> Result<Option<PivotRegionInfo>, String> {
+    let active_sheet = *state.active_sheet.read().unwrap();
+    
+    // Check if cell is in any pivot region (via the generic protected region system)
+    let pivot_id = match state.get_region_at_cell(active_sheet, row, col) {
+        Some(region) if region.region_type == "pivot" => region.owner_id,
+        _ => return Ok(None),
     };
+    
+    log_debug!("PIVOT", "get_pivot_at_cell ({},{}) found pivot_id={}", row, col, pivot_id);
+    
+    // Get pivot info
+    let pivot_tables = pivot_state.pivot_tables.read().unwrap();
+    let (definition, cache) = match pivot_tables.get(&pivot_id) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+    
+    let is_empty = !has_fields_configured(definition);
+    
+    // Build source field info from cache
+    let field_count = cache.field_count();
+    let source_fields: Vec<SourceFieldInfo> = (0..field_count)
+        .map(|i| {
+            let name = cache.field_name(i).unwrap_or_else(|| format!("Field{}", i + 1));
+            let is_numeric = cache.is_numeric_field(i);
+            SourceFieldInfo {
+                index: i,
+                name,
+                is_numeric,
+                table_name: None,
+            }
+        })
+        .collect();
+    
+    let field_configuration = pivot_field_configuration(definition, cache);
 
     // Calculate filter zones from filter field configuration
     // Filter fields are rendered at the top of the pivot:
     // Each filter field occupies one row with label in col 0 and dropdown in col 1
     let destination = definition.destination;
-    let filter_zones: Vec<FilterZoneInfo> = filter_fields
+    let filter_zones: Vec<FilterZoneInfo> = field_configuration.filter_fields
         .iter()
         .enumerate()
         .map(|(idx, field)| FilterZoneInfo {
@@ -3868,6 +3902,17 @@ pub fn get_pivot_regions_for_sheet(
     pivot_state: State<'_, PivotState>,
 ) -> Vec<PivotRegionData> {
     let active_sheet = *state.active_sheet.read().unwrap();
+    pivot_regions_for_sheet(&state, &pivot_state, active_sheet)
+}
+
+/// The body of [`get_pivot_regions_for_sheet`] for sheet `sheet`, over plain
+/// references so a test can drive it.
+pub(crate) fn pivot_regions_for_sheet(state: &AppState, pivot_state: &PivotState, sheet: usize) -> Vec<PivotRegionData> {
+    // Which pivots are data-model pivots, read FIRST and released at the end
+    // of the statement: no guard is held when `pivot_tables` is taken below,
+    // so this adds no lock-order edge.
+    let model_ids: std::collections::HashSet<PivotId> =
+        pivot_state.bi_metadata.read().unwrap().keys().cloned().collect();
     // LOCK ORDER: `pivot_tables` BEFORE `protected_regions` (see
     // `resolve_dest_sheet_index`, which reads the region under `pivot_tables`).
     let pivot_tables = pivot_state.pivot_tables.read().unwrap();
@@ -3875,17 +3920,18 @@ pub fn get_pivot_regions_for_sheet(
 
     regions
         .iter()
-        .filter(|r| r.region_type == "pivot" && r.sheet_index == active_sheet)
+        .filter(|r| r.region_type == "pivot" && r.sheet_index == sheet)
         .map(|r| {
             let pid = r.owner_id;
-            let (is_empty, name, canvas_frame) = pivot_tables
+            let (is_empty, name, canvas_frame, style) = pivot_tables
                 .get(&pid)
                 .map(|(def, _)| (
                     !has_fields_configured(def),
                     def.name.clone().unwrap_or_else(|| format!("PivotTable{}", pid)),
-                    def.canvas_frame.map(CanvasFrameConfig::from),
+                    def.canvas_frame.clone().map(CanvasFrameConfig::from),
+                    def.style.clone().map(crate::pivot::types::PivotStyleConfig::from),
                 ))
-                .unwrap_or_else(|| (true, format!("PivotTable{}", pid), None));
+                .unwrap_or_else(|| (true, format!("PivotTable{}", pid), None, None));
 
             PivotRegionData {
                 pivot_id: pid,
@@ -3895,8 +3941,11 @@ pub fn get_pivot_regions_for_sheet(
                 end_row: r.end_row,
                 end_col: r.end_col,
                 is_empty,
+                is_model: model_ids.contains(&pid),
                 // The frontend region sync reads the canvas pivot's box here.
                 canvas_frame,
+                // ...and every pivot's persisted style (the renderer's theme).
+                style,
             }
         })
         .collect()
@@ -4055,22 +4104,26 @@ pub(crate) fn update_pivot_properties_core(
 ) -> Result<PivotTableInfo, String> {
     log_info!("PIVOT", "update_pivot_properties pivot_id={}", request.pivot_id);
 
-    // A FRAME EDIT is decided before the effect: the pivot must already be a
-    // canvas pivot, and the new frame must be valid. `pivot_tables` is taken
-    // alone and released. Carries the definition as it was, for the undo step.
-    let frame_edit: Option<(pivot_engine::CanvasFrame, PivotDefinition)> = match request.canvas_frame {
-        None => None,
-        Some(config) => {
-            let before = {
-                let tables = pivot_state
-                    .pivot_tables
-                    .read()
-                    .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
-                match tables.get(&request.pivot_id) {
-                    Some((def, _)) => def.clone(),
-                    None => return Err(format!("Pivot table {} not found", request.pivot_id)),
-                }
-            };
+    // A FRAME or STYLE EDIT is decided before the effect. Both are undoable,
+    // so the definition as it was is cloned ONCE, under a read guard of
+    // `pivot_tables` taken alone and released -- for a style-only request
+    // (every worksheet pivot's gallery click) too, so it has a snapshot to
+    // record. The frame must belong to a canvas pivot and be valid (now also
+    // its visual container); the style must be valid.
+    let before: Option<PivotDefinition> = if request.canvas_frame.is_some() || request.style.is_some() {
+        let tables = pivot_state
+            .pivot_tables
+            .read()
+            .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
+        match tables.get(&request.pivot_id) {
+            Some((def, _)) => Some(def.clone()),
+            None => return Err(format!("Pivot table {} not found", request.pivot_id)),
+        }
+    } else {
+        None
+    };
+    let new_frame: Option<pivot_engine::CanvasFrame> = match (request.canvas_frame, before.as_ref()) {
+        (Some(config), Some(before)) => {
             if before.canvas_frame.is_none() {
                 return Err(format!(
                     "Cannot set a canvas frame on pivot table {}: it is a worksheet pivot, and a \
@@ -4081,21 +4134,31 @@ pub(crate) fn update_pivot_properties_core(
             let frame: pivot_engine::CanvasFrame = config.into();
             frame.validate()?;
             // LOCK OBJECTS on the box's page: a frame that MOVES or RESIZES
-            // the box is refused before the effect. Freezing its headers is
-            // formatting and goes through. `pivot_tables` was released above,
-            // so resolving the destination sheet here takes no pivot lock.
-            if let Some(old) = before.canvas_frame {
-                let moves = (old.x, old.y, old.width, old.height) != (frame.x, frame.y, frame.width, frame.height);
-                if moves {
-                    let sheet = crate::pivot::operations::resolve_dest_sheet_index(state, &before);
+            // the box is refused before the effect. Freezing its headers and
+            // its visual container (D-FORMAT) are formatting and go through.
+            // `pivot_tables` was released above, so resolving the destination
+            // sheet here takes no pivot lock.
+            if let Some(old) = &before.canvas_frame {
+                if old.geometry_differs(&frame) {
+                    let sheet = crate::pivot::operations::resolve_dest_sheet_index(state, before);
                     crate::sheets::ensure_canvas_objects_unlocked(state, sheet, "move or resize a PivotTable box")?;
                 }
             }
-            Some((frame, before))
+            Some(frame)
+        }
+        _ => None,
+    };
+    let new_style: Option<Option<pivot_engine::PivotStyleChoice>> = match request.style {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(config)) => {
+            let choice: pivot_engine::PivotStyleChoice = config.into();
+            choice.validate()?;
+            Some(Some(choice))
         }
     };
 
-    let (_effect, mut pivot_tables) = pivot_write_definition_only(pivot_state, file_state, request.pivot_id)?;
+    let (effect, mut pivot_tables) = pivot_write_definition_only(pivot_state, file_state, request.pivot_id)?;
     let (definition, _) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -4104,9 +4167,13 @@ pub(crate) fn update_pivot_properties_core(
     if let Some(name) = request.name {
         definition.name = Some(name);
     }
-    if let Some((frame, _)) = &frame_edit {
-        definition.canvas_frame = Some(*frame);
+    if let Some(frame) = &new_frame {
+        definition.canvas_frame = Some(frame.clone());
     }
+    if let Some(style) = new_style {
+        definition.style = style;
+    }
+    let (after_frame, after_style) = (definition.canvas_frame.clone(), definition.style.clone());
     if let Some(v) = request.allow_multiple_filters_per_field {
         definition.allow_multiple_filters_per_field = v;
     }
@@ -4138,13 +4205,39 @@ pub(crate) fn update_pivot_properties_core(
     };
     drop(pivot_tables);
 
-    // The box moved: ONE undo step that puts the definition -- and so the box --
-    // back. The restore (`apply_pivot_definition_restore`) re-renders through
-    // `finalize_pivot_update`, which is framed-aware. Recorded after the store
-    // guard drops (the resolver must not run under it), and only when the frame
-    // actually changed, so a no-op save of the same box adds no Ctrl+Z step.
-    if let Some((frame, before)) = frame_edit {
-        if before.canvas_frame != Some(frame) {
+    // THE HIDDEN GRID FOLLOWS THE STYLE (ruling R3, WP-C S10b). A style change
+    // restyles the pivot's cells in place in the new style's colours, so the
+    // cells under the box -- and so a copy of them -- wear what the box shows.
+    // No value, format or extent changes, so nothing is recalculated. Its undo
+    // and redo restyle in place the same way (`apply_pivot_definition_restore`
+    // never re-renders a presentation-only step).
+    if let Some(before) = &before {
+        if before.style != after_style {
+            restyle_pivot_cells(state, &effect, pivot_state, request.pivot_id, after_style.as_ref());
+        }
+    }
+
+    // The box moved or was formatted, or the style changed: ONE undo step that
+    // puts the definition -- and so the box and its style -- back. The restore
+    // (`apply_pivot_definition_restore`) puts a presentation-only definition
+    // back WITHOUT re-rendering values (restyling in place for a style). Recorded after the store
+    // guard drops (the resolver must not run under it), and only when the
+    // frame or the style actually changed, so a no-op save adds no Ctrl+Z step.
+    if let Some(before) = before {
+        let frame_changed = before.canvas_frame != after_frame;
+        let style_changed = before.style != after_style;
+        if frame_changed || style_changed {
+            let moved = match (&before.canvas_frame, &after_frame) {
+                (Some(old), Some(new)) => old.geometry_differs(new),
+                _ => false,
+            };
+            let label = if moved {
+                "Move pivot"
+            } else if frame_changed {
+                "Format pivot"
+            } else {
+                "PivotTable Style"
+            };
             let dest_sheet_idx = resolve_dest_sheet_index(state, &before);
             record_pivot_definition_undo(
                 state,
@@ -4154,12 +4247,46 @@ pub(crate) fn update_pivot_properties_core(
                 dest_sheet_idx,
                 Vec::new(),
                 None,
-                "Move pivot",
+                label,
             );
         }
     }
 
     Ok(info)
+}
+
+/// Restyle a pivot's written cells in `style` (ruling R3): the style-only
+/// re-render `update_pivot_properties` runs when a pivot's style changes,
+/// IN PLACE over the cells (`restyle_pivot_in_grid`), using the pivot's STORED
+/// view (`PivotState::views`) only for each cell's role. It never re-renders
+/// values: a BI pivot reloaded from a file has an empty cache until its first
+/// refresh, so recomputing its view here would CLEAR its cells. A pivot with
+/// no stored view yet (none rendered this session) is left as it is -- its
+/// next render writes the persisted style -- and so is one whose stored view
+/// does not cover its block; both are logged, and the style is still saved.
+///
+/// Also the undo/redo of a style-only step (`apply_pivot_definition_restore`),
+/// for the same reason: re-rendering there cleared a reloaded BI pivot.
+///
+/// LOCKS: `views` alone, released before the restyle takes the grid locks in
+/// canonical order. The caller must hold no pivot lock.
+pub(crate) fn restyle_pivot_cells(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    pivot_state: &PivotState,
+    pivot_id: PivotId,
+    style: Option<&pivot_engine::PivotStyleChoice>,
+) {
+    let view = pivot_state.views.lock().ok().and_then(|views| views.get(&pivot_id).cloned());
+    let Some(view) = view else {
+        log_debug!("PIVOT", "restyle pivot {}: no stored view yet, the next render applies the style", pivot_id);
+        return;
+    };
+    let theme = crate::pivot::grid_theme::PivotGridTheme::for_choice(style);
+    match restyle_pivot_in_grid(state, effect, pivot_id, &view, &theme) {
+        Ok(n) => log_debug!("PIVOT", "restyle pivot {}: {} cells in the new style", pivot_id, n),
+        Err(why) => crate::log_warn!("PIVOT", "restyle pivot {}: cells not restyled: {}", pivot_id, why),
+    }
 }
 
 /// Changes the source data range of an existing pivot table.
@@ -5255,6 +5382,30 @@ pub fn set_pivot_number_format(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: SetNumberFormatRequest,
 ) -> Result<PivotViewResponse, String> {
+    set_pivot_number_format_core(
+        &state,
+        &file_state,
+        &pivot_state,
+        PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state },
+        request,
+    )
+}
+
+/// The body of [`set_pivot_number_format`], over plain references so a test
+/// can drive it.
+///
+/// The format written is the USER's: `number_format_from_model` is cleared, so
+/// a BI re-query never overwrites it and every request carries it back
+/// (BUG-0478). `""` CLEARS the override (`None`) -- for a BI pivot the model's
+/// format is re-adopted on that pivot's next query (the Data format card's
+/// "Use source format" follows the clear with a refresh).
+pub(crate) fn set_pivot_number_format_core(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    pivot_state: &PivotState,
+    recalc: PivotRecalcStates<'_>,
+    request: SetNumberFormatRequest,
+) -> Result<PivotViewResponse, String> {
     log_info!(
         "PIVOT",
         "set_pivot_number_format pivot_id={} field={} format={}",
@@ -5263,7 +5414,7 @@ pub fn set_pivot_number_format(
         request.number_format
     );
 
-    let (effect, mut pivot_tables) = pivot_write(&state, &pivot_state, &file_state, request.pivot_id)?;
+    let (effect, mut pivot_tables) = pivot_write(state, pivot_state, file_state, request.pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -5275,13 +5426,14 @@ pub fn set_pivot_number_format(
         ));
     }
 
-    definition.value_fields[request.value_field_index].number_format =
-        Some(request.number_format);
+    let field = &mut definition.value_fields[request.value_field_index];
+    field.number_format = if request.number_format.is_empty() { None } else { Some(request.number_format) };
+    field.number_format_from_model = false;
 
     definition.bump_version();
 
     let view = safe_calculate_pivot(definition, cache);
-    store_view(&pivot_state, request.pivot_id, &view);
+    store_view(pivot_state, request.pivot_id, &view);
     let mut response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
@@ -5289,10 +5441,10 @@ pub fn set_pivot_number_format(
     let dest_ref = PivotDestSheet::of(definition);
 
     drop(pivot_tables);
-    let dest_sheet_idx = dest_ref.resolve(&state);
+    let dest_sheet_idx = dest_ref.resolve(state);
 
-    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &effect, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(PivotRecalcStates { pane: &pane_control_state, ribbon: &ribbon_filter_state, user_files: &user_files_state }))?;
+    response.overwritten_cell_count = count_overwritten_cells(state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(state, &effect, pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some(recalc))?;
 
     Ok(response)
 }
@@ -7932,6 +8084,9 @@ pub(crate) fn expand_bi_value_fields(
                     AggregationType::Sum, // SUM of pre-aggregated = identity
                 );
                 vf.custom_name = v.custom_name.clone();
+                // An incoming format IS an override (a request never carries
+                // an adopted one), so the flag stays false.
+                vf.number_format = v.number_format.clone();
                 vf
             })
             .collect();
@@ -7950,10 +8105,61 @@ pub(crate) fn expand_bi_value_fields(
                 Some(c) => format!("{} [{}]", c, item),
                 None => format!("{} [{}]", v.measure_name, item),
             });
+            vf.number_format = v.number_format.clone();
             vfs.push(vf);
         }
     }
     vfs
+}
+
+/// Adopt each value field's MODEL number format (from `query_with_meta`'s
+/// result columns) so BI value cells render with the model-defined format
+/// (currency, %, etc.) rather than raw numbers. Keyed by (base measure,
+/// calculation item); a placed calculation group's wide metadata carries item
+/// attribution, so its fields fall back to the measure's FIRST applied item
+/// column (`reshape_items`).
+///
+/// A user OVERRIDE is never overwritten: a field is adopted only when it has
+/// no format or its format was itself adopted (`number_format_from_model`),
+/// and an adopted field is flagged so the next request leaves its format out
+/// (`bi_request_from_definition`) and the next query re-adopts -- a changed
+/// model format therefore reaches the pivot on the next refresh (BUG-0478).
+pub(crate) fn adopt_model_number_formats(
+    definition: &mut PivotDefinition,
+    result_columns: &[bi_engine::ResultColumn],
+    reshape_items: &[Option<String>],
+) {
+    let format_by_key: std::collections::HashMap<(String, Option<String>), String> = result_columns
+        .iter()
+        .filter(|rc| matches!(rc.kind, bi_engine::ResultColumnKind::Measure))
+        .filter_map(|rc| {
+            let m = rc.measure.clone()?;
+            let f = rc.format_string.clone()?;
+            Some(((m, rc.calculation_item.clone()), f))
+        })
+        .collect();
+    for vf in definition.value_fields.iter_mut() {
+        if vf.number_format.is_some() && !vf.number_format_from_model {
+            continue; // the user's override
+        }
+        let measure = vf.name.trim_start_matches('[').trim_end_matches(']').to_string();
+        let fmt = format_by_key.get(&(measure.clone(), vf.calc_item.clone())).or_else(|| {
+            reshape_items.first().and_then(|it| format_by_key.get(&(measure.clone(), it.clone())))
+        });
+        match fmt {
+            Some(fmt) => {
+                vf.number_format = Some(fmt.clone());
+                vf.number_format_from_model = true;
+            }
+            // The model no longer formats this measure: a format adopted
+            // from it earlier is stale, and nothing the user chose is lost.
+            None if vf.number_format_from_model => {
+                vf.number_format = None;
+                vf.number_format_from_model = false;
+            }
+            None => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -8022,6 +8228,7 @@ mod calc_group_expand_tests {
         crate::pivot::types::BiValueFieldRef {
             measure_name: name.to_string(),
             custom_name: None,
+            number_format: None,
         }
     }
 
@@ -8249,6 +8456,7 @@ pub(crate) fn extract_bi_model_metadata(
                 table: m.table().to_string(),
                 source_column,
                 aggregation,
+                format_string: m.format_string().map(|s| s.to_string()),
             }
         })
         .collect();
@@ -8510,12 +8718,13 @@ pub async fn create_pivot_from_bi_model(
         let mut styles = state.style_registry.write(&effect).unwrap();
         if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
             let active_sheet = *state.active_sheet.read().unwrap();
+            let theme = crate::pivot::grid_theme::PivotGridTheme::for_choice(definition.style.as_ref());
             let pivot_merges = if dest_sheet_idx == active_sheet {
-                let merges = write_pivot_to_grid(dest_grid, Some(&mut grid), &view, destination, &mut styles);
+                let merges = write_pivot_to_grid(dest_grid, Some(&mut grid), &view, destination, &mut styles, &theme);
                 grid.recalculate_bounds();
                 merges
             } else {
-                write_pivot_to_grid(dest_grid, None, &view, destination, &mut styles)
+                write_pivot_to_grid(dest_grid, None, &view, destination, &mut styles, &theme)
             };
 
             // Update merge regions -- the DESTINATION sheet's set, not the
@@ -9014,6 +9223,7 @@ pub(crate) async fn update_bi_pivot_fields_unrecorded(
                 let destination = definition.destination;
                 let auto_fit = definition.layout.auto_fit_column_widths;
                 let framed = definition.canvas_frame.is_some();
+                let style = definition.style.clone();
                 let dest_ref = PivotDestSheet::of(definition);
                 drop(pivot_tables);
                 let dest_sheet_idx = dest_ref.resolve(&state);
@@ -9021,7 +9231,7 @@ pub(crate) async fn update_bi_pivot_fields_unrecorded(
                 let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
                 response.overwritten_cell_count = saved_cells.len() as u32;
                 let old_region = get_pivot_region(&state, pivot_id);
-                update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view, framed)?;
+                update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view, framed, style.as_ref())?;
                 // The widths this fit overwrites now ride in the SAME undo step
                 // as the change that caused them, exactly as the non-BI path
                 // does. They used to be discarded because this command recorded
@@ -10230,37 +10440,7 @@ pub(crate) async fn update_bi_pivot_fields_unrecorded(
             &value_col_idx,
         );
 
-        // Adopt each measure's model number format (from query_with_meta) so BI
-        // value cells render with the model-defined format (currency, %, etc.)
-        // rather than raw numbers. Keyed by (base measure, calculation item).
-        let format_by_key: std::collections::HashMap<(String, Option<String>), String> =
-            result_columns
-                .iter()
-                .filter(|rc| matches!(rc.kind, bi_engine::ResultColumnKind::Measure))
-                .filter_map(|rc| {
-                    let m = rc.measure.clone()?;
-                    let f = rc.format_string.clone()?;
-                    Some(((m, rc.calculation_item.clone()), f))
-                })
-                .collect();
-        if !format_by_key.is_empty() {
-            for vf in definition.value_fields.iter_mut() {
-                let measure = vf.name.trim_start_matches('[').trim_end_matches(']').to_string();
-                let fmt = format_by_key
-                    .get(&(measure.clone(), vf.calc_item.clone()))
-                    .or_else(|| {
-                        // Placed calc group: the wide metadata carries item
-                        // attribution; adopt the measure's format from its
-                        // first applied item column.
-                        reshape_items.first().and_then(|it| {
-                            format_by_key.get(&(measure.clone(), it.clone()))
-                        })
-                    });
-                if let Some(fmt) = fmt {
-                    vf.number_format = Some(fmt.clone());
-                }
-            }
-        }
+        adopt_model_number_formats(definition, &result_columns, &reshape_items);
     }
 
     // Filter fields — same as row/column fields, map BiFieldRef to PivotFilter,
@@ -10488,6 +10668,7 @@ pub(crate) async fn update_bi_pivot_fields_unrecorded(
     let destination = definition.destination;
     let auto_fit = definition.layout.auto_fit_column_widths;
     let framed = definition.canvas_frame.is_some();
+    let style = definition.style.clone();
     let dest_ref = PivotDestSheet::of(definition);
     drop(pivot_tables);
     let dest_sheet_idx = dest_ref.resolve(&state);
@@ -10497,7 +10678,7 @@ pub(crate) async fn update_bi_pivot_fields_unrecorded(
     let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     response.overwritten_cell_count = saved_cells.len() as u32;
     let old_region = get_pivot_region(&state, pivot_id);
-    update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view, framed)?;
+    update_pivot_in_grid(&state, &effect, pivot_id, dest_sheet_idx, destination, &view, framed, style.as_ref())?;
     // Carried into the undo step below, like the non-BI path: Excel undoes a
     // pivot change and the column resize it caused as ONE press.
     let prev_col_widths = if auto_fit {
@@ -10770,6 +10951,7 @@ pub(crate) fn show_report_filter_pages_core(
                 &view,
                 (0, 0),
                 &mut styles,
+                &crate::pivot::grid_theme::PivotGridTheme::for_choice(filtered_def.style.as_ref()),
             );
         }
 
@@ -11819,6 +12001,7 @@ mod blank_member_tests {
                 table: "Sales".to_string(),
                 source_column: "amount".to_string(),
                 aggregation: "sum".to_string(),
+                format_string: None,
             }],
             hierarchies: vec![],
             calculation_groups: vec![],
@@ -12083,7 +12266,7 @@ mod blank_member_tests {
                     hidden_items: None,
                 }],
                 column_fields: vec![],
-                value_fields: vec![BiValueFieldRef { measure_name: "Revenue".into(), custom_name: None }],
+                value_fields: vec![BiValueFieldRef { measure_name: "Revenue".into(), custom_name: None, number_format: None }],
                 filter_fields: vec![],
                 slicer_fields: None,
                 row_hierarchies: vec![],
@@ -12411,5 +12594,306 @@ mod blank_member_tests {
         assert_eq!(listing(Some(model_slicer.id), Some("Sales.region")), BlankListing::FoldsEmpty);
         assert_eq!(listing(Some(new_id()), None), BlankListing::Separate, "an unknown slicer: the key decides");
         assert_eq!(listing(Some(new_id()), Some("Sales.region")), BlankListing::FoldsEmpty);
+    }
+    // ---- BUG-0478: a BI pivot keeps the user's value number format ----
+
+    /// The `formattedValue` of every DATA cell, as the frontend receives it
+    /// (`pivot_cell_to_data` is the conversion `view_to_response` applies).
+    fn data_cell_texts(fx: &Fx, pivot: identity::EntityId) -> Vec<String> {
+        let mut tables = fx.pivots.pivot_tables.write(&test_seed_effect()).unwrap();
+        let (def, cache) = tables.get_mut(&pivot).unwrap();
+        let def = def.clone();
+        let view = crate::pivot::operations::safe_calculate_pivot(&def, cache);
+        let mut texts: Vec<String> = view
+            .cells
+            .iter()
+            .flatten()
+            .filter(|c| c.cell_type == pivot_engine::PivotCellType::Data)
+            .map(|c| crate::pivot::utils::pivot_cell_to_data(c).formatted_value)
+            .collect();
+        texts.sort();
+        texts
+    }
+
+    fn set_format(fx: &Fx, pivot: identity::EntityId, format: &str) {
+        set_pivot_number_format_core(
+            &fx.state,
+            &fx.file,
+            &fx.pivots,
+            PivotRecalcStates { pane: &fx.pane, ribbon: &fx.filters, user_files: &fx.files },
+            SetNumberFormatRequest { pivot_id: pivot, value_field_index: 0, number_format: format.to_string() },
+        )
+        .expect("set the value field's number format");
+    }
+
+    /// The first value field's (format, from-the-model flag).
+    fn value_format(fx: &Fx, pivot: identity::EntityId) -> (Option<String>, bool) {
+        let tables = fx.pivots.pivot_tables.read().unwrap();
+        let vf = &tables[&pivot].0.value_fields[0];
+        (vf.number_format.clone(), vf.number_format_from_model)
+    }
+
+    /// A laid-out BI pivot (Region x [Revenue]) whose Revenue carries the
+    /// user's "#,##0.00": East 10 reads "10.00".
+    async fn formatted_bi_pivot(fx: &Fx) -> identity::EntityId {
+        let pivot = fx.add_bi_pivot().await;
+        fx.lay_out_region(pivot).await;
+        assert!(
+            data_cell_texts(fx, pivot).iter().all(|t| t.is_empty()),
+            "fixture: the model gives Revenue no format, so the cells start unformatted"
+        );
+        set_format(fx, pivot, "#,##0.00");
+        assert_eq!(value_format(fx, pivot), (Some("#,##0.00".to_string()), false), "the user's format");
+        assert!(data_cell_texts(fx, pivot).contains(&"10.00".to_string()), "{:?}", data_cell_texts(fx, pivot));
+        pivot
+    }
+
+    /// REGRESSION (review R1-5): a refresh re-queries from the reconstruction
+    /// `bi_request_from_definition` builds, and that request dropped the
+    /// format -- every refresh reset the user's decimals.
+    #[tokio::test]
+    async fn a_bi_pivots_value_format_survives_a_refresh() {
+        let fx = Fx::new(sales_with_null_and_empty()).await;
+        let pivot = formatted_bi_pivot(&fx).await;
+
+        refresh_bi_pivot_core(&fx.ctx(), pivot).await.expect("refresh");
+
+        assert_eq!(value_format(&fx, pivot), (Some("#,##0.00".to_string()), false), "the override after a refresh");
+        let texts = data_cell_texts(&fx, pivot);
+        assert!(texts.contains(&"10.00".to_string()), "East keeps two decimals after a refresh: {texts:?}");
+        assert!(texts.iter().all(|t| t.ends_with(".00")), "every value cell keeps the format: {texts:?}");
+    }
+
+    /// REGRESSION (review R1-5): a model-slicer filter on a column the pivot
+    /// does not carry extends it through `ensure_bi_field`, which re-queries
+    /// from the same reconstruction -- and dropped the format the same way.
+    #[tokio::test]
+    async fn a_bi_pivots_value_format_survives_a_model_slicer_filter_that_extends_it() {
+        let fx = Fx::new(sales_with_null_and_empty()).await;
+        let pivot = formatted_bi_pivot(&fx).await;
+        let carried = |fx: &Fx| {
+            let tables = fx.pivots.pivot_tables.read().unwrap();
+            tables[&pivot].1.fields.iter().any(|f| f.model_key.as_deref() == Some("Sales.year"))
+        };
+        assert!(!carried(&fx), "fixture: the pivot does not carry Sales.year yet");
+
+        let request = ApplyPivotFilterRequest {
+            pivot_id: pivot,
+            field_index: None,
+            bi_field_key: Some("Sales.year".to_string()),
+            filters: PivotFilters {
+                manual_filter: Some(PivotManualFilter { selected_items: strings(&["Y1"]) }),
+                ..Default::default()
+            },
+            filter_level: 1,
+            slicer_id: None,
+            reconcile: false,
+        };
+        apply_pivot_filter_core(&fx.ctx(), request).await.expect("apply the model-slicer filter");
+
+        assert!(carried(&fx), "the filter took the ensure route (the pivot was re-queried with Sales.year)");
+        assert_eq!(fx.grand_total(pivot), Some(30.0), "Y1 keeps East 10 + West 20");
+        assert_eq!(value_format(&fx, pivot), (Some("#,##0.00".to_string()), false), "the override after the ensure");
+        let texts = data_cell_texts(&fx, pivot);
+        assert!(texts.contains(&"10.00".to_string()), "East keeps two decimals: {texts:?}");
+        assert!(texts.iter().all(|t| t.ends_with(".00")), "every value cell keeps the format: {texts:?}");
+    }
+
+    /// `""` CLEARS the override (it stored `Some("")`), and the next query is
+    /// free to adopt the model's format again.
+    #[tokio::test]
+    async fn an_empty_format_clears_the_override() {
+        let fx = Fx::new(sales_with_null_and_empty()).await;
+        let pivot = formatted_bi_pivot(&fx).await;
+
+        set_format(&fx, pivot, "");
+
+        assert_eq!(value_format(&fx, pivot), (None, false));
+        assert!(data_cell_texts(&fx, pivot).iter().all(|t| t.is_empty()), "back to unformatted");
+        refresh_bi_pivot_core(&fx.ctx(), pivot).await.expect("refresh");
+        assert_eq!(value_format(&fx, pivot), (None, false), "nothing to adopt: the model gives no format");
+    }
+}
+
+/// BUG-0478: where a BI value field's number format comes from. A user
+/// OVERRIDE travels in the request and is never overwritten; a format ADOPTED
+/// from the model is flagged, left out of every request, and re-adopted by
+/// every query (so a changed model format arrives on the next refresh).
+#[cfg(test)]
+mod number_format_origin_tests {
+    use super::*;
+    use crate::pivot::types::{BiPivotMetadata, BiValueFieldRef};
+    use std::collections::{HashMap, HashSet};
+
+    fn vref(name: &str, format: Option<&str>) -> BiValueFieldRef {
+        BiValueFieldRef { measure_name: name.to_string(), custom_name: None, number_format: format.map(str::to_string) }
+    }
+
+    fn measure_col(measure: &str, item: Option<&str>, format: Option<&str>) -> bi_engine::ResultColumn {
+        let mut c = bi_engine::ResultColumn::bare(measure, bi_engine::ResultColumnKind::Measure);
+        c.measure = Some(measure.to_string());
+        c.calculation_item = item.map(str::to_string);
+        c.format_string = format.map(str::to_string);
+        c
+    }
+
+    fn origin(def: &PivotDefinition) -> Vec<(Option<String>, bool)> {
+        def.value_fields.iter().map(|v| (v.number_format.clone(), v.number_format_from_model)).collect()
+    }
+
+    fn some(s: &str) -> Option<String> {
+        Some(s.to_string())
+    }
+
+    fn definition_from(refs: &[BiValueFieldRef]) -> PivotDefinition {
+        let mut def = PivotDefinition::new(identity::EntityId::ZERO, (0, 0), (0, 0));
+        def.value_fields = expand_bi_value_fields(refs, &[], 0, &HashMap::new());
+        def
+    }
+
+    #[test]
+    fn expand_copies_the_override_in_both_branches_and_never_flags_it_as_the_models() {
+        let refs = vec![vref("Revenue", Some("#,##0.00")), vref("Cost", None)];
+
+        let plain = expand_bi_value_fields(&refs, &[], 0, &HashMap::new());
+        assert_eq!(
+            plain.iter().map(|v| (v.number_format.clone(), v.number_format_from_model)).collect::<Vec<_>>(),
+            vec![(some("#,##0.00"), false), (None, false)]
+        );
+
+        let items = vec!["Current".to_string(), "YTD".to_string()];
+        let expanded = expand_bi_value_fields(&refs, &items, 0, &HashMap::new());
+        assert_eq!(expanded.len(), 4);
+        assert_eq!(
+            expanded.iter().map(|v| (v.number_format.clone(), v.number_format_from_model)).collect::<Vec<_>>(),
+            vec![(some("#,##0.00"), false), (some("#,##0.00"), false), (None, false), (None, false)],
+            "every calculation item of an overridden measure carries the override"
+        );
+    }
+
+    #[test]
+    fn adoption_fills_an_unformatted_field_and_flags_it() {
+        let mut def = definition_from(&[vref("Revenue", None)]);
+        adopt_model_number_formats(&mut def, &[measure_col("Revenue", None, Some("$#,##0"))], &[]);
+        assert_eq!(origin(&def), vec![(some("$#,##0"), true)]);
+    }
+
+    #[test]
+    fn adoption_leaves_a_user_override_alone() {
+        let mut def = definition_from(&[vref("Revenue", Some("0.0"))]);
+        adopt_model_number_formats(&mut def, &[measure_col("Revenue", None, Some("$#,##0"))], &[]);
+        assert_eq!(origin(&def), vec![(some("0.0"), false)], "the model never overwrites the user's format");
+    }
+
+    #[test]
+    fn adoption_re_adopts_a_changed_model_format_for_an_adopted_field() {
+        let mut def = definition_from(&[vref("Revenue", None)]);
+        adopt_model_number_formats(&mut def, &[measure_col("Revenue", None, Some("$#,##0"))], &[]);
+        adopt_model_number_formats(&mut def, &[measure_col("Revenue", None, Some("#,##0.0 kr"))], &[]);
+        assert_eq!(origin(&def), vec![(some("#,##0.0 kr"), true)]);
+    }
+
+    #[test]
+    fn adoption_drops_a_stale_adopted_format_the_model_no_longer_defines() {
+        let mut def = definition_from(&[vref("Revenue", None), vref("Cost", Some("0%"))]);
+        adopt_model_number_formats(
+            &mut def,
+            &[measure_col("Revenue", None, Some("$#,##0")), measure_col("Cost", None, Some("$#,##0"))],
+            &[],
+        );
+        assert_eq!(origin(&def), vec![(some("$#,##0"), true), (some("0%"), false)]);
+        // The model stops formatting either measure.
+        adopt_model_number_formats(&mut def, &[measure_col("Revenue", None, None), measure_col("Cost", None, None)], &[]);
+        assert_eq!(origin(&def), vec![(None, false), (some("0%"), false)], "only the ADOPTED format goes");
+    }
+
+    #[test]
+    fn a_placed_calculation_group_adopts_from_its_first_item_column() {
+        let mut def = definition_from(&[vref("Revenue", None)]);
+        let items = vec![Some("YTD".to_string()), Some("PY".to_string())];
+        adopt_model_number_formats(
+            &mut def,
+            &[measure_col("Revenue", Some("YTD"), Some("0.00")), measure_col("Revenue", Some("PY"), Some("0"))],
+            &items,
+        );
+        assert_eq!(origin(&def), vec![(some("0.00"), true)]);
+    }
+
+    fn meta() -> BiPivotMetadata {
+        BiPivotMetadata {
+            connection_id: identity::EntityId::ZERO,
+            data_source_id: None,
+            model_tables: vec![],
+            measures: vec![],
+            hierarchies: vec![],
+            calculation_groups: vec![],
+            data_as_of: None,
+            last_query: None,
+            lookup_columns: HashSet::new(),
+            drill_through: None,
+            perspectives: vec![],
+            selected_perspective: None,
+            cultures: vec![],
+        }
+    }
+
+    #[test]
+    fn the_rebuilt_request_carries_an_override_and_drops_an_adopted_format() {
+        let mut def = definition_from(&[vref("Revenue", Some("0.0")), vref("Cost", None), vref("Units", None)]);
+        adopt_model_number_formats(&mut def, &[measure_col("Cost", None, Some("$#,##0"))], &[]);
+        assert_eq!(origin(&def), vec![(some("0.0"), false), (some("$#,##0"), true), (None, false)], "fixture");
+
+        let cache = PivotCache::new(def.id, 0);
+        let request = bi_request_from_definition(def.id, &def, &cache, &meta());
+        let formats: Vec<Option<String>> = request.value_fields.iter().map(|v| v.number_format.clone()).collect();
+        assert_eq!(formats, vec![some("0.0"), None, None], "a request carries only the user's overrides");
+
+        // The round trip a refresh makes: the override survives, the model
+        // format is re-adopted (here: CHANGED in the model since).
+        let mut rebuilt = definition_from(&request.value_fields);
+        adopt_model_number_formats(
+            &mut rebuilt,
+            &[measure_col("Revenue", None, Some("$#,##0")), measure_col("Cost", None, Some("#,##0.0 kr"))],
+            &[],
+        );
+        assert_eq!(origin(&rebuilt), vec![(some("0.0"), false), (some("#,##0.0 kr"), true), (None, false)]);
+    }
+
+    #[test]
+    fn the_editor_reads_which_format_came_from_the_model() {
+        let mut def = definition_from(&[vref("Revenue", Some("0.0")), vref("Cost", None)]);
+        adopt_model_number_formats(&mut def, &[measure_col("Cost", None, Some("$#,##0"))], &[]);
+        let cache = PivotCache::new(def.id, 4);
+        let zone = value_zone_fields(&def, &cache);
+        assert_eq!(
+            zone.iter().map(|z| (z.number_format.clone(), z.number_format_from_model)).collect::<Vec<_>>(),
+            vec![(some("0.0"), false), (some("$#,##0"), true)]
+        );
+        let json = serde_json::to_value(&zone).unwrap();
+        assert_eq!(json[1]["numberFormatFromModel"], serde_json::Value::Bool(true), "{json}");
+        assert!(json[0].get("numberFormatFromModel").is_none(), "false is not written: {json}");
+    }
+
+    /// The model's measure format reaches the field list's metadata (what
+    /// "Use source format" shows as its placeholder).
+    #[test]
+    fn measure_metadata_carries_the_models_format_string() {
+        let model = bi_engine::DataModel::builder()
+            .add_table(
+                bi_engine::Table::new("Sales", vec![bi_engine::Column::new("amount", bi_engine::DataType::Float64)])
+                    .unwrap(),
+            )
+            .add_measure(bi_engine::sum_measure("Revenue", "Sales", "amount").with_format_string("#,##0.00"))
+            .add_measure(bi_engine::sum_measure("Plain", "Sales", "amount"))
+            .build()
+            .unwrap();
+        let engine = bi_engine::Engine::new(model);
+        let (_tables, measures, ..) = extract_bi_model_metadata(&engine);
+        let by_name: HashMap<&str, Option<&str>> =
+            measures.iter().map(|m| (m.name.as_str(), m.format_string.as_deref())).collect();
+        assert_eq!(by_name.get("Revenue"), Some(&Some("#,##0.00")));
+        assert_eq!(by_name.get("Plain"), Some(&None));
+        let json = serde_json::to_value(&measures).unwrap();
+        assert!(json.as_array().unwrap().iter().any(|m| m["formatString"] == "#,##0.00"), "{json}");
     }
 }

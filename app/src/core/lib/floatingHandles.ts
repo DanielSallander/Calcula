@@ -47,13 +47,14 @@
 // from, so it is handed in through `registerGridReferencePickProbe` by the
 // resize handlers (the module that owns the press and already depends on it)
 // rather than imported here -- an import would close a cycle through the
-// renderer.
+// renderer. The probe and the predicate live in core/lib/referencePickState.ts
+// (one predicate for this module, Core's pick press and @api/editing).
 
 import { getGridRegions, floatingHitOrder, type GridRegion } from "../../api/gridOverlays";
 import { isObjectInSelection } from "../../api/objectSelection";
 import { getLayoutSurface, isRegionLocked, type DraggedEdges } from "./layoutSurface";
 import { getGridStateSnapshot } from "../state/GridContext";
-import { getExternalFormulaTarget } from "./formulaEditTarget";
+import { floatingReferencePickActive } from "./referencePickState";
 import {
   FLOATING_HANDLE_HIT_HALF,
   FLOATING_HANDLE_MIDPOINT_MIN_EDGE,
@@ -230,34 +231,11 @@ export function floatingHandlesOf(
 // When handles are live
 // ============================================================================
 
-let gridReferencePickProbe: (() => boolean) | null = null;
-
-/**
- * Hand this module the GRID editor's "a formula is picking a reference" probe
- * (see the header: an import would close a cycle through the renderer). Last
- * registration wins; the cleanup removes only what is still this probe.
- */
-export function registerGridReferencePickProbe(probe: () => boolean): () => void {
-  gridReferencePickProbe = probe;
-  return () => {
-    if (gridReferencePickProbe === probe) gridReferencePickProbe = null;
-  };
-}
-
-/**
- * Whether a formula is PICKING a reference right now -- in the grid's own
- * editor, or in an extension's external editor (a floating grid's cell editor,
- * @api/editing). A press on a floating object then belongs to the pick.
- */
-export function floatingReferencePickActive(): boolean {
-  let grid = false;
-  try {
-    grid = gridReferencePickProbe?.() === true;
-  } catch (err) {
-    console.error("[floatingHandles] reference-pick probe threw:", err);
-  }
-  return grid || getExternalFormulaTarget()?.isExpectingReference() === true;
-}
+// The probe and the predicate live in the leaf referencePickState.ts (D-PICK):
+// @api/gridOverlays and @api/editing re-export them from there, and a
+// re-export from THIS module would close a cycle (it imports gridOverlays).
+// Re-exported here unchanged, so every existing importer keeps one binding.
+export { registerGridReferencePickProbe, floatingReferencePickActive } from "./referencePickState";
 
 function activeLayoutSurface() {
   return getLayoutSurface(getGridStateSnapshot()?.sheetContext.activeSheetIndex ?? 0);

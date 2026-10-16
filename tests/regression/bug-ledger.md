@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 452 | Open: 50 | Triaged: 0 | Fixed: 402 | Other: 0
+Total: 501 | Open: 61 | Triaged: 0 | Fixed: 440 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -4741,7 +4741,7 @@ THE CREATE CHART DIALOG'S SERIES LIST NAMES SERIES BY COLUMN LETTER (B, C, D) WH
 
 **Repro:** Insert a column chart over a range with a header row; open the dialog's series list.
 
-## BUG-0449 `[open]`
+## BUG-0449 `[fixed]`
 
 **Found:** 2026-10-08 (manual)
 **Oracle:** nav-button-subscriber-renamed-page
@@ -4749,6 +4749,8 @@ THE CREATE CHART DIALOG'S SERIES LIST NAMES SERIES BY COLUMN LETTER (B, C, D) WH
 A PUBLISHED NAVIGATE BUTTON FAILS ON A SUBSCRIBER WHO ALREADY HAD A SHEET OF THE TARGET PAGE'S NAME: pull remaps the sheet ids, the conflicting page is renamed, and the name fallback finds nothing (a toast says so).
 
 **Repro:** Publish a canvas with a Page Navigator to 'Sales'; subscribe in a workbook that already has a 'Sales' sheet; press the button.
+**Fix:** fixed
+  Files: app/src-tauri/src/controls.rs, app/src-tauri/src/calp_commands.rs, core/calp/src/sheet_renames.rs, core/calcula-format/src/page_navigator.rs
 
 ## BUG-0450 `[open]`
 
@@ -4776,3 +4778,453 @@ check:formula-patterns GOES STALE EVERY DAY AFTER A REGENERATION: the generated 
 THE VERIFIED FORMULA-PATTERN COUNT IS FLAKY: RANDBETWEEN#1.B3 'settles' in about 1 run in 6 (583, 584, 583 ...), ships as {number: 1}, and --check then reports stale against an artifact emitted a minute earlier.
 
 **Repro:** Run node scripts/gen-formula-patterns.mjs --emit six times.
+
+## BUG-0453 `[fixed]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** floating-object-pick-selects
+
+A PRESS ON A FLOATING OBJECT DURING A REFERENCE PICK SELECTS THE OBJECT AND DESELECTS THE EDITED FLOATING GRID (owner F3): typing '=' in a floating grid cell and clicking a canvas pivot cell (or any other object) selects the pivot instead of inserting a reference; Core's press path never asks whether an editor expects a reference.
+
+**Repro:** Canvas page with a floating grid and a pivot box. Double-click a floating-grid cell, type '=', click a pivot value cell: the pivot is selected and the floating grid's edit is lost; no reference is inserted.
+
+## BUG-0454 `[fixed]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** pivot-menu-item-label-formatted-value
+
+PIVOT MENU Expand/Collapse/Keep Only/Hide NAME THE ITEM BY formattedValue, WHICH IS EMPTY FOR TEXT HEADERS AND FOR UNFORMATTED NUMERIC HEADERS: Rust fills formatted_value only for a Number with a non-empty number format, so the menu actions return early (or send an empty item name) on every text row label and on numeric headers such as year 2013.
+
+**Repro:** Pivot with a text row field: right-click a row header > Expand/Collapse or Filter > Keep Only Selected Items: nothing happens. Same on a numeric column header (year) without a number format.
+
+## BUG-0455 `[fixed]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** pivot-menu-reader-ignores-window
+
+PIVOT MENU CELL READERS IGNORE WINDOWING: past view row 200 of a >500-row (windowed) pivot every header item does nothing, because the readers index view.rows[viewRow] directly, without subtracting windowStartRow, and the index falls outside (or onto the wrong row of) the cached window.
+
+**Repro:** Pivot with more than 500 rows (e.g. customer full names). Scroll past row 200, right-click a row header > Filter > Keep Only Selected Items: nothing happens, or a different item is acted on.
+
+## BUG-0456 `[fixed]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** pivot-menu-async-failure-console-only
+
+ASYNC PIVOT MENU ACTIONS REPORT FAILURE TO THE CONSOLE ONLY (the BUG-0096 rule: no silent failures): a refused or failed Expand/Collapse, filter, sort, drill or field action from the pivot context menu (grid) or the canvas pivot box menu leaves the user with no message.
+
+**Repro:** Make any pivot menu action fail (e.g. backend refusal): the menu closes and nothing is shown; the error is only in the devtools console.
+
+## BUG-0457 `[fixed]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** pivot-dblclick-toggle-formatted-value
+
+A DOUBLE-CLICK TOGGLE ON A PIVOT ROW HEADER SENDS formattedValue (empty for text labels) AND NO groupPath, and takes the field index from indentLevel || viewCol, so the toggle names no item (or the wrong one) and its failure is logged to the console only.
+
+**Repro:** Pivot with two row fields: double-click an expandable text row header: it does not collapse (or a different group toggles).
+
+## BUG-0458 `[fixed]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** canvas-pivot-rightclick-no-select
+
+A RIGHT-CLICK ON AN UNSELECTED CANVAS PIVOT BOX OPENS ITS MENU WITHOUT SELECTING IT, unlike every other object family, so the menu acts on a box the selection (and the pane / formula bar) does not show.
+
+**Repro:** Canvas page with a pivot box, nothing selected. Right-click the box: its menu opens, the box stays unselected.
+
+## BUG-0459 `[open]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** pivot-sort-by-value-unsupported
+
+SORT BY VALUE ON PIVOT VALUE CELLS IS UNSUPPORTED: the sort request carries values_hierarchy (pivot/types.rs:801) but no code reads it, so a pivot can only be sorted by its labels. The value-cell menu shows Sort disabled with a reason until the backend implements it.
+
+**Repro:** Pivot value cell > Sort: shown disabled ('Sorting by values is not available yet.'). Sending a sort request with valuesHierarchy set sorts by label.
+
+## BUG-0460 `[fixed]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** canvas-pivot-cells-not-selectable
+
+CANVAS PIVOT CELLS CANNOT BE SELECTED OR COPIED (owner F4): any press on a canvas pivot box selects/moves the whole box, so a cell or range cannot be selected, copied, drilled from the selection or shown in the formula bar / Name Box / status bar, and the value-cell context menu is missing.
+
+**Repro:** Canvas page with a pivot box. Click a value cell, Shift+click another, Ctrl+C: the box is selected (or moved by a drag), no cell selection exists, nothing is copied.
+
+## BUG-0461 `[fixed]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** report-pages-malformed-read-unhandled
+
+@api/reportPages: a get_sheets answer that is not a sheet list (null) threw inside refreshReportPages AFTER its try block, so the fire-and-forget refresh that startReportPages queues became an UNHANDLED REJECTION instead of the documented 'a failed read keeps the previous snapshot'. Five Controls harness suites (buttonRunOnRelease, buttonGesturePass, resizeKeepsRegion, inCellButtonCellMenu, insertWithObjectSelected) reported it as vitest 'Unhandled Errors' once Controls' activate() started the page list (WP-B S6), which fails the run.
+
+**Repro:** Activate Controls in a unit harness whose backend answers get_sheets with null: vitest reports 'TypeError: Cannot read properties of null (reading 'sheets')' at reportPagesFrom <- refreshReportPages as an unhandled error.
+**Fix:** fixed
+  Files: app/src/api/reportPages.ts, app/src/api/__tests__/reportPages.test.ts
+
+## BUG-0462 `[fixed]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** sheet-visibility-change-not-announced
+
+HIDING A NON-ACTIVE SHEET, OR UNHIDING ANY SHEET, ANNOUNCED NOTHING ON THE EVENT BUS: Core's hideSheet / unhideSheet wrappers (app/src/core/lib/tauri-api.ts) only invoked the backend. Every reader of the sheet LIST that is not the tab strip itself -- a live page list, a page navigator -- kept showing a hidden page (or kept missing an unhidden one) until some unrelated sheet event happened.
+
+**Repro:** Three canvases A, B, C with A active; right-click B's tab > Hide. No MUTATION_REFRESH / SHEET_CHANGED is emitted, so any listener of the sheet list still lists B.
+**Fix:** fixed
+  Files: app/src/core/lib/tauri-api.ts, app/src/core/lib/__tests__/lifecycleEmitters.test.ts
+
+## BUG-0463 `[fixed]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** nav-button-current-wash-lost-on-rename
+
+A NAVIGATION BUTTON LOST ITS CURRENT-PAGE WASH AFTER ITS PAGE WAS RENAMED: isCurrentPageButton (app/extensions/Controls/Button/actionGlyph.ts) compared the button's stored actionTargetName with the active sheet's NAME, so after a rename of the page on screen the button that opens it no longer painted pressed, although it still navigated correctly by its stable actionTarget id.
+
+**Repro:** On canvas A insert Buttons > Blank, set Action = Navigate to A (it paints the pressed 'current page' wash); rename A to 'A2'. The wash is gone until the action is re-chosen.
+**Fix:** fixed
+  Files: app/extensions/Controls/Button/actionGlyph.ts, app/extensions/Controls/Button/floatingRenderer.ts, app/extensions/Controls/__tests__/buttonActionPaint.test.ts
+
+## BUG-0464 `[open]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** cli-hide-active-sheet-frontend-not-switched
+
+THE COMMAND LINE CAN HIDE THE ACTIVE SHEET WITHOUT THE FRONTEND SWITCHING: `set sheet <active> visibility=hidden|veryhidden` (app/extensions/CommandLine/cli/appWriters.ts, case "setSheet") calls hideSheet and ignores its result. The backend's hide_sheet moves its active sheet to a neighbour (BUG-0046), but nothing applies that switch to the grid or announces it (Core's wrapper deliberately stays silent when the active sheet moved; the caller must apply the switch), so the grid keeps painting the now-hidden sheet while the backend's active sheet is another one -- the BUG-0046 shape (edits and per-sheet caches keyed on the backend's active sheet disagree with what is on screen). The script host does NOT have this gap: api.setSheetVisibility applies the switch through announceSheetsChanged (app/src/api/scriptHost/host.ts). The command line's own qualified references (ensureSheetActive -> setActiveSheet) move the backend's active sheet the same silent way, which may be the same design gap.
+
+**Repro:** From code, not reproduced live: two visible sheets, Sheet1 active; in the Command Line run `set sheet Sheet1 visibility=hidden`. Expected: the grid switches to Sheet2 (as the tab menu's Hide does). Predicted: the tab disappears from the strip only at the next sheet-list read, and the grid stays on Sheet1's cells while the backend's active sheet is Sheet2.
+
+## BUG-0465 `[fixed]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** pivot-editor-calculated-order-lost
+
+THE PIVOT EDITOR MOVES AN INTERLEAVED CALCULATED FIELD TO THE END ON ITS FIRST EDIT: usePivotEditorState seeds its Values zone by APPENDING the pivot's calculated fields after the value fields (mergedInitialValues), ignoring definition.value_column_order, and every request rebuilds the order from the zone's positions -- so a pivot whose order is [Value 0, Calculated 0, Value 1] is sent back as [V0, V1, C0] by the first unrelated edit (a layout toggle, a field added), and update_pivot_fields REPLACES the order. The Design-tab DSL apply (setAllZones) appended the same way, so a DSL that interleaved a calculated column lost its place too.
+
+**Repro:** Range pivot with values Sum of Sales, Sum of Units and a calculated field placed between them (value_column_order [V0, C0, V1]). Open the field list and toggle any layout option: the calculated column jumps to the right end. Unit capture (WP-A S10): the hook's buildUpdateRequest for that seed returned valueColumnOrder [value 0, value 1, calculated 0].
+
+## BUG-0466 `[fixed]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** pivot-editor-values-stale-after-menu-edit
+
+AN OPEN PIVOT FIELD LIST UNDOES A CONTEXT-MENU VALUE-FIELD EDIT ON ITS NEXT CHANGE: usePivotEditorState seeds rows/columns/values/filters once and re-seeds only when the pivotId changes (its view-update re-read syncs item filters only), and every editor request REPLACES the value fields. So with the field list open, Summarize Values By / Show Values As / Remove "<field>" from the value-cell menu (and the older header-menu Remove field) change the pivot, and the next unrelated edit in the open pane (a layout toggle, a field added) sends the pre-edit Values zone back, silently reverting it.
+
+**Repro:** Range pivot with Sum of Sales, field list open. Right-click a value cell > Summarize Values By > Count: the column shows Count of Sales. Now toggle any layout option (or tick another field) in the field list: the column is back to Sum of Sales.
+
+## BUG-0467 `[fixed]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** pivot-calculated-field-reference-lost-on-value-rename
+
+A CALCULATED FIELD GOES BLANK, SILENTLY, WHEN A VALUE FIELD IT NAMES IS RENAMED: changing a range pivot's value field aggregation renames an un-renamed field to Excel's default ("Sum of Units" -> "Max of Units", buildPivotFieldsRequest), and nothing rewrote calculated-field formulas that name the value field by its shown name ('Sum of Units' * 2, the spelling the engine supports and its own tests use). The reference then resolves to nothing and every cell of the calculated column is empty -- no error value, no toast. Every door that changes the name did it: the value-cell menu's Summarize Values By (WP-A), the Values chip's aggregation and Value Field Settings in the field list.
+
+**Repro:** Range pivot over Month/Units: Sum of Units, calculated field Double = 'Sum of Units' * 2, Count of Units. Right-click a Sum of Units cell > Summarize Values By > Max: the column becomes Max of Units and every Double cell is empty (live: J13 saw Jan..Apr null where 20/80/40/60 were).
+
+## BUG-0468 `[fixed]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** page-navigator-show-checkbox-snaps-back
+
+THE PAGE NAVIGATOR'S 'SHOW THIS PAGE'S BUTTON' BOX SNAPS BACK WHEN CLICKED: the Buttons section bound the checkbox to the STORED override alone (checked={!hidden}) and wrote through an async set_control_property, so a click left the box showing its old tick for the whole backend round trip -- the click looked refused -- and only the re-read after the write unchecked it. The pane's own boolean rows (PropertyRow's ToggleSwitch) show their new value locally; this box did not.
+
+**Repro:** Canvas with pages A, B and a Page Navigator; Design Mode, select the navigator, expand A's row in the Properties pane's Buttons section and click 'Show this page's button'. Live: Playwright's uncheck() reported 'Clicking the checkbox did not change its state' (the box was still checked right after the click).
+
+## BUG-0469 `[fixed]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** identity-uuid-parse-panics-on-non-ascii
+
+SheetId::parse / EntityId::parse PANIC ON A 36-BYTE NON-ASCII STRING, and accept '+' inside a hex pair. core/identity/src/types.rs parse_uuid_str checks s.len() == 36 in BYTES, filters the dashes into a String, checks THAT is 32 bytes, then slices it by byte index (&bytes_str[i*2..i*2+2]) before validating anything else: a multi-byte character straddling an even byte offset makes the slice panic ('byte index 2 is not a char boundary'). u8::from_str_radix also accepts a leading '+', so '+0000000-0000-0000-0000-000000000000' parses as a valid id. Both parsers are fed renderer-supplied strings: object_bindings/object_json.rs:291 parses ObjectBindingRef.id with EntityId::parse (the object_bindings command, reachable from scripts' bindProperty and the MCP tools once S9/S10 land), json_view.rs parses object ids from the JSON view, calp_commands.rs parses sheet ids, and catalog.rs's page-key wildcard (S8d) will parse a binding PATH segment. A panic inside a Tauri command handler is not a refusal sentence.
+
+**Repro:** Scratch crate depending on core/identity: let s = format!("a\u{e9}{}-{}-{}-{}-{}", "0".repeat(8), "0".repeat(5), "0".repeat(5), "0".repeat(5), "0".repeat(6)); (36 bytes, 35 chars, four dashes) -> SheetId::parse(&s) panics at core/identity/src/types.rs:157:50 'byte index 2 is not a char boundary; it is inside 'e-acute' (bytes 1..3)'. SheetId::parse("+0000000-0000-0000-0000-000000000000").is_some() == true. Run 2026-10-15 under setup-rust-env.ps1.
+**Fix:** fixed
+  Files: core/identity/src/types.rs (parse_uuid_str refuses a non-ASCII string up front and any non-hex-digit character before slicing; doc comment names the defect)
+
+## BUG-0470 `[open]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** sheet-repair-uppercases-untouched-sheet-refs-in-rule-formulas
+
+A sheet RENAME or DELETE repair of a RULE formula re-spells every OTHER sheet reference in the formula in UPPER CASE. app/src-tauri/src/sheets.rs rewrite_rule_formulas runs every conditional-format and custom-validation formula through calp::sheet_renames::SheetRenames::rename_formula (rename) or crate::repair_formula_text_on_delete_at (delete); both re-parse the WHOLE formula and re-render it, and the engine lexer upper-cases a BARE sheet name (core/parser/src/lexer.rs), so an untouched `Data!A1` beside the repaired reference comes back as `DATA!A1`: deleting sheet Inputs turns the CF rule `=Data!A1&Inputs!B1` into `=DATA!A1&#REF!` (measured through the shared closure), and a rename re-renders through the same parse, so `=Data!A1+Other!B1` renamed Data->Facts is expected to read `=Facts!A1+OTHER!B1` (inferred, not measured). Evaluation is unaffected (sheet lookup is case-insensitive), but the text the user sees in Conditional Formatting / Data Validation changes spelling for a sheet they never touched. Object property BINDINGS go through the same rewriters and are respelled back to the workbook's case by object_bindings::formula::respell_sheet_case (WP-D S5b); the CF/DV arms are not.
+
+**Repro:** Unit tier (app crate): create_app_state, sheets Data/Inputs/Report (add_sheet_inner), store a binding or a CF expression rule `=Data!A1&Inputs!B1`, delete_sheet_impl(Inputs). Without respell_sheet_case the binding read `=DATA!A1&#REF!` (cascade_tests.rs deleting_a_sheet_turns_binding_refs_into_ref_errors failed with exactly that before the respell was added). The CF rule takes the same closure and keeps `=DATA!A1&#REF!`.
+
+## BUG-0471 `[open]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** calp-dev-pull-drops-object-bindings
+
+A DEV subscription (calp_dev_subscribe / calp_dev_refresh) carries a source .cala's cell-anchored controls but not its object property BINDINGS. core/calp/src/dev_mode.rs pull_dev copies workbook.controls into DevPullResult and has no object_bindings field, and app/src-tauri/src/calp_commands.rs materialize_dev_controls lands only the controls. Since WP-D a control property that follows a formula is a bindings.json row beside the control's own literal (which the migration of an older file empties, and which a binding set later leaves at whatever it was), so a dev-pulled button whose caption follows =Data!A1 arrives showing that frozen or blank literal -- a value that LOOKS live and never moves -- and nothing says the binding was dropped. A source saved before v10 carries valueType:"formula" properties instead, and the dev path runs no migrate_legacy_formulas either, so those controls land with a formula-typed literal resolve_control_properties no longer evaluates. The real pull doors (subscribe, checkout, refresh) carry and land bindings as of S6 (object_bindings::carriage).
+
+**Repro:** Code reading, 2026-10-15: in a v10 workbook bind a button text property (Properties > fx, =Data!A1), save as src.cala. In another workbook dev-subscribe to src.cala. The button lands (materialize_dev_controls) with only its stored literal, and the binding store holds no row for its uid (DevPullResult has no bindings to land), so the caption paints the literal and never follows Data!A1.
+
+## BUG-0472 `[open]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** script-typings-shared-interface-reach-misattributed
+
+The generated script typings attribute EVERY member of a named sub-interface to the broker door it was first PROBED through. app/scripts/scriptTypings/probeShim.ts walks a NAMED_SUBTREES interface once (`walked` set), so ScriptRange -- reached first through api.table(id).range() (table-relative transport: api.objectGetState / api.objectSetState) -- records those brokers for all of its members, and generated/scriptSurfacePolicy.ts publishes `range.setValues` / `range.getValues` (a sheet script's OWN range, which goes through sheet.setRangeValues etc. at RESTRICTED tier) as `broker api.objectSetState, tier unlocked`. The spliced JSDoc in extensions/ScriptableObjects/objectContexts.d.ts (ScriptRange.setValues, about line 6119) tells an author hovering a restricted sheet script's `range(...).setValues` that it needs unlocked access. The policy table is data the app reads (scriptValidation/surface.ts, scriptPreview/objectHooks.ts, the editor), so the same misattribution reaches anything that reads `tier` from it.
+
+**Repro:** npm run gen:script-typings, then grep generated/scriptSurfacePolicy.ts for `chain: "range.setValues"` -> broker api.objectSetState, tier unlocked; compare contextShims.ts: a SheetContext range uses sheetRangeTransport (sheet.* methods, restricted).
+
+## BUG-0473 `[fixed]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** calp-inspector-chart-title-never-read
+
+THE APPLICATION INSPECTOR NEVER SHOWED A CHART TITLE: calp_inspector_overview read `title` from the TOP of each charts.json spec, but the frontend stores the ChartDefinition ENVELOPE ({chartId, name, sheetIndex, x, y, width, height, spec: ChartSpec}) and the title lives in the inner ChartSpec, so every chart of every package listed with no title. (WP-D S1's spec-as-JSON change would also have broken the string read on its own: `specJson` became an embedded `spec` object.)
+
+**Repro:** Publish an application with a titled chart; open it in the Application Inspector (calp_inspector_overview): the chart row's title is empty.
+
+## BUG-0474 `[fixed]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** media-sweep-ignores-bound-picture-sources
+
+THE SAVE-TIME MEDIA SWEEP CANNOT SEE A HANDLE THAT ONLY A BINDING PRODUCES. media::sweep_unreferenced_media keeps exactly the hashes media::referenced_media_hashes finds, and that walks controls, cell types, cell behaviours, pane controls and extension data with calcula_format::media::visit_media_refs, which matches a JSON string that IS `media:<sha256>`. Since WP-D a picture control's /properties/src can be BOUND (Media slot, object_bindings catalog), and the handle it resolves to lives in the formula's string literals (`=IF(Inputs!A1>0,"media:H1","media:H2")`) or in a cell the formula reads -- neither is scanned (workbook.object_bindings is not walked, and a formula string is not equal to a handle anyway). So a handle reached only through a binding is dropped from the archive at save; after reload the binding resolves to a hash state.media no longer holds, the Media coercion refuses it, and the picture keeps its literal: the second image is silently gone. The .calp publish walks the same collector, so a published application loses the same bytes.
+
+**Repro:** Code reading: insert two pictures (srcs media:H1, media:H2). Bind picture 1's src (Properties > fx) to =IF(Inputs!A1>0;"media:H1";"media:H2") with the real hashes. Delete picture 2. Save, close, reopen. Set Inputs!A1 to -1: picture 1 should show image 2 but keeps image 1 (H2 was swept from the archive; the binding's Media coercion has no bytes to admit).
+
+## BUG-0475 `[fixed]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** binding-clamp-ignores-all-sheets-wildcard
+
+THE RESTRICTED-TIER BINDING CLAMP DID NOT SEE THE ALL-SHEETS WILDCARD. object_bindings/formula.rs flag_walk recorded the sheets a binding formula reads by looking each qualified sheet name up in the sheet list; `'*'!A1` (Calcula's all-sheets wildcard, which object_bindings/eval.rs prepare_one expands to a 3D reference over EVERY sheet with crate::expand_wildcard_sheets) matched no name, so BindingFormulaAnalysis.sheets came back EMPTY. Both the TS executor gate (host.ts executeBindingSetAspect: offSheet = sheets.some(s => s !== active)) and the Rust defence-in-depth re-check (mod.rs restricted_clamp) decide from that list, so a RESTRICTED script could bindProperty('/properties/tooltip', '=TEXTJOIN(",",TRUE,\'*\'!A1:Z100)') on its own shape and read every sheet's cells back with getProperty -- the read escalation D §8 risk 2 exists to prevent. Second symptom: the dependency walk (eval.rs Deps::sheets_between) returned no sheet for `*`, so such a binding had no cell edges and stayed frozen at its first value.
+
+**Repro:** Unit: command_tests::restricted_script_source_is_clamped_in_rust with "=SUM('*'!A1)" from a Script{unlocked:false} source on a chart of the active sheet -- before the fix the Set was accepted (Ok(Binding{formula: "=SUM('*'!A1)"})); formula_tests::the_analysis_flags_say_what_the_formula_reads asserted sheets == [] for ='*'!A1.
+
+## BUG-0476 `[open]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** api-batch-write-skips-cube-prefetch
+
+A CUBE FORMULA WRITTEN THROUGH @api SHOWS #N/A UNTIL A FORCED CUBE RECALC: CellRange.setValue / setValues (app/src/api/range.ts) write through updateCellsBatch (and updateCellOnSheets for a background sheet), and neither runs the cube_prefetch that core/lib/tauri-api.ts updateCell runs for the grid editor, nor sets the sessionHasCube latch. So a script, an extension or the E2E harness that writes =CUBEVALUE(...) gets #N/A, and a later plain Calculate Now does not refresh it either (workbookHasCubeFormulas() is still false). Only recalcWithCube() (Model Editor save, Calculated Measures dialog) brings the value.
+
+**Repro:** Live, 2026-10-15, AdventureWorks model connected as 'AWprobe2': tauri-api updateCell(5,3,'=CUBEVALUE("AWprobe2";"[Revenue]")') -> D6 shows 114033992,77...; CellRange.fromCell(6,3,0).setValue(same) -> D7 shows #N/A; after recalcWithCube() both show 114033992,77. Probe: scratchpad pd-probe-cube2.cjs.
+
+## BUG-0477 `[open]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** pivot-properties-noop-dirties
+
+update_pivot_properties DIRTIES THE DOCUMENT ON A NO-OP: update_pivot_properties_core (app/src-tauri/src/pivot/commands.rs) reaches the store through pivot_write_definition_only, which mints DocumentEffect::mutates unconditionally before anything is compared. A request that changes nothing -- the same canvas frame saved again, the same container, the same PivotTable style, the same name -- records no undo step (WP-C S7 compares before/after for the undo record) but still sets is_modified, so the close prompt and AutoRecover fire for a document the user did not change. The DocumentEffect rule says to construct the effect inside the branch that actually changes something.
+
+**Repro:** Unit tier: insert a canvas pivot, update_pivot_properties_core(frame_request(id, f)), mark_saved, then the SAME request again -> undo depth unchanged but wb.file.is_dirty() is true. Same for a style-only request with the style the pivot already has (canvas_sheet_tests a_worksheet_pivot_style_is_one_undoable_step_and_rides_its_region checks only the undo depth for that no-op).
+
+## BUG-0478 `[fixed]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** bi-pivot-number-format-lost
+
+A BI PIVOT LOSES ITS VALUE FIELD NUMBER FORMAT: set_pivot_number_format writes ValueField.number_format, but every BI re-query rebuilds the value fields from BiValueFieldRef (expand_bi_value_fields creates fresh fields) and BiValueFieldRef had no format field, so the override was dropped on the next field-list edit, on every refresh (refresh_bi_pivot_unrecorded -> bi_request_from_definition) and on every model-slicer filter change that extends the pivot (ensure_bi_field's rebuild, same reconstruction). The query then re-adopted the MODEL's format over it. ValueField.number_format also could not tell an adopted model format from a user override, so an editor that sent every format back would freeze the model format as an override. Separately, set_pivot_number_format("") stored Some("") instead of clearing.
+
+**Repro:** Unit tier (app crate, blank_member_tests Fx harness over an in-memory model): lay out a BI pivot (Sales.region x [Revenue]), set_pivot_number_format(value 0, "#,##0.00") -> value cells read "10.00"; then refresh_bi_pivot_core -> the format is gone (cells read ""); same after apply_pivot_filter_core on Sales.year (a column the pivot does not carry, so ensure_bi_field rebuilds the request).
+
+## BUG-0479 `[fixed]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** view-show-pane-dead-for-chart-json
+
+View > Show "Chart JSON" DID NOTHING. The View menu's dynamic "Show <pane>" item does not open a pane itself: it clears the pane's manually-closed mark and dispatches window `taskpane:requestReopen` with the view id, and the pane's OWNER is expected to answer (Pivot answers for pivot-editor). The Charts extension registered the Chart JSON pane (contextKeys ["chart"], so the item was LISTED whenever a chart was selected) and the Format Chart pane, but nothing listened for `taskpane:requestReopen` with viewId "chart-json" or "chart-format" -- the item was offered and was a no-op.
+
+**Repro:** Select a chart, open the Chart JSON pane from the Chart Design band, close it with the pane header's X, then View > Show Chart JSON: the pane stays closed. Unit: dispatch new CustomEvent("taskpane:requestReopen", { detail: { viewId: "chart-json" } }) with the Charts extension active -> no openTaskPane call.
+
+## BUG-0480 `[open]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** dsl-serializer-aliased-bi-measure-renamed
+
+THE PIVOT-LAYOUT DSL SERIALIZER WRITES AN ALIASED BI MEASURE UNDER ITS ALIAS. `VALUES: [Revenue] AS "Sales"` compiles to the zone field {name: "[Revenue]", customName: "Sales"}, and `serialize` (app/extensions/_shared/dsl/pivotLayout/serializer.ts, serializeValueField) emits `[Sales] AS "Sales"`: it decides the field IS a BI measure from either name, then writes `[${customNameBare || fieldNameBare}]` -- the ALIAS wins over the measure's own name. The text it produces names a measure that does not exist, so it no longer compiles ("Unknown measure: [Sales]"), or -- worse -- silently names a DIFFERENT measure when the model happens to have one called like the alias. Every caller that regenerates DSL from zones carries it: the pivot editor's Design tab text after a visual edit of a BI pivot with an aliased value field.
+
+**Repro:** processDsl('ROWS: Geo.Region
+VALUES: [Revenue] AS "Sales"', {sourceFields: [], biModel}) with a model measure Revenue, then serialize(rows, columns, values, filters, layout, {biModel}) -> 'VALUES:  [Sales] AS "Sales"' (measured 2026-10-16 through Charts/lib/designQueryWells.serializeZones). Expected: '[Revenue] AS "Sales"'.
+
+## BUG-0481 `[open]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** chart-edit-dialog-redetects-series
+
+Edit Chart (the chart dialog opened with editChartId, e.g. the context menu's "Select Data...") THROWS AWAY the chart's stored series selection. The open effect seeds `series` from the stored spec, then seeds the range field; the range binding's key goes from "" to the stored range, and the series-detection effect (now useRangeSource's `detection` effect, identical to the old CreateChartDialog effect) runs autoDetectSeries and REPLACES the series and the category index with the detected ones. A chart whose reader had unchecked a series (or reordered the category) reopens with every detected series checked, and "Update Chart" writes them back -- the chart silently starts plotting series the reader removed.
+
+**Repro:** A range chart over Sheet1!A1:C5 plotting only column B (uncheck C in the Data tab, Update). Right-click > Select Data...: the series list shows B AND C checked; Update Chart plots both. Unit (proved 2026-10-16 with a scratch copy of components/__tests__/createChartDialogPreset.test.tsx): getChartById('c9') with spec.series = [Sales(1)] and autoDetectSeries answering [Sales(1), Cost(2)]; show({ editChartId: 'c9' }) -> the DataTab receives series [Sales, Cost] and autoDetectSeries was called once.
+
+## BUG-0482 `[fixed]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** pivot-design-layout-without-editor
+
+THE PIVOT DESIGN RIBBON'S LAYOUT CONTROLS DID NOTHING WHILE NO FIELD-LIST EDITOR WAS MOUNTED, AND SHOWED DEFAULTS. lib/pivotPanelStore.ts updateSharedLayout only emitted PIVOT_LAYOUT_CHANGED, and the only listener that SENDS a layout change is the mounted PivotEditor (usePivotEditorState). With the PivotTable Fields pane closed by hand (handleSelectionChange still registers the Design tab) -- and, after WP-C, for a canvas box whose object pane shows only Format -- Grand Totals, Report Layout, Values position, Repeat Labels and Empty Rows/Cols changed the checkbox and nothing else. The same path announced `layout: {}`, so the sections showed the DEFAULT values instead of the pivot's.
+
+**Repro:** Code reading, not seen live: select a cell of a worksheet pivot, close the PivotTable Fields pane with its X, untick Design > Grand Totals > Row Totals -- no update_pivot_fields is sent (no PivotEditor is mounted to answer PIVOT_LAYOUT_CHANGED), and the checkbox reads checked again on the next selection even when the pivot has row totals off.
+
+## BUG-0483 `[fixed]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** shape-stroke-width-zero-paints-one
+
+A SHAPE WHOSE strokeWidth IS "0" STILL PAINTED A 1 px OUTLINE. Controls/Shape/shapeRenderer.ts parsed the width as `parseFloat(strokeWidth) || 1`, so the falsy 0 fell back to 1: "no outline" could not be said through the width, and a recipe or script that wrote strokeWidth "0" got a visible border. A "none" fill also painted (the fill op ran for the no-paint sentinel).
+
+**Repro:** Insert a rectangle, set its strokeWidth property to "0" (Properties pane or shape.setProperty("strokeWidth", "0")): the outline stays, 1 px wide. Unit: render a shape with strokeWidth "0" and a stroke colour on a recording context -> one stroke op with lineWidth 1.
+
+## BUG-0484 `[fixed]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** taskpane-update-broadcasts-pivot-refresh
+
+EVERY TASK PANE'S onUpdate BROADCAST pivot:refresh. app/src/shell/TaskPane/TaskPaneContainer.tsx handleViewUpdate dispatched `window.dispatchEvent(new CustomEvent("pivot:refresh"))` for whichever view called its onUpdate prop -- the Shell carried a hard-coded Pivot business rule, and any non-pivot pane that announced an update made every mounted pivot editor re-read its pivot.
+
+**Repro:** Unit: render TaskPaneContainer with a non-pivot view, call the view's onUpdate prop, and listen on window for pivot:refresh -> it fires.
+
+## BUG-0485 `[fixed]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** properties-context-key-never-added
+
+THE "properties" TASK-PANE CONTEXT KEY WAS NEVER ADDED. The Controls extension registers the control-properties pane with contextKeys ["properties"], and View > Show lists a pane only while one of its context keys is active, but no code ever called addTaskPaneContextKey("properties"): with a button selected and its Properties pane closed by hand, View > Show never offered it again.
+
+**Repro:** Select an in-cell button in Design Mode, close its Properties pane with the header X, open View > Show: no "Properties" item. Code: a search for addTaskPaneContextKey("properties") under app/extensions had no hit before WP-C.
+
+## BUG-0486 `[fixed]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** pivot-style-session-only
+
+A PIVOTTABLE STYLE CHOSEN IN THE GALLERY WAS NOT SAVED. The style id lived only in the Pivot extension's in-memory pivotStyleMap (fed by PIVOT_LAYOUT_STATE / PIVOT_LAYOUT_CHANGED); PivotDefinition had no style field, so Save and reopen, or a .calp publish, brought the pivot back in the default style -- and the hidden grid (and so a copy) always used the fixed default colours.
+
+**Repro:** Create a pivot, Design > PivotTable Styles > PivotStyleMedium9, save to a .cala, File > New, reopen it: the pivot paints in the default style. Code: pivot-engine definition.rs PivotDefinition had no style member before WP-C.
+
+## BUG-0487 `[fixed]`
+
+**Found:** 2026-10-15 (manual)
+**Oracle:** control-appearance-not-undoable
+
+FORMATTING A CONTROL COULD NOT BE UNDONE. set_control_property (app/src-tauri/src/controls.rs) records an undo entry only for EXECUTABLE slots (code / action properties); a fill, stroke, text colour or font change on a button or shape was written with no undo entry, so Ctrl+Z skipped it (or undid the step before it).
+
+**Repro:** Insert a shape, change its fill in the Properties pane, press Ctrl+Z: the fill stays and the previous unrelated step is undone instead. Code: controls.rs set_control_property_core pushes undo only when the key is an executable / action property.
+
+## BUG-0488 `[open]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** set-pivot-number-format-dirties-on-refusal-no-undo
+
+set_pivot_number_format DIRTIES THE DOCUMENT WHEN IT REFUSES, AND RECORDS NO UNDO STEP WHEN IT WRITES. set_pivot_number_format_core (app/src-tauri/src/pivot/commands.rs) takes `pivot_write`, which mints DocumentEffect::mutates BEFORE the value-field index is range-checked, so a refused out-of-range request sets the dirty flag (close-without-saving prompt, AutoRecover) with nothing changed; and the successful path calls finalize_pivot_update with no record_pivot_undo, so a number format set through this door cannot be undone. Same family as BUG-0477 (update_pivot_properties dirties on a no-op).
+
+**Repro:** Headless: create a pivot with one value field, mark the document saved, call set_pivot_number_format { pivotId, valueFieldIndex: 5, numberFormat: "0.0" } -> Err("Value field index 5 out of range") AND is_modified() == true. Then a valid call with index 0 -> the format changes, and undo restores nothing from it. Reachable from the Pivot service's `setNumberFormat` (Pivot/lib/pivot-api.ts:1639, backend.ts setPivotNumberFormat). WP-C's Data format card does NOT use this door (it rides the fields update, Pivot/lib/pivotDataFormats.ts), so the Format tab is unaffected.
+
+## BUG-0489 `[open]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** chart-style-preset-leaves-previous-theme-keys
+
+PICKING A CHART STYLE AFTER ANOTHER KEEPS THE FIRST STYLE'S COLOURS WHERE THE SECOND ONE IS SILENT. buildPresetUpdates writes `config.theme` as the new preset's theme, and the chart store DEEP-MERGES spec updates (deepMergeSpec), so a theme key the previous preset set and the new one does not -- e.g. mono-blue's axisColor #4E79A7 and titleColor #2c4a6e -- survives a switch to a preset that leaves it at the default (e.g. Classic, colorful-1, sets only plotBackground and gridLineColor). The chart then shows a mix of two styles and the gallery's "current" ring can point at a style the chart does not look like.
+
+**Repro:** Select a chart, Quick Access > Styles > Blue (monochromatic), then Quick Access > Styles > Classic (colorful-1, whose theme sets only plotBackground and gridLineColor): the axis and title stay blue. Same through the command chart.applyStyle (Charts/index.ts:1134). Unit: updateChartSpec(id, buildPresetUpdates(monoBlue, spec)); updateChartSpec(id, buildPresetUpdates(classic, spec)); spec.config.theme.axisColor === "#4E79A7".
+
+## BUG-0490 `[fixed]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** object-pane-title-card-rows-that-change-nothing
+
+THE FORMAT TAB'S TITLE CARD OFFERED ROWS THAT CHANGE NOTHING. For a slicer, a timeline and a floating grid (one-line headers, no subtitle, no divider) the Title card showed "Wrap text" and the Spacing rows "Below subtitle" / "Below divider"; for a floating grid every Spacing row. Toggling or typing in them committed a container value (one undo step, a dirty document) that nothing paints, and the slicer/timeline "Wrap text" row even offered fx (a binding of /container/title/wrap).
+
+**Repro:** Canvas page, insert a slicer, click it, Format tab, Title card: "Wrap text" and "Below subtitle" are there; switch Wrap text on -> "Format Object" undo step, nothing changes on the slicer. Same on a floating grid's Spacing rows.
+
+## BUG-0491 `[open]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** control-container-keys-accepted-where-nothing-paints-them
+
+A SCRIPT OR THE AI CAN WRITE A SECOND, DEAD SPELLING OF A CONTROL'S BACKGROUND OR BORDER. A shape's background IS its `fill` and its border its `stroke`/`strokeWidth` (a button's `borderColor`), but every control accepts all 51 `container*` keys: `shape.setProperty("containerBackgroundColor", "#f00")` (SCRIPT_SHAPE_PROPERTY_KEYS spreads CONTROL_CONTAINER_PROPERTY_KEYS for every control type) and a `/properties/containerBackgroundColor` literal through property.set / MCP set_object_property (one `control` catalog kind for every control type) are stored on a shape, show in the AI-visible properties beside `fill`, and paint nothing. The same holds for the slicer/timeline/floating-grid container rows of fields the family never paints (subtitle.*, divider.*, title.wrap), which the catalog lists as bindable.
+
+**Repro:** Script on a canvas shape: ctx.self.setProperty("containerBackgroundColor", "#ff0000") -> accepted, the shape stays blue (its `fill`), get_sheet_summary lists both keys. Rust: set_control_property_core(.., "shape", "containerBackgroundColor", "static", "#ff0000") -> Ok.
+
+## BUG-0492 `[fixed]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** object-pane-grip-format-between-bring-forward-and-send-backward
+
+THE CANVAS GRIP MENU SPLIT THE STACKING PAIR. A selected canvas chart's grip menu read Size and Position..., Bring Forward, Format..., Send Backward, Lock: WP-C's "Format..." item had order 10, the same as the canvas's Bring Forward, and the object pane activates after the canvas (manifest order), so the tie fell to registration order.
+
+**Repro:** Canvas page, insert a chart, click it, click its grip: the menu lists Format... between Bring Forward and Send Backward.
+
+## BUG-0493 `[fixed]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** ctrl1-on-floating-grid-cell-opens-container-format-silently
+
+CTRL+1 ON A FLOATING GRID'S SELECTED CELL SAID NOTHING. With a floating grid's cell selected on a worksheet, Ctrl+1 used to reach Format Cells, which the floating grid refuses once with its sentence (BUG-0185). WP-C's object-pane Ctrl+1 binding wins whenever an object with a pane is primary, and a floating grid with a selected cell IS the primary object, so Ctrl+1 opened the BOX's Format tab instead (on a worksheet, after a hand close, that is a pane the user did not ask for) and no refusal was shown.
+
+**Repro:** Sheet1, insert a floating grid, click its A1, press Ctrl+1: no toast 'is not available for a floating range's cells yet. Nothing was changed.'; the object pane opens on Format.
+
+## BUG-0494 `[fixed]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** object-pane-checkbox-bounces-until-backend-answers
+
+A CLICKED CHECKBOX ON THE OBJECT PANE BOUNCED BACK. The pane's checkboxes were controlled by the STORED value. For a family whose write goes to the backend (a floating grid: its Row gutter / Column headers strips on Properties, and its Title on/off on Format), the stored value only changes when update_floating_range answers, so the re-render the click caused put the tick straight back: the click looked ignored until the round trip landed, and Playwright's uncheck failed with 'Clicking the checkbox did not change its state'.
+
+**Repro:** Sheet1, insert a floating grid, Design Mode on, right-click it > Properties, untick Row gutter (or Format > Title): the tick returns at once and only disappears when the backend answers.
+
+## BUG-0495 `[fixed]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** bindings-migration-rereads-v10-literal-chart-title
+
+A LITERAL CHART TITLE "=B2" IN A v10 FILE BECAME A LIVE BINDING ON REOPEN. Since bindings exist a chart text field that starts with "=" is TEXT (a script setLiteral or MCP set_object_property stores it, and it paints as typed), but persistence.rs open_file ran object_bindings::migrate::migrate_legacy_formulas with no format-version check, and its chart half (chart_reference_fields / is_cell_reference_text) turned every "=<one cell>" title, axis title and series name into a binding and nulled the literal -- under LoadingFromDisk, so nothing dirtied. The .calp pull and refresh doors (calp_commands.rs) ran the same pass over the WHOLE workbook, the subscriber's own charts included.
+
+**Repro:** MCP set_object_property(chart, "/spec/title", "=B2"), save the .cala (v10), reopen: the title shows B2's value and Formulas > Bound Properties lists a binding nobody created. Unit: object_bindings::migrate_tests a_v10_files_literal_equals_chart_title_stays_text_on_reopen; carriage_tests a_literal_equals_chart_title_survives_a_pull_and_a_refresh.
+
+## BUG-0496 `[fixed]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** pivot-style-undo-clears-unrefreshed-bi-pivot
+
+UNDOING A "PivotTable Style" ON A BI PIVOT NOT REFRESHED SINCE THE FILE WAS OPENED CLEARED THE PIVOT'S CELLS. A reloaded BI pivot has an EMPTY cache and no stored view (persistence.rs load path); the forward style change leaves its cells alone (restyle_pivot_cells finds no view) but records a "PivotTable Style" undo step, and undo_commands::apply_pivot_definition_restore re-rendered it with safe_calculate_pivot over the empty cache and finalize_pivot_update, which cleared the saved output block. Redo did the same; a save then persisted the empty block.
+
+**Repro:** Open a .cala with a data-model pivot, do not refresh, pick a PivotTable Style, press Ctrl+Z: the pivot's output disappears. Unit: commands::canvas_sheet_tests undoing_a_style_on_an_unrefreshed_bi_pivot_keeps_its_cells.
+
+## BUG-0497 `[fixed]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** bindings-undo-whole-store-reverts-refresh
+
+A BINDINGS UNDO STEP RESTORED THE WHOLE BINDING STORE, so Ctrl+Z of the subscriber's own bind after a .calp Refresh reverted the application's bindings too: the refresh (land_pulled_bindings) rewrites the store and records no undo, and the obj_bindings arm replaced every row with the pre-bind snapshot -- a binding the publisher removed came back and the one it added was lost, on subscribed objects the user cannot edit; the next save kept the mix.
+
+**Repro:** Subscribe to an application with a bound chart B, bind a property of your own chart, Collaboration > Refresh to a version that removed B and bound C, Ctrl+Z: B is bound again and C is not. Unit: object_bindings::command_tests undoing_a_bind_never_reverts_a_binding_a_refresh_landed_in_between.
+
+## BUG-0498 `[fixed]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** control-format-undo-erases-later-unrecorded-edit
+
+CTRL+Z OF A "Format control" OR "Set property" STEP SILENTLY ERASED A LATER PAGE NAVIGATOR BUTTONS EDIT. Both steps snapshotted the WHOLE control store and the obj_controls arm restores all of it; the Properties pane's Buttons section writes pageOverrides through set_control_property, which records undo only for code slots, so a per-page caption written after the format had no undo step and vanished with the earlier step's undo.
+
+**Repro:** Format a navigator on the Format tab, edit a per-page caption in Properties > Buttons, press Ctrl+Z: the border goes AND the caption reverts. Unit: object_bindings::page_overrides_tests undoing_a_format_or_literal_step_keeps_a_later_buttons_section_edit.
+
+## BUG-0499 `[fixed]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** data-format-card-on-marks-that-never-paint-it
+
+THE DATA FORMAT CARD WAS OFFERED ON EVERY DESIGN-QUERY CHART, but only Card / Multi-row card / KPI / Gauge paint spec.fieldFormats. chartContainerCapabilities set dataFormat for any design-query chart whatever its mark; a column, bar, line or pie chart's data labels (dataLabelPainter formatWithPattern / formatTickValue), value-axis ticks and tooltips never read the override, so the pane accepted, saved and undid a format the chart did not show.
+
+**Repro:** Select a design-query column chart on the AdventureWorks canvas, Format > General > Data format, set [Revenue] to $#,##0: the labels and axis still show the raw number. Unit: Charts/lib/__tests__/chartObjectFormat.test.ts 'a data format only for a design-query chart whose mark paints it'.
+
+## BUG-0500 `[fixed]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** control-background-transparency-not-offered
+
+BACKGROUND TRANSPARENCY WAS NOT OFFERED FOR TEXT BOXES, SHAPES OR BUTTONS. controlContainerCapabilities turned backgroundTransparency on only for pictures and navigators (where Core paints the background), and the shape path and the button face painted their fill opaque, although the owner's F5 asks for Background colour + transparency on every visual and the flat key containerBackgroundTransparency already existed for every painted kind.
+
+**Repro:** Select a text box or a button on a canvas, Format > Effects > Background: no Transparency row. Unit: Controls/__tests__/controlObjectFormat.test.ts 'Effects > Background > Transparency is offered for every control kind'; shapeRendererNoFill.test.ts 'Effects > Background > Transparency fades the shape's fill only'.
+
+## BUG-0501 `[fixed]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** source-cascade-leaves-bindings-of-deleted-objects
+
+BINDINGS OUTLIVED THE SLICERS, TIMELINES AND PIVOTS A SOURCE CASCADE DELETED. Delete Table, Convert to Range and a row/column delete that swallows a pivot end in object_deps::cascade_deleted_sources, which deleted the slicers / timelines and ran their ribbon-filter and script cascades but not drop_bindings_for_objects (only delete_pivot_table dropped them itself). Formulas > Bound Properties then listed '(no longer in this workbook)' rows, and an .xlsx save warned 'Bound properties ... stop following their formula' because xlsx_save_loss_report tested the RAW store.
+
+**Repro:** Bind a table slicer's header (/headerText := =Data!B1), Delete Table: the slicer goes, its binding row stays. Unit: object_bindings::cascade_tests a_source_cascade_drops_the_bindings_of_every_object_it_destroys.

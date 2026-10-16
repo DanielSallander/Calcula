@@ -56,6 +56,7 @@ import type { ControlMetadata } from "./types";
 import { runInUndoTransaction } from "@api/objectGeometry";
 import { FLOATING_CONTROL_REGION_TYPE } from "./controlHitTest";
 import { buttonActionOfControl } from "./buttonActionOfControl";
+import { controlKindLabel } from "./controlKinds";
 
 // ============================================================================
 // Snapshots
@@ -96,13 +97,6 @@ export function isControlSnapshot(value: unknown): value is ControlSnapshot {
 
 function deepCopy<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
-}
-
-/** The generic word for a control of `controlType` (a paste refusal names it). */
-function controlKindLabel(controlType: string): string {
-  if (controlType === "image") return "Picture";
-  if (controlType === "") return "Control";
-  return controlType.charAt(0).toUpperCase() + controlType.slice(1);
 }
 
 /**

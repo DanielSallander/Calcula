@@ -27,6 +27,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { unzipSync } from "fflate";
 import { test, expect } from "../fixtures";
+import { closeObjectPaneForGood } from "../helpers/object-pane";
 import { readGridGeometry } from "../helpers/grid";
 import { createStarConnection } from "../helpers/edit-model";
 import {
@@ -107,6 +108,9 @@ import {
 } from "../helpers/edit-harness";
 import { clickHomeMenuRow, closeHomeFlyouts } from "../helpers/homeTab";
 import { clickCanvasControl } from "../helpers/canvas-live";
+// The text of the live floating-grid edit (its textarea, else the formula bar
+// that hosts it): shared with canvas-pick-cells.spec.ts, so it lives in the helper.
+import { frEditText } from "../helpers/adventureworks-live";
 
 /** The one sentence a floating grid's claim answers every refused door with. */
 const FR_REFUSAL = /is not available for a floating range's cells yet\. Nothing was changed\./;
@@ -236,6 +240,15 @@ async function hoverMenuPath(page: Page, path: string[]): Promise<void> {
     await page.waitForTimeout(250);
   }
 }
+
+// WP-C (D-PANE): on a canvas a click opens the ONE object pane at its release,
+// and a docked pane narrows the grid. This journey predates the pane and asserts
+// nothing about it, so every test starts with the pane closed AS IF BY HAND
+// (helpers/object-pane.ts). Per test, not once: the fixture's per-test task-pane
+// reset clears the "closed by hand" mark, and Playwright runs this hook after it.
+test.beforeEach(async ({ appPage }) => {
+  await closeObjectPaneForGood(appPage);
+});
 
 // ===========================================================================
 // 1. THE SELECTION OWNER: every door refuses once while a floating-grid cell
@@ -1488,13 +1501,6 @@ async function dblclickFrCell(page: Page, fr: { x: number; y: number }, row: num
   await eventually(() => frEditorOpen(page), (v) => v, `double-clicking the floating grid's cell (${row},${col}) opened no editor`);
 }
 
-/** The text of the live floating-grid edit (its textarea, else the formula bar that hosts it). */
-async function frEditText(page: Page): Promise<string> {
-  const t = await frEditorText(page);
-  if (t !== null) return t;
-  return formulaBarValue(page);
-}
-
 async function clickPoint(page: Page, p: { x: number; y: number }, button: "left" | "right" = "left"): Promise<void> {
   await page.mouse.click(p.x, p.y, { button });
   await page.waitForTimeout(250);
@@ -1553,7 +1559,7 @@ test.describe("the floating-grid edit seam (E1-E4, E6, E9, E12, W12)", () => {
     }
   });
 
-  test("E2 + W13 quoting: a column-header pick into a floating-grid edit inserts Sheet1!C:C, then 'Q1-2026'!C:C (stored and calculated); a GETPIVOTDATA pick qualifies the pivot cell with 'Q1-2026'!; a cell pick on 2024Budget inserts '2024Budget'!C3", async ({
+  test("E2 + W13 quoting: a column-header pick into a floating-grid edit inserts Sheet1!C:C, then 'Q1-2026'!C:C (stored and calculated); a GETPIVOTDATA pick qualifies the pivot's anchor with 'Q1-2026'!; a cell pick on 2024Budget inserts '2024Budget'!C3", async ({
     appPage: page,
   }) => {
     test.setTimeout(180_000);
@@ -1609,8 +1615,10 @@ test.describe("the floating-grid edit seam (E1-E4, E6, E9, E12, W12)", () => {
       const pivotCell = await cellPagePoint(page, febRow, 4);
       await clickPoint(page, pivotCell);
       const gpd = await eventually(() => frEditText(page), (t) => t.startsWith("=GETPIVOTDATA("), "a pivot pick inserted no GETPIVOTDATA");
-      expect(gpd, "the GETPIVOTDATA pick does not qualify the pivot cell with its quoted sheet").toMatch(
-        new RegExp(`^=GETPIVOTDATA\\("Sum of Units"[;,]'Q1-2026'!\\$E\\$${febRow + 1}[;,]"Month"[;,]"Feb"\\)$`),
+      // The pivot_table argument is the pivot's ANCHOR (destination D20), never
+      // the clicked cell (D-PICK, Excel parity).
+      expect(gpd, "the GETPIVOTDATA pick does not qualify the pivot ANCHOR with its quoted sheet").toMatch(
+        new RegExp(`^=GETPIVOTDATA\\("Sum of Units"[;,]'Q1-2026'!\\$D\\$20[;,]"Month"[;,]"Feb"\\)$`),
       );
       await page.keyboard.press("Enter");
       const got = await eventually(() => frCell(page, fr.id, 2, 0), (c) => !!c && c.value !== null && c.value !== undefined && String(c.value) !== "", "the GETPIVOTDATA cell stored nothing");
@@ -2029,7 +2037,7 @@ test.describe("sheet-name quoting in Core's picks and builders (W13, W14, X15)",
     }
   });
 
-  test("W14: in Sheet1!A1's own edit, = then a pivot value on the Pivots sheet inserts GETPIVOTDATA(...,Pivots!$E$n,...) and A1 shows the value, not #REF!", async ({ appPage: page, grid }) => {
+  test("W14: in Sheet1!A1's own edit, = then a pivot value on the Pivots sheet inserts GETPIVOTDATA(...,Pivots!$D$2,...) (the pivot's anchor) and A1 shows the value, not #REF!", async ({ appPage: page, grid }) => {
     test.setTimeout(120_000);
     try {
       await newFile(page);
@@ -2075,8 +2083,9 @@ test.describe("sheet-name quoting in Core's picks and builders (W13, W14, X15)",
       await page.waitForTimeout(400);
       await clickPoint(page, await cellPagePoint(page, febRow, 4));
       const text = await eventually(() => formulaBarValue(page), (v) => v.startsWith("=GETPIVOTDATA("), "a pivot pick inserted no GETPIVOTDATA");
+      // The pivot_table argument is the pivot's ANCHOR (destination D2), never the clicked cell.
       expect(text, "the pick is not qualified with the pivot's sheet").toMatch(
-        new RegExp(`^=GETPIVOTDATA\\("Sum of Units"[;,]Pivots!\\$E\\$${febRow + 1}[;,]"Month"[;,]"Feb"\\)$`),
+        new RegExp(`^=GETPIVOTDATA\\("Sum of Units"[;,]Pivots!\\$D\\$2[;,]"Month"[;,]"Feb"\\)$`),
       );
       await page.keyboard.press("Enter");
       await eventually(() => activeSheet(page), (s) => s === 0, "Enter did not return to Sheet1");

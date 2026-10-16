@@ -4,6 +4,33 @@
 // CONTEXT: Mirrors the TypeScript ChartSpec interface from types.ts.
 
 import { BUILT_IN_CUSTOM_ORDER_NAMES } from "./customOrderLists";
+import { VISUAL_CONTAINER_JSON_SCHEMA } from "@api/visualContainer";
+
+/** The title leaves a chart spells elsewhere (spec.title, theme.titleColor, theme.titleFontSize). */
+export const CHART_CONTAINER_FORBIDDEN_TITLE_LEAVES = ["text", "color", "fontSize"] as const;
+
+/** The longest number-format code a design-query chart's `fieldFormats` entry may hold (Rust checks it too). */
+export const CHART_FIELD_FORMAT_MAX_CHARS = 256;
+
+/**
+ * The chart's container definition: the shared visual-container schema
+ * (@api/visualContainer, `additionalProperties: false` at every level) minus
+ * the three title leaves the chart spells elsewhere -- so a spec that tries to
+ * write a second spelling of the title is refused here, as Rust refuses it
+ * (`forbid_chart_title_leaves`). Built from the shared fragment, never retyped.
+ */
+function chartContainerDefinition(): Record<string, unknown> {
+  const def = JSON.parse(JSON.stringify(VISUAL_CONTAINER_JSON_SCHEMA)) as {
+    description?: string;
+    properties: Record<string, { properties?: Record<string, unknown> }>;
+  };
+  for (const leaf of CHART_CONTAINER_FORBIDDEN_TITLE_LEAVES) delete def.properties.title?.properties?.[leaf];
+  def.description =
+    "The chart's visual container: padding, title style, subtitle, divider, spacing, background, border and " +
+    "shadow around the chart. Sparse: an absent leaf is the chart default (white background, a 1 px #d0d0d0 " +
+    "border). The title TEXT is `title`; its colour and size are `config.theme.titleColor` / `titleFontSize`.";
+  return def;
+}
 
 /**
  * The `customOrder` declaration, shared by the sort transform and the ordinal
@@ -109,7 +136,7 @@ export const chartSpecJsonSchema: object = {
     },
     title: {
       type: ["string", "null"],
-      description: "Chart title displayed above the chart. Use null for no title. Supports cell references like \"=A1\".",
+      description: "Chart title displayed above the chart. Use null for no title. Text starting with \"=\" is shown as typed; to follow a cell or a measure, bind the property instead.",
     },
     xAxis: {
       $ref: "#/definitions/AxisSpec",
@@ -201,6 +228,15 @@ export const chartSpecJsonSchema: object = {
       type: "boolean",
       description: "Plot the source range's hidden rows and columns too (Excel's \"Show data in hidden rows and columns\"). Default false: hidden rows (an AutoFilter, a table slicer) are left out. Range sources only.",
     },
+    container: {
+      $ref: "#/definitions/ChartContainerFormat",
+      description: "The visual container around the chart (padding, title style, subtitle, divider, spacing, background, border, shadow). The chart's outer background lives here, never in config.theme.",
+    },
+    fieldFormats: {
+      type: "object",
+      description: "Design-query charts: measure name (no brackets) -> Excel number format code, e.g. { \"Revenue\": \"#,##0.00\" }. Sent with the query, so the values come back formatted.",
+      additionalProperties: { type: "string", maxLength: CHART_FIELD_FORMAT_MAX_CHARS },
+    },
   },
   // Narrow markOptions to the matching definition based on the chart type.
   allOf: MARK_OPTION_NARROWING,
@@ -254,7 +290,7 @@ export const chartSpecJsonSchema: object = {
       properties: {
         name: {
           type: "string",
-          description: "Display name for the series (shown in legend, tooltips). Supports cell references like \"=B1\".",
+          description: "Display name for the series (shown in legend, tooltips). Text starting with \"=\" is shown as typed; to follow a cell or a measure, bind the property instead.",
         },
         sourceIndex: {
           type: "integer",
@@ -401,7 +437,7 @@ export const chartSpecJsonSchema: object = {
       properties: {
         title: {
           type: ["string", "null"],
-          description: "Axis title text. Use null for no title. Supports cell references like \"=A1\".",
+          description: "Axis title text. Use null for no title. Text starting with \"=\" is shown as typed; to follow a cell or a measure, bind the property instead.",
         },
         gridLines: { type: "boolean", description: "Show grid lines extending from this axis." },
         showLabels: { type: "boolean", description: "Show tick labels on this axis." },
@@ -848,7 +884,7 @@ export const chartSpecJsonSchema: object = {
       properties: {
         x: { type: "number", description: "X position as category index." },
         y: { type: "number", description: "Y position as data value." },
-        text: { type: "string", description: "Text content. Supports cell references like \"=A1\"." },
+        text: { type: "string", description: "Text content, shown as typed." },
         fontSize: { type: "number", minimum: 6, description: "Font size in pixels. Default: 11." },
         color: { type: "string", description: "Text color. Default: \"#333333\"." },
         anchor: { type: "string", enum: ["start", "middle", "end"], description: "Horizontal anchor. Default: \"middle\"." },
@@ -939,7 +975,6 @@ export const chartSpecJsonSchema: object = {
       type: "object",
       description: "Override any property of the built-in chart render theme. All fields are optional.",
       properties: {
-        background: { type: "string", description: "Chart background color. Default: \"#ffffff\"." },
         plotBackground: { type: "string", description: "Plot area background color. Default: \"#fafafa\"." },
         gridLineColor: { type: "string", description: "Grid line color. Default: \"#e8e8e8\"." },
         gridLineWidth: { type: "number", minimum: 0, description: "Grid line width (px). Default: 1." },
@@ -1280,6 +1315,7 @@ export const chartSpecJsonSchema: object = {
       },
       additionalProperties: false,
     },
+    ChartContainerFormat: chartContainerDefinition(),
     GradientFill: {
       type: "object",
       description: "A gradient fill specification.",
@@ -1422,7 +1458,7 @@ export function generateSpecReference(): string {
   lines.push("| seriesOrientation | string | \"columns\" or \"rows\" |");
   lines.push("| categoryIndex | integer | Column/row index for category labels |");
   lines.push("| series | array | Array of ChartSeries objects |");
-  lines.push("| title | string \\| null | Chart title. Supports cell refs like \"=A1\" |");
+  lines.push("| title | string \\| null | Chart title. Literal text; bindable (see Bound Properties) |");
   lines.push("| xAxis | AxisSpec | X-axis configuration |");
   lines.push("| yAxis | AxisSpec | Y-axis configuration |");
   lines.push("| legend | LegendSpec | Legend configuration |");
@@ -1444,7 +1480,7 @@ export function generateSpecReference(): string {
   lines.push("");
   lines.push("| Property | Type | Description |");
   lines.push("|----------|------|-------------|");
-  lines.push("| name | string | Series display name. Supports cell refs like \"=B1\" |");
+  lines.push("| name | string | Series display name. Literal text; bindable (see Bound Properties) |");
   lines.push("| sourceIndex | integer | Column/row index in data range for this series |");
   lines.push("| color | string \\| null | Hex color override (e.g. \"#FF5733\") or null for palette |");
   lines.push("| encoding | SeriesEncoding | Per-data-point visual encoding (conditional color, opacity, size) |");
@@ -1454,7 +1490,7 @@ export function generateSpecReference(): string {
   lines.push("");
   lines.push("| Property | Type | Description |");
   lines.push("|----------|------|-------------|");
-  lines.push("| title | string \\| null | Axis title. Supports cell refs. null = no title |");
+  lines.push("| title | string \\| null | Axis title. Literal text; bindable. null = no title |");
   lines.push("| gridLines | boolean | Show grid lines |");
   lines.push("| showLabels | boolean | Show tick labels |");
   lines.push("| labelAngle | integer | Label rotation: 0, 45, or 90 degrees |");
@@ -1826,7 +1862,7 @@ export function generateSpecReference(): string {
   lines.push("|----------|------|---------|-------------|");
   lines.push("| x | number | 0 | X position (category index) |");
   lines.push("| y | number | 0 | Y position (data value) |");
-  lines.push("| text | string | required | Text content. Supports cell refs |");
+  lines.push("| text | string | required | Text content, shown as typed |");
   lines.push("| fontSize | number | 11 | Font size (px) |");
   lines.push("| color | string | \"#333333\" | Text color |");
   lines.push("| anchor | string | \"middle\" | start, middle, or end |");
@@ -1997,7 +2033,6 @@ export function generateSpecReference(): string {
   lines.push("### ThemeOverrides");
   lines.push("| Property | Type | Default | Description |");
   lines.push("|----------|------|---------|-------------|");
-  lines.push("| background | string | \"#ffffff\" | Chart background |");
   lines.push("| plotBackground | string | \"#fafafa\" | Plot area background |");
   lines.push("| gridLineColor | string | \"#e8e8e8\" | Grid line color |");
   lines.push("| gridLineWidth | number | 1 | Grid line width (px) |");
@@ -2014,14 +2049,44 @@ export function generateSpecReference(): string {
   lines.push("| barBorderRadius | number | 2 | Bar corner radius (px) |");
   lines.push("| barGap | number | 2 | Gap between bars (px) |");
   lines.push("");
-  lines.push("Example: Dark theme with larger fonts:");
+  lines.push("Example: Dark theme with larger fonts (the outer background is the container's):");
   lines.push("```json");
+  lines.push("\"container\": { \"background\": { \"color\": \"#1e1e1e\" } },");
   lines.push("\"config\": { \"theme\": {");
-  lines.push("  \"background\": \"#1e1e1e\", \"plotBackground\": \"#2d2d2d\",");
+  lines.push("  \"plotBackground\": \"#2d2d2d\",");
   lines.push("  \"gridLineColor\": \"#444\", \"axisColor\": \"#666\",");
   lines.push("  \"axisLabelColor\": \"#aaa\", \"titleColor\": \"#eee\",");
   lines.push("  \"titleFontSize\": 16, \"labelFontSize\": 12");
   lines.push("} }");
+  lines.push("```");
+  lines.push("");
+  lines.push("## Visual Container");
+  lines.push("");
+  lines.push("`container` frames the chart the way every canvas object is framed (Power BI's Format pane):");
+  lines.push("padding, the title's style, a subtitle, a divider, spacing, background (colour, transparency,");
+  lines.push("gradient), border (colour, width, rounded corners) and shadow. Sparse: an absent leaf is the default.");
+  lines.push("The title TEXT stays `title` and its colour/size stay `config.theme.titleColor` / `titleFontSize`;");
+  lines.push("`container.title` holds only the rest (font, bold, italic, underline, background, alignment, wrap).");
+  lines.push("");
+  lines.push("| Group | Leaves |");
+  lines.push("|-------|--------|");
+  lines.push("| padding | top, right, bottom, left (px, 0-200) |");
+  lines.push("| lockAspect | boolean: resizing keeps the width:height ratio |");
+  lines.push("| title | show, headingLevel (0-6), fontFamily, bold, italic, underline, background, align, wrap |");
+  lines.push("| subtitle | show, text, fontFamily, fontSize, bold, italic, underline, color, background, align, wrap |");
+  lines.push("| divider | show, color, style (solid/dashed/dotted), width, ignorePadding |");
+  lines.push("| spacing | custom, belowTitle, belowSubtitle, belowDivider |");
+  lines.push("| background | show, color, transparency (0-100), gradient { type, direction, stops } |");
+  lines.push("| border | show, color, width, radius |");
+  lines.push("| shadow | show, color, transparency, offset (outside/inside), position, blur, distance |");
+  lines.push("");
+  lines.push("Colours are #rgb, #rrggbb or #rrggbbaa (\"\" = the default).");
+  lines.push("");
+  lines.push("Example: rounded card with a soft shadow on a dark background:");
+  lines.push("```json");
+  lines.push("\"container\": { \"padding\": { \"top\": 8, \"right\": 8, \"bottom\": 8, \"left\": 8 },");
+  lines.push("  \"background\": { \"color\": \"#1e1e1e\" }, \"border\": { \"show\": true, \"radius\": 12 },");
+  lines.push("  \"shadow\": { \"show\": true } }");
   lines.push("```");
   lines.push("");
   lines.push("## Tooltip Configuration");
@@ -2035,12 +2100,16 @@ export function generateSpecReference(): string {
   lines.push("Format patterns: \"$,.2f\" (currency), \",.0f\" (integer with commas), \"%\" (percentage).");
   lines.push("");
 
-  lines.push("## Cell References");
+  lines.push("## Bound Properties");
   lines.push("");
-  lines.push("String fields (title, axis titles, series names) support cell references:");
-  lines.push("- \"=A1\" reads the display value from cell A1");
-  lines.push("- \"=Sheet1!B5\" reads from a specific sheet");
-  lines.push("- \"='My Sheet'!C1\" quote sheet names with spaces");
+  lines.push("Every string in the spec is a literal: \"title\": \"=A1\" paints the text =A1.");
+  lines.push("A property that should follow a cell or a model measure is a BINDING, stored outside the spec");
+  lines.push("and evaluated live: the Format pane's fx button, bindProperty(\"/spec/title\", \"=Sheet1!A1\") in a");
+  lines.push("script, or the AI tool set_object_binding. Bindable: /spec/title, /spec/xAxis/title, /spec/yAxis/title,");
+  lines.push("axis min/max, /spec/series/<i>/name, /spec/seriesColors/<name>, /spec/params/<i>/value, mark options");
+  lines.push("(goal, target, min, max, colours, ...), theme colours/sizes and every container leaf under");
+  lines.push("/spec/container/... (padding, title style, subtitle, divider, background, border, shadow) except");
+  lines.push("lockAspect. =[Measure] reads the page's model.");
   lines.push("");
 
   lines.push("## Data Source Formats");

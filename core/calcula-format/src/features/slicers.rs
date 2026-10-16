@@ -67,6 +67,16 @@ pub struct SlicerDef {
     /// re-bind visibly rather than misreading the document, so no version link.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_source_id: Option<String>,
+    /// The visual container (D-FORMAT, WP-C), TYPED -- never through the
+    /// string coercions above. Absent when `None`; read leniently, so a
+    /// damaged container is repaired or dropped, never the slicer. Feature id
+    /// `visual_container` (no version link: cosmetic, visible loss).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "visual_format::deserialize_container_lenient"
+    )]
+    pub container: Option<visual_format::VisualContainerFormat>,
 }
 
 /// JSON-friendly slicer connection (Report Connection) for the .cala format.
@@ -171,6 +181,7 @@ impl From<&SavedSlicer> for SlicerDef {
             }).collect(),
             filter_level: s.filter_level,
             data_source_id: s.data_source_id.clone(),
+            container: s.container.clone(),
         }
     }
 }
@@ -236,6 +247,10 @@ impl From<&SlicerDef> for SavedSlicer {
             }).collect(),
             filter_level: s.filter_level,
             data_source_id: s.data_source_id.clone(),
+            // LOAD direction: repaired on the way in (the lenient serde reader
+            // already did; `sanitized` again is idempotent and covers a
+            // SlicerDef built in code).
+            container: s.container.clone().and_then(|c| c.sanitized()),
         }
     }
 }
@@ -281,6 +296,7 @@ mod tests {
             }],
             filter_level: 1,
             data_source_id: data_source_id.map(|s| s.to_string()),
+            container: None,
         }
     }
 
@@ -301,5 +317,38 @@ mod tests {
         // An older file (no field at all) still reads.
         let back = SavedSlicer::from(&serde_json::from_str::<SlicerDef>(&json).unwrap());
         assert_eq!(back.data_source_id, None);
+    }
+
+    /// The visual container rides the `.cala` slicer def as a typed camelCase
+    /// object, round-trips unchanged, is absent when `None`, and a bad colour
+    /// in a saved file is dropped on LOAD (sanitized) rather than refusing the
+    /// slicer.
+    #[test]
+    fn a_slicers_container_round_trips_and_is_sanitized_on_load() {
+        let container: visual_format::VisualContainerFormat = serde_json::from_value(serde_json::json!({
+            "border": {"show": true, "color": "#336699", "radius": 6},
+            "title": {"bold": true, "align": "center"}
+        }))
+        .unwrap();
+        let mut saved = model_slicer(None);
+        saved.container = Some(container.clone());
+        let json = serde_json::to_string(&SlicerDef::from(&saved)).unwrap();
+        assert!(json.contains("\"container\":{"), "{json}");
+        assert!(json.contains("\"radius\":6"), "{json}");
+        let back = SavedSlicer::from(&serde_json::from_str::<SlicerDef>(&json).unwrap());
+        assert_eq!(back.container, Some(container));
+
+        let json = serde_json::to_string(&SlicerDef::from(&model_slicer(None))).unwrap();
+        assert!(!json.contains("container"), "None must be omitted: {json}");
+
+        // A hand-edited file with an unsafe colour and an out-of-range radius.
+        let mut value: serde_json::Value = serde_json::to_value(SlicerDef::from(&saved)).unwrap();
+        value["container"]["border"]["color"] = serde_json::json!("url(javascript:x)");
+        value["container"]["border"]["radius"] = serde_json::json!(5000);
+        let back = SavedSlicer::from(&serde_json::from_value::<SlicerDef>(value).unwrap());
+        let border = back.container.as_ref().unwrap().border.as_ref().unwrap();
+        assert_eq!(border.color, None, "the unsafe colour is dropped");
+        assert_eq!(border.radius, Some(100.0), "the radius is clamped");
+        assert!(back.container.unwrap().validate().is_ok());
     }
 }

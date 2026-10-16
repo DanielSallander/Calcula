@@ -21,6 +21,7 @@ import { getGridStateSnapshot, resolveHeaderSizes, paintedDisplayHeadings } from
 import { hitTestFloatingShape } from "../Shape/shapeRenderer";
 import { hitTestFloatingImage } from "../Image/imageRenderer";
 import { hitTestFloatingButton } from "../Button/floatingRenderer";
+import { PAGE_NAVIGATOR_CONTROL_TYPE } from "@api/buttonControlService";
 
 /** The `GridRegion.type` every floating control publishes (see floatingStore). */
 export const FLOATING_CONTROL_REGION_TYPE = "floating-control";
@@ -38,6 +39,12 @@ export function hitTestFloatingControl(hitCtx: OverlayHitTestContext): boolean {
     return hitTestFloatingShape(hitCtx);
   } else if (controlType === "image") {
     return hitTestFloatingImage(hitCtx);
+  } else if (controlType === PAGE_NAVIGATOR_CONTROL_TYPE) {
+    // A Page Navigator is hit on its WHOLE rectangle, gaps and padding band
+    // included: its zone (lib/controlZoneAt.ts) then says what the point is
+    // for -- an item, or the space between. The button's rectangle test is
+    // exactly that; the branch is spelled out so the routing is visible.
+    return hitTestFloatingButton(hitCtx);
   } else {
     return hitTestFloatingButton(hitCtx);
   }
@@ -81,6 +88,28 @@ function floatingCanvasBounds(
     width: region.floating.width,
     height: region.floating.height,
   };
+}
+
+/**
+ * A client (mouse) point mapped into the canvas space of the floating control
+ * region `regionId`, together with that region's canvas bounds -- the space
+ * Core hands a zone context in (`canvasX` / `canvasY`, `floatingCanvasBounds`),
+ * so a session that started from a zone answer can ask "which part is under
+ * the pointer now?" in the coordinates that answer was given in. Null when the
+ * grid is not mounted or the region is not live (another sheet, a pick preview).
+ */
+export function floatingControlCanvasPoint(
+  regionId: string,
+  clientX: number,
+  clientY: number,
+): { point: { x: number; y: number }; bounds: { x: number; y: number; width: number; height: number } } | null {
+  const point = clientToCanvas(clientX, clientY);
+  if (!point) return null;
+  const region = getLiveGridRegions().find((r) => r.id === regionId);
+  if (!region) return null;
+  const bounds = floatingCanvasBounds(region);
+  if (!bounds) return null;
+  return { point, bounds };
 }
 
 /**

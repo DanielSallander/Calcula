@@ -37,8 +37,8 @@ import { isPivotDataSource, isDesignQueryDataSource, markFurniture } from "../ty
 import { chartsBackend } from "../lib/chartsBackend";
 import { createChart, getChartById, replaceChartSpec, syncChartRegions } from "../lib/chartStore";
 import { invalidateChartCache } from "../rendering/chartRenderer";
-import { autoDetectSeries } from "../lib/chartDataReader";
 import { readChartDataResolved } from "../lib/chartDataReader";
+import { overlayChartBindings } from "../lib/chartBindings";
 import { autoDetectPivotSeries } from "../lib/pivotChartDataReader";
 import { buildDefaultSpec } from "../lib/chartSpecDefaults";
 import { ChartEvents } from "../lib/chartEvents";
@@ -50,19 +50,15 @@ import {
 } from "../lib/crossWindowEvents";
 import { isSpecEditorWindowOpen, closeSpecEditorWindow } from "../lib/openSpecEditorWindow";
 import {
-  bindRangeText,
   formatSheetQualifiedRange,
   rangeRefDisplayText,
-  looksLikeDefinedName,
-  canvasSourceMessage,
   RANGE_FORMAT_MESSAGE,
-  type RangeBinding,
 } from "../lib/chartRangeBinding";
-import { resolveDataSource } from "../lib/dataSourceResolver";
 import { validateChartSpec } from "../lib/chartSpecValidate";
 import { markOptionsForMark } from "../lib/markOptionsForMark";
 
 import { DataTab } from "./tabs/DataTab";
+import { useRangeSource } from "./data/useRangeSource";
 import { DesignTab } from "./tabs/DesignTab";
 import { SpecTab } from "./tabs/SpecTab";
 import { ChartPreview } from "./ChartPreview";
@@ -158,11 +154,6 @@ export function readInitialMark(raw: unknown): ChartMark | null {
 export function readInitialMarkOptions(raw: unknown): MarkOptions | null {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
   return { ...(raw as Record<string, unknown>) } as MarkOptions;
-}
-
-/** "B2" for a one-cell ref: what a single-cell series is called. */
-function cellAddress(ref: DataRangeRef): string {
-  return toA1Notation(ref.startRow, ref.startCol);
 }
 
 /**
@@ -327,7 +318,8 @@ export function CreateChartDialog({
   // per-point overrides, ...). Preserved across edits so the Spec tab is lossless.
   const [specOverlay, setSpecOverlay] = useState<Partial<ChartSpec>>({});
 
-  // Preview data and resolved spec (with cell references like "=A1" resolved)
+  // Preview data and the spec the preview paints (an edited chart's BOUND
+  // properties laid over it -- lib/chartBindings.ts; a literal "=A1" is text)
   const [previewData, setPreviewData] = useState<ParsedChartData | null>(null);
   const [resolvedSpec, setResolvedSpec] = useState<ChartSpec | null>(null);
   // Why the live preview failed (design-query compile/query errors while
@@ -367,9 +359,6 @@ export function CreateChartDialog({
     return () => observer.disconnect();
   }, [isOpen]);
 
-  // Derive available axes from the parsed range
-  const [availableAxes, setAvailableAxes] = useState<Array<{ index: number; label: string }>>([]);
-
   // The workbook's sheets, read once per open. The range text is BOUND against
   // this list: a typed "Sheet2!A1:B5" means Sheet2 (its index AND its stable
   // id are stored), not whatever sheet the dialog was opened on.
@@ -381,16 +370,6 @@ export function CreateChartDialog({
   const sourceRangeRef = useRef(sourceRange);
   sourceRangeRef.current = sourceRange;
 
-  // A DEFINED NAME as the source ("TotalSales"): resolved through the
-  // workbook's names (the same resolver every chart read uses) and STORED by
-  // name, so the chart follows the name when it is redefined. The answer is
-  // kept with the text it answers, so a stale resolution never binds new text.
-  const [nameResolution, setNameResolution] = useState<
-    { name: string; ref: DataRangeRef | null; error: string | null } | null
-  >(null);
-  // True while the header row is off only because the source is one cell.
-  const headersForcedOffRef = useRef(false);
-
   // The ACTIVE sheet, from Core's live grid state when it is there (it moves in
   // the same reducer step as the sheet switch) and from this dialog's own
   // sheet read otherwise. The auto-detected range is qualified by this name,
@@ -398,72 +377,37 @@ export function CreateChartDialog({
   const activeSheetName = gridState.sheetContext?.activeSheetName || currentSheetName;
   const activeSheetIndex = gridState.sheetContext?.activeSheetIndex ?? currentSheetIndex;
 
-  const rangeBinding = useMemo<RangeBinding>(
-    () =>
-      bindRangeText(sourceRange, {
-        sheets: sheetList,
-        currentSheetIndex: activeSheetIndex,
-        currentSheetName: activeSheetName,
-        currentIsCanvas: isCanvasSurface,
-      }),
-    [sourceRange, sheetList, activeSheetIndex, activeSheetName, isCanvasSurface],
-  );
-  // The text is a defined name when it is not a range and has a name's shape.
-  const nameCandidate =
-    !isPivotMode && sourceMode === "range" && !rangeBinding.ok && looksLikeDefinedName(sourceRange)
-      ? sourceRange.trim()
-      : null;
-  const nameAnswer = nameCandidate !== null && nameResolution?.name === nameCandidate ? nameResolution : null;
-  const nameRef = nameAnswer?.ref ?? null;
-  const boundRef: DataRangeRef | null = rangeBinding.ok ? rangeBinding.ref : nameRef;
-  // One cell ("Sheet1!B2", or a name over one cell) is ONE value: a Card or a
-  // Gauge over it. It has no header row and no category column to detect.
-  const isSingleCell = boundRef !== null && boundRef.startRow === boundRef.endRow && boundRef.startCol === boundRef.endCol;
-  // Primitive identity for effects: which cells, on which sheet. The id is left
-  // out on purpose -- it names the same sheet the index does, and a key that
-  // changed when the sheet list merely ARRIVED would re-run series detection.
-  const boundRefKey = boundRef
-    ? `${boundRef.sheetIndex}|${boundRef.startRow}|${boundRef.startCol}|${boundRef.endRow}|${boundRef.endCol}`
-    : "";
-  // Why the typed range cannot be charted, in the reader's terms (null: fine,
-  // or nothing to say yet). Only meaningful for a range source.
-  const rangeError =
-    nameCandidate !== null
-      ? (nameAnswer?.error ?? null)
-      : !isPivotMode && sourceMode === "range" && !rangeBinding.ok
-        ? rangeBinding.message
-        : null;
-
-  // Resolve a defined name when the text has a name's shape. A name over a
-  // CANVAS sheet is refused like a typed canvas range: a canvas has no cells.
-  useEffect(() => {
-    if (nameCandidate === null) return;
-    let live = true;
-    resolveDataSource(nameCandidate)
-      .then((ref) => {
-        if (!live) return;
-        const sheet = sheetListRef.current.find((sh) => sh.index === ref.sheetIndex);
-        if (sheet && sheet.kind === "canvas") {
-          setNameResolution({ name: nameCandidate, ref: null, error: canvasSourceMessage(sheet.name) });
-          return;
-        }
-        const withId: DataRangeRef =
-          sheet && typeof sheet.sheetId === "string" && sheet.sheetId !== "" ? { ...ref, sheetId: sheet.sheetId } : ref;
-        setNameResolution({ name: nameCandidate, ref: withId, error: null });
-      })
-      .catch((err) => {
-        if (!live) return;
-        const why = err instanceof Error ? err.message : String(err);
-        setNameResolution({
-          name: nameCandidate,
-          ref: null,
-          error: `"${nameCandidate}" is not a range or a defined name in this workbook. ${why}`,
-        });
-      });
-    return () => {
-      live = false;
-    };
-  }, [nameCandidate, sheetList]);
+  // THE range source (components/data/useRangeSource -- shared with the object
+  // pane's Data tab): the text bound to cells or to a DEFINED NAME (stored by
+  // name, so the chart follows the name when it is redefined), why it cannot
+  // be charted, the axes it offers, and -- through `detection` -- the series
+  // re-detected whenever the bound range, the header row or the orientation
+  // changes (the one-cell rule included).
+  const rangeSource = useRangeSource({
+    sourceRange,
+    sheets: sheetList,
+    currentSheetIndex: activeSheetIndex,
+    currentSheetName: activeSheetName,
+    currentIsCanvas: isCanvasSurface,
+    rangeMode: !isPivotMode && sourceMode === "range",
+    orientation,
+    detection: {
+      hasHeaders,
+      setHasHeaders,
+      setCategoryIndex,
+      setSeries,
+      onUnbound: () => setPreviewData(null),
+    },
+  });
+  const {
+    binding: rangeBinding,
+    nameCandidate,
+    nameAnswer,
+    nameRef,
+    boundRef,
+    rangeError,
+    availableAxes,
+  } = rangeSource;
 
   // Compose the current spec from all state
   const currentSpec = useMemo((): ChartSpec | null => {
@@ -594,7 +538,7 @@ export function CreateChartDialog({
         // A title-only tile draws no legend; starting it "on" would only
         // write a setting the painter never reads.
         setLegend({ visible: markFurniture(startMark) === "full", position: "bottom" });
-        setNameResolution(null);
+        rangeSource.resetNameResolution();
       }
 
       // Load BI connections for the design-query source picker (non-fatal).
@@ -739,72 +683,8 @@ export function CreateChartDialog({
       });
   }, [isOpen, hasAutoDetected, activeSheetName, gridState.selection, sourceMode, suppressAutoRange, isCanvasSurface]);
 
-  // Auto-detect series when the BOUND range changes (its cells or its sheet).
-  useEffect(() => {
-    if (!boundRef) {
-      setAvailableAxes([]);
-      setSeries([]);
-      setPreviewData(null);
-      return;
-    }
-
-    // Read from the sheet the text names (index + id), not the active sheet.
-    const dataRange: DataRangeRef = { ...boundRef };
-    const parsed = dataRange;
-
-    // Build available axes
-    if (orientation === "columns") {
-      const numCols = parsed.endCol - parsed.startCol + 1;
-      const axes: Array<{ index: number; label: string }> = [];
-      for (let c = 0; c < numCols; c++) {
-        axes.push({ index: c, label: indexToCol(parsed.startCol + c) });
-      }
-      setAvailableAxes(axes);
-    } else {
-      const numRows = parsed.endRow - parsed.startRow + 1;
-      const axes: Array<{ index: number; label: string }> = [];
-      for (let r = 0; r < numRows; r++) {
-        axes.push({ index: r, label: `Row ${parsed.startRow + r + 1}` });
-      }
-      setAvailableAxes(axes);
-    }
-
-    // ONE CELL is one value: no header row, and the cell itself is the series
-    // (named by the defined name, or by its address). Detection would find no
-    // series at all — it treats the first column as the category.
-    if (isSingleCell) {
-      if (hasHeaders) {
-        headersForcedOffRef.current = true;
-        setHasHeaders(false);
-      }
-      setCategoryIndex(0);
-      setSeries([{ name: nameCandidate ?? cellAddress(dataRange), sourceIndex: 0, color: null }]);
-      return;
-    }
-    // Back from one cell to a table: the header row the single cell switched
-    // off is switched back on (the reader did not ask for it to go).
-    if (headersForcedOffRef.current) {
-      headersForcedOffRef.current = false;
-      if (!hasHeaders) {
-        setHasHeaders(true);
-        return; // this effect runs again with the header row
-      }
-    }
-
-    // Auto-detect series
-    autoDetectSeries(dataRange, hasHeaders)
-      .then((detected) => {
-        setCategoryIndex(detected.categoryIndex);
-        setSeries(detected.series);
-      })
-      .catch((err) => {
-        console.error("[CreateChartDialog] Series detection failed:", err);
-      });
-    // boundRefKey stands for boundRef (see its declaration).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [boundRefKey, hasHeaders, orientation, nameCandidate]);
-
-  // Update preview when spec changes (also resolves cell references).
+  // Update preview when spec changes. Editing a placed chart, its bound
+  // properties (a title that follows a cell or a measure) show their values.
   // Composition containers (concat/facet/repeat) read their data via children /
   // partitions, so an empty top-level series is normal — still fetch for them.
   useEffect(() => {
@@ -820,7 +700,7 @@ export function CreateChartDialog({
       return;
     }
 
-    readChartDataResolved(currentSpec)
+    readChartDataResolved(overlayChartBindings(editChartId, currentSpec))
       .then((result) => {
         setResolvedSpec(result.spec);
         setPreviewData(result.data);
@@ -834,7 +714,7 @@ export function CreateChartDialog({
         setDiagnostics([]);
         setPreviewError(err instanceof Error ? err.message : String(err));
       });
-  }, [currentSpec]);
+  }, [currentSpec, editChartId]);
 
   // Push spec updates to the external spec editor window (if open)
   useEffect(() => {

@@ -619,10 +619,24 @@ export function onAppEvent<T = unknown>(
 // ============================================================================
 
 /**
- * Restore keyboard focus to the grid canvas.
+ * Restore keyboard focus to the grid.
  * Used after menu actions, dialogs, etc. to return focus to the spreadsheet.
+ *
+ * The grid's keyboard lives on its focus container
+ * (`[data-focus-container="spreadsheet"]`, tabIndex 0) -- the element
+ * `isGridFocused()` asks about. This used to focus the first `<canvas>`, which
+ * has no tabIndex, so `focus()` did nothing and the keyboard stayed in the pane
+ * or dialog that asked to give it back (found live, object-pane-format J15,
+ * 2026-10-16: Escape in the object pane left the pane's button focused). The
+ * canvas remains a fallback for a host without the container.
  */
 export function restoreFocusToGrid(): void {
+  if (typeof document === "undefined") return;
+  const container = document.querySelector('[data-focus-container="spreadsheet"]') as HTMLElement | null;
+  if (container) {
+    container.focus({ preventScroll: true });
+    return;
+  }
   const canvas = document.querySelector("canvas") as HTMLElement | null;
   if (canvas) {
     canvas.focus();

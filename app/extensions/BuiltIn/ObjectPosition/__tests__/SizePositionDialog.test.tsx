@@ -46,7 +46,9 @@ import {
   SIZE_POSITION_LOCKED,
   SIZE_POSITION_SUBSCRIBED,
 } from "@api/objectPosition";
-import { SizePositionDialog } from "../components/SizePositionDialog";
+import { SIZE_POSITION_ASPECT_LOCKED, SizePositionDialog, lockedFields } from "../components/SizePositionDialog";
+import { registerObjectFormatProvider, resetObjectFormatProviders } from "@api/objectFormat";
+import { BASE_CONTAINER_DEFAULTS } from "@api/visualContainer";
 
 Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
 
@@ -269,6 +271,50 @@ describe("the Size and Position dialog", () => {
     open("slicer-missing");
     expect(byTestId("size-position-reason").textContent).toMatch(/no longer on this sheet/);
     expect(maybe("size-position-x")).toBeNull();
+  });
+});
+
+describe("Lock aspect ratio in the Size and Position dialog", () => {
+  function lockAspectOn(): void {
+    resetObjectFormatProviders();
+    cleanups.push(
+      registerObjectFormatProvider({
+        types: ["slicer"],
+        read: () => ({ lockAspect: true }),
+        defaults: () => BASE_CONTAINER_DEFAULTS,
+        capabilities: () => ({}) as never,
+        commit: async () => {},
+      }),
+    );
+    cleanups.push(() => resetObjectFormatProviders());
+  }
+
+  it("with the object's aspect locked, a typed Width sets the Height by the ratio, and OK commits both", async () => {
+    lockAspectOn();
+    open(SLICER.id);
+    expect(byTestId("size-position-aspect").textContent).toBe(SIZE_POSITION_ASPECT_LOCKED);
+    type("size-position-width", "300");
+    expect(byTestId<HTMLInputElement>("size-position-height").value).toBe("150");
+    type("size-position-height", "50");
+    expect(byTestId<HTMLInputElement>("size-position-width").value).toBe("100");
+    await click("size-position-ok");
+    expect(h.commit).toHaveBeenCalledTimes(1);
+    expect(h.commit.mock.calls[0][0][0]).toMatchObject({ width: 100, height: 50 });
+  });
+
+  it("without the lock, a typed Width leaves the Height alone and no hint shows", () => {
+    open(SLICER.id);
+    expect(maybe("size-position-aspect")).toBeNull();
+    type("size-position-width", "300");
+    expect(byTestId<HTMLInputElement>("size-position-height").value).toBe("100");
+  });
+
+  it("lockedFields: blank, non-finite and position boxes change nothing else", () => {
+    const initial = { x: 0, y: 0, width: 200, height: 100 };
+    expect(lockedFields({ ...initial, width: null }, "width", initial, true)).toEqual({ ...initial, width: null });
+    expect(lockedFields({ ...initial, x: 50 }, "x", initial, true)).toEqual({ ...initial, x: 50 });
+    expect(lockedFields({ ...initial, width: 400 }, "width", initial, false)).toEqual({ ...initial, width: 400 });
+    expect(lockedFields({ ...initial, width: 400 }, "width", initial, true)).toEqual({ ...initial, width: 400, height: 200 });
   });
 });
 

@@ -158,8 +158,9 @@ export function currentInsertView(): InsertView | null {
 /**
  * Where an object of `size` goes on the active canvas (its sheet with the
  * default rect), or null before the grid exists. Exported for the inserts that
- * place several objects at once (lib/pageNavigator.ts), so a row of buttons is
- * placed by the same rule as one.
+ * size their box themselves (lib/pageNavigator.ts: a navigator is ONE control
+ * whose box follows the page list), so they are placed by the same rule as
+ * every other insert.
  */
 export function placeFor(
   size: { width: number; height: number },
@@ -191,7 +192,8 @@ export type CanvasInsertKind =
 /**
  * The button kinds Buttons v inserts one at a time: a blank button (a script
  * button, the old Insert > Button) and Power BI's Back and Clear all slicers.
- * The Page Navigator is a ROW of buttons (lib/pageNavigator.ts).
+ * The Page Navigator is not one of them: a navigator is ONE control of its
+ * own type whose items follow the page list live (lib/pageNavigator.ts).
  */
 export type CanvasButtonKind = "blank" | "back" | "clearSlicers";
 

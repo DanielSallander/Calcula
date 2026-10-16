@@ -2,10 +2,11 @@
 // PURPOSE: The canvas pivot box's wiring (M6), end to end through the real
 //          window events Core dispatches:
 //          - SELECTION BRIDGE. `floatingObject:selected` on a pivot-visual makes
-//            it the active pivot (tabs registered, "pivot" context key set) and
-//            opens the field list from the hidden-grid anchor; a press on any
-//            other object deselects it; a keyboard select (the object-selection
-//            provider) opens no pane; a pane the user closed stays closed.
+//            it the active pivot (tabs registered, "pivot" context key set)
+//            and opens NO pane of its own (WP-C D-PANE: the ONE object pane
+//            opens by its own policy); a press on any other object deselects
+//            it; a keyboard select (the object-selection provider) loads
+//            nothing.
 //          - CHROME. `floatingObject:bodyDragStart` over a +/- only STARTS a
 //            press (pivotChromePress.ts); its release over the same +/-
 //            toggles THAT view cell, the second click of a double-click is
@@ -16,6 +17,10 @@
 //            update_pivot_properties({pivotId, canvasFrame}).
 //          - DOUBLE-CLICK. A body cell maps view cell -> hidden-grid cell and
 //            runs the shared toggle / drill.
+//          - REFERENCE PICK (D-PICK). `referenceAt` names the hidden-grid cell
+//            under a point (frozen + scroll + the box's column block), the
+//            cell beneath the chrome, null on blank area; it is pure; and a
+//            pick drag Core publishes over the box is painted dashed there.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
@@ -37,6 +42,8 @@ const api = vi.hoisted(() => ({
   cancelPivotLoading: vi.fn(),
   getPivotViewCell: vi.fn(),
   runPivotCellDoubleClick: vi.fn(() => true),
+  /** What Core's reference-pick session publishes for a drag (D-PICK); null = no pick drag. */
+  pickPreview: null as unknown,
 }));
 
 vi.mock("@api", () => ({
@@ -50,6 +57,12 @@ vi.mock("@api", () => ({
   emitAppEvent: api.emitAppEvent,
   showToast: api.showToast,
   isPointerClaimed: () => false,
+}));
+
+// Core's pick-drag preview is set by its pick session only; the test states it.
+vi.mock("@api/gridOverlays", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  getFloatingReferencePickPreview: () => api.pickPreview,
 }));
 
 vi.mock("@api/pivot", () => ({
@@ -101,13 +114,13 @@ import { setPivotVisualScroll } from "../pivotVisualScroll";
 import { getPivotVisualRecord } from "../pivotVisualHits";
 import { createRecordingCtx } from "../../../_shared/lib/__tests__/recordingCtx";
 import { resetObjectSelectionProviders, selectObject, deselectAllObjects } from "@api/objectSelection";
-import { installPivotVisual, handlePivotVisualPress } from "../pivotVisualOverlay";
+import { installPivotVisual, handlePivotVisualPress, pivotVisualReferenceAt } from "../pivotVisualOverlay";
 import { isPivotChromePressActive } from "../pivotChromePress";
 import { objectOwnsKey } from "@api/objectSelection";
 import { readFileSync } from "fs";
 import { resolve } from "path";
 import { publishPivotRegions, resetPivotVisualRegionState, PIVOT_VISUAL_REGION_TYPE } from "../pivotVisualRegions";
-import { setPivotVisualRecord, resetPivotVisualHits } from "../pivotVisualHits";
+import { setPivotVisualRecord, resetPivotVisualHits, getPivotVisualHover } from "../pivotVisualHits";
 import { notePivotCreated, adoptCreatedCanvasPivot, resetCreatedPivotTracking } from "../pivotVisualSelection";
 import {
   updateCachedRegions,
@@ -115,7 +128,19 @@ import {
   isPivotVisualSelected,
   resetSelectionHandlerState,
 } from "../../handlers/selectionHandler";
-import { buildPivotVisualGeometry } from "../../rendering/pivotVisualRenderer";
+import { buildPivotVisualGeometry, type PivotVisualGeometry } from "../../rendering/pivotVisualRenderer";
+import { pivotCellSheetRect, PIVOT_BOX_BORDER_BAND } from "../pivotVisualOverlay";
+import {
+  extendPivotCellSelection,
+  getPivotCellSelection,
+  resetPivotCellSelection,
+  setPivotCellAnchor,
+} from "../pivotVisualCellSelection";
+import { isPivotCellPressLive } from "../pivotCellPress";
+import { prunePivotVisualRecords } from "../pivotVisualHits";
+import { setDesignMode } from "@api/designMode";
+import { PivotEvents } from "../../../_shared/lib/pivotEvents";
+import { INNER_SELECTION_BORDER, INNER_SELECTION_FILL } from "../../../_shared/lib/innerSelectionPaint";
 import type { PivotRegionData } from "../../types";
 import type { PivotViewResponse } from "../pivot-api";
 import { DEFAULT_PIVOT_THEME } from "../../rendering/pivot";
@@ -128,7 +153,10 @@ const canvasPivot: PivotRegionData = {
   endRow: 49,
   endCol: 1026,
   isEmpty: false,
-  canvasFrame: { x: 100, y: 80, width: 300, height: 200, frozenHeaders: true },
+  // NO container border (WP-C): the content rect IS the frame, so the
+  // geometry pinned below reads exactly as before the container existed. The
+  // container's own inset is pinned in pivotBoxContainer.test.ts.
+  canvasFrame: { x: 100, y: 80, width: 300, height: 200, frozenHeaders: true, container: { border: { show: false } } },
 };
 
 let overlay: OverlayRegistration | null = null;
@@ -151,6 +179,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.useFakeTimers();
   api.manuallyClosed = [];
+  api.pickPreview = null;
   api.getAtCell.mockResolvedValue({
     pivotId: "cp1",
     sourceFields: [],
@@ -169,6 +198,8 @@ beforeEach(() => {
   resetPivotVisualRegionState();
   resetPivotVisualHits();
   resetCreatedPivotTracking();
+  resetPivotCellSelection();
+  setDesignMode(false);
   setGridRegions([]);
   cleanups = installPivotVisual({ getTheme: () => DEFAULT_PIVOT_THEME }, (reg) => {
     overlay = reg;
@@ -188,7 +219,7 @@ afterEach(() => {
 });
 
 describe("selection bridge", () => {
-  it("a press on the box makes it the active pivot and opens the field list from the hidden-grid anchor", async () => {
+  it("a press on the box makes it the active pivot -- and opens NO pane of its own (the object pane's policy does)", async () => {
     fire("floatingObject:selected", visualDetail());
 
     expect(getActivePivotId()).toBe("cp1");
@@ -198,19 +229,12 @@ describe("selection bridge", () => {
       "pivot-analyze",
       "pivot-design",
     ]);
-    expect(api.getAtCell).toHaveBeenCalledWith(0, 1024);
     await vi.runAllTimersAsync();
-    expect(api.openTaskPane).toHaveBeenCalledTimes(1);
-    expect(api.openTaskPane.mock.calls[0][0]).toBe("pivot-pane");
-    expect((api.openTaskPane.mock.calls[0][1] as { pivotId: string }).pivotId).toBe("cp1");
-  });
-
-  it("a second press on the same box reloads nothing", async () => {
-    fire("floatingObject:selected", visualDetail());
-    await vi.runAllTimersAsync();
-    fire("floatingObject:selected", visualDetail());
-    await vi.runAllTimersAsync();
-    expect(api.getAtCell).toHaveBeenCalledTimes(1);
+    // No worksheet field-list pane for a canvas box, and nothing read for one.
+    expect(api.openTaskPane).not.toHaveBeenCalled();
+    expect(api.getAtCell).not.toHaveBeenCalled();
+    // The ribbon still hears the active pivot.
+    expect(api.emitAppEvent).toHaveBeenCalledWith(expect.stringContaining("pivot"), { pivotId: "cp1", layout: {} });
   });
 
   it("a press on any other object deselects the box", async () => {
@@ -225,14 +249,13 @@ describe("selection bridge", () => {
     expect(api.closeTaskPane).toHaveBeenCalledWith("pivot-pane");
   });
 
-  it("a pane the user closed by hand stays closed; the ribbon still hears the active pivot", async () => {
-    api.manuallyClosed = ["pivot-pane"];
-    fire("floatingObject:selected", visualDetail());
-    await vi.runAllTimersAsync();
-    expect(api.getAtCell).not.toHaveBeenCalled();
-    expect(api.openTaskPane).not.toHaveBeenCalled();
-    expect(api.emitAppEvent).toHaveBeenCalledWith(expect.stringContaining("pivot"), { pivotId: "cp1", layout: {} });
-    expect(getActivePivotId()).toBe("cp1");
+  it("SOURCE: the box's press listener asks for no pane (the object pane owns it)", () => {
+    const src = readFileSync(resolve(__dirname, "../pivotVisualOverlay.ts"), "utf8").replace(/\/\/.*$/gm, "");
+    const at = src.indexOf('listen("floatingObject:selected"');
+    expect(at).toBeGreaterThan(0);
+    const body = src.slice(at, src.indexOf("\n  });", at));
+    expect(body).toMatch(/selectPivotVisual\(pivotId\)/);
+    expect(body).not.toMatch(/openPane|openTaskPane|openObjectPane/);
   });
 
   it("the object-selection provider selects without opening the pane, and deselectAll tears down", async () => {
@@ -258,35 +281,6 @@ describe("selection bridge", () => {
     expect(getActivePivotId()).toBeNull();
   });
 
-  it("a keyboard step to ANOTHER box keeps an open pane in sync (no pane opened from nothing)", async () => {
-    const second: PivotRegionData = { ...canvasPivot, pivotId: "cp2", startCol: 2048, endCol: 2050 };
-    updateCachedRegions([canvasPivot, second]);
-    const regionOf = (id: string, startCol: number) => ({
-      id: `pivot-visual-${id}`,
-      type: PIVOT_VISUAL_REGION_TYPE,
-      startRow: 0,
-      startCol,
-      endRow: 0,
-      endCol: 0,
-      floating: { x: 0, y: 0, width: 10, height: 10 },
-      data: { pivotId: id },
-    });
-
-    // Keyboard-select cp1 with no pane open: nothing is loaded.
-    selectObject(regionOf("cp1", 1024));
-    await vi.runAllTimersAsync();
-    expect(api.getAtCell).not.toHaveBeenCalled();
-
-    // A press opens cp1's pane; a keyboard step to cp2 moves the open pane along.
-    fire("floatingObject:selected", visualDetail());
-    await vi.runAllTimersAsync();
-    expect(api.getAtCell).toHaveBeenLastCalledWith(0, 1024);
-    selectObject(regionOf("cp2", 2048));
-    await vi.runAllTimersAsync();
-    expect(api.getAtCell).toHaveBeenLastCalledWith(0, 2048);
-    expect(getActivePivotId()).toBe("cp2");
-  });
-
   it("a pivot just created on a canvas starts selected (so a page click can deselect it); a worksheet one does not", () => {
     notePivotCreated("cp1");
     adoptCreatedCanvasPivot([]); // not in the list yet: stays pending
@@ -299,6 +293,35 @@ describe("selection bridge", () => {
     notePivotCreated("ws1");
     adoptCreatedCanvasPivot([{ ...canvasPivot, pivotId: "ws1", canvasFrame: undefined }]);
     expect(isPivotVisualSelected("ws1")).toBe(false);
+  });
+
+  it("a pivot created ON THE CANVAS opens the ONE object pane on its Fields tab once its box is published -- never the pivot-editor pane", async () => {
+    const { registerObjectPaneHost, resetObjectPane } = await import("@api/objectPane");
+    resetObjectPane();
+    const opened: Array<{ regionId?: string; tab?: string; reason: string }> = [];
+    const off = registerObjectPaneHost({
+      open: (req) => {
+        opened.push({ regionId: req.region?.id, tab: req.tab, reason: req.reason });
+        return true;
+      },
+      close: () => undefined,
+      state: () => ({ open: false, regionId: null, regionType: null, tabId: null }),
+    });
+    try {
+      notePivotCreated("cp1", { openPane: true });
+      adoptCreatedCanvasPivot([]); // not published yet: nothing opens
+      expect(opened).toEqual([]);
+      adoptCreatedCanvasPivot([canvasPivot]);
+      expect(isPivotVisualSelected("cp1")).toBe(true);
+      expect(opened).toEqual([{ regionId: "pivot-visual-cp1", tab: "fields", reason: "command" }]);
+      // Once only: a later region list does not reopen it.
+      adoptCreatedCanvasPivot([canvasPivot]);
+      expect(opened).toHaveLength(1);
+      expect(api.openTaskPane).not.toHaveBeenCalled();
+    } finally {
+      off();
+      resetObjectPane();
+    }
   });
 
   it("the box disappearing (deleted pivot, other sheet) tears the selection down", async () => {
@@ -328,7 +351,7 @@ describe("chrome presses arrive as CONTENT (the zone answer) through bodyDragSta
     });
   }
 
-  it("zoneAt: chrome is content with a hand, a plain cell is frame -- and the registration has no second answer", () => {
+  it("zoneAt: chrome is content with a hand; with no painted geometry the rest of the box is frame -- and the registration has no second answer", () => {
     recordWithIcon();
     const region = { id: "pivot-visual-cp1", type: PIVOT_VISUAL_REGION_TYPE, startRow: 0, startCol: 1024, endRow: 0, endCol: 0, data: { pivotId: "cp1" } };
     expect(overlay!.zoneAt!({ region, canvasX: 112, canvasY: 164, row: 0, col: 0 })).toEqual({
@@ -340,7 +363,10 @@ describe("chrome presses arrive as CONTENT (the zone answer) through bodyDragSta
       kind: "content",
       part: "filter",
     });
-    expect(overlay!.zoneAt!({ region, canvasX: 250, canvasY: 200, row: 0, col: 0 })).toBeNull();
+    // No geometry painted (geometry: null): no cell to name -- blank frame.
+    expect(overlay!.zoneAt!({ region, canvasX: 250, canvasY: 200, row: 0, col: 0 })).toEqual({ kind: "frame", part: "blank" });
+    // Outside the box: no answer (frame).
+    expect(overlay!.zoneAt!({ region, canvasX: 50, canvasY: 50, row: 0, col: 0 })).toBeNull();
     // No second answer beside the zone (M5 T6 removed the old fields from the
     // type; the cast reads what the object actually carries).
     const fields = overlay as unknown as Record<string, unknown>;
@@ -441,12 +467,17 @@ describe("chrome presses arrive as CONTENT (the zone answer) through bodyDragSta
     expect(api.togglePivotHeaderAt).not.toHaveBeenCalled();
   });
 
-  it("SOURCE: the bodyDragStart listener starts the press (beginPivotChromePress) and never runs the chrome itself", () => {
+  it("SOURCE: the bodyDragStart listener starts a press (cell or chrome) and never runs the chrome itself", () => {
     const src = readFileSync(resolve(__dirname, "../pivotVisualOverlay.ts"), "utf8").replace(/\/\/.*$/gm, "");
     const at = src.indexOf('listen("floatingObject:bodyDragStart"');
     expect(at, "the bodyDragStart listener is gone").toBeGreaterThan(0);
-    const body = src.slice(at, src.indexOf("});", at));
+    // The listener ends at its own closing line (two-space indent): the press
+    // calls inside it close with a deeper `});`.
+    const end = src.indexOf("\n  });", at);
+    expect(end, "the listener's end was not found").toBeGreaterThan(at);
+    const body = src.slice(at, end);
     expect(body).toMatch(/beginPivotChromePress\(\{/);
+    expect(body).toMatch(/beginPivotCellPress\(\{/);
     expect(body, "the listener acts on the PRESS again").not.toMatch(/handlePivotVisualPress\(/);
   });
 });
@@ -458,7 +489,7 @@ describe("frame edits persist through update_pivot_properties", () => {
     await vi.runAllTimersAsync();
     expect(api.updatePivotProperties).toHaveBeenCalledWith({
       pivotId: "cp1",
-      canvasFrame: { x: 144, y: 96, width: 300, height: 200, frozenHeaders: true },
+      canvasFrame: { x: 144, y: 96, width: 300, height: 200, frozenHeaders: true, container: { border: { show: false } } },
     });
   });
 
@@ -467,7 +498,7 @@ describe("frame edits persist through update_pivot_properties", () => {
     await vi.runAllTimersAsync();
     expect(api.updatePivotProperties).toHaveBeenCalledWith({
       pivotId: "cp1",
-      canvasFrame: { x: 100, y: 80, width: 360, height: 240, frozenHeaders: true },
+      canvasFrame: { x: 100, y: 80, width: 360, height: 240, frozenHeaders: true, container: { border: { show: false } } },
     });
   });
 
@@ -570,5 +601,693 @@ describe("double-click", () => {
     expect(handled).toBe(true);
     expect(api.getPivotViewCell).toHaveBeenCalledWith("cp1", 6, 1);
     expect(api.runPivotCellDoubleClick).toHaveBeenCalledWith("cp1", dataCell, 6, 1025, 1);
+  });
+
+  /** A record of `rowCount` rows x 3 columns (100px x 24px) at box (100, 80, 300, 200), unscrolled. */
+  function seedRecord(rowCount: number): void {
+    const view = {
+      pivotId: "cp1",
+      version: 1,
+      rowCount,
+      colCount: 3,
+      rowLabelColCount: 1,
+      columnHeaderRowCount: 1,
+      filterRowCount: 0,
+      filterRows: [],
+      rowFieldSummaries: [],
+      columnFieldSummaries: [],
+      rows: Array.from({ length: rowCount }, (_, i) => ({ viewRow: i, rowType: "Data", depth: 0, visible: true, cells: [] })),
+      columns: [],
+    } as unknown as PivotViewResponse;
+    setPivotVisualRecord({
+      pivotId: "cp1",
+      box: { x: 100, y: 80, width: 300, height: 200 },
+      bounds: { expandCollapseIcons: new Map(), filterButtons: new Map(), headerFilterButtons: new Map() },
+      cancel: null,
+      geometry: buildPivotVisualGeometry(view, true, { columnWidth: () => 100, rowHeight: () => 24 }),
+      scroll: { left: 0, top: 0 },
+      startRow: 0,
+      startCol: 1024,
+    });
+    api.getPivotViewCell.mockReturnValue({ cellType: "Data", value: 5, backgroundStyle: "Normal", groupPath: [[0, 1]] });
+  }
+
+  function regionWith(data: Record<string, unknown> = {}) {
+    return {
+      id: "pivot-visual-cp1",
+      type: PIVOT_VISUAL_REGION_TYPE,
+      startRow: 0,
+      startCol: 1024,
+      endRow: 0,
+      endCol: 0,
+      data: { pivotId: "cp1", ...data },
+    };
+  }
+
+  it("the 4px border band MOVES the box, so a double-click there is inert -- even over a cell (positive control beside it)", () => {
+    seedRecord(50);
+    // Box-local (2, 40): inside the band on the left edge, over the row-label column of view row 1.
+    const onBand = overlay!.onDoubleClick!({ region: regionWith(), canvasX: 100 + 2, canvasY: 80 + 40, row: 0, col: 0 });
+    expect(onBand).toBe(true); // swallowed: a canvas has no editor to fall through to
+    expect(api.runPivotCellDoubleClick).not.toHaveBeenCalled();
+    expect(api.getPivotViewCell).not.toHaveBeenCalled();
+
+    // Control: PIVOT_BOX_BORDER_BAND px further in, the same row's cell drills.
+    const inside = overlay!.onDoubleClick!({
+      region: regionWith(),
+      canvasX: 100 + 2 + PIVOT_BOX_BORDER_BAND,
+      canvasY: 80 + 40,
+      row: 0,
+      col: 0,
+    });
+    expect(inside).toBe(true);
+    expect(api.getPivotViewCell).toHaveBeenCalledWith("cp1", 1, 0);
+    expect(api.runPivotCellDoubleClick).toHaveBeenCalledTimes(1);
+    expect(api.runPivotCellDoubleClick).toHaveBeenCalledWith("cp1", expect.objectContaining({ cellType: "Data" }), 1, 1024, 0);
+  });
+
+  it("blank area past the content is inert", () => {
+    seedRecord(2); // 2 rows x 24px: everything below box-local y 48 is blank
+    const handled = overlay!.onDoubleClick!({ region: regionWith(), canvasX: 250, canvasY: 80 + 120, row: 0, col: 0 });
+    expect(handled).toBe(true);
+    expect(api.runPivotCellDoubleClick).not.toHaveBeenCalled();
+  });
+
+  it("in Design Mode the body grabs the box, so a double-click on a cell is inert; out of it, the same point drills", () => {
+    seedRecord(50);
+    const designed = overlay!.onDoubleClick!({ region: regionWith({ bodyGrab: true }), canvasX: 250, canvasY: 120, row: 0, col: 0 });
+    expect(designed).toBe(true);
+    expect(api.runPivotCellDoubleClick).not.toHaveBeenCalled();
+
+    overlay!.onDoubleClick!({ region: regionWith(), canvasX: 250, canvasY: 120, row: 0, col: 0 });
+    expect(api.runPivotCellDoubleClick).toHaveBeenCalledWith("cp1", expect.objectContaining({ cellType: "Data" }), 1, 1025, 1);
+  });
+
+  it("outside the box it is not the box's double-click (false)", () => {
+    seedRecord(50);
+    expect(overlay!.onDoubleClick!({ region: regionWith(), canvasX: 50, canvasY: 50, row: 0, col: 0 })).toBe(false);
+    expect(api.runPivotCellDoubleClick).not.toHaveBeenCalled();
+  });
+});
+
+describe("reference pick (D-PICK): referenceAt names the hidden-grid cell under the point", () => {
+  /** A view of `rowCount` rows x 3 columns; with 100px columns and 24px rows, header row + row-label column frozen. */
+  function pickView(rowCount = 50): PivotViewResponse {
+    return {
+      pivotId: "cp1",
+      version: 1,
+      rowCount,
+      colCount: 3,
+      rowLabelColCount: 1,
+      columnHeaderRowCount: 1,
+      filterRowCount: 0,
+      filterRows: [],
+      rowFieldSummaries: [],
+      columnFieldSummaries: [],
+      rows: Array.from({ length: rowCount }, (_, i) => ({ viewRow: i, rowType: "Data", depth: 0, visible: true, cells: [] })),
+      columns: [],
+    } as unknown as PivotViewResponse;
+  }
+
+  function record(
+    opts: {
+      geometry?: PivotVisualGeometry | null;
+      scroll?: { left: number; top: number };
+      startRow?: number;
+      startCol?: number;
+      withChrome?: boolean;
+    } = {},
+  ): void {
+    setPivotVisualRecord({
+      pivotId: "cp1",
+      box: { x: 100, y: 80, width: 300, height: 200 },
+      bounds: {
+        expandCollapseIcons: opts.withChrome
+          ? new Map([["7-0", { x: 6, y: 78, width: 12, height: 12, row: 7, col: 0, isExpanded: true, isRow: true }]])
+          : new Map(),
+        filterButtons: new Map(),
+        headerFilterButtons: new Map(),
+      },
+      cancel: null,
+      geometry:
+        opts.geometry === undefined
+          ? buildPivotVisualGeometry(pickView(), true, { columnWidth: () => 100, rowHeight: () => 24 })
+          : opts.geometry,
+      scroll: opts.scroll ?? { left: 0, top: 120 },
+      startRow: opts.startRow ?? 0,
+      startCol: opts.startCol ?? 1024,
+    });
+  }
+
+  const region = {
+    id: "pivot-visual-cp1",
+    type: PIVOT_VISUAL_REGION_TYPE,
+    startRow: 0,
+    startCol: 1024,
+    endRow: 0,
+    endCol: 0,
+    data: { pivotId: "cp1" },
+  };
+  const at = (canvasX: number, canvasY: number) => ({ region, canvasX, canvasY, row: 0, col: 0 });
+
+  it("is the registration's referenceAt, beside its zoneAt", () => {
+    expect(overlay!.referenceAt).toBe(pivotVisualReferenceAt);
+    expect(overlay!.zoneAt).toBeDefined();
+  });
+
+  it("a point in the FROZEN header row names the header cell whatever the body scroll", () => {
+    record({ scroll: { left: 0, top: 600 } });
+    // Box-local (50, 5): header row 0, row-label column 0 -> hidden-grid (0, 1024).
+    expect(pivotVisualReferenceAt(at(150, 85))).toEqual({ space: "sheet", row: 0, col: 1024 });
+    // Box-local (150, 5): header row 0, column 1 -> (0, 1025).
+    expect(pivotVisualReferenceAt(at(250, 85))).toEqual({ space: "sheet", row: 0, col: 1025 });
+  });
+
+  it("a point in the scrolled BODY adds the scroll (the scrolled cell, never the window cell)", () => {
+    record({ scroll: { left: 0, top: 120 } });
+    // Box-local (150, 30): 6px into the body at scroll 120 -> view row 6, column 1.
+    expect(pivotVisualReferenceAt(at(250, 110))).toEqual({ space: "sheet", row: 6, col: 1025 });
+    record({ scroll: { left: 50, top: 0 } });
+    // Box-local (160, 30): body column at 160 + 50 = 210 -> column 2; row 1.
+    expect(pivotVisualReferenceAt(at(260, 110))).toEqual({ space: "sheet", row: 1, col: 1026 });
+    // The frozen row-label column is not scrolled: box-local x 50 is column 0.
+    expect(pivotVisualReferenceAt(at(150, 110))).toEqual({ space: "sheet", row: 1, col: 1024 });
+  });
+
+  it("adds the box's own anchor: a box in another column block, a pivot not at row 0", () => {
+    record({ startRow: 3, startCol: 2048 });
+    expect(pivotVisualReferenceAt(at(250, 110))).toEqual({ space: "sheet", row: 9, col: 2049 });
+  });
+
+  it("over the CHROME (a +/-) it names the cell beneath: during a pick the chrome does not act", () => {
+    record({ scroll: { left: 0, top: 100 }, withChrome: true });
+    // Control: the zone answer there IS the chrome.
+    expect(overlay!.zoneAt!(at(112, 164))).toMatchObject({ kind: "content", part: "icon" });
+    // Box-local (12, 84): 60px into the body at scroll 100 -> view row 7, column 0.
+    expect(pivotVisualReferenceAt(at(112, 164))).toEqual({ space: "sheet", row: 7, col: 1024 });
+  });
+
+  it("blank area past the content, outside the box, no painted geometry or no record: null (inert)", () => {
+    // 5 rows x 24px = 120px of content in a 200px box.
+    record({
+      geometry: buildPivotVisualGeometry(pickView(5), true, { columnWidth: () => 100, rowHeight: () => 24 }),
+      scroll: { left: 0, top: 0 },
+    });
+    expect(pivotVisualReferenceAt(at(250, 80 + 150))).toBeNull();
+    expect(pivotVisualReferenceAt(at(250, 80 + 100)), "control: a cell inside the content").toEqual({
+      space: "sheet",
+      row: 4,
+      col: 1025,
+    });
+    expect(pivotVisualReferenceAt(at(99, 100)), "left of the box").toBeNull();
+
+    record({ geometry: null });
+    expect(pivotVisualReferenceAt(at(250, 110))).toBeNull();
+
+    resetPivotVisualHits();
+    expect(pivotVisualReferenceAt(at(250, 110))).toBeNull();
+    expect(pivotVisualReferenceAt({ ...at(250, 110), region: { ...region, data: {} } })).toBeNull();
+  });
+
+  it("is PURE: a sweep of a thousand points writes no hover, selects nothing, dispatches nothing", () => {
+    record({ withChrome: true, scroll: { left: 0, top: 100 } });
+    const before = getPivotVisualRecord("cp1");
+    const dispatch = vi.spyOn(window, "dispatchEvent");
+    try {
+      let answered = 0;
+      for (let i = 0; i < 1000; i++) {
+        const x = 60 + ((i * 37) % 380);
+        const y = 40 + ((i * 53) % 280);
+        if (pivotVisualReferenceAt(at(x, y))) answered++;
+      }
+      expect(answered, "the sweep never hit a cell -- vacuous").toBeGreaterThan(100);
+      expect(dispatch).not.toHaveBeenCalled();
+    } finally {
+      dispatch.mockRestore();
+    }
+    expect(getPivotVisualHover("cp1")).toBeUndefined();
+    expect(isPivotVisualSelected("cp1")).toBe(false);
+    expect(getActivePivotId()).toBeNull();
+    expect(getPivotVisualRecord("cp1"), "the record was rewritten").toBe(before);
+    expect(api.togglePivotHeaderAt).not.toHaveBeenCalled();
+  });
+});
+
+describe("reference pick (D-PICK): a pick drag across the box is painted dashed over the cells it names", () => {
+  type Stroke = { style: string; rect: { x: number; y: number; width: number; height: number }; clip: unknown };
+
+  function renderWith(preview: unknown): Stroke[] {
+    const rows = Array.from({ length: 50 }, (_, i) => ({
+      viewRow: i,
+      rowType: i === 0 ? "ColumnHeader" : "Data",
+      depth: 0,
+      visible: true,
+      cells: [
+        {
+          cellType: i === 0 ? "RowLabelHeader" : "RowHeader",
+          value: null,
+          formattedValue: i === 0 ? "Row Labels" : `Item ${i}`,
+          backgroundStyle: "Normal",
+        },
+        { cellType: "Data", value: i, formattedValue: String(i), backgroundStyle: "Normal" },
+        { cellType: "Data", value: i * 2, formattedValue: String(i * 2), backgroundStyle: "Normal" },
+      ],
+    }));
+    const view = {
+      pivotId: "cp1",
+      version: 1,
+      rowCount: 50,
+      colCount: 3,
+      rowLabelColCount: 1,
+      columnHeaderRowCount: 1,
+      filterRowCount: 0,
+      filterRows: [],
+      rowFieldSummaries: [],
+      columnFieldSummaries: [],
+      rows,
+      columns: [],
+    } as unknown as PivotViewResponse;
+    setCachedPivotView("cp1", view);
+    setPivotVisualScroll("cp1", { left: 0, top: 120 });
+    api.pickPreview = preview;
+
+    const rec = createRecordingCtx();
+    const strokes: Stroke[] = [];
+    const ctx = rec.ctx as unknown as Record<string, unknown>;
+    const strokeRect = ctx.strokeRect as (x: number, y: number, w: number, h: number) => void;
+    ctx.strokeRect = function (this: Record<string, unknown>, x: number, y: number, w: number, h: number) {
+      strokeRect.call(this, x, y, w, h);
+      const op = rec.ops[rec.ops.length - 1];
+      strokes.push({ style: String(this.strokeStyle), rect: op.rect, clip: op.clip });
+    };
+    const region = getGridRegions().find((r) => r.type === PIVOT_VISUAL_REGION_TYPE)!;
+    try {
+      overlay!.render({
+        ctx: rec.ctx,
+        region,
+        config: { rowHeaderWidth: 0, colHeaderHeight: 0, defaultCellWidth: 100, defaultCellHeight: 24 } as never,
+        viewport: { scrollX: 10, scrollY: 20 } as never,
+        dimensions: { columnWidths: new Map(), rowHeights: new Map() } as never,
+        canvasWidth: 1200,
+        canvasHeight: 800,
+      });
+    } finally {
+      deleteCachedPivotView("cp1");
+    }
+    return strokes;
+  }
+
+  const PICK_BLUE = "#1f6fd1";
+  const regionId = () => getGridRegions().find((r) => r.type === PIVOT_VISUAL_REGION_TYPE)!.id;
+  const blue = (strokes: Stroke[]) => strokes.filter((s) => s.style === PICK_BLUE);
+
+  it("Core's preview of THIS box (hidden-grid rows 6-7, columns 1025-1026) is stroked over those cells, inside the box", () => {
+    const strokes = renderWith({
+      regionId: regionId(),
+      range: { space: "sheet", startRow: 6, startCol: 1025, endRow: 7, endCol: 1026 },
+    });
+    expect(blue(strokes).length, "no dashed preview was painted").toBe(1);
+    // Box at (90, 60) (frame (100, 80), page scrolled (10, 20)); body scrolled 120:
+    // view row 6 sits at 6*24 - 120 = 24, columns 1-2 at 100..300. Inset 0.75 for the 1.5px stroke.
+    expect(blue(strokes)[0].rect).toEqual({ x: 90 + 100 + 0.75, y: 60 + 24 + 0.75, width: 200 - 1.5, height: 48 - 1.5 });
+    expect(blue(strokes)[0].clip).toEqual({ x: 90, y: 60, width: 300, height: 200 });
+  });
+
+  it("a preview of another object, of an object space (a floating grid's cells), or none: nothing dashed here", () => {
+    const sheetRange = { space: "sheet", startRow: 6, startCol: 1025, endRow: 7, endCol: 1026 };
+    expect(blue(renderWith({ regionId: "floating-range-f1", range: sheetRange }))).toEqual([]);
+    expect(blue(renderWith({ regionId: regionId(), range: { ...sheetRange, space: "object", name: "Float2" } }))).toEqual([]);
+    expect(blue(renderWith(null))).toEqual([]);
+  });
+});
+
+// ============================================================================
+// D-CELLS (WP-A S5): the box's cells are CONTENT
+// ============================================================================
+
+describe("cells are content (D-CELLS): the zone answer", () => {
+  /** 50 rows x 3 columns of 24 x 100 px (header row + row-label column frozen), or `rowCount` rows. */
+  function cellView(rowCount = 50): PivotViewResponse {
+    return {
+      pivotId: "cp1",
+      version: 1,
+      rowCount,
+      colCount: 3,
+      rowLabelColCount: 1,
+      columnHeaderRowCount: 1,
+      filterRowCount: 0,
+      filterRows: [],
+      rowFieldSummaries: [],
+      columnFieldSummaries: [],
+      rows: Array.from({ length: rowCount }, (_, i) => ({ viewRow: i, rowType: "Data", depth: 0, visible: true, cells: [] })),
+      columns: [],
+    } as unknown as PivotViewResponse;
+  }
+
+  /** The box at canvas (100, 80), 300 x 200; a +/- at box-local (6, 78) when `withChrome`. */
+  function paintRecord(opts: { rowCount?: number; withChrome?: boolean; scroll?: { left: number; top: number } } = {}): void {
+    setPivotVisualRecord({
+      pivotId: "cp1",
+      box: { x: 100, y: 80, width: 300, height: 200 },
+      bounds: {
+        expandCollapseIcons: opts.withChrome
+          ? new Map([["7-0", { x: 6, y: 78, width: 12, height: 12, row: 7, col: 0, isExpanded: true, isRow: true }]])
+          : new Map(),
+        filterButtons: new Map(),
+        headerFilterButtons: new Map(),
+      },
+      cancel: null,
+      geometry: buildPivotVisualGeometry(cellView(opts.rowCount), true, { columnWidth: () => 100, rowHeight: () => 24 }),
+      scroll: opts.scroll ?? { left: 0, top: 0 },
+      startRow: 0,
+      startCol: 1024,
+    });
+    setPivotVisualScroll("cp1", opts.scroll ?? { left: 0, top: 0 });
+  }
+
+  const regionWith = (data: Record<string, unknown> = {}) => ({
+    id: "pivot-visual-cp1",
+    type: PIVOT_VISUAL_REGION_TYPE,
+    startRow: 0,
+    startCol: 1024,
+    endRow: 49,
+    endCol: 1026,
+    floating: { x: 100, y: 80, width: 300, height: 200 },
+    data: { pivotId: "cp1", ...data },
+  });
+  const bounds = { x: 100, y: 80, width: 300, height: 200 };
+  const zoneAt = (x: number, y: number, data: Record<string, unknown> = {}) =>
+    overlay!.zoneAt!({ region: regionWith(data), canvasX: x, canvasY: y, row: 0, col: 0, floatingCanvasBounds: bounds });
+
+  it("a cell is content with the cell pointer (part 'cell'), in the header row and the body alike", () => {
+    paintRecord();
+    expect(zoneAt(250, 110)).toEqual({ kind: "content", cursor: "cell", part: "cell" });
+    expect(zoneAt(150, 90)).toEqual({ kind: "content", cursor: "cell", part: "cell" });
+  });
+
+  it(`the ${PIVOT_BOX_BORDER_BAND}px band inside the edge is frame 'border' (it moves the box), on all four edges`, () => {
+    paintRecord();
+    expect(zoneAt(102, 150)).toEqual({ kind: "frame", part: "border" }); // left
+    expect(zoneAt(250, 82)).toEqual({ kind: "frame", part: "border" }); // top
+    expect(zoneAt(398, 150)).toEqual({ kind: "frame", part: "border" }); // right
+    expect(zoneAt(250, 278)).toEqual({ kind: "frame", part: "border" }); // bottom
+    // Control: just inside the band is a cell again.
+    expect(zoneAt(105, 150)).toEqual({ kind: "content", cursor: "cell", part: "cell" });
+  });
+
+  it("blank area past the content is frame 'blank' (it moves the box)", () => {
+    paintRecord({ rowCount: 5 }); // 120 px of content in a 200 px box
+    expect(zoneAt(250, 80 + 150)).toEqual({ kind: "frame", part: "blank" });
+    expect(zoneAt(250, 80 + 100), "control: inside the content").toMatchObject({ kind: "content", part: "cell" });
+  });
+
+  it("in DESIGN MODE the whole body is frame 'bodyGrab' -- the chrome still acts", () => {
+    paintRecord({ withChrome: true });
+    expect(zoneAt(250, 110, { bodyGrab: true })).toEqual({ kind: "frame", part: "bodyGrab" });
+    expect(zoneAt(112, 164, { bodyGrab: true })).toEqual({ kind: "content", cursor: "pointer", part: "icon" });
+    expect(zoneAt(250, 110, { bodyGrab: false }), "control: Design Mode off").toMatchObject({ part: "cell" });
+  });
+
+  it("a locked / immovable box's cells are STILL content (reading the report is not editing it)", () => {
+    paintRecord();
+    expect(zoneAt(250, 110, { movable: false, locked: true })).toEqual({ kind: "content", cursor: "cell", part: "cell" });
+  });
+
+  it("is PURE: a sweep of a thousand points writes no cell selection, hover or record, binds no listener, dispatches nothing", () => {
+    paintRecord({ withChrome: true });
+    const before = getPivotVisualRecord("cp1");
+    const dispatch = vi.spyOn(window, "dispatchEvent");
+    const bind = vi.spyOn(window, "addEventListener");
+    const docBind = vi.spyOn(document, "addEventListener");
+    const parts = new Set<string>();
+    try {
+      for (let i = 0; i < 1000; i++) {
+        const x = 60 + ((i * 37) % 380);
+        const y = 40 + ((i * 53) % 280);
+        const z = zoneAt(x, y);
+        parts.add(z ? `${z.kind}:${z.part}` : "null");
+      }
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(bind).not.toHaveBeenCalled();
+      expect(docBind).not.toHaveBeenCalled();
+    } finally {
+      dispatch.mockRestore();
+      bind.mockRestore();
+      docBind.mockRestore();
+    }
+    // Not vacuous: the sweep met cells, the band and the outside.
+    expect([...parts].sort()).toEqual(expect.arrayContaining(["content:cell", "frame:border", "null"]));
+    expect(getPivotCellSelection()).toBeNull();
+    expect(getPivotVisualHover("cp1")).toBeUndefined();
+    expect(getPivotVisualRecord("cp1")).toBe(before);
+    expect(isPivotCellPressLive()).toBe(false);
+  });
+});
+
+describe("cells are content (D-CELLS): the press, the clearing rules, the paint", () => {
+  function cellView(rowCount = 50): PivotViewResponse {
+    const rows = Array.from({ length: rowCount }, (_, i) => ({
+      viewRow: i,
+      rowType: i === 0 ? "ColumnHeader" : "Data",
+      depth: 0,
+      visible: true,
+      cells: [
+        { cellType: i === 0 ? "RowLabelHeader" : "RowHeader", value: null, formattedValue: i === 0 ? "Row Labels" : `Item ${i}`, backgroundStyle: "Normal" },
+        { cellType: "Data", value: i, formattedValue: String(i), backgroundStyle: "Normal" },
+        { cellType: "Data", value: i * 2, formattedValue: String(i * 2), backgroundStyle: "Normal" },
+      ],
+    }));
+    return {
+      pivotId: "cp1",
+      version: 1,
+      rowCount,
+      colCount: 3,
+      rowLabelColCount: 1,
+      columnHeaderRowCount: 1,
+      filterRowCount: 0,
+      filterRows: [],
+      rowFieldSummaries: [],
+      columnFieldSummaries: [],
+      rows,
+      columns: [],
+    } as unknown as PivotViewResponse;
+  }
+
+  function paintRecord(): void {
+    setPivotVisualRecord({
+      pivotId: "cp1",
+      box: { x: 100, y: 80, width: 300, height: 200 },
+      bounds: {
+        expandCollapseIcons: new Map([["7-0", { x: 6, y: 78, width: 12, height: 12, row: 7, col: 0, isExpanded: true, isRow: true }]]),
+        filterButtons: new Map(),
+        headerFilterButtons: new Map(),
+      },
+      cancel: null,
+      geometry: buildPivotVisualGeometry(cellView(), true, { columnWidth: () => 100, rowHeight: () => 24 }),
+      scroll: { left: 0, top: 0 },
+      startRow: 0,
+      startCol: 1024,
+    });
+    setPivotVisualScroll("cp1", { left: 0, top: 0 });
+  }
+
+  let gridArea: HTMLElement | null = null;
+  beforeEach(() => {
+    gridArea = document.createElement("div");
+    gridArea.setAttribute("data-grid-area", "");
+    document.body.appendChild(gridArea);
+  });
+  afterEach(() => {
+    gridArea?.remove();
+    gridArea = null;
+    setDesignMode(false);
+  });
+
+  it("a content press on a CELL (part 'cell') anchors it; Shift+press extends; the release keeps the cells", () => {
+    paintRecord();
+    fire("floatingObject:bodyDragStart", visualDetail({ canvasX: 250, canvasY: 110, part: "cell", shiftKey: false }));
+    expect(getPivotCellSelection()).toEqual({ pivotId: "cp1", anchorRow: 1, anchorCol: 1, endRow: 1, endCol: 1 });
+    expect(isPivotChromePressActive(), "a cell press started the chrome press").toBe(false);
+    window.dispatchEvent(new MouseEvent("mouseup", { clientX: 250, clientY: 110, button: 0 }));
+    fire("floatingObject:bodyDragStart", visualDetail({ canvasX: 350, canvasY: 160, part: "cell", shiftKey: true }));
+    expect(getPivotCellSelection()).toEqual({ pivotId: "cp1", anchorRow: 1, anchorCol: 1, endRow: 3, endCol: 2 });
+    window.dispatchEvent(new MouseEvent("mouseup", { clientX: 350, clientY: 160, button: 0 }));
+    expect(isPivotCellPressLive()).toBe(false);
+    expect(getPivotCellSelection()).toMatchObject({ endRow: 3, endCol: 2 });
+    expect(api.togglePivotHeaderAt).not.toHaveBeenCalled();
+  });
+
+  it("a chrome press (any other part) still starts the chrome press, not a cell press", () => {
+    paintRecord();
+    fire("floatingObject:bodyDragStart", visualDetail({ canvasX: 112, canvasY: 164, part: "icon" }));
+    expect(isPivotChromePressActive()).toBe(true);
+    expect(isPivotCellPressLive()).toBe(false);
+    expect(getPivotCellSelection()).toBeNull();
+  });
+
+  it("one press at a time: a cell press ends a held chrome press, and a chrome press ends a held cell press", () => {
+    paintRecord();
+    fire("floatingObject:bodyDragStart", visualDetail({ canvasX: 112, canvasY: 164, part: "icon" }));
+    expect(isPivotChromePressActive()).toBe(true);
+    fire("floatingObject:bodyDragStart", visualDetail({ canvasX: 250, canvasY: 110, part: "cell" }));
+    expect(isPivotChromePressActive(), "the chrome press outlived the cell press").toBe(false);
+    expect(isPivotCellPressLive()).toBe(true);
+    fire("floatingObject:bodyDragStart", visualDetail({ canvasX: 112, canvasY: 164, part: "icon" }));
+    expect(isPivotCellPressLive(), "the cell press outlived the chrome press").toBe(false);
+    expect(isPivotChromePressActive()).toBe(true);
+    // Its release over the +/- acts once: the cell press is gone, not acting too.
+    window.dispatchEvent(new MouseEvent("mouseup", { clientX: 112, clientY: 164, button: 0 }));
+    expect(api.togglePivotHeaderAt).toHaveBeenCalledTimes(1);
+  });
+
+  it("while the cell drag is held the box owns Escape (the canvas does not deselect it); after it, the SELECTED CELLS own it (S6) until they clear", () => {
+    paintRecord();
+    expect(objectOwnsKey("Escape")).toBe(false);
+    fire("floatingObject:bodyDragStart", visualDetail({ canvasX: 250, canvasY: 110, part: "cell" }));
+    expect(objectOwnsKey("Escape")).toBe(true);
+    expect(objectOwnsKey("Delete"), "a held cell press: Delete must not delete the pivot").toBe(true);
+    window.dispatchEvent(new MouseEvent("mouseup", { clientX: 250, clientY: 110, button: 0 }));
+    expect(getPivotCellSelection(), "fixture: the press left cells selected").not.toBeNull();
+    expect(objectOwnsKey("Escape"), "the cells' Escape clears them before the canvas deselects the box").toBe(true);
+    expect(objectOwnsKey("Delete"), "Delete on selected cells must not delete the pivot").toBe(true);
+    resetPivotCellSelection();
+    expect(objectOwnsKey("Escape"), "no press, no cells: Escape is the canvas's").toBe(false);
+  });
+
+  it("the box's teardown ends a held cell press", () => {
+    paintRecord();
+    fire("floatingObject:bodyDragStart", visualDetail({ canvasX: 250, canvasY: 110, part: "cell" }));
+    expect(isPivotCellPressLive()).toBe(true);
+    cleanups.forEach((c) => c());
+    cleanups = [];
+    expect(isPivotCellPressLive()).toBe(false);
+  });
+
+  it("selecting ANOTHER box clears the cells; re-selecting the same box keeps them; deselecting clears them", async () => {
+    const second: PivotRegionData = { ...canvasPivot, pivotId: "cp2", startCol: 2048, endCol: 2050 };
+    updateCachedRegions([canvasPivot, second]);
+    fire("floatingObject:selected", visualDetail());
+    setPivotCellAnchor("cp1", 2, 1);
+    fire("floatingObject:selected", visualDetail());
+    expect(getPivotCellSelection(), "a press on the same box cleared its cells").toMatchObject({ pivotId: "cp1" });
+
+    fire("floatingObject:selected", {
+      regionId: "pivot-visual-cp2",
+      regionType: PIVOT_VISUAL_REGION_TYPE,
+      data: { pivotId: "cp2" },
+    });
+    expect(getPivotCellSelection()).toBeNull();
+
+    setPivotCellAnchor("cp2", 1, 1);
+    fire("floatingObject:selected", { regionId: "slicer-1", regionType: "slicer", data: { slicerId: "s1" } });
+    expect(isPivotVisualSelected("cp2")).toBe(false);
+    expect(getPivotCellSelection(), "the cells outlived their box's selection").toBeNull();
+    await vi.runAllTimersAsync();
+  });
+
+  it("a new view CLAMPS the cells into it (PIVOT_VIEW_UPDATED); one without the anchor clears them", () => {
+    setPivotCellAnchor("cp1", 3, 1);
+    extendPivotCellSelection(40, 2);
+    setCachedPivotView("cp1", cellView(20));
+    fire(PivotEvents.PIVOT_VIEW_UPDATED, { pivotId: "cp1", version: 2 });
+    expect(getPivotCellSelection()).toEqual({ pivotId: "cp1", anchorRow: 3, anchorCol: 1, endRow: 19, endCol: 2 });
+    setCachedPivotView("cp1", cellView(3));
+    fire(PivotEvents.PIVOT_VIEW_UPDATED, { pivotId: "cp1", version: 3 });
+    expect(getPivotCellSelection()).toBeNull();
+    deleteCachedPivotView("cp1");
+  });
+
+  it("the box going away (pruned records: a deleted pivot, a page left) clears its cells; another box's prune does not", () => {
+    setPivotCellAnchor("cp1", 3, 1);
+    prunePivotVisualRecords(new Set(["cp1", "cp9"]));
+    expect(getPivotCellSelection()).not.toBeNull();
+    prunePivotVisualRecords(new Set(["cp9"]));
+    expect(getPivotCellSelection()).toBeNull();
+  });
+
+  it("the region publishes the hover grip and, in Design Mode only, bodyGrab -- re-published when Design Mode flips", () => {
+    const data = () => getGridRegions().find((r) => r.type === PIVOT_VISUAL_REGION_TYPE)?.data;
+    expect(data()).toMatchObject({ grip: "hover", bodyGrab: false });
+    setDesignMode(true);
+    expect(data()).toMatchObject({ grip: "hover", bodyGrab: true });
+    setDesignMode(false);
+    expect(data()).toMatchObject({ bodyGrab: false });
+  });
+
+  type Mark = { op: string; style: string; rect: { x: number; y: number; width: number; height: number }; clip: unknown };
+
+  function render(): Mark[] {
+    setCachedPivotView("cp1", cellView());
+    setPivotVisualScroll("cp1", { left: 0, top: 120 });
+    const rec = createRecordingCtx();
+    const marks: Mark[] = [];
+    const ctx = rec.ctx as unknown as Record<string, unknown>;
+    for (const name of ["strokeRect", "fill"] as const) {
+      const original = ctx[name] as (...args: unknown[]) => void;
+      ctx[name] = function (this: Record<string, unknown>, ...args: unknown[]) {
+        original.apply(this, args);
+        const op = rec.ops[rec.ops.length - 1];
+        marks.push({
+          op: name,
+          style: String(name === "fill" ? this.fillStyle : this.strokeStyle),
+          rect: op.rect,
+          clip: op.clip,
+        });
+      };
+    }
+    const region = getGridRegions().find((r) => r.type === PIVOT_VISUAL_REGION_TYPE)!;
+    try {
+      overlay!.render({
+        ctx: rec.ctx,
+        region,
+        config: { rowHeaderWidth: 0, colHeaderHeight: 0, defaultCellWidth: 100, defaultCellHeight: 24 } as never,
+        viewport: { scrollX: 10, scrollY: 20 } as never,
+        dimensions: { columnWidths: new Map(), rowHeights: new Map() } as never,
+        canvasWidth: 1200,
+        canvasHeight: 800,
+      });
+    } finally {
+      deleteCachedPivotView("cp1");
+    }
+    return marks;
+  }
+
+  const green = (marks: Mark[]) => marks.filter((m) => m.op === "strokeRect" && m.style === INNER_SELECTION_BORDER);
+
+  it("the selection is painted over the cells it names (scrolled body), inside the box, with the inner-selection ink", () => {
+    setPivotCellAnchor("cp1", 6, 1);
+    extendPivotCellSelection(7, 2);
+    const marks = render();
+    // Box at (90, 60); body scrolled 120: view row 6 at 6*24 - 120 = 24; columns 1-2 at 100..300. 2px border inset 1.
+    expect(green(marks).map((m) => m.rect)).toEqual([{ x: 90 + 100 + 1, y: 60 + 24 + 1, width: 198, height: 46 }]);
+    expect(green(marks)[0].clip).toEqual({ x: 90, y: 60, width: 300, height: 200 });
+    expect(marks.some((m) => m.op === "fill" && m.style === INNER_SELECTION_FILL), "no selection fill").toBe(true);
+  });
+
+  it("a rectangle across the frozen header band is painted in both quadrants (paint == hit)", () => {
+    setPivotCellAnchor("cp1", 0, 1);
+    extendPivotCellSelection(6, 1);
+    const pieces = green(render()).map((m) => m.rect);
+    // Header row (frozen) at 0..24, body rows 5-6 shown from the band's edge (24) to 6*24+24-120 = 48.
+    expect(pieces).toEqual([
+      { x: 191, y: 61, width: 98, height: 22 },
+      { x: 191, y: 85, width: 98, height: 22 },
+    ]);
+  });
+
+  it("another pivot's cells, or none: nothing painted here", () => {
+    expect(green(render())).toEqual([]);
+    setPivotCellAnchor("cp9", 6, 1);
+    expect(green(render())).toEqual([]);
+  });
+
+  it("cellSheetRect: the visible part of a cell in SHEET px (frame + box-local), null when not shown", () => {
+    paintRecord();
+    // Frame (100, 80) on the page; scroll 0: view row 2 at 48, column 1 at 100.
+    expect(pivotCellSheetRect("cp1", 2, 1)).toEqual({ x: 200, y: 128, width: 100, height: 24 });
+    // Row 20 is below the 200 px box.
+    expect(pivotCellSheetRect("cp1", 20, 1)).toBeNull();
+    expect(pivotCellSheetRect("cp1", 0, 7)).toBeNull();
+    expect(pivotCellSheetRect("nope", 0, 0)).toBeNull();
   });
 });

@@ -82,6 +82,7 @@ import { commitTimelineSpan, rememberedTimelineAnchor, resetTimelineCommit } fro
 import {
   TIMELINE_ZONE_TABLE,
   computeTimelineLayout,
+  contentPointOf,
   isTimelineFiltered,
   periodIndexNear,
   scrollOffsetForThumbX,
@@ -290,11 +291,13 @@ export function beginTimelineContentPress(press: TimelineContentPress): boolean 
     case "scrollbar": {
       const layout = computeTimelineLayout(input, input.periodCount);
       const thumb = scrollbarThumbOf(layout, input.scrollOffset);
-      const onThumb = relX >= thumb.x && relX <= thumb.x + thumb.width;
-      started = { ...base, mode: "scroll", grab: onThumb ? relX - thumb.x : thumb.width / 2 };
+      // The track runs along the CONTENT box (the thumb is measured from its left).
+      const trackX = contentPointOf(input, relX, relY).x;
+      const onThumb = trackX >= thumb.x && trackX <= thumb.x + thumb.width;
+      started = { ...base, mode: "scroll", grab: onThumb ? trackX - thumb.x : thumb.width / 2 };
       if (!onThumb) {
         // A press on the track brings the thumb under the pointer.
-        setScrollOffset(press.timelineId, scrollOffsetForThumbX(layout, relX - started.grab));
+        setScrollOffset(press.timelineId, scrollOffsetForThumbX(layout, trackX - started.grab));
       }
       break;
     }
@@ -488,7 +491,7 @@ function trackScroll(s: ScrollSession, at: RelPoint): void {
   if (!input) return;
   const layout = computeTimelineLayout(input, input.periodCount);
   const before = getScrollOffset(s.timelineId);
-  setScrollOffset(s.timelineId, scrollOffsetForThumbX(layout, at.relX - s.grab));
+  setScrollOffset(s.timelineId, scrollOffsetForThumbX(layout, contentPointOf(input, at.relX, at.relY).x - s.grab));
   if (getScrollOffset(s.timelineId) !== before) requestOverlayRedraw();
 }
 
@@ -500,7 +503,9 @@ function trackScroll(s: ScrollSession, at: RelPoint): void {
 function releaseButton(s: ButtonSession, at: RelPoint): void {
   const input = liveTimelineZoneInput(s.timelineId);
   if (!input || !Number.isFinite(at.relX) || !Number.isFinite(at.relY)) return;
-  if (at.relX < 0 || at.relY < 0 || at.relX > input.width || at.relY > input.height) return;
+  // Over the CONTENT box only (the container's band is frame, never a button).
+  const inside = contentPointOf(input, at.relX, at.relY);
+  if (inside.x < 0 || inside.y < 0 || inside.x > input.width || inside.y > input.height) return;
   const zone = timelineZoneAt(input, at.relX, at.relY);
   if (zone.part !== s.part || zone.level !== s.level) return;
 

@@ -4,7 +4,7 @@
 
 import { controlsBackend } from "./controlsBackend";
 import { trackControlGeometryWrite } from "./geometryWriteOrder";
-import type { ControlMetadata, ControlEntry, ControlGeometryChange } from "./types";
+import type { ControlAppearanceChange, ControlMetadata, ControlEntry, ControlGeometryChange } from "./types";
 
 // ============================================================================
 // Control Metadata CRUD
@@ -21,6 +21,23 @@ export async function getControlMetadata(
     row,
     col,
   });
+}
+
+/**
+ * A control's LITERAL properties as flat `key -> value` strings, with its type
+ * (the Format pane's commit computes its writes against these, never against
+ * the binding-overlaid values the painters read). null = no control there.
+ */
+export async function readControlLiteral(
+  sheetIndex: number,
+  row: number,
+  col: number,
+): Promise<{ controlType: string; props: Record<string, string> } | null> {
+  const meta = await getControlMetadata(sheetIndex, row, col);
+  if (!meta) return null;
+  const props: Record<string, string> = {};
+  for (const [key, p] of Object.entries(meta.properties ?? {})) props[key] = p.value;
+  return { controlType: meta.controlType, props };
 }
 
 /** Set a single property on a control. Creates the control if it doesn't exist. */
@@ -184,6 +201,25 @@ export async function setControlGeometry(
   );
 }
 
+/**
+ * Write the APPEARANCE keys of several controls as ONE undoable step ("Format
+ * control", WP-C D-FORMAT): the Format pane's container commit. Rust
+ * (`controls::set_control_appearance`) records ONE real undo entry that JOINS
+ * an open undo transaction -- commitObjectFormat's -- so the Format pane's
+ * change is one Ctrl+Z, where N `set_control_property` calls would record no
+ * undo at all for a non-executable key. Refused whole, with nothing written:
+ * a code / action / held key, a structural key (pinToGrid, embedded,
+ * shapeType, x, y, width, height, offsetX, offsetY, uid, name), a bad
+ * `container*` value (the visual_format check), the same control twice, an
+ * empty entry, a control that does not exist, a protected sheet that does not
+ * allow editing objects. Lock Objects does NOT refuse it (formatting). Values
+ * already stored are skipped; resolves to how many controls changed (0 =
+ * nothing to do: no dirty flag, no undo step).
+ */
+export async function setControlAppearance(changes: ControlAppearanceChange[]): Promise<number> {
+  return controlsBackend.invoke<number>("set_control_appearance", { changes });
+}
+
 /** Get all controls for a specific sheet. */
 export async function getAllControls(
   sheetIndex: number,
@@ -192,9 +228,11 @@ export async function getAllControls(
 }
 
 /**
- * Resolve all formula-type properties for a control.
- * Returns a map of property name -> resolved display value.
- * Static properties are returned as-is; formula properties are evaluated.
+ * The properties a control PAINTS with: its literals, with every bound
+ * property (`@api/objectBindings`, `/properties/<key>`) overlaid by its
+ * current resolved value -- Rust does the overlay (`resolve_control_properties`)
+ * and evaluates nothing here; a pending or (for a non-text property) failed
+ * binding keeps the literal. Returns a map of property name -> value string.
  */
 export async function resolveControlProperties(
   sheetIndex: number,

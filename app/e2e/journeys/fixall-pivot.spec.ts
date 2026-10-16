@@ -30,6 +30,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, expect } from "../fixtures";
+import { closeObjectPaneForGood } from "../helpers/object-pane";
 import type { GridHelper } from "../helpers/grid";
 import {
   MOD,
@@ -151,6 +152,15 @@ async function drill(page: Page, grid: GridHelper, ref: string, cols: number): P
   const rows = grid2.slice(1).filter((r) => r.some((c) => c !== ""));
   return { sheetIndex: added.index, header, rows };
 }
+
+// WP-C (D-PANE): on a canvas a click opens the ONE object pane at its release,
+// and a docked pane narrows the grid. This journey predates the pane and asserts
+// nothing about it, so every test starts with the pane closed AS IF BY HAND
+// (helpers/object-pane.ts). Per test, not once: the fixture's per-test task-pane
+// reset clears the "closed by hand" mark, and Playwright runs this hook after it.
+test.beforeEach(async ({ appPage }) => {
+  await closeObjectPaneForGood(appPage);
+});
 
 // ===========================================================================
 // A. Range pivots: GETPIVOTDATA, drill-through, the point-mode pick

@@ -26,6 +26,7 @@
 /** One tool offered to the model, in Calcula's shape (mirrors `ChatToolDef`). */
 export type { ChatToolDef } from "./aiTypes";
 import type { ChatToolDef } from "./aiTypes";
+import { OBJECT_BINDING_KINDS } from "@api/objectBindings";
 
 /**
  * Object types a drafted script may target.
@@ -57,6 +58,15 @@ export const DRAFT_OBJECT_TYPES = [
   "range",
   "form",
 ] as const;
+
+/**
+ * The object kinds a property binding belongs to, in their wire spelling.
+ *
+ * Re-exported from `@api` (`OBJECT_BINDING_KINDS`, whose own drift test pins it
+ * to the Rust `ObjectBindingKind`), never re-typed: `parse_kind` in
+ * app/src-tauri/src/mcp/bindings.rs refuses any other spelling.
+ */
+export const BINDING_OBJECT_KINDS: readonly string[] = OBJECT_BINDING_KINDS;
 
 export const TOOLS: ChatToolDef[] = [
   {
@@ -253,6 +263,56 @@ export const TOOLS: ChatToolDef[] = [
       required: ["source_range", "destination_cell", "value_fields"],
     },
   },
+  // ---- Object property bindings (WP-D): app/src-tauri/src/mcp/bindings.rs ----
+  // The same param structs as the MCP server (ListObjectPropertiesParams,
+  // SetObjectPropertyParams, SetObjectBindingParams in mcp/server.rs).
+  {
+    name: "list_object_properties",
+    description:
+      "Read an object's properties. With kind + id: ONE object as JSON -- its full JSON, every BINDABLE property (JSON Pointer path, type, label) and its current bindings with the value each shows now. With sheet_index: every object on that sheet with its bindings. Paths it lists are what set_object_property and set_object_binding take. Read-only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        kind: { type: "string", enum: [...BINDING_OBJECT_KINDS], description: "Object kind; pass together with id." },
+        id: { type: "string", description: "The object's id from get_sheet_summary's \"Canvas objects\" section (a control's id is its uid; a canvas page's is its sheet id)." },
+        sheet_index: { type: "number", description: "0-based sheet index: list every object on that sheet. Used only when kind and id are omitted." },
+      },
+    },
+  },
+  {
+    name: "set_object_property",
+    description:
+      "Set the LITERAL value of one object property (a chart title, a shape's fill, a slicer header, a canvas page background). Pass kind, id and a path from list_object_properties. A text starting with '=' is stored as TEXT; to make a property follow a formula use set_object_binding. Undoable.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        kind: { type: "string", enum: [...BINDING_OBJECT_KINDS] },
+        id: { type: "string", description: "The object's id." },
+        path: { type: "string", description: "JSON Pointer from list_object_properties, e.g. /spec/title" },
+        // NO `type` here on purpose: the value is a number, a string or a
+        // boolean as the property's own type says, and a type ARRAY is the
+        // same portability trap as a numeric enum (chatToolSurface.test.ts).
+        value: { description: "The new literal, typed as the property's type says: text, number, boolean, a colour \"#RRGGBB\", or one of an enum's values." },
+      },
+      required: ["kind", "id", "path", "value"],
+    },
+  },
+  {
+    name: "set_object_binding",
+    description:
+      "BIND one object property to a formula so it follows the workbook (a chart title that reads a cell, a Card's goal of [Revenue]*1.1, a shape's text built from cells), or remove the binding by omitting formula. Pass kind, id and a path from list_object_properties. The formula uses comma separators and sheet-qualified cells (Inputs!B1); [Measure] reads the page's model under the page's slicers. Code and action properties are never bindable. The reply shows the value the property shows now. Undoable.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        kind: { type: "string", enum: [...BINDING_OBJECT_KINDS] },
+        id: { type: "string", description: "The object's id." },
+        path: { type: "string", description: "JSON Pointer from list_object_properties, e.g. /spec/markOptions/goal" },
+        formula: { type: "string", description: "A formula starting with '=', e.g. =Inputs!B1. Omit or pass \"\" to remove the binding." },
+        model: { type: "string", description: "The model a [Measure] reads, only when the page has more than one." },
+      },
+      required: ["kind", "id", "path"],
+    },
+  },
   // ---- Analysis: deterministic facts the engine computed (read-only) ----
   // Until 2026-09-10 only an EXTERNAL MCP client could ask for these. The
   // in-app chat had no analysis tool at all, so "what is going on in this
@@ -403,6 +463,13 @@ export const TOOLS: ChatToolDef[] = [
  */
 export const TOOL_NAMES: readonly string[] = TOOLS.map((t) => t.name);
 
+/** The object-property tools (WP-D), named together by the prompt paragraph. */
+export const BINDING_TOOL_NAMES: readonly string[] = [
+  "list_object_properties",
+  "set_object_property",
+  "set_object_binding",
+];
+
 /**
  * The tools a SMALL model is offered once the full surface has defeated it.
  *
@@ -498,6 +565,9 @@ export const AUTORUN_TOOLS: ReadonlySet<string> = new Set<string>([
   // The overlay: a transient lens drawn from computed facts, cleared by the
   // user; it neither writes a cell nor touches a spec (D-IO-7).
   "show_points_of_interest",
+  // Reads an object's JSON and its bindings' values; the values it evaluates
+  // on the way are transient (never saved, never undone, never dirty).
+  "list_object_properties",
   "list_script_drafts",
   "get_script_draft",
   "draft_object_script",
@@ -559,7 +629,17 @@ export function buildSystemPrompt(names: readonly string[] = TOOL_NAMES): string
       "return checked statements, and a claim you compute from a read is not checked. Never " +
       "suggest a cause for a movement the facts do not state.\n\n"
     : "";
-  return SYSTEM_PROMPT_HEAD + names.join(", ") + SYSTEM_PROMPT_MIDDLE + bi + analysis + SYSTEM_PROMPT_TAIL;
+  // Gated on all three binding tools being offered, for the same reason: the
+  // paragraph names each of them.
+  const bindings = BINDING_TOOL_NAMES.every((n) => names.includes(n))
+    ? "OBJECT PROPERTIES. Charts, shapes, slicers and canvas pages have properties at JSON Pointer " +
+      "paths; get_sheet_summary shows each canvas object's properties, and list_object_properties " +
+      "shows one object's bindable paths. To make a property FOLLOW the workbook (a chart title that " +
+      "reads a cell, a Card goal of [Revenue]*1.1) bind it with set_object_binding. " +
+      "set_object_property writes a fixed literal instead, and a literal that starts with '=' is shown " +
+      "as text, never evaluated.\n\n"
+    : "";
+  return SYSTEM_PROMPT_HEAD + names.join(", ") + SYSTEM_PROMPT_MIDDLE + bi + analysis + bindings + SYSTEM_PROMPT_TAIL;
 }
 
 const SYSTEM_PROMPT_HEAD =

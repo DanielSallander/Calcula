@@ -95,7 +95,7 @@ vi.mock("@api/events", () => ({
   onAppEvent: vi.fn(() => () => undefined),
 }));
 
-import { ChartFormatPane } from "../ChartFormatPane";
+import { ChartElementFormatCard } from "../ChartFormatPane";
 
 Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
 
@@ -161,7 +161,7 @@ let root: Root;
 
 async function mount(data?: Record<string, unknown>): Promise<void> {
   await act(async () => {
-    root.render(React.createElement(ChartFormatPane, { data }));
+    root.render(React.createElement(ChartElementFormatCard, { data }));
   });
 }
 
@@ -243,7 +243,7 @@ afterEach(() => {
 describe("retargeting", () => {
   it("invites the reader to click something when nothing is selected", async () => {
     await mount();
-    expect(container.textContent).toContain("Select a chart");
+    expect(container.textContent).toContain("Click the part of the chart");
     expect(container.querySelector('[data-testid="chart-format-pane"]')).toBeNull();
   });
 
@@ -274,7 +274,7 @@ describe("retargeting", () => {
     expect(subject()).toBe("Format Series 1");
 
     await retarget(null);
-    expect(container.textContent).toContain("Select a chart");
+    expect(container.textContent).toContain("Click the part of the chart");
   });
 });
 

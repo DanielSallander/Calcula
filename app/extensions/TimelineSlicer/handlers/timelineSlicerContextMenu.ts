@@ -19,6 +19,7 @@ import { TIMELINE_SETTINGS_DIALOG_ID } from "../manifest";
 import { TIMELINE_REGION_TYPE, timelineIdOf } from "../lib/timelineObjectSelection";
 import { getGridRegions, type GridRegion } from "@api/gridOverlays";
 import { sizeAndPositionMenuEntry } from "@api/objectPosition";
+import { objectPaneMenuEntry } from "@api/objectPane";
 import { isTimelineContextMenuOpen as menuStateOpen, setTimelineContextMenuOpen } from "../lib/timelineMenuState";
 
 let activeMenuElement: HTMLDivElement | null = null;
@@ -105,12 +106,24 @@ function timelineRegionOf(timelineId: string): GridRegion | null {
   return getGridRegions().find((r) => r.type === TIMELINE_REGION_TYPE && timelineIdOf(r) === timelineId) ?? null;
 }
 
-/** The "Size and Position..." row (and its rule) for the timeline's region; none when it is not published. */
+/**
+ * The "Format..." row (the object pane on its Format tab, WP-C D-PANE), the
+ * "Size and Position..." row and their rule, for the timeline's region; none
+ * when it is not published. Each row is disabled with its reason when its
+ * door is shut (no object pane installed, a locked or subscribed page).
+ */
 function sizeAndPositionRows(timelineId: string): MenuItem[] {
   const region = timelineRegionOf(timelineId);
   if (!region) return [];
+  const format = objectPaneMenuEntry(region);
   const entry = sizeAndPositionMenuEntry(region);
   return [
+    {
+      label: format.label,
+      disabled: format.disabled,
+      title: format.reason ?? undefined,
+      onClick: format.run,
+    },
     {
       label: entry.label,
       disabled: entry.disabled,

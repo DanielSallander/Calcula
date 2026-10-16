@@ -6,11 +6,19 @@
  * - Script attachment and persistence
  * - Properties pane integration (groups, custom properties)
  * - Live cell data binding (getCellValue + onCellChange)
+ * - Property bindings (WP-D): a shape property follows a formula only as an
+ *   object property BINDING (`@api/objectBindings`, Rust-owned, evaluated by
+ *   Rust and overlaid by `resolve_control_properties`). The old
+ *   `valueType: "formula"` property is REFUSED by `set_control_property`.
  * - Template application
  * - HTML iframe rendering
  * - Undo integration for script property changes
  */
 import { test, expect } from "../fixtures";
+import { callModule } from "../helpers/canvas-live";
+
+/** `@api/objectBindings`, through the instance the app loaded. */
+const BINDINGS_SEAM = "/src/api/objectBindings/index.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -187,16 +195,54 @@ async function listScripts(page: any) {
   });
 }
 
-/** Set a cell value directly via Tauri API */
+/**
+ * Set a cell value directly via Tauri API, then ANNOUNCE it the way every
+ * backend-made write is announced (the window "grid:refresh" event the shell
+ * re-dispatches). A raw `update_cell` announces nothing, and bindings are
+ * re-evaluated on an announcement (WP-D, D §8 risk 1) -- so the announcement is
+ * part of the write here, not a test-only nudge.
+ */
 async function setCellDirect(page: any, row: number, col: number, value: string) {
   await page.evaluate(
     async (args: any) => {
       const tauri = (window as any).__TAURI__;
       await tauri.core.invoke("update_cell", { row: args.row, col: args.col, value: args.value });
+      window.dispatchEvent(new Event("grid:refresh"));
     },
     { row, col, value },
   );
   await page.waitForTimeout(200);
+}
+
+/**
+ * Bind a shape property to a formula (WP-D): a binding through the seam, on the
+ * control's `uid`. INVARIANT spelling (`,` separators), as scripts and the AI
+ * write it.
+ */
+async function bindProp(page: any, sheetIndex: number, row: number, col: number, key: string, formula: string) {
+  const meta = await getControlMeta(page, sheetIndex, row, col);
+  expect(meta?.uid, `the shape at ${row},${col} has no uid: no binding can name it`).toBeTruthy();
+  return callModule(page, BINDINGS_SEAM, "setBinding", [
+    { kind: "control", id: meta.uid },
+    `/properties/${key}`,
+    formula,
+    { invariant: true },
+  ]);
+}
+
+/** Poll `resolve_control_properties` until `key` shows `expected` (re-evaluation follows the announcement). */
+async function expectResolved(page: any, sheetIndex: number, row: number, col: number, key: string, expected: string | string[]) {
+  const allowed = Array.isArray(expected) ? expected : [expected];
+  // The probe answers "MATCH" or the value it saw, so a failure prints the value.
+  await expect
+    .poll(
+      async () => {
+        const v = (await resolveProps(page, sheetIndex, row, col))?.[key];
+        return allowed.includes(v) ? "MATCH" : v;
+      },
+      { timeout: 15_000, message: `${key} of the shape at ${row},${col} never resolved to ${JSON.stringify(expected)}` },
+    )
+    .toBe("MATCH");
 }
 
 /** Get a cell's display value via Tauri API */
@@ -262,10 +308,9 @@ test.describe("#1 Shape Control CRUD", () => {
 
     // Create shape with formula property
     await createShape(grid.page, 0, 53, 11);
-    await setControlProp(grid.page, 0, 53, 11, "text", "=K54", "formula");
+    await bindProp(grid.page, 0, 53, 11, "text", "=K54");
 
-    const resolved = await resolveProps(grid.page, 0, 53, 11);
-    expect(resolved.text).toBe("Hello World");
+    await expectResolved(grid.page, 0, 53, 11, "text", "Hello World");
 
     await removeControl(grid.page, 0, 53, 11);
   });
@@ -419,10 +464,9 @@ test.describe("#3 Cell Data Binding", () => {
 
     // Create shape with formula-bound text
     await createShape(grid.page, 0, 70, 5);
-    await setControlProp(grid.page, 0, 70, 5, "text", "=A71", "formula");
+    await bindProp(grid.page, 0, 70, 5, "text", "=A71");
 
-    const resolved = await resolveProps(grid.page, 0, 70, 5);
-    expect(resolved.text).toBe("100");
+    await expectResolved(grid.page, 0, 70, 5, "text", "100");
 
     await removeControl(grid.page, 0, 70, 5);
   });
@@ -430,18 +474,16 @@ test.describe("#3 Cell Data Binding", () => {
   test("3b: formula property updates when cell changes", async ({ grid }) => {
     await setCellDirect(grid.page, 71, 0, "50");
     await createShape(grid.page, 0, 71, 5);
-    await setControlProp(grid.page, 0, 71, 5, "text", "=A72", "formula");
+    await bindProp(grid.page, 0, 71, 5, "text", "=A72");
 
     // Verify initial
-    let resolved = await resolveProps(grid.page, 0, 71, 5);
-    expect(resolved.text).toBe("50");
+    await expectResolved(grid.page, 0, 71, 5, "text", "50");
 
-    // Change the cell
+    // Change the cell (the write announces itself, like every backend write)
     await setCellDirect(grid.page, 71, 0, "99");
 
-    // Re-resolve — should reflect new value
-    resolved = await resolveProps(grid.page, 0, 71, 5);
-    expect(resolved.text).toBe("99");
+    // Re-evaluated -- should reflect new value
+    await expectResolved(grid.page, 0, 71, 5, "text", "99");
 
     await removeControl(grid.page, 0, 71, 5);
   });
@@ -450,10 +492,9 @@ test.describe("#3 Cell Data Binding", () => {
     await setCellDirect(grid.page, 72, 0, "200");
 
     await createShape(grid.page, 0, 72, 5);
-    await setControlProp(grid.page, 0, 72, 5, "width", "=A73", "formula");
+    await bindProp(grid.page, 0, 72, 5, "width", "=A73");
 
-    const resolved = await resolveProps(grid.page, 0, 72, 5);
-    expect(resolved.width).toBe("200");
+    await expectResolved(grid.page, 0, 72, 5, "width", "200");
 
     await removeControl(grid.page, 0, 72, 5);
   });
@@ -487,10 +528,9 @@ test.describe("#3 Cell Data Binding", () => {
 
     // Create shape with cross-sheet formula
     await createShape(grid.page, 0, 73, 5);
-    await setControlProp(grid.page, 0, 73, 5, "text", "=Data!A1", "formula");
+    await bindProp(grid.page, 0, 73, 5, "text", "=Data!A1");
 
-    const resolved = await resolveProps(grid.page, 0, 73, 5);
-    expect(resolved.text).toBe("CrossSheet");
+    await expectResolved(grid.page, 0, 73, 5, "text", "CrossSheet");
 
     await removeControl(grid.page, 0, 73, 5);
   });
@@ -536,17 +576,37 @@ test.describe("#4 Property System", () => {
     await removeControl(grid.page, 0, 81, 10);
   });
 
-  test("4c: static vs formula valueType preserved", async ({ grid }) => {
+  test("4c: a static value is stored as static; a formula is a BINDING, never a formula valueType", async ({ grid }) => {
     await createShape(grid.page, 0, 82, 10);
 
     await setControlProp(grid.page, 0, 82, 10, "text", "Static Value", "static");
-    await setControlProp(grid.page, 0, 82, 10, "fill", "=IF(A1>5,\"#FF0000\",\"#00FF00\")", "formula");
+    // The old second spelling is refused at the door (WP-D S5a) ...
+    const refused = await grid.page.evaluate(async () => {
+      try {
+        await (window as any).__TAURI__.core.invoke("set_control_property", {
+          sheetIndex: 0,
+          row: 82,
+          col: 10,
+          controlType: "shape",
+          propertyName: "fill",
+          valueType: "formula",
+          value: "=A1",
+        });
+        return "";
+      } catch (e) {
+        return String(e);
+      }
+    });
+    expect(refused, "set_control_property accepted a formula valueType").toContain("binding");
+    // ... and the one spelling is a binding, which leaves the literal alone.
+    const bound = (await bindProp(grid.page, 0, 82, 10, "fill", '=IF(A1>5,"#FF0000","#00FF00")')) as { formula: string };
+    expect(bound.formula).toContain("IF");
 
     const meta = await getControlMeta(grid.page, 0, 82, 10);
     expect(meta.properties.text.valueType).toBe("static");
     expect(meta.properties.text.value).toBe("Static Value");
-    expect(meta.properties.fill.valueType).toBe("formula");
-    expect(meta.properties.fill.value).toContain("IF");
+    expect(meta.properties.fill.valueType, "the binding wrote a formula valueType onto the control").toBe("static");
+    expect(meta.properties.fill.value, "the binding overwrote the fill literal").toBe("#4472C4");
 
     await removeControl(grid.page, 0, 82, 10);
   });
@@ -554,11 +614,11 @@ test.describe("#4 Property System", () => {
   test("4d: resolve all properties at once", async ({ grid }) => {
     await setCellDirect(grid.page, 83, 0, "Dynamic Text");
     await createShape(grid.page, 0, 83, 5);
-    await setControlProp(grid.page, 0, 83, 5, "text", "=A84", "formula");
+    await bindProp(grid.page, 0, 83, 5, "text", "=A84");
     await setControlProp(grid.page, 0, 83, 5, "fill", "#123456", "static");
 
+    await expectResolved(grid.page, 0, 83, 5, "text", "Dynamic Text");
     const resolved = await resolveProps(grid.page, 0, 83, 5);
-    expect(resolved.text).toBe("Dynamic Text");
     expect(resolved.fill).toBe("#123456");
     expect(resolved.shapeType).toBe("rectangle");
 
@@ -688,15 +748,13 @@ test.describe("#7 Advanced Cell Binding", () => {
     await setCellDirect(grid.page, 110, 0, "#FF0000");
 
     await createShape(grid.page, 0, 110, 5);
-    await setControlProp(grid.page, 0, 110, 5, "fill", "=A111", "formula");
+    await bindProp(grid.page, 0, 110, 5, "fill", "=A111");
 
-    const resolved = await resolveProps(grid.page, 0, 110, 5);
-    expect(resolved.fill).toBe("#FF0000");
+    await expectResolved(grid.page, 0, 110, 5, "fill", "#FF0000");
 
     // Change the cell to a different color
     await setCellDirect(grid.page, 110, 0, "#00FF00");
-    const resolved2 = await resolveProps(grid.page, 0, 110, 5);
-    expect(resolved2.fill).toBe("#00FF00");
+    await expectResolved(grid.page, 0, 110, 5, "fill", "#00FF00");
 
     await removeControl(grid.page, 0, 110, 5);
   });
@@ -706,10 +764,9 @@ test.describe("#7 Advanced Cell Binding", () => {
     await setCellDirect(grid.page, 111, 1, "World");
 
     await createShape(grid.page, 0, 111, 5);
-    await setControlProp(grid.page, 0, 111, 5, "text", '=A112&" "&B112', "formula");
+    await bindProp(grid.page, 0, 111, 5, "text", '=A112&" "&B112');
 
-    const resolved = await resolveProps(grid.page, 0, 111, 5);
-    expect(resolved.text).toBe("Hello World");
+    await expectResolved(grid.page, 0, 111, 5, "text", "Hello World");
 
     await removeControl(grid.page, 0, 111, 5);
   });
@@ -718,15 +775,13 @@ test.describe("#7 Advanced Cell Binding", () => {
     await setCellDirect(grid.page, 112, 0, "10");
 
     await createShape(grid.page, 0, 112, 5);
-    await setControlProp(grid.page, 0, 112, 5, "fill", '=IF(A113>5,"#00FF00","#FF0000")', "formula");
+    await bindProp(grid.page, 0, 112, 5, "fill", '=IF(A113>5,"#00FF00","#FF0000")');
 
-    let resolved = await resolveProps(grid.page, 0, 112, 5);
-    expect(resolved.fill).toBe("#00FF00");
+    await expectResolved(grid.page, 0, 112, 5, "fill", "#00FF00");
 
     // Change to value <= 5
     await setCellDirect(grid.page, 112, 0, "3");
-    resolved = await resolveProps(grid.page, 0, 112, 5);
-    expect(resolved.fill).toBe("#FF0000");
+    await expectResolved(grid.page, 0, 112, 5, "fill", "#FF0000");
 
     await removeControl(grid.page, 0, 112, 5);
   });
@@ -736,15 +791,13 @@ test.describe("#7 Advanced Cell Binding", () => {
     await setCellDirect(grid.page, 113, 1, "=A114*2");
 
     await createShape(grid.page, 0, 113, 5);
-    await setControlProp(grid.page, 0, 113, 5, "text", "=B114", "formula");
+    await bindProp(grid.page, 0, 113, 5, "text", "=B114");
 
-    const resolved = await resolveProps(grid.page, 0, 113, 5);
-    expect(resolved.text).toBe("84");
+    await expectResolved(grid.page, 0, 113, 5, "text", "84");
 
     // Change source cell — chain should propagate
     await setCellDirect(grid.page, 113, 0, "10");
-    const resolved2 = await resolveProps(grid.page, 0, 113, 5);
-    expect(resolved2.text).toBe("20");
+    await expectResolved(grid.page, 0, 113, 5, "text", "20");
 
     await removeControl(grid.page, 0, 113, 5);
   });
@@ -805,11 +858,10 @@ test.describe("#8 Edge Cases", () => {
   test("8e: formula referencing empty cell returns empty string", async ({ grid }) => {
     await createShape(grid.page, 0, 123, 10);
     // Reference a cell that hasn't been written to (row 999, col 99)
-    await setControlProp(grid.page, 0, 123, 10, "text", "=CV1000", "formula");
+    await bindProp(grid.page, 0, 123, 10, "text", "=CV1000");
 
-    const resolved = await resolveProps(grid.page, 0, 123, 10);
     // Empty cell should resolve to "0" or "" depending on formula semantics
-    expect(["", "0"]).toContain(resolved.text);
+    await expectResolved(grid.page, 0, 123, 10, "text", ["", "0"]);
 
     await removeControl(grid.page, 0, 123, 10);
   });
@@ -860,30 +912,23 @@ test.describe("#9 Dashboard Scenario", () => {
     await createShape(grid.page, 0, 203, 5, "roundedRectangle", 220, 50);
 
     // Bind shapes to cells via formula
-    await setControlProp(grid.page, 0, 200, 5, "text", "=B201", "formula");
-    await setControlProp(grid.page, 0, 201, 5, "text", "=B202", "formula");
-    await setControlProp(grid.page, 0, 202, 5, "text", "=B203", "formula");
-    await setControlProp(grid.page, 0, 203, 5, "text", "=B204", "formula");
+    await bindProp(grid.page, 0, 200, 5, "text", "=B201");
+    await bindProp(grid.page, 0, 201, 5, "text", "=B202");
+    await bindProp(grid.page, 0, 202, 5, "text", "=B203");
+    await bindProp(grid.page, 0, 203, 5, "text", "=B204");
 
     // Verify all 4 resolve correctly
-    const r1 = await resolveProps(grid.page, 0, 200, 5);
-    const r2 = await resolveProps(grid.page, 0, 201, 5);
-    const r3 = await resolveProps(grid.page, 0, 202, 5);
-    const r4 = await resolveProps(grid.page, 0, 203, 5);
-
-    expect(r1.text).toBe("12450");
-    expect(r2.text).toBe("247");
-    expect(r3.text).toBe("ok");
-    expect(r4.text).toBe("72");
+    await expectResolved(grid.page, 0, 200, 5, "text", "12450");
+    await expectResolved(grid.page, 0, 201, 5, "text", "247");
+    await expectResolved(grid.page, 0, 202, 5, "text", "ok");
+    await expectResolved(grid.page, 0, 203, 5, "text", "72");
 
     // Update source data and verify propagation
     await setCellDirect(grid.page, 200, 1, "15000");
     await setCellDirect(grid.page, 201, 1, "300");
 
-    const u1 = await resolveProps(grid.page, 0, 200, 5);
-    const u2 = await resolveProps(grid.page, 0, 201, 5);
-    expect(u1.text).toBe("15000");
-    expect(u2.text).toBe("300");
+    await expectResolved(grid.page, 0, 200, 5, "text", "15000");
+    await expectResolved(grid.page, 0, 201, 5, "text", "300");
 
     // Cleanup
     await removeControl(grid.page, 0, 200, 5);
@@ -899,14 +944,13 @@ test.describe("#9 Dashboard Scenario", () => {
     const id2 = await createShape(grid.page, 0, 211, 5);
 
     // Shape 1: formula-bound text
-    await setControlProp(grid.page, 0, 210, 5, "text", "=A211", "formula");
+    await bindProp(grid.page, 0, 210, 5, "text", "=A211");
 
     // Shape 2: script-based
     await createShapeScript(grid.page, id2, 'function setup(shape) { shape.log("independent"); }');
 
     // Verify shape 1 resolves correctly
-    const r1 = await resolveProps(grid.page, 0, 210, 5);
-    expect(r1.text).toBe("Formula Bound");
+    await expectResolved(grid.page, 0, 210, 5, "text", "Formula Bound");
 
     // Verify shape 2 has script
     const scripts = await listScripts(grid.page);
@@ -976,18 +1020,16 @@ test.describe("#10 Stress Tests", () => {
     await createShape(grid.page, 0, 360, 5);
 
     // Bind text to first cell
-    await setControlProp(grid.page, 0, 360, 5, "text", "=A361", "formula");
+    await bindProp(grid.page, 0, 360, 5, "text", "=A361");
 
-    const resolved = await resolveProps(grid.page, 0, 360, 5);
-    expect(resolved.text).toBe("Value0");
+    await expectResolved(grid.page, 0, 360, 5, "text", "Value0");
 
     // Change all source cells
     for (let i = 0; i < 10; i++) {
       await setCellDirect(grid.page, 360 + i, 0, `Changed${i}`);
     }
 
-    const resolved2 = await resolveProps(grid.page, 0, 360, 5);
-    expect(resolved2.text).toBe("Changed0");
+    await expectResolved(grid.page, 0, 360, 5, "text", "Changed0");
 
     await removeControl(grid.page, 0, 360, 5);
   });

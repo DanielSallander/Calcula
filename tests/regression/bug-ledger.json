@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 453,
+  "nextId": 502,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -12202,7 +12202,7 @@
       "repro": {
         "description": "Tooltip page (320x240) in a workbook with 10 canvases: Buttons > Page Navigator puts a button's bottom edge at 280."
       },
-      "notes": "Review tab LOW.",
+      "notes": "Review tab LOW. [2026-10-15, Canvas owner findings 2026-10-15 programme, WP-B (Page Navigator), S8] The wrapped-row design this fix clamped is gone: Buttons > Page Navigator now inserts ONE live pageNavigator control whose box is pageNavigatorNaturalSize(count) clamped to the page, and the items divide the box (Controls/PageNavigator/navigatorModel.ts layoutNavigatorItems). pageNavigatorBlockSize / pageNavigatorButtonWidth were deleted; the defect cannot recur in that form.",
       "fix": {
         "status": "fixed",
         "date": "2026-10-08",
@@ -12722,7 +12722,7 @@
     },
     {
       "id": "BUG-0449",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-10-08",
       "source": {
         "kind": "manual",
@@ -12738,7 +12738,19 @@
       "repro": {
         "description": "Publish a canvas with a Page Navigator to 'Sales'; subscribe in a workbook that already has a 'Sales' sheet; press the button."
       },
-      "notes": "Full fix: Rust remaps actionTarget on pull (core/calp/src/pull.rs). Seams lane open item."
+      "notes": "Full fix: Rust remaps actionTarget on pull (core/calp/src/pull.rs). Seams lane open item. [2026-10-15, Canvas owner findings 2026-10-15 programme, WP-B (Page Navigator), S4] Fixed in the Tauri materializer, not pull.rs (see fix). The dev pull remaps ids but, as before, renames neither control formulas nor static page-target names (open-items 2.ak, WP-B).",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-15",
+        "description": "The ID half: every pull door (subscribe, checkout, refresh, dev pull) builds a PageTargetRemap from the pull's application-sheet-id -> local-index map and the local sheet ids, and materialize_saved_controls rewrites a static navigate button's actionTarget and every Page Navigator pageOverrides[].sheetId to the SUBSCRIBER's sheet id (app/src-tauri/src/controls.rs remap_control_page_targets; calp_commands.rs subscribe/checkout, refresh and materialize_dev_controls). The NAME half rides the one rename authority: calp::sheet_renames visit_control_page_target_names rewrites actionTargetName and pageOverrides[].sheetName with the collision/subscriber renames on pull, reverses them on push, and a gone sheet's name becomes #REF! (core/calp/src/sheet_renames.rs). The ledger's note pointed at core/calp/src/pull.rs; the remap lives in the Tauri materializer instead because pull.rs keeps per-sheet payloads keyed by APPLICATION ids and the final local index exists only after the partition repair (B-navigator spec, C3). Pinned by calp_materialize_tests.rs bug_0449_a_subscribed_navigate_button_and_navigator_go_to_the_pulled_page_after_a_collision_rename, a_refreshed_navigate_button_and_navigator_keep_their_local_page_targets, no_pull_door_materializes_controls_with_an_identity_page_remap, an_untouched_checkout_push_republishes_navigator_targets_byte_for_byte; controls.rs remap unit tests; sheet_renames rename_control_entries_moves_static_page_target_names. Live proof (journey N12) not yet run.",
+        "filesChanged": [
+          "app/src-tauri/src/controls.rs",
+          "app/src-tauri/src/calp_commands.rs",
+          "core/calp/src/sheet_renames.rs",
+          "core/calcula-format/src/page_navigator.rs"
+        ]
+      },
+      "fixedAt": "2026-10-15"
     },
     {
       "id": "BUG-0450",
@@ -12799,6 +12811,1109 @@
         "description": "Run node scripts/gen-formula-patterns.mjs --emit six times."
       },
       "notes": "app/scripts/gen-formula-patterns.mjs (lpad lane). The committed artifact is the 583 version."
+    },
+    {
+      "id": "BUG-0453",
+      "status": "fixed",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas owner findings 2026-10-15 programme, WP-A (reference picks + canvas pivot cells), S0 pre-flight"
+      },
+      "violation": {
+        "oracleId": "floating-object-pick-selects",
+        "severity": "high",
+        "message": "A PRESS ON A FLOATING OBJECT DURING A REFERENCE PICK SELECTS THE OBJECT AND DESELECTS THE EDITED FLOATING GRID (owner F3): typing '=' in a floating grid cell and clicking a canvas pivot cell (or any other object) selects the pivot instead of inserting a reference; Core's press path never asks whether an editor expects a reference.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Canvas page with a floating grid and a pivot box. Double-click a floating-grid cell, type '=', click a pivot value cell: the pivot is selected and the floating grid's edit is lost; no reference is inserted."
+      },
+      "notes": "S0-1 (WP-A S0). app/src/core/hooks/useMouseSelection/layout/overlayMoveHandlers.ts:407-457 (pressZone calls noteObjectPress and dispatches floatingObject:selected/bodyDragStart unconditionally). Fix: WP-A S2 (OverlayRegistration.referenceAt + Core pick branch before pressZone).",
+      "triage": "Core. The press path (overlayMoveHandlers.ts pressZone) never asked whether an editor expected a reference, so every family's own select/move logic ran on a pick press; only the floating grid had a private pick (its own referencePick zone), which nobody else could reuse.",
+      "fix": "WP-A S2 (D-PICK): OverlayRegistration.referenceAt (pure) + referenceAtPoint in @api/gridOverlays; one predicate in core/lib/referencePickState.ts (re-exported by floatingHandles.ts and @api/editing as isFormulaReferencePickActive); handleOverlayMoveMouseDown decides a pick press BEFORE pressZone (no noteObjectPress, no floatingObject:selected/bodyDragStart, no armMove), floatingReferencePickSession.ts follows the drag and inserts at the release through useSpreadsheetSelection.handleFloatingReferencePick; the echo press/dblclick of a double-click is swallowed; the canvas background is inert during a pick. The floating grid answers referenceAt (frReferenceAt). The CANVAS PIVOT's own referenceAt (inserting GETPIVOTDATA / Canvas1!B5) is WP-A S4 (pivotVisualReferenceAt); until then a pivot press during a pick is inert rather than selecting.",
+      "validatedBy": "app/src/core/hooks/useMouseSelection/layout/__tests__/overlayReferencePick.test.ts (23 tests: (a)-(f) of the spec, hover cursor, drag/clamp/lost release, echo pending and ended, 500 ms window); sabotage-verified: disabling the pick branch fails 17 of them, (a) on noteObjectPress. app/src/core/components/Spreadsheet/__tests__/floatingReferencePickRouting.test.tsx (10, the real hook: sheet single -> interceptors + active-sheet qualification, sheet range and object never ask them). app/src/core/hooks/useMouseSelection/__tests__/canvasBackgroundPick.test.tsx (2; sabotage-verified). app/src/core/lib/__tests__/referencePickState.test.ts (11). app/extensions/FloatingRange/__tests__/frReferenceAt.test.ts (6). Live proof: WP-A J-journey (S12), not yet run."
+    },
+    {
+      "id": "BUG-0454",
+      "status": "fixed",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas owner findings 2026-10-15 programme, WP-A (reference picks + canvas pivot cells), S0 pre-flight"
+      },
+      "violation": {
+        "oracleId": "pivot-menu-item-label-formatted-value",
+        "severity": "medium",
+        "message": "PIVOT MENU Expand/Collapse/Keep Only/Hide NAME THE ITEM BY formattedValue, WHICH IS EMPTY FOR TEXT HEADERS AND FOR UNFORMATTED NUMERIC HEADERS: Rust fills formatted_value only for a Number with a non-empty number format, so the menu actions return early (or send an empty item name) on every text row label and on numeric headers such as year 2013.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Pivot with a text row field: right-click a row header > Expand/Collapse or Filter > Keep Only Selected Items: nothing happens. Same on a numeric column header (year) without a number format."
+      },
+      "notes": "S0-2 (WP-A S0). app/extensions/Pivot/handlers/pivotContextMenu.ts:282,314,435,461 read cell.formattedValue; app/src-tauri/src/pivot/utils.rs:569-574 sets formatted_value = String::new() for anything but a formatted Number. Fix: WP-A S9 (label falls back from formattedValue to the value).",
+      "fix": "WP-A S9: every pivot-menu item that names an item reads pivotCellLabel(cell) (lib/pivotChromeActions.ts: formattedValue, else the value as text) -- Keep Only, Hide, the Move labels, getItemLabelForCell, the field-name fallback and the chrome toggle. Expand/Collapse no longer send a name at all: they act through setPivotItemExpandedAt, which toggles the exact item by its group path (label sent as the fallback). A header whose item cannot be read now toasts instead of returning silently.",
+      "validatedBy": "app/extensions/Pivot/handlers/__tests__/pivotContextMenuFixes.test.ts (\"item labels fall back to the value\": Keep Only on a numeric header with an empty formattedValue sends \"2013\"; the Move label names it). Sabotage-verified (scratchpad wpa-s9-sabotage.mjs, 8 of 8 caught). Live proof: WP-A S12 journeys, not yet run."
+    },
+    {
+      "id": "BUG-0455",
+      "status": "fixed",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas owner findings 2026-10-15 programme, WP-A (reference picks + canvas pivot cells), S0 pre-flight"
+      },
+      "violation": {
+        "oracleId": "pivot-menu-reader-ignores-window",
+        "severity": "medium",
+        "message": "PIVOT MENU CELL READERS IGNORE WINDOWING: past view row 200 of a >500-row (windowed) pivot every header item does nothing, because the readers index view.rows[viewRow] directly, without subtracting windowStartRow, and the index falls outside (or onto the wrong row of) the cached window.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Pivot with more than 500 rows (e.g. customer full names). Scroll past row 200, right-click a row header > Filter > Keep Only Selected Items: nothing happens, or a different item is acted on."
+      },
+      "notes": "S0-3 (WP-A S0). app/extensions/Pivot/handlers/pivotContextMenuHelpers.ts:61-66 and :215-219. Fix: WP-A S9 (windowed-aware getPivotViewCell reader).",
+      "fix": "WP-A S9: getCachedCellData and getClickedCellData read rows through getPivotViewRow (the cell-window cache for a windowed view) and bound them by viewRowCount(view), never view.rows.length; governingRowHeader reads the same way.",
+      "validatedBy": "app/extensions/Pivot/handlers/__tests__/pivotContextMenuFixes.test.ts (\"windowed views\": a 600-row windowed view with the cache window at 300 resolves the header at view row 350 in the sync helpers AND in Keep Only's click handler; an unloaded row is null, not a wrong cell). Sabotage-verified (scratchpad wpa-s9-sabotage.mjs, 8 of 8 caught). Live proof: WP-A S12 journeys, not yet run."
+    },
+    {
+      "id": "BUG-0456",
+      "status": "fixed",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas owner findings 2026-10-15 programme, WP-A (reference picks + canvas pivot cells), S0 pre-flight"
+      },
+      "violation": {
+        "oracleId": "pivot-menu-async-failure-console-only",
+        "severity": "medium",
+        "message": "ASYNC PIVOT MENU ACTIONS REPORT FAILURE TO THE CONSOLE ONLY (the BUG-0096 rule: no silent failures): a refused or failed Expand/Collapse, filter, sort, drill or field action from the pivot context menu (grid) or the canvas pivot box menu leaves the user with no message.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Make any pivot menu action fail (e.g. backend refusal): the menu closes and nothing is shown; the error is only in the devtools console."
+      },
+      "notes": "S0-4 (WP-A S0). app/extensions/Pivot/handlers/pivotContextMenu.ts catch blocks (:100, :221, :242, :297, :329, :401, :439, :465, :491, :518, :702); app/extensions/Pivot/lib/pivotVisualContextMenu.ts:217-219. Fix: WP-A S9 (every async menu failure toasts).",
+      "fix": "WP-A S9: every async onClick in handlers/pivotContextMenu.ts is wrapped by menuAction(label, run), which routes any failure through one local reportMenuFailure(label, err) = showToast(`${label} failed: ${msg}`, {variant: \"error\"}) (Delete/Rename/Expand All had no catch at all; Refresh swallowed every error but 'not connected'). Header items throw a named reason instead of returning silently when the cell cannot be read. The canvas box menu's click catch (lib/pivotVisualContextMenu.ts) toasts too. Items that cannot act are disabled with a reason (GridContextMenuItem.disabledReason, shown as the row's tooltip/aria-description).",
+      "validatedBy": "app/extensions/Pivot/handlers/__tests__/pivotContextMenuFixes.test.ts (\"failures reach the user\": rejected toggle, rejected Delete, unreadable header, and a sweep proving no item rejects into the menu host); app/extensions/Pivot/lib/__tests__/pivotVisualContextMenu.test.ts (\"tells the USER with a toast\"). Sabotage-verified (scratchpad wpa-s9-sabotage.mjs, 8 of 8 caught). Live proof: WP-A S12 journeys, not yet run."
+    },
+    {
+      "id": "BUG-0457",
+      "status": "fixed",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas owner findings 2026-10-15 programme, WP-A (reference picks + canvas pivot cells), S0 pre-flight"
+      },
+      "violation": {
+        "oracleId": "pivot-dblclick-toggle-formatted-value",
+        "severity": "medium",
+        "message": "A DOUBLE-CLICK TOGGLE ON A PIVOT ROW HEADER SENDS formattedValue (empty for text labels) AND NO groupPath, and takes the field index from indentLevel || viewCol, so the toggle names no item (or the wrong one) and its failure is logged to the console only.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Pivot with two row fields: double-click an expandable text row header: it does not collapse (or a different group toggles)."
+      },
+      "notes": "S0-5 (WP-A S0). app/extensions/Pivot/lib/pivotCellDoubleClick.ts:37-52. Fix: WP-A S9/S10 (toggle via the governing groupPath, label fallback, toast on failure). Fixed in WP-A S8 (the double-click is S8's; the MENU's Expand/Collapse/Keep Only/Hide naming is BUG-0454, S9).",
+      "triage": "Extension (Pivot). pivotCellDoubleClick.ts toggled with value = cell.formattedValue and no groupPath: the backend (toggle_pivot_group) matches a group path exactly, else the item NAME, so a text label (empty formattedValue) toggled the item \"\" and two same-named headers under different parents could not be told apart; its catch logged to the console only.",
+      "fix": "WP-A S8: the toggle sends the cell's groupPath (omitted when empty, so the backend never toggles the key \"\") and value = pivotCellLabel(cell) (formattedValue, else the raw value as text: \"2013\" for an unformatted year), fieldIndex = indentLevel || viewCol as before; a failure toasts \"Expand/Collapse failed: <reason>\" (variant error) and the pivot:refresh follows only a successful toggle. The drill half is extracted as runPivotDrillThrough(pivotId, cell, gridRow, gridCol) (one drill for the double-click and S10's Show Details). On a canvas box the double-click now acts only where pivotVisualZoneAt answers content 'cell': the 4px border band, blank area and the Design-Mode body grab are inert.",
+      "validatedBy": "app/extensions/Pivot/lib/__tests__/pivotCellDoubleClick.test.ts (17: groupPath + numeric label fallback, text label, empty path, failure toast + no refresh, non-expandable, drill groupPath / grand total / exported drill / refused-drill toast / script hook, non-acting cell types); app/extensions/Pivot/lib/__tests__/pivotVisualOverlay.test.ts double-click block (band inert with positive control, blank inert, Design-Mode body inert with control, outside -> false). Sabotage-verified (scratchpad wpa-s8-sabotage.mjs, 6 of 6 caught: groupPath dropped, formattedValue-only label, console-only failure, empty path sent, drill path dropped, zone check removed). Live proof: WP-A S12 journeys, not yet run."
+    },
+    {
+      "id": "BUG-0458",
+      "status": "fixed",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas owner findings 2026-10-15 programme, WP-A (reference picks + canvas pivot cells), S0 pre-flight"
+      },
+      "violation": {
+        "oracleId": "canvas-pivot-rightclick-no-select",
+        "severity": "low",
+        "message": "A RIGHT-CLICK ON AN UNSELECTED CANVAS PIVOT BOX OPENS ITS MENU WITHOUT SELECTING IT, unlike every other object family, so the menu acts on a box the selection (and the pane / formula bar) does not show.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Canvas page with a pivot box, nothing selected. Right-click the box: its menu opens, the box stays unselected."
+      },
+      "notes": "S0-6 (WP-A S0). app/extensions/Pivot/lib/pivotVisualContextMenu.ts:283-296 (handlePivotBoxContextMenu opens the menu without selectObject). Fix: WP-A S5 (right-click selects the box first).",
+      "triage": "Extension (Pivot). handlePivotBoxContextMenu (lib/pivotVisualContextMenu.ts) opened the box menu without selecting the box, unlike every other floating family, so the menu acted on a box the selection, the pane and the formula bar did not show.",
+      "fix": "WP-A S5: handlePivotBoxContextMenu selects an unselected box first through selectObject(region) (keyboard semantics: no pane opens), then re-anchors the cell selection when the right-click lands outside it; pivotBoxMenuTargetAt stays pure. lib/pivotVisualContextMenu.ts:349.",
+      "validatedBy": "app/extensions/Pivot/lib/__tests__/pivotVisualContextMenu.test.ts (\"SELECTS an unselected box first (no pane: keyboard semantics), as every other family does\", the re-anchor cases and \"pivotBoxMenuTargetAt itself is PURE\"). Live: canvas-pick-cells.spec.ts J12 (a first right-click on the never-selected range pivot R) is WRITTEN (type-checked) but not yet run (open-items 2.ak, WP-A)."
+    },
+    {
+      "id": "BUG-0459",
+      "status": "open",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas owner findings 2026-10-15 programme, WP-A (reference picks + canvas pivot cells), S0 pre-flight"
+      },
+      "violation": {
+        "oracleId": "pivot-sort-by-value-unsupported",
+        "severity": "low",
+        "message": "SORT BY VALUE ON PIVOT VALUE CELLS IS UNSUPPORTED: the sort request carries values_hierarchy (pivot/types.rs:801) but no code reads it, so a pivot can only be sorted by its labels. The value-cell menu shows Sort disabled with a reason until the backend implements it.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Pivot value cell > Sort: shown disabled ('Sorting by values is not available yet.'). Sending a sort request with valuesHierarchy set sorts by label."
+      },
+      "notes": "S0-7 (WP-A S0). app/src-tauri/src/pivot/types.rs:801 values_hierarchy: Option<String> -- read by no code (rg values_hierarchy). Stays OPEN (WP-A non-goal 9); open-items 2.ak WP-A row."
+    },
+    {
+      "id": "BUG-0460",
+      "status": "fixed",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas owner findings 2026-10-15 programme, WP-A (reference picks + canvas pivot cells), S0 pre-flight"
+      },
+      "violation": {
+        "oracleId": "canvas-pivot-cells-not-selectable",
+        "severity": "high",
+        "message": "CANVAS PIVOT CELLS CANNOT BE SELECTED OR COPIED (owner F4): any press on a canvas pivot box selects/moves the whole box, so a cell or range cannot be selected, copied, drilled from the selection or shown in the formula bar / Name Box / status bar, and the value-cell context menu is missing.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Canvas page with a pivot box. Click a value cell, Shift+click another, Ctrl+C: the box is selected (or moved by a drag), no cell selection exists, nothing is copied."
+      },
+      "notes": "S0-8 (WP-A S0). app/extensions/Pivot/lib/pivotVisualOverlay.ts (zone grammar: cells are frame, not content). Fix: WP-A S5-S11 (cells as content, copyCellRange, runPivotDrillThrough, value-cell menu, formula bar/status bar).",
+      "triage": "Extension (Pivot) + Core primitive. The box's zone answer made every cell FRAME (a press selected or moved the whole box), there was no cell selection store, and Core had no way to copy an arbitrary hidden-grid rectangle for an object.",
+      "fix": "WP-A S5-S11 (D-CELLS): cells are content in pivotVisualZoneAt (lib/pivotVisualOverlay.ts:425) with a cell selection store (lib/pivotVisualCellSelection.ts), click / Shift+click / drag with auto-scroll (lib/pivotCellPress.ts) and the inner-selection paint; the box moves by its 4px border band, blank area, hover grip and Design-Mode body. Keys (S6, lib/pivotCanvasCellKeys.ts): arrows / Shift+arrows (hidden rows skipped), Escape clears the cells then the box, Ctrl+A, and Delete / Backspace / Ctrl+X / Shift+Delete / Ctrl+V / Shift+Insert / Ctrl+D refuse with \"You can't change this part of the PivotTable.\" (the provider owns Delete, so the PivotTable is never deleted). Copy (S7a + S7b): Core's copyCellRange (@api/cellClipboard, batched, 200,000-cell cap) reached through ObjectSelectionProvider.innerClipboardCommand, so Ctrl+C, Ctrl+Insert, Home > Copy, Edit > Copy and the box menu's Copy copy the hidden-grid rectangle (hidden rows left out). Drill (S8, runPivotDrillThrough), the value-cell menu (S9/S10), and the formula bar / Name Box / status bar (S11a/S11b, @api/statusBarRange).",
+      "validatedBy": "Unit, through the real keybinding dispatcher with the canvas and generic object keys installed: app/extensions/Pivot/lib/__tests__/{pivotVisualCellSelection,pivotCellPress,pivotCellNavigation,pivotCanvasCellKeys,pivotVisualOverlay,pivotCellFormulaBar,pivotCellDoubleClick}.test.ts, app/extensions/BuiltIn/ObjectPosition/__tests__/selectedObjectKeys.test.ts T17 (the DELETE HAZARD), app/src/core/hooks/__tests__/copyCellRange.test.ts, app/src/api/__tests__/objectClipboardDoorRule.test.ts. copyCellRange is doubled in the pivot copy tests, so the pasted displays and styleIndex are compared with the hidden grid only by the live canvas-pick-cells.spec.ts J7-J9 / J15, which are WRITTEN (type-checked) but not yet run (open-items 2.ak, WP-A)."
+    },
+    {
+      "id": "BUG-0461",
+      "status": "fixed",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas owner findings 2026-10-15 programme, WP-B (Page Navigator), S7"
+      },
+      "violation": {
+        "oracleId": "report-pages-malformed-read-unhandled",
+        "severity": "low",
+        "message": "@api/reportPages: a get_sheets answer that is not a sheet list (null) threw inside refreshReportPages AFTER its try block, so the fire-and-forget refresh that startReportPages queues became an UNHANDLED REJECTION instead of the documented 'a failed read keeps the previous snapshot'. Five Controls harness suites (buttonRunOnRelease, buttonGesturePass, resizeKeepsRegion, inCellButtonCellMenu, insertWithObjectSelected) reported it as vitest 'Unhandled Errors' once Controls' activate() started the page list (WP-B S6), which fails the run.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Activate Controls in a unit harness whose backend answers get_sheets with null: vitest reports 'TypeError: Cannot read properties of null (reading 'sheets')' at reportPagesFrom <- refreshReportPages as an unhandled error."
+      },
+      "notes": "Found in WP-B S7 while running the Controls suites. Introduced by WP-B S2 the same day; never shipped.",
+      "triage": "@api/reportPages refreshReportPages: reportPagesFrom/sheetIdsFrom ran outside the try that guards the read.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-15",
+        "description": "app/src/api/reportPages.ts refreshReportPages parses the answer inside its own try: a malformed answer warns and returns false, keeping the previous snapshot. Pinned by reportPages.test.ts 'a MALFORMED answer is a failed read' (sabotage: rethrow in the catch -> red).",
+        "filesChanged": [
+          "app/src/api/reportPages.ts",
+          "app/src/api/__tests__/reportPages.test.ts"
+        ]
+      },
+      "fixedAt": "2026-10-15"
+    },
+    {
+      "id": "BUG-0462",
+      "status": "fixed",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas owner findings 2026-10-15 programme, WP-B (Page Navigator), design map + S1"
+      },
+      "violation": {
+        "oracleId": "sheet-visibility-change-not-announced",
+        "severity": "low",
+        "message": "HIDING A NON-ACTIVE SHEET, OR UNHIDING ANY SHEET, ANNOUNCED NOTHING ON THE EVENT BUS: Core's hideSheet / unhideSheet wrappers (app/src/core/lib/tauri-api.ts) only invoked the backend. Every reader of the sheet LIST that is not the tab strip itself -- a live page list, a page navigator -- kept showing a hidden page (or kept missing an unhidden one) until some unrelated sheet event happened.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Three canvases A, B, C with A active; right-click B's tab > Hide. No MUTATION_REFRESH / SHEET_CHANGED is emitted, so any listener of the sheet list still lists B."
+      },
+      "notes": "Found while mapping the Page Navigator (owner finding F2). Pre-existing since the wrappers were written.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-15",
+        "description": "hideSheet / unhideSheet read the backend's active sheet first and, when the call left it where it was (a non-active hide, every unhide), emit MUTATION_REFRESH {domains:[\"sheets\"], source:\"commit\"} -- the announcement move/copy/undo already make. A hide of the ACTIVE sheet announces nothing from the wrapper: the caller that applies the switch (SheetTabs applySheetsResult, the script host's announceSheetsChanged) announces SHEET_CHANGED with its detail AFTER the frontend switched, so no cache keyed on the backend's active sheet loads the new sheet's objects while the grid still paints the old one. A failed pre-read announces nothing and never fails the hide. Pinned by src/core/lib/__tests__/lifecycleEmitters.test.ts (non-active hide, unhide, active hide silent, refused unhide silent, failed pre-read).",
+        "filesChanged": [
+          "app/src/core/lib/tauri-api.ts",
+          "app/src/core/lib/__tests__/lifecycleEmitters.test.ts"
+        ]
+      },
+      "fixedAt": "2026-10-15"
+    },
+    {
+      "id": "BUG-0463",
+      "status": "fixed",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas owner findings 2026-10-15 programme, WP-B (Page Navigator), design map + S6"
+      },
+      "violation": {
+        "oracleId": "nav-button-current-wash-lost-on-rename",
+        "severity": "low",
+        "message": "A NAVIGATION BUTTON LOST ITS CURRENT-PAGE WASH AFTER ITS PAGE WAS RENAMED: isCurrentPageButton (app/extensions/Controls/Button/actionGlyph.ts) compared the button's stored actionTargetName with the active sheet's NAME, so after a rename of the page on screen the button that opens it no longer painted pressed, although it still navigated correctly by its stable actionTarget id.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "On canvas A insert Buttons > Blank, set Action = Navigate to A (it paints the pressed 'current page' wash); rename A to 'A2'. The wash is gone until the action is re-chosen."
+      },
+      "notes": "Found while mapping the Page Navigator (owner finding F2); pre-existing since the declarative actions (2026-10-08).",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-15",
+        "description": "isCurrentPageButton(action, { sheetId, sheetName }) compares by sheet id whenever both sides carry one and falls back to a case-folded name only otherwise; the floating renderer passes sheetIdAt(getReportPagesSnapshot(), sheetContext.activeSheetIndex), which answers for any sheet kind, so a worksheet target follows a rename too. The Page Navigator decides its current item by id the same way (navigatorModel currentPageKey). Pinned by app/extensions/Controls/__tests__/buttonActionPaint.test.ts (rename case by id, worksheet target).",
+        "filesChanged": [
+          "app/extensions/Controls/Button/actionGlyph.ts",
+          "app/extensions/Controls/Button/floatingRenderer.ts",
+          "app/extensions/Controls/__tests__/buttonActionPaint.test.ts"
+        ]
+      },
+      "fixedAt": "2026-10-15"
+    },
+    {
+      "id": "BUG-0464",
+      "status": "open",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas owner findings 2026-10-15 programme, WP-B (Page Navigator), S11 (from code)"
+      },
+      "violation": {
+        "oracleId": "cli-hide-active-sheet-frontend-not-switched",
+        "severity": "medium",
+        "message": "THE COMMAND LINE CAN HIDE THE ACTIVE SHEET WITHOUT THE FRONTEND SWITCHING: `set sheet <active> visibility=hidden|veryhidden` (app/extensions/CommandLine/cli/appWriters.ts, case \"setSheet\") calls hideSheet and ignores its result. The backend's hide_sheet moves its active sheet to a neighbour (BUG-0046), but nothing applies that switch to the grid or announces it (Core's wrapper deliberately stays silent when the active sheet moved; the caller must apply the switch), so the grid keeps painting the now-hidden sheet while the backend's active sheet is another one -- the BUG-0046 shape (edits and per-sheet caches keyed on the backend's active sheet disagree with what is on screen). The script host does NOT have this gap: api.setSheetVisibility applies the switch through announceSheetsChanged (app/src/api/scriptHost/host.ts). The command line's own qualified references (ensureSheetActive -> setActiveSheet) move the backend's active sheet the same silent way, which may be the same design gap.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "From code, not reproduced live: two visible sheets, Sheet1 active; in the Command Line run `set sheet Sheet1 visibility=hidden`. Expected: the grid switches to Sheet2 (as the tab menu's Hide does). Predicted: the tab disappears from the strip only at the next sheet-list read, and the grid stays on Sheet1's cells while the backend's active sheet is Sheet2."
+      },
+      "notes": "Recorded by the B-navigator spec (sections 2.1 and 6) as a pre-existing gap for both the script host and the command line; S11 checked both: the script host half is NOT a defect (host.ts announceSheetsChanged dispatches setActiveSheet and SHEET_CHANGED with detail), the command-line half is. Fix sketch: in appWriters setSheet, when the result's activeIndex differs from the active sheet before the call, apply the switch the way the script host does (one feature-neutral @api helper both could share). Out of WP-B's scope."
+    },
+    {
+      "id": "BUG-0465",
+      "status": "fixed",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas owner findings 2026-10-15 programme, WP-A S10 (value-cell items), unit capture before the move"
+      },
+      "violation": {
+        "oracleId": "pivot-editor-calculated-order-lost",
+        "severity": "medium",
+        "message": "THE PIVOT EDITOR MOVES AN INTERLEAVED CALCULATED FIELD TO THE END ON ITS FIRST EDIT: usePivotEditorState seeds its Values zone by APPENDING the pivot's calculated fields after the value fields (mergedInitialValues), ignoring definition.value_column_order, and every request rebuilds the order from the zone's positions -- so a pivot whose order is [Value 0, Calculated 0, Value 1] is sent back as [V0, V1, C0] by the first unrelated edit (a layout toggle, a field added), and update_pivot_fields REPLACES the order. The Design-tab DSL apply (setAllZones) appended the same way, so a DSL that interleaved a calculated column lost its place too.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Range pivot with values Sum of Sales, Sum of Units and a calculated field placed between them (value_column_order [V0, C0, V1]). Open the field list and toggle any layout option: the calculated column jumps to the right end. Unit capture (WP-A S10): the hook's buildUpdateRequest for that seed returned valueColumnOrder [value 0, value 1, calculated 0]."
+      },
+      "notes": "S10 (WP-A). app/extensions/Pivot/components/usePivotEditorState.ts:83-98 (mergedInitialValues appends) and :899-913 (setAllZones appends); the order was not even transported until WP-A S1 (PivotFieldConfiguration.valueColumnOrder). Fixed in the same step by the shared mergeCalculatedIntoValues (lib/pivotFieldsRequest.ts) fed the transported order.",
+      "triage": "Extension (Pivot). The Values zone was seeded by appending the calculated fields (usePivotEditorState mergedInitialValues and setAllZones) and every request rebuilt value_column_order from the zone's positions; update_pivot_fields replaces the order whenever it is sent. The order itself only reached the frontend since WP-A S1 (PivotFieldConfiguration.valueColumnOrder).",
+      "fix": "WP-A S10: ONE recipe, lib/pivotFieldsRequest.ts mergeCalculatedIntoValues(values, calculated, order) places each calculated field by the transported order (appends only when the order is empty; out-of-range/repeated entries skipped, unnamed fields appended so none is lost). buildPivotPaneData passes initialValueColumnOrder (PivotEditorViewData, PivotEditorView, PivotEditor props) and the hook uses it for its seed AND for the Design-tab setAllZones; the editor's request builder moved verbatim to buildPivotFieldsRequest, shared with the value-cell menu's headless edits (valueFieldEdits.ts), which therefore send the pivot's own interleaving.",
+      "validatedBy": "app/extensions/Pivot/lib/__tests__/pivotFieldsRequest.test.ts (identity round trip against literals captured from the unmoved hook; the interleaved fixture now [V0, C0, V1] where the unmoved hook sent [V0, V1, C0]; the editor's first edit and a DSL apply keep the order); valueFieldEdits.test.ts (summarize/showValuesAs keep [V0, C0, V1], remove B sends [V0, C0]). Sabotage (scratchpad wpa-s10-sabotage.mjs): merge-appends and editor-ignores-order both caught. Live proof: WP-A S12 J13, not yet run."
+    },
+    {
+      "id": "BUG-0466",
+      "status": "fixed",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas owner findings 2026-10-15 programme, WP-A S10 (value-cell items), code reading"
+      },
+      "violation": {
+        "oracleId": "pivot-editor-values-stale-after-menu-edit",
+        "severity": "medium",
+        "message": "AN OPEN PIVOT FIELD LIST UNDOES A CONTEXT-MENU VALUE-FIELD EDIT ON ITS NEXT CHANGE: usePivotEditorState seeds rows/columns/values/filters once and re-seeds only when the pivotId changes (its view-update re-read syncs item filters only), and every editor request REPLACES the value fields. So with the field list open, Summarize Values By / Show Values As / Remove \"<field>\" from the value-cell menu (and the older header-menu Remove field) change the pivot, and the next unrelated edit in the open pane (a layout toggle, a field added) sends the pre-edit Values zone back, silently reverting it.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Range pivot with Sum of Sales, field list open. Right-click a value cell > Summarize Values By > Count: the column shows Count of Sales. Now toggle any layout option (or tick another field) in the field list: the column is back to Sum of Sales."
+      },
+      "notes": "S10 (WP-A), found by reading, not yet reproduced live. app/extensions/Pivot/components/usePivotEditorState.ts (zones reset only in the pivotId-change effect; syncHiddenItemsFromPivot touches hidden items only); headless edits in app/extensions/Pivot/lib/valueFieldEdits.ts and handlers/pivotContextMenu.ts. Fix direction: re-seed the editor's zones from the definition after a view change it did not cause (no pending edit), or remount the pane's editor after a headless edit. Not fixed in S10 (outside the step's spec); S12 J13 should cover it.",
+      "triage": "Extension (Pivot). usePivotEditorState seeded its zones once (and again only on a pivot-id change), while every request it sends REPLACES the pivot's fields; a field edit made by another door therefore lived only until the open editor's next request.",
+      "fix": "WP-A package verifier: editPivotValueField (lib/valueFieldEdits.ts) and the header menu's Remove \"<field>\" (handlers/pivotContextMenu.ts) announce PivotEvents.PIVOT_FIELDS_EDITED_ELSEWHERE {pivotId} after a successful send; usePivotEditorState re-seeds rows/columns/values/filters from readPivotZones (PivotEditor passes readPivotEditorZones, the same buildPivotPaneData + mergeCalculatedIntoValues seed, by a dynamic import to keep the manifest cycle open). The re-seed sends nothing, only the latest read is applied, none after a pivot switch, and resetZones (after a failed request) returns to the re-seeded zones rather than the mount-time ones.",
+      "validatedBy": "app/extensions/Pivot/components/__tests__/pivotEditorReseedElsewhere.test.tsx (8: the next pane edit keeps the menu's Count, positive control without the announcement sends Sum, removed stays removed, another pivot not read, latest read wins, null read ignored, reset returns to the re-seed, PivotEditor wiring pin) and app/extensions/Pivot/lib/__tests__/valueFieldEdits.test.ts (announced on success only; readPivotEditorZones seeds as the editor). Five sabotages each caught: no setValues on re-seed, no latest-read guard, reset to mount-time zones, no emit, no readPivotZones wiring. Live: not run (canvas-pick-cells J13 does not drive the pane)."
+    },
+    {
+      "id": "BUG-0467",
+      "status": "fixed",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Live E2E proof of WP-A, canvas-pick-cells.spec.ts J13 first run (2026-10-15)"
+      },
+      "violation": {
+        "oracleId": "pivot-calculated-field-reference-lost-on-value-rename",
+        "severity": "medium",
+        "message": "A CALCULATED FIELD GOES BLANK, SILENTLY, WHEN A VALUE FIELD IT NAMES IS RENAMED: changing a range pivot's value field aggregation renames an un-renamed field to Excel's default (\"Sum of Units\" -> \"Max of Units\", buildPivotFieldsRequest), and nothing rewrote calculated-field formulas that name the value field by its shown name ('Sum of Units' * 2, the spelling the engine supports and its own tests use). The reference then resolves to nothing and every cell of the calculated column is empty -- no error value, no toast. Every door that changes the name did it: the value-cell menu's Summarize Values By (WP-A), the Values chip's aggregation and Value Field Settings in the field list.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Range pivot over Month/Units: Sum of Units, calculated field Double = 'Sum of Units' * 2, Count of Units. Right-click a Sum of Units cell > Summarize Values By > Max: the column becomes Max of Units and every Double cell is empty (live: J13 saw Jan..Apr null where 20/80/40/60 were)."
+      },
+      "notes": "Pre-existing in the field list's aggregation/settings handlers (the same naming rule); reached through WP-A's new headless door. Excel has no equivalent (its calculated fields name source fields only).",
+      "triage": "Extension (Pivot): the shared request recipe renames the value field but kept the calculated formulas as they were.",
+      "fix": "app/extensions/Pivot/lib/pivotFieldsRequest.ts: valueFieldRequestName (the ONE naming rule, the builder now uses it), renameCalculatedReferences (the engine tokenizer's scan: 'quoted', [bracketed] and bare references, case-insensitive, string literals and function names left alone, each spelling kept) and replaceValueField (replace a Values-zone entry and carry a rename into the calculated entries, unless another value field still carries the old name). Used by editPivotValueField (summarize, showValuesAs) and usePivotEditorState (handleAggregationChange, handleValueFieldSettings).",
+      "validatedBy": "Unit: pivotFieldsRequest.test.ts (renameCalculatedReferences x5, replaceValueField x4, editor hook x2) and valueFieldEdits.test.ts (summarize renames and the formula follows; showValuesAs leaves it). Sabotage (replaceValueField never renames) fails 5 of them. Live: canvas-pick-cells J13 passed after the fix (2026-10-15)."
+    },
+    {
+      "id": "BUG-0468",
+      "status": "fixed",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Live E2E proof of WP-B, canvas-page-navigator.spec.ts N10 first run (2026-10-15)"
+      },
+      "violation": {
+        "oracleId": "page-navigator-show-checkbox-snaps-back",
+        "severity": "low",
+        "message": "THE PAGE NAVIGATOR'S 'SHOW THIS PAGE'S BUTTON' BOX SNAPS BACK WHEN CLICKED: the Buttons section bound the checkbox to the STORED override alone (checked={!hidden}) and wrote through an async set_control_property, so a click left the box showing its old tick for the whole backend round trip -- the click looked refused -- and only the re-read after the write unchecked it. The pane's own boolean rows (PropertyRow's ToggleSwitch) show their new value locally; this box did not.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Canvas with pages A, B and a Page Navigator; Design Mode, select the navigator, expand A's row in the Properties pane's Buttons section and click 'Show this page's button'. Live: Playwright's uncheck() reported 'Clicking the checkbox did not change its state' (the box was still checked right after the click)."
+      },
+      "notes": "Found by WP-B's live proof; the N10 assertion (uncheck, then A's item leaves the navigator) is unchanged.",
+      "triage": "Extension (Controls): a controlled checkbox with no local state over an async write.",
+      "fix": "app/extensions/Controls/PropertiesPane/PageNavigatorButtonsSection.tsx: ShowCheckbox holds the clicked value as pending until the stored value changes or the write settles (a refused write puts the stored tick back).",
+      "validatedBy": "Unit: pageNavigatorButtonsSection.test.tsx 'BUG-0468: the box shows the click while the write is in flight, and a refused write puts the tick back'; sabotage (checked={shown}) fails it. Live: canvas-page-navigator N10 passed after the fix, 12/12 (2026-10-15)."
+    },
+    {
+      "id": "BUG-0469",
+      "status": "fixed",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "WP-D S7 (binding seam): mirroring catalog.rs's page-key wildcard, which calls SheetId::parse"
+      },
+      "violation": {
+        "oracleId": "identity-uuid-parse-panics-on-non-ascii",
+        "severity": "medium",
+        "message": "SheetId::parse / EntityId::parse PANIC ON A 36-BYTE NON-ASCII STRING, and accept '+' inside a hex pair. core/identity/src/types.rs parse_uuid_str checks s.len() == 36 in BYTES, filters the dashes into a String, checks THAT is 32 bytes, then slices it by byte index (&bytes_str[i*2..i*2+2]) before validating anything else: a multi-byte character straddling an even byte offset makes the slice panic ('byte index 2 is not a char boundary'). u8::from_str_radix also accepts a leading '+', so '+0000000-0000-0000-0000-000000000000' parses as a valid id. Both parsers are fed renderer-supplied strings: object_bindings/object_json.rs:291 parses ObjectBindingRef.id with EntityId::parse (the object_bindings command, reachable from scripts' bindProperty and the MCP tools once S9/S10 land), json_view.rs parses object ids from the JSON view, calp_commands.rs parses sheet ids, and catalog.rs's page-key wildcard (S8d) will parse a binding PATH segment. A panic inside a Tauri command handler is not a refusal sentence.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Scratch crate depending on core/identity: let s = format!(\"a\\u{e9}{}-{}-{}-{}-{}\", \"0\".repeat(8), \"0\".repeat(5), \"0\".repeat(5), \"0\".repeat(5), \"0\".repeat(6)); (36 bytes, 35 chars, four dashes) -> SheetId::parse(&s) panics at core/identity/src/types.rs:157:50 'byte index 2 is not a char boundary; it is inside 'e-acute' (bytes 1..3)'. SheetId::parse(\"+0000000-0000-0000-0000-000000000000\").is_some() == true. Run 2026-10-15 under setup-rust-env.ps1."
+      },
+      "notes": "Found while writing the TS mirror of the page-key wildcard (app/src/api/objectBindings/catalog.ts uses a strict uuid regex, so the mirror refuses '+' where Rust accepts it -- harmless today because no pageOverrides row exists until S8d). Not fixed in S7 (a TS-only step; core/identity is outside it).",
+      "triage": "Core (identity): parse_uuid_str must refuse a non-ASCII string up front (s.is_ascii()) and accept only ASCII hex digits in each pair (no sign), so every caller gets None instead of a panic.",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-15",
+        "by": "WP-D S9 (script object handle: api.object(kind, id) hands a script-chosen id to EntityId::parse)",
+        "filesChanged": [
+          "core/identity/src/types.rs (parse_uuid_str refuses a non-ASCII string up front and any non-hex-digit character before slicing; doc comment names the defect)"
+        ],
+        "tests": [
+          "core/identity/src/types.rs parse_refuses_non_ascii_and_signs_without_panicking (the 36-byte e-acute probe panicked 'byte index 2 is not a char boundary' with the fix reverted -- sabotage run 2026-10-15; '+0000000-...' no longer parses)"
+        ]
+      }
+    },
+    {
+      "id": "BUG-0470",
+      "status": "open",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "WP-D S5b (binding cascades): deleting_a_sheet_turns_binding_refs_into_ref_errors first read `=DATA!A1&#REF!`"
+      },
+      "violation": {
+        "oracleId": "sheet-repair-uppercases-untouched-sheet-refs-in-rule-formulas",
+        "severity": "low",
+        "message": "A sheet RENAME or DELETE repair of a RULE formula re-spells every OTHER sheet reference in the formula in UPPER CASE. app/src-tauri/src/sheets.rs rewrite_rule_formulas runs every conditional-format and custom-validation formula through calp::sheet_renames::SheetRenames::rename_formula (rename) or crate::repair_formula_text_on_delete_at (delete); both re-parse the WHOLE formula and re-render it, and the engine lexer upper-cases a BARE sheet name (core/parser/src/lexer.rs), so an untouched `Data!A1` beside the repaired reference comes back as `DATA!A1`: deleting sheet Inputs turns the CF rule `=Data!A1&Inputs!B1` into `=DATA!A1&#REF!` (measured through the shared closure), and a rename re-renders through the same parse, so `=Data!A1+Other!B1` renamed Data->Facts is expected to read `=Facts!A1+OTHER!B1` (inferred, not measured). Evaluation is unaffected (sheet lookup is case-insensitive), but the text the user sees in Conditional Formatting / Data Validation changes spelling for a sheet they never touched. Object property BINDINGS go through the same rewriters and are respelled back to the workbook's case by object_bindings::formula::respell_sheet_case (WP-D S5b); the CF/DV arms are not.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Unit tier (app crate): create_app_state, sheets Data/Inputs/Report (add_sheet_inner), store a binding or a CF expression rule `=Data!A1&Inputs!B1`, delete_sheet_impl(Inputs). Without respell_sheet_case the binding read `=DATA!A1&#REF!` (cascade_tests.rs deleting_a_sheet_turns_binding_refs_into_ref_errors failed with exactly that before the respell was added). The CF rule takes the same closure and keeps `=DATA!A1&#REF!`."
+      },
+      "notes": "Pre-existing, cosmetic (no wrong value). Not fixed in S5b: the CF/DV payload walkers live in core/calp and the fix belongs there or in rewrite_rule_formulas (respell each rewritten slot against the post-operation sheet names, as the bindings arm now does).",
+      "triage": "Host: after a rewrite returns Some(text), respell sheet names to the workbook's own case before storing (the bindings arm's respell_sheet_case is the worked example); or make calp's rename_formula render the canonical names it was given."
+    },
+    {
+      "id": "BUG-0471",
+      "status": "open",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "WP-D S6 (.calp carriage of object property bindings): reading every pull door"
+      },
+      "violation": {
+        "oracleId": "calp-dev-pull-drops-object-bindings",
+        "severity": "medium",
+        "message": "A DEV subscription (calp_dev_subscribe / calp_dev_refresh) carries a source .cala's cell-anchored controls but not its object property BINDINGS. core/calp/src/dev_mode.rs pull_dev copies workbook.controls into DevPullResult and has no object_bindings field, and app/src-tauri/src/calp_commands.rs materialize_dev_controls lands only the controls. Since WP-D a control property that follows a formula is a bindings.json row beside the control's own literal (which the migration of an older file empties, and which a binding set later leaves at whatever it was), so a dev-pulled button whose caption follows =Data!A1 arrives showing that frozen or blank literal -- a value that LOOKS live and never moves -- and nothing says the binding was dropped. A source saved before v10 carries valueType:\"formula\" properties instead, and the dev path runs no migrate_legacy_formulas either, so those controls land with a formula-typed literal resolve_control_properties no longer evaluates. The real pull doors (subscribe, checkout, refresh) carry and land bindings as of S6 (object_bindings::carriage).",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Code reading, 2026-10-15: in a v10 workbook bind a button text property (Properties > fx, =Data!A1), save as src.cala. In another workbook dev-subscribe to src.cala. The button lands (materialize_dev_controls) with only its stored literal, and the binding store holds no row for its uid (DevPullResult has no bindings to land), so the caption paints the literal and never follows Data!A1."
+      },
+      "notes": "Not fixed in S6: the dev path is outside the .calp carriage the step specifies (D §3.14 lists publish, pull, materialize, refresh, diff), and DevPullResult's field list is pinned by a source scan (button_cells_tests.rs `pub struct DevPullResult {`).",
+      "triage": "calp + host: DevPullResult gains object_bindings (the source rows whose control lands on a pulled sheet; canvas pages and floating ranges by the same rule when dev pulls carry them), and dev_subscribe_inner / dev_refresh_inner land them through object_bindings::carriage::PulledBindings + land_pulled_bindings (replace on refresh, previously-owned = the dev subscription's controls) and then run migrate::migrate_legacy_formulas with the door's effect."
+    },
+    {
+      "id": "BUG-0472",
+      "status": "open",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "WP-D S9 (script object handle): `self` and `api.object()` first shared ONE named interface and the generated policy gave both the first door's broker"
+      },
+      "violation": {
+        "oracleId": "script-typings-shared-interface-reach-misattributed",
+        "severity": "low",
+        "message": "The generated script typings attribute EVERY member of a named sub-interface to the broker door it was first PROBED through. app/scripts/scriptTypings/probeShim.ts walks a NAMED_SUBTREES interface once (`walked` set), so ScriptRange -- reached first through api.table(id).range() (table-relative transport: api.objectGetState / api.objectSetState) -- records those brokers for all of its members, and generated/scriptSurfacePolicy.ts publishes `range.setValues` / `range.getValues` (a sheet script's OWN range, which goes through sheet.setRangeValues etc. at RESTRICTED tier) as `broker api.objectSetState, tier unlocked`. The spliced JSDoc in extensions/ScriptableObjects/objectContexts.d.ts (ScriptRange.setValues, about line 6119) tells an author hovering a restricted sheet script's `range(...).setValues` that it needs unlocked access. The policy table is data the app reads (scriptValidation/surface.ts, scriptPreview/objectHooks.ts, the editor), so the same misattribution reaches anything that reads `tier` from it.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "npm run gen:script-typings, then grep generated/scriptSurfacePolicy.ts for `chain: \"range.setValues\"` -> broker api.objectSetState, tier unlocked; compare contextShims.ts: a SheetContext range uses sheetRangeTransport (sheet.* methods, restricted)."
+      },
+      "notes": "Not fixed in S9 (a generator change outside the step). S9 avoided the same trap for its own handle by giving the two doors two names: ScriptObjectHandle (`self`, object.setState, restricted) and ScriptTargetObjectHandle extends ScriptObjectHandle (`api.object()`, api.objectSetState, unlocked) -- probeShim.ts NAMED_SUBTREES.",
+      "triage": "Generator (probeShim.ts / generateObjectContexts.ts): record broker+tier PER CHAIN rather than per interface member (walk a named interface again when reached through a different root path and keep each path's brokers), or declare distinct interface names per door as S9 did."
+    },
+    {
+      "id": "BUG-0473",
+      "status": "fixed",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "WP-D S1 (chart spec as JSON) code reading, 2026-10-15; filed at WP-D S11"
+      },
+      "violation": {
+        "oracleId": "calp-inspector-chart-title-never-read",
+        "severity": "low",
+        "message": "THE APPLICATION INSPECTOR NEVER SHOWED A CHART TITLE: calp_inspector_overview read `title` from the TOP of each charts.json spec, but the frontend stores the ChartDefinition ENVELOPE ({chartId, name, sheetIndex, x, y, width, height, spec: ChartSpec}) and the title lives in the inner ChartSpec, so every chart of every package listed with no title. (WP-D S1's spec-as-JSON change would also have broken the string read on its own: `specJson` became an embedded `spec` object.)",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Publish an application with a titled chart; open it in the Application Inspector (calp_inspector_overview): the chart row's title is empty."
+      },
+      "notes": "Found while porting calp_inspector.rs to the v10 charts.json shape; not seen live.",
+      "triage": "Rust host (calp_inspector.rs): read the wrong level of the chart envelope.",
+      "fix": "app/src-tauri/src/calp_inspector.rs: inspector_chart_title reads the row's `spec` object and takes the title from its inner ChartSpec (the chart store's own envelope rule), else a bare spec; pinned by chart_title_tests::chart_titles_are_read_from_a_spec_object_charts_json (sabotage confirmed at WP-D S11, 2026-10-15: descending into a key that never exists, i.e. reading the title from the TOP of the envelope as the old code did, fails the test with left None, right Some(Revenue))."
+    },
+    {
+      "id": "BUG-0474",
+      "status": "fixed",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "WP-D S2 code reading (recorded as an open risk), filed at WP-D S11 census sweep, 2026-10-15"
+      },
+      "violation": {
+        "oracleId": "media-sweep-ignores-bound-picture-sources",
+        "severity": "low",
+        "message": "THE SAVE-TIME MEDIA SWEEP CANNOT SEE A HANDLE THAT ONLY A BINDING PRODUCES. media::sweep_unreferenced_media keeps exactly the hashes media::referenced_media_hashes finds, and that walks controls, cell types, cell behaviours, pane controls and extension data with calcula_format::media::visit_media_refs, which matches a JSON string that IS `media:<sha256>`. Since WP-D a picture control's /properties/src can be BOUND (Media slot, object_bindings catalog), and the handle it resolves to lives in the formula's string literals (`=IF(Inputs!A1>0,\"media:H1\",\"media:H2\")`) or in a cell the formula reads -- neither is scanned (workbook.object_bindings is not walked, and a formula string is not equal to a handle anyway). So a handle reached only through a binding is dropped from the archive at save; after reload the binding resolves to a hash state.media no longer holds, the Media coercion refuses it, and the picture keeps its literal: the second image is silently gone. The .calp publish walks the same collector, so a published application loses the same bytes.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Code reading: insert two pictures (srcs media:H1, media:H2). Bind picture 1's src (Properties > fx) to =IF(Inputs!A1>0;\"media:H1\";\"media:H2\") with the real hashes. Delete picture 2. Save, close, reopen. Set Inputs!A1 to -1: picture 1 should show image 2 but keeps image 1 (H2 was swept from the archive; the binding's Media coercion has no bytes to admit)."
+      },
+      "notes": "Not fixed at S11 (a census + docs step). Undo is not affected: the in-memory store is never pruned (the sweep's own design). The pre-WP-D formula-typed control properties had the same blind spot (a `=A1` formula text is not a handle), so this is an existing gap that bindings make reachable for a Media slot by name.",
+      "triage": "Host media.rs: referenced_media_hashes should also keep every hash a CURRENT resolved Media binding produces (the runtime's resolved values for rows the store holds whose catalog type is Media), and every `media:<sha256>` substring of a bound Media slot's formula text; the publish-side collector must use the same rule (one implementation, per visit_media_refs's own doc). Add a test that a bound picture's only reference survives save and publish.",
+      "fix": "calcula_format::media::visit_media_refs_in_text (new, ONE walker for both callers) finds every `media:<64 hex>` handle INSIDE a text. app media.rs referenced_media_hashes walks Workbook.object_bindings formulas with it (the save sweep keeps a handle only a bound picture's formula names); core/calp publish.rs ships the handles of the PUBLISHED bindings (published_object_bindings) as media artifacts, and calp_commands.rs's publish report counts them the same way. Tests: media::tests::handles_inside_a_binding_formula_are_found (calcula-format), media.rs every_opaque_workbook_payload_is_scanned_for_media_handles (object_bindings row) + a_handle_only_a_binding_names_survives_the_save_sweep, publish::tests::a_published_bindings_media_handles_ship. Sabotage confirmed by the WP-D verifier 2026-10-15 (the app loop filtered to nothing: both media.rs tests fail; the publish loop filtered to nothing: the publish test fails). Scope note: a handle the formula only reads from a CELL is still not kept -- cell text was never a media reference to either walker (pre-existing design, unchanged)."
+    },
+    {
+      "id": "BUG-0475",
+      "status": "fixed",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "WP-D package verifier, adversarial review of object_bindings/formula.rs, 2026-10-15"
+      },
+      "violation": {
+        "oracleId": "binding-clamp-ignores-all-sheets-wildcard",
+        "severity": "high",
+        "message": "THE RESTRICTED-TIER BINDING CLAMP DID NOT SEE THE ALL-SHEETS WILDCARD. object_bindings/formula.rs flag_walk recorded the sheets a binding formula reads by looking each qualified sheet name up in the sheet list; `'*'!A1` (Calcula's all-sheets wildcard, which object_bindings/eval.rs prepare_one expands to a 3D reference over EVERY sheet with crate::expand_wildcard_sheets) matched no name, so BindingFormulaAnalysis.sheets came back EMPTY. Both the TS executor gate (host.ts executeBindingSetAspect: offSheet = sheets.some(s => s !== active)) and the Rust defence-in-depth re-check (mod.rs restricted_clamp) decide from that list, so a RESTRICTED script could bindProperty('/properties/tooltip', '=TEXTJOIN(\",\",TRUE,\\'*\\'!A1:Z100)') on its own shape and read every sheet's cells back with getProperty -- the read escalation D §8 risk 2 exists to prevent. Second symptom: the dependency walk (eval.rs Deps::sheets_between) returned no sheet for `*`, so such a binding had no cell edges and stayed frozen at its first value.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Unit: command_tests::restricted_script_source_is_clamped_in_rust with \"=SUM('*'!A1)\" from a Script{unlocked:false} source on a chart of the active sheet -- before the fix the Set was accepted (Ok(Binding{formula: \"=SUM('*'!A1)\"})); formula_tests::the_analysis_flags_say_what_the_formula_reads asserted sheets == [] for ='*'!A1."
+      },
+      "notes": "Found and fixed by the WP-D package verifier. Not seen live.",
+      "triage": "Rust host object_bindings: the analysis and the dependency walk did not treat the `*` sheet as every sheet.",
+      "fix": "formula.rs: new formula::is_all_sheets_wildcard; flag_walk adds EVERY sheet index for a `*` sheet on CellRef/ColumnRef/RowRef/Range and for a `*` Sheet3DRef. eval.rs Deps::sheets_between returns every sheet id for `*`. Pinned by formula_tests::the_analysis_flags_say_what_the_formula_reads (three wildcard spellings), command_tests::restricted_script_source_is_clamped_in_rust (=SUM('*'!A1) refused with RESTRICTED_BINDING_CLAMP_MESSAGE) and eval_tests::an_all_sheets_wildcard_binding_follows_a_change_on_any_sheet. Sabotage confirmed 2026-10-15 (is_all_sheets_wildcard -> false): all three tests fail."
+    },
+    {
+      "id": "BUG-0476",
+      "status": "open",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Live E2E proof of WP-D, object-bindings.spec.ts B1 first run (2026-10-15)"
+      },
+      "violation": {
+        "oracleId": "api-batch-write-skips-cube-prefetch",
+        "severity": "medium",
+        "message": "A CUBE FORMULA WRITTEN THROUGH @api SHOWS #N/A UNTIL A FORCED CUBE RECALC: CellRange.setValue / setValues (app/src/api/range.ts) write through updateCellsBatch (and updateCellOnSheets for a background sheet), and neither runs the cube_prefetch that core/lib/tauri-api.ts updateCell runs for the grid editor, nor sets the sessionHasCube latch. So a script, an extension or the E2E harness that writes =CUBEVALUE(...) gets #N/A, and a later plain Calculate Now does not refresh it either (workbookHasCubeFormulas() is still false). Only recalcWithCube() (Model Editor save, Calculated Measures dialog) brings the value.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Live, 2026-10-15, AdventureWorks model connected as 'AWprobe2': tauri-api updateCell(5,3,'=CUBEVALUE(\"AWprobe2\";\"[Revenue]\")') -> D6 shows 114033992,77...; CellRange.fromCell(6,3,0).setValue(same) -> D7 shows #N/A; after recalcWithCube() both show 114033992,77. Probe: scratchpad pd-probe-cube2.cjs."
+      },
+      "notes": "Pre-existing, not WP-D: updateCellsBatch has never prefetched cube results. Found because object-bindings B1 cross-checks the oracle with a CUBEVALUE cell written by the harness's setCells (CellRange.setValue). The journey now forces recalcWithCube after that write, the same route fixall-calp W6 uses.",
+      "triage": "Core bridge (core/lib/tauri-api.ts updateCellsBatch / updateCellOnSheets): no cube prefetch and no sessionHasCube latch on the batch/background doors."
+    },
+    {
+      "id": "BUG-0477",
+      "status": "open",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "WP-C S7 code review of update_pivot_properties_core (2026-10-15)"
+      },
+      "violation": {
+        "oracleId": "pivot-properties-noop-dirties",
+        "severity": "low",
+        "message": "update_pivot_properties DIRTIES THE DOCUMENT ON A NO-OP: update_pivot_properties_core (app/src-tauri/src/pivot/commands.rs) reaches the store through pivot_write_definition_only, which mints DocumentEffect::mutates unconditionally before anything is compared. A request that changes nothing -- the same canvas frame saved again, the same container, the same PivotTable style, the same name -- records no undo step (WP-C S7 compares before/after for the undo record) but still sets is_modified, so the close prompt and AutoRecover fire for a document the user did not change. The DocumentEffect rule says to construct the effect inside the branch that actually changes something.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Unit tier: insert a canvas pivot, update_pivot_properties_core(frame_request(id, f)), mark_saved, then the SAME request again -> undo depth unchanged but wb.file.is_dirty() is true. Same for a style-only request with the style the pivot already has (canvas_sheet_tests a_worksheet_pivot_style_is_one_undoable_step_and_rides_its_region checks only the undo depth for that no-op)."
+      },
+      "notes": "Pre-existing for frame saves (since the canvas-pivot programme); WP-C makes this door the Format pane's pivot door, so an unchanged commit now reaches it more often. Fix shape: decide the no-op under a read guard (or lock_pending if pivot_tables gains it) before pivot_write_definition_only, as update_timeline_with does."
+    },
+    {
+      "id": "BUG-0478",
+      "status": "fixed",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "WP-C S8 (spec section 8 C2, review R1-5/R1-6) code reading of pivot/commands.rs"
+      },
+      "violation": {
+        "oracleId": "bi-pivot-number-format-lost",
+        "severity": "medium",
+        "message": "A BI PIVOT LOSES ITS VALUE FIELD NUMBER FORMAT: set_pivot_number_format writes ValueField.number_format, but every BI re-query rebuilds the value fields from BiValueFieldRef (expand_bi_value_fields creates fresh fields) and BiValueFieldRef had no format field, so the override was dropped on the next field-list edit, on every refresh (refresh_bi_pivot_unrecorded -> bi_request_from_definition) and on every model-slicer filter change that extends the pivot (ensure_bi_field's rebuild, same reconstruction). The query then re-adopted the MODEL's format over it. ValueField.number_format also could not tell an adopted model format from a user override, so an editor that sent every format back would freeze the model format as an override. Separately, set_pivot_number_format(\"\") stored Some(\"\") instead of clearing.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Unit tier (app crate, blank_member_tests Fx harness over an in-memory model): lay out a BI pivot (Sales.region x [Revenue]), set_pivot_number_format(value 0, \"#,##0.00\") -> value cells read \"10.00\"; then refresh_bi_pivot_core -> the format is gone (cells read \"\"); same after apply_pivot_filter_core on Sales.year (a column the pivot does not carry, so ensure_bi_field rebuilds the request)."
+      },
+      "notes": "Fixed in WP-C S8: BiValueFieldRef.number_format (an override only), ValueField.number_format_from_model (true = adopted; adopt_model_number_formats adopts only when None or from-model), expand_bi_value_fields copies the override with the flag false, bi_request_from_definition carries number_format only when !number_format_from_model, set_pivot_number_format(\"\") clears to None. Frontend half (the editor sends numberFormat only when !numberFormatFromModel) is WP-C S10. BACKEND HALF LANDED (S8, 2026-10-15); regression pins: pivot::commands::blank_member_tests::{a_bi_pivots_value_format_survives_a_refresh, a_bi_pivots_value_format_survives_a_model_slicer_filter_that_extends_it, an_empty_format_clears_the_override} and pivot::commands::number_format_origin_tests (sabotage of bi_request_from_definition's carry and of the adoption's override skip each turned them red). Stays OPEN until S10 lands the editor half (toBiValueFieldRef sends ZoneField.numberFormat only when !numberFormatFromModel): until then a field-list edit still re-sends no format and loses the override. FRONTEND HALF LANDED (WP-C S10, 2026-10-16): status fixed. Not proved live yet (the S16 journey).",
+      "triage": "Pivot extension + Rust host: a value field's number format had no way back to the BI query, and the editor could not tell an adopted model format from a user override.",
+      "fix": "Backend half in WP-C S8 (see notes). Frontend half in WP-C S10 (2026-10-16): buildPivotPaneData copies ZoneFieldInfo.numberFormatFromModel into the editor's ZoneField; the ONE request builder (lib/pivotFieldsRequest.ts buildPivotFieldsRequest) sends a value field's numberFormat only when !numberFormatFromModel; components/biFieldsRequest.ts toBiValueFieldRef(name, customName, numberFormat?) carries it as BiValueFieldRef.numberFormat (buildBiUpdateRequest passes the override only); usePivotEditorState marks a format the user changes (Number Format modal, Value Field Settings) as the user's. The Format pane's Data format card writes through the same fields update (lib/valueFieldEdits.ts setPivotValueFieldFormat, ONE 'Number Format' undo step). Pinned by biFieldsRequest.test.ts 'the value fields' number format (BUG-0478)', pivotPaneSeeding.test.ts 'value fields: an ADOPTED model format is seeded as adopted', valueFieldEdits.test.ts 'number format OVERRIDE'; sabotages of the adopted-format skip, of the override carry and of the seed's flag each turned them red."
+    },
+    {
+      "id": "BUG-0479",
+      "status": "fixed",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "WP-C S9a (spec section 6) code reading of StandardMenus/ViewMenu.ts and Charts/index.ts"
+      },
+      "violation": {
+        "oracleId": "view-show-pane-dead-for-chart-json",
+        "severity": "low",
+        "message": "View > Show \"Chart JSON\" DID NOTHING. The View menu's dynamic \"Show <pane>\" item does not open a pane itself: it clears the pane's manually-closed mark and dispatches window `taskpane:requestReopen` with the view id, and the pane's OWNER is expected to answer (Pivot answers for pivot-editor). The Charts extension registered the Chart JSON pane (contextKeys [\"chart\"], so the item was LISTED whenever a chart was selected) and the Format Chart pane, but nothing listened for `taskpane:requestReopen` with viewId \"chart-json\" or \"chart-format\" -- the item was offered and was a no-op.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Select a chart, open the Chart JSON pane from the Chart Design band, close it with the pane header's X, then View > Show Chart JSON: the pane stays closed. Unit: dispatch new CustomEvent(\"taskpane:requestReopen\", { detail: { viewId: \"chart-json\" } }) with the Charts extension active -> no openTaskPane call."
+      },
+      "notes": "Fixed in WP-C S9a (2026-10-15): Charts/lib/chartJsonPaneReopen.ts `installTaskPaneReopen(CHART_JSON_PANE_ID, () => openTaskPane(CHART_JSON_PANE_ID))`, wired in Charts/index.ts activate. The \"chart-format\" pane no longer exists (its body is the object pane's \"Chart elements\" card; the object pane answers View > Show \"Object pane\" itself, ObjectPane/lib/objectPanePolicy.ts). Regression pin: Charts/lib/__tests__/chartJsonPaneReopen.test.ts."
+    },
+    {
+      "id": "BUG-0480",
+      "status": "open",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "WP-C S9b (design-query wells round-trip probe)"
+      },
+      "violation": {
+        "oracleId": "dsl-serializer-aliased-bi-measure-renamed",
+        "severity": "medium",
+        "message": "THE PIVOT-LAYOUT DSL SERIALIZER WRITES AN ALIASED BI MEASURE UNDER ITS ALIAS. `VALUES: [Revenue] AS \"Sales\"` compiles to the zone field {name: \"[Revenue]\", customName: \"Sales\"}, and `serialize` (app/extensions/_shared/dsl/pivotLayout/serializer.ts, serializeValueField) emits `[Sales] AS \"Sales\"`: it decides the field IS a BI measure from either name, then writes `[${customNameBare || fieldNameBare}]` -- the ALIAS wins over the measure's own name. The text it produces names a measure that does not exist, so it no longer compiles (\"Unknown measure: [Sales]\"), or -- worse -- silently names a DIFFERENT measure when the model happens to have one called like the alias. Every caller that regenerates DSL from zones carries it: the pivot editor's Design tab text after a visual edit of a BI pivot with an aliased value field.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "processDsl('ROWS: Geo.Region\nVALUES: [Revenue] AS \"Sales\"', {sourceFields: [], biModel}) with a model measure Revenue, then serialize(rows, columns, values, filters, layout, {biModel}) -> 'VALUES:  [Sales] AS \"Sales\"' (measured 2026-10-16 through Charts/lib/designQueryWells.serializeZones). Expected: '[Revenue] AS \"Sales\"'."
+      },
+      "notes": "Not fixed in S9b (the serializer is shared with the pivot editor and is outside the step). The chart Fields tab is protected from it: designQueryWells.readWells offers the wells for editing only when serialize(compile(dsl)) is sameDesignQuery as the dsl, so an aliased measure makes the wells read-only (\"Edit it on the Design tab\") instead of rewriting the query wrong. Fix shape: in serializeValueField write `[${fieldNameBare}]` for a measure whose own name (`field.name`) matches the model, and use customName only for the AS clause; pin with a round-trip test over an aliased measure (and an alias equal to ANOTHER measure's name)."
+    },
+    {
+      "id": "BUG-0481",
+      "status": "open",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "WP-C S9c (extracting the dialog's range state machine into Charts/components/data/useRangeSource.ts)"
+      },
+      "violation": {
+        "oracleId": "chart-edit-dialog-redetects-series",
+        "severity": "medium",
+        "message": "Edit Chart (the chart dialog opened with editChartId, e.g. the context menu's \"Select Data...\") THROWS AWAY the chart's stored series selection. The open effect seeds `series` from the stored spec, then seeds the range field; the range binding's key goes from \"\" to the stored range, and the series-detection effect (now useRangeSource's `detection` effect, identical to the old CreateChartDialog effect) runs autoDetectSeries and REPLACES the series and the category index with the detected ones. A chart whose reader had unchecked a series (or reordered the category) reopens with every detected series checked, and \"Update Chart\" writes them back -- the chart silently starts plotting series the reader removed.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "A range chart over Sheet1!A1:C5 plotting only column B (uncheck C in the Data tab, Update). Right-click > Select Data...: the series list shows B AND C checked; Update Chart plots both. Unit (proved 2026-10-16 with a scratch copy of components/__tests__/createChartDialogPreset.test.tsx): getChartById('c9') with spec.series = [Sales(1)] and autoDetectSeries answering [Sales(1), Cost(2)]; show({ editChartId: 'c9' }) -> the DataTab receives series [Sales, Cost] and autoDetectSeries was called once."
+      },
+      "notes": "Pre-existing (the dialog behaved this way before WP-C); S9c moved the effect into useRangeSource.ts WITHOUT changing its behaviour (spec: no behaviour change in the dialog), so it is filed, not fixed. The object pane's range Data tab (pane/ChartRangeDataTab.tsx) does NOT have the defect: it never auto-detects on mount (no `detection`) and decides the series only when the reader commits a new range, header row or orientation. Fix shape: in edit mode, skip the FIRST detection run for the stored range (e.g. a ref holding the stored rangeRefKey, cleared once the bound key differs from it), so detection runs only when the reader changes the range, the header row or the orientation."
+    },
+    {
+      "id": "BUG-0482",
+      "status": "fixed",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "WP-C S10 code reading of lib/pivotPanelStore.ts updateSharedLayout (2026-10-16)"
+      },
+      "violation": {
+        "oracleId": "pivot-design-layout-without-editor",
+        "severity": "medium",
+        "message": "THE PIVOT DESIGN RIBBON'S LAYOUT CONTROLS DID NOTHING WHILE NO FIELD-LIST EDITOR WAS MOUNTED, AND SHOWED DEFAULTS. lib/pivotPanelStore.ts updateSharedLayout only emitted PIVOT_LAYOUT_CHANGED, and the only listener that SENDS a layout change is the mounted PivotEditor (usePivotEditorState). With the PivotTable Fields pane closed by hand (handleSelectionChange still registers the Design tab) -- and, after WP-C, for a canvas box whose object pane shows only Format -- Grand Totals, Report Layout, Values position, Repeat Labels and Empty Rows/Cols changed the checkbox and nothing else. The same path announced `layout: {}`, so the sections showed the DEFAULT values instead of the pivot's.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Code reading, not seen live: select a cell of a worksheet pivot, close the PivotTable Fields pane with its X, untick Design > Grand Totals > Row Totals -- no update_pivot_fields is sent (no PivotEditor is mounted to answer PIVOT_LAYOUT_CHANGED), and the checkbox reads checked again on the next selection even when the pivot has row totals off."
+      },
+      "triage": "Pivot extension: the layout broadcast had exactly one sender (the mounted editor) and no fallback.",
+      "fix": "WP-C S10: lib/pivotEditorPresence.ts tracks mounted editors; updateSharedLayout sends the change through the editor while one is mounted and otherwise HEADLESSLY (lib/pivotLayoutEdits.ts editPivotLayoutHeadless: the pivot's whole fields request with only the layout changed, the valueFieldEdits recipe), and with no editor the store reads the pivot's real layout from its definition (readLayoutWithoutEditor). Pinned by pivotStylePersist.test.tsx 'updateSharedLayout' + 'the sections show the pivot's REAL layout' and pivotLayoutEdits.test.ts; sabotages of the read and of the styleId strip turned them red.",
+      "notes": "Found while building the canvas box's Format tab Layout card (WP-C S10), which reuses the Design sections. Not proved live."
+    },
+    {
+      "id": "BUG-0483",
+      "status": "fixed",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "WP-C design review (2026-10-15, spec C-pane-format.md section 6) -- filed at WP-C S15 (2026-10-16)"
+      },
+      "violation": {
+        "oracleId": "shape-stroke-width-zero-paints-one",
+        "severity": "low",
+        "message": "A SHAPE WHOSE strokeWidth IS \"0\" STILL PAINTED A 1 px OUTLINE. Controls/Shape/shapeRenderer.ts parsed the width as `parseFloat(strokeWidth) || 1`, so the falsy 0 fell back to 1: \"no outline\" could not be said through the width, and a recipe or script that wrote strokeWidth \"0\" got a visible border. A \"none\" fill also painted (the fill op ran for the no-paint sentinel).",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Insert a rectangle, set its strokeWidth property to \"0\" (Properties pane or shape.setProperty(\"strokeWidth\", \"0\")): the outline stays, 1 px wide. Unit: render a shape with strokeWidth \"0\" and a stroke colour on a recording context -> one stroke op with lineWidth 1."
+      },
+      "triage": "Controls extension: a falsy-default parse (`|| 1`) treated a legal 0 as missing.",
+      "fix": "WP-C S13: parseStrokeWidth(value, fallback) keeps 0 (only a non-number falls back), the stroke runs only for strokeWidth > 0 and a paintable colour, and isNoPaint() skips \"none\" / \"transparent\" / \"\" fills. The text box recipe (fill none, stroke none, strokeWidth \"0\") depends on it. Pinned by Controls/__tests__/shapeRendererNoFill.test.ts (sabotage: restoring `|| 1` turns the strokeWidth \"0\" cases red).",
+      "notes": "Found by code reading in the WP-C review; not seen live. Proved live only by the WP-C journey's J13 (object-pane-format.spec.ts), still owed."
+    },
+    {
+      "id": "BUG-0484",
+      "status": "fixed",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "WP-C design review (2026-10-15, spec C-pane-format.md section 6) -- filed at WP-C S15 (2026-10-16)"
+      },
+      "violation": {
+        "oracleId": "taskpane-update-broadcasts-pivot-refresh",
+        "severity": "low",
+        "message": "EVERY TASK PANE'S onUpdate BROADCAST pivot:refresh. app/src/shell/TaskPane/TaskPaneContainer.tsx handleViewUpdate dispatched `window.dispatchEvent(new CustomEvent(\"pivot:refresh\"))` for whichever view called its onUpdate prop -- the Shell carried a hard-coded Pivot business rule, and any non-pivot pane that announced an update made every mounted pivot editor re-read its pivot.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Unit: render TaskPaneContainer with a non-pivot view, call the view's onUpdate prop, and listen on window for pivot:refresh -> it fires."
+      },
+      "triage": "Shell: a feature event spelled in the host (the microkernel rule says the Shell holds no business logic).",
+      "fix": "WP-C S5: TaskPaneViewDefinition gained `onUpdate?`, handleViewUpdate runs the ACTIVE view definition's onUpdate, and the pivot editor's definition (Pivot/manifest.ts PivotPaneDefinition.onUpdate) dispatches pivot:refresh itself. Pinned by app/src/shell/TaskPane/__tests__/taskPaneUpdate.test.tsx 'a non-pivot view's onUpdate dispatches NO pivot:refresh' (sabotage: the old line restored turns it red).",
+      "notes": "Found by code reading in the WP-C review; not observable as a user symptom beyond redundant pivot re-reads."
+    },
+    {
+      "id": "BUG-0485",
+      "status": "fixed",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "WP-C design review (2026-10-15, spec C-pane-format.md section 6) -- filed at WP-C S15 (2026-10-16)"
+      },
+      "violation": {
+        "oracleId": "properties-context-key-never-added",
+        "severity": "low",
+        "message": "THE \"properties\" TASK-PANE CONTEXT KEY WAS NEVER ADDED. The Controls extension registers the control-properties pane with contextKeys [\"properties\"], and View > Show lists a pane only while one of its context keys is active, but no code ever called addTaskPaneContextKey(\"properties\"): with a button selected and its Properties pane closed by hand, View > Show never offered it again.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Select an in-cell button in Design Mode, close its Properties pane with the header X, open View > Show: no \"Properties\" item. Code: a search for addTaskPaneContextKey(\"properties\") under app/extensions had no hit before WP-C."
+      },
+      "triage": "Controls extension: a declared context key with no owner adding or removing it.",
+      "fix": "WP-C S13: the embedded (in-cell) button route adds the key when it opens control-properties (Controls/index.ts evaluatePropertiesPaneVisibility and the floating->embedded toggle) and closePropertiesIfOpen removes it; a floating control's Properties are now a tab of the object pane. Pinned by the cascadeAnnouncementCensus.test.ts PANE_CONTEXT_OWNERS \"properties\" row (its teeth: a pane-only owner whose reconcile lacks removeTaskPaneContextKey is reported).",
+      "notes": "Found by code reading in the WP-C review; not seen live."
+    },
+    {
+      "id": "BUG-0486",
+      "status": "fixed",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "WP-C design review (2026-10-15, spec C-pane-format.md section 6) -- filed at WP-C S15 (2026-10-16)"
+      },
+      "violation": {
+        "oracleId": "pivot-style-session-only",
+        "severity": "medium",
+        "message": "A PIVOTTABLE STYLE CHOSEN IN THE GALLERY WAS NOT SAVED. The style id lived only in the Pivot extension's in-memory pivotStyleMap (fed by PIVOT_LAYOUT_STATE / PIVOT_LAYOUT_CHANGED); PivotDefinition had no style field, so Save and reopen, or a .calp publish, brought the pivot back in the default style -- and the hidden grid (and so a copy) always used the fixed default colours.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Create a pivot, Design > PivotTable Styles > PivotStyleMedium9, save to a .cala, File > New, reopen it: the pivot paints in the default style. Code: pivot-engine definition.rs PivotDefinition had no style member before WP-C."
+      },
+      "triage": "Pivot extension + pivot-engine: presentation state kept only in a TS session map.",
+      "fix": "WP-C S7 added PivotDefinition.style (PivotStyleChoice {style_id, theme_overrides}, lenient load, feature id pivot_style) written through update_pivot_properties as ONE undoable \"PivotTable Style\" step; S10b made the hidden grid follow it from one preset file shared by TS and Rust; S10 made the gallery write it (lib/pivotStylePersist.ts) and the painter read it, seeded from PivotRegionData.style on every region refresh. Pinned by canvas_sheet_tests.rs a_worksheet_pivot_style_is_one_undoable_step_and_rides_its_region + a_pivot_style_restyles_the_hidden_grid_and_undo_puts_the_default_back, zip_io.rs visual_container_and_pivot_style_declare_feature_ids_but_never_raise_the_version, and Pivot/lib/__tests__/pivotStylePersist.test.tsx.",
+      "notes": "Found by code reading in the WP-C review. The save/reopen round trip is proved live only by the WP-C journey's J10, still owed."
+    },
+    {
+      "id": "BUG-0487",
+      "status": "fixed",
+      "discovered": "2026-10-15",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "WP-C design review (2026-10-15, spec C-pane-format.md section 6) -- filed at WP-C S15 (2026-10-16)"
+      },
+      "violation": {
+        "oracleId": "control-appearance-not-undoable",
+        "severity": "medium",
+        "message": "FORMATTING A CONTROL COULD NOT BE UNDONE. set_control_property (app/src-tauri/src/controls.rs) records an undo entry only for EXECUTABLE slots (code / action properties); a fill, stroke, text colour or font change on a button or shape was written with no undo entry, so Ctrl+Z skipped it (or undid the step before it).",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Insert a shape, change its fill in the Properties pane, press Ctrl+Z: the fill stays and the previous unrelated step is undone instead. Code: controls.rs set_control_property_core pushes undo only when the key is an executable / action property."
+      },
+      "triage": "Backend: the per-key door decided undo by key class, so appearance writes had none.",
+      "fix": "WP-C S7 added the batch command controls::set_control_appearance (the 831st command): several appearance keys on several controls as ONE \"Format control\" undo entry that joins an open transaction, refusing structural and code keys before the effect; the object pane's control provider (S13) commits through it. Pinned by commands/visual_container_tests.rs a_control_appearance_batch_is_one_undo_step_that_restores_every_key, a_control_appearance_batch_joins_an_open_transaction and a_control_appearance_batch_refuses_before_the_effect.",
+      "notes": "Found by the WP-C design review (R1-1). The legacy per-key rows of the Properties tab still write through set_control_property, so an appearance key changed THERE is still not undoable; only the Format tab's writes are. Not proved live; J21 of the WP-C journey is owed."
+    },
+    {
+      "id": "BUG-0488",
+      "status": "open",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "WP-C S8 code reading of pivot/commands.rs set_pivot_number_format_core (2026-10-15), filed at WP-C S15 (2026-10-16)"
+      },
+      "violation": {
+        "oracleId": "set-pivot-number-format-dirties-on-refusal-no-undo",
+        "severity": "low",
+        "message": "set_pivot_number_format DIRTIES THE DOCUMENT WHEN IT REFUSES, AND RECORDS NO UNDO STEP WHEN IT WRITES. set_pivot_number_format_core (app/src-tauri/src/pivot/commands.rs) takes `pivot_write`, which mints DocumentEffect::mutates BEFORE the value-field index is range-checked, so a refused out-of-range request sets the dirty flag (close-without-saving prompt, AutoRecover) with nothing changed; and the successful path calls finalize_pivot_update with no record_pivot_undo, so a number format set through this door cannot be undone. Same family as BUG-0477 (update_pivot_properties dirties on a no-op).",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Headless: create a pivot with one value field, mark the document saved, call set_pivot_number_format { pivotId, valueFieldIndex: 5, numberFormat: \"0.0\" } -> Err(\"Value field index 5 out of range\") AND is_modified() == true. Then a valid call with index 0 -> the format changes, and undo restores nothing from it. Reachable from the Pivot service's `setNumberFormat` (Pivot/lib/pivot-api.ts:1639, backend.ts setPivotNumberFormat). WP-C's Data format card does NOT use this door (it rides the fields update, Pivot/lib/pivotDataFormats.ts), so the Format tab is unaffected."
+      },
+      "triage": "Backend: the gate-before-effect order of the DocumentEffect rule (CLAUDE.md) is broken by the shared pivot_write helper; and the command predates per-command undo recording.",
+      "notes": "Fix shape: check the index (and that the format really changes) before pivot_write, or take the read guard first and construct the effect only inside the changing branch; record a pivot definition undo step like update_pivot_properties_core does. Not fixed in WP-C (outside its doors). Not seen live."
+    },
+    {
+      "id": "BUG-0489",
+      "status": "open",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "WP-C S9a code reading of Charts/lib/chartStylePresets.ts buildPresetUpdates + chartStore deepMergeSpec (2026-10-15), filed at WP-C S15 (2026-10-16)"
+      },
+      "violation": {
+        "oracleId": "chart-style-preset-leaves-previous-theme-keys",
+        "severity": "low",
+        "message": "PICKING A CHART STYLE AFTER ANOTHER KEEPS THE FIRST STYLE'S COLOURS WHERE THE SECOND ONE IS SILENT. buildPresetUpdates writes `config.theme` as the new preset's theme, and the chart store DEEP-MERGES spec updates (deepMergeSpec), so a theme key the previous preset set and the new one does not -- e.g. mono-blue's axisColor #4E79A7 and titleColor #2c4a6e -- survives a switch to a preset that leaves it at the default (e.g. Classic, colorful-1, sets only plotBackground and gridLineColor). The chart then shows a mix of two styles and the gallery's \"current\" ring can point at a style the chart does not look like.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Select a chart, Quick Access > Styles > Blue (monochromatic), then Quick Access > Styles > Classic (colorful-1, whose theme sets only plotBackground and gridLineColor): the axis and title stay blue. Same through the command chart.applyStyle (Charts/index.ts:1134). Unit: updateChartSpec(id, buildPresetUpdates(monoBlue, spec)); updateChartSpec(id, buildPresetUpdates(classic, spec)); spec.config.theme.axisColor === \"#4E79A7\"."
+      },
+      "triage": "Charts extension: a REPLACE intent (a whole preset) sent through a MERGE door.",
+      "notes": "Fix shape: have buildPresetUpdates send every preset-owned theme key, with an explicit undefined for the ones the new preset leaves at the default (replacementRangeRef's pattern in lib/chartDataCommit.ts), so the merge clears them. Pre-existing; noticed in WP-C S9a, not fixed there (outside the container change). Not seen live."
+    },
+    {
+      "id": "BUG-0490",
+      "status": "fixed",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "WP-C package verifier (2026-10-16), from WP-C S15's open-items row"
+      },
+      "violation": {
+        "oracleId": "object-pane-title-card-rows-that-change-nothing",
+        "severity": "low",
+        "message": "THE FORMAT TAB'S TITLE CARD OFFERED ROWS THAT CHANGE NOTHING. For a slicer, a timeline and a floating grid (one-line headers, no subtitle, no divider) the Title card showed \"Wrap text\" and the Spacing rows \"Below subtitle\" / \"Below divider\"; for a floating grid every Spacing row. Toggling or typing in them committed a container value (one undo step, a dirty document) that nothing paints, and the slicer/timeline \"Wrap text\" row even offered fx (a binding of /container/title/wrap).",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Canvas page, insert a slicer, click it, Format tab, Title card: \"Wrap text\" and \"Below subtitle\" are there; switch Wrap text on -> \"Format Object\" undo step, nothing changes on the slicer. Same on a floating grid's Spacing rows."
+      },
+      "triage": "BuiltIn/ObjectPane formatValues.fieldOffered: Wrap was unconditional and every spacing distance was offered whenever ANY title band was; ContainerCapabilities had no switch for either.",
+      "notes": "Fixed in the WP-C verifier pass: @api/objectFormat ContainerCapabilities gains optional `titleWrap` and `spacing` (absent = true); fieldOffered hides title/subtitle.wrap when titleWrap is false, hides every spacing row when spacing is false, and offers each distance only beside its band (belowTitle with a title, belowSubtitle with a subtitle, belowDivider with a divider). Slicer and timeline declare titleWrap false (their title.wrap binding path is now null); the floating grid declares titleWrap false and spacing false. TitleCard renders only offered rows. Pinned by formatValues.test.ts \"never offers a row the family does not honour\" and formatCards.test.tsx \"a one-line header shows no Wrap row...\" (+ the spacing assertions in \"capabilities hide what the family does not offer\"); sabotage of fieldOffered turned all three red.",
+      "fix": "WP-C verifier: ContainerCapabilities gains optional titleWrap/spacing; fieldOffered hides wrap and spacing rows a family does not honour and offers each distance only beside its band; slicer/timeline titleWrap false (title.wrap binding path null), floating grid titleWrap false + spacing false. Pinned by ObjectPane formatValues.test.ts + formatCards.test.tsx (sabotage of fieldOffered: 3 red)."
+    },
+    {
+      "id": "BUG-0491",
+      "status": "open",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "WP-C package verifier code reading (2026-10-16)"
+      },
+      "violation": {
+        "oracleId": "control-container-keys-accepted-where-nothing-paints-them",
+        "severity": "low",
+        "message": "A SCRIPT OR THE AI CAN WRITE A SECOND, DEAD SPELLING OF A CONTROL'S BACKGROUND OR BORDER. A shape's background IS its `fill` and its border its `stroke`/`strokeWidth` (a button's `borderColor`), but every control accepts all 51 `container*` keys: `shape.setProperty(\"containerBackgroundColor\", \"#f00\")` (SCRIPT_SHAPE_PROPERTY_KEYS spreads CONTROL_CONTAINER_PROPERTY_KEYS for every control type) and a `/properties/containerBackgroundColor` literal through property.set / MCP set_object_property (one `control` catalog kind for every control type) are stored on a shape, show in the AI-visible properties beside `fill`, and paint nothing. The same holds for the slicer/timeline/floating-grid container rows of fields the family never paints (subtitle.*, divider.*, title.wrap), which the catalog lists as bindable.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Script on a canvas shape: ctx.self.setProperty(\"containerBackgroundColor\", \"#ff0000\") -> accepted, the shape stays blue (its `fill`), get_sheet_summary lists both keys. Rust: set_control_property_core(.., \"shape\", \"containerBackgroundColor\", \"static\", \"#ff0000\") -> Ok."
+      },
+      "triage": "Scope of the key list / catalog rows is per family, not per control type or per offered field; the paint split (family-painted background and border for shape/button) is only known in TypeScript (Controls/lib/controlContainerDefaults.ts).",
+      "notes": "Fix shape: make the Rust door (`set_control_property_with` / `encode_appearance_changes`) refuse `containerBackground*` / `containerBorder{Color,Width,Show}` on a shape, text box, button and picture (their fact lives in fill/stroke/strokeWidth/borderColor) with a sentence naming the real key, mirror it in validators.ts checkShapeSetProperty (it would need the control type), and drop the slicer/timeline/floating-grid container catalog rows for fields their capabilities hide. Not fixed in WP-C: the spec (C §2.11) prescribes the full key spread, and the per-type split would be a second copy of the TS paint table in Rust. Not seen live."
+    },
+    {
+      "id": "BUG-0492",
+      "status": "fixed",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "WP-C proof phase group 2 (2026-10-16), moving-objects.spec.ts test 21"
+      },
+      "violation": {
+        "oracleId": "object-pane-grip-format-between-bring-forward-and-send-backward",
+        "severity": "low",
+        "message": "THE CANVAS GRIP MENU SPLIT THE STACKING PAIR. A selected canvas chart's grip menu read Size and Position..., Bring Forward, Format..., Send Backward, Lock: WP-C's \"Format...\" item had order 10, the same as the canvas's Bring Forward, and the object pane activates after the canvas (manifest order), so the tie fell to registration order.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Canvas page, insert a chart, click it, click its grip: the menu lists Format... between Bring Forward and Send Backward."
+      },
+      "triage": "BuiltIn/ObjectPane/index.ts OBJECT_PANE_GRIP_ORDER = 10 tied with CanvasSheet/lib/gripMenuItems.ts bringForward order 10.",
+      "notes": "Found live by moving-objects.spec.ts test 21 (the journey's expected menu also gained \"Format...\", the WP-C door).",
+      "fix": "OBJECT_PANE_GRIP_ORDER 10 -> 5 (app/extensions/BuiltIn/ObjectPane/index.ts), so Format... sits directly under Size and Position, above the canvas's Bring Forward (10) / Send Backward (20) / Lock (30). Pinned by objectPaneKeybinding.test.ts \"Format... sits directly below Size and Position...\" (order 10 restored: red). moving-objects journey 21 23/23 live."
+    },
+    {
+      "id": "BUG-0493",
+      "status": "fixed",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "WP-C proof phase group 2 (2026-10-16), fixall-edit.spec.ts BUG-0185 K1/E7 step Ctrl+1"
+      },
+      "violation": {
+        "oracleId": "ctrl1-on-floating-grid-cell-opens-container-format-silently",
+        "severity": "medium",
+        "message": "CTRL+1 ON A FLOATING GRID'S SELECTED CELL SAID NOTHING. With a floating grid's cell selected on a worksheet, Ctrl+1 used to reach Format Cells, which the floating grid refuses once with its sentence (BUG-0185). WP-C's object-pane Ctrl+1 binding wins whenever an object with a pane is primary, and a floating grid with a selected cell IS the primary object, so Ctrl+1 opened the BOX's Format tab instead (on a worksheet, after a hand close, that is a pane the user did not ask for) and no refusal was shown.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Sheet1, insert a floating grid, click its A1, press Ctrl+1: no toast 'is not available for a floating range's cells yet. Nothing was changed.'; the object pane opens on Format."
+      },
+      "triage": "BuiltIn/ObjectPane/index.ts objectPaneFormatApplies checked only the primary object and grid focus, not whether the selection was the object's own cell.",
+      "notes": "Found live by fixall-edit.spec.ts. The floating grid's claim already says when its own cell holds the selection (SelectionOwner.receivesTyping), which is the signal used.",
+      "fix": "objectPaneFormatApplies (app/extensions/BuiltIn/ObjectPane/index.ts) now also requires !selectionOwnerReceivesTyping() (re-exported from @api/selectionOwner), so with one of the object's own CELLS selected Ctrl+1 stays Format Cells and the floating grid refuses it once. Pinned by objectPaneKeybinding.test.ts (cell owner -> Format Cells; object-only owner -> object pane; guard removed: red). fixall-edit 50/50 (+2 by-design skips) live."
+    },
+    {
+      "id": "BUG-0494",
+      "status": "fixed",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "WP-C proof phase group 4 (2026-10-16), floating-range.spec.ts 'the object pane hides chrome'"
+      },
+      "violation": {
+        "oracleId": "object-pane-checkbox-bounces-until-backend-answers",
+        "severity": "low",
+        "message": "A CLICKED CHECKBOX ON THE OBJECT PANE BOUNCED BACK. The pane's checkboxes were controlled by the STORED value. For a family whose write goes to the backend (a floating grid: its Row gutter / Column headers strips on Properties, and its Title on/off on Format), the stored value only changes when update_floating_range answers, so the re-render the click caused put the tick straight back: the click looked ignored until the round trip landed, and Playwright's uncheck failed with 'Clicking the checkbox did not change its state'.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Sheet1, insert a floating grid, Design Mode on, right-click it > Properties, untick Row gutter (or Format > Title): the tick returns at once and only disappears when the backend answers."
+      },
+      "triage": "ToggleField.tsx ToggleBox checked={checked}; FloatingRangePropertiesBody.tsx checked={entry.showRowHeaders} with setBusy(true) re-rendering before the store moved.",
+      "notes": "Found live by floating-range.spec.ts test 7 (first the Properties strip, then the Format Title toggle once the first was fixed).",
+      "fix": "The object pane's checkboxes show their in-flight value until the write settles: ToggleBox (app/extensions/BuiltIn/ObjectPane/components/fields/ToggleField.tsx, every Format on/off row) and the floating grid's Properties strips (app/extensions/FloatingRange/components/FloatingRangePropertiesBody.tsx). Cleared when the stored value moves or the write settles, so a refused write shows the stored value again. Pinned by formatCards.test.tsx and FloatingRangePropertiesBody.test.tsx (each in-flight case red with the override removed). floating-range journey 9/9 live."
+    },
+    {
+      "id": "BUG-0495",
+      "status": "fixed",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas owner findings programme -- cross-package review (2026-10-16), fixed in the review-fix step"
+      },
+      "violation": {
+        "oracleId": "bindings-migration-rereads-v10-literal-chart-title",
+        "severity": "medium",
+        "message": "A LITERAL CHART TITLE \"=B2\" IN A v10 FILE BECAME A LIVE BINDING ON REOPEN. Since bindings exist a chart text field that starts with \"=\" is TEXT (a script setLiteral or MCP set_object_property stores it, and it paints as typed), but persistence.rs open_file ran object_bindings::migrate::migrate_legacy_formulas with no format-version check, and its chart half (chart_reference_fields / is_cell_reference_text) turned every \"=<one cell>\" title, axis title and series name into a binding and nulled the literal -- under LoadingFromDisk, so nothing dirtied. The .calp pull and refresh doors (calp_commands.rs) ran the same pass over the WHOLE workbook, the subscriber's own charts included.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "MCP set_object_property(chart, \"/spec/title\", \"=B2\"), save the .cala (v10), reopen: the title shows B2's value and Formulas > Bound Properties lists a binding nobody created. Unit: object_bindings::migrate_tests a_v10_files_literal_equals_chart_title_stays_text_on_reopen; carriage_tests a_literal_equals_chart_title_survives_a_pull_and_a_refresh."
+      },
+      "triage": "Backend (WP-D migration): the legacy-spelling rule was applied to documents a bindings-era writer produced.",
+      "fix": "migrate_legacy_formulas takes a ChartTextFields reading: open_file passes ChartTextFields::for_format_version(workbook.format_version) (LegacyCellReferences below CHART_SPEC_OBJECT_MIN_FORMAT_VERSION = 10 -- every writer that embeds the chart spec stamps v10 whenever a chart exists -- and for an .xlsx's 0; Literals at v10), and both .calp doors pass Literals (a pull parses only the embedded-object chart shape no pre-bindings publisher wrote). The control half always runs. Pinned by the two tests above plus migrate_tests the_load_path_and_the_calp_doors_choose_the_chart_reading (source pin). Sabotage confirmed: dropping the guard turns both behaviour tests red.",
+      "notes": "Found by the cross-package persistence review (two refutation attempts failed). Not seen live."
+    },
+    {
+      "id": "BUG-0496",
+      "status": "fixed",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas owner findings programme -- cross-package review (2026-10-16), fixed in the review-fix step"
+      },
+      "violation": {
+        "oracleId": "pivot-style-undo-clears-unrefreshed-bi-pivot",
+        "severity": "medium",
+        "message": "UNDOING A \"PivotTable Style\" ON A BI PIVOT NOT REFRESHED SINCE THE FILE WAS OPENED CLEARED THE PIVOT'S CELLS. A reloaded BI pivot has an EMPTY cache and no stored view (persistence.rs load path); the forward style change leaves its cells alone (restyle_pivot_cells finds no view) but records a \"PivotTable Style\" undo step, and undo_commands::apply_pivot_definition_restore re-rendered it with safe_calculate_pivot over the empty cache and finalize_pivot_update, which cleared the saved output block. Redo did the same; a save then persisted the empty block.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Open a .cala with a data-model pivot, do not refresh, pick a PivotTable Style, press Ctrl+Z: the pivot's output disappears. Unit: commands::canvas_sheet_tests undoing_a_style_on_an_unrefreshed_bi_pivot_keeps_its_cells."
+      },
+      "triage": "Backend: the undo of a presentation-only step re-rendered values the forward edit never touched.",
+      "fix": "apply_pivot_definition_restore puts a PRESENTATION-ONLY step back the way it was done: when the snapshot carries no cache and no overwritten cells and the definitions differ only in style and/or the canvas frame (pivot_differs_only_in_presentation), it restores the definition, records the inverse, and for a style restyles the written cells in place from the stored view (restyle_pivot_cells, now pub(crate)) -- no recompute, no finalize_pivot_update. Sabotage confirmed: making the predicate return false turns the test red.",
+      "notes": "Found by the cross-package persistence review. The same branch covers Move pivot / Format pivot undo of a canvas box. Not seen live."
+    },
+    {
+      "id": "BUG-0497",
+      "status": "fixed",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas owner findings programme -- cross-package review (2026-10-16), fixed in the review-fix step"
+      },
+      "violation": {
+        "oracleId": "bindings-undo-whole-store-reverts-refresh",
+        "severity": "medium",
+        "message": "A BINDINGS UNDO STEP RESTORED THE WHOLE BINDING STORE, so Ctrl+Z of the subscriber's own bind after a .calp Refresh reverted the application's bindings too: the refresh (land_pulled_bindings) rewrites the store and records no undo, and the obj_bindings arm replaced every row with the pre-bind snapshot -- a binding the publisher removed came back and the one it added was lost, on subscribed objects the user cannot edit; the next save kept the mix.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Subscribe to an application with a bound chart B, bind a property of your own chart, Collaboration > Refresh to a version that removed B and bound C, Ctrl+Z: B is bound again and C is not. Unit: object_bindings::command_tests undoing_a_bind_never_reverts_a_binding_a_refresh_landed_in_between."
+      },
+      "triage": "Backend (WP-D undo): a whole-store snapshot restore reverts writes the undo stack never saw.",
+      "fix": "The obj_bindings payload is a BindingDelta (object_bindings/store.rs): only the keys the step changed, each with its value before it. undo_commands::bindings_restore_bytes(state, previous) diffs the pre-step snapshot against the current store (every recorder already drops its store guard first), and the arm applies the delta (BindingDelta::apply) and pushes the inverse delta, touching no other key. Every recorder (bind, clear, delete chart/control/slicer/timeline/pivot, structural shift, source cascade) goes through it. Sabotage confirmed: a delta naming every key turns the test red.",
+      "notes": "Found by the cross-package persistence review. Other whole-snapshot families (cells, controls) share the general 'a refresh does not end the undo history' exposure; this closes the bindings instance."
+    },
+    {
+      "id": "BUG-0498",
+      "status": "fixed",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas owner findings programme -- cross-package review (2026-10-16), fixed in the review-fix step"
+      },
+      "violation": {
+        "oracleId": "control-format-undo-erases-later-unrecorded-edit",
+        "severity": "low",
+        "message": "CTRL+Z OF A \"Format control\" OR \"Set property\" STEP SILENTLY ERASED A LATER PAGE NAVIGATOR BUTTONS EDIT. Both steps snapshotted the WHOLE control store and the obj_controls arm restores all of it; the Properties pane's Buttons section writes pageOverrides through set_control_property, which records undo only for code slots, so a per-page caption written after the format had no undo step and vanished with the earlier step's undo.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Format a navigator on the Format tab, edit a per-page caption in Properties > Buttons, press Ctrl+Z: the border goes AND the caption reverts. Unit: object_bindings::page_overrides_tests undoing_a_format_or_literal_step_keeps_a_later_buttons_section_edit."
+      },
+      "triage": "Backend: new whole-store control undo steps (WP-C Format control, WP-D Set property) in front of unrecorded writes.",
+      "fix": "A new per-property restore kind obj_control_props (undo_commands ControlPropsObjSnapshot / record_control_props_undo, registered in both restore tables with the Controls domain): set_control_appearance_core and the literal arm (object_bindings/literal.rs write_control) record only the properties they wrote, each with its value before, and the arm finds the control by uid (else the anchor) and puts back only those keys. Sabotage confirmed for BOTH legs: recording the whole store again in either door turns the test red.",
+      "notes": "Found by the cross-package persistence review. The older whole-store steps (Add control, Move control, Change button code) keep the pre-existing pattern; a Properties-row write is still not its own undo step (open-items 2.ak WP-B)."
+    },
+    {
+      "id": "BUG-0499",
+      "status": "fixed",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas owner findings programme -- cross-package review (2026-10-16), fixed in the review-fix step"
+      },
+      "violation": {
+        "oracleId": "data-format-card-on-marks-that-never-paint-it",
+        "severity": "medium",
+        "message": "THE DATA FORMAT CARD WAS OFFERED ON EVERY DESIGN-QUERY CHART, but only Card / Multi-row card / KPI / Gauge paint spec.fieldFormats. chartContainerCapabilities set dataFormat for any design-query chart whatever its mark; a column, bar, line or pie chart's data labels (dataLabelPainter formatWithPattern / formatTickValue), value-axis ticks and tooltips never read the override, so the pane accepted, saved and undid a format the chart did not show.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Select a design-query column chart on the AdventureWorks canvas, Format > General > Data format, set [Revenue] to $#,##0: the labels and axis still show the raw number. Unit: Charts/lib/__tests__/chartObjectFormat.test.ts 'a data format only for a design-query chart whose mark paints it'."
+      },
+      "triage": "Charts extension: a capability offered for marks with no painter behind it.",
+      "fix": "DATA_FORMAT_MARKS (card, multiRowCard, kpi, gauge) in Charts/lib/chartObjectFormat.ts gates the capability: the card is offered where the mark paints the Rust-formatted text. Sabotage confirmed: dropping the gate turns the test red. Feeding fieldFormats into the other marks' labels, ticks and tooltips is an open row in open-items 2.ak (WP-C).",
+      "notes": "Found by the owner-lens review; the spec's live J6 tested only a Card."
+    },
+    {
+      "id": "BUG-0500",
+      "status": "fixed",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas owner findings programme -- cross-package review (2026-10-16), fixed in the review-fix step"
+      },
+      "violation": {
+        "oracleId": "control-background-transparency-not-offered",
+        "severity": "low",
+        "message": "BACKGROUND TRANSPARENCY WAS NOT OFFERED FOR TEXT BOXES, SHAPES OR BUTTONS. controlContainerCapabilities turned backgroundTransparency on only for pictures and navigators (where Core paints the background), and the shape path and the button face painted their fill opaque, although the owner's F5 asks for Background colour + transparency on every visual and the flat key containerBackgroundTransparency already existed for every painted kind.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Select a text box or a button on a canvas, Format > Effects > Background: no Transparency row. Unit: Controls/__tests__/controlObjectFormat.test.ts 'Effects > Background > Transparency is offered for every control kind'; shapeRendererNoFill.test.ts 'Effects > Background > Transparency fades the shape's fill only'."
+      },
+      "triage": "Controls extension: a container field the family painters did not implement.",
+      "fix": "Every control kind offers background.transparency; Shape/shapeRecipe.ts exports BACKGROUND_TRANSPARENCY_KEY (from @api/visualContainer's controlContainerKey, never re-spelled) and backgroundAlphaOf; the shape renderer fills its path at (shape opacity x background alpha) and the button face (and its highlight) at the background alpha -- outlines and text stay opaque; the Format pane's paint preview is honoured. Sabotage confirmed: removing the fill alpha or the capability turns the tests red.",
+      "notes": "Found by the owner-lens review. Not proved live (object-pane-format journey has no transparency step)."
+    },
+    {
+      "id": "BUG-0501",
+      "status": "fixed",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas owner findings programme -- cross-package review (2026-10-16), fixed in the review-fix step"
+      },
+      "violation": {
+        "oracleId": "source-cascade-leaves-bindings-of-deleted-objects",
+        "severity": "low",
+        "message": "BINDINGS OUTLIVED THE SLICERS, TIMELINES AND PIVOTS A SOURCE CASCADE DELETED. Delete Table, Convert to Range and a row/column delete that swallows a pivot end in object_deps::cascade_deleted_sources, which deleted the slicers / timelines and ran their ribbon-filter and script cascades but not drop_bindings_for_objects (only delete_pivot_table dropped them itself). Formulas > Bound Properties then listed '(no longer in this workbook)' rows, and an .xlsx save warned 'Bound properties ... stop following their formula' because xlsx_save_loss_report tested the RAW store.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Bind a table slicer's header (/headerText := =Data!B1), Delete Table: the slicer goes, its binding row stays. Unit: object_bindings::cascade_tests a_source_cascade_drops_the_bindings_of_every_object_it_destroys."
+      },
+      "triage": "Backend: an object's own cascade not run by every path that deletes it (the binding rows have dependent_kind None, so the transitive census could not see them).",
+      "fix": "cascade_deleted_sources drops the bindings of the removed pivots and of the slicers / timelines it deletes and carries their restore bytes in SourceCascade.bindings_restore; record_source_cascade_undo_into records them FIRST so one Ctrl+Z brings them back LAST. delete_pivot_table's own copy is gone (one spelling). xlsx_save_loss_report asks object_bindings::store::any_live_binding (only bindings of objects that still exist). Sabotage confirmed: removing the drop turns the test red (and the object-deps census).",
+      "notes": "Found by the architecture-lens review. Not seen live."
     }
   ]
 }

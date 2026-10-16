@@ -13,6 +13,8 @@
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "moduleDetection": "force",
+    /* A data file shared with the Rust backend (Pivot/styles/excelPivotStyles.json) */
+    "resolveJsonModule": true,
     "noEmit": true,
     "jsx": "react-jsx",
 

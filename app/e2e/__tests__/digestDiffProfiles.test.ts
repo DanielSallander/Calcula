@@ -105,6 +105,23 @@ describe("the exclusions both profiles have always had", () => {
     }
   });
 
+  it("compares a chart's specJson by value across save/reload, not by key order", () => {
+    // .cala v10 stores the envelope as a JSON value, so a reload hands it back
+    // with sorted keys (measured live 2026-10-16, seed 1792146459645).
+    const chart = (specJson: string) => digest({ charts: { c1: { id: "c1", sheetIndex: 0, specJson } } });
+    const written = chart('{"name":"C","x":400,"spec":{"mark":"bar","title":"T"}}');
+    const reloaded = chart('{"name":"C","spec":{"mark":"bar","title":"T"},"x":400}');
+    const r = diffDigests(written, reloaded, "saveReload");
+    expect(r.equal, JSON.stringify(r.diffs)).toBe(true);
+    // The self-test: a real change in the definition still shows, at its path.
+    const retitled = chart('{"name":"C","spec":{"mark":"bar","title":"OTHER"},"x":400}');
+    const changed = diffDigests(written, retitled, "saveReload");
+    expect(changed.equal).toBe(false);
+    expect(changed.diffs[0].path).toBe("charts.c1.specJson.spec.title");
+    // And a spec that is not JSON is still compared as text.
+    expect(diffDigests(chart("not json"), chart("not json!"), "saveReload").equal).toBe(false);
+  });
+
   it("ignores the usedStyles MAP only across save/reload", () => {
     // Index 7 is in the map and referenced by no cell, which is the case the
     // exclusion is about: style INDICES are reassigned by a save/reload, so the

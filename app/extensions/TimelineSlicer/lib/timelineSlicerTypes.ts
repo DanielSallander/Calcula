@@ -1,6 +1,8 @@
 //! FILENAME: app/extensions/TimelineSlicer/lib/timelineSlicerTypes.ts
 // PURPOSE: TypeScript interfaces mirroring Rust timeline slicer types.
 
+import type { VisualContainerFormat } from "@api/visualContainer";
+
 export type TimelineSourceType = "pivot";
 
 /** Granularity level for the timeline display. */
@@ -30,6 +32,9 @@ export interface TimelineSlicer {
   showScrollbar: boolean;
   stylePreset: string;
   connectedPivotIds: string[];
+  /** The visual container (D-FORMAT). Title text / visibility stay
+   *  `headerText` / `showHeader`. Absent = the family defaults. */
+  container?: VisualContainerFormat;
 }
 
 export interface TimelinePeriod {
@@ -71,6 +76,8 @@ export interface UpdateTimelineParams {
   showScrollbar?: boolean;
   level?: TimelineLevel;
   stylePreset?: string;
+  /** The visual container: absent = keep, null = clear, a value = set. */
+  container?: VisualContainerFormat | null;
 }
 
 export interface UpdateTimelineSelectionParams {

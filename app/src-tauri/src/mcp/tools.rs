@@ -284,6 +284,14 @@ pub fn get_sheet_summary(
         }
     }
 
+    // WP-D: every canvas's objects with their properties (`path = literal`)
+    // and bindings (`path := formula -> value`), then the bound objects on
+    // worksheets. Read with every sheet lock above released (the binding store
+    // is a leaf below them). Same char-budget guard.
+    if let Some(section) = super::bindings::canvas_objects_section(handle) {
+        super::bindings::append_within_budget(&mut summary, &section, max_chars as usize);
+    }
+
     // Fold in a chart inventory so the AI knows what charts exist (mirrors how
     // list_charts renders them). Appended at the MCP host layer — the pure
     // calcula-format crate stays chart-blind. Guard the char budget: the crate's
@@ -548,9 +556,17 @@ fn format_chart_inventory(charts: &[ChartEntry]) -> String {
             .and_then(|s| s.get("data"))
             .map(compact_chart_data)
             .unwrap_or_else(|| "?".to_string());
+        // The LITERAL title, when the spec has one (a bound title's current
+        // value is in the summary's "Canvas objects" / "Bound properties").
+        let title = spec
+            .and_then(|s| s.get("title"))
+            .and_then(|v| v.as_str())
+            .filter(|t| !t.trim().is_empty())
+            .map(|t| format!(" title={}", serde_json::to_string(t).unwrap_or_default()))
+            .unwrap_or_default();
         out.push_str(&format!(
-            "- id={} name=\"{}\" sheet={} mark={} data={}\n",
-            entry.id, name, entry.sheet_index, mark, data
+            "- id={} name=\"{}\" sheet={} mark={}{} data={}\n",
+            entry.id, name, entry.sheet_index, mark, title, data
         ));
     }
     out
@@ -772,6 +788,9 @@ pub(crate) fn validate_chart_spec_core(spec: &serde_json::Value) -> Result<(), S
     if spec.to_string().len() > 2_000_000 {
         return Err("spec too large (max 2 MB)".to_string());
     }
+    // The visual container and the field formats are not opaque to Rust
+    // (D-FORMAT): the AI path refuses what the store refuses.
+    crate::chart_commands::check_chart_spec_formatting(spec)?;
     Ok(())
 }
 
@@ -2057,6 +2076,20 @@ mod tests {
         assert!(lines[1].contains("name=\"(unnamed)\""));
         assert!(lines[1].contains("mark=?"));
         assert!(lines[1].contains("sheet=2"));
+    }
+
+    #[test]
+    fn chart_inventory_names_a_literal_title_when_the_spec_has_one() {
+        let charts = vec![
+            entry(r#"{"name":"Card","spec":{"mark":"card","title":"Revenue \"2025\"","data":"Data!A1:B2"}}"#, 1),
+            entry(r#"{"name":"Bare","spec":{"mark":"bar","data":"Data!A1:B2"}}"#, 0),
+            entry(r#"{"name":"Blank","spec":{"mark":"bar","title":"  ","data":"Data!A1:B2"}}"#, 0),
+        ];
+        let out = format_chart_inventory(&charts);
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines[0].contains(r#"mark=card title="Revenue \"2025\"" data=Data!A1:B2"#), "{}", lines[0]);
+        assert!(!lines[1].contains("title="), "no title, no field: {}", lines[1]);
+        assert!(!lines[2].contains("title="), "a blank title is no title: {}", lines[2]);
     }
 
     #[test]

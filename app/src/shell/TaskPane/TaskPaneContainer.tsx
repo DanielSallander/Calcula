@@ -85,12 +85,14 @@ export function TaskPaneContainer(): React.ReactElement {
     ? TaskPaneExtensions.getView(activeViewId)
     : null;
 
-  // Handle view updates (e.g., pivot fields changed)
-  // Dispatch pivot:refresh so the pivot extension re-fetches view data AND repaints.
-  // (grid:refresh alone would fetch data with triggerRepaint=false, missing the repaint.)
+  // Handle view updates: run what the ACTIVE view's definition says its
+  // onUpdate does (the pivot editor announces "pivot:refresh" from its own
+  // manifest). The Shell knows no feature: it used to broadcast pivot:refresh
+  // for EVERY view, so any pane calling onUpdate re-fetched every pivot.
+  const activeOnUpdate = activeViewDef?.onUpdate;
   const handleViewUpdate = useCallback(() => {
-    window.dispatchEvent(new CustomEvent("pivot:refresh"));
-  }, []);
+    activeOnUpdate?.();
+  }, [activeOnUpdate]);
 
   // Handle close from within the view
   const handleViewClose = useCallback(() => {

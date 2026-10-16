@@ -47,6 +47,40 @@ export interface VisualFormatOptions {
   decimals?: number;
 }
 
+/** The bare measure a series name stands for: its last " - " part, one pair of brackets dropped. */
+function seriesMeasureKey(seriesName: string): string {
+  const parts = seriesName.split(" - ");
+  const last = parts[parts.length - 1].trim();
+  return last.startsWith("[") && last.endsWith("]") ? last.slice(1, -1) : last;
+}
+
+/**
+ * The format options a tile visual writes series `seriesName` with.
+ *
+ * Display units the author CHOSE (`markOptions.displayUnits` set, "auto"
+ * included) always win. Left unset, a measure the author gave a Data format
+ * (`spec.fieldFormats`, Format > General > Data format) is written as that
+ * format says -- units "none", so the Rust-formatted source text is what the
+ * card writes. Without this a #,##0.00 the pane accepted, persisted and the
+ * model formatted came out as "114M" on the page (found live, object-pane-format
+ * J6, 2026-10-16). A measure with no Data format keeps Power BI's "Auto".
+ */
+export function visualFormatFor(
+  spec: { fieldFormats?: Readonly<Record<string, string>> },
+  opts: VisualFormatOptions,
+  seriesName: string | undefined,
+): VisualFormatOptions {
+  const base: VisualFormatOptions = { displayUnits: opts.displayUnits, decimals: opts.decimals };
+  if (opts.displayUnits !== undefined || seriesName === undefined) return base;
+  const formats = spec.fieldFormats;
+  if (!formats) return base;
+  const key = seriesMeasureKey(seriesName);
+  if (!Object.prototype.hasOwnProperty.call(formats, key) || typeof formats[key] !== "string" || formats[key] === "") {
+    return base;
+  }
+  return { ...base, displayUnits: "none" };
+}
+
 /** The source text of one datum, or null when the reader had none. */
 export function datumText(data: ParsedChartData, si: number, ci: number): string | null {
   const t = data.displayValues?.[si]?.[ci];

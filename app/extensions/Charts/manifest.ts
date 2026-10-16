@@ -16,7 +16,6 @@ import { RibbonIcon } from "@api/ribbonIcons";
 import React from "react";
 import { CreateChartDialog } from "./components/CreateChartDialog";
 import { buildChartDesignSections } from "./components/ChartDesignSections";
-import { CHART_FORMAT_PANE_ID, ChartFormatPane } from "./components/ChartFormatPane";
 import { CHART_JSON_PANE_ID, ChartJsonPane } from "./components/ChartJsonPane";
 
 // ============================================================================
@@ -67,41 +66,21 @@ export function buildChartDesignPanelDefinition(): PanelDefinition {
 }
 
 // ============================================================================
-// Task Pane Registration — the retargeting Format pane
-// ============================================================================
-
-/**
- * The Format task pane, Excel's "Format <element>".
- *
- * `contextKeys: ["chart"]` finishes wiring that was half-built:
- * `handlers/selectionHandler.ts` has been calling `addTaskPaneContextKey("chart")`
- * since the selection ladder landed, and until now NO pane in the repository
- * declared that key — so selecting a chart added a context nothing listened to.
- *
- * AUTHORITY. This pane formats THE CURRENT SELECTION; the contextual Design
- * panel above ({@link buildChartDesignPanelDefinition}) configures THE WHOLE
- * CHART. The full statement of the split is in the pane's own header.
- */
-export { CHART_FORMAT_PANE_ID } from "./components/ChartFormatPane";
-
-export const ChartFormatPaneDefinition: TaskPaneViewDefinition = {
-  id: CHART_FORMAT_PANE_ID,
-  title: "Format Chart",
-  icon: React.createElement(RibbonIcon.FormatPoint, { size: 16 }),
-  component: ChartFormatPane,
-  contextKeys: ["chart"],
-  priority: 100,
-  closable: true,
-};
-
-// ============================================================================
 // Task Pane Registration — the Chart JSON pane
 // ============================================================================
+//
+// There is no "Format Chart" task pane any more (WP-C D-PANE): a chart's
+// element formatting is the "Chart elements" card on the Format tab of the ONE
+// object pane (BuiltIn/ObjectPane), contributed through the chart's
+// @api/objectFormat provider (lib/chartObjectFormat.ts) and opened by every
+// former door of the old pane (lib/chartObjectPane.ts `openChartFormatPane`).
 
 /**
  * The chart's stored entry as editable JSON. Opened and closed by the Chart
  * Design band's JSON hero (it replaced a fixed-position overlay); it follows
- * the published chart selection, like the Format pane.
+ * the published chart selection, like the object pane's chart cards.
+ * `contextKeys: ["chart"]`: `handlers/selectionHandler.ts` adds that key while
+ * a chart is selected, so View > Show lists the pane then.
  */
 export { CHART_JSON_PANE_ID } from "./components/ChartJsonPane";
 

@@ -449,6 +449,15 @@ describe("API Facade Completeness", () => {
       }
     });
 
+    it("grid overlay reference-pick API is available (D-PICK)", async () => {
+      const mod = await import("../gridOverlays");
+      expect(typeof mod.referenceAtPoint).toBe("function");
+      expect(typeof mod.getFloatingReferencePickPreview).toBe("function");
+      expect(typeof mod.onFloatingReferencePickPreviewChanged).toBe("function");
+      const editing = await import("../editing");
+      expect(typeof editing.isFormulaReferencePickActive).toBe("function");
+    });
+
     it("grid overlay point-mode view is available", async () => {
       const mod = await import("../gridOverlays");
       expect(typeof mod.getLiveGridRegions).toBe("function");

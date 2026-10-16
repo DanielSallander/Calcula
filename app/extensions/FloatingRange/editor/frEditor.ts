@@ -63,7 +63,7 @@ import {
   localCellOrigin,
   frColWidth,
   frRowHeight,
-  frRowHdrW,
+  frCellsLeft,
   frCellsTop,
   contentWidth,
   contentHeight,
@@ -632,8 +632,9 @@ function insertTextAtCursor(text: string): void {
 }
 
 /** Insert reference text into THIS editor. No caller today: a reference pick
- *  on a range reaches this editor through the external formula target
- *  (`insertReferenceTo`, index.ts). */
+ *  on a floating object reaches this editor through the external formula
+ *  target's `insertReference`, which Core's pick session calls
+ *  (`handleFloatingReferencePick`, core useSpreadsheetSelection, D-PICK). */
 export function insertReferenceIntoFrEditor(text: string): boolean {
   if (!editorState || !textarea) return false;
   insertTextAtCursor(text);
@@ -831,7 +832,7 @@ export function layoutFrEditorForFrame(
   const insets = frEditorVisibleInsets(
     { x: cellX, y: cellY, width: cellW, height: cellH },
     {
-      x: frameCanvasX + frRowHdrW(entry),
+      x: frameCanvasX + frCellsLeft(entry),
       y: frameCanvasY + frCellsTop(entry),
       width: contentWidth(entry),
       height: contentHeight(entry),

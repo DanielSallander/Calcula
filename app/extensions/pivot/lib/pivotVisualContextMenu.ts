@@ -21,22 +21,33 @@
 //          the pointer exactly as on a worksheet -- and Core's cell items
 //          (Cut, Insert Row ...) never appear on a canvas.
 //
-//          Below the pivot's own items sits "Size and Position...", the row
+//          Below the pivot's own items sit "Size and Position...", the row
 //          every object menu carries (@api/objectPosition; BUG-0258 design
-//          phase 5b): the no-drag route to place and size the box.
+//          phase 5b): the no-drag route to place and size the box -- and
+//          "Format...", the object pane's door every family menu carries
+//          (@api/objectPane `objectPaneMenuEntry`, WP-C review R2-15b).
 //
 //          While the menu is open it owns Escape: the canvas's Escape binding
 //          asks the object-selection providers first (`ownsKey`,
 //          pivotVisualSelection.ts), so Escape closes the menu instead of
 //          deselecting the box behind it (the FloatingRange precedent).
 
-import { gridExtensions, type GridContextMenuItem, type GridMenuContext, type Selection } from "@api";
+import { gridExtensions, showToast, type GridContextMenuItem, type GridMenuContext, type Selection } from "@api";
 import { topFloatingRegionAtClient, type GridRegion } from "@api/gridOverlays";
 import { sizeAndPositionMenuEntry } from "@api/objectPosition";
+import { objectPaneMenuEntry } from "@api/objectPane";
 import { getGridStateSnapshot } from "@api/grid";
+import { selectObject } from "@api/objectSelection";
 import { getPivotVisualRecord, viewCellAtCanvasPoint } from "./pivotVisualHits";
 import { PIVOT_VISUAL_REGION_TYPE, pivotIdOfVisual } from "./pivotVisualRegions";
 import { notePivotBoxMenuOpened } from "./pivotVisualMenuState";
+import {
+  getPivotCellSelection,
+  isViewCellSelected,
+  pivotCellGridRange,
+  setPivotCellAnchor,
+} from "./pivotVisualCellSelection";
+import { isPivotVisualSelected } from "../handlers/selectionHandler";
 
 export { isPivotBoxMenuOpen } from "./pivotVisualMenuState";
 
@@ -49,14 +60,23 @@ export interface PivotBoxMenuTarget {
   context: GridMenuContext;
   /** The box's published region (what Size and Position opens for). */
   region: GridRegion;
+  /** The VIEW cell under the pointer, or null (blank area, the scroll gutter). */
+  viewCell: { viewRow: number; viewCol: number } | null;
 }
 
 /**
  * The target of a right-click at a CLIENT point, or null when the topmost
  * floating object there is not a canvas pivot box (or the box has not been
- * painted yet). The clicked cell is the hidden-grid cell under the pointer;
- * a point on no cell (the box's empty area, the scroll gutter) targets the
- * pivot's anchor cell, which still names the pivot.
+ * painted yet). PURE: it states the context the menu will run with once
+ * `handlePivotBoxContextMenu` has selected the box and placed the cells.
+ *
+ *   - The clicked cell is the hidden-grid cell under the pointer.
+ *   - On a cell INSIDE the box's current cell selection (D-CELLS), the menu's
+ *     selection is that whole rectangle mapped to the hidden grid; on a cell
+ *     outside it (or with none) the right-click re-anchors there, so the
+ *     selection is that one cell -- Excel's rule for a right-click on cells.
+ *   - A point on no cell (the box's empty area, the scroll gutter) targets the
+ *     pivot's anchor cell, which still names the pivot.
  */
 export function pivotBoxMenuTargetAt(clientX: number, clientY: number): PivotBoxMenuTarget | null {
   const top = topFloatingRegionAtClient(clientX, clientY);
@@ -74,10 +94,15 @@ export function pivotBoxMenuTargetAt(clientX: number, clientY: number): PivotBox
   const at = viewCellAtCanvasPoint(record, (clientX - rect.left) / zoom, (clientY - rect.top) / zoom);
   const row = record.startRow + (at?.viewRow ?? 0);
   const col = record.startCol + (at?.viewCol ?? 0);
-  const selection: Selection = { startRow: row, startCol: col, endRow: row, endCol: col, type: "cells" };
+  let selection: Selection = { startRow: row, startCol: col, endRow: row, endCol: col, type: "cells" };
+  const cells = getPivotCellSelection();
+  if (at && cells !== null && cells.pivotId === pivotId && isViewCellSelected(at.viewRow, at.viewCol)) {
+    selection = { ...pivotCellGridRange(cells, record.startRow, record.startCol), type: "cells" };
+  }
   return {
     pivotId,
     region: top,
+    viewCell: at,
     context: {
       selection,
       clickedCell: { row, col },
@@ -91,10 +116,13 @@ export function pivotBoxMenuTargetAt(clientX: number, clientY: number): PivotBox
 
 /** The id of the box menu's "Size and Position..." row. */
 export const PIVOT_BOX_SIZE_POSITION_ITEM_ID = "pivot.box.sizeAndPosition";
+/** The id of the box menu's "Format..." row (opens the object pane on Format). */
+export const PIVOT_BOX_FORMAT_ITEM_ID = "pivot.box.format";
 
 /**
  * The pivot group's items for a context (visible ones, labels resolved) and,
- * given the box's `region`, the "Size and Position..." row under them.
+ * given the box's `region`, the "Size and Position..." and "Format..." rows
+ * under them.
  */
 export function pivotBoxMenuItems(context: GridMenuContext, region: GridRegion | null = null): GridContextMenuItem[] {
   const items = gridExtensions.getContextMenuItemsForContext(context).filter((item) => item.group === PIVOT_MENU_GROUP);
@@ -108,6 +136,15 @@ export function pivotBoxMenuItems(context: GridMenuContext, region: GridRegion |
     group: PIVOT_MENU_GROUP,
     disabled: entry.disabled,
     onClick: () => entry.run(),
+  });
+  const format = objectPaneMenuEntry(region);
+  out.push({
+    id: PIVOT_BOX_FORMAT_ITEM_ID,
+    label: format.label,
+    group: PIVOT_MENU_GROUP,
+    disabled: format.disabled,
+    ...(format.reason ? { disabledReason: format.reason } : {}),
+    onClick: () => format.run(),
   });
   return out;
 }
@@ -150,6 +187,27 @@ function place(menu: HTMLDivElement, left: number, top: number): void {
 }
 
 /**
+ * The disabled reason of an item as text: the registry hands it resolved, but
+ * an item built here (or a test double) may still carry the function form.
+ */
+function disabledReasonText(item: GridContextMenuItem, context: GridMenuContext): string | null {
+  const reason = typeof item.disabledReason === "function" ? item.disabledReason(context) : item.disabledReason;
+  return typeof reason === "string" && reason !== "" ? reason : null;
+}
+
+/**
+ * A row's action failed: tell the USER (BUG-0096 -- never the console alone).
+ * The pivot items report their own failures; this catches whatever reaches
+ * the box menu unreported (Size and Position, a future item).
+ */
+function reportBoxMenuFailure(item: GridContextMenuItem, context: GridMenuContext, error: unknown): void {
+  console.error(`[PivotMenu] "${item.id}" failed:`, error);
+  const label = typeof item.label === "string" ? item.label : item.label(context);
+  const msg = error instanceof Error ? error.message : String(error);
+  showToast(`${label.replace(/\.\.\.$/, "")} failed: ${msg}`, { variant: "error" });
+}
+
+/**
  * One menu level. `onSubmenu` is told which row opened which child menu, so a
  * level keeps at most one child open.
  */
@@ -177,6 +235,12 @@ function buildLevel(
     row.dataset.itemId = item.id;
     const disabled = !!item.disabled;
     row.setAttribute("aria-disabled", String(disabled));
+    // A disabled row says WHY (the registry resolved the reason to a string).
+    const reason = disabled ? disabledReasonText(item, context) : null;
+    if (reason) {
+      row.title = reason;
+      row.setAttribute("aria-description", reason);
+    }
     row.style.cssText = `
       padding: 6px 28px 6px 20px;
       cursor: ${disabled ? "default" : "pointer"};
@@ -216,7 +280,7 @@ function buildLevel(
       closePivotBoxMenu();
       Promise.resolve()
         .then(() => item.onClick(context))
-        .catch((error) => console.error(`[PivotMenu] "${item.id}" failed:`, error));
+        .catch((error) => reportBoxMenuFailure(item, context, error));
     });
     menu.appendChild(row);
 
@@ -279,6 +343,12 @@ export function openPivotBoxMenu(clientX: number, clientY: number, target: Pivot
  * The capture-phase `contextmenu` handler. Claims the gesture -- the grid's
  * own handler and every later listener stand down -- only when a canvas pivot
  * box is the topmost object under the pointer. Returns whether it claimed.
+ *
+ * Before the menu opens, the right-click does what it does on every other
+ * family: an unselected box is SELECTED first (`selectObject`, keyboard
+ * semantics -- no pane opens), and a right-click on a cell outside the box's
+ * cell selection re-anchors the selection there (D-CELLS), so the menu acts
+ * on what the user sees selected.
  */
 export function handlePivotBoxContextMenu(e: MouseEvent): boolean {
   // Shift+right-click is the browser's own menu, as on the grid.
@@ -291,6 +361,13 @@ export function handlePivotBoxContextMenu(e: MouseEvent): boolean {
   e.preventDefault();
   e.stopPropagation();
   e.stopImmediatePropagation();
+  if (!isPivotVisualSelected(target.pivotId)) selectObject(target.region);
+  const at = target.viewCell;
+  if (at) {
+    const cells = getPivotCellSelection();
+    const inside = cells !== null && cells.pivotId === target.pivotId && isViewCellSelected(at.viewRow, at.viewCol);
+    if (!inside) setPivotCellAnchor(target.pivotId, at.viewRow, at.viewCol);
+  }
   openPivotBoxMenu(e.clientX, e.clientY, target);
   return true;
 }

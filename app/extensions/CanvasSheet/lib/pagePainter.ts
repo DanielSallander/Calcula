@@ -23,6 +23,7 @@ import { getGridStateSnapshot } from "@api/grid";
 import { canvasLayoutSurface } from "./layoutSurfaceProvider";
 import { canvasWallpaper } from "@api/canvasSheet";
 import { canvasAt } from "./canvasSheetStore";
+import { shownCanvasLayout } from "./canvasBindings";
 
 /** Below this on-screen pitch the dots merge into a tint; skip them. */
 export const MIN_DOT_PITCH_SCREEN_PX = 6;
@@ -88,15 +89,18 @@ export function paintCanvasPage(context: GridLayerContext, palette?: PagePalette
   const originX = gutterX - viewport.scrollX;
   const originY = gutterY - viewport.scrollY;
   const { width: pageW, height: pageH } = surface.page;
+  // The layout as SHOWN: a BOUND background or wallpaper (@api/objectBindings,
+  // D-BIND) paints its resolved colour; the store keeps the literal.
+  const layout = shownCanvasLayout(entry);
 
   // Around the page: Power BI's Wallpaper (Format page > Wallpaper), the
   // colour of everything that is not the page. "" is the theme's surround,
   // so a page with no wallpaper follows the skin as it always did.
-  ctx.fillStyle = canvasWallpaper(entry.layout) || pal.outside;
+  ctx.fillStyle = canvasWallpaper(layout) || pal.outside;
   ctx.fillRect(0, 0, canvasWidth, canvasHeight);
 
   // The page.
-  ctx.fillStyle = entry.layout.background || pal.page;
+  ctx.fillStyle = layout.background || pal.page;
   ctx.fillRect(originX, originY, pageW, pageH);
 
   // The snap grid: one dot per intersection in view, only while it is usable.

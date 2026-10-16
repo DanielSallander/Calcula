@@ -547,58 +547,13 @@ pub(crate) fn view_to_response(
     let use_windowing = total_rows > WINDOW_THRESHOLD;
     let window_end = if use_windowing { INITIAL_WINDOW_SIZE.min(total_rows) } else { total_rows };
 
+    // What a cell's `value_field_index` points into, set on BOTH response
+    // literals below (the windowed one and the ordinary one).
+    let value_field_names: Vec<String> = definition.value_fields.iter().map(|v| v.name.clone()).collect();
+
     // Helper: convert engine cells to response cells
     let convert_cells = |cells: &[pivot_engine::PivotViewCell]| -> Vec<PivotCellData> {
-        cells
-            .iter()
-            .map(|cell| PivotCellData {
-                cell_type: cell.cell_type,
-                value: match &cell.value {
-                    pivot_engine::PivotCellValue::Empty => PivotCellValueData::Empty,
-                    pivot_engine::PivotCellValue::Number(n) => PivotCellValueData::Number(*n),
-                    pivot_engine::PivotCellValue::Text(s) => {
-                        PivotCellValueData::Text(s.clone())
-                    }
-                    pivot_engine::PivotCellValue::Boolean(b) => {
-                        PivotCellValueData::Boolean(*b)
-                    }
-                    pivot_engine::PivotCellValue::Error(e) => {
-                        PivotCellValueData::Text(format!("#{}", e))
-                    }
-                },
-                formatted_value: match (&cell.value, &cell.number_format) {
-                    (pivot_engine::PivotCellValue::Number(n), Some(fmt)) if !fmt.is_empty() => {
-                        format_number(*n, &parse_number_format(fmt), &engine::LocaleSettings::invariant())
-                    }
-                    _ => String::new(),
-                },
-                indent_level: cell.indent_level,
-                is_bold: cell.is_bold,
-                is_expandable: cell.is_expandable,
-                is_collapsed: cell.is_collapsed,
-                background_style: cell.background_style,
-                number_format: cell.number_format.clone(),
-                filter_field_index: cell.filter_field_index,
-                col_span: cell.col_span,
-                group_path: match cell.cell_type {
-                    pivot_engine::PivotCellType::RowHeader
-                    | pivot_engine::PivotCellType::ColumnHeader
-                    | pivot_engine::PivotCellType::RowSubtotal
-                    | pivot_engine::PivotCellType::ColumnSubtotal
-                    | pivot_engine::PivotCellType::GrandTotalRow
-                    | pivot_engine::PivotCellType::GrandTotalColumn
-                    | pivot_engine::PivotCellType::GrandTotal
-                    // Data cells need their path too: double-click drill-through
-                    // filters by it, and an omitted path drills the whole table.
-                    | pivot_engine::PivotCellType::Data => cell
-                        .group_path
-                        .iter()
-                        .map(|(fi, vid)| (*fi, *vid))
-                        .collect(),
-                    _ => Vec::new(),
-                },
-            })
-            .collect()
+        cells.iter().map(pivot_cell_to_data).collect()
     };
 
     // Only build full PivotRowData (with cells) for the window; rest get empty cells.
@@ -799,6 +754,7 @@ pub(crate) fn view_to_response(
             // Filled after the fact by the producer that has something to say,
             // exactly as `overwritten_cell_count` is.
             notices: Vec::new(),
+            value_field_names,
         }
     } else {
         // Small pivot: send everything (no windowing)
@@ -822,7 +778,58 @@ pub(crate) fn view_to_response(
             overwritten_cell_count: 0,
             overwrite_token: None,
             notices: Vec::new(),
+            value_field_names,
         }
+    }
+}
+
+/// THE conversion of one engine view cell into the wire's `PivotCellData`.
+/// Every producer of response cells -- the full view (`view_to_response`) and
+/// the scroll-triggered window (`extract_cell_window`) -- goes through this
+/// one function; they were two hand-copied closures, and a field added to one
+/// would have reached the frontend on small pivots only, or past row 200 only.
+pub(crate) fn pivot_cell_to_data(cell: &pivot_engine::PivotViewCell) -> PivotCellData {
+    PivotCellData {
+        cell_type: cell.cell_type,
+        value: match &cell.value {
+            pivot_engine::PivotCellValue::Empty => PivotCellValueData::Empty,
+            pivot_engine::PivotCellValue::Number(n) => PivotCellValueData::Number(*n),
+            pivot_engine::PivotCellValue::Text(s) => PivotCellValueData::Text(s.clone()),
+            pivot_engine::PivotCellValue::Boolean(b) => PivotCellValueData::Boolean(*b),
+            pivot_engine::PivotCellValue::Error(e) => PivotCellValueData::Text(format!("#{}", e)),
+        },
+        formatted_value: match (&cell.value, &cell.number_format) {
+            (pivot_engine::PivotCellValue::Number(n), Some(fmt)) if !fmt.is_empty() => {
+                format_number(*n, &parse_number_format(fmt), &engine::LocaleSettings::invariant())
+            }
+            _ => String::new(),
+        },
+        indent_level: cell.indent_level,
+        is_bold: cell.is_bold,
+        is_expandable: cell.is_expandable,
+        is_collapsed: cell.is_collapsed,
+        background_style: cell.background_style,
+        number_format: cell.number_format.clone(),
+        filter_field_index: cell.filter_field_index,
+        col_span: cell.col_span,
+        group_path: match cell.cell_type {
+            pivot_engine::PivotCellType::RowHeader
+            | pivot_engine::PivotCellType::ColumnHeader
+            | pivot_engine::PivotCellType::RowSubtotal
+            | pivot_engine::PivotCellType::ColumnSubtotal
+            | pivot_engine::PivotCellType::GrandTotalRow
+            | pivot_engine::PivotCellType::GrandTotalColumn
+            | pivot_engine::PivotCellType::GrandTotal
+            // Data cells need their path too: double-click drill-through
+            // filters by it, and an omitted path drills the whole table.
+            | pivot_engine::PivotCellType::Data => cell
+                .group_path
+                .iter()
+                .map(|(fi, vid)| (*fi, *vid))
+                .collect(),
+            _ => Vec::new(),
+        },
+        value_field_index: cell.value_field_index,
     }
 }
 
@@ -837,56 +844,7 @@ pub(crate) fn extract_cell_window(
         .iter()
         .zip(view.rows[start_row..end_row].iter())
         .map(|(cells, descriptor)| {
-            let cell_data: Vec<PivotCellData> = cells
-                .iter()
-                .map(|cell| PivotCellData {
-                    cell_type: cell.cell_type,
-                    value: match &cell.value {
-                        pivot_engine::PivotCellValue::Empty => PivotCellValueData::Empty,
-                        pivot_engine::PivotCellValue::Number(n) => PivotCellValueData::Number(*n),
-                        pivot_engine::PivotCellValue::Text(s) => {
-                            PivotCellValueData::Text(s.clone())
-                        }
-                        pivot_engine::PivotCellValue::Boolean(b) => {
-                            PivotCellValueData::Boolean(*b)
-                        }
-                        pivot_engine::PivotCellValue::Error(e) => {
-                            PivotCellValueData::Text(format!("#{}", e))
-                        }
-                    },
-                    formatted_value: match (&cell.value, &cell.number_format) {
-                        (pivot_engine::PivotCellValue::Number(n), Some(fmt)) if !fmt.is_empty() => {
-                            format_number(*n, &parse_number_format(fmt), &engine::LocaleSettings::invariant())
-                        }
-                        _ => String::new(),
-                    },
-                    indent_level: cell.indent_level,
-                    is_bold: cell.is_bold,
-                    is_expandable: cell.is_expandable,
-                    is_collapsed: cell.is_collapsed,
-                    background_style: cell.background_style,
-                    number_format: cell.number_format.clone(),
-                    filter_field_index: cell.filter_field_index,
-                    col_span: cell.col_span,
-                    group_path: match cell.cell_type {
-                        pivot_engine::PivotCellType::RowHeader
-                        | pivot_engine::PivotCellType::ColumnHeader
-                        | pivot_engine::PivotCellType::RowSubtotal
-                        | pivot_engine::PivotCellType::ColumnSubtotal
-                        | pivot_engine::PivotCellType::GrandTotalRow
-                        | pivot_engine::PivotCellType::GrandTotalColumn
-                        | pivot_engine::PivotCellType::GrandTotal
-                        // Data cells need their path too: double-click drill-through
-                        // filters by it, and an omitted path drills the whole table.
-                        | pivot_engine::PivotCellType::Data => cell
-                            .group_path
-                            .iter()
-                            .map(|(fi, vid)| (*fi, *vid))
-                            .collect(),
-                        _ => Vec::new(),
-                    },
-                })
-                .collect();
+            let cell_data: Vec<PivotCellData> = cells.iter().map(pivot_cell_to_data).collect();
 
             PivotRowData {
                 view_row: descriptor.view_row,

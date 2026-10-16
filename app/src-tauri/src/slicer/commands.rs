@@ -104,6 +104,7 @@ pub(crate) fn create_slicer_core(
         connected_sources,
         filter_level,
         data_source_id,
+        container: None,
     };
 
     log_debug!(
@@ -456,6 +457,26 @@ pub(crate) async fn delete_slicer_core(
     }
 
     if let Some(removed) = removed {
+        // WP-D (D §3.12): the slicer's object property BINDINGS go with it.
+        // FIRST in the batch, so the reverse replay restores them LAST --
+        // after the slicer exists again.
+        if let Some(previous_bindings) = crate::object_bindings::cascade::drop_bindings_for_objects(
+            ctx.state,
+            &effect,
+            &[crate::api_types::ObjectBindingRef {
+                kind: crate::api_types::ObjectBindingKind::Slicer,
+                id: slicer_id.to_string(),
+            }],
+        ) {
+            restores.insert(
+                0,
+                (
+                    crate::undo_commands::BINDINGS_RESTORE_KIND,
+                    crate::undo_commands::bindings_restore_bytes(ctx.state, &previous_bindings),
+                ),
+            );
+        }
+
         // Filters that cross-filtered this slicer, pruned before the undo
         // lock is taken (it takes the filter lock; the undo lock is never
         // held across one).
@@ -645,6 +666,11 @@ pub(crate) fn update_slicer_core(
     if let Some(level) = params.filter_level {
         crate::slicer::types::validate_filter_level(level)?;
     }
+    // The visual container (D-FORMAT) is validated before the effect too: a
+    // refused value leaves the document clean and the store untouched.
+    if let Some(Some(container)) = &params.container {
+        container.validate()?;
+    }
 
     // Resolve and gate under ONE hold of the store, so the pre-edit clone that
     // becomes the undo payload is exactly what the write replaces.
@@ -733,6 +759,10 @@ pub(crate) fn update_slicer_core(
         }
         if let Some(filter_level) = params.filter_level {
             slicer.filter_level = filter_level;
+        }
+        if let Some(container) = params.container {
+            // An empty container is no container (no key on save).
+            slicer.container = container.filter(|c| !c.is_empty());
         }
         slicer.clone()
     };

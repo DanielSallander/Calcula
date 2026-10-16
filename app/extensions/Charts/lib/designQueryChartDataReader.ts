@@ -54,6 +54,54 @@ export interface DesignQueryReadContext {
   chartId?: string;
   /** The page itself. Wins over `chartId`. */
   sheetIndex?: number;
+  /**
+   * The chart's data formats (`spec.fieldFormats`: bare measure name -> Excel
+   * format code). When the key is PRESENT it is used as given (undefined =
+   * none) -- the render path hands the spec it is drawing, which may be a
+   * preview. When ABSENT they are read from the stored chart the read is for
+   * (`chartId`, else the stored chart holding this very source object).
+   */
+  fieldFormats?: Readonly<Record<string, string>>;
+}
+
+/**
+ * The data formats a read applies: the context's own when it names them,
+ * else the stored chart's (by id, else by IDENTITY of the source, as
+ * {@link designQueryPageOf} finds the page). A preview of a chart not created
+ * yet has none.
+ */
+export function designQueryFieldFormatsOf(
+  source: DesignQueryDataSource,
+  context?: DesignQueryReadContext,
+): Readonly<Record<string, string>> | undefined {
+  if (context && Object.prototype.hasOwnProperty.call(context, "fieldFormats")) return context.fieldFormats;
+  if (context?.chartId !== undefined) return getChartById(context.chartId)?.spec?.fieldFormats;
+  return getAllCharts().find((c) => c.spec?.data === source)?.spec?.fieldFormats;
+}
+
+/**
+ * The request with each value field's chosen number format, pure. A format is
+ * matched by the BARE measure name (`fieldFormats` keys and the compiled
+ * `measureName` are both bracket-free); a measure with no entry, or an empty
+ * one, carries no `numberFormat` key at all, so the backend's default stands.
+ * Rust formats `formattedValue` with it (invariant locale) and adopts NOTHING
+ * from the model on this headless path.
+ */
+export function applyFieldFormats(
+  request: DesignQueryRequest,
+  fieldFormats: Readonly<Record<string, string>> | undefined,
+): DesignQueryRequest {
+  if (!fieldFormats) return request;
+  let changed = false;
+  const valueFields = request.valueFields.map((f) => {
+    const format = Object.prototype.hasOwnProperty.call(fieldFormats, f.measureName)
+      ? fieldFormats[f.measureName]
+      : undefined;
+    if (typeof format !== "string" || format === "") return f;
+    changed = true;
+    return { ...f, numberFormat: format };
+  });
+  return changed ? { ...request, valueFields } : request;
 }
 
 /**
@@ -120,7 +168,8 @@ export function mergePageFilters(
 /**
  * The compiled request behind a design-query source — the DSL against the
  * connection's model, with @Name params substituted from the live controls,
- * and the model filters of the chart's own page merged in.
+ * each measure's chosen number format attached (`applyFieldFormats`), and
+ * the model filters of the chart's own page merged in.
  *
  * Shared by the reader (which runs it) and the data provider (which reads its
  * `valueFields` to say which measure each plotted series is), so the two can
@@ -157,13 +206,17 @@ export async function compileDesignQuerySource(
     throw new Error(`Design query has errors (after @param substitution):\n${detail}`);
   }
 
+  // The chart's data formats (the Format tab's Data format card) ride the
+  // value fields, so the backend writes `formattedValue` in them.
+  const formatted = applyFieldFormats(compiled.request, designQueryFieldFormatsOf(source, context));
+
   // The page's model slicers (@api/pageFilters): only this chart's own sheet
   // or canvas, only this connection's model.
   const page = designQueryPageOf(source, context);
-  if (page === undefined) return compiled.request;
+  if (page === undefined) return formatted;
   const filters = getPageFilters(page, String(source.connectionId));
   return mergePageFilters(
-    compiled.request,
+    formatted,
     filters,
     biModel.tables.map((t) => t.name),
   );

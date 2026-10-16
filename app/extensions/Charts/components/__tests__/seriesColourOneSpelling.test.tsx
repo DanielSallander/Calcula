@@ -96,7 +96,7 @@ vi.mock("../../manifest", () => ({
   CHART_DESIGN_TAB_ID: "chart:design",
 }));
 
-import { ChartFormatPane } from "../ChartFormatPane";
+import { ChartElementFormatCard } from "../ChartFormatPane";
 import { SeriesColorsSection } from "../ChartDesignSections";
 import { DesignTab } from "../tabs/DesignTab";
 import { DataTab } from "../tabs/DataTab";
@@ -341,7 +341,7 @@ describe("OB-1(a) the Format pane and the Design panel agree", () => {
   it("READS BACK a colour the Design panel set", async () => {
     await seed(fixtureSpec({ seriesColors: { Cost: "#123456" } }));
     selectSeries();
-    await render(React.createElement(ChartFormatPane, {} as never));
+    await render(React.createElement(ChartElementFormatCard, {} as never));
 
     // Before the fix this showed the #4472c4 fallback: the pane read
     // spec.series[1].color, which the Design panel never touches.
@@ -351,7 +351,7 @@ describe("OB-1(a) the Format pane and the Design panel agree", () => {
   it("writes a colour the Design panel READS BACK", async () => {
     await seed(fixtureSpec());
     selectSeries();
-    await render(React.createElement(ChartFormatPane, {} as never));
+    await render(React.createElement(ChartElementFormatCard, {} as never));
 
     await clickEl(swatch("Colour", PICKED));
 
@@ -374,7 +374,7 @@ describe("OB-1(a) the Format pane and the Design panel agree", () => {
       { name: "Cost", sourceIndex: 2, color: "#999999" },
     ] } as Partial<ChartSpec>));
     selectSeries();
-    await render(React.createElement(ChartFormatPane, {} as never));
+    await render(React.createElement(ChartElementFormatCard, {} as never));
 
     await clickEl(swatch("Colour", PICKED));
 
@@ -391,7 +391,7 @@ describe("OB-1(b) a series with no spec.series entry", () => {
   it("colours a pivot-shaped chart whose spec carries no series at all", async () => {
     await seed(fixtureSpec({ series: [] } as Partial<ChartSpec>));
     selectSeries();
-    await render(React.createElement(ChartFormatPane, {} as never));
+    await render(React.createElement(ChartElementFormatCard, {} as never));
 
     await clickEl(swatch("Colour", PICKED));
 
@@ -408,7 +408,7 @@ describe("OB-1(b) a series with no spec.series entry", () => {
       level: "series",
       seriesIndex: 1,
     });
-    await render(React.createElement(ChartFormatPane, {} as never));
+    await render(React.createElement(ChartElementFormatCard, {} as never));
 
     expect(container.querySelector('[data-chart-swatches="Colour"]')).toBeNull();
     expect(container.textContent).toContain("cannot be named");
@@ -430,7 +430,7 @@ describe("OB-1 radial marks", () => {
       seriesIndex: 0,
       seriesName: "Share",
     });
-    await render(React.createElement(ChartFormatPane, {} as never));
+    await render(React.createElement(ChartElementFormatCard, {} as never));
 
     expect(container.querySelector('[data-chart-swatches="Colour"]')).toBeNull();
     expect(container.textContent).toContain("slice");
@@ -456,7 +456,7 @@ describe("OB-1 a per-point override outranks the series colour, and the pane say
       } as Partial<ChartSpec>),
     );
     selectSeries();
-    await render(React.createElement(ChartFormatPane, {} as never));
+    await render(React.createElement(ChartElementFormatCard, {} as never));
 
     // The sentence exists BEFORE the series colour is set — this is what makes
     // the behaviour legible rather than looking like a dead control.
@@ -487,7 +487,7 @@ describe("OB-1 a per-point override outranks the series colour, and the pane say
       } as Partial<ChartSpec>),
     );
     selectSeries();
-    await render(React.createElement(ChartFormatPane, {} as never));
+    await render(React.createElement(ChartElementFormatCard, {} as never));
 
     const reset = container.querySelector(
       '[data-testid="chart-reset-to-match-style"]',
@@ -509,7 +509,7 @@ describe("OB-1 a per-point override outranks the series colour, and the pane say
       } as Partial<ChartSpec>),
     );
     selectSeries();
-    await render(React.createElement(ChartFormatPane, {} as never));
+    await render(React.createElement(ChartElementFormatCard, {} as never));
 
     expect(container.textContent).not.toContain("has its own colour");
   });
@@ -524,7 +524,7 @@ describe("OB-1 an ambiguous series name", () => {
     cachedSeries = [{ name: "Cost" }, { name: "Cost" }];
     await seed(fixtureSpec());
     selectSeries(1, "Cost");
-    await render(React.createElement(ChartFormatPane, {} as never));
+    await render(React.createElement(ChartElementFormatCard, {} as never));
 
     expect(container.textContent).toContain("2 series are named");
 
@@ -535,7 +535,7 @@ describe("OB-1 an ambiguous series name", () => {
   it("says nothing when the name is unique", async () => {
     await seed(fixtureSpec());
     selectSeries();
-    await render(React.createElement(ChartFormatPane, {} as never));
+    await render(React.createElement(ChartElementFormatCard, {} as never));
     expect(container.textContent).not.toContain("series are named");
   });
 });
@@ -573,7 +573,7 @@ describe("OB-1 the Design panel Auto button", () => {
 
     await unmount();
     selectSeries();
-    await render(React.createElement(ChartFormatPane, {} as never));
+    await render(React.createElement(ChartElementFormatCard, {} as never));
     expect(colourInput("Colour").value).toBe(PICKED);
   });
 });

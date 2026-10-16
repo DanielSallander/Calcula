@@ -250,6 +250,7 @@ pub(crate) fn create_floating_range_inner(
             show_title: true,
             show_column_headers: true,
             show_row_headers: true,
+            container: None,
         };
         state
             .floating_ranges
@@ -422,6 +423,7 @@ fn patchable_fields_differ(a: &FloatingRange, b: &FloatingRange) -> bool {
         || a.show_row_headers != b.show_row_headers
         || a.col_widths != b.col_widths
         || a.row_heights != b.row_heights
+        || a.container != b.container
 }
 
 /// Whether two rows differ in POSITION or SIZE -- what a page's Lock Objects
@@ -466,6 +468,11 @@ fn patched(row: &FloatingRange, patch: &FloatingRangePatch) -> FloatingRange {
     }
     if let Some(heights) = patch.row_heights.clone() {
         next.row_heights = heights;
+    }
+    if let Some(container) = &patch.container {
+        // Double option: absent keeps, null clears, a value sets. An empty
+        // container is no container (no key on save).
+        next.container = container.clone().filter(|c| !c.is_empty());
     }
     next
 }
@@ -518,6 +525,11 @@ pub(crate) fn update_floating_range_inner(
         MIN_FLOATING_RANGE_ROW_H,
         MAX_FLOATING_RANGE_ROW_H,
     )?;
+    // The visual container (D-FORMAT) is validated like every other field:
+    // before anything is decided, naming the bad leaf.
+    if let Some(Some(container)) = &patch.container {
+        container.validate()?;
+    }
 
     // GATES FIRST, EFFECT LAST (CLAUDE.md, DocumentEffect). The id lookup and
     // the subscribed-canvas refusal both run before anything is decided: a bad
@@ -594,6 +606,9 @@ pub(crate) fn update_floating_range_inner(
             // Chrome is undoable in its own right: hiding a strip SHRINKS the
             // frame, so it is a visible layout change, not a view preference.
             "Change floating range chrome"
+        } else if previous.container != updated.container {
+            // The visual container (D-FORMAT): border, background, padding...
+            "Format floating range"
         } else {
             "Move floating range"
         };
@@ -937,6 +952,17 @@ pub(crate) fn delete_floating_range_inner(
         .write(&effect)
         .unwrap()
         .retain(|fr| fr.id != id);
+    // Its object property BINDINGS go with it (WP-D, D §3.12). No restore is
+    // recorded: the backing sheet's delete above ended the undo history, so no
+    // Ctrl+Z can bring the range back to them.
+    crate::object_bindings::cascade::drop_bindings_for_objects(
+        state,
+        &effect,
+        &[crate::api_types::ObjectBindingRef {
+            kind: crate::api_types::ObjectBindingKind::FloatingRange,
+            id: id.to_string(),
+        }],
+    );
     crate::log_info!("FLOAT", "deleted floating range {}", id);
     Ok(())
 }

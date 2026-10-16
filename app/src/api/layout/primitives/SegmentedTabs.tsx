@@ -116,6 +116,7 @@ export function SegmentedTabs({
             style={fill ? FILL_TAB_STYLE : undefined}
             title={fill ? tab.label : undefined}
             data-testid={testIdPrefix ? `${testIdPrefix}${tab.id}` : undefined}
+            data-tab-id={tab.id}
             onClick={() => {
               if (!selected) onChange(tab.id);
             }}

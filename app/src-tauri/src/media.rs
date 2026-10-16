@@ -213,6 +213,16 @@ pub fn referenced_media_hashes(workbook: &persistence::Workbook) -> HashSet<Stri
     for value in workbook.extension_data.values() {
         collect_media_refs(value, &mut out);
     }
+    // A property BINDING (WP-D) can make a picture's `src` follow a formula
+    // whose string literals name handles (`=IF(A1>0,"media:<h1>","media:<h2>")`):
+    // the handle the picture shows NEXT may be referenced nowhere else, so the
+    // formula text keeps it alive. The `.calp` publish scans the published
+    // bindings with the same walker (`calp::publish`), so the two never disagree.
+    for binding in &workbook.object_bindings {
+        calcula_format::media::visit_media_refs_in_text(&binding.formula, &mut |hash| {
+            out.insert(hash.to_string());
+        });
+    }
     out
 }
 
@@ -895,7 +905,7 @@ mod tests {
             prop.to_string(),
             ControlPropertyValue { value_type: "static".into(), value: value.into() },
         );
-        ControlMetadata { control_type: "image".into(), properties }
+        ControlMetadata { control_type: "image".into(), uid: String::new(), properties }
     }
 
     fn workbook_referencing(refs: &[&str]) -> persistence::Workbook {
@@ -913,6 +923,7 @@ mod tests {
                     row: i as u32,
                     col: 0,
                     control_type: "image".into(),
+                    uid: String::new(),
                     properties,
                 }
             })
@@ -1034,6 +1045,44 @@ mod tests {
         wb.extension_data
             .insert("SomeExtension".into(), serde_json::json!({ "logo": r }));
         assert!(referenced_media_hashes(&wb).contains(&h), "extension_data");
+
+        // BUG-0474: a bound picture's formula names the handle it may show.
+        let mut wb = persistence::Workbook::new();
+        wb.object_bindings = vec![persistence::SavedObjectBinding {
+            object: persistence::SavedObjectRef { kind: "control".into(), id: "u-1".into() },
+            path: "/properties/src".into(),
+            formula: format!("=IF(Inputs!A1>0,\"{r}\",\"\")"),
+            model: None,
+        }];
+        assert!(referenced_media_hashes(&wb).contains(&h), "object_bindings");
+    }
+
+    #[test]
+    fn a_handle_only_a_binding_names_survives_the_save_sweep() {
+        // BUG-0474: the second picture is reachable only through the bound
+        // `src` formula. The sweep must keep its bytes, and still drop a blob
+        // nothing names at all.
+        let shown = "1".repeat(64);
+        let next = "2".repeat(64);
+        let orphan = "3".repeat(64);
+        let mut wb = persistence::Workbook::new();
+        let sid = wb.sheets[0].id;
+        wb.controls = vec![persistence::SavedSheetControls {
+            sheet_id: sid,
+            controls: serde_json::json!([{ "properties": { "src": media_ref(&shown) } }]),
+        }];
+        wb.object_bindings = vec![persistence::SavedObjectBinding {
+            object: persistence::SavedObjectRef { kind: "control".into(), id: "u-1".into() },
+            path: "/properties/src".into(),
+            formula: format!("=IF(Inputs!A1>0,\"{}\",\"{}\")", media_ref(&shown), media_ref(&next)),
+            model: None,
+        }];
+        for h in [&shown, &next, &orphan] {
+            wb.media.insert(h.clone(), vec![1, 2, 3]);
+        }
+        assert_eq!(sweep_unreferenced_media(&mut wb), 1, "only the blob nothing names is dropped");
+        assert!(wb.media.contains_key(&next), "the handle only the binding names is kept");
+        assert!(!wb.media.contains_key(&orphan));
     }
 
     #[test]
@@ -1214,7 +1263,12 @@ mod tests {
         let loaded = calcula_format::load_calcula(&path).unwrap();
         assert!(loaded.media.is_empty(), "nothing to restore — it is all inline");
         let mut controls: ControlStorage = HashMap::new();
-        crate::controls::materialize_saved_controls(&loaded.controls, &mut controls, |_| Some(0));
+        crate::controls::materialize_saved_controls(
+            &loaded.controls,
+            &mut controls,
+            |_| Some(0),
+            &crate::controls::PageTargetRemap::identity(),
+        );
         assert_eq!(controls.len(), 1, "the legacy control survived the round trip");
 
         let mut media = MediaStore::new();
@@ -1253,7 +1307,12 @@ mod tests {
         let reloaded = calcula_format::load_calcula(&path2).unwrap();
         assert_eq!(reloaded.media.get(&hash), Some(&logo), "bytes made it to media/");
         let mut controls2: ControlStorage = HashMap::new();
-        crate::controls::materialize_saved_controls(&reloaded.controls, &mut controls2, |_| Some(0));
+        crate::controls::materialize_saved_controls(
+            &reloaded.controls,
+            &mut controls2,
+            |_| Some(0),
+            &crate::controls::PageTargetRemap::identity(),
+        );
         let mut media2: MediaStore = reloaded.media.clone().into_iter().collect();
         assert_eq!(
             migrate_legacy_data_urls(&mut controls2, &mut media2),
@@ -1279,6 +1338,7 @@ mod tests {
             row: 3,
             col: 2,
             control_type: "image".into(),
+            uid: String::new(),
             properties,
         };
         vec![persistence::SavedSheetControls {

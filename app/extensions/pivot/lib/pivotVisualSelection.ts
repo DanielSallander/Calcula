@@ -3,11 +3,11 @@
 //          deselect and report canvas pivot boxes for a caller that is NOT a
 //          mouse press (a canvas sheet's Tab / Shift+Tab / Escape, its click on
 //          the empty page).
-// CONTEXT: The mouse route (`floatingObject:selected`) selects the box AND opens
-//          the field-list pane, the way clicking into a worksheet pivot does. A
-//          keyboard step is not a click: `select` here makes the pivot active
-//          (its Analyze/Design tabs appear) and opens nothing. Precedent:
-//          Slicer/lib/slicerObjectSelection.ts.
+// CONTEXT: Selecting a box makes the pivot active (its Analyze/Design tabs
+//          appear) and opens nothing: the box's field list lives in the ONE
+//          object pane (WP-C D-PANE), which opens by its own policy (the
+//          release of a mouse press) or through a door -- never from a keyboard
+//          step. Precedent: Slicer/lib/slicerObjectSelection.ts.
 
 import type { GridRegion } from "@api/gridOverlays";
 import {
@@ -15,8 +15,12 @@ import {
   type ObjectSelectionKey,
   type ObjectSelectionProvider,
 } from "@api/objectSelection";
-import { isPivotBoxMenuOpen, isPivotChromePressLive } from "./pivotVisualMenuState";
+import { isPivotBoxMenuOpen, isPivotCellPressHeld, isPivotChromePressLive } from "./pivotVisualMenuState";
+import { clearPivotCellSelection, hasPivotCellSelection } from "./pivotVisualCellSelection";
+import { PIVOT_CANVAS_COPY_CELLS_COMMAND, PIVOT_CANVAS_REFUSE_EDIT_COMMAND } from "./pivotCanvasCellCommands";
 import { canvasObjectRef } from "@api/canvasSheet";
+import { getGridRegions } from "@api/gridOverlays";
+import { openObjectPane } from "@api/objectPane";
 import {
   deselectPivotVisual,
   isPivotVisualSelected,
@@ -45,12 +49,15 @@ export function createPivotVisualSelectionProvider(deps?: PivotVisualSelectionDe
     select(region: GridRegion): void {
       const id = pivotIdOfVisual(region);
       if (id === null) return;
-      selectPivotVisual(id, { openPane: false });
+      selectPivotVisual(id);
     },
 
     deselectAll(): void {
-      // No-op when no box is selected.
+      // No-op when no box is selected. The cells go with the box -- also when
+      // no box is selected any more but cells were somehow left behind: an
+      // inner selection never outlives its object.
       deselectPivotVisual();
+      clearPivotCellSelection();
     },
 
     ownsKey(key: ObjectSelectionKey): boolean {
@@ -67,7 +74,35 @@ export function createPivotVisualSelectionProvider(deps?: PivotVisualSelectionDe
       // owns the key. The menu takes no focus, so the grid keeps the keyboard
       // while it is open: without this, Delete deleted the PivotTable behind
       // the open menu (or under a held +/- press).
-      return (key === "Escape" || key === "Delete") && (isPivotBoxMenuOpen() || isPivotChromePressLive());
+      // A held CELL press (a drag selecting the box's cells, pivotCellPress.ts)
+      // likewise: Escape ends the drag and keeps the cells.
+      if (
+        (key === "Escape" || key === "Delete") &&
+        (isPivotBoxMenuOpen() || isPivotChromePressLive() || isPivotCellPressHeld())
+      ) {
+        return true;
+      }
+      // SELECTED CELLS (D-CELLS) are an inner selection, like a floating
+      // grid's cell: the arrows move them (not the canvas's nudge), Escape
+      // clears them first (the canvas's Escape deselects the box only at the
+      // second press), the clipboard keys and doors copy them (not the
+      // canvas's object copy), and Delete / Backspace REFUSE -- the generic
+      // object Delete must never take the key, because for a pivot box it
+      // deletes the whole PivotTable (the DELETE HAZARD). Tab is NOT claimed:
+      // it keeps cycling the canvas's objects.
+      return (
+        hasPivotCellSelection() &&
+        (key === "Arrow" || key === "Escape" || key === "Clipboard" || key === "Delete")
+      );
+    },
+
+    // The Copy / Paste DOORS (Home tab, Edit menu) while cells are selected:
+    // Copy copies THOSE cells; Paste is refused with the pivot's sentence (a
+    // pivot's cells are not edited). Without cells the canvas's object
+    // clipboard answers, as before.
+    innerClipboardCommand(action: "copy" | "paste"): string | null {
+      if (!hasPivotCellSelection()) return null;
+      return action === "copy" ? PIVOT_CANVAS_COPY_CELLS_COMMAND : PIVOT_CANVAS_REFUSE_EDIT_COMMAND;
     },
 
     refOf(region: GridRegion) {
@@ -124,14 +159,19 @@ export function registerPivotVisualSelection(deps?: PivotVisualSelectionDeps): (
 // the new box were not SELECTED, a click on the empty page (which deselects
 // through this provider) would find nothing to deselect and leave the tabs and
 // the pane addressing a box that is not selected. So the box the create made
-// is selected (keyboard semantics: no second pane load) once the region list
-// that contains it arrives.
+// is selected once the region list that contains it arrives -- and, when the
+// create was made on the canvas (`notePivotCreated(id, { openPane: true })`),
+// the ONE object pane opens on its Fields tab as a door (WP-C D-PANE: a canvas
+// pivot's field list is never the worksheet `pivot-editor` pane).
 
 let pendingCreatedPivotId: string | null = null;
+/** Whether the pending created pivot's box opens the object pane on Fields. */
+let pendingOpensPane = false;
 
 /** Remember a pivot the user just created (PIVOT_CREATED). */
-export function notePivotCreated(pivotId: string): void {
+export function notePivotCreated(pivotId: string, opts: { openPane?: boolean } = {}): void {
   pendingCreatedPivotId = pivotId;
+  pendingOpensPane = opts.openPane === true;
 }
 
 /**
@@ -145,12 +185,21 @@ export function adoptCreatedCanvasPivot(regions: readonly PivotRegionData[]): vo
   const created = regions.find((r) => r.pivotId === pendingCreatedPivotId);
   if (!created) return;
   pendingCreatedPivotId = null;
+  const openPane = pendingOpensPane;
+  pendingOpensPane = false;
   if (created.canvasFrame != null) {
-    selectPivotVisual(created.pivotId, { openPane: false });
+    selectPivotVisual(created.pivotId);
+    if (openPane) {
+      const box = getGridRegions().find(
+        (r) => r.type === PIVOT_VISUAL_REGION_TYPE && pivotIdOfVisual(r) === created.pivotId,
+      );
+      if (box) openObjectPane({ region: box, tab: "fields", reason: "command" });
+    }
   }
 }
 
 /** Test/deactivate hook. */
 export function resetCreatedPivotTracking(): void {
   pendingCreatedPivotId = null;
+  pendingOpensPane = false;
 }

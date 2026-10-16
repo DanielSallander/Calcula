@@ -660,7 +660,7 @@ fn chart_reading(
     persistence::SavedChart {
         id: new_entity(),
         sheet_id: host,
-        spec_json: serde_json::json!({
+        spec: serde_json::json!({
             "chartId": 1,
             "name": name,
             "sheetIndex": 0,
@@ -672,8 +672,7 @@ fn chart_reading(
                     "startRow": 0, "startCol": 0, "endRow": 4, "endCol": 1
                 }
             }
-        })
-        .to_string(),
+        }),
     }
 }
 
@@ -746,8 +745,8 @@ fn a_subscribed_chart_reads_the_pulled_sheet_not_the_publishers_or_the_subscribe
 
 /// CHECKOUT preserves the application's sheet ids, so the chart's refs already
 /// name sheets the working copy has -- and the spec must come through
-/// BYTE-identical: a rewrite would re-serialize it with reordered keys and put
-/// a chart nobody edited into the next push's diff.
+/// UNCHANGED: a rewrite would put a chart nobody edited into the next push's
+/// diff.
 ///
 /// SABOTAGE: run the remap in `MaterializeMode::Checkout` too.
 #[test]
@@ -758,14 +757,15 @@ fn a_checked_out_chart_keeps_its_spec_bytes() {
     let application_data = wb.sheets[1].id;
     publish_sheets(&dir, prof.path(), &wb, vec![0, 1]);
     let checked_out = checkout_pull(&dir, prof.path());
-    let published_spec = checked_out.charts[0].spec_json.clone();
+    let published_spec = checked_out.charts[0].spec.clone();
 
     let h = Harness::new();
     h.materialize(checked_out, MaterializeMode::Checkout);
 
     let charts = h.state.charts.read().unwrap();
     assert_eq!(charts.len(), 1);
-    assert_eq!(charts[0].spec_json, published_spec, "byte-identical on checkout");
+    let stored: serde_json::Value = serde_json::from_str(&charts[0].spec_json).unwrap();
+    assert_eq!(stored, published_spec, "unchanged on checkout");
     let (source_id, _) = spec_data_ref(&charts[0].spec_json);
     assert_eq!(source_id, application_data.to_string());
     assert!(
@@ -877,6 +877,7 @@ fn workbook_with_floating_range() -> (Workbook, identity::EntityId) {
         show_title: false,
         show_column_headers: true,
         show_row_headers: false,
+        container: None,
     }];
     (wb, id)
 }
@@ -973,6 +974,7 @@ fn a_refreshed_floating_range_replaces_only_the_owned_row_on_the_old_sheets() {
         show_title: true,
         show_column_headers: true,
         show_row_headers: true,
+        container: None,
     });
     let owned_v1_id = owned_v1.id;
     h.state.floating_ranges.write(&effect).unwrap().push(owned_v1);
@@ -992,6 +994,7 @@ fn a_refreshed_floating_range_replaces_only_the_owned_row_on_the_old_sheets() {
         show_title: true,
         show_column_headers: true,
         show_row_headers: true,
+        container: None,
     };
     let owned: std::collections::HashSet<String> = [owned_v1_id.to_string()].into_iter().collect();
     let resolve = |sid: identity::SheetId| {
@@ -1056,6 +1059,7 @@ fn a_pulled_timeline_lands_on_the_pulled_sheet() {
         show_scrollbar: false,
         style_preset: "TimelineStyleLight1".to_string(),
         connected_pivot_ids: Vec::new(),
+        container: None,
     }];
     wb.pivot_definitions = vec![pivot.clone()];
     publish_sheets(&dir, prof.path(), &wb, vec![0]);
@@ -1322,6 +1326,7 @@ fn the_publish_report_counts_canvases_timelines_and_floating_ranges_as_included(
         show_scrollbar: true,
         style_preset: "TimelineStyleLight1".to_string(),
         connected_pivot_ids: Vec::new(),
+        container: None,
     };
     // One timeline whose pivot travels, one whose pivot the application lacks.
     wb.timeline_slicers = vec![timeline(carried_pivot.id), timeline(new_entity())];
@@ -1735,6 +1740,7 @@ fn a_detached_canvas_keeps_its_floating_range_timeline_and_chart_through_a_refre
         show_scrollbar: false,
         style_preset: "TimelineStyleLight1".to_string(),
         connected_pivot_ids: Vec::new(),
+        container: None,
     }];
     wb.pivot_definitions = vec![pivot];
     wb.charts = vec![chart_reading(canvas_id, other_id, 2, "OnTheCanvas")];
@@ -2073,11 +2079,10 @@ fn data_and_report() -> Workbook {
     wb.charts = vec![persistence::SavedChart {
         id: new_entity(),
         sheet_id: report_id,
-        spec_json: serde_json::json!({
+        spec: serde_json::json!({
             "chartId": 1, "name": "ByName", "sheetIndex": 1,
             "spec": { "mark": "bar", "data": "Data!A1:A1" }
-        })
-        .to_string(),
+        }),
     }];
     wb
 }
@@ -2273,6 +2278,7 @@ fn a_saved_floating_range_is_clamped_into_the_window_caps_on_the_way_in() {
         show_title: true,
         show_column_headers: true,
         show_row_headers: true,
+        container: None,
     });
     assert_eq!(row.row_count, MAX_FLOATING_RANGE_ROWS);
     assert_eq!(row.col_count, 1);
@@ -2320,6 +2326,7 @@ fn pulled_range(id: identity::EntityId, host: identity::SheetId, backing: identi
         show_title: true,
         show_column_headers: true,
         show_row_headers: true,
+        container: None,
     }
 }
 
@@ -2783,7 +2790,7 @@ fn a_push_restores_the_published_names_in_the_references_it_ships() {
     wb.charts = vec![persistence::SavedChart {
         id: new_entity(),
         sheet_id: wb.sheets[1].id,
-        spec_json: serde_json::json!({ "spec": { "data": "'Data (2)'!A1:A1" } }).to_string(),
+        spec: serde_json::json!({ "spec": { "data": "'Data (2)'!A1:A1" } }),
     }];
     // LOWERCASED local name -> published name, as `assemble_publish_workbook`
     // builds it; a chain, so a pairwise undo would be caught too.
@@ -2802,7 +2809,7 @@ fn a_push_restores_the_published_names_in_the_references_it_ships() {
     assert_eq!(cells[&(0, 0)].formula.as_deref(), Some("Data!A1*2+'A (2)'!A1"));
     assert_eq!(cells[&(1, 0)].formula, own_reference, "left exactly as it was");
     assert_eq!(wb.named_ranges[0].refers_to, "=Data!$A$1");
-    assert!(wb.charts[0].spec_json.contains("Data!A1:A1") && !wb.charts[0].spec_json.contains("(2)"));
+    assert_eq!(wb.charts[0].spec["spec"]["data"], "Data!A1:A1");
 }
 
 /// BUG-0151 ON RESET. "Reset to published" re-pulls the version the subscriber
@@ -3430,6 +3437,7 @@ fn report_with_a_computed_slicer() -> (Workbook, identity::EntityId) {
         connected_sources: Vec::new(),
         filter_level: 1,
         data_source_id: None,
+        container: None,
     }];
     (wb, slicer_id)
 }
@@ -3604,5 +3612,245 @@ fn no_door_strips_a_slicers_computed_properties() {
     assert!(
         !code.contains("computed_properties = Vec::new()"),
         "a door empties slicers' computed properties again"
+    );
+}
+
+// ===========================================================================
+// BUG-0449 / D-NAV: page targets follow the subscriber's sheets on every pull
+// ===========================================================================
+
+/// The canvases "Sales" and "Detail". On Sales: a navigate button at (1, 1)
+/// whose action targets Detail by id and name, and a Page Navigator at (2, 1)
+/// with an override on Detail (caption "Details") and the given `gap`.
+fn sales_and_detail(gap: &str) -> Workbook {
+    let mut sales = Sheet::new("Sales".to_string());
+    sales.kind = persistence::SheetKind::new_canvas();
+    let mut detail = Sheet::new("Detail".to_string());
+    detail.kind = persistence::SheetKind::new_canvas();
+    let (sales_id, detail_id) = (sales.id, detail.id);
+    let overrides = calcula_format::page_navigator::serialize_page_overrides(&[
+        calcula_format::page_navigator::PageOverrideWire {
+            sheet_id: detail_id.to_string(),
+            sheet_name: "Detail".to_string(),
+            text: Some("Details".to_string()),
+            hidden: None,
+            fill: None,
+            color: None,
+            border_color: None,
+        },
+    ]);
+    let mut wb = Workbook::default();
+    wb.sheets = vec![sales, detail];
+    wb.controls = vec![persistence::SavedSheetControls {
+        sheet_id: sales_id,
+        // Every control a build publishes carries its stable uid (WP-D S5a).
+        controls: serde_json::json!([
+            { "row": 1, "col": 1, "controlType": "button", "uid": "app-nav-button", "properties": {
+                "text": static_prop("Go to detail"),
+                "pinToGrid": static_prop("false"),
+                "action": static_prop("navigate"),
+                "actionTarget": static_prop(&detail_id.to_string()),
+                "actionTargetName": static_prop("Detail") } },
+            { "row": 2, "col": 1, "controlType": "pageNavigator", "uid": "app-navigator", "properties": {
+                "pinToGrid": static_prop("false"),
+                "orientation": static_prop("horizontal"),
+                "gap": static_prop(gap),
+                "pageOverrides": static_prop(&overrides) } }
+        ]),
+    }];
+    wb
+}
+
+/// A harness whose one sheet is the subscriber's (or author's) OWN "Detail".
+fn harness_with_own_detail() -> Harness {
+    let h = Harness::new();
+    h.state.sheet_names.write(&test_effect()).unwrap()[0] = "Detail".to_string();
+    h
+}
+
+/// The live (button, navigator) pair on the sheet named `sales`.
+fn page_target_controls(h: &Harness, sales: &str) -> (crate::controls::ControlMetadata, crate::controls::ControlMetadata) {
+    let idx = h.index_of(sales);
+    let controls = h.state.controls.read().unwrap();
+    (
+        controls.get(&(idx, 1, 1)).expect("the navigate button landed").clone(),
+        controls.get(&(idx, 2, 1)).expect("the page navigator landed").clone(),
+    )
+}
+
+/// The one override of a navigator, parsed.
+fn the_override(nav: &crate::controls::ControlMetadata) -> calcula_format::page_navigator::PageOverrideWire {
+    let raw = &nav.properties["pageOverrides"].value;
+    let mut list = calcula_format::page_navigator::parse_page_overrides(raw).expect("the overrides still parse");
+    assert_eq!(list.len(), 1, "{raw}");
+    list.remove(0)
+}
+
+fn local_sheet_id(h: &Harness, name: &str) -> String {
+    h.state.sheet_ids.read().unwrap()[h.index_of(name)].to_string()
+}
+
+/// BUG-0449 at SUBSCRIBE. The subscriber owns "Detail", so the application's
+/// arrives as "Detail (2)". The navigate button's `actionTarget` and the
+/// navigator override's `sheetId` named the APPLICATION's id, which resolves to
+/// nothing here, so a click fell back to the name "Detail" -- the subscriber's
+/// own sheet. Ids now follow the local sheet (`controls.rs`), names follow the
+/// collision rename (`sheet_renames`).
+///
+/// SABOTAGE: pass `PageTargetRemap::identity()` in `materialize_pull_result` ->
+/// the id assertions go red.
+#[test]
+fn bug_0449_a_subscribed_navigate_button_and_navigator_go_to_the_pulled_page_after_a_collision_rename() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let wb = sales_and_detail("8");
+    let app_detail = wb.sheets[1].id.to_string();
+    publish_sheets(&dir, prof.path(), &wb, vec![0, 1]);
+    let h = harness_with_own_detail();
+    h.materialize(subscribe_pull(&dir, prof.path()), MaterializeMode::Subscribe);
+
+    let pulled_detail = local_sheet_id(&h, "Detail (2)");
+    assert_ne!(pulled_detail, app_detail, "precondition: a subscribe gives the pulled sheet an id of its own");
+    assert_ne!(pulled_detail, local_sheet_id(&h, "Detail"), "precondition: not the subscriber's own Detail");
+    let (button, nav) = page_target_controls(&h, "Sales");
+    assert_eq!(button.properties["actionTarget"].value, pulled_detail, "the button's id names the pulled page");
+    assert_eq!(button.properties["actionTargetName"].value, "Detail (2)", "and so does its name fallback");
+    assert_eq!(button.properties["action"].value, "navigate", "the action stays live");
+    let o = the_override(&nav);
+    assert_eq!(o.sheet_id, pulled_detail, "the navigator override's id names the pulled page");
+    assert_eq!(o.sheet_name, "Detail (2)");
+    assert_eq!(o.text.as_deref(), Some("Details"), "the caption survives the rewrite");
+}
+
+/// BUG-0449 at REFRESH -- the door that throws the controls away and
+/// re-materialises them. The subscriber renamed "Detail (2)" to "Detail Local"
+/// after subscribing; v2 still ships the button and the navigator (with a new
+/// gap, the proof the refresh replaced them). Both must name the LOCAL id of
+/// "Detail Local" and its local name.
+///
+/// SABOTAGE: pass `PageTargetRemap::identity()` in `apply_refresh_payloads` ->
+/// red (with every other test green, BUG-0449 would return after the first
+/// refresh).
+#[test]
+fn a_refreshed_navigate_button_and_navigator_keep_their_local_page_targets() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let wb = sales_and_detail("8");
+    let app_detail = wb.sheets[1].id.to_string();
+    publish_as(&dir, prof.path(), &wb, vec![0, 1], "literals", (1, 0, 0), None);
+    let h = harness_with_own_detail();
+    h.materialize(pull_latest(&dir, prof.path(), "literals"), MaterializeMode::Subscribe);
+    let pulled = h.index_of("Detail (2)");
+    crate::sheets::rename_sheet_inner(
+        &h.state,
+        &crate::persistence::FileState::default(),
+        &h.pivot,
+        pulled,
+        "Detail Local".to_string(),
+        false,
+    )
+    .expect("the subscriber renames the pulled page");
+    let local = local_sheet_id(&h, "Detail Local");
+
+    publish_as(&dir, prof.path(), &sales_and_detail_v2(&wb), vec![0, 1], "literals", (1, 1, 0), Some((1, 0, 0)));
+    h.refresh(vec![(0, pull_latest(&dir, prof.path(), "literals"))]);
+
+    assert_eq!(local_sheet_id(&h, "Detail Local"), local, "precondition: the refresh kept the local sheet");
+    let (button, nav) = page_target_controls(&h, "Sales");
+    assert_eq!(nav.properties["gap"].value, "24", "the refresh replaced the navigator with v2's");
+    assert_ne!(local, app_detail);
+    assert_eq!(button.properties["actionTarget"].value, local);
+    assert_eq!(button.properties["actionTargetName"].value, "Detail Local");
+    let o = the_override(&nav);
+    assert_eq!(o.sheet_id, local);
+    assert_eq!(o.sheet_name, "Detail Local");
+}
+
+/// v2 of `sales_and_detail`: the same sheets (same ids), the navigator's gap 24.
+fn sales_and_detail_v2(v1: &Workbook) -> Workbook {
+    let mut v2 = v1.clone();
+    if let Some(entries) = v2.controls[0].controls.as_array_mut() {
+        entries[1]["properties"]["gap"] = static_prop("24");
+    }
+    v2
+}
+
+/// The WIRING: every pull door states its page-target rule as `from_pull`,
+/// and no door in calp_commands.rs passes `identity()` (that is for `.cala`
+/// load and unit tests only) -- a door passing it would compile and pass every
+/// unit test while a subscriber's navigation opened the wrong page.
+///
+/// SABOTAGE: pass `PageTargetRemap::identity()` at any one door.
+#[test]
+fn no_pull_door_materializes_controls_with_an_identity_page_remap() {
+    let from_pull = ["PageTargetRemap", "::from_pull("].concat();
+    for signature in [
+        "pub(crate) fn materialize_pull_result(",
+        "pub(crate) fn apply_refresh_payloads(",
+        "fn materialize_dev_controls(",
+    ] {
+        let code = calp_commands_fn_code(signature);
+        assert!(code.contains("materialize_saved_controls("), "{signature} no longer materializes controls");
+        assert!(code.contains(&from_pull), "{signature} does not build its page-target remap with from_pull");
+    }
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/calp_commands.rs"),
+    )
+    .expect("cannot read calp_commands.rs");
+    let code: String = src
+        .lines()
+        .map(|l| match l.find("//") {
+            Some(i) => &l[..i],
+            None => l,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let identity = ["PageTargetRemap", "::identity("].concat();
+    assert!(!code.contains(&identity), "a .calp door materializes controls with an identity page-target remap");
+}
+
+/// CHECKOUT + PUSH. The author owns "Detail", so the application's arrives in
+/// the working copy as "Detail (2)" -- with the APPLICATION's id (a checkout
+/// keeps ids). The working copy's targets read the local name; an untouched
+/// push puts the published name back and republishes the controls byte for
+/// byte.
+///
+/// SABOTAGE: drop the `visit_control_page_target_names` call from
+/// `rename_control_entries` (the working copy keeps "Detail", the
+/// author's own sheet), or re-serialise unconditionally in the remap.
+#[test]
+fn an_untouched_checkout_push_republishes_navigator_targets_byte_for_byte() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let wb = sales_and_detail("8");
+    let app_detail = wb.sheets[1].id.to_string();
+    publish_as(&dir, prof.path(), &wb, vec![0, 1], "literals", (1, 0, 0), None);
+    let h = harness_with_own_detail();
+    h.materialize(checkout_pull(&dir, prof.path()), MaterializeMode::Checkout);
+
+    assert_eq!(local_sheet_id(&h, "Detail (2)"), app_detail, "precondition: a checkout keeps the application's ids");
+    let (button, nav) = page_target_controls(&h, "Sales");
+    assert_eq!(button.properties["actionTarget"].value, app_detail);
+    assert_eq!(button.properties["actionTargetName"].value, "Detail (2)", "the working copy's name, not the author's own");
+    let o = the_override(&nav);
+    assert_eq!(o.sheet_id, app_detail);
+    assert_eq!(o.sheet_name, "Detail (2)");
+
+    let mut carrier = wb.clone();
+    carrier.controls =
+        crate::controls::collect_controls_for_save(&h.state.controls.read().unwrap(), &h.state.sheet_ids.read().unwrap());
+    let published: std::collections::HashMap<String, String> =
+        [("detail (2)".to_string(), "Detail".to_string())].into_iter().collect();
+    let counts = crate::calp_commands::restore_published_sheet_references(&mut carrier, &[0, 1], &published);
+    assert_eq!(counts.controls, 2, "the button's and the override's names are restored");
+    publish_as(&dir, prof.path(), &carrier, vec![0, 1], "literals", (1, 0, 1), Some((1, 0, 0)));
+
+    let reg = calp::workspace::LocalWorkspace::open(dir.path()).unwrap();
+    let base = reg.read_artifact("literals", "1.0.0", "controls.json").unwrap().expect("v1.0.0 has controls");
+    let pushed = reg.read_artifact("literals", "1.0.1", "controls.json").unwrap().expect("v1.0.1 has controls");
+    assert_eq!(
+        String::from_utf8_lossy(&pushed),
+        String::from_utf8_lossy(&base),
+        "an untouched push changed the application's page targets"
     );
 }

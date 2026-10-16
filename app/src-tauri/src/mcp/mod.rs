@@ -28,6 +28,12 @@ pub(crate) mod objects;
 // Kept in its own module because its store must never be confused with — or
 // merged into — the workbook's mount-on-load object scripts.
 pub(crate) mod drafts;
+// Object property BINDINGS (WP-D): list_object_properties / set_object_property /
+// set_object_binding, and the summary's "Canvas objects" section. The same op
+// cores the `object_bindings` Tauri command runs, behind `objects::gate`.
+pub(crate) mod bindings;
+#[cfg(test)]
+mod bindings_tests;
 
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager};

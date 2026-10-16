@@ -1,8 +1,9 @@
 //! FILENAME: app/extensions/FloatingRange/__tests__/frMoveZones.test.ts
 // PURPOSE: Which part of a floating range MOVES it, which part RESIZES it, and
 //          which part is the working surface -- what a press there does (move,
-//          select, the range's own cell work, a reference pick, an edge-ball
-//          scale, the commit of an open edit), the pointer that must agree with
+//          select, the range's own cell work, an edge-ball scale, the commit of
+//          an open edit; a reference pick is Core's and the range inserts
+//          nothing itself -- D-PICK), the pointer that must agree with
 //          it, the extended hit area of the edge balls, the edge-scale's page
 //          clamp and the corner count-resize's fit.
 // CONTEXT: Owner finding 2026-09-27: "a floating grid cannot be moved" -- the
@@ -74,6 +75,9 @@ vi.mock("@api/editing", () => ({
       },
     };
   },
+  // Core's one predicate (core/lib/referencePickState.ts): the grid's point
+  // mode OR an external target expecting a reference.
+  isFormulaReferencePickActive: () => formula.grid || formula.external?.expecting === true,
 }));
 
 /** Where the frame's top-left sits on the canvas in these tests. */
@@ -110,7 +114,7 @@ vi.mock("@api/lib", () => ({
   getUsedRange: async () => ({ startRow: 0, startCol: 0, endRow: 0, endCol: 0, empty: true }),
 }));
 
-import extension, { quantizeCornerResize, resizeFr, frZoneAt } from "../index";
+import extension, { quantizeCornerResize, resizeFr, frZoneAt, frReferenceAt } from "../index";
 import {
   upsertFromInfo,
   getFloatingRangeById,
@@ -133,13 +137,13 @@ import {
 } from "../lib/frDimensions";
 import { hitTestFloatingRange } from "../rendering/frRenderer";
 import { recordFrUsedExtent, resetFrExtents } from "../lib/frExtent";
-import { buildQualifiedRef } from "../lib/frRefs";
 import { registerLayoutSurfaceProvider, type LayoutSurface } from "@api/layoutSurface";
 import { registerGridOverlay, getOverlayRegistration } from "@api/gridOverlays";
 import { onAppEvent } from "@api/events";
 import type { FloatingRangeInfo } from "@api/floatingRanges";
 import type { GridRegion, OverlayHitTestContext, OverlayRegistration } from "@api/gridOverlays";
 import { pressInCoreOrder, clickInCoreOrder, hoverCursorLikeCore } from "./helpers/frPress";
+import { frContainerOf } from "../lib/frObjectFormat";
 
 const FR_ID = "fr-uuid-1";
 
@@ -409,56 +413,50 @@ describe("an open cell edit and the press that leaves it", () => {
 });
 
 // ============================================================================
-// A reference pick: the press FEEDS a formula, once, and selects nothing
+// A reference pick is Core's (D-PICK): the range inserts nothing itself
 // ============================================================================
+//
+// While a formula expects a reference Core asks `frReferenceAt` (never the
+// zone), inserts "<name>!A1" itself and dispatches neither press event -- that
+// is pinned on Core's side (overlayReferencePick.test.ts,
+// floatingReferencePickRouting.test.tsx) and the answer in frReferenceAt.test.ts.
+// What is left here is the range's SECOND line: should the old press events
+// arrive during a pick anyway, they are refused on the one shared predicate.
 
-describe("a reference pick (a formula expects a reference)", () => {
+describe("a reference pick: the range inserts nothing itself", () => {
   const PRIOR = { frId: FR_ID, anchorRow: 2, anchorCol: 2, endRow: 2, endCol: 2 };
 
-  it("over a cell: the reference is inserted EXACTLY once; the object is not selected, the cell selection does not move", () => {
+  it("a press in the old order on a cell answers the ordinary 'cells' zone and inserts, selects and commits nothing", () => {
     formula.external = { expecting: true };
     setLocalSelection({ ...PRIOR });
     const c = cellCentre(0, 1);
-    expect(clickInCoreOrder(ctxAt(c.dx, c.dy, FREE))).toBe("content");
-    expect(insertReference).toHaveBeenCalledTimes(1);
-    expect(insertReference).toHaveBeenCalledWith({
-      sheetName: "Float1",
-      startRow: 0,
-      startCol: 1,
-      endRow: 0,
-      endCol: 1,
-    });
+    const ctx = ctxAt(c.dx, c.dy, FREE);
+    expect(frZoneAt(ctx)).toEqual({ kind: "content", cursor: "cell", part: "cells" });
+    expect(clickInCoreOrder(ctx)).toBe("content");
+    expect(insertReference).not.toHaveBeenCalled();
+    expect(insertTextIntoActiveFormula).not.toHaveBeenCalled();
     expect(isFloatingRangeSelected(FR_ID)).toBe(false);
     expect(getLocalSelection()).toMatchObject(PRIOR);
     expect(commitFrEditor).not.toHaveBeenCalled();
-  });
 
-  it("over the TITLE: nothing is inserted, and the press neither selects nor moves the object", () => {
-    formula.external = { expecting: true };
-    setLocalSelection({ ...PRIOR });
-    expect(clickInCoreOrder(ctxAt(40, 8, FREE))).toBe("content");
+    // The grid's own point mode drives the same predicate.
+    formula.external = null;
+    formula.grid = true;
+    expect(clickInCoreOrder(ctx)).toBe("content");
     expect(insertReference).not.toHaveBeenCalled();
+    expect(insertTextIntoActiveFormula).not.toHaveBeenCalled();
     expect(isFloatingRangeSelected(FR_ID)).toBe(false);
     expect(getLocalSelection()).toMatchObject(PRIOR);
   });
 
-  it("the grid's own formula: the qualified reference is typed EXACTLY once", () => {
-    formula.grid = true;
-    const c = cellCentre(1, 0);
-    expect(clickInCoreOrder(ctxAt(c.dx, c.dy, FREE))).toBe("content");
-    expect(insertTextIntoActiveFormula).toHaveBeenCalledTimes(1);
-    expect(insertTextIntoActiveFormula).toHaveBeenCalledWith(buildQualifiedRef("Float1", 1, 0));
-    expect(isFloatingRangeSelected(FR_ID)).toBe(false);
-  });
-
-  it("hovering first inserts nothing; the press inserts once", () => {
-    formula.external = { expecting: true };
+  it("control: the same press with no formula picking selects the range and moves the cell selection", () => {
+    setLocalSelection({ ...PRIOR });
     const c = cellCentre(0, 1);
-    const ctx = ctxAt(c.dx, c.dy, FREE);
-    for (let i = 0; i < 25; i++) hoverCursorLikeCore(ctx);
+    expect(clickInCoreOrder(ctxAt(c.dx, c.dy, FREE))).toBe("content");
+    expect(isFloatingRangeSelected(FR_ID)).toBe(true);
+    expect(getLocalSelection()).toMatchObject({ anchorRow: 0, anchorCol: 1, endRow: 0, endCol: 1 });
     expect(insertReference).not.toHaveBeenCalled();
-    pressInCoreOrder(ctx);
-    expect(insertReference).toHaveBeenCalledTimes(1);
+    expect(insertTextIntoActiveFormula).not.toHaveBeenCalled();
   });
 });
 
@@ -667,16 +665,22 @@ describe("the pointer over each zone, and the balls' extended hit area", () => {
     expect(hoverCursorLikeCore(ctxAt(w - 2, h / 2, FREE))).toBe("cell");
   });
 
-  it("while a formula picks, the whole range says 'cell' -- the title too (a press there picks, never moves)", () => {
-    // M5 T5b, deliberate: the pointer is the zone the press will act on. The
-    // range's own cursor used to show 'move' over the title in point mode,
-    // where the press never moves the object.
+  it("while a formula picks, a cell says 'cell' and the title says 'default' -- never 'move' (a press there is inert)", () => {
+    // D-PICK, deliberate: during a pick the pointer is Core's answer from the
+    // range's `referenceAt` -- 'cell' where a press names a cell, 'default'
+    // where it does nothing (the title: before D-PICK the whole range said
+    // 'cell' and a title press inserted nothing either). Never 'move': the
+    // press does not move the object.
     formula.external = { expecting: true };
-    expect(hoverCursorLikeCore(ctxAt(40, 8, FREE))).toBe("cell");
+    expect(hoverCursorLikeCore(ctxAt(40, 8, FREE))).toBe("default");
     expect(hoverCursorLikeCore(ctxAt(CELL_00.dx, CELL_00.dy, FREE))).toBe("cell");
     formula.external = null;
     formula.grid = true;
-    expect(hoverCursorLikeCore(ctxAt(40, 8, FREE))).toBe("cell");
+    expect(hoverCursorLikeCore(ctxAt(40, 8, FREE))).toBe("default");
+    expect(hoverCursorLikeCore(ctxAt(CELL_00.dx, CELL_00.dy, FREE))).toBe("cell");
+    // Control: no pick, and the title moves again.
+    formula.grid = false;
+    expect(hoverCursorLikeCore(ctxAt(40, 8, FREE))).toBe("move");
   });
 
   it("a near miss on a range whose geometry is frozen never promises the scale its press refuses", () => {
@@ -713,7 +717,7 @@ describe("frZoneAt: the range's one zone answer", () => {
     expect(registration.claimsBodyDrag).toBeUndefined();
   });
 
-  it("is PURE: 1000 answers over cells, headers, title and live balls -- an edit open, then a formula picking -- commit nothing, insert nothing, start no drag, select nothing", () => {
+  it("is PURE and pick-blind: 1000 answers over cells, headers, title and live balls -- an edit open, then a formula picking -- give the SAME parts, and commit nothing, insert nothing, start no drag, select nothing", () => {
     const entry = getFloatingRangeById(FR_ID)!;
     const w = frameWidth(entry);
     const h = frameHeight(entry);
@@ -721,12 +725,14 @@ describe("frZoneAt: the range's one zone answer", () => {
     setLocalSelection({ ...PRIOR });
 
     /** Every point of a 25 x 20 lattice from 4px outside the frame to 4px past it, plus the four ball centres. */
-    function sweep(flags: Record<string, unknown>): { parts: Set<string>; calls: number } {
+    function sweep(flags: Record<string, unknown>): { parts: Set<string>; answers: string[]; calls: number } {
       const parts = new Set<string>();
+      const answers: string[] = [];
       let calls = 0;
       const ask = (dx: number, dy: number) => {
         const zone = frZoneAt(ctxAt(dx, dy, flags));
         calls++;
+        answers.push(JSON.stringify(zone));
         if (zone?.part) parts.add(zone.part);
       };
       for (let i = 0; i <= 24; i++) {
@@ -742,7 +748,9 @@ describe("frZoneAt: the range's one zone answer", () => {
       // commit-before-select run from the answer would be heard.
       editorCell.mockReturnValue({ frId: "fr-other", row: 0, col: 0 });
       const live = sweep(SELECTED);
-      // Then a formula picking a reference: a pick run from the answer would insert.
+      // Then a formula picking a reference: a pick run from the answer would
+      // insert. A pick is not a zone any more (D-PICK: Core asks referenceAt
+      // instead), so the answers are exactly the ones given without a pick.
       formula.external = { expecting: true };
       const picking = sweep(SELECTED);
 
@@ -751,7 +759,10 @@ describe("frZoneAt: the range's one zone answer", () => {
       for (const part of ["edgeHandle", "title", "cells", "rowHeader", "colHeader", "outside"]) {
         expect(live.parts, `the sweep never reached '${part}'`).toContain(part);
       }
-      expect([...picking.parts]).toEqual(["referencePick"]);
+      // Point by point, not just the same set of parts.
+      expect(picking.answers).toEqual(live.answers);
+      expect([...picking.parts].sort()).toEqual([...live.parts].sort());
+      expect(picking.parts.has("referencePick")).toBe(false);
 
       expect(commitFrEditor).not.toHaveBeenCalled();
       expect(editorCell()).toEqual({ frId: "fr-other", row: 0, col: 0 });
@@ -764,6 +775,64 @@ describe("frZoneAt: the range's one zone answer", () => {
       expect(isFloatingRangeSelected(FR_ID)).toBe(false);
     } finally {
       listen.mockRestore();
+    }
+  });
+
+  it("frReferenceAt names the range's own cell over every 'cells' point and nothing over the title, the headers or outside -- and is PURE", () => {
+    const entry = getFloatingRangeById(FR_ID)!;
+    const w = frameWidth(entry);
+    const h = frameHeight(entry);
+    const PRIOR = { frId: FR_ID, anchorRow: 1, anchorCol: 1, endRow: 1, endCol: 1 };
+    setLocalSelection({ ...PRIOR });
+    formula.external = { expecting: true };
+
+    const listen = vi.spyOn(window, "addEventListener");
+    const dispatch = vi.spyOn(window, "dispatchEvent");
+    try {
+      let cellPoints = 0;
+      let otherPoints = 0;
+      const otherParts = new Set<string>();
+      for (let i = 0; i <= 24; i++) {
+        for (let j = 0; j <= 19; j++) {
+          const dx = -4 + ((w + 8) * i) / 24;
+          const dy = -4 + ((h + 8) * j) / 19;
+          const ctx = ctxAt(dx, dy, FREE);
+          // The zone says what the point IS (pick-blind, pinned above).
+          const part = frZoneAt(ctx)?.part ?? "none";
+          const pick = frReferenceAt(ctx);
+          if (part === "cells") {
+            cellPoints++;
+            expect(pick, `(${dx}, ${dy}) is a cell`).toEqual({
+              space: "object",
+              name: "Float1",
+              row: Math.floor((dy - FR_TITLE_H - FR_COL_HDR_H) / FR_DEFAULT_ROW_H),
+              col: Math.floor((dx - FR_ROW_HDR_W) / FR_DEFAULT_COL_W),
+            });
+          } else {
+            otherPoints++;
+            otherParts.add(part);
+            expect(pick, `(${dx}, ${dy}) is '${part}'`).toBeNull();
+          }
+        }
+      }
+      // The sweep reached cells AND every kind of non-cell point.
+      expect(cellPoints).toBeGreaterThan(50);
+      expect(otherPoints).toBeGreaterThan(50);
+      for (const part of ["title", "rowHeader", "colHeader", "outside"]) {
+        expect(otherParts, `the sweep never reached '${part}'`).toContain(part);
+      }
+
+      expect(commitFrEditor).not.toHaveBeenCalled();
+      expect(insertReference).not.toHaveBeenCalled();
+      expect(insertTextIntoActiveFormula).not.toHaveBeenCalled();
+      expect(dispatch).not.toHaveBeenCalled();
+      const dragListeners = listen.mock.calls.filter(([type]) => type === "mousemove" || type === "mouseup");
+      expect(dragListeners, "an answer started a drag").toEqual([]);
+      expect(getLocalSelection()).toMatchObject(PRIOR);
+      expect(isFloatingRangeSelected(FR_ID)).toBe(false);
+    } finally {
+      listen.mockRestore();
+      dispatch.mockRestore();
     }
   });
 });
@@ -837,5 +906,70 @@ describe("quantizeCornerResize", () => {
       height: frameHeight(entry),
     });
     expect(q.cols).toBe(4);
+  });
+});
+
+// ============================================================================
+// The visual container's padding band (WP-C S12)
+// ============================================================================
+
+describe("the container's padding band: frame around, the title bar and the cells inside", () => {
+  const PAD = 12;
+
+  /** The region Core would hand the press, carrying the RESOLVED container the store publishes. */
+  function ctxPadded(dx: number, dy: number, flags: Record<string, unknown>): OverlayHitTestContext {
+    const ctx = ctxAt(dx, dy, flags);
+    const entry = getFloatingRangeById(FR_ID)!;
+    return { ...ctx, region: { ...ctx.region, container: frContainerOf(entry) } as GridRegion };
+  }
+
+  beforeEach(() => {
+    load({ container: { padding: { top: PAD, right: PAD, bottom: PAD, left: PAD } } });
+  });
+
+  it("the frame grew by the padding on every side", () => {
+    const entry = getFloatingRangeById(FR_ID)!;
+    expect(frameWidth(entry)).toBeCloseTo(FR_ROW_HDR_W + 3 * FR_DEFAULT_COL_W + 2 * PAD, 6);
+    expect(frameHeight(entry)).toBeCloseTo(FR_TITLE_H + FR_COL_HDR_H + 4 * FR_DEFAULT_ROW_H + 2 * PAD, 6);
+  });
+
+  it("the TITLE bar inside the padding is still the move zone; the padding band is the frame too", () => {
+    expect(clickInCoreOrder(ctxPadded(PAD + 40, PAD + 8, FREE))).toBe("move");
+    expect(clickInCoreOrder(ctxPadded(PAD / 2, 60, FREE))).toBe("move");
+    // Above the title bar, inside the frame: the band, not the title.
+    expect(clickInCoreOrder(ctxPadded(PAD + 40, PAD / 2, FREE))).toBe("move");
+    // A frozen range's band only selects, like its title.
+    expect(clickInCoreOrder(ctxPadded(PAD / 2, 60, FROZEN))).toBe("select");
+  });
+
+  it("the first cell is at the CONTENT origin: a press there selects cell (0,0)", () => {
+    const c = cellCentre(0, 0);
+    expect(clickInCoreOrder(ctxPadded(c.dx + PAD, c.dy + PAD, FREE))).toBe("content");
+    expect(getLocalSelection()).toMatchObject({ frId: FR_ID, anchorRow: 0, anchorCol: 0, endRow: 0, endCol: 0 });
+  });
+
+  it("frZoneAt asked directly answers the band as the frame (part 'padding'), never a cell or a header", () => {
+    expect(frZoneAt(ctxPadded(PAD / 2, 60, FREE))).toEqual({ kind: "frame", part: "padding" });
+    const right = frameWidth(getFloatingRangeById(FR_ID)!) - PAD / 2;
+    expect(frZoneAt(ctxPadded(right, 60, FREE))).toEqual({ kind: "frame", part: "padding" });
+    // Just inside the content's left edge is the row gutter again.
+    expect(frZoneAt(ctxPadded(PAD + 2, cellCentre(1, 0).dy + PAD, FREE))).toMatchObject({ part: "rowHeader" });
+  });
+
+  it("a reference pick in the band names nothing", () => {
+    expect(frReferenceAt(ctxPadded(PAD / 2, 60, FREE))).toBeNull();
+  });
+
+  it("the corner count-resize keeps the padding out of the counts (the derived frame fits again)", () => {
+    const entry = getFloatingRangeById(FR_ID)!;
+    const q = quantizeCornerResize(entry, {
+      x: entry.x,
+      y: entry.y,
+      width: frameWidth(entry) + FR_DEFAULT_COL_W,
+      height: frameHeight(entry),
+    });
+    expect(q.cols).toBe(4);
+    expect(q.rows).toBe(4);
+    expect(q.width).toBeCloseTo(frameWidth(entry) + FR_DEFAULT_COL_W, 6);
   });
 });

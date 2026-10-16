@@ -8,6 +8,8 @@ import {
   getPresetsByCategory,
   getPresetColors,
   buildPresetUpdates,
+  presetContainerPatch,
+  specHasPresetBackground,
   type ChartStylePreset,
 } from "../chartStylePresets";
 
@@ -52,9 +54,12 @@ describe("CHART_STYLE_PRESETS", () => {
     }
   });
 
-  it("all presets have a background color in theme", () => {
+  it("every preset has a background colour, and it is the CONTAINER's, never a theme key", () => {
+    // D-FORMAT: the chart's outer background moved from theme.background to
+    // container.background.color -- one spelling for the fact.
     for (const preset of CHART_STYLE_PRESETS) {
-      expect(preset.theme.background).toBeTruthy();
+      expect(preset.background).toMatch(/^#[0-9a-fA-F]{3,8}$/);
+      expect("background" in preset.theme).toBe(false);
     }
   });
 });
@@ -143,7 +148,18 @@ describe("buildPresetUpdates", () => {
     expect(updates.palette).toBe("default");
     expect(updates.config).toBeDefined();
     expect((updates.config as any).theme).toBeDefined();
-    expect((updates.config as any).theme.background).toBe("#ffffff");
+    expect((updates.config as any).theme.background).toBeUndefined();
+    // The background rides the container, merged (padding, border ... stay).
+    expect(updates.container).toEqual({ background: { color: "#ffffff" } });
+    expect(updates.container).toEqual(presetContainerPatch(preset));
+  });
+
+  it("the gallery's current ring compares the CONTAINER background (white when unset)", () => {
+    const white = getPresetById("colorful-1")!;
+    const dark = getPresetById("dark-1")!;
+    expect(specHasPresetBackground({}, white)).toBe(true);
+    expect(specHasPresetBackground({ container: { background: { color: "#1E1E1E" } } }, dark)).toBe(true);
+    expect(specHasPresetBackground({ container: { background: { color: "#1e1e1e" } } }, white)).toBe(false);
   });
 
   it("includes gridLines update in yAxis", () => {
@@ -171,7 +187,7 @@ describe("buildPresetUpdates", () => {
   it("dark presets have dark background colors", () => {
     const darkPresets = CHART_STYLE_PRESETS.filter((p) => p.category === "dark");
     for (const preset of darkPresets) {
-      const bg = preset.theme.background!;
+      const bg = preset.background;
       // Dark backgrounds should have low luminance (first hex byte < 0x40)
       const r = parseInt(bg.slice(1, 3), 16);
       expect(r).toBeLessThan(64);
@@ -193,7 +209,7 @@ describe("preset serialization", () => {
       expect(parsed[i].id).toBe(CHART_STYLE_PRESETS[i].id);
       expect(parsed[i].name).toBe(CHART_STYLE_PRESETS[i].name);
       expect(parsed[i].palette).toBe(CHART_STYLE_PRESETS[i].palette);
-      expect(parsed[i].theme.background).toBe(CHART_STYLE_PRESETS[i].theme.background);
+      expect(parsed[i].background).toBe(CHART_STYLE_PRESETS[i].background);
     }
   });
 });

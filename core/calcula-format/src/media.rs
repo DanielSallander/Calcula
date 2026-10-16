@@ -519,6 +519,33 @@ pub fn visit_media_refs(value: &serde_json::Value, visit: &mut impl FnMut(&str))
     }
 }
 
+/// Call `visit` with the hash of every well-formed `media:` handle that appears
+/// INSIDE `text` -- the string literals of a property BINDING formula
+/// (`=IF(Inputs!A1>0,"media:<h1>","media:<h2>")`), which a bound picture's
+/// `src` resolves to. A formula is never EQUAL to a handle, so
+/// [`visit_media_refs`] cannot see one there.
+///
+/// Like `visit_media_refs`, ONE implementation for both callers: the `.cala`
+/// save sweep keeps what this finds in `Workbook.object_bindings`, and the
+/// `.calp` publish ships what it finds in the PUBLISHED bindings. A handle a
+/// formula only reads from a CELL is not seen (a cell's text was never a media
+/// reference to either walker).
+pub fn visit_media_refs_in_text(text: &str, visit: &mut impl FnMut(&str)) {
+    let mut rest = text;
+    while let Some(at) = rest.find(MEDIA_REF_PREFIX) {
+        let after = &rest[at + MEDIA_REF_PREFIX.len()..];
+        let hash_len = after
+            .bytes()
+            .take_while(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(c))
+            .count();
+        // Exactly 64 lowercase hex digits, not the first 64 of a longer run.
+        if hash_len == 64 {
+            visit(&after[..64]);
+        }
+        rest = &after[hash_len..];
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Legacy data-URL migration
 // ---------------------------------------------------------------------------
@@ -963,5 +990,27 @@ mod tests {
             out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
         }
         out
+    }
+
+    #[test]
+    fn handles_inside_a_binding_formula_are_found() {
+        let h1 = "a".repeat(64);
+        let h2 = "0123456789abcdef".repeat(4);
+        let formula = format!("=IF(Inputs!A1>0,\"media:{h1}\",\"media:{h2}\")");
+        let mut found = Vec::new();
+        visit_media_refs_in_text(&formula, &mut |h| found.push(h.to_string()));
+        assert_eq!(found, vec![h1.clone(), h2.clone()]);
+
+        // Not a handle: too short, too long, upper-case hex, no prefix.
+        let mut none = Vec::new();
+        for text in [
+            format!("=\"media:{}\"", "a".repeat(63)),
+            format!("=\"media:{}\"", "a".repeat(65)),
+            format!("=\"media:{}\"", "A".repeat(64)),
+            format!("=\"{h1}\""),
+        ] {
+            visit_media_refs_in_text(&text, &mut |h| none.push(h.to_string()));
+        }
+        assert!(none.is_empty(), "{none:?}");
     }
 }

@@ -41,7 +41,9 @@ describe("DEFAULT_CHART_THEME", () => {
   });
 
   it("does not have gradient fills by default", () => {
-    expect(DEFAULT_CHART_THEME.backgroundGradient).toBeUndefined();
+    // The outer background gradient is the container's (D-FORMAT); the theme
+    // keeps only the plot area's.
+    expect("backgroundGradient" in DEFAULT_CHART_THEME).toBe(false);
     expect(DEFAULT_CHART_THEME.plotBackgroundGradient).toBeUndefined();
   });
 });
@@ -89,9 +91,8 @@ describe("mergeTheme", () => {
         { offset: 1, color: "#FFF" },
       ],
     };
-    const result = mergeTheme(DEFAULT_CHART_THEME, { backgroundGradient: gradient });
-    expect(result.backgroundGradient).toBe(gradient);
-    expect(result.plotBackgroundGradient).toBeUndefined();
+    const result = mergeTheme(DEFAULT_CHART_THEME, { plotBackgroundGradient: gradient });
+    expect(result.plotBackgroundGradient).toBe(gradient);
   });
 
   it("does not mutate the base theme", () => {
@@ -124,9 +125,11 @@ describe("resolveChartTheme", () => {
 
   it("merges config theme overrides with defaults", () => {
     const result = resolveChartTheme({
-      theme: { background: "#222222", titleFontSize: 20 },
+      theme: { background: "#222222", titleFontSize: 20 } as never,
     });
-    expect(result.background).toBe("#222222");
+    // A legacy `background` key is ignored: the outer background is the
+    // visual container's (D-FORMAT), and the theme's is derived from it.
+    expect(result.background).toBe(DEFAULT_CHART_THEME.background);
     expect(result.titleFontSize).toBe(20);
     expect(result.plotBackground).toBe(DEFAULT_CHART_THEME.plotBackground);
   });

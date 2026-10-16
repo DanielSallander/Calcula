@@ -87,6 +87,14 @@ export const NAMED_SUBTREES: ReadonlyArray<readonly [path: string, iface: string
   ["api.slicer()", "ScriptSlicerHandle"],
   ["api.shape()", "ScriptShapeHandle"],
   ["api.namedRange()", "ScriptNamedRangeHandle"],
+  // A bindable object's properties by JSON Pointer (D-BIND): the script's own
+  // object (`context.self`) and any object (`api.object(kind, id)`) have ONE
+  // handle shape, under TWO names -- the members are the same, the broker door
+  // is not (object.setState, restricted, vs api.objectSetState, unlocked), and
+  // a named interface is walked once, so one name would publish the first
+  // door's tier for both in the generated policy.
+  ["self", "ScriptObjectHandle"],
+  ["api.object()", "ScriptTargetObjectHandle"],
   // The canonical Range facet, reachable from several contexts by the same shape.
   ["range()", "ScriptRange"],
   ["cell()", "ScriptRange"],

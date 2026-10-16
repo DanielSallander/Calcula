@@ -43,6 +43,17 @@ export const MOD = {
   PIVOT_API: "/extensions/Pivot/lib/pivot-api.ts",
   SLICER_STORE: "/extensions/Slicer/lib/slicerStore.ts",
   TIMELINE_STORE: "/extensions/TimelineSlicer/lib/timelineSlicerStore.ts",
+  // The live Page Navigator (WP-B, D-NAV): THE description the painter, the
+  // zone and the press all read; the page list it is derived from; the
+  // Design-Mode flag (Controls' re-export of @api/designMode, one instance).
+  NAV_DESCRIBE: "/extensions/Controls/PageNavigator/describe.ts",
+  NAV_ITEM_SELECTION: "/extensions/Controls/PageNavigator/navigatorItemSelection.ts",
+  REPORT_PAGES: "/src/api/reportPages.ts",
+  DESIGN_MODE: "/extensions/Controls/lib/designMode.ts",
+  BUTTON_SERVICE: "/src/api/buttonControlService.ts",
+  CONTROLS_FLOATING_STORE: "/extensions/Controls/lib/floatingStore.ts",
+  UI: "/src/api/ui.ts",
+  TASK_PANE_STORE: "/src/shell/TaskPane/useTaskPaneStore.ts",
 } as const;
 
 export interface AppWindow {
@@ -541,6 +552,60 @@ export async function dragObject(
   }
   await page.mouse.up();
   await page.waitForTimeout(300);
+}
+
+/**
+ * A rectangle of the ACTIVE canvas page (sheet px) that no published object
+ * overlaps by less than `margin`, inside the page and fully on screen: the
+ * place to put a new object or to click "nothing". Every grid region is an
+ * obstacle (run-mode buttons too, which the SELECTABLE list leaves out), read
+ * at call time, so an open task pane narrowing the grid is accounted for.
+ * Throws rather than answer a point it cannot vouch for.
+ */
+export async function freeCanvasRect(
+  page: Page,
+  size: { width: number; height: number },
+  margin = 16,
+): Promise<{ x: number; y: number; width: number; height: number }> {
+  await installAppImport(page);
+  const obstacles = await page.evaluate(async (ov) => {
+    const g = (await (window as unknown as AppWindow).__appImport!(ov)) as {
+      getGridRegions: () => Array<{ floating?: { x: number; y: number; width: number; height: number } }>;
+    };
+    return g
+      .getGridRegions()
+      .filter((r) => !!r.floating)
+      .map((r) => ({ x: r.floating!.x, y: r.floating!.y, width: r.floating!.width, height: r.floating!.height }));
+  }, MOD.GRID_OVERLAYS);
+  const res = await sheetsResult(page);
+  const layout = res.sheets.find((s) => s.index === res.activeIndex)?.canvasLayout;
+  const pageW = layout?.pageWidth ?? 1280;
+  const pageH = layout?.pageHeight ?? 720;
+  const geo = await readGridGeometry(page);
+  const box = await gridBox(page);
+  const visLeft = geo.scrollX;
+  const visTop = geo.scrollY;
+  const visRight = geo.scrollX + box.width / geo.zoom - geo.rowHeaderWidth;
+  const visBottom = geo.scrollY + box.height / geo.zoom - geo.colHeaderHeight;
+  const right = Math.min(pageW, visRight) - margin - size.width;
+  const bottom = Math.min(pageH, visBottom) - margin - size.height;
+  const hits = (x: number, y: number) =>
+    obstacles.some(
+      (o) =>
+        x < o.x + o.width + margin &&
+        x + size.width + margin > o.x &&
+        y < o.y + o.height + margin &&
+        y + size.height + margin > o.y,
+    );
+  for (let y = Math.max(margin, visTop + margin); y <= bottom; y += 8) {
+    for (let x = Math.max(margin, visLeft + margin); x <= right; x += 8) {
+      if (!hits(x, y)) return { x, y, width: size.width, height: size.height };
+    }
+  }
+  throw new Error(
+    `freeCanvasRect: no free ${size.width}x${size.height} rectangle on the visible page ` +
+      `(page ${pageW}x${pageH}, obstacles ${JSON.stringify(obstacles)})`,
+  );
 }
 
 /** Click an empty point of the page (deselects everything). */

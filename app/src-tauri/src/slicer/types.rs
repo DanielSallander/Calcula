@@ -175,6 +175,12 @@ pub struct Slicer {
     /// for model slicers on a local connection, whose id is already stable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_source_id: Option<String>,
+    /// The visual container (D-FORMAT, WP-C): padding, title style,
+    /// background, border, shadow. The title TEXT / visibility stay
+    /// `header_text` / `show_header` (one spelling per fact). Written only by
+    /// `update_slicer_core`, validated there before the effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<visual_format::VisualContainerFormat>,
 }
 
 impl Slicer {
@@ -303,6 +309,10 @@ pub struct UpdateSlicerParams {
     pub connected_sources: Option<Vec<SlicerConnection>>,
     /// New filter level (1 = ordinary, 2..=9 = pinned).
     pub filter_level: Option<u8>,
+    /// The visual container: absent = keep, null = clear, value = set
+    /// (validated before the effect; undoable with the rest of the update).
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub container: Option<Option<visual_format::VisualContainerFormat>>,
 }
 
 // ============================================================================

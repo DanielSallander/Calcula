@@ -267,7 +267,9 @@ describe("style presets + theme override interaction", () => {
     expect(preset).toBeDefined();
 
     const theme = resolveChartTheme({ theme: preset!.theme });
-    expect(theme.background).toBe("#1e1e1e");
+    // The preset's background is the CONTAINER's (D-FORMAT), not a theme key.
+    expect(preset!.background).toBe("#1e1e1e");
+    expect(theme.plotBackground).toBe(preset!.theme.plotBackground);
     // Non-overridden fields should keep defaults
     expect(theme.fontFamily).toContain("Segoe UI");
   });
@@ -280,7 +282,7 @@ describe("style presets + theme override interaction", () => {
     const combined = { ...preset!.theme, titleColor: "#FF0000" };
     const theme = resolveChartTheme({ theme: combined });
     expect(theme.titleColor).toBe("#FF0000");
-    expect(theme.background).toBe(preset!.theme.background);
+    expect(theme.plotBackground).toBe(preset!.theme.plotBackground);
   });
 
   it("buildPresetUpdates includes gridLines and barBorderRadius", () => {

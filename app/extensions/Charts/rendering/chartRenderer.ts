@@ -16,9 +16,20 @@ import {
   hasStackingOrder,
   type OverlayRenderContext,
   type OverlayHitTestContext,
+  type GridRegion,
 } from "@api/gridOverlays";
 
 import { drawObjectScriptBadgeIfPresent } from "@api/objectScriptBadge";
+import {
+  measureVisualContainerLayout,
+  paintVisualContainerOver,
+  paintVisualContainerUnder,
+  visualContentRectFor,
+  withContainerContentClip,
+  type ContainerRegion,
+} from "@api/visualContainerPaint";
+import { resolveChartContainer } from "../lib/chartObjectFormat";
+import type { ContainerRect, ResolvedVisualContainer } from "@api/visualContainer";
 import {
   announceChartDataChanged,
   chartCueSteps,
@@ -133,21 +144,57 @@ export function invalidateAllChartCaches(): void {
 // pipelines (e.g. animation GIF/WebM) to grab a current, settled chart raster.
 // ----------------------------------------------------------------------------
 
-/** A PNG blob of the chart's current cached raster, or null if it has no cache yet. */
-export function getChartFrameBitmap(chartId: string): Promise<Blob | null> {
+/**
+ * The chart's current frame as the reader SEES it: the cached raster inside
+ * its visual container (shadow, background, border, padding -- D-FORMAT).
+ * The raster alone is transparent outside its marks now (the painters fill no
+ * background of their own; Core paints the container on the grid), so a
+ * capture of the bare raster would be a frameless, see-through chart -- the
+ * Core-less route of review R1-3 that the Animation GIF export takes. Composed
+ * at the device scale the raster was rendered at. Null when the chart has no
+ * cache yet.
+ */
+function composedChartFrame(chartId: string): OffscreenCanvas | null {
   const cached = chartCanvasCache.get(chartId);
-  return cached ? cached.canvas.convertToBlob() : Promise.resolve(null);
+  if (!cached) return null;
+  const chart = getChartById(chartId);
+  if (!chart || typeof OffscreenCanvas === "undefined") return cached.canvas;
+  const container = resolveChartContainer(chartId, chart.spec);
+  const outer = { x: 0, y: 0, width: chart.width, height: chart.height };
+  const dpr = window.devicePixelRatio || 1;
+  const frame = new OffscreenCanvas(Math.max(1, Math.round(outer.width * dpr)), Math.max(1, Math.round(outer.height * dpr)));
+  const ctx = frame.getContext("2d");
+  if (!ctx) return cached.canvas;
+  ctx.scale(dpr, dpr);
+  const origin = { dx: 0, dy: 0 };
+  const layout = measureVisualContainerLayout(ctx, outer, container);
+  const content = layout.content;
+  paintVisualContainerUnder(ctx, layout, container, origin);
+  if (content.width >= 1 && content.height >= 1) {
+    withContainerContentClip(ctx, { container } as unknown as ContainerRegion, outer, content, () => {
+      ctx.drawImage(cached.canvas, content.x, content.y, content.width, content.height);
+    });
+  }
+  paintVisualContainerOver(ctx, layout, container, origin);
+  return frame;
+}
+
+/** A PNG blob of the chart's current frame (raster + container), or null if it has no cache yet. */
+export function getChartFrameBitmap(chartId: string): Promise<Blob | null> {
+  const frame = composedChartFrame(chartId);
+  return frame ? frame.convertToBlob() : Promise.resolve(null);
 }
 
 /**
- * The chart's current cached raster as ImageData (RGBA, device pixels), or null if
- * it has no cache yet. Direct pixels for capture/export (no PNG round-trip).
+ * The chart's current frame (raster + container) as ImageData (RGBA, device
+ * pixels), or null if it has no cache yet. Direct pixels for capture/export
+ * (no PNG round-trip).
  */
 export function getChartFrameImageData(chartId: string): ImageData | null {
-  const cached = chartCanvasCache.get(chartId);
-  if (!cached) return null;
-  const ctx = cached.canvas.getContext("2d");
-  return ctx ? ctx.getImageData(0, 0, cached.canvas.width, cached.canvas.height) : null;
+  const frame = composedChartFrame(chartId);
+  if (!frame) return null;
+  const ctx = frame.getContext("2d");
+  return ctx ? ctx.getImageData(0, 0, frame.width, frame.height) : null;
 }
 
 /** True while an async render for this chart is in flight. */
@@ -251,7 +298,33 @@ let cachedRowHeaderWidth = 50;
 let cachedColHeaderHeight = 24;
 
 /**
- * Convert canvas coordinates to chart-local coordinates.
+ * The CONTENT rect of a published chart region, in sheet px: where the chart's
+ * raster is laid out, painted and hit-tested (`visualContentRectFor` -- the
+ * same rect Core's container band test reads, so paint == hit).
+ */
+export function chartRegionContentRect(region: GridRegion): ContainerRect | null {
+  if (!region.floating) return null;
+  return visualContentRectFor(region.id, region.floating, (region as ContainerRegion).container);
+}
+
+/**
+ * The chart's CONTENT rect in sheet px: from its published region when it has
+ * one, else (not on screen) the stored box -- a chart without a region has no
+ * container on screen to inset by.
+ */
+export function chartContentRect(chartId: string): ContainerRect | null {
+  const region = getLiveGridRegions().find(
+    (r) => r.type === "chart" && r.floating && r.data?.chartId === chartId,
+  );
+  if (region) return chartRegionContentRect(region);
+  const chart = getChartById(chartId);
+  return chart ? { x: chart.x, y: chart.y, width: chart.width, height: chart.height } : null;
+}
+
+/**
+ * Convert canvas coordinates to chart-local coordinates: relative to the
+ * chart's CONTENT origin (the raster's top-left), never the outer box -- every
+ * layout, hit geometry and element rect the chart keeps is in that space.
  * Uses cached viewport params from the most recent render call.
  */
 export function getChartLocalCoords(
@@ -259,11 +332,11 @@ export function getChartLocalCoords(
   canvasX: number,
   canvasY: number,
 ): { localX: number; localY: number } | null {
-  const chart = getChartById(chartId);
-  if (!chart) return null;
+  const content = chartContentRect(chartId);
+  if (!content) return null;
 
-  const chartCanvasX = cachedRowHeaderWidth + chart.x - cachedScrollX;
-  const chartCanvasY = cachedColHeaderHeight + chart.y - cachedScrollY;
+  const chartCanvasX = cachedRowHeaderWidth + content.x - cachedScrollX;
+  const chartCanvasY = cachedColHeaderHeight + content.y - cachedScrollY;
 
   return {
     localX: canvasX - chartCanvasX,
@@ -285,6 +358,12 @@ export function getChartLocalCoords(
  * LIVE regions only (`getLiveGridRegions`): while a formula picks a reference
  * on another sheet, the published charts belong to the edit's sheet and are
  * not on screen, so they must not answer a click there.
+ *
+ * It answers the OUTER box -- the same rect `hitTestChart` answers -- because
+ * the container's padding / border band is still THIS chart (its frame: Core
+ * moves the chart from there, and a right-click there is the chart's menu).
+ * What of the chart is under the point is a CONTENT-rect question
+ * (`getChartLocalCoords`).
  */
 export function findChartAtCanvasPos(canvasX: number, canvasY: number): string | null {
   const regions = floatingHitOrder(getLiveGridRegions()).filter((r) => r.type === "chart");
@@ -388,16 +467,24 @@ export function handleChartMouseMove(canvasX: number, canvasY: number): void {
   for (const region of regions) {
     if (!region.floating) continue;
 
-    // Compute canvas bounds for this region
-    const chartCanvasX = cachedRowHeaderWidth + region.floating.x - cachedScrollX;
-    const chartCanvasY = cachedColHeaderHeight + region.floating.y - cachedScrollY;
-    const chartWidth = region.floating.width;
-    const chartHeight = region.floating.height;
+    // The OUTER box decides which object is under the pointer (the stacked
+    // walk stops at it); the CONTENT rect decides what of the chart is. A point
+    // in the container's padding band is the chart's FRAME: no element hover.
+    const outerCanvasX = cachedRowHeaderWidth + region.floating.x - cachedScrollX;
+    const outerCanvasY = cachedColHeaderHeight + region.floating.y - cachedScrollY;
     const inBounds =
+      canvasX >= outerCanvasX &&
+      canvasX <= outerCanvasX + region.floating.width &&
+      canvasY >= outerCanvasY &&
+      canvasY <= outerCanvasY + region.floating.height;
+    const content = chartRegionContentRect(region) ?? region.floating;
+    const chartCanvasX = cachedRowHeaderWidth + content.x - cachedScrollX;
+    const chartCanvasY = cachedColHeaderHeight + content.y - cachedScrollY;
+    const inContent =
       canvasX >= chartCanvasX &&
-      canvasX <= chartCanvasX + chartWidth &&
+      canvasX <= chartCanvasX + content.width &&
       canvasY >= chartCanvasY &&
-      canvasY <= chartCanvasY + chartHeight;
+      canvasY <= chartCanvasY + content.height;
 
     const chartId = region.type === "chart" ? (region.data?.chartId as string) : null;
     if (chartId == null) {
@@ -408,12 +495,12 @@ export function handleChartMouseMove(canvasX: number, canvasY: number): void {
 
     // Check if mouse is within chart bounds
     if (inBounds) {
-      // Get chart-local coordinates
+      // Get chart-local coordinates (content origin)
       const localX = canvasX - chartCanvasX;
       const localY = canvasY - chartCanvasY;
 
-      // Hit-test against geometry
-      const cachedData = chartDataCache.get(chartId);
+      // Hit-test against geometry -- inside the content rect only.
+      const cachedData = inContent ? chartDataCache.get(chartId) : undefined;
       if (cachedData) {
         // First check pivot field buttons (they are drawn on top)
         const buttonHit = hitTestPivotFieldButtons(localX, localY, cachedData.pivotFieldButtons);
@@ -555,21 +642,27 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
   cachedRowHeaderWidth = rowHeaderWidth;
   cachedColHeaderHeight = colHeaderHeight;
 
-  // Convert sheet pixel position to canvas pixel position
-  const { canvasX, canvasY } = overlaySheetToCanvas(
-    overlayCtx,
-    region.floating.x,
-    region.floating.y,
-  );
-  const chartWidth = region.floating.width;
-  const chartHeight = region.floating.height;
+  // THE OUTER BOX is the object (Core paints its container -- shadow,
+  // background, border -- around this render and answers its padding band as
+  // frame). THE CONTENT RECT is where the chart lays out, paints its raster
+  // and hit-tests: `visualContentRectFor`, the one rect Core's band test reads
+  // too (paint == hit). Every chart-local coordinate in this file is relative
+  // to the content origin.
+  const outer = region.floating;
+  const container = (region as ContainerRegion).container;
+  const content = visualContentRectFor(region.id, outer, container);
+  const { canvasX: outerX, canvasY: outerY } = overlaySheetToCanvas(overlayCtx, outer.x, outer.y);
+  const canvasX = outerX + (content.x - outer.x);
+  const canvasY = outerY + (content.y - outer.y);
+  const chartWidth = content.width;
+  const chartHeight = content.height;
 
-  const endX = canvasX + chartWidth;
-  const endY = canvasY + chartHeight;
+  const endX = outerX + outer.width;
+  const endY = outerY + outer.height;
 
   // Skip if not visible
   if (endX < rowHeaderWidth || endY < colHeaderHeight) return;
-  if (canvasX > overlayCtx.canvasWidth || canvasY > overlayCtx.canvasHeight) return;
+  if (outerX > overlayCtx.canvasWidth || outerY > overlayCtx.canvasHeight) return;
 
   // Clip to cell area (not over headers)
   ctx.save();
@@ -582,32 +675,32 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
   );
   ctx.clip();
 
-  // 1. Draw white background
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(canvasX, canvasY, chartWidth, chartHeight);
+  // 1. The background is the container's (Core paints it under this render).
 
-  // 2. Draw cached chart image
+  // 2. Draw cached chart image, clipped to the content rect (and the rounded
+  //    outer path) -- never the affordances painted outside the object below.
   const dpr = window.devicePixelRatio || 1;
   const pxWidth = Math.round(chartWidth * dpr);
   const pxHeight = Math.round(chartHeight * dpr);
   const currentVersion = chartVersions.get(chartId) ?? 0;
   const cached = chartCanvasCache.get(chartId);
+  const canvasOuter = { x: outerX, y: outerY, width: outer.width, height: outer.height };
+  const canvasContent = { x: canvasX, y: canvasY, width: chartWidth, height: chartHeight };
+  const hasRoom = pxWidth >= 1 && pxHeight >= 1;
+  // The raster is drawn at the CONTENT size: a cache rendered for another size
+  // (padding changed, the chart resized) is stale even at the current version.
+  const sizeCurrent = !!cached && cached.width === pxWidth && cached.height === pxHeight;
 
-  if (cached && cached.version === currentVersion) {
-    ctx.drawImage(cached.canvas, canvasX, canvasY, chartWidth, chartHeight);
-  } else if (pendingRenders.has(chartId)) {
+  withContainerContentClip(ctx, region, canvasOuter, canvasContent, () => {
+    if (!hasRoom) return;
     if (cached) {
       ctx.drawImage(cached.canvas, canvasX, canvasY, chartWidth, chartHeight);
     } else {
       drawPlaceholder(ctx, canvasX, canvasY, chartWidth, chartHeight, chart.name);
     }
-  } else {
-    if (cached) {
-      ctx.drawImage(cached.canvas, canvasX, canvasY, chartWidth, chartHeight);
-    } else {
-      drawPlaceholder(ctx, canvasX, canvasY, chartWidth, chartHeight, chart.name);
-    }
-    renderChartAsync(chartId, pxWidth, pxHeight, chartWidth, chartHeight, dpr, currentVersion);
+  });
+  if (hasRoom && !pendingRenders.has(chartId) && !(cached && cached.version === currentVersion && sizeCurrent)) {
+    renderChartAsync(chartId, pxWidth, pxHeight, chartWidth, chartHeight, dpr, currentVersion, container);
   }
 
   // 3. Draw selection highlights (series/data point dimming + outlines, the
@@ -669,24 +762,16 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
     }
   }
 
-  // 4. Draw border
-  ctx.strokeStyle = "#d0d0d0";
-  ctx.lineWidth = 1;
-  ctx.setLineDash([]);
-  ctx.strokeRect(
-    Math.floor(canvasX) + 0.5,
-    Math.floor(canvasY) + 0.5,
-    chartWidth - 1,
-    chartHeight - 1,
-  );
+  // 4. The border is the container's (Core paints it over this render).
 
   // 5. The selected chart's OWN affordances. Its selection outline and its
   //    resize handles are Core's (core/lib/gridRenderer/rendering/
   //    floatingObjectChrome.ts), painted after every object from the one
   //    geometry Core's resize hit test reads (BUG-0258 design phase 3).
   if (isChartSelected(chartId)) {
-    // Quick access buttons (to the right of chart)
-    const qaButtons = computeQuickAccessButtons(canvasX, canvasY, chartWidth, chartHeight, chartId);
+    // Quick access buttons: OUTSIDE the object, to the right of the OUTER box
+    // (never clipped by the container's rounded corners -- review R1-2).
+    const qaButtons = computeQuickAccessButtons(outerX, outerY, outer.width, outer.height, chartId);
     drawQuickAccessButtons(ctx, qaButtons);
 
     // Store for hit-testing
@@ -737,7 +822,7 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
   ctx.restore();
 
   // T4: script-presence badge (design mode only) — see code on the object.
-  drawObjectScriptBadgeIfPresent(ctx, "chart", chartId, canvasX, canvasY, chartWidth);
+  drawObjectScriptBadgeIfPresent(ctx, "chart", chartId, outerX, outerY, outer.width);
 }
 
 // ============================================================================
@@ -746,7 +831,10 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
 
 /**
  * Hit-test for chart overlay regions.
- * Uses pixel-based bounds for floating overlays.
+ * Uses pixel-based bounds for floating overlays: the OUTER box (container band
+ * included -- Core answers that band as the chart's frame before it ever asks
+ * `zoneAt`), plus the Quick Access strip outside it, computed from the outer
+ * box exactly as it is painted.
  */
 export function hitTestChart(hitCtx: OverlayHitTestContext): boolean {
   // Use pre-computed canvas bounds for floating overlays
@@ -804,6 +892,7 @@ async function renderChartAsync(
   logicalHeight: number,
   dpr: number,
   version: number,
+  container?: ResolvedVisualContainer,
 ): Promise<void> {
   pendingRenders.add(chartId);
   let superseded = false;
@@ -846,7 +935,10 @@ async function renderChartAsync(
 
     offCtx.scale(dpr, dpr);
 
-    const theme = resolveChartTheme(spec.config);
+    // The RESOLVED container (the one Core paints) supplies the derived
+    // background and the title block's style; the title's colour and size are
+    // the WP-D-overlaid spec's theme (one spelling, review R2-8).
+    const theme = resolveChartTheme(spec.config, container);
 
     // Fetch pivot field metadata BEFORE layout so we can reserve margin space
     let pivotFields: PivotChartFieldInfo[] | undefined;
@@ -966,8 +1058,9 @@ async function renderChartAsync(
 
 /**
  * Paint a visible error state for a chart whose data read or paint failed:
- * white card, warning icon, and the first lines of the error message wrapped
- * to the chart width.
+ * warning icon and the first lines of the error message wrapped to the chart
+ * width. No card of its own: Core paints the chart's container (background and
+ * border) around a failing chart exactly as around a working one.
  */
 function drawChartErrorPlaceholder(
   ctx: OffscreenCanvasRenderingContext2D,
@@ -975,13 +1068,6 @@ function drawChartErrorPlaceholder(
   height: number,
   err: unknown,
 ): void {
-  // Card background + border (matches the default chart frame look)
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, width, height);
-  ctx.strokeStyle = "#d0d0d0";
-  ctx.lineWidth = 1;
-  ctx.strokeRect(0.5, 0.5, width - 1, height - 1);
-
   const message = err instanceof Error ? err.message : String(err);
   const padding = 16;
   const maxTextWidth = Math.max(40, width - padding * 2);

@@ -692,6 +692,8 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
         // host's spill recovery run over an import — the same treatment a
         // pre-v7 `.cala` gets, and for the same reason.
         format_version: 0,
+        // xlsx has no object bindings (the meta carry does not hold them).
+        object_bindings: Vec::new(),
     };
 
     // Sparklines have no native xlsx form — the meta carry is the only source.
@@ -756,22 +758,24 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
                 if !sheet_untouched(mc.sheet_index) && mc.native_emitted {
                     continue; // superseded by the Excel-edited native charts
                 }
+                // The carry holds the spec as a STRING (the meta sheet is
+                // text); the workbook embeds it as a JSON value. An
+                // unparseable carry is kept as a string value, never dropped.
+                let spec = serde_json::from_str::<serde_json::Value>(&mc.spec_json)
+                    .unwrap_or_else(|_| serde_json::Value::String(mc.spec_json.clone()));
                 // Keep the original chart identity when the carried spec has
                 // one, so a round-trip preserves chart ids.
-                let id = serde_json::from_str::<serde_json::Value>(&mc.spec_json)
-                    .ok()
-                    .and_then(|def| {
-                        def.get("chartId")
-                            .and_then(|v| v.as_str())
-                            .and_then(identity::EntityId::parse)
-                    })
+                let id = spec
+                    .get("chartId")
+                    .and_then(|v| v.as_str())
+                    .and_then(identity::EntityId::parse)
                     .unwrap_or_else(|| {
                         identity::EntityId::from_bytes(identity::generate_uuid_v7())
                     });
                 wb.charts.push(crate::SavedChart {
                     id,
                     sheet_id: wb.sheets[mc.sheet_index].id,
-                    spec_json: mc.spec_json.clone(),
+                    spec,
                 });
             }
 
@@ -787,20 +791,17 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
                 if sheet_idx < wb.sheets.len() {
                     chart.sheet_id = wb.sheets[sheet_idx].id;
                 }
-                // Update the sheetIndex inside the JSON spec (positional, for rendering)
-                chart.spec_json = chart.spec_json.replacen(
-                    "\"sheetIndex\":0",
-                    &format!("\"sheetIndex\":{}", sheet_idx),
-                    1,
-                );
                 // Mint unique chart ID
                 chart.id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
-                // Also update chartId in spec JSON
-                chart.spec_json = chart.spec_json.replacen(
-                    "\"chartId\":0",
-                    &format!("\"chartId\":\"{}\"", chart.id),
-                    1,
-                );
+                // Update the positional sheetIndex (for rendering) and the
+                // chartId inside the embedded spec.
+                if let Some(def) = chart.spec.as_object_mut() {
+                    def.insert("sheetIndex".to_string(), serde_json::json!(sheet_idx));
+                    def.insert(
+                        "chartId".to_string(),
+                        serde_json::Value::String(chart.id.to_string()),
+                    );
+                }
                 wb.charts.push(chart);
             }
 
