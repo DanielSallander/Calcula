@@ -412,21 +412,24 @@ general capability, not a special case for `GATHER`.
 
 What a subscriber sees on a sheet that carries writeback regions:
 
-- **One "w" frame per region** (the owner's design, 2026-10-21). A soft SOLID
-  1px line round each region on the ACTIVE sheet, broken at the middle of every
-  outer cell edge by a tiny "w" (9px). It replaced a dashed outline that read
-  as the copy marquee. The line is the grid's cell text colour at 30% alpha and
-  the "w" at 55%, so it follows every skin with no literal. No fill: the cells
-  keep their gridlines and the publisher's formatting. A "w" is placed only on
-  an edge cell wholly on screen along that edge and long enough to hold it;
-  only visible rows/columns are walked. It is a grid LAYER under the selection
-  (`collaboration:writeback-outline`, `lib/writebackOutline.ts`), frozen-pane
-  correct through `@api/gridLayers` `rangeToCanvasRect`, and it is not
-  painted on a canvas page.
+- **One frame per region** (the owner's design, refined twice on 2026-10-21:
+  a dashed outline read as the copy marquee; then a tiny "w" on every outer
+  cell edge became ONE edit icon -- a pen over an open square -- per edge). A
+  soft SOLID 1px line round each region on the ACTIVE sheet, broken once per
+  edge by a 12px edit icon at the middle of the edge's VISIBLE length (so a
+  tall region scrolled half off still shows one). The line is the grid's cell
+  text colour at 45% alpha and the icon at 70%, so it follows every skin with
+  no literal. No fill: the cells keep their gridlines and the publisher's
+  formatting. An edge too short for the icon (a single 20px row's sides) keeps
+  a plain line. One rectangle per region per frame, whatever its size. It is a
+  grid LAYER under the selection (`collaboration:writeback-outline`,
+  `lib/writebackOutline.ts`, `drawEditIcon`), frozen-pane correct through
+  `@api/gridLayers` `rangeToCanvasRect`, and it is not painted on a canvas
+  page.
 - **The author sees it too.** The frame also covers the regions this workbook
   itself designated (`calp_get_writeback_draft_regions`, read by the same
-  store), in a fresh workbook and in a working copy. Those get no marker and no
-  tab: they hold no values.
+  store), in a fresh workbook and in a working copy. Those get no marker (they
+  hold no values) and the PUBLISHER's version of the Writeback tab (below).
 - **A marker on cells that need attention.** A ~3px disc at the cell's
   top-right, inset to sit just LEFT of the 6px note/comment triangle so both
   stay visible, ringed in the cell's background colour, with a tiny "!" from
@@ -533,6 +536,24 @@ skin), order 512 -- right of every other contextual tab. Files:
 `app/extensions/Collaboration/manifest.ts` (`WritebackPanelDefinition`),
 `components/WritebackTabSections.tsx`, `lib/writebackTab.ts` (visibility),
 `lib/writebackTabModel.ts` (state and actions).
+
+**Two roles, one tab** (2026-10-21). The same tab -- id, label, accent and
+place -- carries the SUBSCRIBER's commands in a subscribed region (everything
+below) and the PUBLISHER's in a region this workbook designated itself, in a
+fresh workbook or a working copy (`WritebackPublisherPanelDefinition`,
+`components/WritebackPublisherTabSections.tsx`):
+
+- **Region:** Edit Region (the Designate dialog in edit mode) and Remove Region
+  (`confirmAsync` first; the cells stay, collection stops from the next
+  publish/push, responses already collected stay in the workspace).
+- **Status:** what the region takes and when values arrive ("B3:B5: numbers,
+  sent when the subscriber submits"), and who sees them, in the publisher's
+  words.
+- **Responses:** Collected Responses (the publisher dashboard) and Writeback
+  Pane.
+- No badge: a publisher has nothing to send. A subscribed region wins if both
+  could apply, which cannot happen (a working copy cannot subscribe to its own
+  application). Moving the cursor between the two kinds swaps the section list.
 
 - **When it shows.** While Core's ACTIVE cell is inside a subscribed writeback
   region on the active sheet -- the Table Design shape: one gate, the hide is

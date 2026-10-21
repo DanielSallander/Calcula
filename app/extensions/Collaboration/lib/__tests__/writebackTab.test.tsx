@@ -56,6 +56,16 @@ const h = vi.hoisted(() => ({
   alertAsync: vi.fn(async () => {}),
   showToast: vi.fn(),
   emitAppEvent: vi.fn(),
+  /** This workbook's OWN designated regions (author side). */
+  designated: [] as Array<{
+    id: string;
+    selector: { sheetId: string; rowStart: number; rowEnd: number; colStart: number; colEnd: number };
+    schema?: { valueType: string };
+    visibility?: string;
+    submissionPolicy?: string;
+  }>,
+  removeWritebackRegion: vi.fn(),
+  showDialog: vi.fn(),
 }));
 
 vi.mock("@api/ui", async (importOriginal) => ({
@@ -65,6 +75,7 @@ vi.mock("@api/ui", async (importOriginal) => ({
   PanelExtensions: { setBadge: (...a: unknown[]) => h.setBadge(...a) },
   openTaskPane: (...a: unknown[]) => h.openTaskPane(...a),
   showTaskPaneContainer: () => h.showTaskPaneContainer(),
+  showDialog: (...a: unknown[]) => h.showDialog(...a),
 }));
 vi.mock("@api/grid", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@api/grid")>()),
@@ -83,6 +94,7 @@ vi.mock("@api/collaboration", async (importOriginal) => ({
   submitAllRegions: (...a: unknown[]) => h.submitAllRegions(...a),
   discardWritebackDrafts: (...a: unknown[]) => h.discardWritebackDrafts(...a),
   reconcileWriteback: (...a: unknown[]) => h.reconcileWriteback(...a),
+  removeWritebackRegion: (...a: unknown[]) => h.removeWritebackRegion(...a),
 }));
 vi.mock("@api/dialogs", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@api/dialogs")>()),
@@ -112,6 +124,18 @@ vi.mock("../writebackStore", () => {
     refreshWriteback: () => h.refreshWriteback(),
     getWritebackReconcileError: () => h.reconcileError,
     getWritebackRefreshError: () => h.refreshError,
+    hasWritebackFrames: () => h.regions.length > 0 || h.designated.length > 0,
+    getActiveDesignatedRegionAt: (row: number, col: number) =>
+      h.designated.find(
+        (d) => d.selector.sheetId === h.activeSheetId && inRegion({ ...d.selector, regionId: d.id }, row, col),
+      ) ?? null,
+    getDesignatedRegion: (id: string) => h.designated.find((d) => d.id === id) ?? null,
+    regionRangeA1: (r: { rowStart: number; rowEnd: number; colStart: number; colEnd: number }) => {
+      const L = (c: number) => String.fromCharCode(65 + c);
+      const tl = `${L(r.colStart)}${r.rowStart + 1}`;
+      const br = `${L(r.colEnd)}${r.rowEnd + 1}`;
+      return tl === br ? tl : `${tl}:${br}`;
+    },
   };
 });
 
@@ -120,6 +144,7 @@ import {
   syncWritebackTabToRegions,
   resetWritebackTab,
   isWritebackTabShown,
+  getWritebackTabRole,
 } from "../writebackTab";
 import {
   resetWritebackTabModel,
@@ -134,9 +159,17 @@ import {
   submitAllWriteback,
   discardWritebackRegionDrafts,
   checkWritebackStatus,
+  getWritebackPublisherRegionId,
+  publisherStatusLinesFor,
+  editDesignatedRegion,
+  removeDesignatedRegion,
+  openCollectedResponses,
 } from "../writebackTabModel";
 import {
   WritebackPanelDefinition,
+  WritebackPublisherPanelDefinition,
+  PUBLISHER_DASHBOARD_PANE_ID,
+  DESIGNATE_WRITEBACK_DIALOG_ID,
   WRITEBACK_TAB_ID,
   WRITEBACK_MENU_ID,
   WRITEBACK_PANE_ID,
@@ -204,6 +237,7 @@ beforeEach(() => {
   h.refreshWriteback.mockImplementation(async () => {});
   h.reconcileError = null;
   h.refreshError = null;
+  h.designated = [];
 });
 
 // ===========================================================================
@@ -625,5 +659,101 @@ describe("WritebackPanelDefinition", () => {
       "utf8",
     );
     expect(invariants).toContain("\n  Writeback: {");
+  });
+});
+
+// ===========================================================================
+// The publisher's tab: the same tab over one of this workbook's OWN regions
+// ===========================================================================
+
+const OWN = {
+  id: "own-1",
+  selector: { sheetId: "local-2", rowStart: 7, rowEnd: 9, colStart: 3, colEnd: 3 },
+  schema: { valueType: "number" },
+  visibility: "own_only",
+  submissionPolicy: "on_submit",
+};
+
+describe("the publisher's Writeback tab", () => {
+  it("appears with the publisher's commands in a region this workbook designated, without a badge", () => {
+    h.regions = [];
+    h.designated = [OWN];
+    h.totalUnsent = 5;
+    handleWritebackSelectionChange({ endRow: 8, endCol: 3 });
+    expect(h.registerPanel).toHaveBeenCalledTimes(1);
+    expect(h.registerPanel.mock.calls[0][0]).toBe(WritebackPublisherPanelDefinition);
+    expect(getWritebackTabRole()).toBe("publisher");
+    expect(getWritebackPublisherRegionId()).toBe("own-1");
+    expect(getWritebackTabRegionId()).toBeNull();
+    // A publisher has nothing to send: no unsent badge.
+    expect(h.setBadge.mock.calls.every((c) => c[1] === null)).toBe(true);
+
+    handleWritebackSelectionChange({ endRow: 0, endCol: 0 });
+    expect(isWritebackTabShown()).toBe(false);
+    expect(getWritebackPublisherRegionId()).toBeNull();
+  });
+
+  it("swaps the section list when the cursor moves between a subscribed region and an own one", () => {
+    h.designated = [OWN];
+    handleWritebackSelectionChange({ endRow: 3, endCol: 1 }); // subscribed B4
+    expect(getWritebackTabRole()).toBe("subscriber");
+    handleWritebackSelectionChange({ endRow: 8, endCol: 3 }); // own D9
+    expect(getWritebackTabRole()).toBe("publisher");
+    expect(h.unregisterPanel).toHaveBeenCalledWith(WRITEBACK_TAB_ID);
+    expect(h.registerPanel.mock.calls.map((c) => c[0])).toEqual([
+      WritebackPanelDefinition,
+      WritebackPublisherPanelDefinition,
+    ]);
+    // Moving within the own region registers nothing more.
+    handleWritebackSelectionChange({ endRow: 9, endCol: 3 });
+    expect(h.registerPanel).toHaveBeenCalledTimes(2);
+  });
+
+  it("is the same tab: id, label, accent and place; only the sections differ", () => {
+    expect(WritebackPublisherPanelDefinition.id).toBe(WritebackPanelDefinition.id);
+    expect(WritebackPublisherPanelDefinition.title).toBe("Writeback");
+    expect(WritebackPublisherPanelDefinition.ribbonColor).toBe(WritebackPanelDefinition.ribbonColor);
+    expect(WritebackPublisherPanelDefinition.ribbonOrder).toBe(WritebackPanelDefinition.ribbonOrder);
+    expect(WritebackPublisherPanelDefinition.sections.map((x) => x.id)).toEqual([
+      "writeback-tab.region",
+      "writeback-tab.region-status",
+      "writeback-tab.collected",
+    ]);
+  });
+
+  it("Status says what the region takes, when values arrive and who sees them", () => {
+    const [what, who] = publisherStatusLinesFor(OWN as never);
+    expect(what.text).toBe("D8:D10: numbers, sent when the subscriber submits");
+    expect(who.text).toBe("Each subscriber sees only their own values");
+  });
+
+  it("Edit Region opens the designate dialog in edit mode for that region", () => {
+    h.designated = [OWN];
+    editDesignatedRegion("own-1");
+    expect(h.showDialog).toHaveBeenCalledWith(DESIGNATE_WRITEBACK_DIALOG_ID, { region: OWN });
+  });
+
+  it("Collected Responses opens the publisher dashboard", () => {
+    openCollectedResponses();
+    expect(h.openTaskPane).toHaveBeenCalledWith(PUBLISHER_DASHBOARD_PANE_ID);
+    expect(h.showTaskPaneContainer).toHaveBeenCalled();
+  });
+
+  it("a refused Remove (the Tauri shape: a Promise of false) removes nothing", async () => {
+    h.designated = [OWN];
+    h.confirmAsync.mockReturnValue(Promise.resolve(false));
+    await removeDesignatedRegion("own-1");
+    expect(h.removeWritebackRegion).not.toHaveBeenCalled();
+  });
+
+  it("Remove asks, removes, announces the change, re-reads and says so", async () => {
+    h.designated = [OWN];
+    h.confirmAsync.mockReturnValue(Promise.resolve(true));
+    h.removeWritebackRegion.mockResolvedValue(true);
+    await removeDesignatedRegion("own-1");
+    expect(h.removeWritebackRegion).toHaveBeenCalledWith("own-1");
+    expect(h.emitAppEvent).toHaveBeenCalledWith("collaboration:writebackRegionsChanged", {});
+    expect(h.refreshWriteback).toHaveBeenCalled();
+    expect(String(h.showToast.mock.calls.at(-1)?.[0])).toContain("D8:D10 removed");
   });
 });

@@ -1,22 +1,27 @@
 // FILENAME: app/extensions/Collaboration/lib/writebackOutline.ts
 // PURPOSE: The discreet writeback REGION FRAME: a soft solid line round each
-//          writeback region on the active sheet, broken at the middle of every
-//          outer cell edge by a tiny "w".
-// CONTEXT: The owner's design (2026-10-21). It replaced a dashed outline that
-//          read as the copy marquee (marching ants): the frame is SOLID, low
-//          contrast, and the "w"s say what it is. Before that it replaced the
-//          per-state full-cell tints (pastel fills that made dark-skin text
-//          unreadable and hid the user's own formatting). No fill.
+//          writeback region on the active sheet, broken ONCE per edge by a
+//          small "edit" icon (a pen over an open square).
+// CONTEXT: The owner's design, refined twice on 2026-10-21:
+//            1. a dashed outline read as the copy marquee (marching ants), so
+//               the frame became SOLID with a tiny "w" at the middle of every
+//               outer cell edge;
+//            2. one mark per edge reads calmer than one per cell, and an edit
+//               icon says "you fill this in" better than a letter; the line got
+//               a little stronger.
+//          Before all that it replaced the per-state full-cell tints (pastel
+//          fills that made dark-skin text unreadable and hid the user's own
+//          formatting). No fill.
 //
 //          A grid LAYER at "under-selection", not a cell-anchored grid region:
 //          Core removes the gridlines inside a region, and the sheet must keep
-//          its gridlines and formatting. The region rectangle and every edge
-//          cell's rectangle come from @api/gridLayers `rangeToCanvasRect`, which
-//          is frozen- and split-pane aware; an edge that continues off-screen is
-//          not drawn, and a "w" is placed only on an edge cell that is wholly on
-//          screen along that edge, so scrolling never slides a "w" off-centre.
-//          Only the visible rows/columns of a region are walked, so a region of
-//          a million rows costs what is on screen.
+//          its gridlines and formatting. The rectangle comes from @api/gridLayers
+//          `rangeToCanvasRect`, which is frozen- and split-pane aware and already
+//          clipped to what is on screen; an edge that continues off-screen is not
+//          drawn, and each drawn edge carries its icon at the middle of its
+//          VISIBLE length, so a tall region scrolled half off still shows one.
+//          One rectangle per region per frame: the cost does not grow with the
+//          region's size.
 //
 //          Colours are the grid theme's cell text colour at low alpha, read per
 //          frame, so the frame follows the skin (light and dark) with no
@@ -25,18 +30,15 @@
 
 import type { GridLayerContext, RangeCanvasRect } from "@api/gridLayers";
 
-/** The glyph on the frame. */
-export const FRAME_GLYPH = "w";
-/** CSS pixels; the canvas context is already scaled for the device ratio. */
-export const FRAME_GLYPH_FONT_PX = 9;
-export const FRAME_GLYPH_FONT = `${FRAME_GLYPH_FONT_PX}px "Segoe UI", Calibri, sans-serif`;
-/** The line: quiet, just darker than a gridline. */
-export const FRAME_LINE_ALPHA = 0.3;
-/** The "w": legible but quieter than cell text. */
-export const FRAME_GLYPH_ALPHA = 0.55;
-/** Clear space on each side of a "w" where the line is broken. */
-export const FRAME_GLYPH_PAD = 2;
-/** An edge cell shorter than the glyph plus this keeps a plain line. */
+/** The icon's box, CSS pixels (the canvas context is already DPR-scaled). */
+export const FRAME_ICON_SIZE = 12;
+/** The line: a quiet grey, clearly darker than a gridline. */
+export const FRAME_LINE_ALPHA = 0.45;
+/** The icon: legible, still quieter than cell text. */
+export const FRAME_ICON_ALPHA = 0.7;
+/** Clear space on each side of the icon where the line is broken. */
+export const FRAME_ICON_PAD = 2;
+/** An edge shorter than the icon plus this keeps a plain line. */
 export const FRAME_MIN_EDGE_SLACK = 6;
 
 export interface OutlineRegion {
@@ -49,7 +51,7 @@ export interface OutlineRegion {
 export interface WritebackFrameColors {
   /** The line colour (alpha is applied by the painter). */
   line: string;
-  /** The "w" colour (alpha is applied by the painter). */
+  /** The icon colour (alpha is applied by the painter). */
   glyph: string;
 }
 
@@ -68,55 +70,57 @@ export interface WritebackOutlineDeps {
   ) => RangeCanvasRect | null;
 }
 
-/** A break in a line: [from, to] along the line's axis, with the glyph centre. */
-interface Gap {
-  from: number;
-  to: number;
-  centre: number;
-}
-
 /**
- * The indices of [start, end] that can be on screen: the frozen ones
- * (< `frozenEnd`) and the scrolling window. Ascending, no duplicates.
+ * The "edit" icon centred on (cx, cy): an open square whose top-right corner
+ * gives way to a pen. Drawn on a 24-unit grid (the icon set's), scaled to
+ * {@link FRAME_ICON_SIZE}, with a 2-unit stroke (1px at 12px). Plain path
+ * commands, no Path2D, so a recording context can check it.
  */
-export function visibleIndices(
-  start: number,
-  end: number,
-  frozenEnd: number | null,
-  windowStart: number,
-  windowCount: number,
-): number[] {
-  const out: number[] = [];
-  const frozen = frozenEnd !== null && frozenEnd > 0 ? frozenEnd : 0;
-  for (let i = start; i <= Math.min(end, frozen - 1); i++) out.push(i);
-  const from = Math.max(start, windowStart, frozen);
-  // +1: the last row/column of the window is usually partly visible.
-  const to = Math.min(end, windowStart + windowCount + 1);
-  for (let i = from; i <= to; i++) out.push(i);
-  return out;
+export function drawEditIcon(ctx: CanvasRenderingContext2D, cx: number, cy: number): void {
+  const k = FRAME_ICON_SIZE / 24;
+  const X = (u: number) => cx + (u - 12) * k;
+  const Y = (u: number) => cy + (u - 12) * k;
+  ctx.beginPath();
+  // The square, open at its top-right where the pen sits.
+  ctx.moveTo(X(11), Y(4));
+  ctx.lineTo(X(4), Y(4));
+  ctx.lineTo(X(4), Y(20));
+  ctx.lineTo(X(20), Y(20));
+  ctx.lineTo(X(20), Y(13));
+  // The pen: a slanted body from the top-right, ending in a point.
+  ctx.moveTo(X(17.5), Y(3.5));
+  ctx.lineTo(X(20.5), Y(6.5));
+  ctx.lineTo(X(12), Y(15));
+  ctx.lineTo(X(8.5), Y(15.5));
+  ctx.lineTo(X(9), Y(12));
+  ctx.lineTo(X(17.5), Y(3.5));
+  ctx.stroke();
 }
 
-/** Stroke [a, b] along one axis with the gaps cut out. */
-function strokeBroken(
+/** Stroke [a, b] along one axis, broken around `centre` when there is one. */
+function strokeEdge(
   ctx: CanvasRenderingContext2D,
   a: number,
   b: number,
-  gaps: readonly Gap[],
+  centre: number | null,
   point: (t: number) => [number, number],
 ): void {
-  let at = a;
-  for (const g of gaps) {
-    if (g.from > at) {
-      ctx.moveTo(...point(at));
-      ctx.lineTo(...point(Math.min(g.from, b)));
-    }
-    at = Math.max(at, g.to);
-    if (at >= b) return;
-  }
-  if (b > at) {
-    ctx.moveTo(...point(at));
+  if (centre === null) {
+    ctx.moveTo(...point(a));
     ctx.lineTo(...point(b));
+    return;
   }
+  const half = FRAME_ICON_SIZE / 2 + FRAME_ICON_PAD;
+  ctx.moveTo(...point(a));
+  ctx.lineTo(...point(centre - half));
+  ctx.moveTo(...point(centre + half));
+  ctx.lineTo(...point(b));
+}
+
+/** The middle of [a, b] when the edge is long enough to hold the icon, else null. */
+function iconCentre(a: number, b: number): number | null {
+  if (b - a < FRAME_ICON_SIZE + 2 * FRAME_ICON_PAD + FRAME_MIN_EDGE_SLACK) return null;
+  return Math.round((a + b) / 2) + 0.5;
 }
 
 /** Paint the frame of one region. Exported for tests. */
@@ -124,7 +128,7 @@ export function paintRegionFrame(
   context: GridLayerContext,
   region: OutlineRegion,
   rectOf: WritebackOutlineDeps["rectOf"],
-  glyphWidth: number,
+  colors: WritebackFrameColors,
 ): void {
   const rect = rectOf(context, region.rowStart, region.colStart, region.rowEnd, region.colEnd);
   if (!rect) return;
@@ -135,74 +139,35 @@ export function paintRegionFrame(
   const bottom = Math.round(rect.y + rect.height) - 0.5;
   if (right <= left || bottom <= top) return;
 
-  const vp = context.viewport;
-  const freeze = context.freezeConfig;
-  const cols = visibleIndices(
-    region.colStart, region.colEnd, freeze?.freezeCol ?? null, vp.startCol, vp.colCount,
-  );
-  const rows = visibleIndices(
-    region.rowStart, region.rowEnd, freeze?.freezeRow ?? null, vp.startRow, vp.rowCount,
-  );
-  const glyphHeight = FRAME_GLYPH_FONT_PX;
-  const halfW = glyphWidth / 2 + FRAME_GLYPH_PAD;
-  const halfH = glyphHeight / 2 + FRAME_GLYPH_PAD;
+  const hCentre = iconCentre(left, right);
+  const vCentre = iconCentre(top, bottom);
+  const icons: Array<[number, number]> = [];
 
-  // One gap per wholly visible edge cell that is long enough for a "w".
-  const horizontalGaps = (row: number): Gap[] => {
-    const gaps: Gap[] = [];
-    for (const c of cols) {
-      const cell = rectOf(context, row, c, row, c);
-      if (!cell || cell.clippedLeft || cell.clippedRight) continue;
-      if (cell.width < glyphWidth + FRAME_MIN_EDGE_SLACK) continue;
-      const centre = cell.x + cell.width / 2;
-      gaps.push({ from: centre - halfW, to: centre + halfW, centre });
-    }
-    return gaps;
-  };
-  const verticalGaps = (col: number): Gap[] => {
-    const gaps: Gap[] = [];
-    for (const r of rows) {
-      const cell = rectOf(context, r, col, r, col);
-      if (!cell || cell.clippedTop || cell.clippedBottom) continue;
-      if (cell.height < glyphHeight + FRAME_MIN_EDGE_SLACK) continue;
-      const centre = cell.y + cell.height / 2;
-      gaps.push({ from: centre - halfH, to: centre + halfH, centre });
-    }
-    return gaps;
-  };
-
-  const glyphs: Array<[number, number]> = [];
   ctx.beginPath();
   if (!rect.clippedTop) {
-    const gaps = horizontalGaps(region.rowStart);
-    strokeBroken(ctx, left, right, gaps, (t) => [t, top]);
-    for (const g of gaps) glyphs.push([g.centre, top]);
+    strokeEdge(ctx, left, right, hCentre, (t) => [t, top]);
+    if (hCentre !== null) icons.push([hCentre, top]);
   }
   if (!rect.clippedBottom) {
-    const gaps = horizontalGaps(region.rowEnd);
-    strokeBroken(ctx, left, right, gaps, (t) => [t, bottom]);
-    for (const g of gaps) glyphs.push([g.centre, bottom]);
+    strokeEdge(ctx, left, right, hCentre, (t) => [t, bottom]);
+    if (hCentre !== null) icons.push([hCentre, bottom]);
   }
   if (!rect.clippedLeft) {
-    const gaps = verticalGaps(region.colStart);
-    strokeBroken(ctx, top, bottom, gaps, (t) => [left, t]);
-    for (const g of gaps) glyphs.push([left, g.centre]);
+    strokeEdge(ctx, top, bottom, vCentre, (t) => [left, t]);
+    if (vCentre !== null) icons.push([left, vCentre]);
   }
   if (!rect.clippedRight) {
-    const gaps = verticalGaps(region.colEnd);
-    strokeBroken(ctx, top, bottom, gaps, (t) => [right, t]);
-    for (const g of gaps) glyphs.push([right, g.centre]);
+    strokeEdge(ctx, top, bottom, vCentre, (t) => [right, t]);
+    if (vCentre !== null) icons.push([right, vCentre]);
   }
+  ctx.strokeStyle = colors.line;
   ctx.globalAlpha = FRAME_LINE_ALPHA;
   ctx.stroke();
 
-  if (glyphs.length === 0) return;
-  ctx.globalAlpha = FRAME_GLYPH_ALPHA;
-  for (const [x, y] of glyphs) {
-    // Nudged up one pixel: a lowercase "w" has no ascender, so its optical
-    // centre sits below the em box's middle.
-    ctx.fillText(FRAME_GLYPH, x, y - 1);
-  }
+  if (icons.length === 0) return;
+  ctx.strokeStyle = colors.glyph;
+  ctx.globalAlpha = FRAME_ICON_ALPHA;
+  for (const [x, y] of icons) drawEditIcon(ctx, x, y);
 }
 
 /** The layer's paint function. */
@@ -214,18 +179,12 @@ export function createWritebackOutlinePainter(
     if (list.length === 0) return;
     const { ctx } = context;
     const colors = deps.colors();
-    ctx.strokeStyle = colors.line;
-    ctx.fillStyle = colors.glyph;
     ctx.lineWidth = 1;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
     ctx.setLineDash([]);
-    ctx.font = FRAME_GLYPH_FONT;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    const measured = ctx.measureText(FRAME_GLYPH).width;
-    // A context without text metrics (tests, an exotic canvas) still frames.
-    const glyphWidth = Number.isFinite(measured) && measured > 0 ? measured : FRAME_GLYPH_FONT_PX * 0.75;
     for (const r of list) {
-      paintRegionFrame(context, r, deps.rectOf, glyphWidth);
+      paintRegionFrame(context, r, deps.rectOf, colors);
     }
   };
 }

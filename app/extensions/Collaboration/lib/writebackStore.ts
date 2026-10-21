@@ -27,7 +27,7 @@ import {
   getWritebackLayer,
   getWritebackDraftRegions,
   reconcileWriteback,
-  type RegionSelector,
+  type WritebackRegionDeclaration,
   type WritebackRegionEntry,
   type WritebackSubmission,
 } from "@api/collaboration";
@@ -115,7 +115,7 @@ let countsByRegion = new Map<string, RegionCounts>();
  * workbook and in a working copy alike. Their selectors hold the workbook's own
  * (local) sheet ids -- a working copy keeps the application's ids.
  */
-let designatedBySheetId = new Map<string, RegionSelector[]>();
+let designatedBySheetId = new Map<string, WritebackRegionDeclaration[]>();
 let designatedCount = 0;
 let loaded = false;
 let lastError: string | null = null;
@@ -186,16 +186,17 @@ function apply(nextRegions: WritebackRegionEntry[], nextLayer: WritebackSubmissi
   countsByRegion = counts;
 }
 
-function applyDesignated(selectors: readonly RegionSelector[]): void {
-  const bySheet = new Map<string, RegionSelector[]>();
-  for (const sel of selectors) {
-    if (!sel || !sel.sheetId) continue;
-    const list = bySheet.get(sel.sheetId);
-    if (list) list.push(sel);
-    else bySheet.set(sel.sheetId, [sel]);
+function applyDesignated(declarations: readonly WritebackRegionDeclaration[]): void {
+  const bySheet = new Map<string, WritebackRegionDeclaration[]>();
+  for (const d of declarations) {
+    const sheetId = d?.selector?.sheetId;
+    if (!sheetId) continue;
+    const list = bySheet.get(sheetId);
+    if (list) list.push(d);
+    else bySheet.set(sheetId, [d]);
   }
   designatedBySheetId = bySheet;
-  designatedCount = selectors.length;
+  designatedCount = declarations.length;
 }
 
 function notify(): void {
@@ -240,7 +241,7 @@ async function read(stillCurrent: () => boolean): Promise<void> {
   } catch (err) {
     const designated = await designatedRead;
     if (!stillCurrent()) return;
-    if (designated) applyDesignated(designated.map((d) => d.selector));
+    if (designated) applyDesignated(designated);
     lastError = `Could not read the writeback regions: ${errorText(err)}`;
     console.warn("[writebackStore]", lastError);
     notify();
@@ -268,7 +269,7 @@ async function read(stillCurrent: () => boolean): Promise<void> {
   const designated = await designatedRead;
   if (!stillCurrent()) return;
   apply(nextRegions, nextLayer ?? [...layer]);
-  if (designated) applyDesignated(designated.map((d) => d.selector));
+  if (designated) applyDesignated(designated);
   loaded = true;
   lastError = layerError;
   lastReconcileError = reconcileError;
@@ -470,7 +471,34 @@ export function getActiveSheetFrameRegions(): readonly WritebackFrameRegion[] {
   const id = sheetIdAt(getReportPagesSnapshot(), state.sheetContext?.activeSheetIndex);
   const own = id ? designatedBySheetId.get(id) : undefined;
   if (!own || own.length === 0) return subscribed;
-  return [...subscribed, ...own];
+  return [...subscribed, ...own.map((d) => d.selector)];
+}
+
+/**
+ * The region THIS workbook designated (author side) under a cell of the ACTIVE
+ * sheet, or null. Drives the publisher's Writeback tab. Never on a canvas page.
+ */
+export function getActiveDesignatedRegionAt(row: number, col: number): WritebackRegionDeclaration | null {
+  if (designatedCount === 0) return null;
+  const state = getGridStateSnapshot();
+  if (!state || state.surface === "canvas") return null;
+  const id = sheetIdAt(getReportPagesSnapshot(), state.sheetContext?.activeSheetIndex);
+  const own = id ? designatedBySheetId.get(id) : undefined;
+  if (!own) return null;
+  for (const d of own) {
+    const sel = d.selector;
+    if (row >= sel.rowStart && row <= sel.rowEnd && col >= sel.colStart && col <= sel.colEnd) return d;
+  }
+  return null;
+}
+
+/** One of this workbook's own designated regions by id, or null. */
+export function getDesignatedRegion(regionId: string): WritebackRegionDeclaration | null {
+  for (const list of designatedBySheetId.values()) {
+    const hit = list.find((d) => d.id === regionId);
+    if (hit) return hit;
+  }
+  return null;
 }
 
 export function getActiveRegionAt(row: number, col: number): WritebackRegionEntry | null {

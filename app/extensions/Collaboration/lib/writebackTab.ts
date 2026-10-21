@@ -1,7 +1,9 @@
 // FILENAME: app/extensions/Collaboration/lib/writebackTab.ts
 // PURPOSE: Shows the contextual "Writeback" ribbon tab while Core's ACTIVE cell
-//          is inside a subscribed writeback region on the active sheet, and
-//          keeps its badge (unsent values across the workbook) current.
+//          is inside a writeback region on the active sheet -- with the
+//          SUBSCRIBER's commands in a subscribed region, the PUBLISHER's in one
+//          this workbook designated itself -- and keeps the subscriber badge
+//          (unsent values across the workbook) current.
 // CONTEXT: The Table Design shape (Table/handlers/selectionHandler.ts), minus
 //          its dedupe cache:
 //            - ONE gate (`showWritebackTab`): shown only while no selection
@@ -21,12 +23,27 @@
 import { registerPanel, unregisterPanel, PanelExtensions } from "@api/ui";
 import { getGridStateSnapshot } from "@api/grid";
 import { isSelectionOwned } from "@api/selectionOwner";
-import { getActiveRegionAt, hasWritebackRegions, totalUnsentDrafts } from "./writebackStore";
-import { setWritebackTabRegionId, countText } from "./writebackTabModel";
-import { WritebackPanelDefinition, WRITEBACK_TAB_ID } from "../manifest";
+import {
+  getActiveRegionAt,
+  getActiveDesignatedRegionAt,
+  hasWritebackRegions,
+  hasWritebackFrames,
+  totalUnsentDrafts,
+} from "./writebackStore";
+import {
+  setWritebackTabRegionId,
+  setWritebackPublisherRegionId,
+  countText,
+  type WritebackTabRole,
+} from "./writebackTabModel";
+import {
+  WritebackPanelDefinition,
+  WritebackPublisherPanelDefinition,
+  WRITEBACK_TAB_ID,
+} from "../manifest";
 
-/** Whether the contextual panel is registered now. */
-let tabRegistered = false;
+/** Which definition of the tab is registered now, or null when it is down. */
+let tabRole: WritebackTabRole | null = null;
 
 /** The last active cell Core announced to this handler (used only when the
  *  grid state is not readable, e.g. before the grid mounted). */
@@ -41,9 +58,10 @@ function setBadge(text: string | null): void {
   PanelExtensions.setBadge(WRITEBACK_TAB_ID, text);
 }
 
-/** The tab badge: the workbook's unsent values, or nothing at zero. */
+/** The tab badge: the workbook's unsent values, or nothing at zero. Only the
+ *  subscriber's tab carries it -- a publisher has nothing to send. */
 function syncBadge(): void {
-  if (!tabRegistered) {
+  if (tabRole !== "subscriber") {
     setBadge(null);
     return;
   }
@@ -57,15 +75,18 @@ function syncBadge(): void {
  * under the owner, and a tab whose Submit acts on a region nobody can see is
  * not Excel's rule (W22).
  */
-function showWritebackTab(show: boolean): void {
-  if (show && !isSelectionOwned()) {
-    if (!tabRegistered) {
-      registerPanel(WritebackPanelDefinition);
-      tabRegistered = true;
+function showWritebackTab(role: WritebackTabRole | null): void {
+  if (role && !isSelectionOwned()) {
+    if (tabRole !== role) {
+      // One id, two definitions: moving between a subscribed region and one of
+      // the workbook's own swaps the section list.
+      if (tabRole) unregisterPanel(WRITEBACK_TAB_ID);
+      registerPanel(role === "publisher" ? WritebackPublisherPanelDefinition : WritebackPanelDefinition);
+      tabRole = role;
     }
-  } else if (tabRegistered) {
+  } else if (tabRole) {
     unregisterPanel(WRITEBACK_TAB_ID);
-    tabRegistered = false;
+    tabRole = null;
   }
   syncBadge();
 }
@@ -79,10 +100,15 @@ function coreActiveCell(): { row: number; col: number } | null {
 
 function deriveForCell(cell: { row: number; col: number } | null): void {
   const region = cell && hasWritebackRegions() ? getActiveRegionAt(cell.row, cell.col) : null;
+  // The workbook's OWN region is asked only when no subscribed one is there (a
+  // cell is never both: a working copy cannot subscribe to its application).
+  const own =
+    cell && !region && hasWritebackFrames() ? getActiveDesignatedRegionAt(cell.row, cell.col) : null;
   // The region the tab's buttons address follows the cursor even while the
   // tab stands aside for a selection owner, so it is right when it returns.
   setWritebackTabRegionId(region ? region.regionId : null);
-  showWritebackTab(region !== null);
+  setWritebackPublisherRegionId(own ? own.id : null);
+  showWritebackTab(region ? "subscriber" : own ? "publisher" : null);
 }
 
 /**
@@ -112,21 +138,28 @@ export function syncWritebackTabToRegions(): void {
     return;
   }
   setWritebackTabRegionId(null);
-  showWritebackTab(false);
+  setWritebackPublisherRegionId(null);
+  showWritebackTab(null);
 }
 
 /** Whether the tab is registered now (tests, diagnostics). */
 export function isWritebackTabShown(): boolean {
-  return tabRegistered;
+  return tabRole !== null;
+}
+
+/** Which commands the registered tab shows, or null when it is down. */
+export function getWritebackTabRole(): WritebackTabRole | null {
+  return tabRole;
 }
 
 /** Deactivation: take the tab and its badge down and forget the cursor. */
 export function resetWritebackTab(): void {
   lastCoreCell = null;
   setWritebackTabRegionId(null);
-  if (tabRegistered) {
+  setWritebackPublisherRegionId(null);
+  if (tabRole) {
     unregisterPanel(WRITEBACK_TAB_ID);
-    tabRegistered = false;
+    tabRole = null;
   }
   setBadge(null);
   lastBadge = null;

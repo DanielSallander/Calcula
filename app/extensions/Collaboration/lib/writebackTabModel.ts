@@ -2,7 +2,9 @@
 // PURPOSE: The contextual Writeback ribbon tab's model: which region is under
 //          Core's active cell, whether an action is running, what the Status
 //          lines say, and the four actions (Submit, Submit All, Discard Drafts,
-//          Check Status) plus opening the pane.
+//          Check Status) plus opening the pane -- and, for the PUBLISHER of a
+//          region this workbook designated, Edit Region, Remove Region and
+//          Collected Responses.
 // CONTEXT: Kept apart from the selection handler (lib/writebackTab.ts) because
 //          the handler imports the panel definition, the panel definition
 //          imports the sections, and the sections import THIS -- one module
@@ -22,11 +24,13 @@ import {
   submitRegion,
   submitAllRegions,
   discardWritebackDrafts,
+  removeWritebackRegion,
   type OutboundSubmissionPreview,
+  type WritebackRegionDeclaration,
 } from "@api/collaboration";
 import { confirmAsync, alertAsync } from "@api/dialogs";
 import { showToast } from "@api/notifications";
-import { openTaskPane, showTaskPaneContainer } from "@api/ui";
+import { openTaskPane, showTaskPaneContainer, showDialog } from "@api/ui";
 import { refreshGridData } from "@api/grid";
 import { emitAppEvent, AppEvents } from "@api/events";
 import { refuseIfSelectionOwned } from "@api/selectionOwner";
@@ -38,10 +42,17 @@ import {
   listRegionSummaries,
   getWritebackReconcileError,
   getWritebackRefreshError,
+  getDesignatedRegion,
+  regionRangeA1,
   type WritebackRegionSummary,
   type WritebackVisibility,
 } from "./writebackStore";
-import { WRITEBACK_PANE_ID } from "./writebackIds";
+import {
+  WRITEBACK_PANE_ID,
+  PUBLISHER_DASHBOARD_PANE_ID,
+  DESIGNATE_WRITEBACK_DIALOG_ID,
+  WRITEBACK_REGIONS_CHANGED_EVENT,
+} from "./writebackIds";
 
 // ============================================================================
 // Tab state: the region under Core's active cell, and "an action is running"
@@ -102,6 +113,7 @@ function setBusy(next: boolean): void {
 /** Test seam: forget the region and the busy flag. */
 export function resetWritebackTabModel(): void {
   tabRegionId = null;
+  publisherRegionId = null;
   busy = false;
   notify();
 }
@@ -518,4 +530,144 @@ export async function checkWritebackStatus(): Promise<void> {
     }
     showToast("Status updated", { type: "success", duration: 3000 });
   });
+}
+
+// ============================================================================
+// Publisher side: the tab over one of THIS workbook's own designated regions
+// ============================================================================
+//
+// The same "Writeback" tab, with the publisher's commands instead of the
+// subscriber's: an author whose cursor is in a region they designated (in a
+// fresh workbook or a working copy) edits or removes that region and opens the
+// responses collected for it. The selection handler decides which role the
+// tab is in; a cell is never both (a workbook cannot subscribe to the
+// application it is a working copy of).
+
+/** Which commands the tab shows: a subscriber's or a publisher's. */
+export type WritebackTabRole = "subscriber" | "publisher";
+
+let publisherRegionId: string | null = null;
+
+/** The author's own region under Core's active cell, or null. */
+export function getWritebackPublisherRegionId(): string | null {
+  return publisherRegionId;
+}
+
+/** Called by the selection handler only. */
+export function setWritebackPublisherRegionId(regionId: string | null): void {
+  if (regionId === publisherRegionId) return;
+  publisherRegionId = regionId;
+  notify();
+}
+
+/** What a value-type id reads as in a sentence. */
+export function valueTypeText(valueType: string | undefined): string {
+  switch (valueType) {
+    case "number":
+      return "numbers";
+    case "integer":
+      return "whole numbers";
+    case "text":
+      return "text";
+    case "boolean":
+      return "TRUE/FALSE";
+    case "date":
+      return "dates";
+    case "enum":
+      return "a choice from a list";
+    default:
+      return "any value";
+  }
+}
+
+/** When a subscriber's value reaches the publisher, in the publisher's words. */
+export function submissionPolicyText(policy: string | undefined): string {
+  switch (policy) {
+    case "immediate":
+      return "sent as soon as it is typed";
+    case "on_approval":
+      return "counted once you approve it";
+    case "on_submit":
+    default:
+      return "sent when the subscriber submits";
+  }
+}
+
+/** Who sees the collected values, in the publisher's words (same policy as
+ *  {@link visibilitySentence}, which says it to the subscriber). */
+export function publisherVisibilitySentence(v: string | undefined): string {
+  switch (v) {
+    case "own_only":
+      return "Each subscriber sees only their own values";
+    case "own_plus_aggregate":
+      return "Subscribers see each other's values, without names";
+    case "transparent":
+    default:
+      return "Every subscriber sees every value, with names";
+  }
+}
+
+/** The publisher tab's two Status lines for one of this workbook's regions. */
+export function publisherStatusLinesFor(
+  d: WritebackRegionDeclaration,
+): [WritebackStatusLine, WritebackStatusLine] {
+  const sel = d.selector;
+  const range = regionRangeA1(sel);
+  return [
+    {
+      tone: "info",
+      text: `${range}: ${valueTypeText(d.schema?.valueType)}, ${submissionPolicyText(d.submissionPolicy)}`,
+    },
+    { tone: "info", text: publisherVisibilitySentence(d.visibility) },
+  ];
+}
+
+/** Open the Designate dialog in EDIT mode for one of this workbook's regions. */
+export function editDesignatedRegion(regionId: string): void {
+  if (refuseIfSelectionOwned("Edit Region")) return;
+  const region = getDesignatedRegion(regionId);
+  if (!region) {
+    showToast("That writeback region no longer exists.", { type: "info", duration: 3000 });
+    return;
+  }
+  showDialog(DESIGNATE_WRITEBACK_DIALOG_ID, { region });
+}
+
+/**
+ * Remove one of this workbook's own writeback regions (it stops being
+ * collected from the next publish/push on). Asks first, fails closed.
+ */
+export async function removeDesignatedRegion(regionId: string): Promise<void> {
+  if (refuseIfSelectionOwned("Remove Region")) return;
+  await runExclusive(async () => {
+    const region = getDesignatedRegion(regionId);
+    if (!region) {
+      showToast("That writeback region no longer exists.", { type: "info", duration: 3000 });
+      return;
+    }
+    const range = regionRangeA1(region.selector);
+    const ok = await confirmAsync(
+      `Remove the writeback region ${range}?\n\n` +
+        `Its cells stay as they are, but subscribers can no longer send values ` +
+        `for them once you publish or push this change. Responses already ` +
+        `collected stay in the workspace.`,
+      { title: "Remove writeback region", okLabel: "Remove", kind: "warning" },
+    );
+    if (!ok) return;
+    try {
+      await removeWritebackRegion(regionId);
+      emitAppEvent(WRITEBACK_REGIONS_CHANGED_EVENT, {});
+      showToast(`Writeback region ${range} removed.`, { type: "success", duration: 4000 });
+    } catch (err) {
+      showToast(`Could not remove the region: ${errorText(err)}`, { type: "error", duration: 8000 });
+    } finally {
+      await refreshWriteback();
+    }
+  });
+}
+
+/** Open the publisher's Collected Responses pane. */
+export function openCollectedResponses(): void {
+  openTaskPane(PUBLISHER_DASHBOARD_PANE_ID);
+  showTaskPaneContainer();
 }

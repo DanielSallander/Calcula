@@ -11,7 +11,8 @@
  * WHAT THIS PROVES, in the running app:
  *   1. the pulled sheet's region is reported on the subscriber's LOCAL sheet id
  *      (D1: it used to keep the publisher's id and fall back to sheet index 0),
- *      the "w" frame is painted round B3:B5 and NOT round A3, and the
+ *      the region frame (a soft line with one edit icon per edge) is painted
+ *      round B3:B5 and NOT round A3, and the
  *      contextual "Writeback" tab is absent on A1 and present on B3;
  *   2. typing 1, 2, 3 with the KEYBOARD saves exactly three drafts in the
  *      backend, paints the top-right draft marker (against a non-writeback
@@ -25,8 +26,10 @@
  *   5. after save + File > New + reopen the region is still on the LOCAL sheet
  *      id, the tab still follows the cursor, and typing still saves a draft;
  *   6. Open Application for Editing (a working copy) gives the author the
- *      application's region back, framed on the sheet with a "w" on its edge,
- *      and the push diff names no removed region (checkout used to drop it).
+ *      application's region back, framed on the sheet with its edit icon, the
+ *      Writeback tab shows the PUBLISHER's commands there (Collected Responses,
+ *      no Submit), and the push diff names no removed region (checkout used to
+ *      drop it).
  *
  * NEVER THE OWNER'S WORKSPACE. C:\writeback-test is COPIED to a temp folder
  * first; a submit writes `submissions/` into the workspace it was subscribed
@@ -202,7 +205,7 @@ async function topEdgeClip(page: Page, grid: GridHelper, ref: string) {
   return { x: Math.round(b.left + 6), y: Math.round(b.top - 2), width: Math.round(b.right - b.left - 12), height: 4 };
 }
 
-/** A small square straddling the MIDDLE of a cell's LEFT edge (where a frame "w" sits). */
+/** A small square straddling the MIDDLE of a cell's LEFT edge (where the frame's icon sits for B3:B5). */
 async function leftEdgeMidClip(page: Page, grid: GridHelper, ref: string) {
   const b = await cellBox(page, grid, ref);
   const mid = (b.top + b.bottom) / 2;
@@ -587,26 +590,39 @@ test.describe.serial("writeback subscriber: see what you typed, send it, and see
     expect(sel.sheetId).toBe(PUBLISHER_SHEET_ID);
     expect([sel.rowStart, sel.rowEnd, sel.colStart, sel.colEnd]).toEqual([2, 4, 1, 1]);
 
-    // An author is not a subscriber: no index entry, so no tab and no markers.
+    // An author is not a subscriber: no index entry, so no markers -- but the
+    // Writeback tab appears with the PUBLISHER's commands, and only there.
     expect((await regions(page)).length).toBe(0);
+    await grid.clickCell("A1");
+    await expect.poll(() => writebackTabCount(page), { timeout: 5000 }).toBe(0);
     await grid.clickCell("B3");
-    await page.waitForTimeout(400);
-    expect(await writebackTabCount(page)).toBe(0);
+    await expect.poll(() => writebackTabCount(page), { timeout: 5000 }).toBe(1);
+    await ribbonTab(page, "Writeback").click();
+    await page.locator('[data-testid="writeback-tab-collected-responses"]').waitFor({ state: "visible", timeout: 8000 });
+    await expect(page.locator('[data-testid="writeback-tab-edit-region"]')).toBeVisible();
+    expect(await page.locator('[data-testid="writeback-tab-submit-all"]').count(), "a publisher has nothing to submit").toBe(0);
+    await expect(page.locator('[data-testid="writeback-tab-publisher-region"]')).toContainText("B3:B5");
+    await grid.clickCell("A1");
+    await expect.poll(() => writebackTabCount(page), { timeout: 5000 }).toBe(0);
 
     // THE FRAME: the perimeter on B3's top edge (not on B4's internal one), and
-    // a "w" in the middle of B4's left edge (not on D4's plain gridline).
+    // the edit icon in the middle of the left edge -- B4's, the middle row --
+    // and not on B3's left edge, which carries the same frame LINE but no icon
+    // (so the line alone cannot pass this).
     await parkCursor(grid);
-    const [b3Top, b4Top, b4Left, d4Left] = await samplePixelPatches(page, [
+    const [b3Top, b4Top, b4Left, b3Left] = await samplePixelPatches(page, [
       await topEdgeClip(page, grid, "B3"),
       await topEdgeClip(page, grid, "B4"),
       await leftEdgeMidClip(page, grid, "B4"),
-      await leftEdgeMidClip(page, grid, "D4"),
+      await leftEdgeMidClip(page, grid, "B3"),
     ]);
     const frameTop = diffCount(b3Top, b4Top);
-    const glyph = diffCount(b4Left, d4Left);
-    console.log(`[writeback] working copy frame B3top/B4top=${frameTop} w B4left/D4left=${glyph}`);
+    const glyph = diffCount(b4Left, b3Left);
+    console.log(`[writeback] working copy frame B3top/B4top=${frameTop} icon B4left/B3left=${glyph}`);
     expect(frameTop, "no frame on B3's top edge in the working copy").toBeGreaterThan(10);
-    expect(glyph, "no 'w' on B4's left edge in the working copy").toBeGreaterThan(4);
+    // Measured live 2026-10-21: 159 with the icon, 32 with the icon switched
+    // off (the line still breaks where the icon sits). 80 separates them.
+    expect(glyph, "no edit icon on the frame's left edge in the working copy").toBeGreaterThan(80);
 
     // A PUSH WOULD KEEP IT: the diff against the base names no removed region.
     const d = await pushDiff(page, WS, APP);

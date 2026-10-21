@@ -15,3 +15,13 @@ export const WRITEBACK_PANE_ID = "collaboration:writeback";
  * label, never an id.
  */
 export const WRITEBACK_TAB_ID = "writeback-tab";
+
+/** The publisher's Collected Responses pane (the review dashboard). */
+export const PUBLISHER_DASHBOARD_PANE_ID = "collaboration:publisherDashboard";
+
+/** The Designate / Edit Writeback Region dialog. */
+export const DESIGNATE_WRITEBACK_DIALOG_ID = "collaboration:designateWritebackDialog";
+
+/** Emitted after one of this workbook's own (author-side) writeback regions is
+ *  added, updated or removed, so everything listing or framing them re-reads. */
+export const WRITEBACK_REGIONS_CHANGED_EVENT = "collaboration:writebackRegionsChanged";

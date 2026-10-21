@@ -17,7 +17,13 @@ import { ConnectionDialog } from "./components/ConnectionDialog";
 import { PromoteDialog } from "./components/PromoteDialog";
 import { EditPipelineDialog } from "./components/EditPipelineDialog";
 import { WRITEBACK_TAB_SECTIONS } from "./components/WritebackTabSections";
-import { WRITEBACK_PANE_ID, WRITEBACK_TAB_ID } from "./lib/writebackIds";
+import { WRITEBACK_PUBLISHER_TAB_SECTIONS } from "./components/WritebackPublisherTabSections";
+import {
+  WRITEBACK_PANE_ID,
+  WRITEBACK_TAB_ID,
+  PUBLISHER_DASHBOARD_PANE_ID,
+  DESIGNATE_WRITEBACK_DIALOG_ID,
+} from "./lib/writebackIds";
 
 export const COLLABORATION_EXTENSION_ID = "calcula.collaboration";
 
@@ -33,9 +39,8 @@ export const WRITEBACK_MENU_ID = "writeback";
 export const OVERRIDES_PANE_ID = "collaboration:overrides";
 // Defined in lib/writebackIds.ts (a module that imports nothing), so the
 // contextual tab's actions can name the pane without importing this file.
-export { WRITEBACK_PANE_ID, WRITEBACK_TAB_ID };
+export { WRITEBACK_PANE_ID, WRITEBACK_TAB_ID, PUBLISHER_DASHBOARD_PANE_ID, DESIGNATE_WRITEBACK_DIALOG_ID };
 export const SUBSCRIPTIONS_PANE_ID = "collaboration:subscriptions";
-export const PUBLISHER_DASHBOARD_PANE_ID = "collaboration:publisherDashboard";
 export const AUDIT_LOG_PANE_ID = "collaboration:auditLog";
 export const APPLICATION_EXPLORER_PANEL_ID = "collaboration:applicationExplorer";
 
@@ -60,7 +65,6 @@ export const SUBSCRIBE_DIALOG_ID = "collaboration:subscribeDialog";
 export const REFRESH_PREVIEW_DIALOG_ID = "collaboration:refreshPreviewDialog";
 /** One id for BOTH subscriber-diff entries; `data.mode` picks the footer. */
 export const SUBSCRIPTION_DIFF_DIALOG_ID = "collaboration:subscriptionDiffDialog";
-export const DESIGNATE_WRITEBACK_DIALOG_ID = "collaboration:designateWritebackDialog";
 export const CONNECTION_DIALOG_ID = "collaboration:connectionDialog";
 /** One id for BOTH directions; `data.mode` picks promote or rollback. */
 export const PROMOTE_DIALOG_ID = "collaboration:promoteDialog";
@@ -173,4 +177,17 @@ export const WritebackPanelDefinition: PanelDefinition = {
   ribbonOrder: WRITEBACK_TAB_ORDER,
   ribbonColor: WRITEBACK_TAB_COLOR,
   priority: 1000 - WRITEBACK_TAB_ORDER,
+};
+
+/**
+ * The SAME tab -- same id, label, colour and place -- as the PUBLISHER sees it:
+ * shown while Core's active cell is inside a writeback region THIS workbook
+ * designated (a fresh workbook or a working copy), with Edit Region, Remove
+ * Region and Collected Responses instead of the subscriber's Submit and drafts.
+ * lib/writebackTab.ts registers whichever of the two fits the region under the
+ * cursor; they are never registered together.
+ */
+export const WritebackPublisherPanelDefinition: PanelDefinition = {
+  ...WritebackPanelDefinition,
+  sections: WRITEBACK_PUBLISHER_TAB_SECTIONS,
 };

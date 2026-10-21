@@ -36,9 +36,10 @@ import {
   dialogWidth,
 } from "@api/dialogLayout";
 
-/** Emitted after a draft writeback region is added/updated, so the WritebackPane
- *  (and anything else listing draft regions) can refresh. */
-export const WRITEBACK_REGIONS_CHANGED_EVENT = "collaboration:writebackRegionsChanged";
+// Defined in lib/writebackIds.ts (imports nothing), so the Writeback tab's
+// actions can announce a removal without importing this component.
+import { WRITEBACK_REGIONS_CHANGED_EVENT } from "../lib/writebackIds";
+export { WRITEBACK_REGIONS_CHANGED_EVENT };
 
 interface Props {
   onClose: () => void;
