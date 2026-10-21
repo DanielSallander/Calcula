@@ -3,7 +3,10 @@
 // CONTEXT: All filters are sourced from a Calcula model (BI) connection;
 //          item values are fetched through the BI engine. The store also
 //          caches connection display info so the UI can attribute each
-//          filter to its model connection.
+//          filter to its model connection. A filter reaches the visuals of
+//          its connection: the pivots through filterPaneFilterBridge, every
+//          other model visual through filterReportPublisher, which publishes
+//          what this store has SAID (its events), never an optimistic value.
 
 import type {
   RibbonFilter,
@@ -22,6 +25,7 @@ import {
   runRibbonFilterSelectionGesture,
   type RibbonFilterFailure,
 } from "./filterPaneFilterBridge";
+import { splitBiFieldKey } from "../../_shared/lib/biFieldKey";
 import { cellEvents } from "@api/cellEvents";
 import { confirmPivotOverwriteOrUndo } from "@api/pivotOverwrite";
 import { emitAppEvent, AppEvents } from "@api/events";
@@ -136,6 +140,20 @@ export function isRibbonFilterChangeLanding(): boolean {
 /** Cached items per filter (filter id -> items). Refreshed on demand. */
 const itemsCache = new Map<string, SlicerItem[]>();
 
+/** Why the last item load of a filter failed (filter id -> sentence). Absent
+ *  after a success: the card shows this INSTEAD of an empty list, so a failed
+ *  load never reads as "no values". */
+const itemsErrorCache = new Map<string, string>();
+
+/** Why the last load could not narrow the values by the filter's dependent
+ *  filters (filter id -> sentence). The values are then shown un-narrowed. */
+const narrowingErrorCache = new Map<string, string>();
+
+/** How many item loads {@link refreshFilterItems} has STARTED per filter id
+ *  since the document opened. A diagnostic: tests and the journey read it to
+ *  prove a retry really ran. */
+const loadAttempts = new Map<string, number>();
+
 /** Cached BI connection info (connection id -> info) for attribution. */
 let connectionInfoCache = new Map<string, api.BiConnectionInfo>();
 
@@ -162,6 +180,23 @@ export function getFilterById(id: string): RibbonFilter | undefined {
 
 export function getCachedItems(filterId: string): SlicerItem[] | undefined {
   return itemsCache.get(filterId);
+}
+
+/** The last item-load failure of a filter, or null after a success. */
+export function getFilterItemsError(filterId: string): string | null {
+  return itemsErrorCache.get(filterId) ?? null;
+}
+
+/** Why the last item load shows the values un-narrowed by the filter's
+ *  dependent filters, or null when the narrowing worked (or was not needed). */
+export function getFilterNarrowingError(filterId: string): string | null {
+  return narrowingErrorCache.get(filterId) ?? null;
+}
+
+/** How many times {@link refreshFilterItems} has started a load for this id
+ *  since the document opened (cleared with {@link clearCache}). */
+export function getFilterLoadAttempts(filterId: string): number {
+  return loadAttempts.get(filterId) ?? 0;
 }
 
 /** Display name of a model connection, or undefined if it no longer exists. */
@@ -210,6 +245,9 @@ export async function deleteFilterAsync(filterId: string): Promise<boolean> {
     }
     await api.deleteRibbonFilter(filterId);
     itemsCache.delete(filterId);
+    itemsErrorCache.delete(filterId);
+    narrowingErrorCache.delete(filterId);
+    loadAttempts.delete(filterId);
     await refreshCache();
     // GET.CONTROLVALUE: formulas bound to the deleted filter's name go #N/A.
     // Fall back to a full control recalc if the filter wasn't in the cache.
@@ -313,7 +351,7 @@ export async function updateFilterSelectionAsync(
     // new selection (multi-select spills handled backend-side).
     triggerControlValueRecalc([filter.name]);
 
-    // Refresh sibling filter items (cross-filtering has_data)
+    // Refresh sibling filter items (the dependent filters' has_data)
     await refreshSiblingFilterItems(filterId);
 
     window.dispatchEvent(
@@ -482,87 +520,160 @@ async function settleAfterTakeBack(reconcilesBefore: number): Promise<void> {
 // Item management
 // ============================================================================
 
-/** Fetch items for a filter via the BI engine. */
-export async function refreshFilterItems(filterId: string): Promise<void> {
+/** What one item load of a ribbon filter came to. */
+export type FilterItemsOutcome =
+  /** The values loaded. `narrowingError` set: the dependent-filter narrowing
+   *  failed, so the values are shown un-narrowed (never hidden). */
+  | { ok: true; narrowingError: string | null }
+  /** Nothing loaded; `error` is the sentence the card shows. */
+  | { ok: false; error: string };
+
+function errorSentence(err: unknown): string {
+  const text = err instanceof Error ? err.message : String(err);
+  return text.trim() === "" ? "The model reported an error without a message." : text;
+}
+
+/** The sentence for a field key whose table is not one of the model's. */
+function namesNoTable(fieldName: string): string {
+  return `"${fieldName}" names no table of this model.`;
+}
+
+/**
+ * Split a "Table.Column" field key against the model's OWN table names.
+ * Table names may contain dots ("BI.dim_date"), so a first-dot split sends
+ * table "BI" to the engine; `splitBiFieldKey` takes the longest table that
+ * prefixes the key. Its fallback (the first-dot split, for a key no table
+ * prefixes) is refused here: a key whose table was renamed or removed would
+ * otherwise reproduce exactly that wrong table.
+ */
+function splitInModel(
+  fieldName: string,
+  tableNames: readonly string[],
+): { table: string; column: string } | null {
+  const split = splitBiFieldKey(fieldName, tableNames);
+  return tableNames.includes(split.table) ? split : null;
+}
+
+/**
+ * Fetch the values of a ribbon filter through the BI engine, marking each
+ * selected and whether it has data under the filter's dependent filters (the
+ * siblings on the same connection that name this filter as a dependent).
+ *
+ * A failure is REPORTED, never an empty list: the items cache entry is
+ * dropped, the sentence is kept for {@link getFilterItemsError}, and the
+ * outcome says so. A failed narrowing keeps the values, un-narrowed, and is
+ * kept for {@link getFilterNarrowingError}.
+ */
+export async function refreshFilterItems(filterId: string): Promise<FilterItemsOutcome> {
+  const filter = cachedFilters.find((f) => f.id === filterId);
+  if (!filter) {
+    return failItems(filterId, "This filter is no longer in the workbook.");
+  }
+  loadAttempts.set(filterId, (loadAttempts.get(filterId) ?? 0) + 1);
+
   try {
-    const filter = cachedFilters.find((f) => f.id === filterId);
-    if (!filter) return;
+    // The model's table names and the column's values in ONE turn of the
+    // engine: the split needs the names, and both read the same engine.
+    const loaded = await withBiMutex(async () => {
+      const info = await api.getBiModelInfo(filter.connectionId);
+      if (info === null) {
+        return {
+          ok: false as const,
+          error: "The model of this filter's connection is not loaded.",
+        };
+      }
+      const tableNames = info.tables.map((t) => t.name);
+      const own = splitInModel(filter.fieldName, tableNames);
+      if (!own) return { ok: false as const, error: namesNoTable(filter.fieldName) };
+      const values = await api.getBiColumnValues(filter.connectionId, own.table, own.column);
+      return { ok: true as const, tableNames, own, values };
+    });
+    if (!loaded.ok) return failItems(filterId, loaded.error);
+    const { tableNames, own, values: allValues } = loaded;
 
-    const [table, column] = parseBiFieldName(filter.fieldName);
-
-    // Get ALL unique values for this column
-    const allValues = await withBiMutex(() =>
-      api.getBiColumnValues(filter.connectionId, table, column),
-    );
-
-    // Collect cross-filter constraints from sibling filters on the SAME
-    // model connection that have this filter listed in their crossFilterTargets.
-    const crossFilters: api.BiCrossFilter[] = [];
+    // The value constraints of the siblings on the SAME model connection that
+    // list this filter among their dependentFilters.
+    // A sibling whose table is not in the model is left out and named: the
+    // values are then shown un-narrowed by it, never hidden.
+    const narrowingProblems: string[] = [];
+    const constraints: api.BiValueConstraint[] = [];
     for (const sibling of cachedFilters) {
       if (
         sibling.id === filter.id ||
         sibling.connectionId !== filter.connectionId ||
         sibling.selectedItems === null ||
-        !(sibling.crossFilterTargets ?? []).includes(filter.id)
+        !(sibling.dependentFilters ?? []).includes(filter.id)
       ) {
         continue;
       }
-      const [sTable, sColumn] = parseBiFieldName(sibling.fieldName);
-      crossFilters.push({
-        table: sTable,
-        column: sColumn,
+      const theirs = splitInModel(sibling.fieldName, tableNames);
+      if (!theirs) {
+        narrowingProblems.push(namesNoTable(sibling.fieldName));
+        continue;
+      }
+      constraints.push({
+        table: theirs.table,
+        column: theirs.column,
         values: sibling.selectedItems,
       });
     }
 
-    // If there are cross-filters, get the available values (subset with data)
+    // With constraints: the values that still have data (a subset).
     let availableSet: Set<string> | null = null;
-    if (crossFilters.length > 0) {
-      const available = await withBiMutex(() =>
-        api.getBiColumnAvailableValues(
-          filter.connectionId,
-          table,
-          column,
-          crossFilters,
-        ),
-      );
-      availableSet = new Set(available);
+    if (constraints.length > 0) {
+      try {
+        const available = await withBiMutex(() =>
+          api.getBiColumnAvailableValues(filter.connectionId, own.table, own.column, constraints),
+        );
+        availableSet = new Set(available);
+      } catch (err) {
+        narrowingProblems.push(errorSentence(err));
+      }
     }
 
-    const selectedSet = filter.selectedItems
-      ? new Set(filter.selectedItems)
-      : null;
-    const items: SlicerItem[] = allValues.map((v) => ({
-      value: v,
-      selected: selectedSet === null || selectedSet.has(v),
-      hasData: availableSet === null || availableSet.has(v),
+    const selectedSet = filter.selectedItems ? new Set(filter.selectedItems) : null;
+    // Selection and has-data match on the member KEY (the selection stores
+    // keys; the available set is a key set); the label is only shown.
+    const items: SlicerItem[] = allValues.map((m) => ({
+      key: m.key,
+      label: m.label,
+      selected: selectedSet === null || selectedSet.has(m.key),
+      hasData: availableSet === null || availableSet.has(m.key),
     }));
     itemsCache.set(filter.id, items);
+    itemsErrorCache.delete(filter.id);
+    const narrowingError = narrowingProblems.length > 0 ? narrowingProblems.join(" ") : null;
+    if (narrowingError === null) narrowingErrorCache.delete(filter.id);
+    else narrowingErrorCache.set(filter.id, narrowingError);
+    return { ok: true, narrowingError };
   } catch (err) {
-    console.error("[FilterPane] Failed to refresh filter items:", err);
+    return failItems(filterId, errorSentence(err));
   }
 }
 
-/** Parse "table.column" BI field name into [table, column]. */
-function parseBiFieldName(fieldName: string): [string, string] {
-  const dotIdx = fieldName.indexOf(".");
-  if (dotIdx >= 0) {
-    return [fieldName.substring(0, dotIdx), fieldName.substring(dotIdx + 1)];
-  }
-  return ["", fieldName];
+/** Record a failed item load: no cached items (never a stale or empty list
+ *  that reads as "no values"), and the sentence kept for the card. */
+function failItems(filterId: string, error: string): FilterItemsOutcome {
+  console.warn(`[FilterPane] Could not load the values of filter ${filterId}: ${error}`);
+  itemsCache.delete(filterId);
+  itemsErrorCache.set(filterId, error);
+  narrowingErrorCache.delete(filterId);
+  return { ok: false, error };
 }
 
 /** Refresh items for sibling filters (those affected by this filter's
- *  selection): cross-filter targets in both directions. Targeted canvas
- *  slicers refresh themselves via the FILTER_SELECTION_CHANGED event. */
+ *  selection): dependent filters in both directions. Targeted canvas
+ *  slicers refresh themselves via the FILTER_SELECTION_CHANGED event.
+ *  Outcomes are not returned: a failure lives in the error maps, where the
+ *  card reads it. */
 async function refreshSiblingFilterItems(filterId: string): Promise<void> {
   const filter = cachedFilters.find((f) => f.id === filterId);
   if (!filter) return;
 
   const siblingIds = new Set<string>();
 
-  // Filters that this filter targets for cross-filtering
-  const targets = filter.crossFilterTargets ?? [];
+  // This filter's dependent filters
+  const targets = filter.dependentFilters ?? [];
   for (const targetId of targets) {
     siblingIds.add(targetId);
   }
@@ -571,7 +682,7 @@ async function refreshSiblingFilterItems(filterId: string): Promise<void> {
   for (const f of cachedFilters) {
     if (
       f.id !== filterId &&
-      (f.crossFilterTargets ?? []).includes(filterId)
+      (f.dependentFilters ?? []).includes(filterId)
     ) {
       siblingIds.add(f.id);
     }
@@ -614,7 +725,8 @@ export async function refreshCache(): Promise<void> {
   }
 }
 
-/** Refresh items for all cached filters. */
+/** Refresh items for all cached filters. Outcomes are not returned: a
+ *  failure lives in the error maps, where each card reads it. */
 export async function refreshAllItems(): Promise<void> {
   await Promise.all(cachedFilters.map((f) => refreshFilterItems(f.id)));
 }
@@ -625,5 +737,8 @@ export function clearCache(): void {
   cacheInitialized = false;
   reconcilesSettled = Promise.resolve();
   itemsCache.clear();
+  itemsErrorCache.clear();
+  narrowingErrorCache.clear();
+  loadAttempts.clear();
   connectionInfoCache = new Map();
 }

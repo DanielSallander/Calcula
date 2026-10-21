@@ -91,6 +91,9 @@ function info(id: string, overrides: Partial<FloatingRangeInfo> = {}): FloatingR
     colCount: 3,
     colWidths: {},
     rowHeights: {},
+    // The backend always sends the hidden sets (P3 S2), empty by default.
+    hiddenRows: [],
+    hiddenCols: [],
     showTitle: true,
     showColumnHeaders: true,
     showRowHeaders: true,

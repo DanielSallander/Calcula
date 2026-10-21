@@ -1,7 +1,8 @@
 //! FILENAME: app/extensions/FloatingRange/rendering/frRenderer.ts
 // PURPOSE: Overlay render + hit-test for floating ranges: opaque frame (title
-//          bar, local A1 headers, gridlines), backend display strings with
-//          type-based alignment, FR-local selection paint, the yellow edge
+//          bar, local A1 headers, gridlines), the CELLS formatted like the
+//          sheet's (P3: styles, merges, conditional formatting evaluated on
+//          the backing sheet, hidden lines), FR-local selection paint, the yellow edge
 //          balls (a grid layer, `paintFrEdgeBalls`), and the quantized-resize
 //          ghost. The OBJECT-selection outline and the corner handles are
 //          Core's (core/lib/gridRenderer/rendering/floatingObjectChrome.ts,
@@ -48,7 +49,11 @@ import {
 import { columnToLetter, type GridLayerContext } from "@api";
 import { withContainerContentClip } from "@api/visualContainerPaint";
 import type { ResolvedVisualText } from "@api/visualContainer";
-import type { TypedCellData } from "@api/lib";
+import type { CellConditionalFormat, ConditionalFormatDefinition } from "@api";
+import type { MergedRegion, StyleData } from "@api/types";
+import type { CellTargetCells, TargetCellData } from "@api/cellTarget";
+import { paintStyledCellBox, paintStyledCellEdges, type CellBox } from "@api/cellPaint";
+import { conditionalResultsToOverride, paintConditionalFormat } from "@api/conditionalFormatPaint";
 import { paintScrollIndicators } from "../../_shared/lib/scrollIndicators";
 import {
   INNER_SELECTION_BORDER,
@@ -80,14 +85,17 @@ import {
   frVisibleRange,
   frEdgeHandles,
   frEdgeHandleAt,
+  frColHidden,
+  frRowHidden,
   type FrCellRange,
   type FrView,
 } from "../lib/frDimensions";
 import {
   getLocalSelection,
   localSelectionRect,
+  type FrCellArea,
 } from "../lib/frSelection";
-import { readFrCells, type FrCellRect } from "../lib/frCellReads";
+import { readFrStyledCells, type FrCellRect } from "../lib/frCellReads";
 import { FrFetchLedger } from "../lib/frFetchLedger";
 import {
   ensureFrExtent,
@@ -128,17 +136,26 @@ export function frHandlesLive(region: GridRegion, frId: string): boolean {
 // Cell cache (async fetch, sync render)
 // ============================================================================
 
-interface CachedFrCell {
-  display: string;
-  align: CanvasTextAlign;
-}
-
-/** One range's cached cells: the rectangle that was READ, and what it held. */
+/**
+ * One range's cached STYLED read (P3): the rectangle that was READ and what it
+ * held -- the cells with their style indices, the styles they use (the cache
+ * the paint takes each cell's style from, primed from the read's `styles`),
+ * the backing merges, the conditional-format results (by cell) and the
+ * BACKING rules that produced them.
+ */
 interface FrCellCacheEntry {
   /** Inclusive rectangle of local cells the map answers for. */
   rect: FrCellRect;
-  /** "row,col" -> cell, for the non-empty cells inside `rect`. */
-  cells: Map<string, CachedFrCell>;
+  /** "row,col" -> cell, for every STORED cell inside `rect` (style-only empty cells too). */
+  cells: Map<string, TargetCellData>;
+  /** styleIndex -> style, for every style the cells use. */
+  styles: Map<number, StyleData>;
+  /** The backing sheet's merged regions intersecting `rect`. */
+  merges: MergedRegion[];
+  /** "row,col" -> that cell's conditional-format results, in priority order. */
+  conditional: Map<string, CellConditionalFormat[]>;
+  /** The backing sheet's rules behind `conditional` (data-bar / icon colours). */
+  rules: ConditionalFormatDefinition[];
 }
 
 /** frId -> the last read that landed (kept visible while a newer one is in flight). */
@@ -154,16 +171,85 @@ const cellLedger = new FrFetchLedger();
 const FR_FETCH_MARGIN_ROWS = 20;
 const FR_FETCH_MARGIN_COLS = 4;
 
-function alignmentForType(cell: TypedCellData): CanvasTextAlign {
-  switch (cell.type) {
-    case "number":
-      return "right";
-    case "boolean":
-    case "error":
-      return "center";
-    default:
-      return "left";
+/** Build the cache entry for one styled read of `rect`. Exported for the unit tier. */
+export function frCacheEntryFrom(rect: FrCellRect, read: CellTargetCells): FrCellCacheEntry {
+  const cells = new Map<string, TargetCellData>();
+  for (const cell of read.cells ?? []) cells.set(`${cell.row},${cell.col}`, cell);
+  const styles = new Map<number, StyleData>();
+  for (const entry of read.styles ?? []) styles.set(entry.index, entry.style);
+  const conditional = new Map<string, CellConditionalFormat[]>();
+  for (const result of read.conditional ?? []) {
+    const key = `${result.row},${result.col}`;
+    const list = conditional.get(key);
+    if (list) list.push(result);
+    else conditional.set(key, [result]);
   }
+  return {
+    rect: { ...rect },
+    cells,
+    styles,
+    merges: [...(read.merges ?? [])],
+    conditional,
+    rules: [...(read.rules ?? [])],
+  };
+}
+
+/**
+ * Record a styled read as a known, fresh answer -- the seam tests use to stand
+ * a range up with cells, merges and conditional formats without a backend
+ * (the `recordFrUsedExtent` pattern).
+ */
+export function recordFrCellRead(frId: string, rect: FrCellRect, read: CellTargetCells): void {
+  cellCache.set(frId, frCacheEntryFrom(rect, read));
+  const n = cellLedger.begin(frId);
+  cellLedger.applied(frId, n);
+  cellLedger.end(frId, n);
+}
+
+/**
+ * The merged region of range `frId` that holds local cell (row, col), from the
+ * last styled read, or null. Selection, navigation and a press snap to it.
+ */
+export function frMergeAt(frId: string, row: number, col: number): FrCellArea | null {
+  const merges = cellCache.get(frId)?.merges;
+  if (!merges) return null;
+  for (const m of merges) {
+    if (row >= m.startRow && row <= m.endRow && col >= m.startCol && col <= m.endCol) {
+      return { startRow: m.startRow, startCol: m.startCol, endRow: m.endRow, endCol: m.endCol };
+    }
+  }
+  return null;
+}
+
+/**
+ * Grow `rect` until no known merge of range `frId` straddles its edge (Excel
+ * snaps a selection to whole merges). Pure over the cached merges.
+ */
+export function frExpandToMerges(frId: string, rect: FrCellArea): FrCellArea {
+  return expandAreaToMerges(rect, cellCache.get(frId)?.merges ?? []);
+}
+
+/** {@link frExpandToMerges} over an explicit merge list (the unit tier's door). */
+export function expandAreaToMerges(rect: FrCellArea, merges: readonly MergedRegion[]): FrCellArea {
+  const out = {
+    startRow: Math.min(rect.startRow, rect.endRow),
+    startCol: Math.min(rect.startCol, rect.endCol),
+    endRow: Math.max(rect.startRow, rect.endRow),
+    endCol: Math.max(rect.startCol, rect.endCol),
+  };
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const m of merges) {
+      const intersects = !(m.endRow < out.startRow || m.startRow > out.endRow || m.endCol < out.startCol || m.startCol > out.endCol);
+      if (!intersects) continue;
+      if (m.startRow < out.startRow) { out.startRow = m.startRow; grew = true; }
+      if (m.startCol < out.startCol) { out.startCol = m.startCol; grew = true; }
+      if (m.endRow > out.endRow) { out.endRow = m.endRow; grew = true; }
+      if (m.endCol > out.endCol) { out.endCol = m.endCol; grew = true; }
+    }
+  }
+  return out;
 }
 
 function rectCovers(outer: FrCellRect, inner: FrCellRange): boolean {
@@ -204,19 +290,13 @@ export async function fetchFrCells(
   const frId = entry.id;
   const n = cellLedger.begin(frId);
   try {
-    const cells = await readFrCells(frId, rect);
+    // The STYLED read (P3): formatted display, styles, merges, CF evaluated on
+    // the backing sheet -- never the typed value read, which carries none.
+    const read = await readFrStyledCells(frId, rect);
     // An answer older than the one on screen (IPC reads can land out of
     // order), or for a range that was forgotten meanwhile, is dropped.
     if (!cellLedger.mayApply(frId, n)) return;
-    const map = new Map<string, CachedFrCell>();
-    for (const cell of cells) {
-      if (cell.type === "empty") continue;
-      map.set(`${cell.row},${cell.col}`, {
-        display: cell.display ?? "",
-        align: alignmentForType(cell),
-      });
-    }
-    cellCache.set(frId, { rect: { ...rect }, cells: map });
+    cellCache.set(frId, frCacheEntryFrom(rect, read));
     cellLedger.applied(frId, n);
     requestOverlayRedraw();
   } catch (err) {
@@ -341,7 +421,7 @@ export function frPickPreviewCells(
 }
 
 // ============================================================================
-// Colors (deliberately plain; FR cells carry no formatting in v1)
+// Colors of the FRAME (the cells paint their own formatting: paintStyledCellBox)
 // ============================================================================
 
 const COLORS = {
@@ -352,7 +432,6 @@ const COLORS = {
   headerBg: "#f7f7f7",
   headerText: "#666666",
   gridline: "#d8d8d8",
-  cellText: "#1a1a1a",
   /** The shared inner-selection ink (_shared/lib/innerSelectionPaint.ts):
    *  a canvas pivot's cell selection looks exactly like this range's. */
   selectionFill: INNER_SELECTION_FILL,
@@ -367,7 +446,6 @@ const COLORS = {
 };
 
 const CELL_FONT = "11px 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif";
-const CELL_PAD_X = 3;
 /** The title text's inset from the bar's left / right end. */
 const TITLE_PAD_X = 6;
 
@@ -428,6 +506,158 @@ export function paintFrTitleBar(
     ctx.stroke();
   }
   ctx.restore();
+}
+
+// ============================================================================
+// Hidden lines in the headers
+// ============================================================================
+
+/**
+ * The index each RUN of hidden lines starts at, below `count` -- where the run
+ * collapsed to a zero-width boundary (its offset equals the next shown line's).
+ * Exported for the unit tier.
+ */
+export function frHiddenBoundaries(hidden: readonly number[] | undefined, count: number): number[] {
+  const out: number[] = [];
+  let prev = -2;
+  for (const i of hidden ?? []) {
+    if (i >= count) break;
+    if (i !== prev + 1) out.push(i);
+    prev = i;
+  }
+  return out;
+}
+
+/**
+ * Excel's hint that lines are hidden: a DOUBLE line across the header strip
+ * where they collapsed. `positions` are canvas x (cols) / y (rows) of each
+ * collapsed boundary; `start` / `size` the strip's extent on the other axis.
+ */
+function paintHiddenLineHints(
+  ctx: CanvasRenderingContext2D,
+  axis: "cols" | "rows",
+  positions: number[],
+  start: number,
+  size: number,
+): void {
+  if (positions.length === 0) return;
+  ctx.save();
+  ctx.strokeStyle = COLORS.headerText;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (const p of positions) {
+    for (const at of [p - 1.5, p + 0.5]) {
+      if (axis === "cols") {
+        ctx.moveTo(at, start);
+        ctx.lineTo(at, start + size);
+      } else {
+        ctx.moveTo(start, at);
+        ctx.lineTo(start + size, at);
+      }
+    }
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+// ============================================================================
+// The cells (P3: formatting, merges, conditional formatting)
+// ============================================================================
+
+/** One painted box: the cell (or merge anchor) it shows and where. */
+interface FrPaintedBox {
+  key: string;
+  box: CellBox;
+  cell: TargetCellData | null;
+  style: StyleData | null;
+}
+
+/**
+ * Paint the cells of `range` from the styled read `cached`: every stored cell
+ * through `paintStyledCellBox` (its style from the read's style cache, its
+ * conditional style folded from the BACKING results), each merged region ONCE
+ * as one box over its whole extent (its covered cells skipped, its interior
+ * gridlines covered), then every edge border in a second pass (a border that
+ * straddles a boundary is not covered by the neighbour's fill -- the grid's
+ * order), then the conditional-format glyphs (data bars, icon sets) through
+ * the seam, with the backing rules. A hidden line is zero-size and paints
+ * nothing. Exported for the unit tier.
+ */
+export function paintFrCells(
+  ctx: CanvasRenderingContext2D,
+  entry: FloatingRangeEntry,
+  cached: FrCellCacheEntry,
+  range: FrCellRange,
+  colLeft: (c: number) => number,
+  rowTopY: (r: number) => number,
+): void {
+  const boxes: FrPaintedBox[] = [];
+  const handled = new Set<string>();
+  const styleOf = (cell: TargetCellData | null): StyleData | null =>
+    cell ? (cached.styles.get(cell.styleIndex) ?? cached.styles.get(0) ?? null) : null;
+
+  // Merges intersecting what is on screen: one box each, painted from the
+  // anchor cell (which may lie above or left of the screen).
+  for (const m of cached.merges) {
+    if (m.endRow < range.startRow || m.startRow > range.endRow || m.endCol < range.startCol || m.startCol > range.endCol) {
+      continue;
+    }
+    for (let r = m.startRow; r <= m.endRow; r++) {
+      for (let c = m.startCol; c <= m.endCol; c++) handled.add(`${r},${c}`);
+    }
+    const x = colLeft(m.startCol);
+    const y = rowTopY(m.startRow);
+    const box = { x, y, width: colLeft(m.endCol + 1) - x, height: rowTopY(m.endRow + 1) - y };
+    if (box.width <= 0 || box.height <= 0) continue;
+    // Cover the gridlines INSIDE the merge (its own right / bottom edge stays).
+    ctx.fillStyle = COLORS.frameBg;
+    ctx.fillRect(box.x, box.y, Math.max(0, box.width - 1), Math.max(0, box.height - 1));
+    const key = `${m.startRow},${m.startCol}`;
+    const cell = cached.cells.get(key) ?? null;
+    boxes.push({ key, box, cell, style: styleOf(cell) });
+  }
+
+  for (let r = range.startRow; r <= range.endRow; r++) {
+    if (frRowHidden(entry, r)) continue;
+    const y = rowTopY(r);
+    const h = frRowHeight(entry, r);
+    for (let c = range.startCol; c <= range.endCol; c++) {
+      const key = `${r},${c}`;
+      if (handled.has(key) || frColHidden(entry, c)) continue;
+      let cell = cached.cells.get(key);
+      if (!cell) {
+        // An EMPTY cell a conditional format still paints (a "blanks" rule):
+        // the default style, the rule's fill.
+        if (!cached.conditional.has(key)) continue;
+        cell = { row: r, col: c, display: "", formula: null, styleIndex: 0, valueKind: "empty" };
+      }
+      const x = colLeft(c);
+      boxes.push({ key, box: { x, y, width: frColWidth(entry, c), height: h }, cell, style: styleOf(cell) });
+    }
+  }
+
+  // Pass 1: fill, diagonals and text.
+  const conditionalOf = (key: string) => conditionalResultsToOverride(cached.conditional.get(key));
+  for (const b of boxes) {
+    if (!b.cell || !b.style) continue;
+    paintStyledCellBox(ctx, b.box, {
+      cell: b.cell,
+      style: b.style,
+      valueKind: b.cell.valueKind,
+      conditional: conditionalOf(b.key),
+      edgeBorders: false,
+    });
+  }
+  // Pass 2: the edge borders, after every fill.
+  for (const b of boxes) {
+    if (!b.style) continue;
+    paintStyledCellEdges(ctx, b.box, { style: b.style, conditional: conditionalOf(b.key) });
+  }
+  // Pass 3: the conditional-format glyphs, with the BACKING rules.
+  for (const b of boxes) {
+    const results = cached.conditional.get(b.key);
+    if (results && results.length > 0) paintConditionalFormat(ctx, b.box, results, cached.rules);
+  }
 }
 
 // ============================================================================
@@ -572,8 +802,11 @@ export function renderFloatingRange(overlayCtx: OverlayRenderContext): void {
         ctx.clip();
         for (let c = range.startCol; c <= range.endCol; c++) {
           const cw = frColWidth(entry, c);
+          if (cw <= 0) continue; // a hidden column has no letter
           ctx.fillText(columnToLetter(c), colLeft(c) + cw / 2, hdrTop + colHdrH / 2 + 0.5);
         }
+        // Excel's hint that columns are hidden: a double line where they were.
+        paintHiddenLineHints(ctx, "cols", frHiddenBoundaries(entry.hiddenCols, view.cols).map(colLeft), hdrTop, colHdrH);
         ctx.restore();
       }
       // Row numbers.
@@ -584,8 +817,10 @@ export function renderFloatingRange(overlayCtx: OverlayRenderContext): void {
         ctx.clip();
         for (let r = range.startRow; r <= range.endRow; r++) {
           const rh = frRowHeight(entry, r);
+          if (rh <= 0) continue; // a hidden row has no number
           ctx.fillText(String(r + 1), canvasX + rowHdrW / 2, rowTopY(r) + rh / 2 + 0.5);
         }
+        paintHiddenLineHints(ctx, "rows", frHiddenBoundaries(entry.hiddenRows, view.rows).map(rowTopY), canvasX, rowHdrW);
         ctx.restore();
       }
 
@@ -608,11 +843,13 @@ export function renderFloatingRange(overlayCtx: OverlayRenderContext): void {
       ctx.rect(cellsLeft, cellsTop, vpW, vpH);
       ctx.clip();
 
-      // ---- 4. Gridlines (each shown cell's right / bottom edge) ----
+      // ---- 4. Gridlines (each shown cell's right / bottom edge; a hidden
+      // line has no edge of its own) ----
       ctx.strokeStyle = COLORS.gridline;
       ctx.beginPath();
       if (colsShown) {
         for (let c = range.startCol; c <= range.endCol; c++) {
+          if (frColHidden(entry, c)) continue;
           const x = colLeft(c + 1);
           ctx.moveTo(x + 0.5 - 1, cellsTop);
           ctx.lineTo(x + 0.5 - 1, cellsTop + vpH);
@@ -620,6 +857,7 @@ export function renderFloatingRange(overlayCtx: OverlayRenderContext): void {
       }
       if (rowsShown) {
         for (let r = range.startRow; r <= range.endRow; r++) {
+          if (frRowHidden(entry, r)) continue;
           const y = rowTopY(r + 1);
           ctx.moveTo(cellsLeft, y + 0.5 - 1);
           ctx.lineTo(cellsLeft + vpW, y + 0.5 - 1);
@@ -627,29 +865,48 @@ export function renderFloatingRange(overlayCtx: OverlayRenderContext): void {
       }
       ctx.stroke();
 
-      // ---- 5. FR-local selection (under the values' ink is fine — it is a fill) ----
-      // Clamped to the EXTENT, not the window: a selection may reach cells that
-      // only scrolling shows. The viewport clip trims what is scrolled away.
-      const localSel = getLocalSelection();
-      if (localSel && localSel.frId === frId) {
-        const rect = localSelectionRect(localSel);
-        const minRow = Math.min(rect.minRow, view.rows - 1);
-        const minCol = Math.min(rect.minCol, view.cols - 1);
-        const maxRow = Math.min(rect.maxRow, view.rows - 1);
-        const maxCol = Math.min(rect.maxCol, view.cols - 1);
-        const sx = colLeft(minCol);
-        const sy = rowTopY(minRow);
-        const selW = colOff[maxCol + 1] - colOff[minCol];
-        const selH = rowOff[maxRow + 1] - rowOff[minRow];
-        ctx.fillStyle = COLORS.selectionFill;
-        ctx.fillRect(sx, sy, selW, selH);
-        ctx.strokeStyle = COLORS.selectionBorder;
-        ctx.lineWidth = 2;
-        ctx.strokeRect(sx + 1, sy + 1, selW - 2, selH - 2);
-        ctx.lineWidth = 1;
+      // ---- 5. The cells: formatted, merged, conditionally formatted (P3) ----
+      // Each cell paints through the SAME per-cell primitive the sheet's look
+      // is built from (@api/cellPaint), with its style from the read's style
+      // cache and its conditional formatting evaluated on the BACKING sheet
+      // (@api/conditionalFormatPaint) -- never the host sheet's interceptors.
+      if (cached && colsShown && rowsShown) {
+        paintFrCells(ctx, entry, cached, range, colLeft, rowTopY);
       }
 
-      // ---- 5b. A reference pick's drag over THIS range (D-PICK) ----
+      // ---- 6. FR-local selection, OVER the cells' fills (as on the sheet) ----
+      // Clamped to the EXTENT, not the window: a selection may reach cells that
+      // only scrolling shows. The viewport clip trims what is scrolled away.
+      // Every area of a multi-area selection is painted, each grown to whole
+      // merges (a merged cell is selected as one).
+      const localSel = getLocalSelection();
+      if (localSel && localSel.frId === frId) {
+        const main = localSelectionRect(localSel);
+        const areas: FrCellArea[] = [
+          { startRow: main.minRow, startCol: main.minCol, endRow: main.maxRow, endCol: main.maxCol },
+          ...(localSel.areas ?? []),
+        ];
+        for (const raw of areas) {
+          const area = expandAreaToMerges(raw, cached?.merges ?? []);
+          const minRow = Math.min(area.startRow, view.rows - 1);
+          const minCol = Math.min(area.startCol, view.cols - 1);
+          const maxRow = Math.min(area.endRow, view.rows - 1);
+          const maxCol = Math.min(area.endCol, view.cols - 1);
+          const sx = colLeft(minCol);
+          const sy = rowTopY(minRow);
+          const selW = colOff[maxCol + 1] - colOff[minCol];
+          const selH = rowOff[maxRow + 1] - rowOff[minRow];
+          if (selW <= 0 || selH <= 0) continue;
+          ctx.fillStyle = COLORS.selectionFill;
+          ctx.fillRect(sx, sy, selW, selH);
+          ctx.strokeStyle = COLORS.selectionBorder;
+          ctx.lineWidth = 2;
+          ctx.strokeRect(sx + 1, sy + 1, selW - 2, selH - 2);
+          ctx.lineWidth = 1;
+        }
+      }
+
+      // ---- 6b. A reference pick's drag over THIS range (D-PICK) ----
       // Core runs the pick and inserts "<name>!A1:B3" itself; the range only shows
       // what the drag covers, dashed, in the same scrolled cell space as the
       // selection above (the viewport clip trims what is scrolled away).
@@ -663,36 +920,6 @@ export function renderFloatingRange(overlayCtx: OverlayRenderContext): void {
             height: rowOff[pick.endRow + 1] - rowOff[pick.startRow],
           },
         ]);
-      }
-
-      // ---- 6. Cell values (single line, clipped per cell, type alignment) ----
-      ctx.font = CELL_FONT;
-      ctx.textBaseline = "middle";
-      if (cached && colsShown && rowsShown) {
-        for (let r = range.startRow; r <= range.endRow; r++) {
-          const rh = frRowHeight(entry, r);
-          const y = rowTopY(r);
-          for (let c = range.startCol; c <= range.endCol; c++) {
-            const cell = cached.cells.get(`${r},${c}`);
-            if (!cell || cell.display === "") continue;
-            const cw = frColWidth(entry, c);
-            const x = colLeft(c);
-            ctx.save();
-            ctx.beginPath();
-            ctx.rect(x, y, cw, rh);
-            ctx.clip();
-            ctx.fillStyle = COLORS.cellText;
-            ctx.textAlign = cell.align;
-            const tx =
-              cell.align === "right"
-                ? x + cw - CELL_PAD_X
-                : cell.align === "center"
-                  ? x + cw / 2
-                  : x + CELL_PAD_X;
-            ctx.fillText(cell.display, tx, y + rh / 2 + 0.5);
-            ctx.restore();
-          }
-        }
       }
 
       // Overlay scroll indicators on each axis whose content overflows the window.

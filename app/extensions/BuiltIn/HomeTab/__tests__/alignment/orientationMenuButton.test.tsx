@@ -526,6 +526,51 @@ describe("refusals", () => {
     expect(lib.beginUndoTransaction).not.toHaveBeenCalled();
   });
 
+  // P3 S9: a floating grid that admits the act is asked here too -- the
+  // rotation and its AutoFit then run as one step (each door asks the grid
+  // again and acts on its cells); one that admits nothing refuses, once.
+  const floatingGridCell = () => ({
+    ref: { kind: "floatingRange" as const, id: "fr-8" },
+    selection: { startRow: 1, startCol: 1, endRow: 1, endCol: 1, activeRow: 1, activeCol: 1, type: "cells" as const },
+    bounds: { rows: 5, cols: 5 },
+    label: "Float1",
+    wholeObject: false,
+  });
+
+  it("a floating grid that admits the act: the rotation and the AutoFit run, as ONE step, no toast", async () => {
+    releaseOwner = registerSelectionOwner({
+      id: "floatingRange",
+      label: "a floating grid's cells",
+      ownsSelection: () => true,
+      cellTarget: floatingGridCell,
+      actsOn: ["format", "lineSize"],
+    });
+    applyFormat.mockImplementation(async (formatting: { textRotation?: string }) => {
+      log.push(`format:${formatting.textRotation}`);
+      return true;
+    });
+    await openMenu();
+    click(byTestId("fmt-orientation-rotateTextUp"));
+    await settle();
+    expect(toasts).toEqual([]);
+    expect(log).toEqual(["begin:Rotate Text Up", "format:rotate90", AUTOFIT, "commit:7"]);
+  });
+
+  it("inert until S8: a floating grid that admits nothing refuses, once; no step opened", async () => {
+    releaseOwner = registerSelectionOwner({
+      id: "floatingRange",
+      label: "a floating grid's cells",
+      ownsSelection: () => true,
+      cellTarget: floatingGridCell,
+    });
+    await openMenu();
+    click(byTestId("fmt-orientation-rotateTextUp"));
+    await settle();
+    expect(toasts).toHaveLength(1);
+    expect(applyFormat).not.toHaveBeenCalled();
+    expect(lib.beginUndoTransaction).not.toHaveBeenCalled();
+  });
+
   it("a write the door refused (applyFormat answers false) is not followed by an AutoFit", async () => {
     applyFormat.mockImplementation(async (formatting: { textRotation?: string }) => {
       log.push(`format:${formatting.textRotation}`);

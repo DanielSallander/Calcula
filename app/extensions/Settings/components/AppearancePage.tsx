@@ -66,6 +66,7 @@ import {
   type DropdownOption,
 } from "@api/layout";
 import { RibbonIcon } from "@api/ribbonIcons";
+import { formatNumber } from "@api/locale";
 
 /**
  * How each org-skin trust state is shown. EVERY member of `SkinTrust` has a row
@@ -766,7 +767,7 @@ export function AppearancePage(): React.ReactElement {
               title="Focus rings, ticks and selected states in this colour may be hard to see on white."
               testId="appearance-accent-contrast"
             >
-              Low contrast: {accentContrast.toFixed(1)}:1 on white
+              Low contrast: {formatNumber(accentContrast, { decimals: 1 })}:1 on white
             </Chip>
           </div>
         )}

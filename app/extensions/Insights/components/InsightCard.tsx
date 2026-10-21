@@ -19,6 +19,7 @@
 
 import React from "react";
 import type { Insight, InsightEvidence } from "@api/insightsService";
+import { formatDateTime, formatNumber } from "@api/locale";
 
 export interface InsightCardProps {
   insight: Insight;
@@ -147,11 +148,7 @@ export function describeQueryEvidence(evidence: InsightEvidence): string {
 }
 
 function formatAsOf(ms: number): string {
-  try {
-    return new Date(ms).toLocaleString();
-  } catch {
-    return new Date(ms).toISOString();
-  }
+  return formatDateTime(ms) || String(ms);
 }
 
 export function InsightCard({
@@ -174,7 +171,7 @@ export function InsightCard({
           {insight.kind}
         </span>
         <span style={weightStyle} data-testid="insight-weight">
-          weight {insight.score.toFixed(2)}
+          weight {formatNumber(insight.score, { decimals: 2 })}
         </span>
       </div>
 

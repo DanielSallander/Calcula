@@ -406,6 +406,14 @@ pub struct CalendarNames {
     pub months_short: [&'static str; 12],
     pub days_full: [&'static str; 7],
     pub days_short: [&'static str; 7],
+    /// The letter(s) a quarter label starts with: "Q" ("Q3") in English,
+    /// "Kv" ("Kv3") in Swedish, "T" (trimestre/trimestre/trimestre/trimestre)
+    /// in French, Spanish, Italian and Portuguese. Only en and sv are pinned
+    /// against the OS by tests; the rest default to "Q" and are listed for an
+    /// owner call in open-items section 2.al (P2 app locale). Read through
+    /// [`CalendarNames::quarter_label`] -- pivot date-group headers and the
+    /// timeline slicer name quarters with it.
+    pub quarter_prefix: &'static str,
 }
 
 const CALENDAR_EN: CalendarNames = CalendarNames {
@@ -413,6 +421,7 @@ const CALENDAR_EN: CalendarNames = CalendarNames {
     months_short: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
     days_full: ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"],
     days_short: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+    quarter_prefix: "Q",
 };
 
 const CALENDAR_SV: CalendarNames = CalendarNames {
@@ -420,6 +429,7 @@ const CALENDAR_SV: CalendarNames = CalendarNames {
     months_short: ["jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec"],
     days_full: ["s\u{00F6}ndag", "m\u{00E5}ndag", "tisdag", "onsdag", "torsdag", "fredag", "l\u{00F6}rdag"],
     days_short: ["s\u{00F6}n", "m\u{00E5}n", "tis", "ons", "tor", "fre", "l\u{00F6}r"],
+    quarter_prefix: "Kv",
 };
 
 const CALENDAR_DE: CalendarNames = CalendarNames {
@@ -427,6 +437,7 @@ const CALENDAR_DE: CalendarNames = CalendarNames {
     months_short: ["Jan", "Feb", "M\u{00E4}r", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"],
     days_full: ["Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"],
     days_short: ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"],
+    quarter_prefix: "Q",
 };
 
 const CALENDAR_FR: CalendarNames = CalendarNames {
@@ -434,6 +445,7 @@ const CALENDAR_FR: CalendarNames = CalendarNames {
     months_short: ["janv.", "f\u{00E9}vr.", "mars", "avr.", "mai", "juin", "juil.", "ao\u{00FB}t", "sept.", "oct.", "nov.", "d\u{00E9}c."],
     days_full: ["dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi"],
     days_short: ["dim.", "lun.", "mar.", "mer.", "jeu.", "ven.", "sam."],
+    quarter_prefix: "T",
 };
 
 const CALENDAR_NB: CalendarNames = CalendarNames {
@@ -441,6 +453,7 @@ const CALENDAR_NB: CalendarNames = CalendarNames {
     months_short: ["jan.", "feb.", "mar.", "apr.", "mai", "jun.", "jul.", "aug.", "sep.", "okt.", "nov.", "des."],
     days_full: ["s\u{00F8}ndag", "mandag", "tirsdag", "onsdag", "torsdag", "fredag", "l\u{00F8}rdag"],
     days_short: ["s\u{00F8}n.", "man.", "tir.", "ons.", "tor.", "fre.", "l\u{00F8}r."],
+    quarter_prefix: "Q",
 };
 
 const CALENDAR_DA: CalendarNames = CalendarNames {
@@ -448,6 +461,7 @@ const CALENDAR_DA: CalendarNames = CalendarNames {
     months_short: ["jan.", "feb.", "mar.", "apr.", "maj", "jun.", "jul.", "aug.", "sep.", "okt.", "nov.", "dec."],
     days_full: ["s\u{00F8}ndag", "mandag", "tirsdag", "onsdag", "torsdag", "fredag", "l\u{00F8}rdag"],
     days_short: ["s\u{00F8}n.", "man.", "tir.", "ons.", "tor.", "fre.", "l\u{00F8}r."],
+    quarter_prefix: "Q",
 };
 
 const CALENDAR_FI: CalendarNames = CalendarNames {
@@ -455,6 +469,7 @@ const CALENDAR_FI: CalendarNames = CalendarNames {
     months_short: ["tammi", "helmi", "maalis", "huhti", "touko", "kes\u{00E4}", "hein\u{00E4}", "elo", "syys", "loka", "marras", "joulu"],
     days_full: ["sunnuntai", "maanantai", "tiistai", "keskiviikko", "torstai", "perjantai", "lauantai"],
     days_short: ["su", "ma", "ti", "ke", "to", "pe", "la"],
+    quarter_prefix: "Q",
 };
 
 const CALENDAR_NL: CalendarNames = CalendarNames {
@@ -462,6 +477,7 @@ const CALENDAR_NL: CalendarNames = CalendarNames {
     months_short: ["jan", "feb", "mrt", "apr", "mei", "jun", "jul", "aug", "sep", "okt", "nov", "dec"],
     days_full: ["zondag", "maandag", "dinsdag", "woensdag", "donderdag", "vrijdag", "zaterdag"],
     days_short: ["zo", "ma", "di", "wo", "do", "vr", "za"],
+    quarter_prefix: "Q",
 };
 
 const CALENDAR_IT: CalendarNames = CalendarNames {
@@ -469,6 +485,7 @@ const CALENDAR_IT: CalendarNames = CalendarNames {
     months_short: ["gen", "feb", "mar", "apr", "mag", "giu", "lug", "ago", "set", "ott", "nov", "dic"],
     days_full: ["domenica", "luned\u{00EC}", "marted\u{00EC}", "mercoled\u{00EC}", "gioved\u{00EC}", "venerd\u{00EC}", "sabato"],
     days_short: ["dom", "lun", "mar", "mer", "gio", "ven", "sab"],
+    quarter_prefix: "T",
 };
 
 const CALENDAR_ES: CalendarNames = CalendarNames {
@@ -476,6 +493,7 @@ const CALENDAR_ES: CalendarNames = CalendarNames {
     months_short: ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"],
     days_full: ["domingo", "lunes", "martes", "mi\u{00E9}rcoles", "jueves", "viernes", "s\u{00E1}bado"],
     days_short: ["dom", "lun", "mar", "mi\u{00E9}", "jue", "vie", "s\u{00E1}b"],
+    quarter_prefix: "T",
 };
 
 const CALENDAR_PT: CalendarNames = CalendarNames {
@@ -483,6 +501,7 @@ const CALENDAR_PT: CalendarNames = CalendarNames {
     months_short: ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"],
     days_full: ["domingo", "segunda-feira", "ter\u{00E7}a-feira", "quarta-feira", "quinta-feira", "sexta-feira", "s\u{00E1}bado"],
     days_short: ["dom", "seg", "ter", "qua", "qui", "sex", "s\u{00E1}b"],
+    quarter_prefix: "T",
 };
 
 const CALENDAR_JA: CalendarNames = CalendarNames {
@@ -490,6 +509,7 @@ const CALENDAR_JA: CalendarNames = CalendarNames {
     months_short: ["1\u{6708}", "2\u{6708}", "3\u{6708}", "4\u{6708}", "5\u{6708}", "6\u{6708}", "7\u{6708}", "8\u{6708}", "9\u{6708}", "10\u{6708}", "11\u{6708}", "12\u{6708}"],
     days_full: ["\u{65E5}\u{66DC}\u{65E5}", "\u{6708}\u{66DC}\u{65E5}", "\u{706B}\u{66DC}\u{65E5}", "\u{6C34}\u{66DC}\u{65E5}", "\u{6728}\u{66DC}\u{65E5}", "\u{91D1}\u{66DC}\u{65E5}", "\u{571F}\u{66DC}\u{65E5}"],
     days_short: ["\u{65E5}", "\u{6708}", "\u{706B}", "\u{6C34}", "\u{6728}", "\u{91D1}", "\u{571F}"],
+    quarter_prefix: "Q",
 };
 
 const CALENDAR_ZH: CalendarNames = CalendarNames {
@@ -497,6 +517,7 @@ const CALENDAR_ZH: CalendarNames = CalendarNames {
     months_short: ["1\u{6708}", "2\u{6708}", "3\u{6708}", "4\u{6708}", "5\u{6708}", "6\u{6708}", "7\u{6708}", "8\u{6708}", "9\u{6708}", "10\u{6708}", "11\u{6708}", "12\u{6708}"],
     days_full: ["\u{661F}\u{671F}\u{65E5}", "\u{661F}\u{671F}\u{4E00}", "\u{661F}\u{671F}\u{4E8C}", "\u{661F}\u{671F}\u{4E09}", "\u{661F}\u{671F}\u{56DB}", "\u{661F}\u{671F}\u{4E94}", "\u{661F}\u{671F}\u{516D}"],
     days_short: ["\u{5468}\u{65E5}", "\u{5468}\u{4E00}", "\u{5468}\u{4E8C}", "\u{5468}\u{4E09}", "\u{5468}\u{56DB}", "\u{5468}\u{4E94}", "\u{5468}\u{516D}"],
+    quarter_prefix: "Q",
 };
 
 const CALENDAR_KO: CalendarNames = CalendarNames {
@@ -504,6 +525,7 @@ const CALENDAR_KO: CalendarNames = CalendarNames {
     months_short: ["1\u{C6D4}", "2\u{C6D4}", "3\u{C6D4}", "4\u{C6D4}", "5\u{C6D4}", "6\u{C6D4}", "7\u{C6D4}", "8\u{C6D4}", "9\u{C6D4}", "10\u{C6D4}", "11\u{C6D4}", "12\u{C6D4}"],
     days_full: ["\u{C77C}\u{C694}\u{C77C}", "\u{C6D4}\u{C694}\u{C77C}", "\u{D654}\u{C694}\u{C77C}", "\u{C218}\u{C694}\u{C77C}", "\u{BAA9}\u{C694}\u{C77C}", "\u{AE08}\u{C694}\u{C77C}", "\u{D1A0}\u{C694}\u{C77C}"],
     days_short: ["\u{C77C}", "\u{C6D4}", "\u{D654}", "\u{C218}", "\u{BAA9}", "\u{AE08}", "\u{D1A0}"],
+    quarter_prefix: "Q",
 };
 
 const CALENDAR_PL: CalendarNames = CalendarNames {
@@ -511,6 +533,7 @@ const CALENDAR_PL: CalendarNames = CalendarNames {
     months_short: ["sty", "lut", "mar", "kwi", "maj", "cze", "lip", "sie", "wrz", "pa\u{017A}", "lis", "gru"],
     days_full: ["niedziela", "poniedzia\u{0142}ek", "wtorek", "\u{015B}roda", "czwartek", "pi\u{0105}tek", "sobota"],
     days_short: ["niedz.", "pon.", "wt.", "\u{015B}r.", "czw.", "pt.", "sob."],
+    quarter_prefix: "Q",
 };
 
 const CALENDAR_RU: CalendarNames = CalendarNames {
@@ -518,6 +541,7 @@ const CALENDAR_RU: CalendarNames = CalendarNames {
     months_short: ["\u{044F}\u{043D}\u{0432}", "\u{0444}\u{0435}\u{0432}", "\u{043C}\u{0430}\u{0440}", "\u{0430}\u{043F}\u{0440}", "\u{043C}\u{0430}\u{0439}", "\u{0438}\u{044E}\u{043D}", "\u{0438}\u{044E}\u{043B}", "\u{0430}\u{0432}\u{0433}", "\u{0441}\u{0435}\u{043D}", "\u{043E}\u{043A}\u{0442}", "\u{043D}\u{043E}\u{044F}", "\u{0434}\u{0435}\u{043A}"],
     days_full: ["\u{0432}\u{043E}\u{0441}\u{043A}\u{0440}\u{0435}\u{0441}\u{0435}\u{043D}\u{044C}\u{0435}", "\u{043F}\u{043E}\u{043D}\u{0435}\u{0434}\u{0435}\u{043B}\u{044C}\u{043D}\u{0438}\u{043A}", "\u{0432}\u{0442}\u{043E}\u{0440}\u{043D}\u{0438}\u{043A}", "\u{0441}\u{0440}\u{0435}\u{0434}\u{0430}", "\u{0447}\u{0435}\u{0442}\u{0432}\u{0435}\u{0440}\u{0433}", "\u{043F}\u{044F}\u{0442}\u{043D}\u{0438}\u{0446}\u{0430}", "\u{0441}\u{0443}\u{0431}\u{0431}\u{043E}\u{0442}\u{0430}"],
     days_short: ["\u{0432}\u{0441}", "\u{043F}\u{043D}", "\u{0432}\u{0442}", "\u{0441}\u{0440}", "\u{0447}\u{0442}", "\u{043F}\u{0442}", "\u{0441}\u{0431}"],
+    quarter_prefix: "Q",
 };
 
 impl CalendarNames {
@@ -535,6 +559,16 @@ impl CalendarNames {
     }
     pub fn day_short(&self, dow: u32) -> &'static str {
         self.days_short.get(dow as usize).copied().unwrap_or("???")
+    }
+    /// The display label of quarter `q` (1..=4): prefix + number, no space
+    /// ("Q3", "Kv3", "T3"). Out of range yields "???" like the month and day
+    /// lookups, so a corrupt key is visible rather than silently renumbered.
+    pub fn quarter_label(&self, q: u32) -> String {
+        if (1..=4).contains(&q) {
+            format!("{}{}", self.quarter_prefix, q)
+        } else {
+            "???".to_string()
+        }
     }
 }
 
@@ -684,6 +718,27 @@ mod tests {
             assert_eq!(cal.month_full(0), "???");
             assert_eq!(cal.month_full(13), "???");
             assert_eq!(cal.day_full(7), "???");
+        }
+    }
+
+    /// Quarter labels are calendar NAMES, so they follow the language part like
+    /// the month table. Only en and sv are pinned (the sv "Kv" matches Excel's
+    /// Swedish pivot date grouping); the other prefixes await an owner call.
+    #[test]
+    fn quarter_labels_follow_the_language() {
+        let us = LocaleSettings::invariant();
+        assert_eq!(us.calendar().quarter_label(1), "Q1");
+        assert_eq!(us.calendar().quarter_label(4), "Q4");
+        let gb = LocaleSettings::from_locale_id("en-GB");
+        assert_eq!(gb.calendar().quarter_label(3), "Q3");
+        let se = LocaleSettings::from_locale_id("sv-SE");
+        assert_eq!(se.calendar().quarter_label(1), "Kv1");
+        assert_eq!(se.calendar().quarter_label(3), "Kv3");
+        for (id, _) in LocaleSettings::supported_locales() {
+            let cal = LocaleSettings::from_locale_id(&id).calendar();
+            assert!(!cal.quarter_prefix.is_empty(), "{id} has no quarter prefix");
+            assert_eq!(cal.quarter_label(0), "???", "{id}");
+            assert_eq!(cal.quarter_label(5), "???", "{id}");
         }
     }
 

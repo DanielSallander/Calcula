@@ -31,11 +31,20 @@ import { useGridKeyboard } from "../useGridKeyboard";
 import { GridProvider, useGridContext, getGridStateSnapshot } from "../../state/GridContext";
 import { getInitialState } from "../../state/gridReducer";
 import { setSelection } from "../../state/gridActions";
-import { registerSelectionOwner, setSelectionRefusalAnnouncer } from "../../lib/selectionOwner";
+import {
+  registerSelectionOwner,
+  setSelectionRefusalAnnouncer,
+  CELL_TARGET_CAPABILITIES,
+  type CellTarget,
+  type CellTargetCapability,
+} from "../../lib/selectionOwner";
 
 Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
 
 const commands: string[] = [];
+/** The target each command / Delete was handed (P3), in order. */
+const targets: (CellTarget | undefined)[] = [];
+const deleteTargets: (CellTarget | undefined)[] = [];
 let deleteCalls = 0;
 let containerEl: HTMLDivElement;
 const announced: string[] = [];
@@ -47,11 +56,13 @@ function Harness(): React.ReactElement {
     containerRef: ref,
     enabled: true,
     isEditing: false,
-    onDelete: async () => {
+    onDelete: async (target?: CellTarget) => {
       deleteCalls += 1;
+      deleteTargets.push(target);
     },
-    onCommand: async (command: string) => {
+    onCommand: async (command: string, target?: CellTarget) => {
       commands.push(command);
+      targets.push(target);
     },
   });
   React.useEffect(() => {
@@ -80,6 +91,8 @@ async function press(key: string, init: KeyboardEventInit = {}): Promise<void> {
 
 beforeEach(async () => {
   commands.length = 0;
+  targets.length = 0;
+  deleteTargets.length = 0;
   deleteCalls = 0;
   announced.length = 0;
   setSelectionRefusalAnnouncer((m) => announced.push(m));
@@ -166,5 +179,97 @@ describe("positive controls: nothing owns the selection", () => {
   it("bare Delete clears", async () => {
     await press("Delete");
     expect(deleteCalls).toBe(1);
+  });
+});
+
+// ============================================================================
+// P3 S9: an owner that ANSWERS its cells (a floating grid's claim)
+// ============================================================================
+
+const REF = { kind: "floatingRange" as const, id: "fr-1" };
+const FR_SELECTION = { startRow: 4, startCol: 1, endRow: 4, endCol: 1, activeRow: 4, activeCol: 1, type: "cells" as const };
+const ADMITTED = CELL_TARGET_CAPABILITIES.filter((c) => c !== "table" && c !== "filter" && c !== "shiftCells");
+
+/** Replace the test owner by a double of the floating grid's claim. */
+function floatingGrid(actsOn?: readonly CellTargetCapability[]): void {
+  release();
+  release = registerSelectionOwner({
+    id: "floatingRange",
+    label: "a floating grid's cells",
+    ownsSelection: () => true,
+    cellTarget: () => ({ ref: REF, selection: { ...FR_SELECTION }, bounds: { rows: 10, cols: 4 }, label: "Float1", wholeObject: false }),
+    ...(actsOn ? { actsOn } : {}),
+  });
+}
+
+/** The keys whose command may act on an owner's cells, and the rest. */
+const TARGETED = WRITES.filter(([, , , c]) => c.startsWith("format.") || c === "clipboard.pasteSpecial");
+const REFUSED = WRITES.filter(([, , , c]) => !TARGETED.some(([, , , t]) => t === c));
+
+describe("a floating grid that admits the act: the keyboard hands its cells on", () => {
+  it("the two lists split the keys as intended (the filter is not blind)", () => {
+    expect(TARGETED.length).toBeGreaterThan(5);
+    expect(REFUSED.map(([, , , c]) => c).sort()).toEqual(["checkbox.toggle", "edit.insertDate", "edit.insertTime", "insert.chart"]);
+  });
+
+  for (const [label, key, init, command] of TARGETED) {
+    it(`${label}: runs ${command} with the grid's target, nothing announced`, async () => {
+      floatingGrid(ADMITTED);
+      await press(key, init);
+      expect(commands).toEqual([command]);
+      expect(targets[0]).toMatchObject({ kind: "object", ref: REF, selection: FR_SELECTION });
+      expect(announced).toEqual([]);
+    });
+  }
+
+  for (const [label, key, init, command] of REFUSED) {
+    it(`${label}: ${command} has no target route and still refuses, once`, async () => {
+      floatingGrid(ADMITTED);
+      await press(key, init);
+      expect(commands).toEqual([]);
+      expect(announced.length).toBe(1);
+    });
+  }
+
+  it('Delete hands the grid\'s target to the clear ("clear")', async () => {
+    floatingGrid(ADMITTED);
+    await press("Delete");
+    expect(deleteCalls).toBe(1);
+    expect(deleteTargets[0]).toMatchObject({ kind: "object", ref: REF });
+    expect(announced).toEqual([]);
+  });
+
+  it('an owner admitting "format" only refuses the number-format keys', async () => {
+    floatingGrid(["format"]);
+    await press("b", { ctrlKey: true });
+    await press("%", { ctrlKey: true, shiftKey: true });
+    expect(commands).toEqual(["format.toggleBold"]);
+    expect(announced.length).toBe(1);
+  });
+
+  it("with no owner the commands receive the GRID target", async () => {
+    release();
+    release = () => {};
+    await press("b", { ctrlKey: true });
+    expect(commands).toEqual(["format.toggleBold"]);
+    expect(targets[0]).toMatchObject({ kind: "grid" });
+  });
+});
+
+describe("inert until S8: a floating-grid owner that admits NOTHING refuses every key", () => {
+  for (const [label, key, init, command] of WRITES) {
+    it(`${label}: ${command} is not run; one announcement`, async () => {
+      floatingGrid(undefined);
+      await press(key, init);
+      expect(commands).toEqual([]);
+      expect(announced.length).toBe(1);
+    });
+  }
+
+  it("Delete refuses", async () => {
+    floatingGrid(undefined);
+    await press("Delete");
+    expect(deleteCalls).toBe(0);
+    expect(announced.length).toBe(1);
   });
 });

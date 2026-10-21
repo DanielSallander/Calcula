@@ -7,7 +7,12 @@
 //              INSIDE it, not 300 ms later as a step of its own;
 //            - the chart area's Background writes the CONTAINER
 //              (`container.background.color`, through commitObjectFormat:
-//              "Format Object"), never `config.theme.background`.
+//              "Format Object"), never `config.theme.background`;
+//            - a colour PICK is one write: the OS picker's `input` steps only
+//              preview (into `chart.spec`, on purpose), its native `change`
+//              commits once (round 2, G1 -- it used to write on every step);
+//            - the pick is a SOLID background commit: it clears a stored
+//              container gradient.
 // CONTEXT: The real card, the real chart store, the real format seam and the
 //          real undo transaction; the backend (chart channel + the undo
 //          begin/commit) is doubled into ONE ordered log.
@@ -147,20 +152,85 @@ describe("the Chart elements card writes in ONE undo step", () => {
     expect(log).toEqual(["begin:Format Chart", "update_chart", "commit"]);
   });
 
-  it("the chart area's Background writes the CONTAINER (Format Object), never the theme", async () => {
+  it("the chart area's Background writes the CONTAINER (Format Object), never the theme -- once, on the pick's change", async () => {
     publishChartSelection({ chartId: "c1", chartName: "Chart 1", level: "chart" });
     await mount();
-    const input = host.querySelector('input[type="color"][aria-label="Background"]') as HTMLInputElement;
-    expect(input).not.toBeNull();
-    await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
-      setter.call(input, "#1e1e1e");
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-    });
+    const input = backgroundInput();
+    await step(input, "#1e1e1e");
+    await settle();
+    // (1) A step alone writes nothing: the STORED spec is untouched (the
+    // previewed `chart.spec` is not asserted here -- the preview puts the
+    // colour there on purpose; the next case pins that).
+    expect(log).toEqual([]);
+    expect((getPreviewBaseSpec("c1") ?? getChartById("c1")!.spec).container).toBeUndefined();
+    // (2) The picker closes on the colour: ONE write, one undo step.
+    await pick(input);
     await settle();
     const spec = getChartById("c1")!.spec;
     expect(spec.container).toEqual({ background: { color: "#1e1e1e" } });
     expect((spec.config?.theme as Record<string, unknown> | undefined)?.background).toBeUndefined();
     expect(log).toEqual(["begin:Format Object", "update_chart", "commit"]);
   });
+
+  it("the card's preview DOES rewrite chart.spec before the change, and the change still commits exactly once", async () => {
+    publishChartSelection({ chartId: "c1", chartName: "Chart 1", level: "chart" });
+    await mount();
+    const input = backgroundInput();
+    await step(input, "#336699");
+    await step(input, "#1e1e1e");
+    // The blocker's live shape: by the time the picker reports `change`, the
+    // value the field was rendered with IS the picked colour.
+    expect(getChartById("c1")!.spec.container?.background?.color).toBe("#1e1e1e");
+    expect(log).toEqual([]);
+    await pick(input);
+    await settle();
+    expect(getChartById("c1")!.spec.container).toEqual({ background: { color: "#1e1e1e" } });
+    expect(log.filter((e) => e === "update_chart")).toHaveLength(1);
+    expect(log).toEqual(["begin:Format Object", "update_chart", "commit"]);
+  });
+
+  it("a pick over a stored container gradient clears the gradient (a solid background commit)", async () => {
+    updateChartSpec("c1", {
+      container: {
+        background: {
+          gradient: { type: "linear", stops: [{ offset: 0, color: "#ff0000" }, { offset: 1, color: "#0000ff" }] },
+        },
+      },
+    } as Partial<ChartSpec>);
+    await flushPendingChartSavesQuietly();
+    expect(getChartById("c1")!.spec.container?.background?.gradient).toBeDefined();
+    log.length = 0;
+    publishChartSelection({ chartId: "c1", chartName: "Chart 1", level: "chart" });
+    await mount();
+    const input = backgroundInput();
+    await step(input, "#1e1e1e");
+    await pick(input);
+    await settle();
+    const stored = JSON.parse(JSON.stringify(getChartById("c1")!.spec)) as ChartSpec;
+    expect(stored.container?.background?.color).toBe("#1e1e1e");
+    expect(stored.container?.background).not.toHaveProperty("gradient");
+    expect(log).toEqual(["begin:Format Object", "update_chart", "commit"]);
+  });
 });
+
+function backgroundInput(): HTMLInputElement {
+  const input = host.querySelector('input[type="color"][aria-label="Background"]') as HTMLInputElement;
+  expect(input).not.toBeNull();
+  return input;
+}
+
+/** One step of the OS picker: the DOM value moves and `input` fires. */
+async function step(input: HTMLInputElement, hex: string): Promise<void> {
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    setter.call(input, hex);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
+/** The OS picker closes on its colour: the native `change`. */
+async function pick(input: HTMLInputElement): Promise<void> {
+  await act(async () => {
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}

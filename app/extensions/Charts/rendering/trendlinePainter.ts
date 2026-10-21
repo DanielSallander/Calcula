@@ -3,6 +3,7 @@
 // CONTEXT: Called after the main chart paint pass but before layers.
 //          Uses pre-computed trendline data from trendlineComputation.ts.
 
+import { formatNumber } from "@api/locale";
 import type {
   ChartSpec,
   ParsedChartData,
@@ -115,7 +116,7 @@ export function paintTrendlines(
       const labels: string[] = [];
       if (trendline.showEquation) labels.push(result.equation);
       if (trendline.showRSquared && isFinite(result.rSquared)) {
-        labels.push(`R\u00B2 = ${result.rSquared.toFixed(4)}`);
+        labels.push(`R\u00B2 = ${formatNumber(result.rSquared, { decimals: 4 })}`);
       }
 
       // Position label near end of trendline

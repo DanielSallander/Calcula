@@ -55,7 +55,7 @@ impl Fx {
 
     fn params(&self, apply_to: ClearApplyTo) -> ClearRangeParams {
         // A1:B2
-        ClearRangeParams { start_row: 0, start_col: 0, end_row: 1, end_col: 1, apply_to, sheet_index: None }
+        ClearRangeParams { start_row: 0, start_col: 0, end_row: 1, end_col: 1, apply_to, sheet_index: None, target: None }
     }
 
     fn style(&self, row: u32, col: u32) -> Option<usize> {
@@ -128,7 +128,7 @@ fn clear_hyperlinks_keeps_every_format() {
 fn a_range_without_links_changes_nothing() {
     let fx = Fx::new();
     let depth = fx.undo_depth();
-    let params = ClearRangeParams { start_row: 0, start_col: 1, end_row: 0, end_col: 1, apply_to: ClearApplyTo::RemoveHyperlinks, sheet_index: None };
+    let params = ClearRangeParams { start_row: 0, start_col: 1, end_row: 0, end_col: 1, apply_to: ClearApplyTo::RemoveHyperlinks, sheet_index: None, target: None };
     let result = clear_hyperlinks_apply_to(&fx.state, &fx.file, 0, &params).expect("no-op");
     assert_eq!(result.count, 0);
     assert_eq!(fx.style(0, 1), Some(4));
@@ -144,7 +144,7 @@ fn the_off_sheet_path_refuses_both_hyperlink_kinds() {
     for kind in [ClearApplyTo::Hyperlinks, ClearApplyTo::RemoveHyperlinks] {
         let err = clear_range_with_options_off_sheet(
             &fx.state, &fx.file, &fx.files, &fx.pivots, &fx.pane, &fx.filters, 0,
-            ClearRangeParams { start_row: 0, start_col: 0, end_row: 1, end_col: 1, apply_to: kind, sheet_index: Some(0) },
+            ClearRangeParams { start_row: 0, start_col: 0, end_row: 1, end_col: 1, apply_to: kind, sheet_index: Some(0), target: None },
         )
         .unwrap_err();
         assert!(err.contains("active sheet"), "{}", err);

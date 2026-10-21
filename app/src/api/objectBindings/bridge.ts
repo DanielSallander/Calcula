@@ -14,6 +14,14 @@
 //          decision forbids (computed properties prove the failure: one
 //          caller, and paste / undo / sort never re-evaluated).
 //
+//          PAGE FILTERS (P4 S11). The mirror is keyed by SHEET ID end to end:
+//          each touched (page, connection) carries the page's BASE set
+//          (`resolvePageBase`) plus per-object OVERRIDES for the model
+//          visuals that resolve differently (`resolveFiltersFor`: a
+//          visual-scoped ribbon filter, another visual's filter-mode
+//          selection, a `none` interaction). Highlights never reach a binding.
+//          See `pageFiltersSnapshot`.
+//
 //          Every trigger of one animation frame is COALESCED into one flush:
 //          at most one `SetPageFilters` and one `CellsChanged` per frame, and
 //          requests reach the backend strictly in order (one queue), so an old
@@ -42,14 +50,28 @@ import {
   type CellsUpdatedPayload,
   type MutationDomain,
 } from "../events";
-import { getPageFilters, listPageFilterPages, onPageFiltersChange } from "../pageFilters";
+import {
+  getCrossFilters,
+  getReportFilters,
+  onReportFiltersChange,
+  resolveFiltersFor,
+  resolvePageBase,
+  startReportFilters,
+  type ResolvedFieldFilter,
+  type ResolvedTupleFilter,
+} from "../reportFilters";
+import { getReportPagesSnapshot, onReportPagesChanged } from "../reportPages";
+import { listModelVisuals, modelVisualOf } from "../modelVisuals";
 import { getGridStateSnapshot } from "../../core/state/GridContext";
 import type {
   ChangedCellRef,
   ObjectBindingsChangedPayload,
   ObjectBindingsRequest,
   ObjectBindingsResponse,
+  ObjectFilterOverrideWire,
   PageFilterPageWire,
+  PageFilterWire,
+  TupleFilterWire,
 } from "../types";
 import {
   applyResolvedValues,
@@ -104,29 +126,131 @@ async function send(request: ObjectBindingsRequest): Promise<ObjectBindingsRespo
 // Page filters
 // --------------------------------------------------------------------------
 
+/** One resolved per-column filter as the mirror carries it (items = member KEYS). */
+function fieldWire(f: ResolvedFieldFilter): PageFilterWire {
+  return { field: f.field, includedItems: [...f.includedKeys], filterLevel: f.level };
+}
+
+/** One resolved OR-of-AND filter as the mirror carries it. */
+function tupleWire(t: ResolvedTupleFilter): TupleFilterWire {
+  return { fields: [...t.fields], tuples: t.tuples.map((row) => [...row]) };
+}
+
+function cmp(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 /**
- * The FULL page-filter snapshot as Rust's mirror wants it: every (page,
- * connection) that holds a filter. Rust REPLACES its whole mirror with this.
+ * Every (page, connection) any resolver input touches, keyed `sheetId|conn`:
+ *   - a page / pages-scoped filter: its pages;
+ *   - an all-pages filter: every sheet of the live page list;
+ *   - a visuals-scoped filter: the page of each target visual (by
+ *     @api/modelVisuals; a target no provider lists has no page to reach);
+ *   - a cross-filter selection: its page.
+ * Interaction pairs touch nothing of their own: a pair changes what a target
+ * reads only while its source publishes or selects, and that source already
+ * touched the page.
+ */
+function touchedPages(): Map<string, { sheetId: string; connectionId: string }> {
+  const pages = new Map<string, { sheetId: string; connectionId: string }>();
+  const touch = (sheetId: string | null | undefined, connectionId: string): void => {
+    if (!sheetId) return;
+    pages.set(`${sheetId}|${connectionId}`, { sheetId, connectionId });
+  };
+  const everySheet = [...getReportPagesSnapshot().sheetIdByIndex.values()];
+  for (const f of getReportFilters()) {
+    switch (f.scope.kind) {
+      case "page":
+        touch(f.scope.sheetId, f.connectionId);
+        break;
+      case "pages":
+        for (const id of f.scope.sheetIds) touch(id, f.connectionId);
+        break;
+      case "all":
+        for (const id of everySheet) touch(id, f.connectionId);
+        break;
+      case "visuals":
+        for (const target of f.scope.targets) touch(modelVisualOf(target)?.sheetId, f.connectionId);
+        break;
+    }
+  }
+  for (const sel of getCrossFilters()) touch(sel.pageSheetId, sel.connectionId);
+  return pages;
+}
+
+/**
+ * The FULL page-filter snapshot Rust's binding mirror replaces itself with
+ * (`SetPageFilters`). Pages are SHEET IDS (an index shifts on every move).
+ *
+ * For every (page, connection) any resolver input touches (`touchedPages`):
+ *   - `filters` / `tupleFilters`: the page's BASE (`resolvePageBase`, the ONE
+ *     base path: page / pages / all-scoped filters; no visual-scoped filter,
+ *     no selection, no interaction). What every bound object of the page
+ *     reads unless it has an override -- a shape, a control, the page itself.
+ *     The base never carries a tuple filter today (only selections make one);
+ *     the field is on the wire so an override and a base read alike.
+ *   - `objects`: one override per model visual of the page, on that
+ *     connection, that FOLLOWS others (`role.target`), whose own resolved
+ *     `filters + tupleFilters` (`resolveFiltersFor`) differ from the base: a
+ *     visual-scoped ribbon filter that names it, another visual's filter-mode
+ *     selection, a slicer filter its `none` pair drops. HIGHLIGHTS NEVER
+ *     REACH BINDINGS: the visual is asked with its own `canHighlight`, so a
+ *     highlight-mode selection lands in `highlights` and is not sent -- a
+ *     bound measure shows the filtered value only under a filter-mode
+ *     interaction (and a visual that cannot paint a highlight is filtered,
+ *     which is exactly what it shows).
+ *
+ * Order is deterministic (page-list position, then sheet id, then connection;
+ * objects by kind then id), so an unchanged state is an unchanged wire and the
+ * dedupe below re-sends nothing.
  */
 export function pageFiltersSnapshot(): PageFilterPageWire[] {
-  return listPageFilterPages().map((page) => ({
-    sheetIndex: page.sheetIndex,
-    connectionId: page.connectionId,
-    filters: getPageFilters(page.sheetIndex, page.connectionId).map((f) => ({
-      field: f.field,
-      includedItems: [...f.includedItems],
-      filterLevel: f.filterLevel,
-    })),
-  }));
+  const position = new Map<string, number>();
+  for (const [index, id] of getReportPagesSnapshot().sheetIdByIndex) position.set(id, index);
+  const at = (id: string): number => position.get(id) ?? Number.MAX_SAFE_INTEGER;
+
+  return [...touchedPages().values()]
+    .sort((a, b) => at(a.sheetId) - at(b.sheetId) || cmp(a.sheetId, b.sheetId) || cmp(a.connectionId, b.connectionId))
+    .map(({ sheetId, connectionId }) => {
+      const base = resolvePageBase(sheetId, connectionId);
+      const filters = base.filters.map(fieldWire);
+      const tupleFilters = base.tupleFilters.map(tupleWire);
+      const baseKey = JSON.stringify([filters, tupleFilters]);
+
+      const objects: ObjectFilterOverrideWire[] = [];
+      const visuals = listModelVisuals({ sheetId, connectionId })
+        .filter((v) => v.role.target)
+        .sort((a, b) => cmp(a.ref.kind, b.ref.kind) || cmp(a.ref.id, b.ref.id));
+      const seen = new Set<string>();
+      for (const v of visuals) {
+        const key = `${v.ref.kind}:${v.ref.id}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const own = resolveFiltersFor(sheetId, { ref: v.ref, canHighlight: v.role.canHighlight }, connectionId);
+        const ownFilters = own.filters.map(fieldWire);
+        const ownTuples = own.tupleFilters.map(tupleWire);
+        if (JSON.stringify([ownFilters, ownTuples]) === baseKey) continue;
+        objects.push({ object: { kind: v.ref.kind, id: v.ref.id }, filters: ownFilters, tupleFilters: ownTuples });
+      }
+      return { sheetId, connectionId, filters, tupleFilters, objects };
+    });
 }
 
 /** Send the current snapshot NOW (in queue order). */
 export function sendPageFiltersNow(): Promise<void> {
   pendingPageFilters = false;
   return enqueue(async () => {
-    expectResponse(await send({ op: "setPageFilters", pages: pageFiltersSnapshot() }), "ack");
+    const pages = pageFiltersSnapshot();
+    lastSentPageFilters = JSON.stringify(pages);
+    expectResponse(await send({ op: "setPageFilters", pages }), "ack");
   });
 }
+
+/**
+ * The wire last handed to Rust (JSON). A check trigger (the page list or the
+ * set of objects moved) re-sends only when the wire actually changed.
+ */
+let lastSentPageFilters: string | null = null;
 
 // --------------------------------------------------------------------------
 // Coalesced frame flush
@@ -134,6 +258,8 @@ export function sendPageFiltersNow(): Promise<void> {
 
 let frameScheduled = false;
 let pendingPageFilters = false;
+/** Something the snapshot reads may have moved without a report-filter change: compare, send on a difference. */
+let pendingPageFiltersCheck = false;
 let pendingFull = false;
 let pendingCells: Map<string, ChangedCellRef> | null = null;
 
@@ -149,6 +275,21 @@ function requestFlush(): void {
   if (frameScheduled) return;
   frameScheduled = true;
   scheduleFrame(flush);
+}
+
+/** Whether the snapshot now differs from the wire last sent (a failed read counts as changed). */
+function pageFiltersWireChanged(): boolean {
+  try {
+    return JSON.stringify(pageFiltersSnapshot()) !== lastSentPageFilters;
+  } catch {
+    return true;
+  }
+}
+
+/** Compare the page-filter wire on the next frame (no send when nothing moved). */
+function notePageFiltersCheck(): void {
+  pendingPageFiltersCheck = true;
+  requestFlush();
 }
 
 function activeSheetIndex(): number {
@@ -181,7 +322,11 @@ function noteFull(): void {
 function flush(): void {
   frameScheduled = false;
 
-  if (pendingPageFilters) void sendPageFiltersNow().catch((e) => warnFailure("Mirroring the page filters", e));
+  const check = pendingPageFiltersCheck;
+  pendingPageFiltersCheck = false;
+  if (pendingPageFilters || (check && pageFiltersWireChanged())) {
+    void sendPageFiltersNow().catch((e) => warnFailure("Mirroring the page filters", e));
+  }
 
   const full = pendingFull;
   const cells = pendingCells;
@@ -332,19 +477,46 @@ export function installObjectBindingsBridge(): () => void {
   ]) {
     offs.push(onAppEvent(evt, () => noteFull()));
   }
+  // An object added, deleted or moved between sheets, a sheet added or
+  // removed: the set of visuals (and so of per-object overrides) may differ
+  // with no report-filter change. Compared on the frame, sent only on a
+  // difference -- with NO bindings too, like every page-filter send.
+  for (const evt of [
+    AppEvents.MUTATION_REFRESH,
+    AppEvents.SHEET_ADDED,
+    AppEvents.SHEET_DELETED,
+    AppEvents.STRUCTURAL_UNDO,
+  ]) {
+    offs.push(onAppEvent(evt, () => notePageFiltersCheck()));
+  }
   offs.push(onAppEvent(AppEvents.NAMED_RANGES_CHANGED, () => reevaluateAfterNameChange()));
 
-  offs.push(
-    onPageFiltersChange(() => {
-      pendingPageFilters = true;
-      requestFlush();
-    }),
-  );
+  // The report-filter seam's lifetime (the page list an all-pages filter
+  // reaches, the selection reset): this bridge is one of its starters.
+  offs.push(startReportFilters());
+  const notePageFilters = (): void => {
+    pendingPageFilters = true;
+    requestFlush();
+  };
+  offs.push(onReportFiltersChange(notePageFilters));
+  // The first page-list read answered, or a sheet came or went: an all-pages
+  // filter now reaches other pages. The page list changes for many reasons (a
+  // rename, a canvas re-size), so only a changed WIRE re-sends.
+  offs.push(onReportPagesChanged(() => notePageFiltersCheck()));
 
   offs.push(onAppEvent(AppEvents.AFTER_OPEN, () => onDocumentReplaced()));
   offs.push(onAppEvent(AppEvents.AFTER_NEW, () => onDocumentReplaced()));
   offs.push(onAppEvent(AppEvents.BI_MODEL_CHANGED, () => void requestMeasureRefresh()));
   offs.push(onAppEvent(AppEvents.BI_REFRESH_COMPLETED, () => void requestMeasureRefresh()));
+  // App locale switch (P2 S7): a binding's display text (a formatted number,
+  // a measure's General text) is written by the backend in the app locale, so
+  // the bindings re-resolve and the measures re-read.
+  offs.push(
+    onAppEvent(AppEvents.LOCALE_CHANGED, () => {
+      void requestReload();
+      void requestMeasureRefresh();
+    }),
+  );
 
   let unlistenTauri: (() => void) | null = null;
   listenTauriEvent<ObjectBindingsChangedPayload>(BACKEND_OBJECT_BINDINGS_EVENT, onBackendChanged)

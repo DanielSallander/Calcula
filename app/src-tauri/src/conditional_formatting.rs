@@ -576,6 +576,10 @@ pub struct AddCFParams {
     pub ranges: Vec<ConditionalFormatRange>,
     #[serde(default)]
     pub stop_if_true: bool,
+    /// An OBJECT's cells (P3: a floating grid). The rule is stored under the
+    /// object's BACKING sheet and its ranges are in the object's coordinates.
+    #[serde(default)]
+    pub target: Option<crate::api_types::CellTargetRef>,
 }
 
 /// Parameters for updating a conditional format
@@ -593,6 +597,10 @@ pub struct UpdateCFParams {
     pub stop_if_true: Option<bool>,
     #[serde(default)]
     pub enabled: Option<bool>,
+    /// An OBJECT's cells (P3): the rule is looked up on the object's BACKING
+    /// sheet, never the active sheet.
+    #[serde(default)]
+    pub target: Option<crate::api_types::CellTargetRef>,
 }
 
 // ============================================================================
@@ -621,6 +629,34 @@ fn resolve_cf_sheet(state: &AppState, sheet_index: Option<usize>) -> Result<usiz
     }
 }
 
+/// The sheet a CF command acts on when it names an OBJECT's cells (P3): the
+/// object's BACKING sheet, resolved by id in the one resolver. A MUTATION
+/// (`writes: true`) also asks the HOST's protection -- conditional formatting
+/// is a cell-format act, so a protected host refuses it without Format Cells,
+/// as Excel does -- and refuses a range outside the object's write extent.
+/// Call holding nothing.
+fn cf_target_sheet(
+    state: &AppState,
+    target: &crate::api_types::CellTargetRef,
+    ranges: &[ConditionalFormatRange],
+    writes: bool,
+) -> Result<usize, String> {
+    let t = crate::cell_target::resolve_cell_target(state, target)?;
+    for r in ranges {
+        crate::cell_target::ensure_in_extent(&t, r.start_row, r.start_col, r.end_row, r.end_col)?;
+    }
+    if writes {
+        crate::cell_target::gate_host_action(
+            state,
+            t.host_index,
+            t.backing_index,
+            "formatCells",
+            "change conditional formatting",
+        )?;
+    }
+    Ok(t.backing_index)
+}
+
 /// Add a conditional format rule
 #[tauri::command]
 pub fn add_conditional_format(
@@ -638,7 +674,15 @@ pub(crate) fn add_conditional_format_impl(
     file_state: &FileState,
     params: AddCFParams,
 ) -> CFResult {
-    let active_sheet = *state.active_sheet.read().unwrap();
+    // An OBJECT's cells (P3): the rule lives on its backing sheet. Every gate
+    // runs before the effect below, so a refusal leaves the document clean.
+    let active_sheet = match &params.target {
+        Some(target) => match cf_target_sheet(state, target, &params.ranges, true) {
+            Ok(sheet) => sheet,
+            Err(e) => return CFResult::err(e),
+        },
+        None => *state.active_sheet.read().unwrap(),
+    };
     // Rules live in `workbook.conditional_formats` and are written only by the save
     // path, so adding one changes what a save would write.
     let effect = DocumentEffect::mutates(file_state);
@@ -701,7 +745,16 @@ pub(crate) fn update_conditional_format_impl(
     file_state: &FileState,
     params: UpdateCFParams,
 ) -> CFResult {
-    let active_sheet = *state.active_sheet.read().unwrap();
+    let active_sheet = match &params.target {
+        Some(target) => {
+            let ranges = params.ranges.clone().unwrap_or_default();
+            match cf_target_sheet(state, target, &ranges, true) {
+                Ok(sheet) => sheet,
+                Err(e) => return CFResult::err(e),
+            }
+        }
+        None => *state.active_sheet.read().unwrap(),
+    };
     let effect = DocumentEffect::mutates(file_state);
     let mut cf_storage = state.conditional_formats.write(&effect).unwrap();
 
@@ -756,8 +809,9 @@ pub fn delete_conditional_format(
     state: State<AppState>,
     file_state: State<FileState>,
     rule_id: u64,
+    target: Option<crate::api_types::CellTargetRef>,
 ) -> CFResult {
-    delete_conditional_format_impl(&state, &file_state, rule_id)
+    delete_conditional_format_on(&state, &file_state, rule_id, target.as_ref())
 }
 
 /// Command body over plain references, so the undo contract is unit-testable
@@ -767,7 +821,24 @@ pub(crate) fn delete_conditional_format_impl(
     file_state: &FileState,
     rule_id: u64,
 ) -> CFResult {
-    let active_sheet = *state.active_sheet.read().unwrap();
+    delete_conditional_format_on(state, file_state, rule_id, None)
+}
+
+/// [`delete_conditional_format_impl`] with an optional OBJECT target (P3):
+/// the rule is removed from the object's backing sheet.
+pub(crate) fn delete_conditional_format_on(
+    state: &AppState,
+    file_state: &FileState,
+    rule_id: u64,
+    target: Option<&crate::api_types::CellTargetRef>,
+) -> CFResult {
+    let active_sheet = match target {
+        Some(target) => match cf_target_sheet(state, target, &[], true) {
+            Ok(sheet) => sheet,
+            Err(e) => return CFResult::err(e),
+        },
+        None => *state.active_sheet.read().unwrap(),
+    };
     let effect = DocumentEffect::mutates(file_state);
     let mut cf_storage = state.conditional_formats.write(&effect).unwrap();
 
@@ -801,8 +872,9 @@ pub fn reorder_conditional_formats(
     state: State<AppState>,
     file_state: State<FileState>,
     rule_ids: Vec<u64>,
+    target: Option<crate::api_types::CellTargetRef>,
 ) -> CFResult {
-    reorder_conditional_formats_impl(&state, &file_state, rule_ids)
+    reorder_conditional_formats_on(&state, &file_state, rule_ids, target.as_ref())
 }
 
 /// Command body over plain references, so the undo contract is unit-testable
@@ -812,7 +884,24 @@ pub(crate) fn reorder_conditional_formats_impl(
     file_state: &FileState,
     rule_ids: Vec<u64>,
 ) -> CFResult {
-    let active_sheet = *state.active_sheet.read().unwrap();
+    reorder_conditional_formats_on(state, file_state, rule_ids, None)
+}
+
+/// [`reorder_conditional_formats_impl`] with an optional OBJECT target (P3):
+/// the object's backing sheet's rules are reordered.
+pub(crate) fn reorder_conditional_formats_on(
+    state: &AppState,
+    file_state: &FileState,
+    rule_ids: Vec<u64>,
+    target: Option<&crate::api_types::CellTargetRef>,
+) -> CFResult {
+    let active_sheet = match target {
+        Some(target) => match cf_target_sheet(state, target, &[], true) {
+            Ok(sheet) => sheet,
+            Err(e) => return CFResult::err(e),
+        },
+        None => *state.active_sheet.read().unwrap(),
+    };
     let effect = DocumentEffect::mutates(file_state);
     let mut cf_storage = state.conditional_formats.write(&effect).unwrap();
 
@@ -870,8 +959,27 @@ pub fn get_conditional_format(
 pub fn get_all_conditional_formats(
     state: State<AppState>,
     sheet_index: Option<usize>,
+    target: Option<crate::api_types::CellTargetRef>,
 ) -> Result<Vec<ConditionalFormatDefinition>, String> {
-    let target_sheet = resolve_cf_sheet(&state, sheet_index)?;
+    get_all_conditional_formats_on(&state, sheet_index, target.as_ref())
+}
+
+/// [`get_all_conditional_formats`] over plain references. With an OBJECT
+/// target (P3): the object's backing sheet's rules, never the active sheet's.
+pub(crate) fn get_all_conditional_formats_on(
+    state: &AppState,
+    sheet_index: Option<usize>,
+    target: Option<&crate::api_types::CellTargetRef>,
+) -> Result<Vec<ConditionalFormatDefinition>, String> {
+    let target_sheet = match target {
+        Some(t) => {
+            if sheet_index.is_some() {
+                return Err("Pass a floating grid target or a sheet, not both.".to_string());
+            }
+            cf_target_sheet(state, t, &[], false)?
+        }
+        None => resolve_cf_sheet(state, sheet_index)?,
+    };
     let cf_storage = state.conditional_formats.read().unwrap();
 
     Ok(cf_storage
@@ -1222,9 +1330,44 @@ pub fn clear_conditional_formats_in_range(
     end_row: u32,
     end_col: u32,
     sheet_index: Option<usize>,
+    target: Option<crate::api_types::CellTargetRef>,
 ) -> Result<u32, String> {
+    match target {
+        Some(target) => clear_conditional_formats_in_range_on_target(
+            &state, &file_state, start_row, start_col, end_row, end_col, sheet_index, &target,
+        ),
+        None => clear_conditional_formats_in_range_impl(
+            &state, &file_state, start_row, start_col, end_row, end_col, sheet_index,
+        ),
+    }
+}
+
+/// Clear Rules from Selected Cells on an OBJECT's cells (P3): the cut is in
+/// the object's coordinates, applied to its BACKING sheet's rules, after the
+/// host's Format Cells gate and the extent check.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn clear_conditional_formats_in_range_on_target(
+    state: &AppState,
+    file_state: &FileState,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+    sheet_index: Option<usize>,
+    target: &crate::api_types::CellTargetRef,
+) -> Result<u32, String> {
+    if sheet_index.is_some() {
+        return Err("Pass a floating grid target or a sheet, not both.".to_string());
+    }
+    let cut = ConditionalFormatRange {
+        start_row: start_row.min(end_row),
+        start_col: start_col.min(end_col),
+        end_row: start_row.max(end_row),
+        end_col: start_col.max(end_col),
+    };
+    let backing = cf_target_sheet(state, target, std::slice::from_ref(&cut), true)?;
     clear_conditional_formats_in_range_impl(
-        &state, &file_state, start_row, start_col, end_row, end_col, sheet_index,
+        state, file_state, start_row, start_col, end_row, end_col, Some(backing),
     )
 }
 
@@ -2239,6 +2382,7 @@ mod tests {
             &book.state,
             &book.file,
             AddCFParams {
+                target: None,
                 rule: ConditionalFormatRule::CellValue(CellValueRule {
                     operator: CellValueOperator::GreaterThan,
                     value1: "5".to_string(),

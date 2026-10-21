@@ -13,6 +13,7 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::time::Instant;
+use engine::MemberSource;
 use crate::cache::{
     member_id, CacheValue, GroupKey, OrderedFloat, PivotCache, ValueId, VALUE_ID_BLANK,
     VALUE_ID_EMPTY, parse_cache_value_as_date,
@@ -630,7 +631,9 @@ impl<'a> PivotCalculator<'a> {
 
     /// Finds the ValueId for a named base_item within a field.
     /// Special values: "(previous)" and "(next)" return None (handled by caller).
-    /// "(blank)" (any case) names the blank member when the field has one.
+    /// The blank member -- its key "" or its header text "(blank)" in any
+    /// case (`is_blank_member_key`, ruling Q8) -- names the blank member when
+    /// the field has one; otherwise "" falls through to an empty-text item.
     fn resolve_base_item_id(
         &mut self,
         field_index: FieldIndex,
@@ -639,7 +642,7 @@ impl<'a> PivotCalculator<'a> {
         if base_item == "(previous)" || base_item == "(next)" {
             return None; // Sentinel - caller handles positional logic
         }
-        if crate::cache::is_blank_item_label(base_item)
+        if crate::cache::is_blank_member_key(base_item)
             && self.get_ordered_items_for_field(field_index).first() == Some(&VALUE_ID_BLANK)
         {
             return Some(VALUE_ID_BLANK);
@@ -899,20 +902,38 @@ impl<'a> PivotCalculator<'a> {
 
     /// Resolves string hidden items to ValueIds by comparing display strings.
     ///
-    /// The blank item's label ("(blank)", any case) resolves to
-    /// `VALUE_ID_EMPTY`: blanks are never interned, so the scan over the
-    /// interned values below could never find them, and hiding "(blank)" --
-    /// or an inclusion `Region = ("East")` inverted into "hide every other
-    /// item" -- kept every blank record (BUG-0197).
+    /// The BLANK MEMBER -- its key "" or its header text "(blank)" in any
+    /// case (`is_blank_member_key`) -- resolves to `VALUE_ID_EMPTY`: blanks
+    /// are never interned, so the scan over the interned values below could
+    /// never find them, and hiding "(blank)" -- or an inclusion
+    /// `Region = ("East")` inverted into "hide every other item" -- kept every
+    /// blank record (BUG-0197). It also resolves to every EMPTY-TEXT item:
+    /// a NULL and an empty string are ONE member (ruling Q8, Power BI's
+    /// "(Blank)"), listed once under the key "", so hiding it hides both.
     fn resolve_hidden_ids(field_cache: &crate::cache::FieldCache, hidden_items: &[String]) -> Vec<ValueId> {
         let mut ids = Vec::new();
         for hidden_str in hidden_items {
-            if crate::cache::is_blank_item_label(hidden_str) && !ids.contains(&VALUE_ID_EMPTY) {
-                ids.push(VALUE_ID_EMPTY);
+            if crate::cache::is_blank_member_key(hidden_str) {
+                if !ids.contains(&VALUE_ID_EMPTY) {
+                    ids.push(VALUE_ID_EMPTY);
+                }
+                for id in 0..field_cache.unique_count() as ValueId {
+                    if matches!(field_cache.get_value(id), Some(CacheValue::Text(s)) if s.is_empty())
+                        && !ids.contains(&id)
+                    {
+                        ids.push(id);
+                    }
+                }
+                if hidden_str.is_empty() {
+                    continue;
+                }
             }
+            // By its display spelling, or by its member KEY (the spelling
+            // every member list hands out -- they differ for a decimal,
+            // "5.5" vs "5.50", `MemberKind::Decimal`).
             for id in 0..field_cache.unique_count() as ValueId {
                 if let Some(value) = field_cache.get_value(id) {
-                    if Self::cache_value_display(value) == *hidden_str {
+                    if Self::cache_value_display(value) == *hidden_str || field_cache.member_key(id) == *hidden_str {
                         ids.push(id);
                         break;
                     }
@@ -1093,6 +1114,8 @@ impl<'a> PivotCalculator<'a> {
                             .intern(CacheValue::Number(OrderedFloat(month_num)));
                         self.cache.virtual_fields[vf_idx]
                             .label_map.insert(vid, name.to_string());
+                        self.cache.virtual_fields[vf_idx]
+                            .label_source_map.insert(vid, MemberSource::Month { month: (i + 1) as u32 });
                     }
                 }
                 DateGroupLevel::Quarter => {
@@ -1101,6 +1124,8 @@ impl<'a> PivotCalculator<'a> {
                             .intern(CacheValue::Number(OrderedFloat(q as f64)));
                         self.cache.virtual_fields[vf_idx]
                             .label_map.insert(vid, format!("Q{}", q));
+                        self.cache.virtual_fields[vf_idx]
+                            .label_source_map.insert(vid, MemberSource::Quarter { quarter: q });
                     }
                 }
                 _ => {} // Year, Week, Day use number values that display/sort naturally
@@ -1129,17 +1154,28 @@ impl<'a> PivotCalculator<'a> {
                     let mut labels = Vec::new();
                     for id in 0..count as ValueId {
                         if let Some(CacheValue::Number(n)) = field_cache.get_value(id) {
-                            let label = match level {
-                                DateGroupLevel::Year => format!("{}", n.as_f64() as i64),
-                                DateGroupLevel::Week => format!("W{:02}", n.as_f64() as u32),
-                                DateGroupLevel::Day => format!("{}", n.as_f64() as u32),
+                            // The KEY stays the invariant text it always was;
+                            // the SOURCE says how to write it for a locale:
+                            // Year / Day as General numbers, Week as its own
+                            // key ("W01" is not a number).
+                            let (label, source) = match level {
+                                DateGroupLevel::Year => {
+                                    let year = n.as_f64() as i64;
+                                    (format!("{}", year), MemberSource::Number { value: year as f64 })
+                                }
+                                DateGroupLevel::Week => (format!("W{:02}", n.as_f64() as u32), MemberSource::Text),
+                                DateGroupLevel::Day => {
+                                    let day = n.as_f64() as u32;
+                                    (format!("{}", day), MemberSource::Number { value: day as f64 })
+                                }
                                 _ => unreachable!(),
                             };
-                            labels.push((id, label));
+                            labels.push((id, label, source));
                         }
                     }
-                    for (id, label) in labels {
+                    for (id, label, source) in labels {
                         self.cache.virtual_fields[vf_idx].label_map.insert(id, label);
+                        self.cache.virtual_fields[vf_idx].label_source_map.insert(id, source);
                     }
                 }
                 _ => {} // Month and Quarter already handled in pre-intern
@@ -1185,18 +1221,31 @@ impl<'a> PivotCalculator<'a> {
         for bin_idx in 0..bin_count {
             let bin_start = start + (bin_idx as f64) * interval;
             let bin_end = (bin_start + interval).min(end);
-            let label = if bin_start.fract() == 0.0 && bin_end.fract() == 0.0 {
+            // KEY unchanged; the SOURCE carries the typed bin so its label
+            // is written with the app locale's separators. A single-width
+            // integer bin is one number; `end` is the bin's EXCLUSIVE end.
+            let (label, source) = if bin_start.fract() == 0.0 && bin_end.fract() == 0.0 {
                 if bin_end - bin_start == 1.0 {
-                    format!("{}", bin_start as i64)
+                    (
+                        format!("{}", bin_start as i64),
+                        MemberSource::Number { value: (bin_start as i64) as f64 },
+                    )
                 } else {
-                    format!("{}-{}", bin_start as i64, (bin_end - 1.0) as i64)
+                    (
+                        format!("{}-{}", bin_start as i64, (bin_end - 1.0) as i64),
+                        MemberSource::NumberBin { start: bin_start, end: bin_end, integer: true },
+                    )
                 }
             } else {
-                format!("{:.2}-{:.2}", bin_start, bin_end)
+                (
+                    format!("{:.2}-{:.2}", bin_start, bin_end),
+                    MemberSource::NumberBin { start: bin_start, end: bin_end, integer: false },
+                )
             };
             let vid = self.cache.virtual_fields[vf_idx]
                 .intern(CacheValue::Number(OrderedFloat(bin_idx as f64)));
             self.cache.virtual_fields[vf_idx].label_map.insert(vid, label);
+            self.cache.virtual_fields[vf_idx].label_source_map.insert(vid, source);
         }
 
         // Also pre-intern overflow bin labels
@@ -1204,10 +1253,14 @@ impl<'a> PivotCalculator<'a> {
             .intern(CacheValue::Number(OrderedFloat(-1.0)));
         self.cache.virtual_fields[vf_idx]
             .label_map.insert(under_vid, format!("<{}", start));
+        self.cache.virtual_fields[vf_idx]
+            .label_source_map.insert(under_vid, MemberSource::BinBelow { start });
         let over_vid = self.cache.virtual_fields[vf_idx]
             .intern(CacheValue::Number(OrderedFloat(bin_count as f64)));
         self.cache.virtual_fields[vf_idx]
             .label_map.insert(over_vid, format!(">{}", end));
+        self.cache.virtual_fields[vf_idx]
+            .label_source_map.insert(over_vid, MemberSource::BinAbove { end });
 
         // Collect numeric values from records
         let record_count = self.cache.records.len();
@@ -1683,30 +1736,55 @@ impl<'a> PivotCalculator<'a> {
         }
     }
     
-    /// Gets the display label for a value.
-    /// Checks label_map first (used by date/number grouping for friendly names).
+    /// The HEADER TEXT of a member: its key ([`crate::cache::FieldCache::member_key`],
+    /// the one spelling the engine and the host share), except that the
+    /// blank member's header still reads [`crate::cache::BLANK_ITEM_LABEL`]
+    /// ("(blank)") where its KEY is "" (ruling Q8). Every header, GETPIVOTDATA
+    /// and `group_path` name is therefore byte-identical to before the key
+    /// function moved. The name resolvers (hidden items, base items) read the
+    /// blank by either spelling -- its header text "(blank)" or its Q8 key ""
+    /// (`crate::cache::is_blank_member_key`, P2 S4) -- and a hidden blank
+    /// hides the empty-TEXT items too: a NULL and an empty string are ONE
+    /// member (ruling Q8).
     fn get_value_label(
         &self,
         field_cache: &crate::cache::FieldCache,
         value_id: ValueId,
     ) -> String {
-        if value_id == VALUE_ID_EMPTY || value_id == VALUE_ID_BLANK {
-            return "(blank)".to_string();
+        if value_id == VALUE_ID_EMPTY
+            || value_id == VALUE_ID_BLANK
+            || (!field_cache.label_map.contains_key(&value_id)
+                && matches!(field_cache.get_value(value_id), Some(CacheValue::Empty)))
+        {
+            return crate::cache::BLANK_ITEM_LABEL.to_string();
         }
+        field_cache.member_key(value_id)
+    }
 
-        // Check for custom label override (used by date grouping, number binning)
-        if let Some(label) = field_cache.label_map.get(&value_id) {
-            return label.clone();
+    /// The [`MemberSource`] of the member a header cell for `item` shows at
+    /// `depth`, or `None` when that cell does not show one member of an axis
+    /// field: the grand total, an item's own subtotal / value-field row, a
+    /// level past the item's fields, or any text that is not the member's own
+    /// header text (`"East Total"`, `"Sum of Sales"`, a calculated item) --
+    /// the guard compares the shown `label` with the member's header text, so
+    /// a source is never attached to a cell that names something else.
+    fn member_source_at(&self, item: &FlatAxisItem, depth: usize, label: &str) -> Option<MemberSource> {
+        if item.is_grand_total {
+            return None;
         }
-
-        match field_cache.get_value(value_id) {
-            Some(CacheValue::Empty) => "(blank)".to_string(),
-            Some(CacheValue::Number(n)) => format!("{}", n.as_f64()),
-            Some(CacheValue::Text(s)) => s.clone(),
-            Some(CacheValue::Boolean(b)) => if *b { "TRUE" } else { "FALSE" }.to_string(),
-            Some(CacheValue::Error(e)) => format!("#{}", e),
-            None => "(unknown)".to_string(),
+        if depth == item.depth && (item.is_subtotal || item.value_field.is_some()) {
+            return None;
         }
+        let id = *item.group_values.get(depth)?;
+        if id == VALUE_ID_EMPTY {
+            return None;
+        }
+        let fi = *item.field_indices.get(depth)?;
+        let fc = self.cache.get_field(fi)?;
+        if self.get_value_label(fc, id) != label {
+            return None;
+        }
+        Some(fc.member_source(id))
     }
     
     /// Flattens the axis tree into an ordered list with hierarchy info.
@@ -2033,8 +2111,9 @@ impl<'a> PivotCalculator<'a> {
             let field_index = filter.field.source_index;
             let field_name = filter.field.name.clone();
 
-            // Collect unique values for this filter field
-            let unique_values = self.collect_unique_values_for_field(field_index);
+            // Collect unique values for this filter field (KEYS, with the
+            // source each one's label is written from)
+            let (unique_values, member_sources) = self.collect_unique_members_for_field(field_index);
 
             // Determine which values are selected (not hidden)
             let hidden_items = &filter.field.hidden_items;
@@ -2061,6 +2140,7 @@ impl<'a> PivotCalculator<'a> {
                 field_name: field_name.clone(),
                 selected_values: selected_values.clone(),
                 unique_values: unique_values.clone(),
+                member_sources: member_sources.clone(),
                 display_value: display_value.clone(),
                 view_row: filter_idx,
             };
@@ -2079,6 +2159,18 @@ impl<'a> PivotCalculator<'a> {
 
             // Second cell: filter dropdown (spans remaining row label columns if any)
             let mut dropdown_cell = PivotViewCell::filter_dropdown(display_value, field_index);
+            // One selected item: the dropdown SHOWS that member, so it
+            // carries the member's source (its label is localised by the
+            // host); "(All)", "(None)" and "(N items)" carry none.
+            // (The same test that chose `display_value` above.)
+            let shows_one_item = !(hidden_items.is_empty() || selected_values.len() == unique_values.len())
+                && selected_values.len() == 1;
+            if shows_one_item {
+                dropdown_cell.member_source = unique_values
+                    .iter()
+                    .position(|v| *v == selected_values[0])
+                    .and_then(|i| member_sources.get(i).cloned());
+            }
             dropdown_cell.background_style = BackgroundStyle::FilterRow;
             if row_label_cols > 1 {
                 dropdown_cell.col_span = (row_label_cols - 1) as u16;
@@ -2135,18 +2227,20 @@ impl<'a> PivotCalculator<'a> {
         filter_fields.len() + 1
     }
     
-    /// Collects all unique values for a field as display strings.
-    fn collect_unique_values_for_field(&self, field_index: FieldIndex) -> Vec<String> {
+    /// Collects all unique values for a field as KEY strings (the header
+    /// text), each with the [`MemberSource`] its label is written from.
+    fn collect_unique_members_for_field(&self, field_index: FieldIndex) -> (Vec<String>, Vec<MemberSource>) {
         let mut values = Vec::new();
-        
+        let mut sources = Vec::new();
+
         if let Some(field_cache) = self.cache.fields.get(field_index) {
             for id in 0..field_cache.unique_count() as ValueId {
-                let label = self.get_value_label(field_cache, id);
-                values.push(label);
+                values.push(self.get_value_label(field_cache, id));
+                sources.push(field_cache.member_source(id));
             }
         }
-        
-        values
+
+        (values, sources)
     }
     
     /// Calculates how many columns are needed for row labels.
@@ -2465,6 +2559,7 @@ impl<'a> PivotCalculator<'a> {
                             // label at own position (with expand icon if collapsed)
                             current_group = None;
                             let mut ch = PivotViewCell::column_header(item.label.clone());
+                            ch.member_source = self.member_source_at(item, item.depth, &item.label);
                             ch.group_path = Self::build_group_path(item);
                             ch.is_expandable = item.has_children;
                             ch.is_collapsed = item.is_collapsed;
@@ -2491,6 +2586,7 @@ impl<'a> PivotCalculator<'a> {
                                 let mut ch = PivotViewCell::column_header(
                                     anc.label.clone(),
                                 );
+                                ch.member_source = self.member_source_at(anc, anc.depth, &anc.label);
                                 ch.group_path = Self::build_group_path(anc);
                                 ch.is_expandable = anc.has_children;
                                 ch.is_collapsed = anc.is_collapsed;
@@ -2512,12 +2608,12 @@ impl<'a> PivotCalculator<'a> {
                             let synth_key = usize::MAX - (gv as usize);
                             if current_group != Some(synth_key) {
                                 current_group = Some(synth_key);
-                                let label = if let Some(fc) = self.cache.fields.get(fi) {
-                                    self.get_value_label(fc, gv)
+                                let (label, source) = if let Some(fc) = self.cache.fields.get(fi) {
+                                    (self.get_value_label(fc, gv), Some(fc.member_source(gv)))
                                 } else {
-                                    format!("{}", gv)
+                                    (format!("{}", gv), None)
                                 };
-                                PivotViewCell::column_header(label)
+                                PivotViewCell::column_header(label).with_member_source(source)
                             } else {
                                 PivotViewCell::corner()
                             }
@@ -2610,6 +2706,7 @@ impl<'a> PivotCalculator<'a> {
                         item.label.clone(),
                         item.depth as u8,
                     );
+                    cell.member_source = self.member_source_at(item, item.depth, &item.label);
                     cell.is_expandable = item.has_children;
                     cell.is_collapsed = item.is_collapsed;
 
@@ -2672,6 +2769,7 @@ impl<'a> PivotCalculator<'a> {
                                 item.label.clone(),
                                 0, // No indent in tabular
                             );
+                            cell.member_source = self.member_source_at(item, item.depth, &item.label);
                             cell.is_expandable = item.has_children;
                             cell.is_collapsed = item.is_collapsed;
                             cell.group_path = row_gp.clone();
@@ -2694,7 +2792,8 @@ impl<'a> PivotCalculator<'a> {
                             && matches!(report_layout, ReportLayout::Outline | ReportLayout::Tabular) {
                             // Repeat parent labels in outline/tabular layout
                             let parent_label = self.get_parent_label_at_depth(&row_items, row_idx, col);
-                            let mut cell = PivotViewCell::row_header(parent_label, 0);
+                            let source = self.member_source_at(item, col, &parent_label);
+                            let mut cell = PivotViewCell::row_header(parent_label, 0).with_member_source(source);
                             cell.group_path = row_gp.clone();
                             cells.push(cell);
                         } else {
@@ -5320,5 +5419,485 @@ mod blank_member_tests {
         def.row_fields[0].sort_order = SortOrder::DataSourceOrder;
         def.row_fields[0].show_all_items = true;
         assert_eq!(labels(&data_rows(&calc(&def, cache))), vec!["Q3", "Q1", "Q2", "Q4"]);
+    }
+}
+
+/// P2 S2 (app locale everywhere): every header and filter-item cell that
+/// shows ONE member of an axis field carries that member's
+/// `engine::MemberSource`, so the host writes its LABEL for the app locale at
+/// response time while the cell's `value` keeps the invariant KEY text. The
+/// keys themselves are byte-identical to before (`FieldCache::member_key` is
+/// the moved body of the engine's old private label function), except the
+/// blank member's KEY, which is "" by ruling Q8 while its header still reads
+/// "(blank)".
+#[cfg(test)]
+mod member_source_tests {
+    use super::*;
+    use crate::cache::{FieldCache, MemberKind, BLANK_ITEM_LABEL, BLANK_MEMBER_KEY};
+    use crate::definition::{AggregationType, FilterCondition, PivotField, PivotFilter, PivotId, ValueField};
+    use crate::view::{PivotCellValue, PivotViewCell};
+    use engine::{CellError, CellValue, LocaleSettings};
+
+    fn pid() -> PivotId {
+        PivotId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9])
+    }
+
+    /// The engine's member label spelling BEFORE the key function moved,
+    /// copied verbatim from the old private `PivotEngine::get_value_label` --
+    /// the reference every key and header text is pinned against.
+    fn legacy_label(fc: &FieldCache, value_id: ValueId) -> String {
+        if value_id == VALUE_ID_EMPTY || value_id == VALUE_ID_BLANK {
+            return "(blank)".to_string();
+        }
+        if let Some(label) = fc.label_map.get(&value_id) {
+            return label.clone();
+        }
+        match fc.get_value(value_id) {
+            Some(CacheValue::Empty) => "(blank)".to_string(),
+            Some(CacheValue::Number(n)) => format!("{}", n.as_f64()),
+            Some(CacheValue::Text(s)) => s.clone(),
+            Some(CacheValue::Boolean(b)) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+            Some(CacheValue::Error(e)) => format!("#{}", e),
+            None => "(unknown)".to_string(),
+        }
+    }
+
+    /// A one-field-on-rows pivot (field 0) summing field 1.
+    fn rows_pivot(field: PivotField) -> PivotDefinition {
+        let mut def = PivotDefinition::new(pid(), (0, 0), (0, 0));
+        def.row_fields = vec![field];
+        def.value_fields = vec![ValueField::new(1, "Sum of Amount".to_string(), AggregationType::Sum)];
+        def
+    }
+
+    /// A two-field cache: field 0 holds `values`, field 1 an amount of 1.
+    fn cache_of(values: &[CellValue]) -> PivotCache {
+        let mut cache = PivotCache::new(pid(), 2);
+        cache.set_field_name(0, "Key".to_string());
+        cache.set_field_name(1, "Amount".to_string());
+        for (i, v) in values.iter().enumerate() {
+            cache.add_record(i as u32, &[v.clone(), CellValue::Number(1.0)]);
+        }
+        cache
+    }
+
+    fn date(y: i32, m: i32, d: i32) -> CellValue {
+        CellValue::Number(engine::date_serial::date_to_serial(y, m, d))
+    }
+
+    fn text_of(cell: &PivotViewCell) -> String {
+        match &cell.value {
+            PivotCellValue::Text(s) => s.clone(),
+            other => format!("{other:?}"),
+        }
+    }
+
+    /// Every RowHeader cell that names a member, as (value text, source).
+    fn member_headers(view: &PivotView) -> Vec<(String, MemberSource)> {
+        view.cells
+            .iter()
+            .flatten()
+            .filter(|c| c.cell_type == PivotCellType::RowHeader)
+            .filter_map(|c| c.member_source.clone().map(|s| (text_of(c), s)))
+            .collect()
+    }
+
+    #[test]
+    fn a_month_grouped_pivots_headers_carry_month_sources_and_keep_their_keys() {
+        let values: Vec<CellValue> = (1..=12).map(|m| date(2024, m, 15)).collect();
+        let mut cache = cache_of(&values);
+        let mut field = PivotField::new(0, "Date".to_string());
+        field.grouping = FieldGrouping::DateGrouping { levels: vec![DateGroupLevel::Month] };
+        let view = calculate_pivot(&rows_pivot(field), &mut cache);
+        let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        let expected: Vec<(String, MemberSource)> = months
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (m.to_string(), MemberSource::Month { month: i as u32 + 1 }))
+            .collect();
+        assert_eq!(member_headers(&view), expected);
+        // The formatted value is still the invariant key.
+        for cell in view.cells.iter().flatten().filter(|c| c.member_source.is_some()) {
+            assert_eq!(cell.formatted_value, text_of(cell), "formatted_value drifted from the key");
+        }
+        // The grand total names no member.
+        let gt = view.cells.iter().flatten().find(|c| c.formatted_value == "Grand Total").expect("a grand total");
+        assert_eq!(gt.member_source, None, "the grand total header carries a member source");
+    }
+
+    #[test]
+    fn a_quarter_grouped_pivots_headers_carry_quarter_sources() {
+        let values = vec![date(2024, 2, 1), date(2024, 5, 1), date(2024, 8, 1), date(2024, 11, 1)];
+        let mut cache = cache_of(&values);
+        let mut field = PivotField::new(0, "Date".to_string());
+        field.grouping = FieldGrouping::DateGrouping { levels: vec![DateGroupLevel::Quarter] };
+        let view = calculate_pivot(&rows_pivot(field), &mut cache);
+        let expected: Vec<(String, MemberSource)> =
+            (1..=4u32).map(|q| (format!("Q{q}"), MemberSource::Quarter { quarter: q })).collect();
+        assert_eq!(member_headers(&view), expected);
+    }
+
+    #[test]
+    fn year_week_and_day_headers_carry_number_text_and_number_sources() {
+        let values = vec![date(2013, 1, 3), date(2014, 1, 3)];
+        let mut cache = cache_of(&values);
+        let mut field = PivotField::new(0, "Date".to_string());
+        field.grouping = FieldGrouping::DateGrouping {
+            levels: vec![DateGroupLevel::Year, DateGroupLevel::Week, DateGroupLevel::Day],
+        };
+        let view = calculate_pivot(&rows_pivot(field), &mut cache);
+        let headers = member_headers(&view);
+        assert!(
+            headers.contains(&("2013".to_string(), MemberSource::Number { value: 2013.0 })),
+            "a Year header lost its Number source: {headers:?}"
+        );
+        assert!(
+            headers.contains(&("W01".to_string(), MemberSource::Text)),
+            "a Week header is not Text with key W01: {headers:?}"
+        );
+        assert!(
+            headers.contains(&("3".to_string(), MemberSource::Number { value: 3.0 })),
+            "a Day header lost its Number source: {headers:?}"
+        );
+    }
+
+    #[test]
+    fn a_numeric_row_fields_header_carries_a_number_source() {
+        let mut cache = cache_of(&[CellValue::Number(2013.0), CellValue::Number(1234.5)]);
+        let view = calculate_pivot(&rows_pivot(PivotField::new(0, "Year".to_string())), &mut cache);
+        assert_eq!(
+            member_headers(&view),
+            vec![
+                ("1234.5".to_string(), MemberSource::Number { value: 1234.5 }),
+                ("2013".to_string(), MemberSource::Number { value: 2013.0 }),
+            ]
+        );
+    }
+
+    #[test]
+    fn bin_fields_carry_bin_number_and_overflow_sources() {
+        // Multi-width integer bins [0,10) [10,20), plus both overflow bins.
+        let values = vec![
+            CellValue::Number(-3.0),
+            CellValue::Number(5.0),
+            CellValue::Number(15.0),
+            CellValue::Number(25.0),
+        ];
+        let mut cache = cache_of(&values);
+        let mut field = PivotField::new(0, "Score".to_string());
+        field.grouping = FieldGrouping::NumberBinning { start: 0.0, end: 20.0, interval: 10.0 };
+        let view = calculate_pivot(&rows_pivot(field), &mut cache);
+        let headers = member_headers(&view);
+        for want in [
+            ("<0".to_string(), MemberSource::BinBelow { start: 0.0 }),
+            ("0-9".to_string(), MemberSource::NumberBin { start: 0.0, end: 10.0, integer: true }),
+            ("10-19".to_string(), MemberSource::NumberBin { start: 10.0, end: 20.0, integer: true }),
+            (">20".to_string(), MemberSource::BinAbove { end: 20.0 }),
+        ] {
+            assert!(headers.contains(&want), "missing {want:?} in {headers:?}");
+        }
+
+        // Single-width integer bins are ONE number each.
+        let mut cache = cache_of(&[CellValue::Number(0.0), CellValue::Number(1.0), CellValue::Number(2.0)]);
+        let mut field = PivotField::new(0, "Score".to_string());
+        field.grouping = FieldGrouping::NumberBinning { start: 0.0, end: 3.0, interval: 1.0 };
+        let view = calculate_pivot(&rows_pivot(field), &mut cache);
+        assert_eq!(
+            member_headers(&view),
+            vec![
+                ("0".to_string(), MemberSource::Number { value: 0.0 }),
+                ("1".to_string(), MemberSource::Number { value: 1.0 }),
+                ("2".to_string(), MemberSource::Number { value: 2.0 }),
+            ]
+        );
+
+        // Fractional bins keep their two-decimal key and a non-integer source.
+        let mut cache = cache_of(&[CellValue::Number(0.25), CellValue::Number(0.75)]);
+        let mut field = PivotField::new(0, "Score".to_string());
+        field.grouping = FieldGrouping::NumberBinning { start: 0.0, end: 1.0, interval: 0.5 };
+        let view = calculate_pivot(&rows_pivot(field), &mut cache);
+        let headers = member_headers(&view);
+        let first = (
+            "0.00-0.50".to_string(),
+            MemberSource::NumberBin { start: 0.0, end: 0.5, integer: false },
+        );
+        assert!(headers.contains(&first), "fractional bin: {headers:?}");
+        // The label written from it follows the locale; the key does not.
+        let de = LocaleSettings::from_locale_id("de-DE");
+        assert_eq!(engine::member_label(&first.0, &first.1, &de), "0,00-0,50");
+    }
+
+    /// `member_key` equals the old label function for every value of a
+    /// fixture holding every kind of value -- except the blank, whose KEY is
+    /// "" (ruling Q8) while the header still reads "(blank)".
+    #[test]
+    fn member_key_equals_the_pre_change_label_for_every_value() {
+        let values = vec![
+            CellValue::Text("East".to_string()),
+            CellValue::Number(1234.5),
+            CellValue::Number(-0.000123),
+            CellValue::Number(1e21),
+            CellValue::Boolean(true),
+            CellValue::Boolean(false),
+            CellValue::Error(CellError::NA),
+            CellValue::Text(String::new()),
+            CellValue::Empty,
+        ];
+        let mut cache = cache_of(&values);
+        let mut fc = cache.get_field(0).expect("field 0").clone();
+        // A host-written label_map entry, as grouping keys are.
+        let east = fc.find_id(&CacheValue::Text("East".to_string())).expect("East interned");
+        fc.label_map.insert(east, "EAST-GROUP".to_string());
+        for id in 0..fc.unique_count() as ValueId {
+            assert_eq!(fc.member_key(id), legacy_label(&fc, id), "key of id {id} drifted");
+        }
+        assert_eq!(fc.member_key(VALUE_ID_EMPTY), BLANK_MEMBER_KEY);
+        assert_eq!(fc.member_key(VALUE_ID_BLANK), BLANK_MEMBER_KEY);
+        assert_eq!(fc.member_source(VALUE_ID_BLANK), MemberSource::Blank);
+        assert_eq!(fc.member_source(east), MemberSource::Text, "a host label_map entry is shown as written");
+
+        // The view's header TEXT is byte-identical to the old label for
+        // every member, the blank included ("(blank)").
+        let view = calculate_pivot(&rows_pivot(PivotField::new(0, "Key".to_string())), &mut cache);
+        let fc = cache.get_field(0).expect("field 0");
+        let mut seen_blank = false;
+        for cell in view.cells.iter().flatten().filter(|c| c.member_source.is_some()) {
+            let &(field, id) = cell.group_path.last().expect("a member header names its item");
+            assert_eq!(field, 0);
+            assert_eq!(text_of(cell), legacy_label(fc, id), "header text of id {id} drifted");
+            assert_eq!(cell.formatted_value, legacy_label(fc, id));
+            if text_of(cell) == BLANK_ITEM_LABEL {
+                seen_blank = true;
+                assert_eq!(cell.member_source, Some(MemberSource::Blank));
+                assert_eq!(fc.member_key(id), BLANK_MEMBER_KEY, "the blank's KEY is not \"\" (Q8)");
+            }
+        }
+        assert!(seen_blank, "the fixture shows no (blank) header");
+        let sources: Vec<MemberSource> =
+            view.cells.iter().flatten().filter_map(|c| c.member_source.clone()).collect();
+        assert!(sources.contains(&MemberSource::Boolean { value: true }), "{sources:?}");
+        assert!(sources.contains(&MemberSource::Error), "{sources:?}");
+        assert!(sources.contains(&MemberSource::Number { value: 1234.5 }), "{sources:?}");
+    }
+
+    #[test]
+    fn iso_keys_read_as_dates_only_where_the_field_declares_them() {
+        let mut fc = FieldCache::new(0, "When".to_string());
+        let day = fc.intern(CacheValue::Text("2024-01-15".to_string()));
+        let stamp = fc.intern(CacheValue::Text("2024-01-15 13:04:05".to_string()));
+        let code = fc.intern(CacheValue::Text("2024-13-45".to_string()));
+        assert_eq!(fc.member_source(day), MemberSource::Text, "a Plain field guessed a date from text");
+        fc.member_kind = MemberKind::IsoDate;
+        assert_eq!(fc.member_source(day), MemberSource::Date { serial: 45306.0 });
+        assert!(matches!(fc.member_source(stamp), MemberSource::DateTime { .. }));
+        assert_eq!(fc.member_source(code), MemberSource::Text, "an impossible date became a date");
+        assert_eq!(fc.member_key(day), "2024-01-15", "the key changed with the kind");
+    }
+
+    #[test]
+    fn subtotal_and_field_name_headers_carry_no_source() {
+        let mut cache = PivotCache::new(pid(), 3);
+        cache.set_field_name(0, "Region".to_string());
+        cache.set_field_name(1, "Product".to_string());
+        cache.set_field_name(2, "Amount".to_string());
+        for (i, (r, p)) in [("East", "Apples"), ("East", "Pears"), ("West", "Apples")].iter().enumerate() {
+            cache.add_record(
+                i as u32,
+                &[CellValue::Text(r.to_string()), CellValue::Text(p.to_string()), CellValue::Number(1.0)],
+            );
+        }
+        let mut def = PivotDefinition::new(pid(), (0, 0), (0, 0));
+        def.row_fields = vec![PivotField::new(0, "Region".to_string()), PivotField::new(1, "Product".to_string())];
+        def.value_fields = vec![ValueField::new(2, "Sum of Amount".to_string(), AggregationType::Sum)];
+        def.layout.report_layout = ReportLayout::Tabular;
+        let view = calculate_pivot(&def, &mut cache);
+        let mut checked = 0;
+        for cell in view.cells.iter().flatten() {
+            let t = text_of(cell);
+            if t.ends_with(" Total") || t == "Sum of Amount" || t == "Region" || t == "Product" {
+                checked += 1;
+                assert_eq!(cell.member_source, None, "{t:?} carries a member source");
+            }
+        }
+        assert!(checked >= 3, "the fixture shows no subtotal / field-name headers ({checked})");
+        let east: Vec<&PivotViewCell> = view
+            .cells
+            .iter()
+            .flatten()
+            .filter(|c| text_of(c) == "East" && c.cell_type == PivotCellType::RowHeader)
+            .collect();
+        assert!(!east.is_empty());
+        assert!(east.iter().all(|c| c.member_source == Some(MemberSource::Text)), "{east:?}");
+    }
+
+    #[test]
+    fn column_headers_carry_sources_at_every_level() {
+        let mut cache = PivotCache::new(pid(), 3);
+        cache.set_field_name(0, "Region".to_string());
+        cache.set_field_name(1, "Year".to_string());
+        cache.set_field_name(2, "Amount".to_string());
+        for (i, (r, y)) in [("East", 2013.0), ("East", 2014.0), ("West", 2013.0)].iter().enumerate() {
+            cache.add_record(i as u32, &[CellValue::Text(r.to_string()), CellValue::Number(*y), CellValue::Number(1.0)]);
+        }
+        let mut def = PivotDefinition::new(pid(), (0, 0), (0, 0));
+        def.column_fields = vec![PivotField::new(0, "Region".to_string()), PivotField::new(1, "Year".to_string())];
+        def.value_fields = vec![ValueField::new(2, "Sum of Amount".to_string(), AggregationType::Sum)];
+        let view = calculate_pivot(&def, &mut cache);
+        let col_headers: Vec<(String, Option<MemberSource>)> = view
+            .cells
+            .iter()
+            .flatten()
+            .filter(|c| c.cell_type == PivotCellType::ColumnHeader && !text_of(c).is_empty())
+            .map(|c| (text_of(c), c.member_source.clone()))
+            .collect();
+        assert!(col_headers.contains(&("East".to_string(), Some(MemberSource::Text))), "{col_headers:?}");
+        assert!(col_headers.contains(&("2014".to_string(), Some(MemberSource::Number { value: 2014.0 }))), "{col_headers:?}");
+        for (t, s) in &col_headers {
+            if t.ends_with(" Total") || t == "Grand Total" {
+                assert_eq!(*s, None, "{t:?} carries a member source");
+            }
+        }
+    }
+
+    #[test]
+    fn filter_rows_carry_one_source_per_item_and_a_single_selection_names_it() {
+        let mut cache = cache_of(&[CellValue::Number(10.0), CellValue::Number(20.0), CellValue::Text("x".to_string())]);
+        let mut def = PivotDefinition::new(pid(), (0, 0), (0, 0));
+        let mut filter = PivotField::new(0, "Key".to_string());
+        filter.hidden_items = vec!["20".to_string(), "x".to_string()];
+        def.filter_fields = vec![PivotFilter { field: filter, condition: FilterCondition::ValueList(Vec::new()) }];
+        def.value_fields = vec![ValueField::new(1, "Sum of Amount".to_string(), AggregationType::Sum)];
+        let view = calculate_pivot(&def, &mut cache);
+        let info = &view.filter_rows[0];
+        assert_eq!(info.unique_values.len(), 3);
+        assert_eq!(info.unique_values.len(), info.member_sources.len(), "sources are not parallel to the items");
+        let fc = cache.get_field(0).expect("field 0");
+        for (key, source) in info.unique_values.iter().zip(&info.member_sources) {
+            let value = match key.parse::<f64>() {
+                Ok(n) => CacheValue::Number(OrderedFloat(n)),
+                Err(_) => CacheValue::Text(key.clone()),
+            };
+            let id = fc.find_id(&value).expect("a listed key is interned");
+            assert_eq!(*source, fc.member_source(id), "item {key}");
+        }
+        let dropdown = view
+            .cells
+            .iter()
+            .flatten()
+            .find(|c| c.cell_type == PivotCellType::FilterDropdown)
+            .expect("a filter dropdown");
+        assert_eq!(dropdown.formatted_value, "10");
+        assert_eq!(dropdown.member_source, Some(MemberSource::Number { value: 10.0 }));
+
+        // "(All)" names no member.
+        let mut cache = cache_of(&[CellValue::Number(10.0), CellValue::Number(20.0)]);
+        let mut def2 = PivotDefinition::new(pid(), (0, 0), (0, 0));
+        def2.filter_fields = vec![PivotFilter {
+            field: PivotField::new(0, "Key".to_string()),
+            condition: FilterCondition::ValueList(Vec::new()),
+        }];
+        def2.value_fields = vec![ValueField::new(1, "Sum of Amount".to_string(), AggregationType::Sum)];
+        let view = calculate_pivot(&def2, &mut cache);
+        let dropdown = view
+            .cells
+            .iter()
+            .flatten()
+            .find(|c| c.cell_type == PivotCellType::FilterDropdown)
+            .expect("a filter dropdown");
+        assert_eq!(dropdown.formatted_value, "(All)");
+        assert_eq!(dropdown.member_source, None);
+    }
+
+    #[test]
+    fn the_unique_member_siblings_keep_their_own_keys_and_add_sources() {
+        let cache = cache_of(&[CellValue::Number(2013.0), CellValue::Text("a".to_string()), CellValue::Empty]);
+        let plain = cache.get_unique_values_for_filter(0);
+        let members = cache.get_unique_members_for_filter(0);
+        assert_eq!(plain.len(), members.len());
+        for ((id, key), (mid, mkey, _)) in plain.iter().zip(&members) {
+            assert_eq!((id, key), (mid, mkey), "the sibling changed a key spelling");
+        }
+        assert!(members.iter().any(|(_, k, s)| k == "2013" && *s == MemberSource::Number { value: 2013.0 }));
+        let in_data = cache.get_unique_members_for_filter_in_data(0);
+        assert!(
+            in_data.iter().any(|(id, key, s)| *id == VALUE_ID_EMPTY && key == "(blank)" && *s == MemberSource::Blank),
+            "{in_data:?}"
+        );
+        assert_eq!(cache.get_value_label(0, VALUE_ID_EMPTY).as_deref(), Some(""), "the raw label of the blank changed");
+        assert_eq!(cache.get_value_member_source(0, VALUE_ID_EMPTY), Some(MemberSource::Blank));
+        assert_eq!(cache.get_value_member_source(99, 0), None);
+    }
+
+    /// The new fields are serde-default: an undo snapshot written before
+    /// them still loads.
+    #[test]
+    fn snapshots_without_the_new_fields_deserialise() {
+        let mut fc = FieldCache::new(0, "Key".to_string());
+        fc.intern(CacheValue::Number(OrderedFloat(1.0)));
+        let mut json = serde_json::to_value(&fc).expect("serialise");
+        let obj = json.as_object_mut().expect("an object");
+        assert!(obj.remove("member_kind").is_some(), "the field is not serialised as member_kind");
+        assert!(obj.remove("label_source_map").is_some());
+        let back: FieldCache = serde_json::from_value(json).expect("an old FieldCache snapshot no longer loads");
+        assert_eq!(back.member_kind, MemberKind::Plain);
+        assert!(back.label_source_map.is_empty());
+
+        let cell = PivotViewCell::row_header("x".to_string(), 0);
+        let json = serde_json::to_value(&cell).expect("serialise");
+        assert!(json.get("member_source").is_none(), "a None source is written to the wire");
+        let _: PivotViewCell = serde_json::from_value(json).expect("a cell without member_source loads");
+
+        // A source round-trips with its camelCase kind tag.
+        let cell = cell.with_member_source(Some(MemberSource::Month { month: 3 }));
+        let json = serde_json::to_value(&cell).expect("serialise");
+        assert_eq!(json["member_source"]["kind"], "month");
+        let back: PivotViewCell = serde_json::from_value(json).expect("deserialise");
+        assert_eq!(back.member_source, Some(MemberSource::Month { month: 3 }));
+
+        // A filter row without member_sources loads as "no sources".
+        let info = crate::view::FilterRowInfo {
+            field_index: 0,
+            field_name: "Key".to_string(),
+            selected_values: vec![],
+            unique_values: vec!["1".to_string()],
+            member_sources: vec![MemberSource::Number { value: 1.0 }],
+            display_value: "(All)".to_string(),
+            view_row: 0,
+        };
+        let mut json = serde_json::to_value(&info).expect("serialise");
+        json.as_object_mut().expect("an object").remove("member_sources");
+        let back: crate::view::FilterRowInfo = serde_json::from_value(json).expect("an old filter row loads");
+        assert!(back.member_sources.is_empty());
+    }
+
+    /// A BI Decimal field keys its members with the column's scale (MemberKind::Decimal),
+    /// the spelling the model's value list hands out ("5.50"), and a hidden
+    /// item names a member by that KEY as well as by its display ("5.5").
+    /// A hidden BLANK ("" or "(blank)") hides the NULL records AND the
+    /// empty-text items: ONE member under ruling Q8.
+    #[test]
+    fn decimal_keys_keep_their_scale_and_hidden_items_resolve_by_key_and_fold_the_blank() {
+        let mut cache = cache_of(&[
+            CellValue::Number(5.5),
+            CellValue::Number(10.0),
+            CellValue::Empty,
+            CellValue::Text(String::new()),
+        ]);
+        cache.fields[0].member_kind = MemberKind::Decimal { scale: 2 };
+        let fc = &cache.fields[0];
+        let five = (0..fc.unique_count() as ValueId).find(|&id| matches!(fc.get_value(id), Some(CacheValue::Number(n)) if n.as_f64() == 5.5)).unwrap();
+        assert_eq!(fc.member_key(five), "5.50");
+        assert_eq!(fc.member_source(five), MemberSource::Number { value: 5.5 }, "the label is still a number");
+        for name in ["5.50", "5.5"] {
+            assert_eq!(PivotCalculator::resolve_hidden_ids(fc, &[name.to_string()]), vec![five], "{name}");
+        }
+        let empty_text = (0..fc.unique_count() as ValueId).find(|&id| matches!(fc.get_value(id), Some(CacheValue::Text(s)) if s.is_empty())).unwrap();
+        for blank in [BLANK_MEMBER_KEY, BLANK_ITEM_LABEL, "(Blank)"] {
+            let mut ids = PivotCalculator::resolve_hidden_ids(fc, &[blank.to_string()]);
+            ids.sort();
+            let mut want = vec![VALUE_ID_EMPTY, empty_text];
+            want.sort();
+            assert_eq!(ids, want, "{blank:?} hides the NULLs and the empty text");
+        }
     }
 }

@@ -20,6 +20,7 @@ import type {
   ConditionalFormatRange,
 } from "@api";
 import { tryAddRule } from "../lib/ruleWrites";
+import type { CellTargetRef } from "@api/cellTarget";
 import { PRESET_STYLES, DATE_OCCURRING_PERIODS } from "../types";
 
 // ============================================================================
@@ -166,6 +167,8 @@ const RULE_DEFS: Record<string, QuickRuleDef> = {
 export const QuickCFDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) => {
   const ruleType = (data?.ruleType as string) || "greaterThan";
   const selection = data?.selection as ConditionalFormatRange | null;
+  // A floating grid's cells (P3): the rule is written with the object's target.
+  const target = data?.target as CellTargetRef | undefined;
   const def = RULE_DEFS[ruleType] || RULE_DEFS.greaterThan;
 
   const [value1, setValue1] = useState(ruleType.includes("10") ? "10" : "");
@@ -256,12 +259,15 @@ export const QuickCFDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
     if (busy) return;
     setBusy(true);
     setRefusal(null);
-    const refused = await tryAddRule({
-      rule,
-      format,
-      ranges: [selection],
-      stopIfTrue: false,
-    });
+    const refused = await tryAddRule(
+      {
+        rule,
+        format,
+        ranges: [selection],
+        stopIfTrue: false,
+      },
+      target,
+    );
     setBusy(false);
     if (refused !== null) {
       // Stay open: the user can change the value and press OK again.
@@ -270,7 +276,7 @@ export const QuickCFDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
     }
     onClose();
     restoreFocusToGrid();
-  }, [ruleType, value1, value2, formatIndex, dropdownValue, period, selection, onClose, busy]);
+  }, [ruleType, value1, value2, formatIndex, dropdownValue, period, selection, target, onClose, busy]);
 
   const handleCancel = useCallback(() => {
     onClose();

@@ -81,19 +81,42 @@ const meta = (
   label: string,
   layoutFamily: "cartesian" | "radial" | "other",
   furniture?: "titleOnly",
-) => ({ label, layoutFamily, builtin: true as const, ...(furniture ? { furniture } : {}) });
+  crossFilter?: { source: boolean; canHighlight: boolean },
+) => ({
+  label,
+  layoutFamily,
+  builtin: true as const,
+  ...(furniture ? { furniture } : {}),
+  ...(crossFilter ? { crossFilter } : {}),
+});
 
-registerChartMark("bar", { meta: meta("Column", "cartesian"), paint: paintBarChart, computeLayout: computeBarLayout, computeGeometry: asBars(computeBarRects) });
-registerChartMark("horizontalBar", { meta: meta("Bar", "cartesian"), paint: paintHorizontalBarChart, computeLayout: computeHorizontalBarLayout, computeGeometry: asBars(computeHorizontalBarRects) });
-registerChartMark("line", { meta: meta("Line", "cartesian"), paint: paintLineChart, computeLayout: computeLineLayout, computeGeometry: asPoints(computeLinePointMarkers) });
-registerChartMark("area", { meta: meta("Area", "cartesian"), paint: paintAreaChart, computeLayout: computeAreaLayout, computeGeometry: asPoints(computeAreaPointMarkers) });
-registerChartMark("scatter", { meta: meta("Scatter", "cartesian"), paint: paintScatterChart, computeLayout: computeScatterLayout, computeGeometry: asPoints(computeScatterPointMarkers) });
-registerChartMark("pie", { meta: meta("Pie", "radial"), paint: paintPieChart, computeLayout: computePieLayout, computeGeometry: asSlices(computePieSliceArcs) });
-registerChartMark("donut", { meta: meta("Donut", "radial"), paint: paintPieChart, computeLayout: computePieLayout, computeGeometry: asSlices(computePieSliceArcs) });
+/**
+ * The built-in marks' part in Power BI cross-filtering (P4, @api/chartMarks
+ * `crossFilter`). A SOURCE's datums carry member paths, so a click on one
+ * filters the page; a mark that can HIGHLIGHT paints the selection's part of
+ * each datum over a faded whole (rendering/crossHighlight.ts):
+ *   - column/bar: the faded full bar plus the highlighted portion;
+ *   - pie/donut: an inner arc;
+ *   - scatter/bubble: the non-matching points dimmed.
+ * Line and area are sources but filter-only targets (a line has no "part of
+ * a datum" to show). Every other mark -- the tiles (card, multi-row card, KPI,
+ * gauge) included -- declares nothing and stays a filter-only target that is
+ * never a source (fail closed).
+ */
+const XF_HIGHLIGHT = { source: true, canHighlight: true } as const;
+const XF_SOURCE_ONLY = { source: true, canHighlight: false } as const;
+
+registerChartMark("bar", { meta: meta("Column", "cartesian", undefined, XF_HIGHLIGHT), paint: paintBarChart, computeLayout: computeBarLayout, computeGeometry: asBars(computeBarRects) });
+registerChartMark("horizontalBar", { meta: meta("Bar", "cartesian", undefined, XF_HIGHLIGHT), paint: paintHorizontalBarChart, computeLayout: computeHorizontalBarLayout, computeGeometry: asBars(computeHorizontalBarRects) });
+registerChartMark("line", { meta: meta("Line", "cartesian", undefined, XF_SOURCE_ONLY), paint: paintLineChart, computeLayout: computeLineLayout, computeGeometry: asPoints(computeLinePointMarkers) });
+registerChartMark("area", { meta: meta("Area", "cartesian", undefined, XF_SOURCE_ONLY), paint: paintAreaChart, computeLayout: computeAreaLayout, computeGeometry: asPoints(computeAreaPointMarkers) });
+registerChartMark("scatter", { meta: meta("Scatter", "cartesian", undefined, XF_HIGHLIGHT), paint: paintScatterChart, computeLayout: computeScatterLayout, computeGeometry: asPoints(computeScatterPointMarkers) });
+registerChartMark("pie", { meta: meta("Pie", "radial", undefined, XF_HIGHLIGHT), paint: paintPieChart, computeLayout: computePieLayout, computeGeometry: asSlices(computePieSliceArcs) });
+registerChartMark("donut", { meta: meta("Donut", "radial", undefined, XF_HIGHLIGHT), paint: paintPieChart, computeLayout: computePieLayout, computeGeometry: asSlices(computePieSliceArcs) });
 registerChartMark("waterfall", { meta: meta("Waterfall", "cartesian"), paint: paintWaterfallChart, computeLayout: computeWaterfallLayout, computeGeometry: asBars(computeWaterfallBarRects) });
 registerChartMark("combo", { meta: meta("Combo", "cartesian"), paint: paintComboChart, computeLayout: computeComboLayout, computeGeometry: computeComboHitGeometry });
 registerChartMark("radar", { meta: meta("Radar", "radial"), paint: paintRadarChart, computeLayout: computeRadarLayout, computeGeometry: asPoints(computeRadarPointMarkers) });
-registerChartMark("bubble", { meta: meta("Bubble", "cartesian"), paint: paintBubbleChart, computeLayout: computeBubbleLayout, computeGeometry: asPoints(computeBubblePointMarkers) });
+registerChartMark("bubble", { meta: meta("Bubble", "cartesian", undefined, XF_HIGHLIGHT), paint: paintBubbleChart, computeLayout: computeBubbleLayout, computeGeometry: asPoints(computeBubblePointMarkers) });
 registerChartMark("histogram", { meta: meta("Histogram", "cartesian"), paint: paintHistogramChart, computeLayout: computeHistogramLayout, computeGeometry: asBars(computeHistogramBarRects) });
 registerChartMark("funnel", { meta: meta("Funnel", "other"), paint: paintFunnelChart, computeLayout: computeFunnelLayout, computeGeometry: asBars(computeFunnelBarRects) });
 registerChartMark("treemap", { meta: meta("Treemap", "other"), paint: paintTreemapChart, computeLayout: computeTreemapLayout, computeGeometry: asBars(computeTreemapBarRects) });

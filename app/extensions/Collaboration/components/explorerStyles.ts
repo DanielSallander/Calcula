@@ -8,6 +8,7 @@
 //          shades of "pay attention to this" in one panel.
 
 import type React from "react";
+import { formatDateTime } from "@api/locale";
 
 export const linkButtonStyle: React.CSSProperties = {
   background: "transparent",
@@ -47,5 +48,5 @@ export const errorTextStyle: React.CSSProperties = {
 export function formatWhen(iso: string): string {
   if (!iso) return "—";
   const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+  return Number.isNaN(d.getTime()) ? iso : formatDateTime(d);
 }

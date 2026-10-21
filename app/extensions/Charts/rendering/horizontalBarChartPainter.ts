@@ -8,6 +8,7 @@ import { getSeriesColor } from "./chartTheme";
 import { resolvePointColor, resolvePointOpacity, resolveSeriesEncoding, seriesPaletteIndex } from "../lib/encodingResolver";
 import { resolveDatumStyle } from "../lib/dataPointOverrides";
 import { applyFillStyle } from "./gradientFill";
+import { datumEmphasis, paintFadedThenHighlighted } from "./crossHighlight";
 import { strokeDatumBorderRect } from "./barChartPainter";
 import { createLinearScale, createBandScale, createScaleFromSpec } from "./scales";
 import {
@@ -226,24 +227,29 @@ function drawHorizontalBars(
 
       if (clippedWidth <= 0) continue;
 
-      if (style.opacity != null) ctx.globalAlpha = style.opacity;
-      applyFillStyle(ctx, style.fill, style.gradientFill ?? undefined, clippedX, barY, clippedWidth, barHeight);
+      // A horizontal bar's rounded corners follow its WIDTH (its long side).
+      const fillBar = (x: number, y: number, w: number, h: number): void => {
+        applyFillStyle(ctx, style.fill, style.gradientFill ?? undefined, x, y, w, h);
+        if (theme.barBorderRadius > 0 && w > theme.barBorderRadius * 2) {
+          drawRoundedRect(ctx, x, y, w, h, theme.barBorderRadius);
+          ctx.fill();
+        } else {
+          ctx.fillRect(x, y, w, h);
+        }
+      };
 
-      if (theme.barBorderRadius > 0 && clippedWidth > theme.barBorderRadius * 2) {
-        drawRoundedRect(
-          ctx,
-          clippedX,
-          barY,
-          clippedWidth,
-          barHeight,
-          theme.barBorderRadius,
-        );
-        ctx.fill();
+      // Cross-filter (P4): the highlighted portion grows from the bar's own
+      // baseline (the left end, the right end for a negative value).
+      const emphasis = datumEmphasis(data, si, ci);
+      if (emphasis.kind === "plain") {
+        if (style.opacity != null) ctx.globalAlpha = style.opacity;
+        fillBar(clippedX, barY, clippedWidth, barHeight);
+        strokeDatumBorderRect(ctx, style, clippedX, barY, clippedWidth, barHeight, theme.barBorderRadius);
+        if (style.opacity != null) ctx.globalAlpha = 1;
       } else {
-        ctx.fillRect(clippedX, barY, clippedWidth, barHeight);
+        paintFadedThenHighlighted(ctx, { x: clippedX, y: barY, w: clippedWidth, h: barHeight }, emphasis, style.opacity, value >= 0 ? "left" : "right", fillBar);
+        strokeDatumBorderRect(ctx, style, clippedX, barY, clippedWidth, barHeight, theme.barBorderRadius);
       }
-      strokeDatumBorderRect(ctx, style, clippedX, barY, clippedWidth, barHeight, theme.barBorderRadius);
-      if (style.opacity != null) ctx.globalAlpha = 1;
     }
   }
 }
@@ -319,17 +325,29 @@ function drawStackedHorizontalBars(
       const clippedWidth = clippedRight - clippedX;
       if (clippedWidth <= 0) continue;
 
-      if (style.opacity != null) ctx.globalAlpha = style.opacity;
-      applyFillStyle(ctx, style.fill, style.gradientFill ?? undefined, clippedX, barY, clippedWidth, barHeight);
+      // A horizontal bar's rounded corners follow its WIDTH (its long side).
+      const fillBar = (x: number, y: number, w: number, h: number): void => {
+        applyFillStyle(ctx, style.fill, style.gradientFill ?? undefined, x, y, w, h);
+        if (theme.barBorderRadius > 0 && w > theme.barBorderRadius * 2) {
+          drawRoundedRect(ctx, x, y, w, h, theme.barBorderRadius);
+          ctx.fill();
+        } else {
+          ctx.fillRect(x, y, w, h);
+        }
+      };
 
-      if (theme.barBorderRadius > 0 && clippedWidth > theme.barBorderRadius * 2) {
-        drawRoundedRect(ctx, clippedX, barY, clippedWidth, barHeight, theme.barBorderRadius);
-        ctx.fill();
+      // Cross-filter (P4): the highlighted portion grows from the bar's own
+      // baseline (the left end, the right end for a negative value).
+      const emphasis = datumEmphasis(data, si, ci);
+      if (emphasis.kind === "plain") {
+        if (style.opacity != null) ctx.globalAlpha = style.opacity;
+        fillBar(clippedX, barY, clippedWidth, barHeight);
+        strokeDatumBorderRect(ctx, style, clippedX, barY, clippedWidth, barHeight, theme.barBorderRadius);
+        if (style.opacity != null) ctx.globalAlpha = 1;
       } else {
-        ctx.fillRect(clippedX, barY, clippedWidth, barHeight);
+        paintFadedThenHighlighted(ctx, { x: clippedX, y: barY, w: clippedWidth, h: barHeight }, emphasis, style.opacity, value >= 0 ? "left" : "right", fillBar);
+        strokeDatumBorderRect(ctx, style, clippedX, barY, clippedWidth, barHeight, theme.barBorderRadius);
       }
-      strokeDatumBorderRect(ctx, style, clippedX, barY, clippedWidth, barHeight, theme.barBorderRadius);
-      if (style.opacity != null) ctx.globalAlpha = 1;
     }
   }
 }

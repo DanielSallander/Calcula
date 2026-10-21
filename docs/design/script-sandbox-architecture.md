@@ -519,7 +519,7 @@ The render loop **never** crosses the worker boundary. Zero changes to Core: `ce
 
 - Worker, on `renderDraw`: `new OffscreenCanvas(w*dpr, h*dpr)` → 2D context → `scale(dpr,dpr)` → call the **unchanged** user function (`(ctx, bounds)`; slicer items also get `item`) → `transferToImageBitmap()` → transfer to host. Full Canvas2D fidelity — `measureText`, gradients, paths all real.
 - Host: `shapeRenderer.ts:413` and `slicerRenderer.ts:364` change from "call user fn" to "drawImage(cachedBitmap)" inside `save()/translate(bounds)/clip(bounds)/restore()` — a script can never paint outside its region. Missing bitmap → single-flight request, skip this frame.
-- **Invalidation:** shapes — `shape:propertyChanged`, watched-cell `onCellChange`, resize, `render.invalidate()`. Slicer items — bitmap cache keyed `(slicerId, text, selected, hasData, w, h)`, so state changes self-invalidate; `render.invalidate()` clears all.
+- **Invalidation:** shapes — `shape:propertyChanged`, watched-cell `onCellChange`, resize, `render.invalidate()`. Slicer items — bitmap cache keyed `(slicerId, key + NUL + text, selected, hasData, w, h)`, so state changes self-invalidate; `render.invalidate()` clears all. The renderer's `item` is `{ text, key, selected, hasData, index }` (API 1.5.0, P2 S7): `text` is the DISPLAY label in the app locale ("15.01.2024", "(Blank)"), `key` the invariant member key that `slicer.setSelectedItems` speaks ("2024-01-15", "" for the blank). Paint `text`; select by `key`. A locale switch keeps the key and changes the text, so the cache repaints.
 - Animation: not per-frame in v1; `render.invalidate()` from an ambient timer gets best-effort ~60 fps via single-flight coalescing. Documented.
 
 ### 6.3 Shape `setHtmlContent` — S6 interaction (Phase 0 quick win)

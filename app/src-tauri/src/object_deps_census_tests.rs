@@ -853,8 +853,8 @@ fn collect_ts_sources(dir: &std::path::Path, out: &mut Vec<String>) {
 //     claiming to drive a chart that no longer existed.
 //   * `cascade_deleted_sources` (the table and pivot delete path) deletes
 //     SLICERS and never ran `cascade_deleted_slicers`, so deleting the table a
-//     slicer filtered left every ribbon filter still cross-filtering against
-//     it -- the 3bn orphan itself, one level down.
+//     slicer filtered left every ribbon filter still naming it as a
+//     dependent -- the 3bn orphan itself, one level down.
 //   * Neither path pruned the OBJECT SCRIPTS of what it deleted (C10: the
 //     instanceId IS the object id, so the script is inherited by whatever is
 //     minted there next).
@@ -1290,7 +1290,7 @@ fn cascade_domains_are_derived_transitively_from_the_matrix() {
 
     // A table delete owes the RIBBON FILTER store, and nobody wrote that down:
     // a table cascades into its slicers, and a slicer is pruned out of every
-    // ribbon filter that cross-filters it. If the walk stopped at one level
+    // ribbon filter that names it as a dependent. If the walk stopped at one level
     // this would be {objects, slicer}.
     let table = cascade_domains(ObjectKind::Table);
     assert!(

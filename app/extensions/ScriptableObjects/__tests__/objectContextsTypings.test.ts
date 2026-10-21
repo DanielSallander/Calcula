@@ -173,8 +173,12 @@ describe("objectContexts.d.ts is generated, not maintained", () => {
     // one declaration each (ScriptTargetObjectHandle INHERITS its members, so
     // the api.object.* chains share ScriptObjectHandle's declarations by text
     // but are entered under their own interface).
-    expect(chains.size).toBe(734);
-    expect(entries.length).toBe(791);
+    // 2026-10-17 (P4 S12): 734 -> 737 chains and 791 -> 794 entries — the
+    // three cross-filter rows on UnlockedAPI, `api.getCrossFilters`,
+    // `api.setCrossFilter` and `api.clearCrossFilters`, one declaration each
+    // (`interactions` on the canvas layout types is a data shape, not a chain).
+    expect(chains.size).toBe(737);
+    expect(entries.length).toBe(794);
     expect(entries.length).toBeGreaterThan(chains.size);
 
     const policyPairs = new Set(
@@ -197,7 +201,9 @@ describe("objectContexts.d.ts is generated, not maintained", () => {
     // the 18 context interfaces, its 8 members under ScriptObjectHandle,
     // `api.object` under UnlockedAPI, and the same 8 members under
     // ScriptTargetObjectHandle (the unlocked door) -- 18 + 8 + 1 + 8.
-    expect(policyPairs.size).toBe(995);
+    // 2026-10-17 (P4 S12): 995 -> 998, the three cross-filter members above,
+    // each probed under exactly one interface (UnlockedAPI).
+    expect(policyPairs.size).toBe(998);
     expect(entries.length).toBeLessThan(policyPairs.size);
 
     // TOTALITY, which is what makes `entryFor`'s exact match total: every

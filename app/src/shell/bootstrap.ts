@@ -29,7 +29,6 @@ import {
 import { RibbonIcon } from "../api/ribbonIcons";
 
 import { initKeybindings } from "../api/keybindings";
-import { getLocaleSettings } from "../api/locale";
 import { listenTauriEvent } from "../api/backend";
 import { getGridRegions } from "../api/gridOverlays";
 import { onAppEvent, emitAppEvent, AppEvents, type MutationDomain, type MutationRefreshPayload } from "../api/events";
@@ -581,9 +580,14 @@ export function bootstrapShell(): void {
   // Initialize centralized keybinding system
   initKeybindings();
 
-  // Eagerly load locale settings so getCachedLocale() is available
-  // for formula autocomplete hints and other synchronous locale consumers.
-  getLocaleSettings();
+  // The app locale was installed before the first render (main.tsx awaits
+  // initAppLocale), so getAppLocale() is already the backend's value here. A
+  // later switch (Settings, another window, a script) repaints the grid ONCE:
+  // cell display text is rendered by Rust in the app locale, so a re-fetch is
+  // all the grid needs. Feature caches follow LOCALE_CHANGED themselves.
+  onAppEvent(AppEvents.LOCALE_CHANGED, () => {
+    window.dispatchEvent(new Event("grid:refresh"));
+  });
 
   // C1a: bridge the backend "grid:refresh" Tauri event (emitted after an
   // OUT-OF-BAND cell write — e.g. an MCP/AI set_cell_value or run_script that

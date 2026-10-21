@@ -38,6 +38,13 @@
 //          `open` / `onOpenChange`, so opening Fill closes Font colour by
 //          construction — no swatch is remounted, and focus and DOM identity
 //          survive the switch.
+//
+//          A FLOATING GRID'S CELLS (P3, owner finding G3). Every write asks
+//          WHICH cells (`resolveCellTarget`, @api/cellTarget) -- Core's
+//          selection, or a floating grid's own cells written through
+//          `{ target }` -- and the pill's state is read from that same cell
+//          (`cellTargetFor("read")` + `readTargetCell`). An owner that does
+//          not admit the act refuses once, as before (BUG-0185).
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -55,7 +62,15 @@ import { activeCellOf } from "../../../api/activeCell";
 import { selectionBlocks } from "../../../api/selectionBlocks";
 import { announceFormattingResult } from "../../../api/announceFormatting";
 import { fontSizeStep } from "../../../api/fontSizeLadder";
-import { refuseIfSelectionOwned } from "../../../api/selectionOwner";
+import { formatNumber } from "../../../api/locale";
+import {
+  resolveCellTarget,
+  cellTargetFor,
+  targetRefOf,
+  readTargetCell,
+  type CellTargetCapability,
+} from "../../../api/cellTarget";
+import type { Selection } from "../../../api/types";
 import type { GridMenuContext } from "../../../api/extensions";
 import {
   ColorSwatch,
@@ -165,8 +180,7 @@ const DEFAULT_STYLE: CurrentStyle = {
 // Helpers
 // ============================================================================
 
-function getSelectionRange(context: GridMenuContext) {
-  const sel = context.selection;
+function getSelectionRange(sel: Selection | null | undefined) {
   if (!sel) return null;
   const startRow = Math.min(sel.startRow, sel.endRow);
   const endRow = Math.max(sel.startRow, sel.endRow);
@@ -188,14 +202,21 @@ function getSelectionRange(context: GridMenuContext) {
  * The MAIN range only: a per-block step would let each block's own first cell
  * decide, where Excel's active cell decides for all of them.
  */
-function activeFirst(context: GridMenuContext): { rows: number[]; cols: number[] } | null {
-  const range = getSelectionRange(context);
-  const active = activeCellOf(context.selection);
+function activeFirst(selection: Selection | null | undefined): { rows: number[]; cols: number[] } | null {
+  const range = getSelectionRange(selection);
+  const active = activeCellOf(selection);
   if (!range || !active) return null;
   return {
     rows: [active.row, ...range.rows.filter((r) => r !== active.row)],
     cols: [active.col, ...range.cols.filter((c) => c !== active.col)],
   };
+}
+
+/** The capability a write asks for: the number format alone is the Number
+ *  group's ("numberFormat"); anything else is "format". */
+function capabilityOf(formatting: Record<string, unknown>): CellTargetCapability {
+  const keys = Object.keys(formatting).filter((k) => formatting[k] !== undefined);
+  return keys.length === 1 && keys[0] === "numberFormat" ? "numberFormat" : "format";
 }
 
 /** The rows and columns of one rectangle, as `applyFormatting` takes them. */
@@ -241,9 +262,13 @@ export function MiniFormatToolbar({
         // the top-left corner: after a drag from a bold B2 down to a plain B5
         // the pill showed Bold on while the ribbon showed it off, and a toggle
         // then computed from the wrong cell (review finding (g), 2026-10-04).
-        const active = activeCellOf(context.selection);
+        // A floating grid's active cell when its owner admits a read (P3),
+        // else Core's.
+        const answer = cellTargetFor("read");
+        const owned = "kind" in answer && answer.kind === "object" ? answer : null;
+        const active = activeCellOf(owned ? owned.selection : context.selection);
         if (!active) return;
-        const cell = await getCell(active.row, active.col);
+        const cell = owned ? await readTargetCell(owned.ref, active.row, active.col) : await getCell(active.row, active.col);
         if (!cell) return;
         const s = await getStyle(cell.styleIndex);
         setStyle({
@@ -325,8 +350,10 @@ export function MiniFormatToolbar({
   // through the ONE announcement (`@api/announceFormatting`).
   const apply = useCallback(
     async (formatting: Record<string, unknown>, action: string): Promise<boolean> => {
-      if (refuseIfSelectionOwned(action)) return false;
-      const blocks = selectionBlocks(context.selection);
+      const t = resolveCellTarget(action, capabilityOf(formatting));
+      if (t === null) return false;
+      const target = targetRefOf(t);
+      const blocks = selectionBlocks(t.kind === "object" ? t.selection : context.selection);
       if (blocks.length === 0) return true;
       const results: FormattingResult[] = [];
       const tx =
@@ -339,7 +366,7 @@ export function MiniFormatToolbar({
       try {
         for (const block of blocks) {
           const { rows, cols } = rowsColsOf(block);
-          results.push(await applyFormatting(rows, cols, formatting as never));
+          results.push(await applyFormatting(rows, cols, formatting as never, { target }));
         }
         await tx?.commit();
       } catch (err) {
@@ -347,7 +374,7 @@ export function MiniFormatToolbar({
         if (results.length > 0) await tx?.commit().catch(() => undefined);
         else await tx?.cancel().catch(() => undefined);
       }
-      if (results.length > 0) announceFormattingResult(results);
+      if (results.length > 0) announceFormattingResult(results, { target });
       return true;
     },
     [context],
@@ -360,11 +387,13 @@ export function MiniFormatToolbar({
   // and applied to the whole selection as one undo step: the Home tab's door.
   const stepDecimals = useCallback(
     async (delta: 1 | -1, action: string): Promise<void> => {
-      if (refuseIfSelectionOwned(action)) return;
-      const lists = activeFirst(context);
+      const t = resolveCellTarget(action, "numberFormat");
+      if (t === null) return;
+      const target = targetRefOf(t);
+      const lists = activeFirst(t.kind === "object" ? t.selection : context.selection);
       if (!lists) return;
       try {
-        announceFormattingResult(await adjustNumberFormatDecimals(lists.rows, lists.cols, delta));
+        announceFormattingResult(await adjustNumberFormatDecimals(lists.rows, lists.cols, delta, { target }), { target });
       } catch (err) {
         console.error("[MiniFormatToolbar] Failed to change decimals:", err);
       }
@@ -408,13 +437,15 @@ export function MiniFormatToolbar({
 
   const changeFontSize = useCallback(
     async (e: React.ChangeEvent<HTMLSelectElement>) => {
-      const val = parseFloat(e.target.value);
-      if (!isNaN(val) && val > 0) {
+      // The option's value is only a lookup handle (its label is in the app
+      // locale, "10,5" under de-DE): take the option's OWN number.
+      const val = [...FONT_SIZES, style.fontSize].find((s) => String(s) === e.target.value);
+      if (val !== undefined && val > 0) {
         if (!(await apply({ fontSize: val }, "Font Size"))) return;
         setStyle((s) => ({ ...s, fontSize: val }));
       }
     },
-    [apply],
+    [apply, style.fontSize],
   );
 
   // Grow / Shrink step through Excel's ladder (`@api/fontSizeLadder`, the
@@ -535,7 +566,7 @@ export function MiniFormatToolbar({
         >
           {sizeOptions.map((s) => (
             <option key={s} value={s}>
-              {s}
+              {formatNumber(s)}
             </option>
           ))}
         </Select>

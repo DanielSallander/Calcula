@@ -20,6 +20,12 @@
 //            - never while an INNER selection owns the key (a floating range's
 //              selected cell moves on Tab; a chart walked down to a series goes
 //              up a level on Escape) -- the owning family answers that.
+//
+//          Escape, in order (P4 S10): while Edit interactions is on, it ends
+//          the mode (the selection stays); with an object selected it
+//          deselects, as before; with nothing selected and no inner selection
+//          it clears the page's cross-filter selections -- and applies only
+//          when there is one to clear, so it never swallows the key.
 
 import { CommandRegistry } from "@api/commands";
 import { registerKeybinding, isGridFocused } from "@api/keybindings";
@@ -32,6 +38,9 @@ import {
   selectObject,
 } from "@api/objectSelection";
 import type { GridRegion } from "@api/gridOverlays";
+import { clearCrossFilters, getCrossFilters } from "@api/reportFilters";
+import { getCanvasSheetSnapshot } from "./canvasSheetStore";
+import { INTERACTION_OVERLAY_ATTR, exitEditInteractions, isEditInteractionsActive } from "./editInteractions";
 
 export const CANVAS_NEXT_OBJECT_COMMAND = "canvasSheet.nextObject";
 export const CANVAS_PREVIOUS_OBJECT_COMMAND = "canvasSheet.previousObject";
@@ -70,17 +79,49 @@ export function tabApplies(): boolean {
   return onCanvas() && isGridFocused() && selectableFloatingRegions().length > 0 && !objectOwnsKey("Tab");
 }
 
+/** The active canvas page's sheet id, or null. */
+function activePageId(): string | null {
+  return getCanvasSheetSnapshot().active?.sheetId ?? null;
+}
+
 /**
- * Escape applies while ANYTHING is selected -- held by a family or by the
- * selection set (a second chart in a multi-selection) -- and clears it all.
+ * Whether focus is on the grid, or on Edit interactions' own chrome (its
+ * strips on the page, or the ribbon toggle just pressed).
+ */
+function focusOnGridOrInteractions(): boolean {
+  if (isGridFocused()) return true;
+  const el = typeof document === "undefined" ? null : document.activeElement;
+  return !!el?.closest?.(`[${INTERACTION_OVERLAY_ATTR}], [data-testid="canvas-edit-interactions"]`);
+}
+
+/**
+ * Escape applies: while Edit interactions is on (it ends the mode); while
+ * ANYTHING is selected -- held by a family or by the selection set (a second
+ * chart in a multi-selection) -- and nothing inner owns the key (it clears it
+ * all); and with nothing selected, while the page has a cross-filter
+ * selection to clear.
  */
 export function escapeApplies(): boolean {
-  return (
-    onCanvas() &&
-    isGridFocused() &&
-    getSelectedObjectRegion(selectableFloatingRegions()) !== null &&
-    !objectOwnsKey("Escape")
-  );
+  if (!onCanvas()) return false;
+  if (isEditInteractionsActive()) return focusOnGridOrInteractions();
+  if (!isGridFocused()) return false;
+  if (getSelectedObjectRegion(selectableFloatingRegions()) !== null) return !objectOwnsKey("Escape");
+  const page = activePageId();
+  return page !== null && getCrossFilters(page).length > 0;
+}
+
+/** What Escape does on a canvas (see {@link escapeApplies}). Exported for tests. */
+export function runCanvasEscape(): void {
+  if (isEditInteractionsActive()) {
+    exitEditInteractions();
+    return;
+  }
+  if (getSelectedObjectRegion(selectableFloatingRegions()) !== null) {
+    deselectAllObjects();
+    return;
+  }
+  const page = activePageId();
+  if (page !== null) clearCrossFilters(page);
 }
 
 /** Register the commands and the three guarded bindings. */
@@ -93,7 +134,7 @@ export function installCanvasObjectKeyboard(extensionId: string): Array<() => vo
     stepCanvasObject(-1);
   });
   CommandRegistry.register(CANVAS_DESELECT_OBJECT_COMMAND, () => {
-    deselectAllObjects();
+    runCanvasEscape();
   });
   cleanups.push(() => CommandRegistry.unregister(CANVAS_NEXT_OBJECT_COMMAND));
   cleanups.push(() => CommandRegistry.unregister(CANVAS_PREVIOUS_OBJECT_COMMAND));

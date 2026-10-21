@@ -25,6 +25,7 @@ import { RunLog } from "../../_shared/components/RunLog";
 import { formatElapsed } from "../../_shared/formatElapsed";
 import { runLogRows, dryRunLine } from "../lib/runLogRows";
 import type { AuthoringRun, RunAttempt, RunOutcome, RunDecision } from "@api/scriptHost/authoringRun";
+import { formatDateTime } from "@api/locale";
 
 const OVERLAY: React.CSSProperties = {
   position: "fixed",
@@ -90,7 +91,7 @@ const DECISION_TEXT: Record<RunDecision, string> = {
 function whenText(iso: string): string {
   const t = Date.parse(iso);
   if (Number.isNaN(t)) return iso;
-  return new Date(t).toLocaleString();
+  return formatDateTime(t);
 }
 
 function AttemptBlock(props: { attempt: RunAttempt }): React.ReactElement {

@@ -24,7 +24,7 @@ vi.mock("@api/ui", () => ({
   },
 }));
 
-vi.mock("@api/locale", () => ({ getCachedLocale: () => ({ decimalSeparator: "." }) }));
+vi.mock("@api/locale", () => ({ getAppLocale: () => ({ decimalSeparator: "." }) }));
 
 // The macro store: recording end paths must not need a backend.
 vi.mock("@api", async () => {

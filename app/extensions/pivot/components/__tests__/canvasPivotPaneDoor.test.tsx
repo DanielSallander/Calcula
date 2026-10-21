@@ -64,6 +64,9 @@ vi.mock("@api", () => ({
   onAppEvent,
 }));
 vi.mock("@api/events", () => ({ onAppEvent, emitAppEvent }));
+// The editor follows the APP locale for caption translation (P2); this suite
+// mocks @api/events, so the locale seam is stubbed here too.
+vi.mock("@api/locale", () => ({ getAppLocale: () => ({ localeId: "en-US" }), onLocaleChanged: () => () => undefined }));
 vi.mock("@api/grid", () => ({ getGridStateSnapshot: () => ({ surface: "canvas", sheetContext: { activeSheetIndex: 1 } }) }));
 vi.mock("@api/dialogs", () => ({ confirmAsync: vi.fn(() => Promise.resolve(false)) }));
 vi.mock("../../manifest", () => ({

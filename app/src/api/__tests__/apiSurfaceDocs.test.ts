@@ -77,11 +77,28 @@ describe("the selection-owner surface", () => {
       "isSelectionOwned",
       "onSelectionOwnershipChanged",
       "notifySelectionOwnershipChanged",
+      // P3: the owner answers its cells, and the door asks for them.
+      "cellTarget",
+      "actsOn",
+      "resolveCellTarget",
     ]) {
       expect(GUIDE, `the extension guide never mentions ${name}`).toContain(name);
     }
     expect(GUIDE).toContain("@api/selectionOwner");
+    expect(GUIDE).toContain("@api/cellTarget");
   });
+
+  it("the cell-target door the guide teaches is exported by @api/cellTarget and @api/selectionOwner", async () => {
+    const cellTarget = await import("../cellTarget");
+    const seam = await import("../selectionOwner");
+    for (const name of ["resolveCellTarget", "cellTargetFor"]) {
+      expect(typeof (cellTarget as Record<string, unknown>)[name], `@api/cellTarget does not export ${name}`).toBe("function");
+      expect(typeof (seam as Record<string, unknown>)[name], `@api/selectionOwner does not export ${name}`).toBe("function");
+    }
+    for (const name of ["targetRefOf", "getCellTargetCells", "readTargetCell", "selectTargetCells", "editTargetCell"]) {
+      expect(typeof (cellTarget as Record<string, unknown>)[name], `@api/cellTarget does not export ${name}`).toBe("function");
+    }
+  }, 120_000);
 
   it("every selection-owner function the guide names is exported by @api/selectionOwner", async () => {
     const seam = await import("../selectionOwner");
@@ -100,5 +117,14 @@ describe("the selection-owner surface", () => {
     expect(OWNER_CORE).toMatch(/receivesTyping\?: \(\) => boolean;/);
     const header = OWNER_SEAM.slice(0, OWNER_SEAM.indexOf("import "));
     expect(header, "the owner example in the seam's header omits receivesTyping").toContain("receivesTyping");
+  });
+
+  it("@api/selectionOwner's own usage header shows cellTarget and actsOn, which the type declares", () => {
+    expect(OWNER_CORE).toMatch(/cellTarget\?: \(\) => OwnedCellTarget \| null;/);
+    expect(OWNER_CORE).toMatch(/actsOn\?: readonly CellTargetCapability\[\];/);
+    const header = OWNER_SEAM.slice(0, OWNER_SEAM.indexOf("import "));
+    expect(header, "the owner example in the seam's header omits cellTarget").toContain("cellTarget:");
+    expect(header, "the owner example in the seam's header omits actsOn").toContain("actsOn:");
+    expect(header, "the door example in the seam's header omits resolveCellTarget").toContain("resolveCellTarget(");
   });
 });

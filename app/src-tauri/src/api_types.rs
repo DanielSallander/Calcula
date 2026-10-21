@@ -851,6 +851,10 @@ pub struct ClearRangeParams {
     /// Target sheet (0-based). None = the active sheet (Wave 3 cross-sheet ops).
     #[serde(default)]
     pub sheet_index: Option<usize>,
+    /// An OBJECT's cells (P3: a floating grid's backing sheet), in the object's
+    /// own coordinates. Excludes `sheet_index`.
+    #[serde(default)]
+    pub target: Option<CellTargetRef>,
 }
 
 /// Result of clear_range_with_options command.
@@ -984,6 +988,10 @@ pub struct SortRangeParams {
     /// Target sheet (0-based). None = the active sheet (Wave 3 cross-sheet ops).
     #[serde(default)]
     pub sheet_index: Option<usize>,
+    /// An OBJECT's cells (P3: a floating grid's backing sheet), in the object's
+    /// own coordinates. Excludes `sheet_index`.
+    #[serde(default)]
+    pub target: Option<CellTargetRef>,
 }
 
 /// Result of sort_range command.
@@ -2416,6 +2424,47 @@ pub struct SolverVariableValue {
 // LOCALE / REGIONAL SETTINGS
 // ============================================================================
 
+/// THE member shape at the Rust boundary (P2, app locale everywhere): pivot
+/// header and filter-item cells, pivot filter lists, BI column values and
+/// slicer items all carry one.
+///
+/// - `key` = the invariant canonical text. Selections, filters, page filters,
+///   GETPIVOTDATA and cross-filter tuples match on it, and ONLY on it.
+/// - `label` = the app-locale display (`engine::member_label`).
+///
+/// Never parse one into the other. The BLANK member is key `""` and label
+/// `"(Blank)"` everywhere (orchestrator ruling Q8): a NULL and an empty
+/// string are ONE member.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberRef {
+    pub key: String,
+    pub label: String,
+}
+
+impl MemberRef {
+    /// A member whose label is its key (a table-source slicer's display text,
+    /// a calculation-group item name).
+    pub fn verbatim(text: impl Into<String>) -> Self {
+        let key = text.into();
+        MemberRef { label: key.clone(), key }
+    }
+
+    /// THE blank member: key `""`, label `"(Blank)"` (ruling Q8).
+    pub fn blank() -> Self {
+        MemberRef {
+            key: pivot_engine::BLANK_MEMBER_KEY.to_string(),
+            label: engine::BLANK_MEMBER_LABEL.to_string(),
+        }
+    }
+
+    /// The member of `key` written for `locale` from its locale-free source.
+    pub fn from_source(key: String, source: &engine::MemberSource, locale: &engine::LocaleSettings) -> Self {
+        let label = engine::member_label(&key, source, locale);
+        MemberRef { key, label }
+    }
+}
+
 /// Locale settings returned to the frontend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2434,10 +2483,41 @@ pub struct LocaleSettingsData {
     pub time_format: String,
     pub currency_symbol: String,
     pub currency_position: String,
+    /// The persisted override the app runs on (an id from
+    /// `get_supported_locales`), or `None` when following the OS regional
+    /// format. Filled by `get_locale_settings` / `set_locale` from
+    /// `app_locale`; `From<&LocaleSettings>` leaves it `None`.
+    #[serde(default)]
+    pub override_id: Option<String>,
+    /// 12 abbreviated month names, January first (the engine's calendar table).
+    #[serde(default)]
+    pub month_names_short: Vec<String>,
+    /// 12 full month names, January first.
+    #[serde(default)]
+    pub month_names_long: Vec<String>,
+    /// 7 abbreviated day names, SUNDAY first (as `CalendarNames`).
+    #[serde(default)]
+    pub day_names_short: Vec<String>,
+    /// 7 full day names, Sunday first.
+    #[serde(default)]
+    pub day_names_long: Vec<String>,
+    /// 4 quarter labels ("Q1".."Q4" in English, "Kv1".."Kv4" in Swedish).
+    #[serde(default)]
+    pub quarter_labels: Vec<String>,
+}
+
+impl LocaleSettingsData {
+    /// The same data, reporting `override_id` as the persisted override.
+    pub fn with_override(mut self, override_id: Option<String>) -> Self {
+        self.override_id = override_id;
+        self
+    }
 }
 
 impl From<&engine::LocaleSettings> for LocaleSettingsData {
     fn from(locale: &engine::LocaleSettings) -> Self {
+        let calendar = locale.calendar();
+        let names = |list: &[&'static str]| list.iter().map(|n| n.to_string()).collect::<Vec<_>>();
         Self {
             locale_id: locale.locale_id.clone(),
             display_name: locale.display_name.clone(),
@@ -2452,6 +2532,12 @@ impl From<&engine::LocaleSettings> for LocaleSettingsData {
                 engine::LocaleCurrencyPosition::Before => "before".to_string(),
                 engine::LocaleCurrencyPosition::After => "after".to_string(),
             },
+            override_id: None,
+            month_names_short: names(&calendar.months_short),
+            month_names_long: names(&calendar.months_full),
+            day_names_short: names(&calendar.days_short),
+            day_names_long: names(&calendar.days_full),
+            quarter_labels: (1..=4).map(|q| calendar.quarter_label(q)).collect(),
         }
     }
 }
@@ -2705,6 +2791,22 @@ pub struct FloatingRange {
     /// chrome flags do, so it is formatting (Lock Objects lets it through).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<visual_format::VisualContainerFormat>,
+    /// Rows / columns of the WINDOW the author hid (Home > Format > Hide &
+    /// Unhide on a floating grid; P3, DECISIONS2 "Hide/Unhide rows/cols via
+    /// object maps"). Local indices, SORTED, DEDUPLICATED and each below
+    /// `MAX_FLOATING_RANGE_ROWS` / `MAX_FLOATING_RANGE_COLS` -- the edit path
+    /// refuses anything else (`floating_range::validate_line_set`) and the load
+    /// path repairs it (`persistence::saved_floating_range_to_row`). A hidden
+    /// line shrinks the frame, so Lock Objects refuses changing the set.
+    ///
+    /// They live on the OBJECT, not in the backing sheet's user-hidden sets, so
+    /// SUBTOTAL(101-111) does NOT skip them (open-items P3 (b)). Persisted at
+    /// `.cala` v11 when non-empty: an older reader that dropped them would show
+    /// rows the author hid -- the lie case.
+    #[serde(default)]
+    pub hidden_rows: Vec<u32>,
+    #[serde(default)]
+    pub hidden_cols: Vec<u32>,
 }
 
 fn default_true() -> bool {
@@ -2734,6 +2836,52 @@ pub struct FloatingRangeInfo {
     pub name: String,
     pub backing_sheet_index: usize,
     pub host_sheet_index: usize,
+}
+
+/// What a cell command acts on when it is NOT Core's selection on the active
+/// sheet: an object whose cells live in a hidden backing sheet. Resolved in
+/// ONE place (`cell_target::resolve_cell_target`); the frontend never sends a
+/// backing sheet index. Wire form: `{"kind":"floatingRange","id":"<uuid>"}`
+/// (the tagged shape `BindingEditSource` uses).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum CellTargetRef {
+    FloatingRange { id: identity::EntityId },
+}
+
+/// The styled read of a rectangle of a cell target (`get_cell_target_cells`):
+/// everything the floating grid's renderer needs to paint the cells exactly
+/// as the sheet would, all of it read from the BACKING sheet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CellTargetCells {
+    /// Every STORED cell in the rectangle, including style-only empty cells
+    /// (a fill on an empty cell paints) and merge masters; the cells a merge
+    /// covers are omitted, as `get_viewport_cells` omits them. `display` is
+    /// formatted with the app locale.
+    pub cells: Vec<TargetCellData>,
+    /// Merged regions on the backing sheet intersecting the rectangle.
+    pub merges: Vec<MergedRegion>,
+    /// Conditional-format results for the rectangle, evaluated on the BACKING
+    /// grid with the BACKING sheet's rules.
+    pub conditional: Vec<crate::conditional_formatting::CellConditionalFormat>,
+    /// The styles the returned cells use, to prime the style cache.
+    pub styles: Vec<StyleEntry>,
+    /// The BACKING sheet's rules whose ranges intersect the rectangle -- the
+    /// rules that produced `conditional`, so the data-bar and icon-set
+    /// painters take their colours from them, never from the active sheet's.
+    pub rules: Vec<crate::conditional_formatting::ConditionalFormatDefinition>,
+}
+
+/// One cell of a [`CellTargetCells`] read: `CellData` flattened, plus the
+/// value kind General alignment needs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetCellData {
+    #[serde(flatten)]
+    pub cell: CellData,
+    /// "number" | "text" | "boolean" | "error" | "empty".
+    pub value_kind: String,
 }
 
 /// Partial update for `update_floating_range`: geometry, window size and cell
@@ -2774,6 +2922,13 @@ pub struct FloatingRangePatch {
     /// through, like the chrome flags).
     #[serde(default, deserialize_with = "deserialize_double_option", skip_serializing_if = "Option::is_none")]
     pub container: Option<Option<visual_format::VisualContainerFormat>>,
+    /// WHOLE-SET replacement of the hidden window rows / columns (sorted,
+    /// deduplicated, in range -- `validate_line_set` refuses anything else).
+    /// Absent = leave alone, like the size maps.
+    #[serde(default)]
+    pub hidden_rows: Option<Vec<u32>>,
+    #[serde(default)]
+    pub hidden_cols: Option<Vec<u32>>,
 }
 
 /// Default row height and column width for the workbook.
@@ -2866,6 +3021,34 @@ pub struct CanvasLayoutPatch {
     pub objects_locked: Option<bool>,
     pub z_order: Option<Vec<CanvasObjectRef>>,
     pub locked: Option<Vec<CanvasObjectRef>>,
+    /// The page's visual interactions (`CanvasLayout::interactions`), replaced
+    /// WHOLE: the default mode and every explicit pair. Normalized by
+    /// [`normalize_canvas_interactions`] (refs trimmed, a pair named twice
+    /// keeps its LAST mode -- the latest edit wins) and then validated with
+    /// the rest of the layout, so a bad kind or a self-pair is refused.
+    pub interactions: Option<::persistence::CanvasInteractions>,
+}
+
+/// `interactions` as an EDIT stores them: every ref trimmed, and of the pairs
+/// naming the same (source, target) only the LAST kept, at the position of
+/// that last occurrence (the latest edit wins). Nothing is dropped for being
+/// invalid: the merged layout's `validate` REFUSES a bad pair, where a load's
+/// `CanvasInteractions::sanitized` would silently drop it.
+pub fn normalize_canvas_interactions(
+    interactions: &::persistence::CanvasInteractions,
+) -> ::persistence::CanvasInteractions {
+    let trim = |r: &CanvasObjectRef| CanvasObjectRef { kind: r.kind.trim().to_string(), id: r.id.trim().to_string() };
+    let mut seen: std::collections::HashSet<(CanvasObjectRef, CanvasObjectRef)> =
+        std::collections::HashSet::with_capacity(interactions.pairs.len());
+    let mut kept: Vec<::persistence::CanvasInteraction> = Vec::with_capacity(interactions.pairs.len());
+    for p in interactions.pairs.iter().rev() {
+        let pair = ::persistence::CanvasInteraction { source: trim(&p.source), target: trim(&p.target), mode: p.mode };
+        if seen.insert((pair.source.clone(), pair.target.clone())) {
+            kept.push(pair);
+        }
+    }
+    kept.reverse();
+    ::persistence::CanvasInteractions { default_mode: interactions.default_mode, pairs: kept }
 }
 
 impl CanvasLayoutPatch {
@@ -2920,6 +3103,9 @@ impl CanvasLayoutPatch {
         }
         if let Some(v) = &self.locked {
             layout.locked = ::persistence::normalize_canvas_object_refs(v);
+        }
+        if let Some(v) = &self.interactions {
+            layout.interactions = normalize_canvas_interactions(v);
         }
         layout.validate()?;
         Ok(layout)
@@ -3025,8 +3211,10 @@ pub struct ChangedCellRef {
     pub col: u32,
 }
 
-/// One page filter mirrored from `@api/pageFilters` (frontend-owned).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One model filter mirrored from `@api/reportFilters` (frontend-owned):
+/// `field` is `"Table.Column"`, `included_items` are member KEYS (the blank
+/// member's key is `""`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageFilterWire {
     pub field: String,
@@ -3034,13 +3222,59 @@ pub struct PageFilterWire {
     pub filter_level: u8,
 }
 
-/// Every page filter of one (page, connection), mirrored to Rust.
+/// An OR-of-AND filter mirrored from `@api/reportFilters` (P4: a cross-filter
+/// selection made on another visual): keep a row whose `fields` (each
+/// `"Table.Column"`) equal, column by column, one of the `tuples` of member
+/// KEYS. An empty `tuples` keeps nothing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TupleFilterWire {
+    pub fields: Vec<String>,
+    #[serde(default)]
+    pub tuples: Vec<Vec<String>>,
+}
+
+/// The filters ONE object reads instead of its page's (P4: a visual
+/// interaction other than the page default -- a `none` pair, a highlight
+/// target). Replaces the page set for that object on that connection.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObjectFilterOverrideWire {
+    pub object: ObjectBindingRef,
+    #[serde(default)]
+    pub filters: Vec<PageFilterWire>,
+    #[serde(default)]
+    pub tuple_filters: Vec<TupleFilterWire>,
+}
+
+/// Every model filter of one (page, connection), mirrored to Rust. The page is
+/// named by its SHEET ID (P4 DC-4), never an index.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageFilterPageWire {
-    pub sheet_index: usize,
+    pub sheet_id: identity::SheetId,
     pub connection_id: String,
+    #[serde(default)]
     pub filters: Vec<PageFilterWire>,
+    #[serde(default)]
+    pub tuple_filters: Vec<TupleFilterWire>,
+    #[serde(default)]
+    pub objects: Vec<ObjectFilterOverrideWire>,
+}
+
+/// The cross-filter selections of OTHER visuals that reach one MODEL slicer
+/// (P4 S4d), as `@api/reportFilters` resolved them for it: `get_slicer_items`
+/// narrows the slicer's has-data shading by them, never its selection.
+/// `filters` are plain value constraints (member KEYS); `tuples` are
+/// OR-of-AND selections over several columns, answered exactly up to
+/// `slicer::commands::SLICER_TUPLE_HAS_DATA_CAP` combinations.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlicerVisualConstraints {
+    #[serde(default)]
+    pub filters: Vec<crate::bi::types::BiValueConstraint>,
+    #[serde(default)]
+    pub tuples: Vec<TupleFilterWire>,
 }
 
 /// What a binding formula reads and how it would be stored.

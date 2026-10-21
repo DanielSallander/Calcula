@@ -10,6 +10,10 @@
 // UPDATED: Removed FindState - Find state now lives in the FindReplaceDialog extension
 //          per Microkernel Architecture (Find is a feature, not a kernel primitive)
 
+// The conditional-format shapes are declared beside their wrappers in @api/backend;
+// `CellTargetCells` (below) carries them. Type-only: erased at runtime, no cycle.
+import type { CellConditionalFormat, ConditionalFormatDefinition } from "../../api/backend";
+
 /**
  * Zoom constants, as RENDER FACTORS (1.0 = 100%).
  *
@@ -2594,3 +2598,47 @@ export interface CellShiftResult {
 export type InsertCellsShift = "right" | "down";
 /** Excel's Delete dialog shifts: `delete_cells`'s `shift` argument. */
 export type DeleteCellsShift = "left" | "up";
+
+// ============================================================================
+// Cell targets (P3, owner finding G3): a cell command acting on an OBJECT's
+// cells -- a floating grid's, whose cells live in a hidden backing sheet --
+// instead of Core's selection on the active sheet.
+// ============================================================================
+
+/**
+ * WHAT a cell command acts on when it is not Core's selection (mirrors Rust
+ * `api_types::CellTargetRef`, a tagged enum: `{"kind":"floatingRange","id":"<uuid>"}`).
+ * Resolved by the backend in ONE place; the frontend never sends a backing
+ * sheet index. Always passed EXPLICITLY (`opts.target` on a wrapper), never
+ * read from an ambient selection.
+ */
+export type CellTargetRef = { kind: "floatingRange"; id: string };
+
+/** How a target cell's value aligns under General: Excel's value kinds. */
+export type TargetCellValueKind = "number" | "text" | "boolean" | "error" | "empty";
+
+/**
+ * One stored cell of a target (mirrors Rust `TargetCellData`: `CellData`
+ * flattened, plus the value kind). Coordinates are the BACKING sheet's, which
+ * equal the object's local coordinates.
+ */
+export interface TargetCellData extends CellData {
+  valueKind: TargetCellValueKind;
+}
+
+/**
+ * A styled read of a rectangle of a target (mirrors Rust `CellTargetCells`,
+ * the answer of `get_cell_target_cells`).
+ */
+export interface CellTargetCells {
+  /** Every STORED cell in the rectangle, including style-only empty cells. */
+  cells: TargetCellData[];
+  /** Merged regions on the backing sheet intersecting the rectangle. */
+  merges: MergedRegion[];
+  /** Conditional-format results, evaluated on the BACKING grid. */
+  conditional: CellConditionalFormat[];
+  /** The styles the returned cells use, to prime the style cache. */
+  styles: StyleEntry[];
+  /** The BACKING sheet's rules that produced `conditional` (never the active sheet's). */
+  rules: ConditionalFormatDefinition[];
+}

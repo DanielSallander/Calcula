@@ -65,6 +65,9 @@ vi.mock("../lib/filterPaneStore", () => ({
   updateFilterSelectionAsync: vi.fn(),
   getAllFilters: () => [],
   getConnectionName: () => "Sales model",
+  getFilterItemsError: () => null,
+  getFilterNarrowingError: () => null,
+  getFilterLoadAttempts: () => 0,
 }));
 vi.mock("../lib/filterPaneApi", () => ({
   getAllSlicers: async () => [],
@@ -123,7 +126,11 @@ describe("Report Connections: disconnecting a pivot", () => {
           <FilterDropdown
             filterId="f1"
             fieldName="Customers.Region"
-            items={[{ value: "East", selected: true, hasData: true }]}
+            items={[{ key: "East", label: "East", selected: true, hasData: true }]}
+            fieldLabel="Customers.Region"
+            itemsError={null}
+            narrowingError={null}
+            onRetry={() => undefined}
             selectedItems={["East"]}
             anchorEl={anchor}
             onApply={() => undefined}
@@ -131,8 +138,8 @@ describe("Report Connections: disconnecting a pivot", () => {
             onDelete={() => undefined}
             connectionId="c1"
             connectionMode="manual"
-            crossFilterTargets={[]}
-            crossFilterSlicerTargets={[]}
+            dependentFilters={[]}
+            dependentSlicers={[]}
             advancedFilter={null}
             fieldDataType="text"
             connectedPivots={["P"]}
@@ -170,5 +177,172 @@ describe("Report Connections: disconnecting a pivot", () => {
       mocks.calls.some((c: Call) => JSON.stringify(c.args ?? {}).includes("fieldIndex")),
     ).toBe(false);
     expect(mocks.updateFilterAsync).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ============================================================================
+// P4 (G2-B): Report connections name every model visual, not pivots only
+// ============================================================================
+
+import { registerModelVisualProvider, type ModelVisualInfo } from "@api/modelVisuals";
+
+function chartVisual(id: string, name: string, over: Partial<ModelVisualInfo> = {}): ModelVisualInfo {
+  return {
+    ref: { kind: "chart", id },
+    name,
+    sheetIndex: 0,
+    sheetId: "sheet-a",
+    connectionId: "c1",
+    role: { source: true, target: true, canHighlight: true, reason: null },
+    label: "Column chart",
+    ...over,
+  };
+}
+
+function renderVisualsDropdown(over: Partial<React.ComponentProps<typeof FilterDropdown>> = {}): void {
+  const anchor = document.createElement("div");
+  document.body.appendChild(anchor);
+  act(() => {
+    root.render(
+      <SurfaceLayoutProvider value={bandLayout()}>
+        <FilterDropdown
+          filterId="f1"
+          fieldName="Customers.Region"
+          items={[{ key: "East", label: "East", selected: true, hasData: true }]}
+          fieldLabel="Customers.Region"
+          itemsError={null}
+          narrowingError={null}
+          onRetry={() => undefined}
+          selectedItems={null}
+          anchorEl={anchor}
+          onApply={() => undefined}
+          onClose={() => undefined}
+          onDelete={() => undefined}
+          connectionId="c1"
+          connectionMode="manual"
+          dependentFilters={[]}
+          dependentSlicers={[]}
+          advancedFilter={null}
+          fieldDataType="text"
+          connectedPivots={["P"]}
+          connectedSheets={[]}
+          hideNoData={false}
+          indicateNoData={true}
+          sortNoDataLast={true}
+          showSelectAll={false}
+          singleSelect={false}
+          filterLevel={1}
+          {...over}
+        />
+      </SurfaceLayoutProvider>,
+    );
+  });
+}
+
+function radio(text: string): HTMLInputElement {
+  const label = Array.from(document.querySelectorAll("label")).find((l) => l.textContent?.trim() === text);
+  if (!label) throw new Error(`no "${text}" mode`);
+  return label.querySelector<HTMLInputElement>('input[type="radio"]')!;
+}
+
+describe("Report connections: Selected visuals / Selected pages / All pages", () => {
+  let unregister: (() => void) | null = null;
+  afterEach(() => {
+    unregister?.();
+    unregister = null;
+  });
+
+  it("labels the modes in Power BI's words, and All pages names every visual kind", async () => {
+    renderVisualsDropdown();
+    await flush();
+    await clickAsync(button("Connections"));
+    await flush();
+    const modes = Array.from(document.querySelectorAll<HTMLLabelElement>("label"))
+      .filter((l) => l.querySelector('input[type="radio"]'))
+      .map((l) => l.textContent?.trim());
+    expect(modes).toEqual(["Selected visuals", "Selected pages", "All pages"]);
+    expect(document.body.textContent).not.toMatch(/\bManual\b|By Sheet|Workbook/);
+
+    await clickAsync(radio("All pages"));
+    await flush();
+    expect(document.body.textContent).toContain(
+      "Filters every PivotTable, chart, card, KPI and gauge built on this model, on every page, including ones added later.",
+    );
+  });
+
+  it("says 'No visuals use this model yet.' when the model has neither pivots nor visuals", async () => {
+    const api = await import("../lib/filterPaneApi");
+    const spy = vi.spyOn(api, "getPivotsForBiConnection").mockResolvedValue([]);
+    try {
+      renderVisualsDropdown({ connectedPivots: [] });
+      await flush();
+      await clickAsync(button("Connections"));
+      await flush();
+      expect(document.body.textContent).toContain("No visuals use this model yet.");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("lists the pivots AND the model's charts with kind labels; another model's chart and a non-target are left out", async () => {
+    unregister = registerModelVisualProvider({
+      kind: "chart",
+      list: () => [
+        chartVisual("7", "Sales by region"),
+        chartVisual("8", "Other model", { connectionId: "c2" }),
+        chartVisual("9", "Static", { role: { source: false, target: false, canHighlight: false, reason: "x" } }),
+      ],
+    });
+    renderVisualsDropdown();
+    await flush();
+    await clickAsync(button("Connections"));
+    await flush();
+    const rows = Array.from(document.querySelectorAll<HTMLLabelElement>("label"))
+      .filter((l) => l.querySelector('input[type="checkbox"]'))
+      .map((l) => l.textContent?.replace(/\s+/g, " ").trim())
+      // The value checklist (East) stays mounted beside the connections.
+      .filter((t) => t !== "East");
+    expect(rows).toEqual(["PivotTableRegion pivot", "Column chartSales by region (Report)"]);
+  });
+
+  it("Save writes the pivots to connectedPivots and the ticked chart to connectedVisuals", async () => {
+    unregister = registerModelVisualProvider({ kind: "chart", list: () => [chartVisual("7", "Sales by region")] });
+    mocks.updateFilterAsync.mockResolvedValue({ id: "f1", selectedItems: null });
+    renderVisualsDropdown({ connectedVisuals: [{ kind: "chart", id: "42" }] });
+    await flush();
+    await clickAsync(button("Connections"));
+    await flush();
+    const chartRow = document.querySelector('label[data-visual-ref="chart:7"]');
+    expect(chartRow, "the chart is listed").toBeTruthy();
+    const box = chartRow!.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(box.checked).toBe(false);
+    await clickAsync(box);
+    await clickAsync(button("Save"));
+    await flush();
+    expect(mocks.updateFilterAsync).toHaveBeenCalledTimes(1);
+    const [, updates] = mocks.updateFilterAsync.mock.calls[0];
+    expect(updates.connectionMode).toBe("manual");
+    expect(updates.connectedPivots).toEqual(["P"]);
+    // The ticked chart, plus the connected ref no family lists (not shown is
+    // not unticked).
+    expect(updates.connectedVisuals).toEqual([
+      { kind: "chart", id: "7" },
+      { kind: "chart", id: "42" },
+    ]);
+  });
+
+  it("Save outside Selected visuals sends no visuals list (the backend clears it)", async () => {
+    unregister = registerModelVisualProvider({ kind: "chart", list: () => [chartVisual("7", "Sales by region")] });
+    mocks.updateFilterAsync.mockResolvedValue({ id: "f1", selectedItems: null });
+    renderVisualsDropdown({ connectedVisuals: [{ kind: "chart", id: "7" }] });
+    await flush();
+    await clickAsync(button("Connections"));
+    await flush();
+    await clickAsync(radio("All pages"));
+    await clickAsync(button("Save"));
+    await flush();
+    const [, updates] = mocks.updateFilterAsync.mock.calls[0];
+    expect(updates.connectionMode).toBe("workbook");
+    expect("connectedVisuals" in updates).toBe(false);
   });
 });

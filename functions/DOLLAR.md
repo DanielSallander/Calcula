@@ -17,9 +17,10 @@ The DOLLAR function converts a number to text using the currency ($) format with
 
 ## Remarks
 
-- Negative numbers are enclosed in parentheses.
-- The result is a text string, not a number.
-- Thousands separators (commas) are added automatically.
+- The text follows Calcula's app locale (its regional setting): the currency symbol and its position, the decimal separator and the thousands separator are that region's. The examples below are en-US; in de-DE `=DOLLAR(1234.5)` gives `€ 1.234,50`, in sv-SE `1 234,50 kr`.
+- Negative numbers are enclosed in parentheses in en-US and carry a leading minus sign in every other region.
+- The result is a text string, not a number. Like TEXT, it is written when the formula calculates, so after changing the region it updates on the next recalculation (F9).
+- Thousands separators are added automatically.
 
 ## Example
 

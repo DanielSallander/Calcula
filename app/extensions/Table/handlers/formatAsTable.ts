@@ -25,13 +25,16 @@
 //
 //          The selection it reads is Core's, so it refuses (once, with the
 //          shared message) while another surface owns the selection (BUG-0185).
+//          It asks the cell-target question with capability "table", which no
+//          owner admits: on a floating grid's cells the owner answers why (a
+//          floating grid is already a table-like object; P3, spec 1.3).
 
 import React from "react";
 import type { ExtensionContext } from "@api/contract";
 import { ExtensionCommands, showDialog, showToast, AppEvents, IconInsertTable } from "@api";
 import { emitAppEvent } from "@api/events";
 import { getGridStateSnapshot } from "@api/grid";
-import { refuseIfSelectionOwned } from "@api/selectionOwner";
+import { resolveCellTarget } from "@api/cellTarget";
 import { getTableAtCell } from "../lib/tableStore";
 import { applyTableStyleAsync, resolveTableStyleId, tableStyleNameForId } from "../lib/tableStyles";
 import { TABLE_DIALOG_ID } from "../lib/dialogIds";
@@ -52,7 +55,7 @@ export interface FormatAsTableArgs {
  * restyle the backend declined -- each already said in a toast). Never rejects.
  */
 export async function formatAsTable(args: FormatAsTableArgs | undefined): Promise<boolean> {
-  if (refuseIfSelectionOwned("Format as Table")) return false;
+  if (resolveCellTarget("Format as Table", "table") === null) return false;
 
   const styleId = resolveTableStyleId(args?.styleId);
   if (!styleId) {

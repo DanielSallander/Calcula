@@ -577,6 +577,66 @@ export function containerFieldPatch(id: ContainerFieldId, value: unknown | null)
   return patch as VisualContainerPatch;
 }
 
+// ============================================================================
+// A solid background commit (round 2, owner finding G1)
+// ============================================================================
+
+/** What a solid-colour commit is compared against: the stored container and the family-resolved one. */
+export interface SolidBackgroundBase {
+  stored: VisualContainerFormat | undefined;
+  resolved: Pick<ResolvedVisualContainer, "background"> | undefined;
+}
+
+function storedBackground(base: SolidBackgroundBase): Record<string, unknown> | undefined {
+  const bg = (base.stored as Record<string, unknown> | undefined)?.background;
+  return isPlainObject(bg) ? bg : undefined;
+}
+
+/** A gradient is stored, or resolves (the family's default), so it would paint over a solid colour. */
+function backgroundHasGradient(base: SolidBackgroundBase): boolean {
+  const stored = storedBackground(base)?.gradient;
+  if (stored !== undefined && stored !== null) return true;
+  const resolved = base.resolved?.background.gradient;
+  return resolved !== undefined && resolved !== null;
+}
+
+/** The background is switched off: stored `show:false`, or a family whose resolved show is false. */
+function backgroundIsHidden(base: SolidBackgroundBase): boolean {
+  return storedBackground(base)?.show === false || base.resolved?.background.show === false;
+}
+
+/**
+ * The patch that sets the container background to ONE solid colour: `{ background: { color } }`, plus
+ * `gradient: null` when a gradient is stored OR resolved, and `show: true` when the resolved show is false
+ * (stored false, or a family whose default is false -- a floating grid). Picking a colour means "paint this
+ * colour", so a gradient left over from the Fill card, or a background switched off, would make the pick a
+ * write that shows nothing (owner finding G1). With `base` undefined the patch is UNCONDITIONAL:
+ * `{ background: { color, show: true, gradient: null } }` (the chart style preset form).
+ * `color` null = back to the family default: only `{ background: { color: null } }` -- never touches show or
+ * the gradient. The Rust literal door (`object_bindings/container_literal.rs`) applies the same rule to
+ * script, MCP and binding-literal writes.
+ */
+export function solidBackgroundPatch(color: string | null, base?: SolidBackgroundBase): VisualContainerPatch {
+  if (color === null) return { background: { color: null } };
+  if (base === undefined) return { background: { color, show: true, gradient: null } };
+  const background: NonNullable<Exclude<VisualContainerPatch["background"], null>> = { color };
+  if (backgroundIsHidden(base)) background.show = true;
+  if (backgroundHasGradient(base)) background.gradient = null;
+  return { background };
+}
+
+/**
+ * True when committing `color` would change nothing: the colour that shows (the stored literal when there is
+ * one, else the resolved colour) is the same colour, the background is not switched off, and no gradient is
+ * stored or resolved. The ONE no-op test of a solid background commit.
+ */
+export function solidBackgroundIsNoop(color: string, base: SolidBackgroundBase): boolean {
+  if (backgroundIsHidden(base) || backgroundHasGradient(base)) return false;
+  const stored = storedBackground(base)?.color;
+  const shown = typeof stored === "string" && stored !== "" ? stored : base.resolved?.background.color;
+  return typeof shown === "string" && shown.trim().toLowerCase() === color.trim().toLowerCase();
+}
+
 /** "title.fontSize" -> "/title/fontSize": the pointer of a field INSIDE the container (WP-D catalog suffix). */
 export function containerFieldPointer(id: ContainerFieldId): string {
   return "/" + id.split(".").join("/");

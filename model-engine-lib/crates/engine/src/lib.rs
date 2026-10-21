@@ -137,6 +137,8 @@ mod topn_tests;
 #[cfg(test)]
 mod transform_tests;
 #[cfg(test)]
+mod tuple_filter_tests;
+#[cfg(test)]
 mod writeback_tests;
 
 use std::borrow::Cow;
@@ -244,8 +246,8 @@ pub use engine_query::registry::{AnyConnector, SemiJoinConfig, SourceBinding, So
 pub use engine_query::request::{
     CalcGroupSelection, CalculationGroupApplication, ColumnRef, DetailRequest, HierarchyGroupBy,
     InFilter, LookupColumn, MeasureFilter, OrderByClause, OrderTarget, QueryRequest, RankBy,
-    ResultColumn, ResultColumnKind, ScopedFilter, ScopedInFilter, TopN, TotalsMode,
-    BLANK_MEMBER_LABEL, GROUPING_ID_COLUMN,
+    ResultColumn, ResultColumnKind, ScopedFilter, ScopedInFilter, ScopedTupleFilter, TopN,
+    TotalsMode, TupleColumn, BLANK_MEMBER_LABEL, GROUPING_ID_COLUMN,
 };
 pub use engine_query::request::is_blank_member_label;
 pub use engine_query::rest_connector::{RestConnector, REST_SOURCE_SCHEMA};
@@ -2515,6 +2517,24 @@ impl Engine {
                 None => {
                     if let Some(object) = bare_denied(&f.filter.column) {
                         return deny(object);
+                    }
+                }
+            }
+        }
+        // Tuple (multi-column) slicers: every column exactly like a scoped
+        // IN column -- a tuple is as good a bisection tool as an IN-list.
+        for f in &request.scoped_tuple_filters {
+            for c in &f.columns {
+                match &c.table {
+                    Some(t) => {
+                        if col_denied(t, &c.column) {
+                            return deny(format!("{t}[{}]", c.column));
+                        }
+                    }
+                    None => {
+                        if let Some(object) = bare_denied(&c.column) {
+                            return deny(object);
+                        }
                     }
                 }
             }

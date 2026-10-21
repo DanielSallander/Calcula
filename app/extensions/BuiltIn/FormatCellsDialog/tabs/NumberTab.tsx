@@ -17,8 +17,7 @@ import {
 import type { NumberFormatCategory, RibbonResolvedFormat } from "../utils/numberFormats";
 import {
   previewNumberFormat,
-  getCachedLocale,
-  getLocaleSettings,
+  getAppLocale,
   getRibbonNumberFormats,
   onLocaleChanged,
 } from "@api";
@@ -52,7 +51,9 @@ export function NumberTab(): React.ReactElement {
    */
   const pinnedCategory = useRef<string | null>(numberCategory);
 
-  const [locale, setLocale] = useState<LocaleSettings | null>(() => getCachedLocale());
+  // The app locale is installed before the first render (P2), so a SYNC read
+  // is the backend's value; later switches arrive through onLocaleChanged.
+  const [locale, setLocale] = useState<LocaleSettings | null>(() => getAppLocale());
   /**
    * The ribbon's eleven entries, RESOLVED BY THE BACKEND for this locale.
    *
@@ -70,15 +71,10 @@ export function NumberTab(): React.ReactElement {
   const [ribbon, setRibbon] = useState<RibbonResolvedFormat[]>([]);
 
   const [categories, setCategories] = useState<NumberFormatCategory[]>(() =>
-    localeCategories(getCachedLocale())
+    localeCategories(getAppLocale())
   );
   useEffect(() => {
     let live = true;
-    if (!getCachedLocale()) {
-      getLocaleSettings()
-        .then((loc) => { if (live) setLocale(loc); })
-        .catch(() => { /* keep defaults if locale cannot be read */ });
-    }
     const unsubscribe = onLocaleChanged((loc) => {
       if (live) setLocale(loc);
     });

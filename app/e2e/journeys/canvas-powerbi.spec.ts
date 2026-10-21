@@ -450,7 +450,11 @@ test.describe("Canvas tab = Power BI report authoring, live", () => {
       const numberCard = await insertFromRow(page, "card", "Sheet1!G2");
       const nd = await waitPainted(page, numberCard.id);
       expect(nd.series[0].values[0], "the Card reads G2's number").toBeCloseTo(1234.5, 6);
-      await eventually(() => recordedTexts(page), (t) => t.includes("$1.2K"), "the currency Card did not write $1.2K (auto units keep the $)");
+      // A tile writes its digits in the APP locale (P2, BUG-0447): "$1.2K" in
+      // en-US, "$1,2K" in the owner's sv-SE. The decimal mark is read, never typed.
+      const dec = (await invoke<{ decimalSeparator: string }>(page, "get_locale_settings", {})).decimalSeparator;
+      const scaled = `$1${dec}2K`;
+      await eventually(() => recordedTexts(page), (t) => t.includes(scaled), `the currency Card did not write ${scaled} (auto units keep the $)`);
 
       // Display units "none" through Chart Design > Card (the tile's Visual section):
       // the source's own text, exactly as the cell shows it.
@@ -581,13 +585,16 @@ test.describe("Canvas tab = Power BI report authoring, live", () => {
         "no model slicer was created",
       )).find((x) => x.sourceType === "biConnection")!;
       expect(slicer.sheetIndex, "the slicer sits on the Card's canvas").toBe(canvas.index);
-      await eventually(() => callModule<Array<{ value: string }> | undefined>(page, SLICER_STORE, "getCachedItems", [slicer.id]), (it) => (it?.length ?? 0) > 0, "the model slicer shows no items", 15_000);
+      await eventually(() => callModule<Array<{ key: string }> | undefined>(page, SLICER_STORE, "getCachedItems", [slicer.id]), (it) => (it?.length ?? 0) > 0, "the model slicer shows no items", 15_000);
 
       // ---- Pick Nordics: the Card is re-queried with the page's filter.
       await startTextRecorder(page);
       await callModule(page, SLICER_STORE, "clickSlicerItem", [slicer.id, "Nordics", false]);
       await eventually(() => cachedData(page, card.id), (d) => !!d && Math.abs((d.series[0]?.values[0] ?? NaN) - byRegion.Nordics) < 0.01, `the slicer did not refilter the Card to Nordics (${byRegion.Nordics})`, 30_000);
-      await eventually(() => recordedTexts(page), (t) => t.includes(`${(byRegion.Nordics / 1e6).toFixed(1)}M`), "the refiltered Card did not WRITE the Nordics total");
+      // In the APP locale's decimal mark (P2): "8.4M" in en-US, "8,4M" in sv-SE.
+      const decimalMark = (await invoke<{ decimalSeparator: string }>(page, "get_locale_settings", {})).decimalSeparator;
+      const nordicsText = `${(byRegion.Nordics / 1e6).toFixed(1).replace(".", decimalMark)}M`;
+      await eventually(() => recordedTexts(page), (t) => t.includes(nordicsText), `the refiltered Card did not WRITE the Nordics total ${nordicsText}`);
 
       // ---- Elements > Buttons > Clear All Slicers, then press it in run mode.
       await clickCanvasMenuRow(page, "canvas-buttons", "canvas-buttons-clearSlicers");

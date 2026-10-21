@@ -1,0 +1,533 @@
+{
+  "_comment": [
+    "The locale census allowlist (P2 S11). localeCensus.test.ts counts, per production file under src/ and extensions/,",
+    "the shapes that format or parse a number outside the app locale: .toFixed(, parseFloat(, Number(e.target.value) /",
+    "Number(raw), and the display re-parse .replace(/[^0-9. A file may hold at most the counts listed here; any other",
+    "file holds none. Display text and user input go through @api/locale (formatNumber / parseNumber) instead.",
+    "Every entry carries a reason: css-px, geometry, log, wire (an invariant value: a stored literal, an option or range",
+    "value, a language token, an integer-only box), internal (a number that never becomes text), script-source (code inside",
+    "a script template), test-harness (the dev-only TestRunner) or unloaded (built by nothing). An unclassifiable display",
+    "hit is fixed, not listed. Comment-only lines are not counted. Lower a count when you remove a hit: a stale count fails."
+  ],
+  "files": {
+    "extensions/_shared/dsl/pivotLayout/describeQuery/panelSize.ts": {
+      "counts": {
+        "numberOfRaw": 1
+      },
+      "reason": "wire",
+      "note": "a panel height in px read back from localStorage"
+    },
+    "extensions/_shared/dsl/pivotLayout/parser.ts": {
+      "counts": {
+        "parseFloat": 1
+      },
+      "reason": "wire",
+      "note": "a numeric token of the pivot layout DSL, which is invariant"
+    },
+    "extensions/_standard/conditional-formatting/components/QuickFormatMenu.tsx": {
+      "counts": {
+        "parseFloat": 1
+      },
+      "reason": "unloaded",
+      "note": "the legacy _standard bucket: in no manifest and imported by no production module (one test loads it)"
+    },
+    "extensions/_standard/conditional-formatting/ruleEvaluator.ts": {
+      "counts": {
+        "parseFloat": 6
+      },
+      "reason": "unloaded",
+      "note": "the legacy _standard bucket: in no manifest and imported by no production module (one test loads it)"
+    },
+    "extensions/_standard/conditional-formatting/types.ts": {
+      "counts": {
+        "parseFloat": 2
+      },
+      "reason": "unloaded",
+      "note": "the legacy _standard bucket: in no manifest and imported by no production module (one test loads it)"
+    },
+    "extensions/BuiltIn/ZoomSlider/ZoomSliderWidget.tsx": {
+      "counts": {
+        "parseFloat": 1
+      },
+      "reason": "wire",
+      "note": "a range input's value (the browser hands back invariant text)"
+    },
+    "extensions/BusinessIntelligence/components/BiPane.tsx": {
+      "counts": {
+        "parseFloat": 2
+      },
+      "reason": "wire",
+      "note": "BI query result cells, which are invariant Arrow text (arrow_value_to_string)"
+    },
+    "extensions/Charts/lib/chartFormula.ts": {
+      "counts": {
+        "parseFloat": 1
+      },
+      "reason": "wire",
+      "note": "a numeric token of the chart formula language, which is invariant like a cell formula"
+    },
+    "extensions/ConditionalFormatting/components/NewRuleDialog.tsx": {
+      "counts": {
+        "numberOfRaw": 3
+      },
+      "reason": "wire",
+      "note": "<select> option values (preset and colour indexes)"
+    },
+    "extensions/ConditionalFormatting/components/QuickCFDialog.tsx": {
+      "counts": {
+        "numberOfRaw": 1
+      },
+      "reason": "wire",
+      "note": "<select> option value (format index)"
+    },
+    "extensions/Controls/Image/imageRenderer.ts": {
+      "counts": {
+        "parseFloat": 2
+      },
+      "reason": "wire",
+      "note": "stored control property literals (opacity, rotation), written invariant"
+    },
+    "extensions/Controls/index.ts": {
+      "counts": {
+        "parseFloat": 8
+      },
+      "reason": "geometry",
+      "note": "stored control geometry properties (x, y, width, height, offsets), written invariant"
+    },
+    "extensions/Controls/lib/controlClipboard.ts": {
+      "counts": {
+        "parseFloat": 4
+      },
+      "reason": "geometry",
+      "note": "stored control x/y properties, written invariant"
+    },
+    "extensions/Controls/lib/controlContainerDefaults.ts": {
+      "counts": {
+        "numberOfRaw": 1
+      },
+      "reason": "wire",
+      "note": "a stored container property literal, checked against an invariant number pattern first"
+    },
+    "extensions/Controls/lib/floatingStore.ts": {
+      "counts": {
+        "parseFloat": 2
+      },
+      "reason": "geometry",
+      "note": "stored control width/height properties, written invariant"
+    },
+    "extensions/Controls/PageNavigator/navigatorModel.ts": {
+      "counts": {
+        "numberOfRaw": 1
+      },
+      "reason": "wire",
+      "note": "stored navigator property literals (padding, font size)"
+    },
+    "extensions/Controls/Shape/shapeRecipe.ts": {
+      "counts": {
+        "parseFloat": 1
+      },
+      "reason": "wire",
+      "note": "a stored shape property literal (outline width)"
+    },
+    "extensions/Controls/Shape/shapeRenderer.ts": {
+      "counts": {
+        "parseFloat": 2
+      },
+      "reason": "wire",
+      "note": "stored control property literals (opacity, rotation), written invariant"
+    },
+    "extensions/Controls/Shape/shapeTemplateCatalog.ts": {
+      "counts": {
+        "parseFloat": 2
+      },
+      "reason": "script-source",
+      "note": "code inside shape template scripts (scriptSource strings)"
+    },
+    "extensions/ControlsPane/components/AddFilterDialog.tsx": {
+      "counts": {
+        "numberOfRaw": 1
+      },
+      "reason": "wire",
+      "note": "<select> option value (source index)"
+    },
+    "extensions/ControlsPane/components/CustomControlHost.tsx": {
+      "counts": {
+        "parseFloat": 2
+      },
+      "reason": "script-source",
+      "note": "code inside the generated pane-control script template"
+    },
+    "extensions/ControlsPane/components/FilterDropdown.tsx": {
+      "counts": {
+        "numberOfRaw": 1
+      },
+      "reason": "wire",
+      "note": "<select> option value (filter level)"
+    },
+    "extensions/CubeFormulas/components/CubeFormulaBuilderPanel.tsx": {
+      "counts": {
+        "numberOfRaw": 3
+      },
+      "reason": "wire",
+      "note": "two <select> option values (sort order, KPI property) and the integer-only Rank box (no separator is valid input)"
+    },
+    "extensions/DataForm/components/DataFormDialog.tsx": {
+      "counts": {
+        "regexReparse": 1
+      },
+      "reason": "internal",
+      "note": "the record-number jump box keeps digits only: an integer, so no separator is valid input"
+    },
+    "extensions/FormulaVisualizer/components/FormulaVisualizer.tsx": {
+      "counts": {
+        "numberOfRaw": 1
+      },
+      "reason": "wire",
+      "note": "a range input's value (zoom)"
+    },
+    "extensions/FormulaVisualizer/components/PlaybackControls.tsx": {
+      "counts": {
+        "numberOfRaw": 1
+      },
+      "reason": "wire",
+      "note": "a range input's value (speed)"
+    },
+    "extensions/ModelEditor/components/diagram/RelationshipDiagram.tsx": {
+      "counts": {
+        "parseFloat": 1
+      },
+      "reason": "wire",
+      "note": "a range input's value (diagram scale)"
+    },
+    "extensions/ModelEditor/components/sections/RestSourceForm.tsx": {
+      "counts": {
+        "numberOfRaw": 5
+      },
+      "reason": "wire",
+      "note": "integer-only boxes (page size, limit, max pages, timeout seconds, MB): no separator is valid input"
+    },
+    "extensions/ModelEditor/components/sections/strategy/MeasuresGrid.tsx": {
+      "counts": {
+        "numberOfRaw": 1
+      },
+      "reason": "wire",
+      "note": "an integer-only priority box: no separator is valid input"
+    },
+    "extensions/ModelEditor/components/sections/strategy/TablesGrid.tsx": {
+      "counts": {
+        "numberOfRaw": 1
+      },
+      "reason": "wire",
+      "note": "an integer-only priority box: no separator is valid input"
+    },
+    "extensions/ModelEditor/components/sections/TestingGroundSection.tsx": {
+      "counts": {
+        "numberOfRaw": 1
+      },
+      "reason": "wire",
+      "note": "<select> option value (level)"
+    },
+    "extensions/ModelEditor/components/transform/stepKit.tsx": {
+      "counts": {
+        "numberOfRaw": 1
+      },
+      "reason": "wire",
+      "note": "an integer-only step box (Math.trunc): no separator is valid input"
+    },
+    "extensions/ModelEditor/lib/strategyTypes.ts": {
+      "counts": {
+        "numberOfRaw": 2
+      },
+      "reason": "wire",
+      "note": "the strategy document grammar (targets, bands, materiality), which is invariant and uses ',' as its list separator"
+    },
+    "extensions/Pivot/components/PivotEditor.tsx": {
+      "counts": {
+        "toFixed": 2
+      },
+      "reason": "log",
+      "note": "[PERF][pivot] console timings"
+    },
+    "extensions/Pivot/components/PivotHeaderFilterDropdown.tsx": {
+      "counts": {
+        "numberOfRaw": 1
+      },
+      "reason": "wire",
+      "note": "<select> option value (field index)"
+    },
+    "extensions/Pivot/handlers/selectionHandler.ts": {
+      "counts": {
+        "toFixed": 1
+      },
+      "reason": "log",
+      "note": "[PERF][pivot-sel] console timing"
+    },
+    "extensions/Pivot/index.ts": {
+      "counts": {
+        "toFixed": 5
+      },
+      "reason": "log",
+      "note": "[PERF][pivot] console timings"
+    },
+    "extensions/Pivot/lib/pivot-api.ts": {
+      "counts": {
+        "toFixed": 5
+      },
+      "reason": "log",
+      "note": "[PERF][pivot] console timings"
+    },
+    "extensions/Settings/components/AppearancePage.tsx": {
+      "counts": {
+        "parseFloat": 1
+      },
+      "reason": "css-px",
+      "note": "reads a skin radius token (\"12px\") for the preview"
+    },
+    "extensions/Slicer/components/InsertSlicerDialog.tsx": {
+      "counts": {
+        "numberOfRaw": 1
+      },
+      "reason": "wire",
+      "note": "<select> option value (source index)"
+    },
+    "extensions/Subtotals/components/SubtotalsDialog.tsx": {
+      "counts": {
+        "numberOfRaw": 2
+      },
+      "reason": "wire",
+      "note": "<select> option values (column, function code)"
+    },
+    "extensions/TestRunner/components/TestRunnerPane.tsx": {
+      "counts": {
+        "toFixed": 2
+      },
+      "reason": "test-harness",
+      "note": "the dev-only TestRunner's timing and summary output (not shipped UI)"
+    },
+    "extensions/TestRunner/lib/formatter.ts": {
+      "counts": {
+        "toFixed": 2
+      },
+      "reason": "test-harness",
+      "note": "the dev-only TestRunner's timing and summary output (not shipped UI)"
+    },
+    "extensions/TestRunner/lib/runner.ts": {
+      "counts": {
+        "toFixed": 3
+      },
+      "reason": "test-harness",
+      "note": "the dev-only TestRunner's timing and summary output (not shipped UI)"
+    },
+    "extensions/TestRunner/lib/suites/advancedFeaturesDeepDive.ts": {
+      "counts": {
+        "parseFloat": 1
+      },
+      "reason": "test-harness",
+      "note": "the dev-only TestRunner's own assertions and timing lines (not shipped UI)"
+    },
+    "extensions/TestRunner/lib/suites/biEngineIntegration.ts": {
+      "counts": {
+        "parseFloat": 6
+      },
+      "reason": "test-harness",
+      "note": "the dev-only TestRunner's own assertions and timing lines (not shipped UI)"
+    },
+    "extensions/TestRunner/lib/suites/calaRoundTrip.ts": {
+      "counts": {
+        "parseFloat": 4
+      },
+      "reason": "test-harness",
+      "note": "the dev-only TestRunner's own assertions and timing lines (not shipped UI)"
+    },
+    "extensions/TestRunner/lib/suites/crossSheetFormulas.ts": {
+      "counts": {
+        "parseFloat": 1
+      },
+      "reason": "test-harness",
+      "note": "the dev-only TestRunner's own assertions and timing lines (not shipped UI)"
+    },
+    "extensions/TestRunner/lib/suites/edgeCaseRegressions.ts": {
+      "counts": {
+        "parseFloat": 2
+      },
+      "reason": "test-harness",
+      "note": "the dev-only TestRunner's own assertions and timing lines (not shipped UI)"
+    },
+    "extensions/TestRunner/lib/suites/enterpriseSimulations.ts": {
+      "counts": {
+        "parseFloat": 2
+      },
+      "reason": "test-harness",
+      "note": "the dev-only TestRunner's own assertions and timing lines (not shipped UI)"
+    },
+    "extensions/TestRunner/lib/suites/excelGapFeatures.ts": {
+      "counts": {
+        "parseFloat": 2
+      },
+      "reason": "test-harness",
+      "note": "the dev-only TestRunner's own assertions and timing lines (not shipped UI)"
+    },
+    "extensions/TestRunner/lib/suites/formulaChains.ts": {
+      "counts": {
+        "parseFloat": 2,
+        "regexReparse": 1
+      },
+      "reason": "test-harness",
+      "note": "the dev-only TestRunner's own assertions and timing lines (not shipped UI)"
+    },
+    "extensions/TestRunner/lib/suites/multiFeatureWorkflows.ts": {
+      "counts": {
+        "parseFloat": 2
+      },
+      "reason": "test-harness",
+      "note": "the dev-only TestRunner's own assertions and timing lines (not shipped UI)"
+    },
+    "extensions/TestRunner/lib/suites/performance.ts": {
+      "counts": {
+        "toFixed": 14
+      },
+      "reason": "test-harness",
+      "note": "the dev-only TestRunner's own assertions and timing lines (not shipped UI)"
+    },
+    "extensions/TestRunner/lib/suites/realisticSimulations.ts": {
+      "counts": {
+        "parseFloat": 6
+      },
+      "reason": "test-harness",
+      "note": "the dev-only TestRunner's own assertions and timing lines (not shipped UI)"
+    },
+    "extensions/TestRunner/lib/suites/stressWorkflow.ts": {
+      "counts": {
+        "parseFloat": 7
+      },
+      "reason": "test-harness",
+      "note": "the dev-only TestRunner's own assertions and timing lines (not shipped UI)"
+    },
+    "extensions/TestRunner/lib/suites/tableFormulaStress.ts": {
+      "counts": {
+        "parseFloat": 2
+      },
+      "reason": "test-harness",
+      "note": "the dev-only TestRunner's own assertions and timing lines (not shipped UI)"
+    },
+    "extensions/TestRunner/lib/suites/whatIfAnalysis.ts": {
+      "counts": {
+        "parseFloat": 2
+      },
+      "reason": "test-harness",
+      "note": "the dev-only TestRunner's own assertions and timing lines (not shipped UI)"
+    },
+    "extensions/TimelineSlicer/components/InsertTimelineDialog.tsx": {
+      "counts": {
+        "numberOfRaw": 1
+      },
+      "reason": "wire",
+      "note": "<select> option value (source index)"
+    },
+    "src/api/dialogLayout.tsx": {
+      "counts": {
+        "toFixed": 1
+      },
+      "reason": "css-px",
+      "note": "a splitter's flex-basis percentage in a CSS calc() string"
+    },
+    "src/api/layout/primitives/Color.tsx": {
+      "counts": {
+        "numberOfRaw": 1
+      },
+      "reason": "wire",
+      "note": "a grid cell index read back from a data attribute"
+    },
+    "src/api/scriptableObjectScaffolds.ts": {
+      "counts": {
+        "toFixed": 1
+      },
+      "reason": "script-source",
+      "note": "example code inside a scaffold script template (the user's own script, never run by the app)"
+    },
+    "src/api/scriptHost/modelProfile/index.ts": {
+      "counts": {
+        "toFixed": 1
+      },
+      "reason": "internal",
+      "note": "rounds a score to 4 decimals inside Number(); a number, not text"
+    },
+    "src/api/scriptHost/scriptEval/index.ts": {
+      "counts": {
+        "toFixed": 3
+      },
+      "reason": "internal",
+      "note": "rounds grades/scores to 4 decimals inside Number(); numbers, not text"
+    },
+    "src/core/components/Grid/GridCanvas.tsx": {
+      "counts": {
+        "toFixed": 4
+      },
+      "reason": "log",
+      "note": "[PERF] console timings"
+    },
+    "src/core/components/InlineEditor/InlineEditor.tsx": {
+      "counts": {
+        "parseFloat": 1
+      },
+      "reason": "css-px",
+      "note": "reads a computed CSS font-size (\"14.6667px\")"
+    },
+    "src/core/components/Spreadsheet/useSpreadsheetSelection.ts": {
+      "counts": {
+        "toFixed": 3
+      },
+      "reason": "log",
+      "note": "[PERF] console timings"
+    },
+    "src/core/hooks/useClipboard.ts": {
+      "counts": {
+        "toFixed": 1
+      },
+      "reason": "log",
+      "note": "[PERF] console timings"
+    },
+    "src/core/hooks/useEditing.ts": {
+      "counts": {
+        "toFixed": 6
+      },
+      "reason": "log",
+      "note": "[PERF] console timings"
+    },
+    "src/core/hooks/useFillHandle.ts": {
+      "counts": {
+        "toFixed": 8
+      },
+      "reason": "log",
+      "note": "[PERF] console timings"
+    },
+    "src/core/lib/fillEngine.ts": {
+      "counts": {
+        "toFixed": 5
+      },
+      "reason": "log",
+      "note": "[PERF] console timings; fill values are read and written through fillNumberOf / fillNumberText (app locale)"
+    },
+    "src/core/lib/gridRenderer/rendering/overflowMarker.ts": {
+      "counts": {
+        "toFixed": 1
+      },
+      "reason": "internal",
+      "note": "re-renders a General cell's digits in the decimal separator recovered from that cell's OWN display (renderWithDecimals)"
+    },
+    "src/core/lib/tauri-api.ts": {
+      "counts": {
+        "toFixed": 7
+      },
+      "reason": "log",
+      "note": "[PERF][bridge] console timings"
+    },
+    "src/shell/utils/mockData.ts": {
+      "counts": {
+        "toFixed": 1
+      },
+      "reason": "log",
+      "note": "dev mock-data console line"
+    }
+  }
+}

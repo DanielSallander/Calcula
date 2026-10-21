@@ -176,7 +176,7 @@ pub async fn ai_chat_run_tool(
         "set_object_property" => {
             let p: crate::mcp::server::SetObjectPropertyParams =
                 serde_json::from_value(input.clone()).map_err(|e| e.to_string())?;
-            bindings::set_object_property(&handle, &p.kind, &p.id, &p.path, p.value)
+            Box::pin(bindings::set_object_property(&handle, &p.kind, &p.id, &p.path, p.value)).await
         }
         "set_object_binding" => {
             let p: crate::mcp::server::SetObjectBindingParams =

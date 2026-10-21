@@ -26,6 +26,7 @@ import {
   type LifecyclePolicyConfig,
 } from "@api/collaboration";
 import { useDialogWindow } from "@api/dialogWindow";
+import { formatNumber, parseNumber } from "@api/locale";
 import {
   DialogBody,
   DialogPane,
@@ -129,8 +130,11 @@ export function DesignateWritebackDialog({ onClose, data }: Props) {
   );
   const [valueType, setValueType] = useState<string>(s?.valueType ?? "number");
   const [required, setRequired] = useState(s?.required ?? false);
-  const [min, setMin] = useState(s?.min != null ? String(s.min) : "");
-  const [max, setMax] = useState(s?.max != null ? String(s.max) : "");
+  // Min / Max are typed and shown in the APP locale (P2 S11): "2,5" under
+  // de-DE. They were native number inputs read with parseFloat, which typed in
+  // the browser's locale and not the app's.
+  const [min, setMin] = useState(s?.min != null ? formatNumber(s.min) : "");
+  const [max, setMax] = useState(s?.max != null ? formatNumber(s.max) : "");
   const [enumValues, setEnumValues] = useState((s?.enumValues ?? []).join(", "));
   const [customValidator, setCustomValidator] = useState<string>(s?.customValidator ?? "");
   const [visibility, setVisibility] = useState<string>(editing?.visibility ?? "own_plus_aggregate");
@@ -151,6 +155,13 @@ export function DesignateWritebackDialog({ onClose, data }: Props) {
       return;
     }
 
+    const minValue = min.trim() === "" ? null : parseNumber(min);
+    const maxValue = max.trim() === "" ? null : parseNumber(max);
+    if ((min.trim() !== "" && minValue === null) || (max.trim() !== "" && maxValue === null)) {
+      setError("Min and Max must be numbers.");
+      return;
+    }
+
     setError(null);
     setSubmitting(true);
     try {
@@ -158,8 +169,8 @@ export function DesignateWritebackDialog({ onClose, data }: Props) {
         valueType: valueType as ValueSchemaConfig["valueType"],
         required,
       };
-      if (min) schema.min = parseFloat(min);
-      if (max) schema.max = parseFloat(max);
+      if (minValue !== null) schema.min = minValue;
+      if (maxValue !== null) schema.max = maxValue;
       if (valueType === "enum" && enumValues.trim()) {
         schema.enumValues = enumValues.split(",").map((v) => v.trim()).filter(Boolean);
       }
@@ -384,10 +395,10 @@ export function DesignateWritebackDialog({ onClose, data }: Props) {
                 <DialogFieldSpan>
                   <div style={{ display: "flex", gap: 12 }}>
                     <Field label="Min" style={{ flex: "0 0 150px" }}>
-                      <input type="number" value={min} onChange={(e) => setMin(e.target.value)} style={controlStyle} />
+                      <input type="text" inputMode="decimal" aria-label="Min" value={min} onChange={(e) => setMin(e.target.value)} style={controlStyle} />
                     </Field>
                     <Field label="Max" style={{ flex: "0 0 150px" }}>
-                      <input type="number" value={max} onChange={(e) => setMax(e.target.value)} style={controlStyle} />
+                      <input type="text" inputMode="decimal" aria-label="Max" value={max} onChange={(e) => setMax(e.target.value)} style={controlStyle} />
                     </Field>
                   </div>
                 </DialogFieldSpan>

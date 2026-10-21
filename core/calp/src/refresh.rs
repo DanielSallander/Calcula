@@ -2172,6 +2172,8 @@ mod tests {
                 show_column_headers: true,
                 show_row_headers: true,
                 container: None,
+                hidden_rows: Vec::new(),
+                hidden_cols: Vec::new(),
             }];
             wb.pivot_definitions = vec![pivot.clone()];
             wb.timeline_slicers = if with_timeline {

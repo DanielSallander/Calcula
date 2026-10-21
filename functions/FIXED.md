@@ -20,6 +20,7 @@ The FIXED function rounds a number to a specified number of decimal places, form
 
 - The result is a text string, not a number.
 - Negative numbers are prefixed with a minus sign.
+- The decimal and thousands separators follow Calcula's app locale (its regional setting): `=FIXED(1234.567,2)` gives `1,234.57` in en-US and `1 234,57` in sv-SE. The text updates on the next recalculation after the region changes.
 
 ## Example
 

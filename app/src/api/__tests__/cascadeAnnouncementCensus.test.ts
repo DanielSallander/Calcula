@@ -132,7 +132,7 @@ const DELETING_POLICIES = new Set(["Cascade", "CascadeOrRebind"]);
  *
  * The transitive step is the whole reason `dependent_kind` exists in the Rust
  * matrix. Deleting a table deletes its slicers, and deleting a slicer prunes it
- * out of every ribbon filter that cross-filters it, so a table delete owes the
+ * out of every ribbon filter that names it as a dependent, so a table delete owes the
  * ribbon-filter store. Before this walk, the census asked only for the domains
  * of the owner's DIRECT dependents — `deleteTableAsync` announced "ribbonFilter"
  * anyway, and nothing would have noticed if it stopped.
@@ -244,7 +244,7 @@ const DELETE_ROUTES: Record<string, Route[]> = {
       file: "app/extensions/ControlsPane/lib/filterPaneStore.ts",
       symbol: "deleteFilterAsync",
       ownDomain: "ribbonFilter",
-      why: "Deleting one filter prunes the cross-filter targets of its siblings.",
+      why: "Deleting one filter prunes it from its siblings' dependent filters.",
     },
   ],
 };
@@ -810,7 +810,7 @@ describe("cascade announcement census — the frontend half of §3bt's seventh c
     // The property the walk exists for, asserted directly so that flattening it
     // back to one level fails here rather than silently weakening every route
     // check above. A table cascades into its slicers; a slicer is pruned out of
-    // every ribbon filter that cross-filters it.
+    // every ribbon filter that names it as a dependent.
     const table = requiredDomainsFor("Table", rows, domains);
     expect([...table].sort()).toEqual(["ribbonFilter", "slicer"]);
     // ...and the owner's OWN domain is not demanded of a frontend route.

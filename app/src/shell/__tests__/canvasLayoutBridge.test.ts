@@ -57,14 +57,22 @@ describe("backend canvas-layout bridge", () => {
 
   it("the Rust command emits it after the write has returned", () => {
     const rust = read("../../../src-tauri/src/sheets.rs");
-    const command = rust.slice(rust.indexOf("pub fn set_canvas_layout("));
+    // The command is async since P4 S4d: the write (and the DC-9 pivot
+    // re-fold) is `set_canvas_layout_refolding`, awaited; the emit is
+    // `announce_canvas_layout_done`, called after it.
+    const fnStart = rust.indexOf("pub async fn set_canvas_layout(");
+    expect(fnStart, "fixture: the command was not found").toBeGreaterThan(-1);
+    const command = rust.slice(fnStart);
     const body = command.slice(0, command.indexOf("\n}\n"));
-    const writeAt = body.indexOf("set_canvas_layout_inner(");
-    const emitAt = body.indexOf("app.emit(CANVAS_LAYOUT_EVENT");
+    const writeAt = body.indexOf("set_canvas_layout_refolding(");
+    const announceAt = body.indexOf("announce_canvas_layout_done(");
     expect(writeAt).toBeGreaterThan(-1);
-    // After the inner call returns, every guard it took is dropped: a
+    // After the write returns, every guard it took is dropped: a
     // subscriber that answers by re-reading get_sheets cannot deadlock.
-    expect(emitAt).toBeGreaterThan(writeAt);
+    expect(announceAt).toBeGreaterThan(writeAt);
+    const announcer = rust.slice(rust.indexOf("pub(crate) fn announce_canvas_layout_done("));
+    const announceBody = announcer.slice(0, announcer.indexOf("\n}\n"));
+    expect(announceBody).toContain("app.emit(CANVAS_LAYOUT_EVENT");
   });
 
   it("re-emits as CANVAS_LAYOUT_CHANGED, carrying no payload", async () => {

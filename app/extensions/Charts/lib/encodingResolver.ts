@@ -5,6 +5,7 @@
 
 import type { ConditionalValue, ValueCondition, SeriesEncoding, ChartSelectionMap, ChartSpec, ParsedChartData } from "../types";
 import { getSeriesColor } from "../rendering/chartTheme";
+import { parseNumber } from "@api/locale";
 
 /**
  * Resolve a series' conditional encoding by NAME against the (unfiltered) spec.
@@ -83,7 +84,10 @@ function evaluateCondition(
   }
 
   // Numeric comparisons (only meaningful for numeric field or numeric value)
-  const numVal = typeof testValue === "number" ? testValue : parseFloat(testValue as string);
+  // A category is display text, so it is read STRICTLY in the app locale
+  // (P2 S11): "2,5" under de-DE is 2.5 -- parseFloat read it as 2 -- and text
+  // that is not a number there ("12 kg") does not compare at all.
+  const numVal = typeof testValue === "number" ? testValue : (parseNumber(String(testValue)) ?? NaN);
   if (isNaN(numVal)) return false;
 
   if (condition.gt != null && !(numVal > condition.gt)) return false;

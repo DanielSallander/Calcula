@@ -191,7 +191,7 @@ pub(crate) fn analyze_range_impl(
         ),
     )?;
 
-    let (plan, dataset, locale_id) = {
+    let (plan, dataset, locale) = {
         let active_grid = state.grid.read().map_err(|e| e.to_string())?;
         let grids = state.grids.read().map_err(|e| e.to_string())?;
         let grid: &engine::grid::Grid = if target == active_sheet {
@@ -226,10 +226,10 @@ pub(crate) fn analyze_range_impl(
             ),
         )?;
         let dataset = region::extract_dataset(grid, &styles, &locale, &sheet_name, &plan);
-        (plan, dataset, locale.locale_id.clone())
+        (plan, dataset, locale.clone())
     };
 
-    let bundle = analyze_with_notes(&dataset, &locale_id, plan.notes);
+    let bundle = analyze_with_notes(&dataset, &locale, plan.notes);
     Ok(wire::from_core_with_sheets(
         bundle,
         BundleSource::Range,
@@ -251,12 +251,9 @@ pub fn insights_for_series(
 ) -> Result<WireBundle, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
 
-    let locale_id = state
-        .locale
-        .lock()
-        .map_err(|e| e.to_string())?
-        .locale_id
-        .clone();
+    // The app locale (leaf lock: take, clone, drop): its digits narrate the
+    // numbers, its id picks the prose language.
+    let locale = state.locale.lock().map_err(|e| e.to_string())?.clone();
 
     let (dataset, mut notes) = dataset_from_series(&request);
 
@@ -271,7 +268,7 @@ pub fn insights_for_series(
             let mut withheld = series_strategy::Withheld::default();
             let mut bundle = insights::analyze_with_policy(
                 &dataset,
-                &AnalyzeOptions::for_locale_id(&locale_id),
+                &AnalyzeOptions::for_settings(&locale),
                 &mut |insight| {
                     let verdict = series_strategy::judge(insight, &bindings);
                     withheld.record(verdict);
@@ -283,7 +280,7 @@ pub fn insights_for_series(
             bundle.notes = notes;
             bundle
         }
-        None => analyze_with_notes(&dataset, &locale_id, notes),
+        None => analyze_with_notes(&dataset, &locale, notes),
     };
     // A chart's series live in no sheet, so there is no sheet name to resolve
     // and every fact's evidence is the series itself.
@@ -301,10 +298,10 @@ pub fn insights_for_series(
 /// footnote nobody gets to.
 fn analyze_with_notes(
     dataset: &Dataset,
-    locale_id: &str,
+    locale: &engine::LocaleSettings,
     mut notes: Vec<String>,
 ) -> insights::types::InsightBundle {
-    let mut bundle = insights::analyze(dataset, &AnalyzeOptions::for_locale_id(locale_id));
+    let mut bundle = insights::analyze(dataset, &AnalyzeOptions::for_settings(locale));
     notes.append(&mut bundle.notes);
     bundle.notes = notes;
     bundle
@@ -666,7 +663,7 @@ mod tests {
     #[test]
     fn the_callers_notes_are_stated_before_the_analysis_own() {
         let (dataset, _) = dataset_from_series(&request(vec![vec![Some(1.0), Some(2.0)]]));
-        let bundle = analyze_with_notes(&dataset, "en-US", vec!["mine first".to_string()]);
+        let bundle = analyze_with_notes(&dataset, &engine::LocaleSettings::invariant(), vec!["mine first".to_string()]);
         assert_eq!(bundle.notes.first().map(String::as_str), Some("mine first"));
     }
 
@@ -674,11 +671,25 @@ mod tests {
     fn a_swedish_workbook_narrates_a_chart_with_a_decimal_comma() {
         let values: Vec<Option<f64>> = (0..20).map(|i| Some(100.0 + 2.5 * i as f64)).collect();
         let (dataset, _) = dataset_from_series(&request(vec![values]));
-        let sv = analyze_with_notes(&dataset, "sv-SE", Vec::new());
-        let en = analyze_with_notes(&dataset, "en-US", Vec::new());
+        let sv = analyze_with_notes(&dataset, &engine::LocaleSettings::from_locale_id("sv-SE"), Vec::new());
+        let en = analyze_with_notes(&dataset, &engine::LocaleSettings::invariant(), Vec::new());
         assert_eq!(sv.locale_id, "sv-SE");
         assert!(sv.markdown.contains(','), "{}", sv.markdown);
         assert_ne!(sv.markdown, en.markdown);
+    }
+
+    /// P2 S5 (A15): the commands hand the APP LOCALE'S SETTINGS to the
+    /// analyser, so a de-DE workbook narrates German digits ("1.0..") in
+    /// English prose. Through the old `for_locale_id` route every locale but
+    /// sv-SE collapsed to en-US numbers.
+    #[test]
+    fn a_german_workbook_narrates_a_chart_with_german_digits() {
+        let values: Vec<Option<f64>> = (0..20).map(|i| Some(1000.0 + 2.5 * i as f64)).collect();
+        let (dataset, _) = dataset_from_series(&request(vec![values]));
+        let de = analyze_with_notes(&dataset, &engine::LocaleSettings::from_locale_id("de-DE"), Vec::new());
+        assert_eq!(de.locale_id, "en-US", "the prose stays English");
+        assert!(de.markdown.contains("1.0"), "no German grouping in:\n{}", de.markdown);
+        assert!(!de.markdown.contains("1,0"), "an en-US grouping in:\n{}", de.markdown);
     }
 
     #[test]
@@ -725,7 +736,7 @@ mod tests {
             Some(50.0),
             Some(60.0),
         ]]));
-        let bundle = analyze_with_notes(&dataset, "en-US", Vec::new());
+        let bundle = analyze_with_notes(&dataset, &engine::LocaleSettings::invariant(), Vec::new());
         let wire = wire::from_core(bundle, BundleSource::Range);
         assert!(!wire.insights.is_empty());
         for insight in &wire.insights {
@@ -933,7 +944,7 @@ mod tests {
             strategy: None,
         };
         let (dataset, _) = dataset_from_series(&request);
-        let bundle = analyze_with_notes(&dataset, "en-US", Vec::new());
+        let bundle = analyze_with_notes(&dataset, &engine::LocaleSettings::invariant(), Vec::new());
         assert!(bundle.insights.is_empty());
         assert!(!bundle.notes.is_empty(), "silence is not an answer");
     }

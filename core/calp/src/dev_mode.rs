@@ -296,6 +296,8 @@ mod tests {
             show_column_headers: true,
             show_row_headers: true,
             container: None,
+            hidden_rows: Vec::new(),
+            hidden_cols: Vec::new(),
         }];
         calcula_format::save_calcula(&wb, &source_path).unwrap();
 

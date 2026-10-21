@@ -51,7 +51,7 @@ import {
 import { ownUndoTransaction, type OwnedUndoTransaction, type UndoTransactionCloses } from "@api/undoTicket";
 import { FilterEvents } from "./filterEvents";
 import { alertAsync } from "@api/dialogs";
-import { refuseIfSelectionOwned } from "@api/selectionOwner";
+import { resolveCellTarget } from "@api/cellTarget";
 
 // ============================================================================
 // Module State
@@ -180,8 +180,11 @@ export async function toggleFilter(): Promise<void> {
   // Creating a filter builds it from Core's selection -- HIDDEN while
   // something else owns the selection (a floating grid's selected cell), so
   // refuse, once (D4, BUG-0185 class). Removing an existing filter (above) is
-  // the sheet's filter, not the selection's, and stays allowed.
-  if (refuseIfSelectionOwned("Filter")) return;
+  // the sheet's filter, not the selection's, and stays allowed (W18). The
+  // question is the cell-target one with capability "filter", which no owner
+  // admits: a floating grid says why (it is already a table-like object; P3,
+  // spec 1.3).
+  if (resolveCellTarget("Filter", "filter") === null) return;
 
   // Create a new filter - detect data region
   let startRow: number;
@@ -419,6 +422,9 @@ export async function sortByColor(
         color,
       }],
       { hasHeaders: true },
+      // The SHEET's filter range: an AutoFilter never lives in an object's
+      // cells (no owner admits "filter"), so there is no target here.
+      { target: undefined },
     );
     landed = result.success;
     if (result.success) {

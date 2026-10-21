@@ -32,7 +32,7 @@
  */
 import type { Locator, Page } from "@playwright/test";
 import { readGridGeometry } from "./grid";
-import { bounded, callModule, eventually, installAppImport, sheetPointToPage, type AppWindow } from "./canvas-live";
+import { MOD, bounded, callModule, eventually, humanClick, installAppImport, sheetPointToPage, type AppWindow } from "./canvas-live";
 import { connectAdventureWorks, type AwConnection } from "./adventureworks-live";
 import type { PixelClip, PixelSample } from "../viewportSample";
 
@@ -360,6 +360,28 @@ export async function closeObjectPaneQuietly(page: Page): Promise<void> {
 }
 
 /**
+ * Close every task pane through the REAL store -- the appPage fixture's own
+ * route (`useTaskPaneStore.reset()`) -- and say what is open afterwards. File >
+ * New closes no task pane, so a journey's teardown calls this and asserts
+ * `isOpen === false` (memory note "a leaked task pane narrows the grid for
+ * LATER specs"). Moved here from calp-inline-buttons.spec.ts (round 2, P1 S8).
+ */
+export async function closeTaskPanes(page: Page): Promise<{ isOpen: boolean; openPanes: number }> {
+  await installAppImport(page);
+  return bounded(
+    "closeTaskPanes",
+    page.evaluate(async (mod) => {
+      const m = (await (window as unknown as AppWindow).__appImport!(mod)) as {
+        useTaskPaneStore: { getState: () => { reset: () => void; isOpen?: boolean; openPanes?: unknown[] } };
+      };
+      m.useTaskPaneStore.getState().reset();
+      const s = m.useTaskPaneStore.getState();
+      return { isOpen: Boolean(s.isOpen), openPanes: Array.isArray(s.openPanes) ? s.openPanes.length : -1 };
+    }, MOD.TASK_PANE_STORE),
+  );
+}
+
+/**
  * A floating control's Properties, through its own right-click menu's
  * "Properties..." row (`controls.properties`, an @api/objectPane door): the
  * route that works on a WORKSHEET too, where a press opens no pane (WP-C S13
@@ -432,6 +454,17 @@ export async function liveRegions(page: Page): Promise<LiveRegion[]> {
 export async function regionWhere(page: Page, pick: (r: LiveRegion) => boolean, label: string, timeoutMs = 15_000): Promise<LiveRegion> {
   const all = await eventually(() => liveRegions(page), (rs) => rs.some(pick), `${label} was never published on the active page`, timeoutMs);
   return all.find(pick)!;
+}
+
+/**
+ * A hand's click at a point inside a region (sheet offsets from its top-left;
+ * default 24,24 -- the frame/title band of a chart, never a datum). Moved here
+ * from object-pane-format.spec.ts (round 2, P1 S8).
+ */
+export async function clickRegion(page: Page, r: LiveRegion, at: { dx: number; dy: number } = { dx: 24, dy: 24 }): Promise<void> {
+  const p = await sheetPointToPage(page, r.floating.x + at.dx, r.floating.y + at.dy);
+  await humanClick(page, p.x, p.y);
+  await page.waitForTimeout(250);
 }
 
 /** Core's content rect of a live region (sheet px): what the family lays out and hit-tests inside. */

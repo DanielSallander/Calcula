@@ -8,6 +8,7 @@ import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { resolvePointColor, resolvePointOpacity, resolvePointSize, resolveSeriesEncoding, seriesPaletteIndex } from "../lib/encodingResolver";
 import { resolveDatumStyle } from "../lib/dataPointOverrides";
+import { pointIsDimmed, DIM_ALPHA } from "./crossHighlight";
 import {
   paintDatumMarker,
   recordXAxisTitleRect,
@@ -125,7 +126,9 @@ export function paintScatterChart(
         fill: style.markerFill ?? style.fill,
         borderColor: style.markerBorderColor ?? style.borderColor,
         borderWidth: style.markerBorderWidth ?? style.borderWidth,
-        opacity: style.opacity,
+        // Cross-filter (P4): a point the highlight does not reach, or that
+        // its own source's selection does not hold, is dimmed.
+        opacity: pointIsDimmed(data, si, ci) ? (style.opacity ?? 1) * DIM_ALPHA : style.opacity,
       });
     }
   }

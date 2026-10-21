@@ -15,11 +15,26 @@
 //          tab's Top / Bottom / Left / Right are the range's OUTER edges, with
 //          two more buttons for the lines inside it. That is the model here.
 //
-//          The plan is executed by FormatCellsDialog.tsx inside ONE undo
-//          transaction, so however many calls it takes, OK is one undo step.
+//          The plan is executed (`executeFormatCellsPlan`, below) by
+//          FormatCellsDialog.tsx inside ONE undo transaction, so however many
+//          calls it takes, OK is one undo step.
+//
+//          WHICH CELLS (P3, owner finding G3; closes the BUG-0493 door). OK
+//          asks `resolveCellTarget("Format Cells", "format")` (in the dialog)
+//          -- Core's selection, or a floating grid's own cells when its owner
+//          admits the act -- and hands the answer here. The rectangle comes from THAT
+//          answer's selection (`formatCellsRectOf`), and every write carries
+//          its `{ target }`, so a floating grid's cells are formatted on the
+//          grid's hidden backing sheet and never on the active sheet's cell
+//          under it. Protection on a target is the style's Locked / Hidden
+//          flags (`applyFormatting`), the same flags `setCellProtection`
+//          writes on a sheet.
 
 import type { FillParam } from "@api";
-import type { FormattingOptions } from "@api/types";
+import type { CellData, FormattingOptions, Selection } from "@api/types";
+import { applyFormatting, applyBorderPreset } from "@api/lib";
+import { setCellProtection } from "@api/backend";
+import type { CellTarget, CellTargetRef } from "@api/cellTarget";
 import type { BorderSide, FormatCellsSnapshot } from "../hooks/useFormatCellsState";
 
 /** The selection, normalised (start <= end). */
@@ -268,4 +283,90 @@ export function planFormatCellsWrites(
       : null;
 
   return { calls, protection };
+}
+
+// ============================================================================
+// Which cells, and the execution
+// ============================================================================
+
+/**
+ * The normalised rectangle a target's write covers: the object's own
+ * selection (its local == backing coordinates) for a floating grid, else
+ * Core's `gridSelection` (the target's, or the dialog's when Core has not
+ * reported one to the seam). Null when there is no selection.
+ */
+export function formatCellsRectOf(t: CellTarget, gridSelection?: Selection | null): FormatCellsRect | null {
+  const sel = t.kind === "object" ? t.selection : (t.selection ?? gridSelection ?? null);
+  if (!sel) return null;
+  return {
+    startRow: Math.min(sel.startRow, sel.endRow),
+    startCol: Math.min(sel.startCol, sel.endCol),
+    endRow: Math.max(sel.startRow, sel.endRow),
+    endCol: Math.max(sel.startCol, sel.endCol),
+  };
+}
+
+/** What executing a plan wrote, and the protection half's refusal, if any. */
+export interface FormatCellsExecution {
+  /** The cells the backend reported written (for a sheet's cell events). */
+  touched: CellData[];
+  /** The protection change's refusal (the formatting DID apply), or null. */
+  protectionError: string | null;
+}
+
+/**
+ * Run `plan` over `rect` where `target` says (undefined: the active sheet).
+ * Every call carries `{ target }`. Throws on a formatting refusal (the caller
+ * keeps what landed undoable and says why); a protection refusal on a sheet
+ * resolves as `protectionError`, as `setCellProtection` reports it.
+ */
+export async function executeFormatCellsPlan(
+  plan: FormatCellsPlan,
+  rect: FormatCellsRect,
+  target: CellTargetRef | undefined,
+): Promise<FormatCellsExecution> {
+  const touched: CellData[] = [];
+  for (const call of plan.calls) {
+    const result =
+      call.kind === "format"
+        ? await applyFormatting(call.rows, call.cols, call.formatting, { target })
+        : await applyBorderPreset(
+            rect.startRow,
+            rect.startCol,
+            rect.endRow,
+            rect.endCol,
+            call.preset,
+            call.style,
+            call.color,
+            call.width,
+            { target },
+          );
+    touched.push(...result.cells);
+  }
+
+  let protectionError: string | null = null;
+  if (plan.protection) {
+    if (target) {
+      // A floating grid's cells: the Locked / Hidden flags of their style on
+      // the backing sheet, gated by the HOST's protection like any format.
+      const result = await applyFormatting(
+        span(rect.startRow, rect.endRow),
+        span(rect.startCol, rect.endCol),
+        { locked: plan.protection.locked, formulaHidden: plan.protection.formulaHidden },
+        { target },
+      );
+      touched.push(...result.cells);
+    } else {
+      const protResult = await setCellProtection({
+        startRow: rect.startRow,
+        startCol: rect.startCol,
+        endRow: rect.endRow,
+        endCol: rect.endCol,
+        locked: plan.protection.locked,
+        formulaHidden: plan.protection.formulaHidden,
+      });
+      if (!protResult.success && protResult.error) protectionError = protResult.error;
+    }
+  }
+  return { touched, protectionError };
 }

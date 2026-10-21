@@ -170,6 +170,7 @@ fn request(conn: ConnectionId, measures: &[&str], rows: Vec<DesignQueryFieldRef>
         value_fields: measures.iter().map(|m| measure(m)).collect(),
         filter_fields: filters,
         page_filter_fields: Vec::new(),
+        tuple_filters: Vec::new(),
         calculated_fields: None,
         value_column_order: None,
         layout: None,
@@ -210,7 +211,7 @@ async fn the_one_total(bi: &BiState, req: &DesignQueryRequest) -> Vec<Option<f64
         "the grand-total row is visible"
     );
     // The response the frontend receives says the same.
-    let response = crate::pivot::utils::view_to_response(&view, &def, &mut cache);
+    let response = crate::pivot::utils::view_to_response(&view, &def, &mut cache, &engine::LocaleSettings::invariant());
     let json = serde_json::to_value(&response).unwrap();
     let kinds: Vec<String> = json["rows"]
         .as_array()
@@ -569,7 +570,7 @@ async fn a_value_fields_number_format_reaches_the_formatted_value() {
     assert_eq!(grand_total_rows(&view), vec![vec![Some(1234.5)]], "fixture: 210 * 5 + 184.5");
     assert_eq!(def.value_fields[0].number_format.as_deref(), Some("#,##0.00"));
     assert!(!def.value_fields[0].number_format_from_model, "a request's format is an override");
-    let json = serde_json::to_value(crate::pivot::utils::view_to_response(&view, &def, &mut cache)).unwrap();
+    let json = serde_json::to_value(crate::pivot::utils::view_to_response(&view, &def, &mut cache, &engine::LocaleSettings::invariant())).unwrap();
     let texts: Vec<String> = json["rows"]
         .as_array()
         .unwrap()
@@ -584,7 +585,7 @@ async fn a_value_fields_number_format_reaches_the_formatted_value() {
     // No override: no format on this path (the model adopts nothing here).
     let (def, mut cache, view) = compute_design_query_view(&bi, &formatted_total(None)).await.expect("runs");
     assert_eq!(def.value_fields[0].number_format, None);
-    let response = crate::pivot::utils::view_to_response(&view, &def, &mut cache);
+    let response = crate::pivot::utils::view_to_response(&view, &def, &mut cache, &engine::LocaleSettings::invariant());
     let json = serde_json::to_value(response).unwrap();
     assert!(!json.to_string().contains("1,234.50"), "unformatted without an override");
 }

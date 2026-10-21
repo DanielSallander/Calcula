@@ -1256,16 +1256,46 @@ export type {
 // ============================================================================
 
 export {
+  initAppLocale,
+  getAppLocale,
   getLocaleSettings,
   setLocale,
   getSupportedLocales,
-  getCachedLocale,
   onLocaleChanged,
+  decimalSeparator,
+  listSeparator,
+  formatNumber,
+  formatNumberWithCode,
+  formatDate,
+  formatDateTime,
+  monthName,
+  dayName,
+  quarterLabel,
+  parseNumber,
+  parseDate,
+  LOCALE_CHANGED_EVENT,
+  INVARIANT_LOCALE,
 } from "./locale";
 export type {
   LocaleSettings,
   SupportedLocaleEntry,
+  DateStyle,
+  FormatNumberOptions,
 } from "./locale";
+
+// ============================================================================
+// Members: identity from the KEY, display from the LABEL (API v1.5.0)
+// ============================================================================
+
+export {
+  pivotCellItemKey,
+  pivotCellDisplayText,
+  memberKeyNumber,
+  memberKeyDate,
+  memberKeys,
+  memberLabelOf,
+} from "./pivotMembers";
+export type { MemberRef } from "./types";
 
 // ============================================================================
 // Extension Settings API
@@ -3063,6 +3093,8 @@ export {
   isEmptyVisualContainer,
   readContainerField,
   containerFieldPatch,
+  solidBackgroundPatch,
+  solidBackgroundIsNoop,
   containerFieldPointer,
   containerFieldIdOfPointer,
   resolveVisualContainer,
@@ -3100,6 +3132,7 @@ export type {
   ResolvedVisualContainer,
   ContainerRect,
   VisualContainerLayout,
+  SolidBackgroundBase,
 } from "./visualContainer";
 
 export {

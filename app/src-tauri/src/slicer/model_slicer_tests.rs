@@ -346,6 +346,11 @@ impl Fx {
     }
 }
 
+/// `n` fresh sheet identities, for the pure page-fold tests.
+fn test_sheet_ids(n: usize) -> Vec<identity::SheetId> {
+    (0..n).map(|_| identity::SheetId::from_bytes(identity::generate_uuid_v7())).collect()
+}
+
 fn sorted(mut v: Vec<String>) -> Vec<String> {
     v.sort();
     v
@@ -575,7 +580,7 @@ fn model_slicer_cross_filters_are_page_scoped() {
     let unselected = slicer_on(2, conn, "Sales.amount", None);
     let slicers = vec![me.clone(), same_page.clone(), other_page, other_model, unselected];
 
-    let got = model_slicer_cross_filters(&me, slicers.iter(), &[], &HashSet::new());
+    let got = model_slicer_cross_filters(&me, slicers.iter(), &[], &HashSet::new(), None);
     assert_eq!(got, vec![("Sales.year".to_string(), strings(&["Y1"]))], "only the same-page, same-model slicer");
 
     // Ribbon filters.
@@ -593,7 +598,7 @@ fn model_slicer_cross_filters_are_page_scoped() {
     explicit.explicit = true;
     let other_model_ribbon = ribbon(other_conn, "Sales.year", ConnectionMode::Workbook);
 
-    let reach = |r: RibbonCrossCandidate| !model_slicer_cross_filters(&me, std::iter::empty(), &[r], &pivots_on_page).is_empty();
+    let reach = |r: RibbonCrossCandidate| !model_slicer_cross_filters(&me, std::iter::empty(), &[r], &pivots_on_page, None).is_empty();
     assert!(reach(by_sheet), "a By-sheet filter on this sheet reaches the page");
     assert!(!reach(by_other_sheet), "a By-sheet filter on ANOTHER sheet does not");
     assert!(reach(workbook), "a Workbook filter reaches every page");
@@ -706,8 +711,11 @@ fn page_model_slicers_follow_the_page_rule() {
     rebound_later.data_source_id = Some("ds-9".to_string());
     let all = vec![here.clone(), there, idle, not_a_column, rebound_later.clone()];
 
-    let got = page_model_slicers(all.iter(), &meta, 1);
-    let ids: HashSet<EntityId> = got.iter().map(|p| p.slicer_id).collect();
+    let sheet_ids = test_sheet_ids(3);
+    let pivot_ref = ::persistence::CanvasObjectRef { kind: "pivot".to_string(), id: new_id().to_string() };
+    let got = page_model_slicers(all.iter(), &meta, sheet_ids[1], &sheet_ids, &pivot_ref, None);
+    assert!(got.clear.is_empty(), "no interactions: nothing is cleared");
+    let ids: HashSet<EntityId> = got.apply.iter().map(|p| p.slicer_id).collect();
     assert_eq!(ids, [here.id, rebound_later.id].into_iter().collect::<HashSet<_>>());
 }
 
@@ -722,10 +730,10 @@ fn page_model_slicers_follow_the_page_rule() {
 async fn a_model_slicer_lists_every_value_of_its_model_column() {
     let fx = Fx::new(1).await;
     let slicer = fx.model_slicer(1, "Sales.region", None);
-    let items = get_slicer_items_core(&fx.state, &fx.pivots, &fx.slicer, &fx.filters, &fx.bi, slicer)
+    let items = get_slicer_items_core(&fx.state, &fx.pivots, &fx.slicer, &fx.filters, &fx.bi, slicer, None)
         .await
         .expect("a model slicer's items");
-    let values: Vec<&str> = items.iter().map(|i| i.value.as_str()).collect();
+    let values: Vec<&str> = items.iter().map(|i| i.key.as_str()).collect();
     assert_eq!(values, vec!["East", "North", "West"]);
     assert!(items.iter().all(|i| i.selected && i.has_data));
 }
@@ -737,13 +745,13 @@ async fn a_model_slicer_on_another_sheet_is_excluded_from_has_data() {
     let region = fx.model_slicer(1, "Sales.region", None);
     // Another canvas: Y2 only (East + North). Must NOT grey West here.
     fx.model_slicer(2, "Sales.year", Some(vec!["Y2"]));
-    let items = get_slicer_items_core(&fx.state, &fx.pivots, &fx.slicer, &fx.filters, &fx.bi, region).await.unwrap();
+    let items = get_slicer_items_core(&fx.state, &fx.pivots, &fx.slicer, &fx.filters, &fx.bi, region, None).await.unwrap();
     assert!(items.iter().all(|i| i.has_data), "a slicer on another page cross-filtered this one: {items:?}");
 
     // The same slicer on THIS page does shade it (positive control).
     fx.model_slicer(1, "Sales.year", Some(vec!["Y2"]));
-    let items = get_slicer_items_core(&fx.state, &fx.pivots, &fx.slicer, &fx.filters, &fx.bi, region).await.unwrap();
-    let no_data: Vec<&str> = items.iter().filter(|i| !i.has_data).map(|i| i.value.as_str()).collect();
+    let items = get_slicer_items_core(&fx.state, &fx.pivots, &fx.slicer, &fx.filters, &fx.bi, region, None).await.unwrap();
+    let no_data: Vec<&str> = items.iter().filter(|i| !i.has_data).map(|i| i.key.as_str()).collect();
     assert_eq!(no_data, vec!["West"], "a same-page slicer must shade the values it leaves without rows");
 }
 
@@ -1450,8 +1458,10 @@ async fn a_column_added_to_the_live_model_after_the_pivot_can_be_filtered() {
     // The page fold resolves it too (a model slicer on the new column).
     let meta = fx.pivots.bi_metadata.read().unwrap()[&pivot].clone();
     let slicer = slicer_on(1, fx.conn, "Sales.channel", Some(&["Web"]));
-    let got = page_model_slicers([slicer].iter(), &meta, 1);
-    assert_eq!(got.len(), 1, "the page fold dropped the model slicer on the new column");
+    let sheet_ids: Vec<identity::SheetId> = fx.state.sheet_ids.read().unwrap().clone();
+    let pivot_ref = ::persistence::CanvasObjectRef { kind: "pivot".to_string(), id: pivot.to_string() };
+    let got = page_model_slicers([slicer].iter(), &meta, sheet_ids[1], &sheet_ids, &pivot_ref, None);
+    assert_eq!(got.apply.len(), 1, "the page fold dropped the model slicer on the new column");
 }
 
 /// FINDING 3. A level-1 selection spelled the MODEL's way (booleans "true",
@@ -3280,11 +3290,20 @@ async fn a_pivot_fields_item_lists_include_the_blank_item() {
     };
     let response = update_bi_pivot_fields_core(&fx.ctx(), request(None)).await.expect("lay the pivot out");
     let filter_row = response.filter_rows.first().expect("the region filter cell");
-    assert_eq!(filter_row.unique_values.last().map(String::as_str), Some("(blank)"), "{:?}", filter_row.unique_values);
+    // THE blank member, last: key "" and label "(Blank)" (ruling Q8).
+    let last = filter_row.members.last().expect("a member");
+    assert_eq!((last.key.as_str(), last.label.as_str()), ("", "(Blank)"), "{:?}", filter_row.members);
 
     let idx = filter_row.field_index;
-    let listed = crate::pivot::commands::pivot_field_unique_values_core(&fx.pivots, pivot, idx).expect("the list");
-    assert_eq!(listed.unique_values.last().map(String::as_str), Some("(blank)"), "{:?}", listed.unique_values);
+    let listed = crate::pivot::commands::pivot_field_unique_values_core(
+        &fx.pivots,
+        pivot,
+        idx,
+        &engine::LocaleSettings::invariant(),
+    )
+    .expect("the list");
+    let last = listed.members.last().expect("a member");
+    assert_eq!((last.key.as_str(), last.label.as_str()), ("", "(Blank)"), "{:?}", listed.members);
 
     let response = update_bi_pivot_fields_core(&fx.ctx(), request(Some(strings(&["(Blank)"])))).await.expect("hide it");
     let filter_row = response.filter_rows.first().expect("the region filter cell");
@@ -3808,8 +3827,8 @@ async fn a_ribbon_filter_change_is_one_step_and_its_settings_update_joins_an_ope
             "connectedSheets": [],
             "displayMode": "checklist",
             "selectedItems": ["East"],
-            "crossFilterTargets": [],
-            "crossFilterSlicerTargets": [],
+            "dependentFilters": [],
+            "dependentSlicers": [],
             "order": 0,
             "buttonColumns": 2,
             "buttonRows": 0,
@@ -3899,11 +3918,11 @@ impl Fx {
 
     /// The values a slicer lists, in its order.
     async fn slicer_values(&self, slicer: EntityId) -> Vec<String> {
-        get_slicer_items_core(&self.state, &self.pivots, &self.slicer, &self.filters, &self.bi, slicer)
+        get_slicer_items_core(&self.state, &self.pivots, &self.slicer, &self.filters, &self.bi, slicer, None)
             .await
             .expect("the slicer's items")
             .into_iter()
-            .map(|i| i.value)
+            .map(|i| i.key)
             .collect()
     }
 
@@ -4040,8 +4059,8 @@ async fn a_pivot_slicer_lists_the_blank_item_and_deselecting_one_item_keeps_the_
     let values = fx.slicer_values(slicer).await;
     assert_eq!(
         values.last().map(String::as_str),
-        Some(pivot_engine::BLANK_ITEM_LABEL),
-        "the pivot slicer does not offer the blank item: {values:?}"
+        Some(pivot_engine::BLANK_MEMBER_KEY),
+        "the pivot slicer does not offer the blank member (key \"\", Q8): {values:?}"
     );
     // Ctrl+click West from "all": every listed item but West.
     let next: Vec<&str> = values.iter().map(String::as_str).filter(|v| *v != "West").collect();
@@ -4072,8 +4091,8 @@ async fn a_sibling_slicer_selecting_the_blank_item_keeps_its_records_available()
     let year = fx.pivot_slicer(pivot, "Sales.year");
     fx.slicer.slicers.write(&test_seed_effect()).unwrap().get_mut(&region).unwrap().selected_items =
         Some(strings(&["(blank)"]));
-    let items = get_slicer_items_core(&fx.state, &fx.pivots, &fx.slicer, &fx.filters, &fx.bi, year).await.unwrap();
-    let with_data: Vec<&str> = items.iter().filter(|i| i.has_data).map(|i| i.value.as_str()).collect();
+    let items = get_slicer_items_core(&fx.state, &fx.pivots, &fx.slicer, &fx.filters, &fx.bi, year, None).await.unwrap();
+    let with_data: Vec<&str> = items.iter().filter(|i| i.has_data).map(|i| i.key.as_str()).collect();
     assert_eq!(with_data, vec!["Y2"], "the blank-region record's year is not available: {items:?}");
 }
 
@@ -4093,18 +4112,18 @@ async fn a_model_slicers_selection_hides_the_blank_rows_unless_it_names_the_blan
     let slicer = fx.model_slicer(0, "Sales.region", None);
     let values = fx.slicer_values(slicer).await;
     assert!(
-        values.last().is_some_and(|v| pivot_engine::is_blank_item_label(v)),
-        "the model slicer's list does not offer the blank member last: {values:?}"
+        values.last().is_some_and(|v| v == pivot_engine::BLANK_MEMBER_KEY),
+        "the model slicer's list does not offer the blank member last, keyed \"\" (Q8): {values:?}"
     );
     let blank_hidden = |hidden: &Option<Vec<String>>| {
-        hidden.as_ref().is_some_and(|h| h.iter().any(|v| pivot_engine::is_blank_item_label(v)))
+        hidden.as_ref().is_some_and(|h| h.iter().any(|v| pivot_engine::is_blank_member_key(v)))
     };
     let named_hidden = |hidden: &Option<Vec<String>>| -> Vec<String> {
         hidden
             .clone()
             .unwrap_or_default()
             .into_iter()
-            .filter(|v| !pivot_engine::is_blank_item_label(v))
+            .filter(|v| !pivot_engine::is_blank_member_key(v))
             .collect()
     };
 
@@ -4174,8 +4193,8 @@ impl Fx {
             "connectedSheets": [],
             "displayMode": "checklist",
             "selectedItems": selected.map(strings),
-            "crossFilterTargets": [],
-            "crossFilterSlicerTargets": [],
+            "dependentFilters": [],
+            "dependentSlicers": [],
             "order": 0,
             "buttonColumns": 2,
             "buttonRows": 0,
@@ -4467,8 +4486,9 @@ async fn a_pivot_fields_info_lists_the_blank_item_and_reads_its_visibility() {
     let pivot = fx.add_bi_pivot(0).await;
     fx.lay_out(pivot, &["region"], &[]).await;
     let idx = fx.row_field_index(pivot);
+    // The blank item is named by its member KEY, "" (ruling Q8).
     let blank_of = |info: &crate::pivot::types::PivotFieldInfo| {
-        info.items.last().filter(|i| pivot_engine::is_blank_item_label(&i.name)).map(|i| i.visible)
+        info.items.last().filter(|i| i.name == pivot_engine::BLANK_MEMBER_KEY).map(|i| i.visible)
     };
     let info = crate::pivot::commands::pivot_field_info_core(&fx.pivots, pivot, idx).expect("the info");
     assert_eq!(blank_of(&info), Some(true), "the blank item is not listed last as visible: {:?}", info.items);
@@ -4480,7 +4500,7 @@ async fn a_pivot_fields_info_lists_the_blank_item_and_reads_its_visibility() {
     assert_eq!(blank_of(&info), Some(true), "(blank) reads UNCHECKED although its rows are visible");
     let selected = info.filters.manual_filter.expect("a filtered field").selected_items;
     assert!(
-        selected.iter().any(|s| pivot_engine::is_blank_item_label(s)) && !selected.iter().any(|s| s == "West"),
+        selected.iter().any(|s| pivot_engine::is_blank_member_key(s)) && !selected.iter().any(|s| s == "West"),
         "the selection the dropdown starts from would hide the blank rows on OK: {selected:?}"
     );
 
@@ -4558,3 +4578,8 @@ async fn a_pivot_write_joining_a_step_that_wrote_its_cell_undoes_to_the_steps_st
     fx.undo_once();
     assert_eq!(fx.text_at(c), None, "undoing the step left the script's value in a cell that was empty when it began");
 }
+
+// P4 S4d: visual interactions in the page fold, the has-data shading and the
+// DC-9 re-fold. A child module, so it reuses `Fx` and the helpers above.
+#[path = "canvas_interactions_refold_tests.rs"]
+mod canvas_interactions_refold_tests;

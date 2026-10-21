@@ -17,9 +17,9 @@ The EURO function converts a number to text using the euro currency format. It w
 
 ## Remarks
 
-- Negative numbers are enclosed in parentheses.
+- Negative numbers are enclosed in parentheses in en-US and carry a leading minus sign in every other region.
 - The result is a text string, not a number.
-- Thousands separators (commas) are added automatically.
+- Thousands separators are added automatically. The euro sign stays before the number, while the decimal and thousands separators follow Calcula's app locale (its regional setting).
 
 ## Example
 

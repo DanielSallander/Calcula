@@ -93,6 +93,7 @@ import {
 import type { PivotRegionData, PivotEditorViewData, BiPivotModelInfo } from "./types";
 import { getPivotRegionsForSheet, getPivotAtCell, getPivotView, getPivotCellWindow, getAllPivotTables, refreshPivotCache, relocatePivot, getPivotHierarchies, updatePivotProperties } from "./lib/pivot-api";
 import { getPivotViewCell } from "./lib/pivotChromeActions";
+import { installPivotCrossFilter } from "./lib/pivotCrossFilterView";
 import {
   overlayIconBounds,
   overlayHeaderFilterBounds,
@@ -662,7 +663,7 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
         (fr) => fr.fieldIndex === fdFieldIndex
       );
       const hasActiveFdFilter = filterRowMeta
-        ? filterRowMeta.selectedValues.length < filterRowMeta.uniqueValues.length
+        ? filterRowMeta.selectedValues.length < filterRowMeta.members.length
         : false;
       const cellResult: PivotCellDrawResult = drawPivotCell(ctx, fd.cell, fd.x, fd.y, fd.width, fd.height, fd.i, fd.j, theme, {
         isHoveredFilterButton: isHoveredFd,
@@ -1554,6 +1555,10 @@ function activate(context: ExtensionContext): void {
       context.grid.overlays.register(registration),
     ),
   );
+  // Cross-filter (P4 G4, S7): the @api/reportFilters lifetime, the
+  // @api/modelVisuals provider for the boxes, and each canvas BI box's
+  // paint-only filtered view while another visual's selection reaches it.
+  cleanupFunctions.push(...installPivotCrossFilter());
   // The box in the ONE object pane (WP-C D-PANE / D-FORMAT): its Fields /
   // Design tabs (the lifted field-list editor), its Format tab's container
   // (saved with the frame) plus the Style, Layout and Data format cards, the
@@ -1806,6 +1811,15 @@ function activate(context: ExtensionContext): void {
   };
   cleanupFunctions.push(
     onAppEvent(AppEvents.TABLE_DEFINITIONS_UPDATED, handleTableDefsUpdated),
+  );
+
+  // App locale switch (P2 S7): member labels and formatted values are written
+  // by the backend at RESPONSE time in the locale of that moment, so the
+  // mounted pivots' views are re-fetched (never served from the view cache)
+  // and repainted. Keys -- selections, filters -- are invariant and unchanged.
+  const handleLocaleChangedForPivots = () => { void refreshPivotRegions(true); };
+  cleanupFunctions.push(
+    onAppEvent(AppEvents.LOCALE_CHANGED, handleLocaleChangedForPivots),
   );
 
   // Also refresh regions when grid refreshes (sheet switch, etc.)

@@ -25,6 +25,7 @@ import {
   type DebugTrigger,
 } from "../lib/debugger";
 import { onAppEvent } from "@api/events";
+import { formatNumber } from "@api/locale";
 
 // ============================================================================
 // Styles (injected once per window)
@@ -762,7 +763,7 @@ function idleTone(session: DebugSessionState): string {
 /** " in 0.4 s", or nothing when the host did not time the run. */
 function formatDuration(ms: number | undefined): string {
   if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return "";
-  return ms < 1000 ? ` in ${Math.round(ms)} ms` : ` in ${(ms / 1000).toFixed(1)} s`;
+  return ms < 1000 ? ` in ${Math.round(ms)} ms` : ` in ${formatNumber(ms / 1000, { decimals: 1 })} s`;
 }
 
 // ============================================================================

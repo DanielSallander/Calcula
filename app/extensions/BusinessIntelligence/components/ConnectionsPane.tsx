@@ -25,6 +25,7 @@ import { MODEL_DIALOG_ID } from "../manifest";
 import type { ConnectionInfo } from "../types";
 import { confirmAsync, promptAsync } from "@api/dialogs";
 import { listObjectDependents } from "@api/backend";
+import { formatDateTime } from "@api/locale";
 
 // ============================================================================
 // Styles
@@ -493,7 +494,7 @@ ${dependents.length} object(s) read this connection ` +
                 {conn.lastRefreshed && (
                   <div>
                     <strong>Last refreshed:</strong>{" "}
-                    {new Date(conn.lastRefreshed).toLocaleString()}
+                    {formatDateTime(conn.lastRefreshed) || conn.lastRefreshed}
                   </div>
                 )}
               </div>

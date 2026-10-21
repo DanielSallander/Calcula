@@ -24,10 +24,11 @@ import React from "react";
 import { RibbonIcon, type RibbonIconProps } from "@api";
 import { CoreCommands, ExtensionCommands } from "@api/commands";
 import { useGridState } from "@api/grid";
+import { cellTargetFor } from "@api/cellTarget";
 import { MenuButton, IconButton, MenuItem, MENU_ICON_BLANK, ICON_SIZE_SM } from "@api/layout";
 import type { HomeItemProps } from "../homeItemProps";
 import { itemTooltip } from "../itemTooltip";
-import { fillHasSource, type FillDirection } from "./editingRules";
+import { fillHasSource, fillSourceView, type FillDirection } from "./editingRules";
 import { MENU_ROW_ICON_SIZE, runCommand } from "../runCommand";
 
 /** Excel's four direction rows, in its order, with the command each runs. */
@@ -47,7 +48,11 @@ const DIRECTION_ROWS: ReadonlyArray<{
 /** The menu's rows. Mounted only while the menu is open. */
 function FillMenuRows({ testId }: { testId: string }): React.ReactElement {
   const gridState = useGridState();
-  const { totalRows, totalCols } = gridState.config;
+  // WHICH cells the fill acts on: a floating grid's own selection when it
+  // holds the selection (Core's is then HIDDEN, usually A1, where Down is
+  // always grey -- found live 2026-10-17, floating-grid-home FG9), else
+  // Core's. Asked without announcing; the command itself refuses aloud.
+  const view = fillSourceView(cellTargetFor("content", "Fill"), gridState.selection, gridState.config);
 
   return (
     <>
@@ -58,7 +63,7 @@ function FillMenuRows({ testId }: { testId: string }): React.ReactElement {
           testId={`${testId}-${direction}`}
           // Ctrl+D and Ctrl+R are the only two with a key (Excel's too).
           shortcutCommandId={commandId}
-          disabled={!fillHasSource(direction, gridState.selection, totalRows, totalCols)}
+          disabled={view !== "refused" && !fillHasSource(direction, view.selection, view.totalRows, view.totalCols)}
           onSelect={() => void runCommand(commandId)}
         >
           {label}

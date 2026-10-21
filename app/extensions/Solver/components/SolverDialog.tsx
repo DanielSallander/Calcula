@@ -9,6 +9,7 @@ import {
   columnToLetter,
   DialogExtensions,
 } from "@api";
+import { parseNumber } from "@api/locale";
 import type {
   SolverObjective,
   SolverMethod,
@@ -348,11 +349,13 @@ export function SolverDialog(props: DialogProps): React.ReactElement | null {
     // Validate target value if needed
     let targetValue: number | undefined;
     if (objectiveType === "targetValue") {
-      targetValue = parseFloat(targetValueStr);
-      if (isNaN(targetValue)) {
+      // In the APP locale: "1,5" is 1.5 under sv-SE (parseFloat read 1).
+      const typed = parseNumber(targetValueStr);
+      if (typed === null) {
         setValidationError("Target value must be a number.");
         return;
       }
+      targetValue = typed;
     }
 
     // Build constraints
@@ -371,9 +374,9 @@ export function SolverDialog(props: DialogProps): React.ReactElement | null {
       };
 
       if (!["integer", "binary", "allDifferent"].includes(c.operator)) {
-        // Try parsing as number first, then as cell reference
-        const numVal = parseFloat(c.rhsRef);
-        if (!isNaN(numVal)) {
+        // A number in the app locale first, then a cell reference.
+        const numVal = parseNumber(c.rhsRef);
+        if (numVal !== null) {
           constraint.rhsValue = numVal;
         } else {
           const rhsCell = parseCellRef(c.rhsRef);

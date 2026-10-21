@@ -8,6 +8,7 @@
 import React from "react";
 import { css } from "@emotion/css";
 import { useDialogWindow } from "@api/dialogWindow";
+import { formatNumber } from "@api/locale";
 import type { ParsedChartData } from "../types";
 
 const MAX_ROWS = 1000;
@@ -150,7 +151,7 @@ export function DataInspectorWindow({ data, onClose }: DataInspectorWindowProps)
                     return (
                       <td key={si} className="num">
                         {typeof v === "number"
-                          ? v.toLocaleString(undefined, { maximumFractionDigits: 2 })
+                          ? formatNumber(v, { maxDecimals: 2, grouping: true })
                           : String(v ?? "")}
                       </td>
                     );
@@ -164,8 +165,8 @@ export function DataInspectorWindow({ data, onClose }: DataInspectorWindowProps)
 
       <div className={s.footer}>
         {rowCount > MAX_ROWS
-          ? `Showing the first ${MAX_ROWS.toLocaleString()} of ${rowCount.toLocaleString()} rows`
-          : `${rowCount.toLocaleString()} row${rowCount === 1 ? "" : "s"} × ${data?.series.length ?? 0} series`}
+          ? `Showing the first ${formatNumber(MAX_ROWS, { grouping: true })} of ${formatNumber(rowCount, { grouping: true })} rows`
+          : `${formatNumber(rowCount, { grouping: true })} row${rowCount === 1 ? "" : "s"} × ${data?.series.length ?? 0} series`}
       </div>
       {win.resizeHandles}
     </div>

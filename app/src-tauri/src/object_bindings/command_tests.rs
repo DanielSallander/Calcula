@@ -85,6 +85,7 @@ impl Wb {
             pivots: &self.pivots,
             pane: &self.pane,
             ribbon: &self.ribbon,
+            user_files: &self.files,
         }
     }
 
@@ -800,6 +801,28 @@ fn list_returns_bindings_with_their_values_and_display_formula() {
     assert_eq!(one[0].resolved.as_ref().unwrap().value, json!(1.3));
 }
 
+/// P2 S5: a computed (not single-cell) binding's DISPLAY is General in the
+/// APP locale -- a de-DE title reads "1234,5", never the invariant "1234.5".
+/// The typed value stays the number.
+#[test]
+fn a_computed_bindings_display_reads_in_the_app_locale() {
+    let wb = Wb::new();
+    *wb.state.locale.lock().unwrap() = engine::LocaleSettings::from_locale_id("de-DE");
+    let chart = wb.chart(DATA, json!({}));
+    // No separator in the formula, so it parses the same in every locale.
+    let info = binding_of(wb.send(set_req(&chart, "/spec/xAxis/min", "=12345/10")).unwrap());
+    let resolved = info.resolved.expect("the binding resolves");
+    assert_eq!(resolved.value, json!(1234.5));
+    assert_eq!(resolved.display, "1234,5", "General in the app locale");
+
+    *wb.state.locale.lock().unwrap() = engine::LocaleSettings::invariant();
+    let all = match wb.send(json!({ "op": "resolveAll" })).unwrap() {
+        ObjectBindingsResponse::Resolved { values } => values,
+        r => panic!("{r:?}"),
+    };
+    assert_eq!(all[0].display, "1234.5");
+}
+
 #[test]
 fn runtime_ops_never_dirty_and_never_record_undo() {
     let wb = Wb::new();
@@ -826,7 +849,7 @@ fn runtime_ops_never_dirty_and_never_record_undo() {
     wb.send(json!({ "op": "refreshMeasures", "sheetIndex": REPORT })).unwrap();
     wb.send(json!({ "op": "refreshMeasures" })).unwrap();
     wb.send(json!({ "op": "setPageFilters", "pages": [
-        { "sheetIndex": REPORT, "connectionId": "c-1", "filters": [{ "field": "BI.dim_territory.territorygroup", "includedItems": ["Europe"], "filterLevel": 1 }] }
+        { "sheetId": wb.ids[REPORT].to_string(), "connectionId": "c-1", "filters": [{ "field": "BI.dim_territory.territorygroup", "includedItems": ["Europe"], "filterLevel": 1 }] }
     ] }))
     .unwrap();
     assert!(!wb.dirty(), "resolved values and the page-filter mirror are transient");
@@ -838,13 +861,15 @@ fn set_page_filters_replaces_the_mirror_and_reports_changed_pages() {
     let wb = Wb::new();
     let page = |items: &[&str]| -> Vec<crate::api_types::PageFilterPageWire> {
         vec![crate::api_types::PageFilterPageWire {
-            sheet_index: REPORT,
+            sheet_id: wb.ids[REPORT],
             connection_id: "c-1".to_string(),
             filters: vec![crate::api_types::PageFilterWire {
                 field: "BI.dim_territory.territorygroup".to_string(),
                 included_items: items.iter().map(|s| s.to_string()).collect(),
                 filter_level: 1,
             }],
+            tuple_filters: Vec::new(),
+            objects: Vec::new(),
         }]
     };
     assert_eq!(set_page_filters_core(&wb.cx(), page(&["Europe"])), vec![wb.ids[REPORT]]);
@@ -1200,4 +1225,157 @@ fn undoing_a_bind_never_reverts_a_binding_a_refresh_landed_in_between() {
     assert_eq!(after_redo.get(&key_of(&mine)).map(|b| b.formula.as_str()), Some("=Data!A2"), "redo rebinds");
     assert!(!after_redo.contains_key(&key_of(&app_b)));
     assert_eq!(after_redo.get(&key_of(&app_c)), Some(&stored("=Data!A3")));
+}
+
+// ===========================================================================
+// P4 S4a: a canvas page's `/interactions` -- a literal, never a binding
+// ===========================================================================
+
+fn interactions_value(source: &ObjectBindingRef, target: &ObjectBindingRef, mode: &str) -> Value {
+    json!({
+        "defaultMode": "filter",
+        "pairs": [{
+            "source": { "kind": source.kind.wire_name(), "id": source.id },
+            "target": { "kind": target.kind.wire_name(), "id": target.id },
+            "mode": mode
+        }]
+    })
+}
+
+impl Wb {
+    /// Send one request through the ASYNC dispatcher (the command's own), with
+    /// an empty BI state: the door every `/interactions` write takes (P4 S4d).
+    async fn send_async(&self, request: Value) -> Result<ObjectBindingsResponse, String> {
+        let request: ObjectBindingsRequest = serde_json::from_value(request).expect("request");
+        let bi = crate::bi::types::BiState::new();
+        let cx = self.cx();
+        handle_request_async(&cx, &bi, request).await.map(|h| h.response)
+    }
+}
+
+/// The SYNCHRONOUS literal door refuses `/interactions` (P4 S4d): the write
+/// can need a pivot re-fold, which only the async door can run.
+#[test]
+fn the_sync_literal_door_refuses_interactions() {
+    let wb = Wb::new();
+    let page = wb.page();
+    let slicer = wb.slicer(REPORT);
+    let chart = wb.chart(REPORT, json!({}));
+    wb.clean();
+    let err = wb
+        .send(literal_req(&page, "/interactions", interactions_value(&slicer, &chart, "none")))
+        .expect_err("the sync door does not write interactions");
+    assert_eq!(err, super::literal::INTERACTIONS_NEED_THE_ASYNC_DOOR);
+    let err = crate::mcp::bindings::set_object_property_core(
+        &wb.cx(),
+        "canvasPage",
+        &page.id,
+        "/interactions",
+        interactions_value(&slicer, &chart, "none"),
+    )
+    .expect_err("nor does the sync MCP core");
+    assert_eq!(err, super::literal::INTERACTIONS_NEED_THE_ASYNC_DOOR);
+    assert!(wb.canvas_layout().interactions.is_default() && !wb.dirty(), "nothing changed");
+}
+
+/// MCP `set_object_property` writes a page's interactions WHOLE through the
+/// layout core: one undo step that Ctrl+Z takes back, the document dirtied,
+/// and a re-send of the same value changes nothing.
+#[tokio::test]
+async fn set_object_property_writes_a_pages_interactions_as_one_undo_step() {
+    let wb = Wb::new();
+    let page = wb.page();
+    let slicer = wb.slicer(REPORT);
+    let chart = wb.chart(REPORT, json!({}));
+    wb.clean();
+    let depth = wb.depth();
+
+    let value = interactions_value(&slicer, &chart, "none");
+    let bi = crate::bi::types::BiState::new();
+    let cx = wb.cx();
+    let written =
+        crate::mcp::bindings::set_object_property_async_core(&cx, &bi, "canvasPage", &page.id, "/interactions", value.clone())
+            .await
+            .expect("a page's interactions are writable");
+    assert!(written.reply.contains("one undo step"), "{}", written.reply);
+    assert!(written.layout.is_some(), "the layout change is announced to the canvas");
+    let layout = wb.canvas_layout();
+    assert_eq!(layout.interactions.default_mode, Some(::persistence::VisualInteractionMode::Filter));
+    assert_eq!(layout.interactions.pairs.len(), 1);
+    assert_eq!(layout.interactions.pairs[0].source.id, slicer.id);
+    assert_eq!(layout.interactions.pairs[0].target.id, chart.id);
+    assert_eq!(layout.interactions.pairs[0].mode, ::persistence::VisualInteractionMode::None);
+    assert!(wb.dirty(), "an interactions edit is a document change");
+    assert_eq!(wb.depth(), depth + 1, "ONE undo step");
+    assert_eq!(wb.undo_description().as_deref(), Some("Change visual interaction"));
+
+    let same = crate::mcp::bindings::set_object_property_async_core(&cx, &bi, "canvasPage", &page.id, "/interactions", value)
+        .await
+        .expect("re-sending is not an error");
+    assert!(same.reply.contains("nothing changed"), "{}", same.reply);
+    assert_eq!(wb.depth(), depth + 1, "a re-send records nothing");
+
+    wb.undo();
+    assert!(wb.canvas_layout().interactions.is_default(), "Ctrl+Z takes the interactions back");
+}
+
+/// Every ref must name an interaction-capable object ON THIS PAGE: an unknown
+/// id and an object on another sheet are refused naming the ref, before the
+/// effect.
+#[tokio::test]
+async fn set_literal_interactions_refuses_a_ref_that_is_not_on_the_page() {
+    let wb = Wb::new();
+    let page = wb.page();
+    let slicer = wb.slicer(REPORT);
+    let elsewhere = wb.chart(DATA, json!({}));
+    wb.clean();
+    let depth = wb.depth();
+
+    let ghost = ObjectBindingRef { kind: ObjectBindingKind::Chart, id: entity().to_string() };
+    for target in [&ghost, &elsewhere] {
+        let err = wb
+            .send_async(literal_req(&page, "/interactions", interactions_value(&slicer, target, "none")))
+            .await
+            .expect_err("a ref that is not on the page is refused");
+        assert!(err.contains(&target.id), "the refusal names the ref: {err}");
+        assert!(err.contains("not an object on this canvas page"), "{err}");
+    }
+    let err = wb
+        .send_async(literal_req(&page, "/interactions", json!({ "pairs": "nope" })))
+        .await
+        .expect_err("a malformed value is refused");
+    assert!(err.contains("Interactions are an object"), "{err}");
+    assert!(wb.canvas_layout().interactions.is_default(), "nothing was written");
+    assert!(!wb.dirty(), "a refusal leaves the document clean");
+    assert_eq!(wb.depth(), depth, "a refusal records no step");
+}
+
+#[tokio::test]
+async fn set_literal_interactions_is_refused_on_a_protected_page() {
+    let wb = Wb::new();
+    let page = wb.page();
+    let slicer = wb.slicer(REPORT);
+    let chart = wb.chart(REPORT, json!({}));
+    wb.protect(REPORT);
+    wb.clean();
+    let err = wb
+        .send_async(literal_req(&page, "/interactions", interactions_value(&slicer, &chart, "highlight")))
+        .await
+        .expect_err("a protected page refuses an interactions edit");
+    assert!(err.contains("protected sheet"), "the layout core's own protection sentence: {err}");
+    assert!(wb.canvas_layout().interactions.is_default() && !wb.dirty(), "nothing changed");
+}
+
+/// No catalog row (P4 DC-6): a BINDING on `/interactions` is refused by name,
+/// through the Set door and through the catalog itself.
+#[test]
+fn interactions_are_refused_as_a_binding_by_name() {
+    let wb = Wb::new();
+    let page = wb.page();
+    wb.clean();
+    let err = wb.send(set_req(&page, "/interactions", "=Inputs!B1")).expect_err("not bindable");
+    assert_eq!(err, super::catalog::INTERACTIONS_NOT_BINDABLE);
+    let err = super::catalog::match_path(ObjectBindingKind::CanvasPage, "/interactions/pairs/0/mode").unwrap_err();
+    assert_eq!(err, super::catalog::INTERACTIONS_NOT_BINDABLE, "a deeper pointer is refused the same way");
+    assert!(wb.rows().is_empty() && !wb.dirty(), "nothing was bound");
 }

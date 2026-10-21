@@ -410,6 +410,7 @@ describe("sortByColor", () => {
       0, 0, 10, 3,
       [{ key: 2, ascending: true, sortOn: "cellColor", color: "#ff0000" }],
       { hasHeaders: true },
+      { target: undefined },
     );
   });
 });

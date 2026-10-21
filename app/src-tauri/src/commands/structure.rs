@@ -1578,7 +1578,29 @@ pub fn insert_rows(
     row: u32,
     count: u32,
     sheet_index: Option<usize>,
+    target: Option<crate::api_types::CellTargetRef>,
 ) -> Result<Vec<CellData>, String> {
+    // A floating grid's rows (P3 2.5, table semantics): the backing sheet shifts
+    // and the object's window grows with it, ONE undo step. Never together with
+    // an explicit sheet.
+    crate::cell_target::refuse_target_with_sheet(&target, sheet_index.is_some())?;
+    if let Some(target) = &target {
+        return crate::cell_target::edit_lines_on_target(
+            &state,
+            &file_state,
+            &pivot_state,
+            &user_files_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            &slicer_state,
+            &timeline_state,
+            target,
+            true,
+            true,
+            row,
+            count,
+        );
+    }
     insert_rows_impl(
         &state,
         &file_state,
@@ -2080,7 +2102,29 @@ pub fn insert_columns(
     col: u32,
     count: u32,
     sheet_index: Option<usize>,
+    target: Option<crate::api_types::CellTargetRef>,
 ) -> Result<Vec<CellData>, String> {
+    // A floating grid's columns (P3 2.5, table semantics): the backing sheet shifts
+    // and the object's window grows with it, ONE undo step. Never together with
+    // an explicit sheet.
+    crate::cell_target::refuse_target_with_sheet(&target, sheet_index.is_some())?;
+    if let Some(target) = &target {
+        return crate::cell_target::edit_lines_on_target(
+            &state,
+            &file_state,
+            &pivot_state,
+            &user_files_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            &slicer_state,
+            &timeline_state,
+            target,
+            false,
+            true,
+            col,
+            count,
+        );
+    }
     insert_columns_impl(
         &state,
         &file_state,
@@ -3515,7 +3559,29 @@ pub fn delete_rows(
     row: u32,
     count: u32,
     sheet_index: Option<usize>,
+    target: Option<crate::api_types::CellTargetRef>,
 ) -> Result<Vec<CellData>, String> {
+    // A floating grid's rows (P3 2.5, table semantics): the backing sheet shifts
+    // and the object's window shrinks with it, ONE undo step. Never together with
+    // an explicit sheet.
+    crate::cell_target::refuse_target_with_sheet(&target, sheet_index.is_some())?;
+    if let Some(target) = &target {
+        return crate::cell_target::edit_lines_on_target(
+            &state,
+            &file_state,
+            &pivot_state,
+            &user_files_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            &slicer_state,
+            &timeline_state,
+            target,
+            true,
+            false,
+            row,
+            count,
+        );
+    }
     delete_rows_impl(
         &state,
         &file_state,
@@ -4074,7 +4140,29 @@ pub fn delete_columns(
     col: u32,
     count: u32,
     sheet_index: Option<usize>,
+    target: Option<crate::api_types::CellTargetRef>,
 ) -> Result<Vec<CellData>, String> {
+    // A floating grid's columns (P3 2.5, table semantics): the backing sheet shifts
+    // and the object's window shrinks with it, ONE undo step. Never together with
+    // an explicit sheet.
+    crate::cell_target::refuse_target_with_sheet(&target, sheet_index.is_some())?;
+    if let Some(target) = &target {
+        return crate::cell_target::edit_lines_on_target(
+            &state,
+            &file_state,
+            &pivot_state,
+            &user_files_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            &slicer_state,
+            &timeline_state,
+            target,
+            false,
+            false,
+            col,
+            count,
+        );
+    }
     delete_columns_impl(
         &state,
         &file_state,
@@ -4626,7 +4714,7 @@ fn index_to_col_letters(mut idx: u32) -> String {
 ///
 /// `src_min_row` / `src_min_col` are 0-indexed grid coordinates.
 /// Formula row numbers are 1-indexed (A1 style), so we add 1 when comparing.
-fn relocate_references_in_formula(
+pub(crate) fn relocate_references_in_formula(
     formula: &str,
     src_min_row: u32,
     src_min_col: u32,
@@ -7147,7 +7235,14 @@ fn shift_cross_sheet_formulas_for_off_sheet_edit(
             if updated == formula {
                 continue;
             }
-            if let Ok(ast) = parser::parse(&updated) {
+            if let Ok(mut ast) = parser::parse(&updated) {
+                // THE WORKBOOK'S OWN CAPITALISATION (BUG-0515, P3 S5): the
+                // re-parse shouts bare sheet qualifiers, so `=Sheet2!A3` came
+                // back from an off-sheet row insert as `=SHEET2!A5` -- and every
+                // host formula reading a floating grid (`=Float1!A3`) as
+                // `=FLOAT1!A5`. Restamped from the official names, as the cell
+                // doors do. Takes no lock (the names are the caller's slice).
+                crate::sheet_names::restamp_sheet_casing(&mut ast, sheet_names);
                 previous.push(((r, c), Some(cell.clone())));
                 let mut next = cell;
                 next.ast = Some(Box::new(ast));

@@ -169,3 +169,18 @@ describe("the chart store's reload window opens at the request, not when the cha
     expect(source.slice(at, at + 120)).toContain('requestChartsReload("sheets")');
   });
 });
+
+describe("an app locale switch repaints every chart in the new locale (P2 S8)", () => {
+  it("drops the cached rasters and refreshes on AppEvents.LOCALE_CHANGED", () => {
+    // A chart's raster is cached per version and its data per chart, so a
+    // locale switch with no handler left every tick label, data label and
+    // Card in the OLD separators until something else invalidated it. The
+    // formatters read the active locale at paint time; the cache has to go.
+    const source = chartsIndexSource();
+    const at = source.indexOf("onAppEvent(AppEvents.LOCALE_CHANGED, handleLocaleChanged)");
+    expect(at, "Charts does not follow a locale switch").toBeGreaterThan(-1);
+    const body = source.slice(source.indexOf("const handleLocaleChanged = () => {"), at);
+    expect(body).toContain("invalidateAllChartCaches();");
+    expect(body).toContain("context.events.emit(AppEvents.GRID_REFRESH);");
+  });
+});

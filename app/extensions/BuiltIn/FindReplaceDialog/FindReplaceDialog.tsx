@@ -5,6 +5,11 @@
 //          This follows Microkernel Architecture - Find is a feature, not a kernel primitive.
 //          Core only provides primitives (setSelection, scrollToCell).
 //          Dialog state (isOpen, currentIndex, matches) lives in the extension.
+// P3 (owner finding G3): with a floating grid's cell selected, Find searches
+//          THAT object's cells (findAll with its target), selects matches in
+//          the object (selectTargetCells), and Replace / Replace All write
+//          there. The SCOPE is fixed by the search that produced the matches:
+//          a replace never applies one scope's coordinates to another.
 
 import React, { useState, useCallback, useEffect, useRef } from "react";
 import {
@@ -21,10 +26,33 @@ import {
   columnToLetter,
 } from "@api";
 import type { DialogProps } from "@api/uiTypes";
+import {
+  cellTargetFor,
+  resolveCellTarget,
+  selectTargetCells,
+  type CellTarget,
+  type CellTargetRef,
+} from "@api/cellTarget";
 import { useDialogWindow } from "@api/dialogWindow";
 // Extension-local state management
 import { useFindStore } from "../../_shared/lib/useFindStore";
 import * as S from "./FindReplaceDialog.styles";
+
+/**
+ * What Find searches right now: an OBJECT's cells when one of its cells is
+ * selected (asked silently -- a search is a read, and the dialog stays open
+ * while the selection moves), else the active sheet (null).
+ */
+export function findScope(): Extract<CellTarget, { kind: "object" }> | null {
+  const t = cellTargetFor("read", "Find");
+  return "kind" in t && t.kind === "object" ? t : null;
+}
+
+/** Whether two scopes are the same place (both the sheet, or the same object). */
+function sameScope(a: CellTargetRef | null, b: CellTargetRef | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.kind === b.kind && a.id === b.id;
+}
 
 export function FindReplaceDialog(props: DialogProps): React.ReactElement | null {
   // Core dispatch for grid primitives (selection, scroll)
@@ -56,6 +84,53 @@ export function FindReplaceDialog(props: DialogProps): React.ReactElement | null
   const [errorText, setErrorText] = useState<string | null>(null);
 
   const searchInputRef = useRef<HTMLInputElement>(null);
+  // The place the current matches are in (null = the active sheet).
+  const scopeRef = useRef<CellTargetRef | null>(null);
+
+  /** Select the match at (row, col) in the scope that found it. */
+  const goTo = useCallback(
+    (row: number, col: number) => {
+      const scope = scopeRef.current;
+      if (scope === null) {
+        // Use Core primitives for navigation
+        dispatch(setSelection(row, col, row, col, "cells"));
+        dispatch(scrollToCell(row, col, false));
+        return;
+      }
+      // Only while the same object still holds the selection: a match in an
+      // object is never applied to the sheet's coordinates.
+      const now = findScope();
+      if (now && sameScope(now.ref, scope)) {
+        selectTargetCells(now, {
+          startRow: row,
+          startCol: col,
+          endRow: row,
+          endCol: col,
+          type: "cells",
+          activeRow: row,
+          activeCol: col,
+        });
+      }
+    },
+    [dispatch],
+  );
+
+  /**
+   * The target a replace writes with: undefined for the sheet; the object's
+   * when the matches are an object's AND that object still takes content
+   * (asked out loud). Null: refused -- nothing may be written.
+   */
+  const replaceTarget = useCallback((action: string): { target: CellTargetRef | undefined } | null => {
+    const scope = scopeRef.current;
+    if (scope === null) return { target: undefined };
+    const t = resolveCellTarget(action, "content");
+    if (t === null) return null;
+    if (t.kind !== "object" || !sameScope(t.ref, scope)) {
+      setErrorText("The selection moved since the search. Search again. Nothing was changed.");
+      return null;
+    }
+    return { target: t.ref };
+  }, []);
 
   // Movable + resizable dialog window (shared @api hook)
   const win = useDialogWindow({ minWidth: 400, minHeight: 200 });
@@ -84,11 +159,19 @@ export function FindReplaceDialog(props: DialogProps): React.ReactElement | null
 
       setIsSearching(true);
       try {
-        const result = await findAll(searchQuery, {
-          caseSensitive: options.caseSensitive,
-          matchEntireCell: options.matchEntireCell,
-          searchFormulas: options.searchFormulas,
-        });
+        // A live re-search keeps the scope its matches came from; a new
+        // search asks where the selection is now.
+        const scope = preserveIndex ? scopeRef.current : (findScope()?.ref ?? null);
+        const result = await findAll(
+          searchQuery,
+          {
+            caseSensitive: options.caseSensitive,
+            matchEntireCell: options.matchEntireCell,
+            searchFormulas: options.searchFormulas,
+          },
+          { target: scope ?? undefined },
+        );
+        scopeRef.current = scope;
 
         // Update extension-local state
         setMatches(result.matches, searchQuery);
@@ -96,9 +179,7 @@ export function FindReplaceDialog(props: DialogProps): React.ReactElement | null
         // Navigate to first match if any (unless preserving index for live updates)
         if (result.matches.length > 0 && !preserveIndex) {
           const [row, col] = result.matches[0];
-          // Use Core primitives for navigation
-          dispatch(setSelection(row, col, row, col, "cells"));
-          dispatch(scrollToCell(row, col, false));
+          goTo(row, col);
         }
       } catch (error) {
         console.error("[FindReplaceDialog] Search failed:", error);
@@ -106,7 +187,7 @@ export function FindReplaceDialog(props: DialogProps): React.ReactElement | null
         setIsSearching(false);
       }
     },
-    [dispatch, options.caseSensitive, options.matchEntireCell, options.searchFormulas, setMatches, clearResults]
+    [goTo, options.caseSensitive, options.matchEntireCell, options.searchFormulas, setMatches, clearResults]
   );
 
   // Handle search input change with debounce
@@ -164,10 +245,8 @@ export function FindReplaceDialog(props: DialogProps): React.ReactElement | null
     setCurrentIndex(nextIndex);
 
     const [row, col] = matches[nextIndex];
-    // Use Core primitives for navigation
-    dispatch(setSelection(row, col, row, col, "cells"));
-    dispatch(scrollToCell(row, col, false));
-  }, [dispatch, matches, currentIndex, setCurrentIndex]);
+    goTo(row, col);
+  }, [goTo, matches, currentIndex, setCurrentIndex]);
 
   // Navigate to previous match
   const handleFindPrevious = useCallback(() => {
@@ -177,16 +256,16 @@ export function FindReplaceDialog(props: DialogProps): React.ReactElement | null
     setCurrentIndex(prevIndex);
 
     const [row, col] = matches[prevIndex];
-    // Use Core primitives for navigation
-    dispatch(setSelection(row, col, row, col, "cells"));
-    dispatch(scrollToCell(row, col, false));
-  }, [dispatch, matches, currentIndex, setCurrentIndex]);
+    goTo(row, col);
+  }, [goTo, matches, currentIndex, setCurrentIndex]);
 
   // Replace current match
   const handleReplace = useCallback(async () => {
     if (currentIndex < 0 || currentIndex >= matches.length) return;
 
     const [row, col] = matches[currentIndex];
+    const place = replaceTarget("Replace");
+    if (place === null) return;
 
     try {
       const result = await replaceSingle(
@@ -194,10 +273,18 @@ export function FindReplaceDialog(props: DialogProps): React.ReactElement | null
         col,
         searchValue,
         replaceValue,
-        options.caseSensitive
+        options.caseSensitive,
+        undefined,
+        { target: place.target },
       );
 
-      if (result) {
+      if (result && place.target) {
+        // An object's cell: its (row, col) would alias an active-sheet cell,
+        // so no cell event -- the object re-reads its cells on grid:refresh.
+        setErrorText(null);
+        window.dispatchEvent(new CustomEvent("grid:refresh"));
+        await performSearch(searchValue);
+      } else if (result) {
         setErrorText(null);
         // Emit cell change event for refresh
         cellEvents.emit({
@@ -218,22 +305,31 @@ export function FindReplaceDialog(props: DialogProps): React.ReactElement | null
       // this is the only place the user can learn why the cell did not change.
       setErrorText(String(error instanceof Error ? error.message : error));
     }
-  }, [currentIndex, matches, searchValue, replaceValue, options.caseSensitive, performSearch]);
+  }, [currentIndex, matches, searchValue, replaceValue, options.caseSensitive, performSearch, replaceTarget]);
 
   // Replace all matches
   const handleReplaceAll = useCallback(async () => {
     if (!searchValue.trim()) return;
+    const place = replaceTarget("Replace All");
+    if (place === null) return;
 
     try {
-      const result = await replaceAll(searchValue, replaceValue, {
-        caseSensitive: options.caseSensitive,
-        matchEntireCell: options.matchEntireCell,
-      });
+      const result = await replaceAll(
+        searchValue,
+        replaceValue,
+        {
+          caseSensitive: options.caseSensitive,
+          matchEntireCell: options.matchEntireCell,
+        },
+        { target: place.target },
+      );
 
       setErrorText(null);
 
-      // Emit refresh events
-      for (const cell of result.updatedCells) {
+      // Emit refresh events (an object's cells re-read on grid:refresh: their
+      // coordinates would alias active-sheet cells).
+      if (place.target) window.dispatchEvent(new CustomEvent("grid:refresh"));
+      for (const cell of place.target ? [] : result.updatedCells) {
         cellEvents.emit({
           row: cell.row,
           col: cell.col,
@@ -252,7 +348,7 @@ export function FindReplaceDialog(props: DialogProps): React.ReactElement | null
       // because it names the writeback region and the way out.
       setErrorText(String(error instanceof Error ? error.message : error));
     }
-  }, [searchValue, replaceValue, options.caseSensitive, options.matchEntireCell, setMatches]);
+  }, [searchValue, replaceValue, options.caseSensitive, options.matchEntireCell, setMatches, replaceTarget]);
 
   // Handle close - sync both Zustand store and DialogExtensions registry
   const handleClose = useCallback(() => {

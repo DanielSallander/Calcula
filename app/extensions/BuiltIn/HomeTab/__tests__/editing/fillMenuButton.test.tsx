@@ -41,6 +41,15 @@ const grid = vi.hoisted(() => ({
 }));
 vi.mock("@api/grid", () => ({ useGridState: () => grid.state }));
 
+/** Who holds the selection: null = Core's grid (the default); else a floating grid's cells. */
+const owner = vi.hoisted(() => ({
+  target: null as null | { kind: "object"; selection: Record<string, unknown>; bounds: { rows: number; cols: number } } | { refusal: string },
+}));
+vi.mock("@api/cellTarget", async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
+  cellTargetFor: () => owner.target ?? { kind: "grid", selection: grid.state.selection },
+}));
+
 import { findHardcodedColours, ICON_SIZE_SM } from "@api/layout";
 import { initKeybindings } from "@api/keybindings";
 import { CommandRegistry, CoreCommands, ExtensionCommands } from "@api/commands";
@@ -227,6 +236,28 @@ describe("which directions are greyed: Excel's measured rule", () => {
     await render();
     key(byTestId("fmt-fill"), "ArrowDown");
     expect(document.activeElement).toBe(byTestId("fmt-fill-up"));
+  });
+
+  it("a floating grid's cells: the greying reads ITS selection, not Core's hidden A1 (FG9)", async () => {
+    // Core's selection stays A1 (Down grey there); the grid holds B1:B2 of
+    // its own 5 x 4 window -- Down has a source.
+    select(0, 0);
+    owner.target = {
+      kind: "object",
+      selection: { startRow: 0, startCol: 1, endRow: 1, endCol: 1, type: "cells" },
+      bounds: { rows: 5, cols: 4 },
+    };
+    try {
+      expect(await greyed()).toEqual([false, false, false, false]);
+      // Its OWN last row (row 5 of 5), not the sheet's: Up is grey there.
+      owner.target = { kind: "object", selection: { startRow: 4, startCol: 1, endRow: 4, endCol: 1, type: "cells" }, bounds: { rows: 5, cols: 4 } };
+      expect((await greyed())[2]).toBe(true);
+      // An owner that refuses the fill: rows stay enabled so the command says why.
+      owner.target = { refusal: "Fill is not available here." };
+      expect(await greyed()).toEqual([false, false, false, false]);
+    } finally {
+      owner.target = null;
+    }
   });
 
   it("the menu follows the selection while it is open", async () => {

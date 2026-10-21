@@ -19,7 +19,9 @@ const { getLocaleMock, setLocaleMock, supportedMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("@api/locale", () => ({
-  getLocaleSettings: getLocaleMock,
+  // The page reads the app locale SYNCHRONOUSLY (P2): no await before the preview.
+  getAppLocale: () => getLocaleMock(),
+  onLocaleChanged: () => () => {},
   setLocale: setLocaleMock,
   getSupportedLocales: supportedMock,
 }));
@@ -86,7 +88,7 @@ beforeEach(() => {
   Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
   localStorage.clear();
   getLocaleMock.mockReset();
-  getLocaleMock.mockResolvedValue(LOCALE);
+  getLocaleMock.mockReturnValue(LOCALE);
   setLocaleMock.mockReset();
   setLocaleMock.mockResolvedValue(LOCALE);
   supportedMock.mockReset();
@@ -185,6 +187,13 @@ describe("SettingsView", () => {
     expect(preview.textContent).toContain(", (comma)");
     expect(preview.textContent).toContain("(space)");
     expect(preview.textContent).toContain("; (semicolon)");
+  });
+
+  it("says that text-producing formulas follow a locale switch only on the next recalculation", async () => {
+    await render();
+    const note = container.querySelector('[data-testid="settings-locale-recalc-note"]');
+    expect(note?.textContent).toContain("TEXT, DOLLAR, FIXED");
+    expect(note?.textContent).toContain("next recalculation (F9)");
   });
 
   it("still saves the file-explorer click behaviour", async () => {

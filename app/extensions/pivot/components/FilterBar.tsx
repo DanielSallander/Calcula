@@ -6,10 +6,13 @@ import React, { useState, useCallback } from "react";
 import { css } from "@emotion/css";
 import { FilterDropdown } from "./FilterDropdown";
 import type { ZoneField } from "./types";
+import { memberKeys, memberLabelOf, type MemberRef } from "@api/pivotMembers";
 
 export interface FilterFieldState {
   field: ZoneField;
-  uniqueValues: string[];
+  /** The field's members: the chip's list shows labels and selects KEYS. */
+  members: MemberRef[];
+  /** The KEYS of the kept members. */
   selectedValues: string[];
 }
 
@@ -148,10 +151,10 @@ export function FilterBar({
 
       {filters.map((filter, index) => {
         const isFiltered =
-          filter.selectedValues.length < filter.uniqueValues.length;
+          filter.selectedValues.length < filter.members.length;
         const isOpen = openFilterIndex === index;
         const hiddenCount =
-          filter.uniqueValues.length - filter.selectedValues.length;
+          filter.members.length - filter.selectedValues.length;
 
         return (
           <button
@@ -176,7 +179,8 @@ export function FilterBar({
         <FilterDropdown
           fieldName={filters[openFilterIndex].field.name}
           fieldIndex={filters[openFilterIndex].field.sourceIndex}
-          uniqueValues={filters[openFilterIndex].uniqueValues}
+          uniqueValues={memberKeys(filters[openFilterIndex].members)}
+          labelOf={memberLabelOf(filters[openFilterIndex].members)}
           selectedValues={pendingSelection}
           anchorRect={{ x: dropdownPosition.x, y: dropdownPosition.y, width: 0, height: 0 }}
           onApply={handleApply}

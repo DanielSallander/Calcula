@@ -402,6 +402,29 @@ interface ScriptCanvasLayoutShim {
   objectsLocked?: boolean;
   zOrder?: Array<{ kind: string; id: string }>;
   locked?: Array<{ kind: string; id: string }>;
+  interactions?: ScriptCanvasInteractionsShim;
+}
+
+/** A visual on a canvas page that can take part in cross-filtering. */
+interface ScriptVisualRefShim {
+  kind: "chart" | "pivot" | "slicer";
+  id: string;
+}
+
+/** How a canvas page's visuals filter each other (Edit interactions). */
+interface ScriptCanvasInteractionsShim {
+  defaultMode?: "filter" | "highlight";
+  pairs?: Array<{ source: ScriptVisualRefShim; target: ScriptVisualRefShim; mode: "filter" | "highlight" | "none" }>;
+}
+
+/** One visual's cross-filter selection, as api.getCrossFilters answers it. */
+interface ScriptCrossFilterShim {
+  source: ScriptVisualRefShim;
+  sourceName: string;
+  sheetIndex: number;
+  sheetName: string;
+  fields: string[];
+  tuples: string[][];
 }
 
 /** What api.setCanvasLayout accepts: any subset of the settable keys. */
@@ -414,6 +437,7 @@ interface ScriptCanvasLayoutPatchShim {
   pageHeight?: number;
   background?: string;
   wallpaper?: string;
+  interactions?: ScriptCanvasInteractionsShim;
 }
 
 /** How one column of an AutoFilter is currently filtered (read back). */
@@ -3087,6 +3111,19 @@ function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
      *  resolve to the resulting layout. */
     setCanvasLayout: (patch: ScriptCanvasLayoutPatchShim, sheet?: SheetRef) =>
       call(rt, "api.setCanvasLayout", [patch, sheet]) as Promise<ScriptCanvasLayoutShim>,
+    // ---- Cross-filter (P4): a visual's selection on a canvas page (view state) ----
+    /** The selections filtering one canvas page (omitted sheet = every page). */
+    getCrossFilters: (sheet?: SheetRef) =>
+      call(rt, "api.getCrossFilters", [sheet]) as Promise<ScriptCrossFilterShim[]>,
+    /** Select member tuples in a visual (null clears it); omitted sheet = the active one. */
+    setCrossFilter: (
+      source: ScriptVisualRefShim,
+      selection: { fields: string[]; tuples: string[][] } | null,
+      sheet?: SheetRef,
+    ) => call(rt, "api.setCrossFilter", [source, selection, sheet]) as Promise<void>,
+    /** Clear the selections on one canvas page (omitted sheet = every page). */
+    clearCrossFilters: (sheet?: SheetRef) =>
+      call(rt, "api.clearCrossFilters", [sheet]) as Promise<void>,
     // ---- Range discovery (Wave 2): Range.End / CurrentRegion / UsedRange ----
     /** Where Ctrl+Arrow would land from (row, col) — a pure read, nothing moves. */
     getRangeEdge: (row: number, col: number, direction: EdgeDirection, sheet?: SheetRef) =>

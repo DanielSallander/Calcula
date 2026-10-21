@@ -25,8 +25,8 @@
 //! * deleting a PIVOT orphaned its slicers, its timeline slicers, and every
 //!   ribbon filter that listed it in `connected_pivots`;
 //! * deleting a SLICER left ribbon filters pointing at it through
-//!   `cross_filter_slicer_targets`;
-//! * deleting a RIBBON FILTER left its siblings' `cross_filter_targets`
+//!   `dependent_slicers`;
+//! * deleting a RIBBON FILTER left its siblings' `dependent_filters`
 //!   pointing at it;
 //! * deleting a CHART left a pane-control slider bound to a chart parameter
 //!   that no longer had a chart;
@@ -50,7 +50,7 @@
 //! item list still resolves.
 //!
 //! Where Excel simply prunes a dangling pointer and keeps the object (a ribbon
-//! filter's cross-filter target list, a pane control's chart binding), the
+//! filter's dependent-filter list, a pane control's chart binding), the
 //! policy is [`DeletePolicy::Prune`]: the object survives, minus the reference.
 //! Deleting a chart must not delete the slider that drove it.
 //!
@@ -497,7 +497,7 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     },
     DependencyRule {
         owner: ObjectKind::Pivot,
-        dependent: "ribbonFilter.connectedPivots / crossFilterTargets",
+        dependent: "ribbonFilter.connectedPivots / dependentFilters",
         dependent_kind: Some(ObjectKind::RibbonFilter),
         policy: DeletePolicy::Prune,
         implemented_by: "cascade_deleted_sources",
@@ -578,11 +578,11 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     // -----------------------------------------------------------------------
     DependencyRule {
         owner: ObjectKind::Slicer,
-        dependent: "ribbonFilter.crossFilterSlicerTargets",
+        dependent: "ribbonFilter.dependentSlicers",
         dependent_kind: Some(ObjectKind::RibbonFilter),
         policy: DeletePolicy::Prune,
         implemented_by: "cascade_deleted_slicers",
-        note: "A filter listing a dead slicer re-evaluated cross-filter \
+        note: "A filter listing a dead slicer re-evaluated dependent-slicer \
                 candidacy against it on every item fetch.",
     },
     DependencyRule {
@@ -635,11 +635,11 @@ pub const DEPENDENCY_MATRIX: &[DependencyRule] = &[
     // -----------------------------------------------------------------------
     DependencyRule {
         owner: ObjectKind::RibbonFilter,
-        dependent: "ribbonFilter.crossFilterTargets (siblings)",
+        dependent: "ribbonFilter.dependentFilters (siblings)",
         dependent_kind: Some(ObjectKind::RibbonFilter),
         policy: DeletePolicy::Prune,
         implemented_by: "cascade_deleted_filters",
-        note: "Cross-filter targets are filter ids; a deleted filter left \
+        note: "Dependent filters are filter ids; a deleted filter left \
                 every sibling listing an id that resolves to nothing.",
     },
     DependencyRule {
@@ -1482,11 +1482,11 @@ pub fn cascade_deleted_sources(
     //
     // A CASCADE THAT DELETES AN OBJECT MUST RUN THAT OBJECT'S OWN CASCADE, and
     // this is where §3bt stopped one step short. `delete_slicer` prunes the
-    // slicer out of every ribbon filter's `cross_filter_slicer_targets` and
+    // slicer out of every ribbon filter's `dependent_slicers` and
     // prunes the object script attached to its id -- and the slicers deleted a
     // few lines above went out through this path instead, which ran neither. So
     // deleting the TABLE a slicer filtered left every ribbon filter still
-    // cross-filtering against a slicer that no longer existed: the same orphan
+    // naming as a dependent a slicer that no longer existed: the same orphan
     // §3bn opened for, one level further down the tree.
     //
     // Found by the transitive walk added in §3cd (`cascade_domains`), not by
@@ -1498,7 +1498,7 @@ pub fn cascade_deleted_sources(
         let pruned = cascade_deleted_slicers(ribbon_filter_state, effect, &dead_slicers);
         // Into `rebound_filters`, which is exactly what
         // `record_source_cascade_undo` already restores -- so one Ctrl+Z brings
-        // the cross-filter links back with the slicers.
+        // the dependent-slicer links back with the slicers.
         out.rebound_filters.extend(pruned);
         for id in dead_slicers {
             crate::scripting::object_script_commands::prune_scripts_for_instance(
@@ -1558,13 +1558,13 @@ pub fn cascade_deleted_sources(
         let mut filters = ribbon_filter_state.filters.write(effect).unwrap();
         for filter in filters.values_mut() {
             let touches = filter.connected_pivots.iter().any(|p| dead_pivots.contains(p))
-                || filter.cross_filter_targets.iter().any(|p| dead_pivots.contains(p));
+                || filter.dependent_filters.iter().any(|p| dead_pivots.contains(p));
             if !touches {
                 continue;
             }
             out.rebound_filters.push(filter.clone());
             filter.connected_pivots.retain(|p| !dead_pivots.contains(p));
-            filter.cross_filter_targets.retain(|p| !dead_pivots.contains(p));
+            filter.dependent_filters.retain(|p| !dead_pivots.contains(p));
         }
     }
 
@@ -1600,7 +1600,7 @@ pub fn drop_slicer_computed_properties(
     }
 }
 
-/// Ribbon filters listing a now-deleted SLICER in `cross_filter_slicer_targets`.
+/// Ribbon filters listing a now-deleted SLICER in `dependent_slicers`.
 /// Returns the PREVIOUS value of every filter it edited, for undo.
 pub fn cascade_deleted_slicers(
     ribbon_filter_state: &RibbonFilterState,
@@ -1615,7 +1615,7 @@ pub fn cascade_deleted_slicers(
     let mut filters = ribbon_filter_state.filters.write(effect).unwrap();
     for filter in filters.values_mut() {
         if !filter
-            .cross_filter_slicer_targets
+            .dependent_slicers
             .iter()
             .any(|s| dead.contains(s))
         {
@@ -1623,13 +1623,13 @@ pub fn cascade_deleted_slicers(
         }
         previous.push(filter.clone());
         filter
-            .cross_filter_slicer_targets
+            .dependent_slicers
             .retain(|s| !dead.contains(s));
     }
     previous
 }
 
-/// Ribbon filters listing a now-deleted SIBLING FILTER in `cross_filter_targets`.
+/// Ribbon filters listing a now-deleted SIBLING FILTER in `dependent_filters`.
 /// Returns the PREVIOUS value of every filter it edited, for undo.
 pub fn cascade_deleted_filters(
     ribbon_filter_state: &RibbonFilterState,
@@ -1643,11 +1643,11 @@ pub fn cascade_deleted_filters(
     let mut previous = Vec::new();
     let mut filters = ribbon_filter_state.filters.write(effect).unwrap();
     for filter in filters.values_mut() {
-        if !filter.cross_filter_targets.iter().any(|f| dead.contains(f)) {
+        if !filter.dependent_filters.iter().any(|f| dead.contains(f)) {
             continue;
         }
         previous.push(filter.clone());
-        filter.cross_filter_targets.retain(|f| !dead.contains(f));
+        filter.dependent_filters.retain(|f| !dead.contains(f));
     }
     previous
 }
@@ -1916,7 +1916,7 @@ pub fn cascade_sheet_removed(
 
     // THE DELETED SLICERS' AND TIMELINES' OWN CASCADES, for the same reason
     // `cascade_deleted_sources` runs them (§3cd): a slicer removed with its
-    // sheet is still named in every ribbon filter's cross-filter target list,
+    // sheet is still named in every ribbon filter's dependent-slicer list,
     // and still owns an object script keyed on its id. The charts removed here
     // are handled by the caller, which is the one holding `PaneControlState`.
     {
@@ -2300,7 +2300,7 @@ pub(crate) fn list_object_dependents_core(
                 let filters = ribbon_filter_state.filters.read().unwrap();
                 for filter in filters.values() {
                     if !filter.connected_pivots.contains(&id)
-                        && !filter.cross_filter_targets.contains(&id)
+                        && !filter.dependent_filters.contains(&id)
                     {
                         continue;
                     }
@@ -2318,7 +2318,7 @@ pub(crate) fn list_object_dependents_core(
             let Some(id) = id else { return out };
             let filters = ribbon_filter_state.filters.read().unwrap();
             for filter in filters.values() {
-                if !filter.cross_filter_slicer_targets.contains(&id) {
+                if !filter.dependent_slicers.contains(&id) {
                     continue;
                 }
                 out.push(ObjectDependent {
@@ -2326,7 +2326,7 @@ pub(crate) fn list_object_dependents_core(
                     id: filter.id.to_string(),
                     name: filter.name.clone(),
                     policy: policy_wire_name(DeletePolicy::Prune).to_string(),
-                    via: "crossFilterSlicerTargets".to_string(),
+                    via: "dependentSlicers".to_string(),
                 });
             }
         }
@@ -2334,7 +2334,7 @@ pub(crate) fn list_object_dependents_core(
             let Some(id) = id else { return out };
             let filters = ribbon_filter_state.filters.read().unwrap();
             for filter in filters.values() {
-                if filter.id == id || !filter.cross_filter_targets.contains(&id) {
+                if filter.id == id || !filter.dependent_filters.contains(&id) {
                     continue;
                 }
                 out.push(ObjectDependent {
@@ -2342,7 +2342,7 @@ pub(crate) fn list_object_dependents_core(
                     id: filter.id.to_string(),
                     name: filter.name.clone(),
                     policy: policy_wire_name(DeletePolicy::Prune).to_string(),
-                    via: "crossFilterTargets".to_string(),
+                    via: "dependentFilters".to_string(),
                 });
             }
         }

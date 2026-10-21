@@ -23,7 +23,7 @@
 //   left clean, so the gesture can show Excel's data-loss warning BEFORE
 //   anything happens, for any selection size.
 
-use crate::api_types::{CellData, MergeOptions, MergeResult, MergedRegion, MovedCell};
+use crate::api_types::{CellData, CellTargetRef, MergeOptions, MergeResult, MergedRegion, MovedCell};
 use crate::persistence::FileState;
 use crate::{format_cell_value_and_class, AppState};
 use engine::UndoMergeRegion;
@@ -344,7 +344,26 @@ pub fn merge_cells(
     end_col: u32,
     sheet_index: Option<usize>,
     options: Option<MergeOptions>,
+    target: Option<CellTargetRef>,
 ) -> Result<MergeResult, String> {
+    // P3: an OBJECT's cells (Merge & Center and its menu on a floating grid).
+    if let Some(target) = target.as_ref() {
+        crate::cell_target::refuse_target_with_sheet(&Some(target.clone()), sheet_index.is_some())?;
+        return merge_cells_on_target(
+            &state,
+            &file_state,
+            &user_files_state,
+            &pivot_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            target,
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+            options,
+        );
+    }
     merge_cells_core(
         &state,
         &file_state,
@@ -815,7 +834,14 @@ pub fn unmerge_cells(
     sheet_index: Option<usize>,
     end_row: Option<u32>,
     end_col: Option<u32>,
+    target: Option<CellTargetRef>,
 ) -> Result<MergeResult, String> {
+    // P3: an OBJECT's cells. The RANGE form is accepted here (the off-sheet
+    // refusal of a range is for a bare `sheet_index`).
+    if let Some(target) = target.as_ref() {
+        crate::cell_target::refuse_target_with_sheet(&Some(target.clone()), sheet_index.is_some())?;
+        return unmerge_cells_on_target(&state, &file_state, target, row, col, end_row, end_col);
+    }
     unmerge_cells_core(&state, &file_state, row, col, sheet_index, end_row, end_col)
 }
 
@@ -963,6 +989,379 @@ pub fn unmerge_cells_core(
         merged_regions: merged_regions.iter().cloned().collect(),
         updated_cells,
         removed_regions: to_remove,
+        ..Default::default()
+    })
+}
+
+// ---------------------------------------------------------------------------
+// P3: merge and unmerge on an OBJECT's cells (a floating grid)
+// ---------------------------------------------------------------------------
+
+/// Record `(row, col)`'s state BEFORE its first change in this command, once.
+fn remember_original(
+    grid: &engine::Grid,
+    originals: &mut Vec<(u32, u32, Option<engine::Cell>)>,
+    touched: &mut std::collections::HashSet<(u32, u32)>,
+    row: u32,
+    col: u32,
+) {
+    if touched.insert((row, col)) {
+        originals.push((row, col, grid.get_cell(row, col).cloned()));
+    }
+}
+
+/// Merge on an OBJECT's cells (P3, owner finding G3; ruling Q4: ONE merge
+/// behaviour, so every `MergeOptions` the sheet gesture sends works here
+/// exactly as on a sheet). The object's BACKING sheet is planned and written;
+/// the active sheet is never touched.
+///
+/// - Holding nothing, before any effect: the write extent, the HOST's
+///   protection (Format Cells plus the backing cells' lock flags), the
+///   writeback claim and the array guard on the backing sheet.
+/// - `probe`: the plan (`lossy_regions` from the BACKING grid, the regions to
+///   create and dissolve, the moves) with nothing changed and no effect.
+/// - `across`: one region per row; `absorb`: merges wholly inside the range
+///   are dissolved and re-merged, a partial overlap still refuses.
+/// - `keep_first_value`: a region whose top-left holds nothing takes the first
+///   cell in reading order that does (value, formula and style), and every
+///   formula ON THE BACKING SHEET that read the moved cell is re-pointed at
+///   the top-left -- the same-sheet re-pointing `relocate_cell_references`
+///   does for the sheet gesture, which cannot reach a backing sheet.
+/// - ONE owned undo step (joining the gesture's open step): the backing
+///   cells (`script_grid_cells`) and the backing merge set
+///   (`sheet_merge_regions`), so one Ctrl+Z restores content and geometry.
+/// - PHASE B, holding nothing: dependencies rebuilt when a formula moved or
+///   was re-pointed; dependents anywhere recalculated when a value changed.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn merge_cells_on_target(
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    target: &CellTargetRef,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+    options: Option<MergeOptions>,
+) -> Result<MergeResult, String> {
+    let opts = options.unwrap_or_default();
+    let t = crate::cell_target::resolve_cell_target(state, target)?;
+    let backing = t.backing_index;
+    let rect = MergedRegion {
+        start_row: start_row.min(end_row),
+        start_col: start_col.min(end_col),
+        end_row: start_row.max(end_row),
+        end_col: start_col.max(end_col),
+    };
+    crate::cell_target::ensure_in_extent(&t, rect.start_row, rect.start_col, rect.end_row, rect.end_col)?;
+    crate::cell_target::gate_target_cells(
+        state,
+        &t,
+        (rect.start_row, rect.start_col, rect.end_row, rect.end_col),
+        "formatCells",
+        "merge cells",
+    )?;
+    crate::calp_commands::ensure_range_unclaimed_on_sheets(
+        state, "merge these cells", &[backing], rect.start_row, rect.start_col, rect.end_row, rect.end_col,
+    )?;
+    crate::commands::data::check_no_array_within(
+        state, backing, rect.start_row, rect.start_col, rect.end_row, rect.end_col,
+    )?;
+
+    let current: Vec<MergedRegion> =
+        crate::report::with_sheet_merges(state, backing, |merged| merged.iter().cloned().collect());
+
+    // Nothing to merge: a single cell, or Merge Across over one column.
+    let single_cell = rect.start_row == rect.end_row && rect.start_col == rect.end_col;
+    let single_column_across = opts.across && rect.start_col == rect.end_col;
+    if single_cell || single_column_across {
+        return Ok(MergeResult { success: false, merged_regions: current, ..Default::default() });
+    }
+    if opts.across && rect.end_row - rect.start_row + 1 > MAX_MERGE_ACROSS_ROWS {
+        return Err("Merge Across can merge at most 10,000 rows at once. Select fewer rows.".to_string());
+    }
+
+    // ABSORB: merges wholly inside are dissolved first; a partial overlap
+    // refuses, exactly as on a sheet.
+    let mut contained: Vec<MergedRegion> = Vec::new();
+    for region in &current {
+        if !rects_intersect(&rect, region) {
+            continue;
+        }
+        if opts.absorb && rect_contains(&rect, region) {
+            contained.push(region.clone());
+        } else {
+            return Err("Cannot merge: selection overlaps with existing merged region".to_string());
+        }
+    }
+    contained.sort_by_key(|r| (r.start_row, r.start_col, r.end_row, r.end_col));
+
+    let planned: Vec<MergedRegion> = if opts.across {
+        (rect.start_row..=rect.end_row)
+            .map(|row| MergedRegion { start_row: row, start_col: rect.start_col, end_row: row, end_col: rect.end_col })
+            .collect()
+    } else {
+        vec![rect.clone()]
+    };
+    if !contained.is_empty() {
+        let wanted: std::collections::HashSet<&MergedRegion> = planned.iter().collect();
+        let existing: std::collections::HashSet<&MergedRegion> = contained.iter().collect();
+        if wanted == existing {
+            return Ok(MergeResult { success: false, merged_regions: current, ..Default::default() });
+        }
+    }
+
+    let grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
+    crate::cell_target::ensure_target_still_at(state, &t)?;
+    let Some(grid) = grids.get(backing) else {
+        return Err("Floating range backing sheet is missing".to_string());
+    };
+
+    // THE PLAN on the BACKING grid: Excel's data-loss count and the value rule.
+    let stored = stored_cells_in(grid, &rect);
+    let mut lossy_regions: u32 = 0;
+    let mut moves: Vec<Option<(u32, u32)>> = Vec::with_capacity(planned.len());
+    for region in &planned {
+        let mut first_content: Option<(u32, u32)> = None;
+        let mut with_content: u32 = 0;
+        for &(row, col) in cells_of_region(&stored, region) {
+            if grid.get_cell(row, col).is_some_and(holds_content) {
+                with_content += 1;
+                if first_content.is_none() {
+                    first_content = Some((row, col));
+                }
+            }
+        }
+        if with_content >= 2 {
+            lossy_regions += 1;
+        }
+        let master_holds = grid.get_cell(region.start_row, region.start_col).is_some_and(holds_content);
+        moves.push(if opts.keep_first_value && !master_holds { first_content } else { None });
+    }
+    let moved_cells: Vec<MovedCell> = planned
+        .iter()
+        .zip(&moves)
+        .filter_map(|(region, from)| {
+            from.map(|(from_row, from_col)| MovedCell {
+                from_row,
+                from_col,
+                to_row: region.start_row,
+                to_col: region.start_col,
+            })
+        })
+        .collect();
+
+    if opts.probe {
+        // A READ: no effect, no undo step.
+        return Ok(MergeResult {
+            success: true,
+            merged_regions: current,
+            updated_cells: Vec::new(),
+            created_regions: planned,
+            removed_regions: contained,
+            lossy_regions,
+            moved_cells,
+        });
+    }
+
+    // Every gate has passed and the merge changes the document.
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let mut grids = grids.authorize(&effect);
+    let mut originals: Vec<(u32, u32, Option<engine::Cell>)> = Vec::new();
+    let mut touched: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+    let mut values_changed = false;
+    let mut formula_moved = false;
+    {
+        let grid = &mut grids[backing];
+        for (region, from) in planned.iter().zip(&moves) {
+            let master = (region.start_row, region.start_col);
+            if let Some((from_row, from_col)) = *from {
+                if let Some(source) = grid.get_cell(from_row, from_col).cloned() {
+                    remember_original(grid, &mut originals, &mut touched, master.0, master.1);
+                    formula_moved |= source.ast.is_some();
+                    grid.set_cell(master.0, master.1, source);
+                    values_changed = true;
+                }
+            }
+            for &(row, col) in cells_of_region(&stored, region) {
+                if (row, col) == master {
+                    continue;
+                }
+                if grid.get_cell(row, col).is_some() {
+                    remember_original(grid, &mut originals, &mut touched, row, col);
+                    grid.clear_cell(row, col);
+                    values_changed = true;
+                }
+            }
+        }
+        // Readers of a MOVED value on the backing sheet follow it to the
+        // top-left cell (the sheet gesture's same-sheet re-pointing).
+        for moved in &moved_cells {
+            let delta_row = moved.to_row as i32 - moved.from_row as i32;
+            let delta_col = moved.to_col as i32 - moved.from_col as i32;
+            let mut rewrites: Vec<(u32, u32, String)> = grid
+                .cells
+                .iter()
+                .filter(|(&coord, _)| coord != (moved.to_row, moved.to_col))
+                .filter_map(|(&(row, col), cell)| {
+                    let formula = crate::commands::structure::formula_to_rewrite(cell)?;
+                    let relocated = crate::commands::structure::relocate_references_in_formula(
+                        &formula,
+                        moved.from_row,
+                        moved.from_col,
+                        moved.from_row,
+                        moved.from_col,
+                        delta_row,
+                        delta_col,
+                    );
+                    (relocated != formula).then_some((row, col, relocated))
+                })
+                .collect();
+            rewrites.sort_by_key(|&(row, col, _)| (row, col));
+            for (row, col, relocated) in rewrites {
+                let Some(mut cell) = grid.get_cell(row, col).cloned() else { continue };
+                if crate::commands::structure::store_rewritten_formula(&mut cell, &relocated, "merge", row, col) {
+                    remember_original(grid, &mut originals, &mut touched, row, col);
+                    grid.set_cell(row, col, cell);
+                    formula_moved = true;
+                    values_changed = true;
+                }
+            }
+        }
+    }
+    {
+        let label = if opts.across { "Merge across" } else { "Merge cells" };
+        let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
+        let owned = undo_stack.begin_owned_transaction(label);
+        if !originals.is_empty() {
+            undo_stack.record_custom_restore(
+                "script_grid_cells".to_string(),
+                crate::undo_commands::script_grid_cells_snapshot_bytes(backing, originals),
+                label,
+            );
+        }
+        undo_stack.record_custom_restore(
+            "sheet_merge_regions".to_string(),
+            crate::undo_commands::sheet_merge_regions_snapshot_bytes(backing, current),
+            label,
+        );
+        undo_stack.commit_owned(owned);
+    }
+    drop(grids);
+
+    let merged_regions: Vec<MergedRegion> = crate::report::with_sheet_merges_mut(state, &effect, backing, |merged| {
+        for region in &contained {
+            merged.remove(region);
+        }
+        for region in &planned {
+            merged.insert(region.clone());
+        }
+        let mut all: Vec<MergedRegion> = merged.iter().cloned().collect();
+        all.sort_by_key(|r| (r.start_row, r.start_col, r.end_row, r.end_col));
+        all
+    });
+
+    // PHASE B, holding nothing from the write.
+    if formula_moved {
+        crate::undo_commands::rebuild_all_dependencies(state);
+    }
+    if values_changed {
+        crate::commands::data::recalc_after_off_sheet_write(
+            state,
+            user_files_state,
+            pivot_state,
+            pane_control_state,
+            ribbon_filter_state,
+            &[backing],
+        );
+    }
+
+    Ok(MergeResult {
+        success: true,
+        merged_regions,
+        updated_cells: Vec::new(),
+        created_regions: planned,
+        removed_regions: contained,
+        lossy_regions,
+        moved_cells,
+    })
+}
+
+/// Unmerge on an OBJECT's cells (P3). The single-cell form dissolves the
+/// backing region containing (`row`, `col`); the RANGE form (both end
+/// corners) dissolves every backing region intersecting the rectangle. Gated
+/// by the HOST's Format Cells option (merge structure is a format; unmerging
+/// destroys no value) and the writeback claim of each found region; ONE owned
+/// undo step restoring the backing merge set.
+pub(crate) fn unmerge_cells_on_target(
+    state: &AppState,
+    file_state: &FileState,
+    target: &CellTargetRef,
+    row: u32,
+    col: u32,
+    end_row: Option<u32>,
+    end_col: Option<u32>,
+) -> Result<MergeResult, String> {
+    let t = crate::cell_target::resolve_cell_target(state, target)?;
+    let backing = t.backing_index;
+    let area = match (end_row, end_col) {
+        (Some(er), Some(ec)) => MergedRegion {
+            start_row: row.min(er),
+            start_col: col.min(ec),
+            end_row: row.max(er),
+            end_col: col.max(ec),
+        },
+        _ => MergedRegion { start_row: row, start_col: col, end_row: row, end_col: col },
+    };
+    crate::cell_target::ensure_in_extent(&t, area.start_row, area.start_col, area.end_row, area.end_col)?;
+    crate::cell_target::gate_host_action(state, t.host_index, backing, "formatCells", "unmerge cells")?;
+
+    let current: Vec<MergedRegion> =
+        crate::report::with_sheet_merges(state, backing, |merged| merged.iter().cloned().collect());
+    let mut found: Vec<MergedRegion> = current.iter().filter(|r| rects_intersect(&area, r)).cloned().collect();
+    found.sort_by_key(|r| (r.start_row, r.start_col));
+    if found.is_empty() {
+        return Ok(MergeResult { success: false, merged_regions: current, ..Default::default() });
+    }
+    for region in &found {
+        crate::calp_commands::ensure_range_unclaimed_on_sheets(
+            state,
+            "unmerge these cells",
+            &[backing],
+            region.start_row,
+            region.start_col,
+            region.end_row,
+            region.end_col,
+        )?;
+    }
+
+    {
+        let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
+        let owned = undo_stack.begin_owned_transaction("Unmerge cells");
+        undo_stack.record_custom_restore(
+            "sheet_merge_regions".to_string(),
+            crate::undo_commands::sheet_merge_regions_snapshot_bytes(backing, current),
+            "Unmerge cells",
+        );
+        undo_stack.commit_owned(owned);
+    }
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let merged_regions: Vec<MergedRegion> = crate::report::with_sheet_merges_mut(state, &effect, backing, |merged| {
+        for region in &found {
+            merged.remove(region);
+        }
+        let mut all: Vec<MergedRegion> = merged.iter().cloned().collect();
+        all.sort_by_key(|r| (r.start_row, r.start_col, r.end_row, r.end_col));
+        all
+    });
+
+    Ok(MergeResult {
+        success: true,
+        merged_regions,
+        removed_regions: found,
         ..Default::default()
     })
 }

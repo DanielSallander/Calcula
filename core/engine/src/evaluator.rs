@@ -8431,9 +8431,28 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    /// The serial of a date / time / date-and-time written the way the
+    /// evaluator's LOCALE writes it ("15.01.2024" in de-DE, "15/01/2024" in
+    /// en-GB, the locale's month names), via the typed-entry ladder -- the one
+    /// date reader, so DATEVALUE and typing into a cell agree. Returns the
+    /// COMBINED serial and whether a date part was present (a bare "12:00"
+    /// has none).
+    fn locale_date_time_serial(&self, text: &str) -> Option<(f64, bool)> {
+        let (serial, format) = crate::typed_entry::parse_date_time_input(text.trim(), &self.locale)?;
+        let has_date = !matches!(format, crate::style::NumberFormat::Time { .. });
+        Some((serial, has_date))
+    }
+
     fn fn_datevalue(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
         let text = text_arg!(self.evaluate(&args[0]));
+        // The locale's own date order FIRST (en-GB "01/02/2024" is 1 February),
+        // dropping any time part as Excel does; a time-only text is not a date
+        // and falls through. Then the old ISO-then-US reader, so "2024-01-15"
+        // and "01/15/2024" keep working wherever the locale does not claim them.
+        if let Some((serial, true)) = self.locale_date_time_serial(&text) {
+            return EvalResult::Number(serial.trunc());
+        }
         match date_serial::parse_date_string(&text) {
             Some(serial) => EvalResult::Number(serial),
             None => EvalResult::Error(CellError::Value),
@@ -8443,6 +8462,11 @@ impl<'a> Evaluator<'a> {
     fn fn_timevalue(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
         let text = text_arg!(self.evaluate(&args[0]));
+        // The locale reader first: its fraction of a day (a date-only text has
+        // none, so it is 0, as Excel's TIMEVALUE of a date-only text is).
+        if let Some((serial, _)) = self.locale_date_time_serial(&text) {
+            return EvalResult::Number(serial.fract());
+        }
         match date_serial::parse_time_string(&text) {
             Some(fraction) => EvalResult::Number(fraction),
             None => EvalResult::Error(CellError::Value),
@@ -16852,15 +16876,66 @@ impl<'a> Evaluator<'a> {
 
     // ==================== Additional Text Functions ====================
 
+    // DOLLAR, EURO and FIXED PRODUCE TEXT, and the text follows the evaluator's
+    // locale (the app locale the host installs). They used to hard-code the
+    // en-US spelling -- "," grouping, "." decimal, a "$" sign -- so a Swedish
+    // or German user saw `$1,234.50` from the very formula Excel shows them as
+    // `1 234,50 kr` / `€ 1.234,50`. The formula itself stays invariant; only
+    // the produced text localises, and (like TEXT) it refreshes on the next
+    // recalculation after a locale switch, never by itself.
+    //
+    // DOLLAR uses the locale's `currency_symbol` and `currency_position` AS
+    // THE LOCALE TABLE STATES THEM (the symbol carries its own spacing:
+    // de-DE "€ " before, fr-FR " €" after). EURO keeps the euro sign before
+    // the number and takes only the separators. A negative is wrapped in
+    // parentheses where the region's accounting pattern does that (en-US
+    // only, `LocaleSettings::accounting_negative_style`) and carries a
+    // leading minus everywhere else. With the default (invariant) locale every
+    // result is byte-identical to the old en-US output.
+
     fn fn_dollar(&self, args: &[Expression]) -> EvalResult {
-        self.fn_currency(args, "$")
+        let symbol = self.locale.currency_symbol.clone();
+        let before = self.locale.currency_position == crate::locale::LocaleCurrencyPosition::Before;
+        self.fn_currency(args, &symbol, before)
     }
 
     fn fn_euro(&self, args: &[Expression]) -> EvalResult {
-        self.fn_currency(args, "\u{20AC}")
+        self.fn_currency(args, "\u{20AC}", true)
     }
 
-    fn fn_currency(&self, args: &[Expression], symbol: &str) -> EvalResult {
+    /// `abs_rounded` written with `decimals` places (a non-positive count is a
+    /// whole number) in the evaluator's locale: its decimal separator, and its
+    /// thousands separator every three integer digits when `grouping`.
+    fn locale_fixed_digits(&self, abs_rounded: f64, decimals: i32, grouping: bool) -> String {
+        let formatted = if decimals > 0 {
+            format!("{:.prec$}", abs_rounded, prec = decimals as usize)
+        } else {
+            format!("{}", abs_rounded as i64)
+        };
+        let (integer_part, fraction) = match formatted.split_once('.') {
+            Some((i, f)) => (i, Some(f)),
+            None => (formatted.as_str(), None),
+        };
+        let mut out = String::with_capacity(formatted.len() + formatted.len() / 3);
+        if grouping {
+            let len = integer_part.chars().count();
+            for (i, ch) in integer_part.chars().enumerate() {
+                if i > 0 && (len - i) % 3 == 0 {
+                    out.push(self.locale.thousands_separator);
+                }
+                out.push(ch);
+            }
+        } else {
+            out.push_str(integer_part);
+        }
+        if let Some(f) = fraction {
+            out.push(self.locale.decimal_separator);
+            out.push_str(f);
+        }
+        out
+    }
+
+    fn fn_currency(&self, args: &[Expression], symbol: &str, symbol_before: bool) -> EvalResult {
         // DOLLAR/EURO(number, [decimals])
         if args.is_empty() || args.len() > 2 { return EvalResult::Error(CellError::Value); }
         let number = match self.evaluate(&args[0]).as_number() {
@@ -16878,34 +16953,22 @@ impl<'a> Evaluator<'a> {
 
         let multiplier = 10_f64.powi(decimals);
         let rounded = (number * multiplier).round() / multiplier;
-        let abs_val = rounded.abs();
+        let digits = self.locale_fixed_digits(rounded.abs(), decimals, true);
 
-        let formatted = if decimals > 0 {
-            format!("{:.prec$}", abs_val, prec = decimals as usize)
+        let result = if symbol_before {
+            format!("{}{}", symbol, digits)
         } else {
-            format!("{}", abs_val as i64)
-        };
-
-        // Add thousands separators
-        let parts: Vec<&str> = formatted.splitn(2, '.').collect();
-        let integer_part = parts[0];
-        let mut with_commas = String::new();
-        for (i, ch) in integer_part.chars().rev().enumerate() {
-            if i > 0 && i % 3 == 0 {
-                with_commas.push(',');
-            }
-            with_commas.push(ch);
-        }
-        let with_commas: String = with_commas.chars().rev().collect();
-
-        let result = if parts.len() > 1 {
-            format!("{}{}.{}", symbol, with_commas, parts[1])
-        } else {
-            format!("{}{}", symbol, with_commas)
+            format!("{}{}", digits, symbol)
         };
 
         if rounded < 0.0 {
-            EvalResult::Text(format!("({})", result))
+            match self.locale.accounting_negative_style() {
+                crate::style::NegativeStyle::Parentheses
+                | crate::style::NegativeStyle::RedParentheses => {
+                    EvalResult::Text(format!("({})", result))
+                }
+                _ => EvalResult::Text(format!("-{}", result)),
+            }
         } else {
             EvalResult::Text(result)
         }
@@ -16938,32 +17001,7 @@ impl<'a> Evaluator<'a> {
 
         let multiplier = 10_f64.powi(decimals);
         let rounded = (number * multiplier).round() / multiplier;
-
-        let formatted = if decimals > 0 {
-            format!("{:.prec$}", rounded.abs(), prec = decimals as usize)
-        } else {
-            format!("{}", rounded.abs() as i64)
-        };
-
-        let result = if no_commas {
-            formatted
-        } else {
-            let parts: Vec<&str> = formatted.splitn(2, '.').collect();
-            let integer_part = parts[0];
-            let mut with_commas = String::new();
-            for (i, ch) in integer_part.chars().rev().enumerate() {
-                if i > 0 && i % 3 == 0 {
-                    with_commas.push(',');
-                }
-                with_commas.push(ch);
-            }
-            let with_commas: String = with_commas.chars().rev().collect();
-            if parts.len() > 1 {
-                format!("{}.{}", with_commas, parts[1])
-            } else {
-                with_commas
-            }
-        };
+        let result = self.locale_fixed_digits(rounded.abs(), decimals, !no_commas);
 
         if rounded < 0.0 {
             EvalResult::Text(format!("-{}", result))

@@ -5,6 +5,7 @@
 import { jsPDF } from "jspdf";
 import type { PrintData } from "@api/lib";
 import { indexToCol, colToIndex } from "@api/lib";
+import { formatDate } from "@api/locale";
 
 // ============================================================================
 // Paper sizes in mm (same as printGenerator.ts)
@@ -184,19 +185,25 @@ function parseHeaderFooterSections(text: string): HeaderFooterSections {
   return { left: left.trim(), center: center.trim(), right: right.trim() };
 }
 
-/** Replace dynamic field codes with actual values. */
-function replaceDynamicFields(
+/**
+ * Replace dynamic field codes with actual values. &D / &T are the date and time
+ * of `now` in the APP locale's short-date and time patterns.
+ */
+export function replaceDynamicFields(
   text: string,
   pageNum: number,
   totalPages: number,
   sheetName: string,
+  now: Date = new Date(),
 ): string {
   if (!text) return "";
+  const dateText = formatDate(now, "short");
+  const timeText = formatDate(now, "time");
   return text
     .replace(/&P/g, String(pageNum))
     .replace(/&N/g, String(totalPages))
-    .replace(/&D/g, new Date().toLocaleDateString())
-    .replace(/&T/g, new Date().toLocaleTimeString())
+    .replace(/&D/g, () => dateText)
+    .replace(/&T/g, () => timeText)
     .replace(/&F/g, sheetName)
     .replace(/&A/g, sheetName);
 }

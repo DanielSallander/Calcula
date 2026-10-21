@@ -33,7 +33,7 @@ export interface DesignQueryFieldRef {
   /** The FILTER LEVEL an engine-routed filter applies at (Rust
    *  `DesignQueryFieldRef.level`): absent = 1, an ordinary slicer that a bare
    *  CLEAR/RESET removes; 2..9 = a slicer PINNED above that range
-   *  (`@api/pageFilters` `filterLevel`). Only engine-routed filters read it. */
+   *  (`@api/reportFilters` `filterLevel`). Only engine-routed filters read it. */
   level?: number;
 }
 
@@ -48,6 +48,18 @@ export interface DesignQueryValueRef {
   numberFormat?: string;
 }
 
+/**
+ * One tuple (OR-of-AND) filter of a design query (P4). Mirrors the Rust
+ * `DesignQueryTupleFilter` (pivot/headless.rs): `tuples[i][j]` is the member
+ * KEY of `fields[j]` ("" for the blank member). An empty `tuples` keeps
+ * nothing. `level` as `DesignQueryFieldRef.level` (absent = 1).
+ */
+export interface DesignQueryTupleFilter {
+  fields: Array<{ table: string; column: string }>;
+  tuples: string[][];
+  level?: number;
+}
+
 /** Compiled design query — the payload sent to `run_design_query`. */
 export interface DesignQueryRequest {
   connectionId: string;
@@ -55,12 +67,16 @@ export interface DesignQueryRequest {
   columnFields: DesignQueryFieldRef[];
   valueFields: DesignQueryValueRef[];
   filterFields: DesignQueryFieldRef[];
-  /** The canvas PAGE's model filters (`@api/pageFilters`), merged by the
+  /** The canvas PAGE's model filters (`@api/reportFilters`), merged by the
    *  chart reader and kept apart from the query's own FILTERS: the backend
    *  runs them INSIDE the engine query, never as a GROUP BY column, so a
    *  non-additive measure under a slicer keeping several items is exact
    *  (Rust `DesignQueryRequest.page_filter_fields`). */
   pageFilterFields?: DesignQueryFieldRef[];
+  /** OR-of-AND filters (a non-rectangular cross-filter selection, P4): keep a
+   *  row whose columns equal one of the tuples. Run inside the engine query
+   *  like `pageFilterFields` (Rust `DesignQueryRequest.tuple_filters`). */
+  tupleFilters?: DesignQueryTupleFilter[];
   calculatedFields?: CalculatedFieldDef[];
   valueColumnOrder?: ValueColumnRefDef[];
   layout?: LayoutConfig;

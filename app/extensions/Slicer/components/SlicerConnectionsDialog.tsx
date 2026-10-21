@@ -8,6 +8,15 @@
 //          list for it. So for a model slicer this dialog SHOWS that page,
 //          read-only, and says what is not reached -- rather than listing every
 //          pivot with ticks that would give the slicer mixed semantics.
+//
+//          The page is every VISUAL of the model there (P4): its BI pivots
+//          (from the backend, the list the slicer's filter is written to) and
+//          its design-query charts, cards, KPIs and gauges (from
+//          @api/modelVisuals, read-only: they follow the slicer through
+//          @api/reportFilters). A visual the page's Edit interactions set to
+//          None for this slicer is listed UNticked with "(None -- Edit
+//          interactions)": the place to change it is Canvas > Edit
+//          interactions, never this dialog.
 
 import React, { useState, useEffect, useCallback } from "react";
 import type { DialogProps } from "@api";
@@ -15,10 +24,13 @@ import { getAllPivotTables, getPivotHierarchies, getAllTables } from "@api/backe
 import { getSlicerById, updateSlicerAsync } from "../lib/slicerStore";
 import { broadcastSelectedSlicers } from "../handlers/selectionHandler";
 import {
-  getModelSlicerPageTargets,
+  getModelSlicerPagePivots,
+  slicerInteractionLookup,
+  slicerVisualRef,
   syncReportConnections,
-  type ModelConnectionPivot,
 } from "../lib/slicerFilterBridge";
+import { listModelVisuals } from "@api/modelVisuals";
+import type { VisualRef } from "@api/reportFilters";
 import { MODEL_SLICER_REACH } from "../lib/insertSlicerPlan";
 import { runStepThenConfirmOverwrite } from "@api/pivotOverwrite";
 import type { Slicer, SlicerSourceType, SlicerConnection } from "../lib/slicerTypes";
@@ -32,6 +44,40 @@ interface ConnectionTarget {
   id: string;
   name: string;
   hasField: boolean; // Whether this source has the slicer's field name
+}
+
+/** One visual of a model slicer's page, as the read-only list shows it. */
+export interface ModelSlicerPageVisual {
+  ref: VisualRef;
+  name: string;
+  /** "PivotTable", "Column chart", "Card"... */
+  kindLabel: string;
+  /** False when the page's Edit interactions set this visual to None for the slicer. */
+  filtered: boolean;
+}
+
+/** What a visual set to None for the slicer says beside its name. */
+export const NONE_INTERACTION_NOTE = "(None -- Edit interactions)";
+
+/**
+ * The visuals a model slicer's page holds: its BI pivots (the backend's list)
+ * first, then the design-query visuals of the same model on the same sheet
+ * that follow other visuals (@api/modelVisuals). Each says whether the page's
+ * Edit interactions keep the slicer's filter on it.
+ */
+export async function loadModelSlicerPageVisuals(slicer: Slicer): Promise<ModelSlicerPageVisual[]> {
+  const pivots = await getModelSlicerPagePivots(slicer.cacheSourceId, slicer.sheetIndex);
+  const modeOf = slicerInteractionLookup(slicer.sheetIndex);
+  const self = slicerVisualRef(slicer.id);
+  const rows: ModelSlicerPageVisual[] = pivots.map((p) => {
+    const ref: VisualRef = { kind: "pivot", id: String(p.id) };
+    return { ref, name: p.name, kindLabel: "PivotTable", filtered: modeOf(self, ref) !== "none" };
+  });
+  for (const v of listModelVisuals({ connectionId: String(slicer.cacheSourceId) })) {
+    if (v.ref.kind !== "chart" || !v.role.target || v.sheetIndex !== slicer.sheetIndex) continue;
+    rows.push({ ref: v.ref, name: v.name, kindLabel: v.label, filtered: modeOf(self, v.ref) !== "none" });
+  }
+  return rows;
 }
 
 // ============================================================================
@@ -52,7 +98,7 @@ export function SlicerConnectionsDialog({
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   /** A model slicer's page (read-only); null for table / pivot slicers. */
-  const [pageTargets, setPageTargets] = useState<ModelConnectionPivot[] | null>(null);
+  const [pageTargets, setPageTargets] = useState<ModelSlicerPageVisual[] | null>(null);
 
   const connKey = (type: SlicerSourceType, id: string) => `${type}:${id}`;
 
@@ -82,11 +128,11 @@ export function SlicerConnectionsDialog({
   const loadPageTargets = async (s: Slicer) => {
     setIsLoading(true);
     try {
-      setPageTargets(await getModelSlicerPageTargets(s.cacheSourceId, s.sheetIndex));
+      setPageTargets(await loadModelSlicerPageVisuals(s));
     } catch (err) {
       console.error("[SlicerConnections] Error loading the model slicer's page:", err);
       setPageTargets([]);
-      setError("Failed to load the PivotTables this slicer filters.");
+      setError("Failed to load the visuals this slicer filters.");
     } finally {
       setIsLoading(false);
     }
@@ -267,22 +313,30 @@ export function SlicerConnectionsDialog({
           {pageTargets !== null ? (
             <div data-testid="model-slicer-page">
               <div style={s.sectionLabel}>
-                PivotTables this model slicer filters (this sheet):
+                Visuals this model slicer filters (this page):
               </div>
               <div style={s.reachNote}>{MODEL_SLICER_REACH}</div>
               {isLoading ? (
-                <div style={s.loadingText}>Loading PivotTables...</div>
+                <div style={s.loadingText}>Loading visuals...</div>
               ) : pageTargets.length === 0 ? (
                 <div style={s.emptyText}>
-                  No PivotTable of this model on this sheet yet. PivotTables added here later
-                  are filtered automatically.
+                  No visual of this model on this page yet. Visuals added here later are filtered
+                  automatically.
                 </div>
               ) : (
                 <div style={s.targetList}>
                   {pageTargets.map((p) => (
-                    <label key={p.id} style={{ ...s.targetRow, cursor: "default" }} title={p.name}>
-                      <input type="checkbox" checked readOnly disabled style={s.checkbox} />
+                    <label
+                      key={`${p.ref.kind}:${p.ref.id}`}
+                      data-visual-ref={`${p.ref.kind}:${p.ref.id}`}
+                      style={{ ...s.targetRow, cursor: "default" }}
+                      title={p.filtered ? p.name : `${p.name} ${NONE_INTERACTION_NOTE}`}
+                    >
+                      <input type="checkbox" checked={p.filtered} readOnly disabled style={s.checkbox} />
                       <span style={s.targetName}>{p.name}</span>
+                      <span style={s.incompatibleBadge}>
+                        {p.filtered ? p.kindLabel : `${p.kindLabel} ${NONE_INTERACTION_NOTE}`}
+                      </span>
                     </label>
                   ))}
                 </div>

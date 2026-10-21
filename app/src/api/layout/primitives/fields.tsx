@@ -21,9 +21,18 @@
 //          `Number(e.target.value)` turned the first keystroke of "-5" into
 //          "auto" and applied it to the chart. See the component for how the
 //          draft text is kept apart from the committed number.
+//
+//          P2 (app locale everywhere): the box is a TEXT input that reads and
+//          shows numbers in the APP locale ("1,5" under de-DE), never the
+//          browser's own locale, which is what a native number input follows
+//          and which need not be the app's. NumberInput is the bare <input>
+//          with those semantics (draft, app-locale parse, ArrowUp/ArrowDown
+//          step, clamp on blur) for callers that style their own box;
+//          NumberField puts it on the field chrome.
 
 import React, { forwardRef, useId, useState } from "react";
 import { css, cx } from "@emotion/css";
+import { formatNumberIn, getActiveLocale, parseNumberIn } from "../../../core/lib/locale";
 import { useSurfaceLayout } from "../context";
 import { LT } from "../theme";
 import { FIELD_HEIGHT, FONT_FAMILY, GAP_SM, GAP_XS, LABEL_FONT_SIZE, ROW_GAP } from "../tokens";
@@ -189,29 +198,37 @@ export function FieldGrid({
 }
 
 // ============================================================================
-// NumberField
+// NumberInput / NumberField
 // ============================================================================
 
 /** Default NumberField width: four digits and a sign at 12px. */
 export const NUMBER_FIELD_WIDTH = 62;
 
-/** Display text for a committed number: blank for null, and without binary
- *  float noise (0.1 + 0.2 shows "0.3", not "0.30000000000000004"). Fifteen
- *  significant digits is the most a double round-trips exactly. */
+/** Significant digits a double round-trips exactly. */
+const ROUND_TRIP_DIGITS = 15;
+
+/** Display text for a committed number, in the APP locale: blank for null,
+ *  no grouping (so the text reads back exactly), and without binary float
+ *  noise (0.1 + 0.2 shows "0.3", not "0.30000000000000004"): fifteen
+ *  significant digits, the most a double round-trips exactly. */
 export function formatNumberFieldValue(value: number | null): string {
   if (value === null || !Number.isFinite(value)) return "";
-  return String(parseFloat(value.toPrecision(15)));
+  const abs = Math.abs(value);
+  const intDigits = abs >= 1 ? Math.floor(Math.log10(abs)) + 1 : 0;
+  const maxDecimals = Math.max(0, Math.min(ROUND_TRIP_DIGITS, ROUND_TRIP_DIGITS - intDigits));
+  return formatNumberIn(getActiveLocale(), value, { minDecimals: 0, maxDecimals, grouping: false });
 }
 
 /**
- * What the box's text means: `null` for blank, a number, or `undefined` for
- * text that is not (yet) a number and must not be reported. `badInput` is the
- * browser's own flag for a half-typed "1." or "-", which it reports as "".
+ * What the box's text means, read STRICTLY in the app locale: `null` for
+ * blank, a number, or `undefined` for text that is not (yet) a number and must
+ * not be reported -- a half-typed "-" or "1e", or the foreign spelling ("1.5"
+ * under de-DE, where "." groups thousands).
  */
-export function parseNumberFieldText(raw: string, badInput = false): number | null | undefined {
-  if (raw.trim() === "") return badInput ? undefined : null;
-  const n = Number(raw);
-  return Number.isFinite(n) ? n : undefined;
+export function parseNumberFieldText(raw: string): number | null | undefined {
+  if (raw.trim() === "") return null;
+  const n = parseNumberIn(getActiveLocale(), raw);
+  return n === null ? undefined : n;
 }
 
 /** Clamp into [min, max] where those bounds exist. */
@@ -221,6 +238,111 @@ function clampToRange(n: number, min?: number, max?: number): number {
   if (max !== undefined && out > max) out = max;
   return out;
 }
+
+/**
+ * One ArrowUp (+1) / ArrowDown (-1) press: `current` moved by `step` (1 when
+ * absent or "any", as a native number input steps), without float noise, and
+ * clamped into [min, max]. A blank box steps from 0.
+ */
+export function stepNumberFieldValue(
+  current: number | null,
+  direction: 1 | -1,
+  step?: number | "any",
+  min?: number,
+  max?: number,
+): number {
+  const size = typeof step === "number" && Number.isFinite(step) && step > 0 ? step : 1;
+  const next = (current ?? 0) + direction * size;
+  const clean = Number(next.toPrecision(ROUND_TRIP_DIGITS));
+  return clampToRange(Object.is(clean, -0) ? 0 : clean, min, max);
+}
+
+export interface NumberInputProps
+  extends Omit<
+    React.InputHTMLAttributes<HTMLInputElement>,
+    "type" | "value" | "defaultValue" | "onChange" | "min" | "max" | "step"
+  > {
+  /** The committed number, or null for blank. */
+  value: number | null;
+  /** Called with each new number while typing (and on each arrow step), and
+   *  with null when the box is emptied. Never called for half-typed or
+   *  foreign-locale text ("-", "1e", "1.5" under de-DE). */
+  onChange: (value: number | null) => void;
+  /** Lower bound: enforced when the box loses focus and by the arrow step. */
+  min?: number;
+  /** Upper bound, enforced the same way. */
+  max?: number;
+  /** ArrowUp/ArrowDown step. Default 1. */
+  step?: number | "any";
+  /** data-testid for the <input>. */
+  testId?: string;
+}
+
+/**
+ * A bare number <input> in the APP locale, for a caller that styles its own
+ * box (NumberField is this on the field chrome). Keeps what the user is typing
+ * as a local DRAFT while it differs from a number -- so "-", "1," and "1e"
+ * survive the controlled re-render -- and reports a number only when the text
+ * is one. ArrowUp/ArrowDown step it the way a native number input did. When
+ * focus leaves, the draft is dropped (the box shows the committed value again)
+ * and min/max are enforced. Every other HTML prop and the ref go to the input;
+ * a caller's onKeyDown runs first and may preventDefault the step.
+ */
+export const NumberInput = forwardRef<HTMLInputElement, NumberInputProps>(function NumberInput(
+  { value, onChange, min, max, step, testId, onBlur, onKeyDown, ...rest },
+  ref,
+) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const shown = draft ?? formatNumberFieldValue(value);
+
+  return (
+    <input
+      data-testid={testId}
+      inputMode="decimal"
+      autoComplete="off"
+      spellCheck={false}
+      {...rest}
+      ref={ref}
+      type="text"
+      // A native number input was a spinbutton; this one still steps.
+      role="spinbutton"
+      aria-valuenow={value ?? undefined}
+      aria-valuemin={min}
+      aria-valuemax={max}
+      aria-valuetext={shown}
+      value={shown}
+      onChange={(e) => {
+        const raw = e.target.value;
+        setDraft(raw);
+        const parsed = parseNumberFieldText(raw);
+        if (parsed !== undefined) onChange(parsed);
+      }}
+      onKeyDown={(e) => {
+        onKeyDown?.(e);
+        if (e.defaultPrevented) return;
+        if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+        if (e.altKey || e.ctrlKey || e.metaKey) return;
+        e.preventDefault();
+        const typed = parseNumberFieldText(e.currentTarget.value);
+        const base = typeof typed === "number" ? typed : value;
+        const next = stepNumberFieldValue(base, e.key === "ArrowUp" ? 1 : -1, step, min, max);
+        setDraft(formatNumberFieldValue(next));
+        onChange(next);
+      }}
+      onBlur={(e) => {
+        onBlur?.(e);
+        const parsed = parseNumberFieldText(e.currentTarget.value);
+        if (typeof parsed === "number") {
+          const clamped = clampToRange(parsed, min, max);
+          if (clamped !== parsed) onChange(clamped);
+        }
+        // Text that never became a value is dropped: the box shows the
+        // committed value again.
+        setDraft(null);
+      }}
+    />
+  );
+});
 
 const numberRow = css`
   display: inline-flex;
@@ -261,15 +383,16 @@ export interface NumberFieldProps
   > {
   /** The committed number, or null for blank. */
   value: number | null;
-  /** Called with each new number while typing, and with null when the box is
-   *  emptied. Never called for half-typed text ("-", "1."). */
+  /** Called with each new number while typing (in the app locale) and on each
+   *  arrow step, and with null when the box is emptied. Never called for
+   *  half-typed or foreign-locale text ("-", "1e", "1.5" under de-DE). */
   onChange: (value: number | null) => void;
-  /** Lower bound: offered to the spinner, and enforced when the box loses
-   *  focus (a typed value below it is corrected to it). */
+  /** Lower bound: enforced by the arrow step and when the box loses focus (a
+   *  typed value below it is corrected to it). */
   min?: number;
   /** Upper bound, enforced the same way. */
   max?: number;
-  /** Spinner/arrow-key step. Default: the browser's (1). */
+  /** ArrowUp/ArrowDown step. Default 1. */
   step?: number | "any";
   /** Input width in px. Default 62. */
   width?: number;
@@ -286,12 +409,10 @@ export interface NumberFieldProps
 }
 
 /**
- * A number box that can be blank. Keeps what the user is typing as a local
- * DRAFT while the box has focus — so "-", "1." and "1e" survive the controlled
- * re-render — and reports a number only when the text is one. When focus
- * leaves, the draft is dropped (the box shows the committed value again) and
- * min/max are enforced. HTML props and the ref go to the <input>;
- * `className`/`style` go to the row.
+ * A number box that can be blank: NumberInput (app-locale text, draft,
+ * arrow step, clamp on blur) on the field chrome, with an optional label and
+ * unit. HTML props and the ref go to the <input>; `className`/`style` go to
+ * the row.
  */
 export const NumberField = forwardRef<HTMLInputElement, NumberFieldProps>(function NumberField(
   {
@@ -315,9 +436,6 @@ export const NumberField = forwardRef<HTMLInputElement, NumberFieldProps>(functi
   const generatedId = useId();
   const suffixId = useId();
   const inputId = rest.id ?? generatedId;
-  const [draft, setDraft] = useState<string | null>(null);
-
-  const shown = draft ?? formatNumberFieldValue(value);
   const describedBy = suffix
     ? [rest["aria-describedby"], suffixId].filter(Boolean).join(" ")
     : rest["aria-describedby"];
@@ -329,42 +447,21 @@ export const NumberField = forwardRef<HTMLInputElement, NumberFieldProps>(functi
           {label}
         </label>
       )}
-      <input
-        data-testid={testId}
+      <NumberInput
+        testId={testId}
         placeholder={blankMeans === "auto" ? "auto" : undefined}
-        inputMode="decimal"
         {...rest}
         ref={ref}
         id={inputId}
-        type="number"
         className={cx(fieldChrome, numberInput)}
         style={{ width }}
-        value={shown}
+        value={value}
+        onChange={onChange}
         min={min}
         max={max}
         step={step}
         aria-label={ariaLabel ?? rest["aria-label"]}
         aria-describedby={describedBy}
-        onChange={(e) => {
-          const raw = e.target.value;
-          setDraft(raw);
-          const parsed = parseNumberFieldText(raw, e.target.validity?.badInput ?? false);
-          if (parsed !== undefined) onChange(parsed);
-        }}
-        onBlur={(e) => {
-          rest.onBlur?.(e);
-          const el = e.currentTarget;
-          const parsed = parseNumberFieldText(el.value, el.validity?.badInput ?? false);
-          if (typeof parsed === "number") {
-            const clamped = clampToRange(parsed, min, max);
-            if (clamped !== parsed) onChange(clamped);
-          }
-          // Half-typed text never became a value: clear it from the DOM too,
-          // or a blank committed value (React sees "" == "") would leave the
-          // garbage on screen.
-          if (el.validity?.badInput) el.value = "";
-          setDraft(null);
-        }}
       />
       {suffix && (
         <span id={suffixId} className={numberSuffix}>

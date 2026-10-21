@@ -582,6 +582,15 @@ function activate(context: ExtensionContext): void {
       refreshCache().catch(console.error);
     }),
   );
+  // The period LABELS ("Jan", "Kv1") are written by Rust in the APP locale
+  // (`get_timeline_data`) and cached per timeline: a locale switch must
+  // re-read them, or every timeline keeps the old language until something
+  // unrelated (a sheet switch, a pivot refresh) happens to re-read it.
+  cleanupFunctions.push(
+    context.events.on(AppEvents.LOCALE_CHANGED, () => {
+      refreshCache().then(() => requestOverlayRedraw()).catch(console.error);
+    }),
+  );
 
   // The filter a timeline selection puts on its pivots is applied by
   // `updateTimelineSelectionAsync` itself, as part of the same gesture (one

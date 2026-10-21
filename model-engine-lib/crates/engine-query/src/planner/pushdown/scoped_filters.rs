@@ -73,6 +73,67 @@ pub(super) struct ScopedFilterPlan {
     pub withheld_legacy_in: Vec<usize>,
     /// The contested filters the LocalAggregation plan carries.
     pub contested: Vec<ContestedFilter>,
+    /// The tuple (multi-column) filters the LocalAggregation plan carries.
+    /// Always applied locally, per measure (projected onto the columns the
+    /// measure does not clear); their uncleared columns ALSO contribute a
+    /// pre-narrowing IN to `fetch_in`.
+    pub tuple: Vec<TuplePlan>,
+}
+
+/// One value of a [`TuplePlan`] tuple, with the BLANK member already read by
+/// [`blank_member_split`] -- the one blank rule, never re-implemented.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TupleValue {
+    /// An ordinary member: the column equals this value (and is not NULL).
+    Value(String),
+    /// The column's BLANK member: its NULL rows, plus these literal values
+    /// (on a text column the empty string, and the label itself so a literal
+    /// `(blank)` value still matches; on any other column none).
+    Blank {
+        /// The literal values that also count as this member.
+        values: Vec<String>,
+    },
+}
+
+/// A resolved [`crate::request::ScopedTupleFilter`]: OR over `tuples` of AND
+/// over `columns`, applied by the local executor per measure.
+///
+/// The exact predicate is NEVER a fetch-time WHERE: a measure that clears
+/// some of the columns evaluates under the tuple set projected onto the
+/// others, which a fetch that already dropped the rows could not express.
+#[derive(Debug, Clone)]
+pub struct TuplePlan {
+    /// `(owner table, column)` per tuple position; each owner is unique.
+    pub columns: Vec<(String, String)>,
+    /// The kept tuples (deduplicated), each aligned with `columns`. Empty
+    /// matches nothing.
+    pub tuples: Vec<Vec<TupleValue>>,
+    /// The filter level (1 = ordinary slicer, 2..=9 = pinned).
+    pub level: u8,
+    /// `(measure, cleared column indexes)` for every requested measure that
+    /// clears at least one column at `level`. Drives EXPLAIN and the
+    /// pre-narrowing decision; the executor re-reads each measure's own
+    /// resolved context when it applies the filter.
+    pub cleared_by: Vec<(String, Vec<usize>)>,
+}
+
+impl TuplePlan {
+    /// The tuple set projected onto `keep` (column indexes, in order),
+    /// deduplicated. An empty `keep` returns `None`: every column is cleared,
+    /// so the filter does not apply to that measure.
+    pub fn projected(&self, keep: &[usize]) -> Option<Vec<Vec<TupleValue>>> {
+        if keep.is_empty() {
+            return None;
+        }
+        let mut out: Vec<Vec<TupleValue>> = Vec::new();
+        for t in &self.tuples {
+            let p: Vec<TupleValue> = keep.iter().map(|&i| t[i].clone()).collect();
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+        Some(out)
+    }
 }
 
 fn filter_op_to_comparison(op: FilterOperator) -> ComparisonOp {
@@ -125,7 +186,7 @@ fn owners_type_column_as(
 /// `(blank)` value still matches itself); on any other column the label is
 /// dropped -- it is not a value there, and rendering it would turn an integer
 /// list non-sargable or fail a numeric cast.
-fn blank_member_split(
+pub(crate) fn blank_member_split(
     model: &DataModel,
     owners: &[String],
     column: &str,
@@ -352,6 +413,118 @@ pub(super) fn classify_query_filters(
             level: f.level,
             predicate: ContestedPredicate::InList { values, include_null },
         });
+    }
+
+    // Tuple (multi-column) slicers. Every column resolves to ONE owner (an
+    // ambiguous column fails closed: the tuple's columns are compared on the
+    // same joined row), every tuple has one value per column, and the exact
+    // predicate always goes to the local executor. A column no requested
+    // measure clears ALSO pre-narrows its owner's fetch with the IN-list of
+    // its distinct tuple values -- sound, because the product of the
+    // per-column INs is a superset of the tuple set.
+    for f in &request.scoped_tuple_filters {
+        if f.columns.is_empty() {
+            return Err(QueryError::InvalidQuery(
+                "a tuple filter names no column; a filter applying to nothing would silently \
+                 widen the result, so this fails closed"
+                    .into(),
+            ));
+        }
+        let mut columns: Vec<(String, String)> = Vec::with_capacity(f.columns.len());
+        for c in &f.columns {
+            let owners = resolve_scoped_owners(model, c.table.as_deref(), &c.column, f.level)?;
+            if owners.len() > 1 {
+                return Err(QueryError::InvalidQuery(format!(
+                    "a tuple filter column '{}' is in more than one table ({}); name its table",
+                    c.column,
+                    owners.join(", ")
+                )));
+            }
+            let owner = owners[0].clone();
+            if columns.iter().any(|(t, col)| {
+                t.eq_ignore_ascii_case(&owner) && col.eq_ignore_ascii_case(&c.column)
+            }) {
+                return Err(QueryError::InvalidQuery(format!(
+                    "a tuple filter names column '{owner}[{}]' twice",
+                    c.column
+                )));
+            }
+            columns.push((owner, c.column.clone()));
+        }
+        let mut tuples: Vec<Vec<TupleValue>> = Vec::with_capacity(f.tuples.len());
+        for (n, raw) in f.tuples.iter().enumerate() {
+            if raw.len() != columns.len() {
+                return Err(QueryError::InvalidQuery(format!(
+                    "tuple {n} of a tuple filter has {} value(s) but the filter names {} \
+                     column(s)",
+                    raw.len(),
+                    columns.len()
+                )));
+            }
+            let resolved: Vec<TupleValue> = raw
+                .iter()
+                .zip(columns.iter())
+                .map(|(v, (t, col))| {
+                    let (values, include_null) = blank_member_split(
+                        model,
+                        std::slice::from_ref(t),
+                        col,
+                        std::slice::from_ref(v),
+                    );
+                    if include_null {
+                        TupleValue::Blank { values }
+                    } else {
+                        TupleValue::Value(v.clone())
+                    }
+                })
+                .collect();
+            if !tuples.contains(&resolved) {
+                tuples.push(resolved);
+            }
+        }
+        let cleared_by: Vec<(String, Vec<usize>)> = contexts
+            .iter()
+            .filter_map(|(name, ctx)| {
+                let idx: Vec<usize> = columns
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (t, col))| ctx.clears_query_filter_ci(t, col, f.level))
+                    .map(|(i, _)| i)
+                    .collect();
+                (!idx.is_empty()).then(|| (name.clone(), idx))
+            })
+            .collect();
+        for (i, (t, col)) in columns.iter().enumerate() {
+            if cleared_by.iter().any(|(_, idx)| idx.contains(&i)) {
+                continue;
+            }
+            let mut distinct: Vec<String> = Vec::new();
+            for raw in &f.tuples {
+                if !distinct.contains(&raw[i]) {
+                    distinct.push(raw[i].clone());
+                }
+            }
+            let owners = vec![t.clone()];
+            let cond = scoped_in_condition(model, &owners, col, &distinct);
+            plan.fetch_in.push((owners, cond));
+        }
+        plan.tuple.push(TuplePlan {
+            columns,
+            tuples,
+            level: f.level,
+            cleared_by,
+        });
+    }
+
+    // A tuple filter is applied per measure in the local SQL, which the local
+    // ROLLUP render does not thread into its subtotal rows -- refuse.
+    if !plan.tuple.is_empty() && request.totals == TotalsMode::Rollup {
+        return Err(QueryError::InvalidQuery(
+            "a tuple (multi-column) filter is applied per measure on the local path and the \
+             request asks for ROLLUP totals; this combination is not supported yet -- drop the \
+             totals mode or send the selection as per-column IN filters"
+                .into(),
+        ));
     }
 
     // Per-measure removal changes what a ROLLUP subtotal row would aggregate

@@ -232,12 +232,18 @@ fn default_button_radius() -> f64 {
 // SLICER ITEM
 // ============================================================================
 
-/// A single item (unique value) in a slicer's list.
+/// A single item (one member) in a slicer's list -- THE member shape
+/// (`api_types::MemberRef`) plus its state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlicerItem {
-    /// Display text
-    pub value: String,
+    /// The member KEY: invariant canonical text. The selection stores keys,
+    /// and selection and has-data are decided by key (BUG-0166). The blank
+    /// member's key is "" (ruling Q8). A TABLE-source slicer's key is its
+    /// display text (DC2: AutoFilter matches display text).
+    pub key: String,
+    /// The app-locale display text ("(Blank)" for the blank member).
+    pub label: String,
     /// Whether this item is currently selected
     pub selected: bool,
     /// Whether this item has matching data (false = grayed out, no data matches)

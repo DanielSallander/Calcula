@@ -79,6 +79,31 @@ describe("canvas sheet constants mirror the Rust authority", () => {
     expect(body![1]).toMatch(/#\[serde\(skip_serializing_if = "String::is_empty"\)\]\s*pub wallpaper: String,/);
     expect(body![1]).toMatch(/#\[serde\(skip_serializing_if = "std::ops::Not::not"\)\]\s*pub objects_locked: bool,/);
   });
+
+  // P4: the interactions field exists in Rust under the name the TS mirror
+  // reads, and it is omitted at its default (no pairs, no default mode), which
+  // is why `CanvasLayout.interactions` is optional in tauri-api.
+  it("interactions is a Rust field, skipped at its default", () => {
+    const body = RUST.match(/pub struct CanvasLayout \{([\s\S]*?)\n\}/);
+    expect(body, "pub struct CanvasLayout not found").not.toBeNull();
+    expect(body![1]).toMatch(
+      /#\[serde\(skip_serializing_if = "CanvasInteractions::is_default"\)\]\s*pub interactions: CanvasInteractions,/,
+    );
+  });
+
+  it("the interaction kinds, in order", () => {
+    const m = RUST.match(/pub const CANVAS_INTERACTION_KINDS: [^=]+= &\[([^\]]*)\];/);
+    expect(m, "CANVAS_INTERACTION_KINDS not found in lib.rs").not.toBeNull();
+    const rust = [...m![1].matchAll(/"([^"]+)"/g)].map((x) => x[1]);
+    expect(rust.length).toBeGreaterThan(0);
+    expect([...canvas.CANVAS_INTERACTION_KINDS]).toEqual(rust);
+    // Every interaction kind is a canvas object kind.
+    for (const k of canvas.CANVAS_INTERACTION_KINDS) expect(canvas.CANVAS_OBJECT_KINDS).toContain(k);
+  });
+
+  it("the per-list ref cap", () => {
+    expect(canvas.CANVAS_MAX_OBJECT_REFS).toBe(rustNumber("CANVAS_MAX_OBJECT_REFS"));
+  });
 });
 
 describe("the page presets, grouped as Power BI shows them", () => {

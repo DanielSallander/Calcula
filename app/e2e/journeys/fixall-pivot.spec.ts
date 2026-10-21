@@ -1360,7 +1360,7 @@ test.describe("D. field pane, header dropdown, merges, filter pages, slicer labe
     }
   });
 
-  test("X2/A2 (header dropdown): a column with =\"\" cells AND empty cells lists both, (blank) last and checked; unchecking only \"\" hides only the \"\" rows; reopened, (blank) is still checked; OK unchanged keeps the (blank) rows", async ({
+  test("X2/A2 (header dropdown): a column with =\"\" cells AND empty cells lists ONE blank member (Blank), last and checked (ruling Q8); unchecking it hides both kinds of blank row; reopened, it is unchecked; OK unchanged keeps the filter; re-checking brings them back", async ({
     appPage: page,
   }) => {
     try {
@@ -1376,33 +1376,36 @@ test.describe("D. field pane, header dropdown, merges, filter pages, slicer labe
       await configurePivot(page, { pivotId: pid, rowFields: [{ sourceIndex: 0, name: "Region" }], valueFields: [{ sourceIndex: 1, name: "Sum of Sales", aggregation: "sum" }] });
       expect((await rowMap(page, pid))["Grand Total"], "precondition: all four records").toBe("110");
 
+      // Round 2, ruling Q8 (P2 S4): the pivot's OWN item lists fold the empty cells AND the ="" cells into
+      // ONE blank member (key "", label "(Blank)"); BlankListing::Separate is deleted, so the dropdown no
+      // longer offers "" apart from (blank) (Excel does -- recorded in open-items §2.al as an owner call).
       await openHeaderDropdown(page, pid);
       const items = await headerDropdownItems(page);
-      const blankItem = items.find((i) => i.text === "(blank)");
-      const emptyItem = items.find((i) => i.text !== "(blank)" && !["East", "West"].includes(i.text));
-      expect(blankItem, `the dropdown lists (blank): ${JSON.stringify(items)}`).toBeTruthy();
-      expect(emptyItem, `the dropdown lists the "" item separately: ${JSON.stringify(items)}`).toBeTruthy();
-      expect(items[items.length - 1].text, "(blank) is listed last").toBe("(blank)");
+      expect(items.map((i) => i.text), `the dropdown lists East, West and ONE blank member, last: ${JSON.stringify(items)}`).toEqual(["East", "West", "(Blank)"]);
       expect(items.every((i) => i.checked), "everything is checked while every row shows (A2)").toBe(true);
 
-      // Uncheck only "" and press OK.
-      await headerDropdown(page).locator("label").filter({ hasText: new RegExp(`^${escapeRe(emptyItem!.text)}$`) }).locator('input[type="checkbox"]').uncheck();
+      // Uncheck the blank member and press OK: both kinds of blank row go.
+      await headerDropdown(page).locator("label").filter({ hasText: /^\(Blank\)$/ }).locator('input[type="checkbox"]').uncheck();
       await headerDropdown(page).getByRole("button", { name: /^OK$/ }).click();
       await expect(headerDropdown(page)).toHaveCount(0);
-      await eventually(() => rowMap(page, pid).then((m) => m["Grand Total"]), (g) => g === "60", "unchecking only \"\" did not hide exactly the \"\" rows (60 = 10+20+30)");
-      expect((await rowMap(page, pid))["(blank)"], "the (blank) rows still show").toBe("30");
+      await eventually(() => rowMap(page, pid).then((m) => m["Grand Total"]), (g) => g === "30", "unchecking (Blank) did not hide the empty AND the \"\" rows (30 = 10+20)");
 
-      // Reopen: (blank) still checked, "" unchecked.
+      // Reopen: (Blank) unchecked, East and West still checked (A2: the dropdown reads back the filter).
       await openHeaderDropdown(page, pid);
       const again = await headerDropdownItems(page);
-      expect(again.find((i) => i.text === "(blank)")?.checked, `(blank) is still CHECKED: ${JSON.stringify(again)}`).toBe(true);
-      expect(again.find((i) => i.text === emptyItem!.text)?.checked, `"" is unchecked: ${JSON.stringify(again)}`).toBe(false);
-      // OK unchanged: the (blank) rows still show.
+      expect(again.find((i) => i.text === "(Blank)")?.checked, `(Blank) is UNCHECKED: ${JSON.stringify(again)}`).toBe(false);
+      expect(again.filter((i) => i.text !== "(Blank)").every((i) => i.checked), `East and West are still checked: ${JSON.stringify(again)}`).toBe(true);
+      // OK unchanged keeps the filter.
       await headerDropdown(page).getByRole("button", { name: /^OK$/ }).click();
       await page.waitForTimeout(800);
-      const after = await rowMap(page, pid);
-      expect(after["(blank)"], "OK unchanged keeps the (blank) rows").toBe("30");
-      expect(after["Grand Total"]).toBe("60");
+      expect((await rowMap(page, pid))["Grand Total"], "OK unchanged keeps the blank rows hidden").toBe("30");
+
+      // Check it again: every row is back.
+      await openHeaderDropdown(page, pid);
+      await headerDropdown(page).locator("label").filter({ hasText: /^\(Blank\)$/ }).locator('input[type="checkbox"]').check();
+      await headerDropdown(page).getByRole("button", { name: /^OK$/ }).click();
+      await expect(headerDropdown(page)).toHaveCount(0);
+      await eventually(() => rowMap(page, pid).then((m) => m["Grand Total"]), (g) => g === "110", "re-checking (Blank) did not bring back both kinds of blank row");
     } finally {
       await newFile(page);
     }
@@ -1547,8 +1550,8 @@ async function createPivotSlicer(page: Page, pid: string, field: string, sheetIn
 
 async function slicerItems(page: Page, id: string): Promise<string[]> {
   await callModule(page, MOD.SLICER_STORE, "refreshSlicerItems", [id]);
-  const items = await callModule<Array<{ value: string }> | undefined>(page, MOD.SLICER_STORE, "getCachedItems", [id]);
-  return (items ?? []).map((i) => i.value);
+  const items = await callModule<Array<{ key: string }> | undefined>(page, MOD.SLICER_STORE, "getCachedItems", [id]);
+  return (items ?? []).map((i) => i.key);
 }
 
 async function slicerSelection(page: Page, id: string): Promise<string[] | null> {
@@ -1678,7 +1681,7 @@ test.describe("E. slicers on range pivots", () => {
     }
   });
 
-  test("X2 (pivot slicer): a column with =\"\" and empty cells lists East, West, (blank) -- no \"\" item; East + (blank) hides only West; East alone hides both kinds of blank; with =\"\" but no empty cells it lists East, West and selecting both hides nothing", async ({
+  test("X2 (pivot slicer): a column with =\"\" and empty cells lists East, West, (blank) -- no \"\" item; East + (blank) hides only West; East alone hides both kinds of blank; with =\"\" but no empty cells it lists East, West and the blank member (ruling Q8): East + West hides the =\"\" row, all three hide nothing", async ({
     appPage: page,
   }) => {
     try {
@@ -1694,7 +1697,8 @@ test.describe("E. slicers on range pivots", () => {
       await configurePivot(page, { pivotId: pid, rowFields: [{ sourceIndex: 0, name: "Region" }], valueFields: [{ sourceIndex: 1, name: "Sum of Sales", aggregation: "sum" }] });
       const sid = await createPivotSlicer(page, pid, "Region", 0);
       const items = await slicerItems(page, sid);
-      expect(items, "the slicer's items").toEqual(["East", "West", "(blank)"]);
+      // Item KEYS (P2): the blank member's key is "" (ruling Q8; its label reads "(Blank)").
+      expect(items, "the slicer's items").toEqual(["East", "West", ""]);
 
       await scriptSelect(page, sid, ["East", "(blank)"]);
       await eventually(() => rowMap(page, pid).then((m) => m["Grand Total"]), (g) => g === "90", "East + (blank) must hide only West (10+30+50)");
@@ -1714,10 +1718,13 @@ test.describe("E. slicers on range pivots", () => {
       const p2 = await createRangePivot(page, { sourceRange: "Sheet1!A1:B4", destinationCell: "E1", sourceSheet: 0, destinationSheet: 0 });
       await configurePivot(page, { pivotId: p2, rowFields: [{ sourceIndex: 0, name: "Region" }], valueFields: [{ sourceIndex: 1, name: "Sum of Sales", aggregation: "sum" }] });
       const s2 = await createPivotSlicer(page, p2, "Region", 0);
-      expect(await slicerItems(page, s2), "no (blank) is offered when no cell is empty").toEqual(["East", "West"]);
+      // Ruling Q8 (P2 S4): a ="" cell IS the blank member (key ""), so it is offered even with no empty
+      // cell, and leaving it out hides the ="" row.
+      expect(await slicerItems(page, s2), "the ='' cell is offered as the blank member").toEqual(["East", "West", ""]);
       await scriptSelect(page, s2, ["East", "West"]);
-      await page.waitForTimeout(500);
-      expect((await rowMap(page, p2))["Grand Total"], "selecting every offered item hides nothing").toBe("80");
+      await eventually(() => rowMap(page, p2).then((m) => m["Grand Total"]), (g) => g === "30", "East + West must hide the ='' row (10+20)");
+      await scriptSelect(page, s2, ["East", "West", ""]);
+      await eventually(() => rowMap(page, p2).then((m) => m["Grand Total"]), (g) => g === "80", "selecting every offered item hides nothing");
     } finally {
       await newFile(page);
     }
@@ -1731,7 +1738,7 @@ test.describe("E. slicers on range pivots", () => {
       await configurePivot(page, { pivotId: pid, rowFields: [{ sourceIndex: 0, name: "Region" }], valueFields: [{ sourceIndex: 1, name: "Sum of Sales", aggregation: "sum" }] });
       const sid = await createPivotSlicer(page, pid, "Region", 0);
       const items = await slicerItems(page, sid);
-      expect(items[items.length - 1], `(blank) is listed last: ${JSON.stringify(items)}`).toBe("(blank)");
+      expect(items[items.length - 1], `the blank member (key "") is listed last: ${JSON.stringify(items)}`).toBe("");
 
       await callModule(page, MOD.SLICER_STORE, "clickSlicerItem", [sid, "West", true]);
       await eventually(() => rowMap(page, pid), (m) => m.West === undefined, "Ctrl+click West did not deselect West");
@@ -2259,7 +2266,7 @@ test.describe("G. data-model pivots, model slicers, ribbon filters", () => {
       // Model slicer.
       const sid = await createModelSlicer(page, conn.connectionId, "Region", 0);
       const items = await eventually(() => slicerItems(page, sid), (i) => i.length > 0, "the model slicer shows no items", 15_000);
-      expect(items, "the model slicer lists East, West, (blank) -- one blank item").toEqual(["East", "West", "(blank)"]);
+      expect(items, "the model slicer lists East, West and ONE blank member (key \"\")").toEqual(["East", "West", ""]);
       await scriptSelect(page, sid, ["East", "(blank)"]);
       await eventually(() => rowMap(page, pid).then((m) => m["Grand Total"]), (g) => g === "90", "East + (blank) must hide only West (10+30+50)", 20_000);
       await scriptSelect(page, sid, ["East"]);
@@ -2275,12 +2282,12 @@ test.describe("G. data-model pivots, model slicers, ribbon filters", () => {
       expect(filter, "precondition: a ribbon filter was created").toBeTruthy();
       await callModule(page, "/extensions/ControlsPane/lib/filterPaneStore.ts", "refreshFilterItems", [filter!.id]);
       const fItems = await eventually(
-        async () => ((await callModule<Array<{ value: string }> | undefined>(page, "/extensions/ControlsPane/lib/filterPaneStore.ts", "getCachedItems", [filter!.id])) ?? []).map((i) => i.value),
+        async () => ((await callModule<Array<{ key: string }> | undefined>(page, "/extensions/ControlsPane/lib/filterPaneStore.ts", "getCachedItems", [filter!.id])) ?? []).map((i) => i.key),
         (i) => i.length > 0,
         "the ribbon filter shows no items",
         15_000,
       );
-      expect(fItems, "the ribbon filter lists East, West, (blank)").toEqual(["East", "West", "(blank)"]);
+      expect(fItems, "the ribbon filter lists East, West and the blank member (key \"\")").toEqual(["East", "West", ""]);
       await callModule(page, "/extensions/ControlsPane/lib/filterPaneStore.ts", "updateFilterSelectionAsync", [filter!.id, ["East", "(blank)"]]);
       await eventually(() => rowMap(page, pid).then((m) => m["Grand Total"]), (g) => g === "90", "ribbon filter East + (blank) must hide only West", 20_000);
     } finally {

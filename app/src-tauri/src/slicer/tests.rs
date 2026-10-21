@@ -210,7 +210,8 @@ mod tests {
     #[test]
     fn test_slicer_item_serde() {
         let item = SlicerItem {
-            value: "North".to_string(),
+            key: "North".to_string(),
+            label: "North".to_string(),
             selected: true,
             has_data: false,
         };
@@ -220,7 +221,10 @@ mod tests {
         assert!(!json.contains("\"has_data\""));
 
         let back: SlicerItem = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.value, "North");
+        assert_eq!(back.key, "North");
+        assert_eq!(back.label, "North");
+        // THE member shape on the wire: key + label, never the old "value".
+        assert!(json.contains("\"key\"") && json.contains("\"label\"") && !json.contains("\"value\""));
         assert!(back.selected);
         assert!(!back.has_data);
     }

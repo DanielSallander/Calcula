@@ -16,7 +16,7 @@
  * whenever @api gains a member, and list it in API_CHANGELOG below
  * (src/api/__tests__/apiVersion.test.ts checks that every listed name exists).
  */
-export const API_VERSION = "1.4.0";
+export const API_VERSION = "1.5.0";
 
 /** One @api addition: a runtime export of `module` (a member of it when the
  *  name is dotted), or a TYPE-only member declared in `declaredIn`. */
@@ -49,8 +49,372 @@ export interface ApiChangelogEntry {
  * findings programme (2026-10-15): ONE entry for the whole programme, each
  * work package adding its own block (WP-A's reference picks and canvas pivot
  * cells first); docs/EXTENSION_GUIDE.md "New in API v1.4.0" mirrors it.
+ * 1.5.0 is canvas round 2 (2026-10-16): ONE entry for the round, each package
+ * (P1, P3, P2, P4, in landing order) appending its own block -- P1's solid
+ * background commit first, then P3's cell targets (@api/cellTarget, the
+ * SelectionOwner.cellTarget / actsOn members, the wrappers' `{ target }`, the
+ * styled cell box and the conditional-format paint seam), then P2's app locale
+ * (@api/locale: the sync accessor, formatting and parsing in the app locale,
+ * getCachedLocale removed; the { key, label } member shape and its readers),
+ * then P4's report filters (@api/reportFilters replacing @api/pageFilters:
+ * pages by sheet id, scoped publishers, cross-filter selections, Edit
+ * interactions and the one target-aware resolver; @api/modelVisuals; the chart
+ * mark's cross-filter capability);
+ * docs/EXTENSION_GUIDE.md "New in API v1.5.0" mirrors it.
  */
 export const API_CHANGELOG: readonly ApiChangelogEntry[] = [
+  {
+    version: "1.5.0",
+    added: [
+      // ---- P1: a solid background commit (owner finding G1) -----------------
+      // Picking ONE colour for a visual's background clears a stored or
+      // resolved gradient and switches a hidden background on, so the pick is
+      // never a write that shows nothing. The Format-pane doors and chart
+      // presets build their patch here; Rust's container-literal door applies
+      // the same rule to script, MCP and binding writes.
+      { name: "solidBackgroundPatch", module: "@api/visualContainer" },
+      { name: "solidBackgroundIsNoop", module: "@api/visualContainer" },
+      {
+        name: "SolidBackgroundBase",
+        declaredIn: "src/api/visualContainer.ts",
+        pattern: "export interface SolidBackgroundBase \\{",
+      },
+      // ---- P3: floating grids take every Home command (owner finding G3) -----
+      // A selection owner may answer the cells it holds and the KINDS of cell
+      // act it admits; a door asks resolveCellTarget and acts on those cells
+      // through the wrappers' explicit `{ target }` option.
+      { name: "resolveCellTarget", module: "@api/cellTarget" },
+      { name: "cellTargetFor", module: "@api/cellTarget" },
+      { name: "CELL_TARGET_CAPABILITIES", module: "@api/cellTarget" },
+      { name: "WHOLE_OBJECT_CAPABILITIES", module: "@api/cellTarget" },
+      { name: "targetRefOf", module: "@api/cellTarget" },
+      { name: "getCellTargetCells", module: "@api/cellTarget" },
+      { name: "readTargetCell", module: "@api/cellTarget" },
+      { name: "onCellTargetChanged", module: "@api/cellTarget" },
+      { name: "notifyCellTargetChanged", module: "@api/cellTarget" },
+      { name: "selectTargetCells", module: "@api/cellTarget" },
+      { name: "editTargetCell", module: "@api/cellTarget" },
+      { name: "CELL_TARGET_READ_BAND", module: "@api/cellTarget" },
+      // P3 S10: the object's own line state (AutoFit, Row Height, Unhide on a
+      // floating grid) and the announcement after a write changed the object.
+      { name: "getCellTargetLines", module: "@api/cellTarget" },
+      { name: "announceCellTargetObjectChanged", module: "@api/cellTarget" },
+      // P3 S11: values, not display text, for doors that compute (Fill Series,
+      // AutoSum, Flash Fill on a floating grid).
+      { name: "getCellTargetCellsTyped", module: "@api/cellTarget" },
+      { name: "TARGET_COMMANDS", module: "@api/cellTargetCommands" },
+      {
+        name: "CellTargetRef",
+        declaredIn: "src/core/types/types.ts",
+        pattern: "export type CellTargetRef = \\{ kind: \"floatingRange\"; id: string \\};",
+      },
+      {
+        name: "CellTargetCells",
+        declaredIn: "src/core/types/types.ts",
+        pattern: "export interface CellTargetCells \\{",
+      },
+      {
+        name: "TargetCellData",
+        declaredIn: "src/core/types/types.ts",
+        pattern: "export interface TargetCellData extends CellData \\{",
+      },
+      {
+        name: "CellTargetCapability",
+        declaredIn: "src/core/lib/selectionOwner.ts",
+        pattern: "export type CellTargetCapability =",
+      },
+      {
+        name: "OwnedCellTarget",
+        declaredIn: "src/core/lib/selectionOwner.ts",
+        pattern: "export interface OwnedCellTarget \\{",
+      },
+      {
+        name: "CellTarget",
+        declaredIn: "src/core/lib/selectionOwner.ts",
+        pattern: "export type CellTarget =",
+      },
+      {
+        name: "SelectionOwner.cellTarget",
+        declaredIn: "src/core/lib/selectionOwner.ts",
+        pattern: "cellTarget\\?: \\(\\) => OwnedCellTarget \\| null;",
+      },
+      {
+        name: "SelectionOwner.actsOn",
+        declaredIn: "src/core/lib/selectionOwner.ts",
+        pattern: "actsOn\\?: readonly CellTargetCapability\\[\\];",
+      },
+      {
+        name: "SelectionOwner.selectCells",
+        declaredIn: "src/core/lib/selectionOwner.ts",
+        pattern: "selectCells\\?: \\(selection: Selection\\) => void;",
+      },
+      {
+        name: "SelectionOwner.editActiveCell",
+        declaredIn: "src/core/lib/selectionOwner.ts",
+        pattern: "editActiveCell\\?: \\(text: string\\) => boolean;",
+      },
+      {
+        name: "CellTargetOptions",
+        declaredIn: "src/core/lib/tauri-api.ts",
+        pattern: "export interface CellTargetOptions \\{",
+      },
+      {
+        name: "GridCommandContext",
+        declaredIn: "src/core/lib/gridCommands.ts",
+        pattern: "export interface GridCommandContext \\{",
+      },
+      { name: "GRID_COMMAND_CAPABILITY", module: "@api/extensions" },
+      // The styled cell box and the conditional-format paint seam (P3 S7).
+      { name: "paintStyledCellBox", module: "@api/cellPaint" },
+      { name: "registerConditionalFormatPainter", module: "@api/conditionalFormatPaint" },
+      { name: "paintConditionalFormat", module: "@api/conditionalFormatPaint" },
+      // ---- P2: the app locale everywhere (owner rule G0) ----------------------
+      // Rust owns the app locale; every window awaits it before its first
+      // render and follows locale:changed. Display and input text go through
+      // these helpers, which a shared corpus keeps identical to the engine.
+      { name: "initAppLocale", module: "@api/locale" },
+      { name: "getAppLocale", module: "@api/locale" },
+      { name: "decimalSeparator", module: "@api/locale" },
+      { name: "listSeparator", module: "@api/locale" },
+      { name: "formatNumber", module: "@api/locale" },
+      { name: "formatNumberWithCode", module: "@api/locale" },
+      { name: "formatDate", module: "@api/locale" },
+      { name: "formatDateTime", module: "@api/locale" },
+      { name: "monthName", module: "@api/locale" },
+      { name: "dayName", module: "@api/locale" },
+      { name: "quarterLabel", module: "@api/locale" },
+      { name: "parseNumber", module: "@api/locale" },
+      { name: "parseDate", module: "@api/locale" },
+      { name: "LOCALE_CHANGED_EVENT", module: "@api/locale" },
+      { name: "INVARIANT_LOCALE", module: "@api/locale" },
+      {
+        name: "DateStyle",
+        declaredIn: "src/core/lib/locale/localeText.ts",
+        pattern: "export type DateStyle = \"short\" \\| \"long\" \\| \"time\" \\| \"dateTime\";",
+      },
+      {
+        name: "FormatNumberOptions",
+        declaredIn: "src/core/lib/locale/localeText.ts",
+        pattern: "export interface FormatNumberOptions \\{",
+      },
+      {
+        name: "LocaleSettings.overrideId",
+        declaredIn: "src/core/lib/locale/localeText.ts",
+        pattern: "overrideId: string \\| null;",
+      },
+      {
+        name: "LocaleSettings.monthNamesLong",
+        declaredIn: "src/core/lib/locale/localeText.ts",
+        pattern: "monthNamesLong: string\\[\\];",
+      },
+      {
+        name: "LocaleSettings.quarterLabels",
+        declaredIn: "src/core/lib/locale/localeText.ts",
+        pattern: "quarterLabels: string\\[\\];",
+      },
+      // P2 S7: ONE member shape, { key, label }. Identity from the KEY
+      // (invariant: selections, filters, page filters, GETPIVOTDATA), display
+      // from the LABEL (app locale). A label is never parsed into a key.
+      { name: "pivotCellItemKey", module: "@api" },
+      { name: "pivotCellDisplayText", module: "@api" },
+      { name: "memberKeyNumber", module: "@api" },
+      { name: "memberKeyDate", module: "@api" },
+      { name: "memberKeys", module: "@api" },
+      { name: "memberLabelOf", module: "@api" },
+      {
+        name: "MemberRef",
+        declaredIn: "src/api/types.ts",
+        pattern: "export interface MemberRef \\{",
+      },
+      {
+        name: "PivotCellData.member",
+        declaredIn: "src/api/pivotTypes.ts",
+        pattern: "member\\?: MemberRef;",
+      },
+      {
+        name: "FilterRowData.members",
+        declaredIn: "src/api/pivotTypes.ts",
+        pattern: "members: MemberRef\\[\\];",
+      },
+      {
+        name: "BiColumnKind",
+        declaredIn: "src/api/backend.ts",
+        pattern: "export type BiColumnKind = \"number\" \\| \"date\" \\| \"dateTime\" \\| \"boolean\" \\| \"text\" \\| \"unknown\";",
+      },
+      {
+        name: "BiQueryResult.columnKinds",
+        declaredIn: "src/api/backend.ts",
+        pattern: "columnKinds: BiColumnKind\\[\\];",
+      },
+      {
+        name: "SlicerItemRenderer.item.key",
+        declaredIn: "src/api/componentStoreRegistry.ts",
+        pattern: "item: \\{ text: string; key: string; selected: boolean; hasData: boolean; index: number \\}",
+      },
+      // P2 S9: typed numbers are read in the APP locale. NumberInput is the
+      // bare <input> behind NumberField (draft, strict app-locale parse,
+      // ArrowUp/ArrowDown step, clamp on blur) for a caller with its own box.
+      { name: "NumberInput", module: "@api/layout" },
+      {
+        name: "NumberInputProps",
+        declaredIn: "src/api/layout/primitives/fields.tsx",
+        pattern: "export interface NumberInputProps",
+      },
+      // ---- P4: one target-aware report-filter resolver (G2-B, G4) -----------
+      // @api/reportFilters replaces @api/pageFilters. Pages are SHEET IDS; a
+      // publisher's filter carries a scope (page, pages, all, visuals) and,
+      // for a model slicer, its object; visuals hold cross-filter selections;
+      // a page's interactions say which visual filters which; every querying
+      // visual asks resolveFiltersFor(page, target, connection).
+      { name: "publishReportFilters", module: "@api/reportFilters" },
+      { name: "getReportFilters", module: "@api/reportFilters" },
+      { name: "setCrossFilter", module: "@api/reportFilters" },
+      { name: "addToCrossFilter", module: "@api/reportFilters" },
+      { name: "clearCrossFilter", module: "@api/reportFilters" },
+      { name: "clearCrossFilters", module: "@api/reportFilters" },
+      { name: "getCrossFilters", module: "@api/reportFilters" },
+      { name: "pruneCrossFilter", module: "@api/reportFilters" },
+      // A family's store reload clears the selections of visuals that vanished
+      // by any route (undo, script/MCP/AI removal), not only by Delete.
+      { name: "pruneMissingCrossFilterSources", module: "@api/reportFilters" },
+      { name: "isCrossFilterSource", module: "@api/reportFilters" },
+      { name: "publishPageInteractions", module: "@api/reportFilters" },
+      { name: "interactionFor", module: "@api/reportFilters" },
+      { name: "resolvePageBase", module: "@api/reportFilters" },
+      { name: "resolveFiltersFor", module: "@api/reportFilters" },
+      { name: "isRectangular", module: "@api/reportFilters" },
+      { name: "onReportFiltersChange", module: "@api/reportFilters" },
+      { name: "startReportFilters", module: "@api/reportFilters" },
+      {
+        name: "VisualRef",
+        declaredIn: "src/api/reportFilters/types.ts",
+        pattern: "export type VisualRef = \\{ kind: \"chart\" \\| \"pivot\" \\| \"slicer\"; id: string \\};",
+      },
+      {
+        name: "InteractionMode",
+        declaredIn: "src/api/reportFilters/types.ts",
+        pattern: "export type InteractionMode = \"filter\" \\| \"highlight\" \\| \"none\";",
+      },
+      { name: "MemberCoord", declaredIn: "src/api/reportFilters/types.ts", pattern: "export interface MemberCoord \\{" },
+      { name: "MemberPath", declaredIn: "src/api/reportFilters/types.ts", pattern: "export type MemberPath = readonly MemberCoord\\[\\];" },
+      { name: "ReportFilterScope", declaredIn: "src/api/reportFilters/types.ts", pattern: "export type ReportFilterScope =" },
+      { name: "ReportFilterInput", declaredIn: "src/api/reportFilters/types.ts", pattern: "export interface ReportFilterInput \\{" },
+      { name: "ReportFilter", declaredIn: "src/api/reportFilters/types.ts", pattern: "export interface ReportFilter extends" },
+      { name: "CrossFilterSelection", declaredIn: "src/api/reportFilters/types.ts", pattern: "export interface CrossFilterSelection \\{" },
+      { name: "ResolvedFieldFilter", declaredIn: "src/api/reportFilters/types.ts", pattern: "export interface ResolvedFieldFilter \\{" },
+      { name: "ResolvedTupleFilter", declaredIn: "src/api/reportFilters/types.ts", pattern: "export interface ResolvedTupleFilter \\{" },
+      { name: "ResolvedFilters", declaredIn: "src/api/reportFilters/types.ts", pattern: "export interface ResolvedFilters \\{" },
+      { name: "ResolveTarget", declaredIn: "src/api/reportFilters/types.ts", pattern: "export interface ResolveTarget \\{" },
+      { name: "ResolveOptions", declaredIn: "src/api/reportFilters/types.ts", pattern: "export interface ResolveOptions \\{" },
+      { name: "ReportFiltersChange", declaredIn: "src/api/reportFilters/types.ts", pattern: "export interface ReportFiltersChange \\{" },
+      { name: "PageInteractions", declaredIn: "src/api/reportFilters/types.ts", pattern: "export interface PageInteractions \\{" },
+      // P4: which visuals read a model, and their cross-filter roles.
+      { name: "registerModelVisualProvider", module: "@api/modelVisuals" },
+      { name: "listModelVisuals", module: "@api/modelVisuals" },
+      { name: "modelVisualOf", module: "@api/modelVisuals" },
+      { name: "ModelVisualInfo", declaredIn: "src/api/modelVisuals.ts", pattern: "export interface ModelVisualInfo \\{" },
+      { name: "ModelVisualProvider", declaredIn: "src/api/modelVisuals.ts", pattern: "export interface ModelVisualProvider \\{" },
+      // P4: a chart mark DECLARES its part in cross-filtering (fail closed).
+      { name: "chartMarkCrossFilter", module: "@api/chartMarks" },
+      {
+        name: "ChartMarkMeta.crossFilter",
+        declaredIn: "src/api/chartMarks.ts",
+        pattern: "crossFilter\\?: \\{ source: boolean; canHighlight: boolean \\};",
+      },
+      // P4: the canvas layout's interactions and their mirrors of Rust.
+      { name: "CANVAS_INTERACTION_KINDS", module: "@api/canvasSheet" },
+      { name: "CANVAS_MAX_OBJECT_REFS", module: "@api/canvasSheet" },
+      {
+        name: "CanvasLayout.interactions",
+        declaredIn: "src/core/lib/tauri-api.ts",
+        pattern: "interactions\\?: \\{",
+      },
+      {
+        name: "PivotViewResponse.groupMembers",
+        declaredIn: "src/api/pivotTypes.ts",
+        pattern: "groupMembers\\?: PivotGroupMembers\\[\\];",
+      },
+      { name: "PivotGroupMembers", declaredIn: "src/api/pivotTypes.ts", pattern: "export interface PivotGroupMembers \\{" },
+    ],
+    changed: [
+      // P3: the cell wrappers take a trailing `opts?: { target }` naming an
+      // OBJECT's cells (fail-closed until the backend accepts it), a target is
+      // never recorded by the macro recorder and drops the sheet group; and
+      // SelectionOwner.refusal is asked with the capability a target-aware
+      // door wanted.
+      "applyFormatting",
+      "adjustNumberFormatDecimals",
+      "applyBorderPreset",
+      "setCellRichText",
+      "applyNamedStyleRange",
+      "clearRangeWithOptions",
+      "sortRange",
+      "fillRange",
+      "updateCellsBatch",
+      "mergeCells",
+      "unmergeCells",
+      "insertRows",
+      "insertColumns",
+      "deleteRows",
+      "deleteColumns",
+      "setRowHeights",
+      "setColumnWidths",
+      "setRowsHidden",
+      "setColsHidden",
+      "goToSpecial",
+      "findAll",
+      "countMatches",
+      "replaceAll",
+      "replaceSingle",
+      "addConditionalFormat",
+      "updateConditionalFormat",
+      "deleteConditionalFormat",
+      "reorderConditionalFormats",
+      "getAllConditionalFormats",
+      "clearConditionalFormatsInRange",
+      "announceFormattingResult",
+      "SelectionOwner.refusal",
+      "FloatingRangeInfo",
+      "FloatingRangePatch",
+      // P2: getCachedLocale is REMOVED (getAppLocale is never null);
+      // getLocaleSettings returns the app locale Rust owns (no localStorage);
+      // setLocale is persisted by Rust and announced to every window; the
+      // LocaleSettings type gained overrideId and the calendar names.
+      "getCachedLocale",
+      "getLocaleSettings",
+      "setLocale",
+      "LocaleSettings",
+      // P2 S7: the member wire. biGetColumnValues returns MemberRef[] (was
+      // string[]); FilterRowData / FieldUniqueValuesResponse carry `members`
+      // in place of `uniqueValues`; a slicer item renderer's `text` is the
+      // display label and it gains `key`; getSlicerItemBitmap keys its cache
+      // on key + text; pageFilters' includedItems are member KEYS.
+      "biGetColumnValues",
+      "FilterRowData",
+      "FieldUniqueValuesResponse",
+      "ISlicerStoreService.getCachedItems",
+      "getSlicerItemBitmap",
+      "PageFilterInput.includedItems",
+      // P2 S9: NumberField is a TEXT box (role spinbutton) that reads and
+      // shows its number in the app locale ("1,5" under de-DE; the foreign
+      // "1.5" there is not reported); the Slider readout is in the app locale.
+      "NumberField",
+      "Slider",
+      // P4: @api/pageFilters is REMOVED (not aliased) -- @api/reportFilters
+      // replaces it, with pages by sheet id: publishPageFilters ->
+      // publishReportFilters (a scope and a sourceRef, includedKeys),
+      // getPageFilters / listPageFilterPages -> resolveFiltersFor /
+      // resolvePageBase / getReportFilters, onPageFiltersChange ->
+      // onReportFiltersChange.
+      "@api/pageFilters",
+      "publishPageFilters",
+      "getPageFilters",
+      "listPageFilterPages",
+      "onPageFiltersChange",
+      "PageFilterInput",
+      "PageFilter",
+    ],
+  },
   {
     version: "1.4.0",
     added: [

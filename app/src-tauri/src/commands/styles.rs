@@ -1,7 +1,11 @@
 //! FILENAME: app/src-tauri/src/commands/styles.rs
 // PURPOSE: Styling operations, formatting, and style definitions.
 
-use crate::api_types::{CellData, FillParam, FormattingParams, FormattingResult, PreviewResult, StyleData, StyleEntry};
+use crate::api_types::{
+    CellData, CellTargetRef, FillParam, FormattingParams, FormattingResult, MergedRegion, PreviewResult, StyleData,
+    StyleEntry,
+};
+use crate::cell_target::ResolvedCellTarget;
 use serde::{Deserialize, Serialize};
 use crate::persistence::FileState;
 use crate::{format_cell_value_with_color, AppState};
@@ -342,14 +346,20 @@ impl<'a> ParsedFormatting<'a> {
 /// sheet plus one. Now every sheet is gated before any is written and the whole
 /// group is ONE undo step. `sheet_indices` may include the active sheet; an
 /// absent list formats the active sheet only.
+///
+/// `target` (P3, owner finding G3): format an OBJECT's cells instead -- a
+/// floating grid's backing sheet, ONLY, inside its write extent, gated by the
+/// HOST's protection. Refused together with `sheet_indices`; the result then
+/// describes the BACKING cells (their merges included).
 #[tauri::command]
 pub fn apply_formatting(
     state: State<AppState>,
     file_state: State<FileState>,
     params: FormattingParams,
     sheet_indices: Option<Vec<usize>>,
+    target: Option<CellTargetRef>,
 ) -> Result<FormattingResult, String> {
-    apply_formatting_core(&state, &file_state, &params, sheet_indices.as_deref().unwrap_or(&[]))
+    apply_formatting_on(&state, &file_state, &params, sheet_indices.as_deref().unwrap_or(&[]), target.as_ref())
 }
 
 /// `apply_formatting` without the Tauri wrappers, so the tests drive the real
@@ -360,12 +370,54 @@ pub(crate) fn apply_formatting_core(
     params: &FormattingParams,
     group: &[usize],
 ) -> Result<FormattingResult, String> {
+    apply_formatting_on(state, file_state, params, group, None)
+}
+
+/// [`apply_formatting_core`] with an optional cell target. With `Some`, the
+/// group must be empty, and only the target's backing sheet is written.
+pub(crate) fn apply_formatting_on(
+    state: &AppState,
+    file_state: &FileState,
+    params: &FormattingParams,
+    group: &[usize],
+    target: Option<&CellTargetRef>,
+) -> Result<FormattingResult, String> {
     // Refusable VALUES first (see `ParsedFormatting`), then the gates.
     let parsed = {
         let locale = state.locale.lock().unwrap();
         ParsedFormatting::parse(params, &locale)?
     };
-    format_cells_on_sheets(state, file_state, &parsed, &params.rows, &params.cols, group, true)
+    let resolved = resolve_style_target(state, target, !group.is_empty(), bounds_of_lists(&params.rows, &params.cols))?;
+    let route = match &resolved {
+        Some(t) => StyleTargets::Only(t),
+        None => StyleTargets::Sheets { group, include_active: true },
+    };
+    format_cells_on_sheets(state, file_state, &parsed, &params.rows, &params.cols, route)
+}
+
+/// The cell-target half of every style command, run holding NOTHING before
+/// `StyleLocks::take`: resolve the target once, refuse it together with an
+/// explicit sheet group, and refuse a rectangle (`(r0, c0, r1, c1)`; `None`
+/// for an empty selection) outside the write extent. `None` without a target.
+fn resolve_style_target(
+    state: &AppState,
+    target: Option<&CellTargetRef>,
+    has_group: bool,
+    bounds: Option<(u32, u32, u32, u32)>,
+) -> Result<Option<ResolvedCellTarget>, String> {
+    let Some(target) = target else { return Ok(None) };
+    crate::cell_target::refuse_target_with_sheet(&Some(target.clone()), has_group)?;
+    let resolved = crate::cell_target::resolve_cell_target(state, target)?;
+    if let Some((r0, c0, r1, c1)) = bounds {
+        crate::cell_target::ensure_in_extent(&resolved, r0, c0, r1, c1)?;
+    }
+    Ok(Some(resolved))
+}
+
+/// The bounding box `(min row, min col, max row, max col)` of `rows` x
+/// `cols`; `None` when either list is empty.
+fn bounds_of_lists(rows: &[u32], cols: &[u32]) -> Option<(u32, u32, u32, u32)> {
+    Some((*rows.iter().min()?, *cols.iter().min()?, *rows.iter().max()?, *cols.iter().max()?))
 }
 
 // ============================================================================
@@ -424,6 +476,41 @@ impl<'a> StyleLocks<'a> {
         }
         out
     }
+
+    /// The sheets `route` writes, once each, and the sheet whose written cells
+    /// the result REPORTS: the active sheet for a sheet route, the backing
+    /// sheet for a cell target (P3).
+    fn route_targets(&self, route: &StyleTargets<'_>) -> (Vec<usize>, usize) {
+        match route {
+            StyleTargets::Sheets { group, include_active } => (self.targets(group, *include_active), self.active_sheet),
+            StyleTargets::Only(t) => {
+                // ONLY the backing sheet: never the active sheet, never a group.
+                let mut out = self.targets(&[], false);
+                if t.backing_index < self.grids.len() && !out.contains(&t.backing_index) {
+                    out.push(t.backing_index);
+                }
+                (out, t.backing_index)
+            }
+        }
+    }
+}
+
+/// Which sheets a style command writes (P3).
+#[derive(Clone, Copy)]
+enum StyleTargets<'t> {
+    /// The active sheet (when `include_active`) and the grouped sheets.
+    Sheets { group: &'t [usize], include_active: bool },
+    /// ONLY a cell target's backing sheet, gated by its HOST's protection.
+    Only(&'t ResolvedCellTarget),
+}
+
+impl<'t> StyleTargets<'t> {
+    fn cell_target(&self) -> Option<&'t ResolvedCellTarget> {
+        match self {
+            StyleTargets::Only(t) => Some(t),
+            StyleTargets::Sheets { .. } => None,
+        }
+    }
 }
 
 /// What a style command's protection gate is asked about.
@@ -439,24 +526,42 @@ enum StyleArea<'p> {
 /// Gate EVERY target sheet -- the formatCells option and the locked cells --
 /// against the HELD guards, before anything is written: one protected sheet
 /// refuses the whole group. `what` names the operation in the refusal.
+///
+/// With a cell target (P3) the backing sheet is first re-checked to still be
+/// the target's (`ensure_target_still_at`: `sheet_ids` after `grids`), and the
+/// protection asked is the HOST's, through the derived view
+/// (`cell_target::target_protection_view`): the lock flags come from the
+/// backing cells, the protected flag and the options from the host.
 fn gate_style_targets(
     state: &AppState,
     locks: &StyleLocks<'_>,
     targets: &[usize],
+    cell_target: Option<&ResolvedCellTarget>,
     area: StyleArea<'_>,
     what: &str,
 ) -> Result<(), String> {
+    if let Some(t) = cell_target {
+        crate::cell_target::ensure_target_still_at(state, t)?;
+    }
     // After the style registry, released before the undo stack is taken: the
     // order search.rs's held-guard gates use.
     let sheet_kinds = state.sheet_kinds.read().unwrap();
-    let protection = state.sheet_protection.read().unwrap();
+    let stored = state.sheet_protection.read().unwrap();
+    let view;
+    let protection: &crate::protection::ProtectionStorage = match cell_target {
+        Some(t) => {
+            view = crate::cell_target::target_protection_view(&stored, t);
+            &view
+        }
+        None => &stored,
+    };
     for &sheet in targets {
         let Some(grid) = locks.sheet_grid(sheet) else { continue };
-        crate::protection::check_sheet_action_in(&sheet_kinds, &protection, sheet, "formatCells", what)?;
+        crate::protection::check_sheet_action_in(&sheet_kinds, protection, sheet, "formatCells", what)?;
         match area {
             StyleArea::Range(rect) => crate::protection::check_sheet_protection_range_in(
                 &sheet_kinds,
-                &protection,
+                protection,
                 grid,
                 &locks.styles,
                 sheet,
@@ -467,7 +572,7 @@ fn gate_style_targets(
             )?,
             StyleArea::Cells { rows, cols } => crate::protection::check_sheet_protection_cells_in(
                 &sheet_kinds,
-                &protection,
+                protection,
                 grid,
                 &locks.styles,
                 sheet,
@@ -481,19 +586,19 @@ fn gate_style_targets(
 /// The body of `apply_formatting` and `apply_formatting_to_sheets`: gate every
 /// target sheet under the held guards, then walk `rows` x `cols` on each of
 /// them inside ONE owned undo transaction (or the step a caller holds open).
-/// Returns the ACTIVE sheet's written cells and the styles they use.
+/// Returns the REPORTED sheet's written cells (the active sheet's, or a cell
+/// target's backing sheet's) and the styles they use.
 fn format_cells_on_sheets(
     state: &AppState,
     file_state: &FileState,
     parsed: &ParsedFormatting<'_>,
     rows: &[u32],
     cols: &[u32],
-    group: &[usize],
-    include_active: bool,
+    route: StyleTargets<'_>,
 ) -> Result<FormattingResult, String> {
     let locks = StyleLocks::take(state);
-    let targets = locks.targets(group, include_active);
-    gate_style_targets(state, &locks, &targets, StyleArea::Cells { rows, cols }, "format cells")?;
+    let (targets, report_sheet) = locks.route_targets(&route);
+    gate_style_targets(state, &locks, &targets, route.cell_target(), StyleArea::Cells { rows, cols }, "format cells")?;
     if targets.is_empty() {
         // Nothing to format (a group of only the active sheet, or indices past
         // the workbook): nothing written, and the document stays clean -- this
@@ -516,8 +621,8 @@ fn format_cells_on_sheets(
     let delta = |style: &mut CellStyle| parsed.apply(style);
     let mut written = Vec::new();
     for &sheet in &targets {
-        if sheet == active_sheet {
-            written = write_style_delta(
+        let cells = if sheet == active_sheet {
+            write_style_delta(
                 &mut grid,
                 grids.get_mut(active_sheet),
                 &mut styles,
@@ -526,9 +631,16 @@ fn format_cells_on_sheets(
                 rows,
                 cols,
                 &delta,
-            );
+            )
         } else if let Some(sheet_grid) = grids.get_mut(sheet) {
-            write_style_delta(sheet_grid, None, &mut styles, &mut undo_stack, sheet, rows, cols, &delta);
+            write_style_delta(sheet_grid, None, &mut styles, &mut undo_stack, sheet, rows, cols, &delta)
+        } else {
+            continue;
+        };
+        // KEEP the reported sheet's cells -- a cell target's backing sheet's
+        // too, which used to be discarded with every off-sheet result.
+        if sheet == report_sheet {
+            written = cells;
         }
     }
     undo_stack.commit_owned(txn);
@@ -537,7 +649,28 @@ fn format_cells_on_sheets(
     let mut used: Vec<usize> = written.iter().map(|&(_, _, index)| index).collect();
     used.sort_unstable();
     used.dedup();
-    Ok(formatting_result(state, &grid, &styles, &written, Some(used)))
+    let merges = report_merges(state, report_sheet, active_sheet);
+    let report_grid = if report_sheet == active_sheet { &*grid } else { &grids[report_sheet] };
+    Ok(formatting_result(state, report_grid, &styles, &written, &merges, Some(used)))
+}
+
+/// The merged regions of the REPORTED sheet, for the result's spans: the
+/// active sheet's live mirror (`state.merged_regions`), else the stored set
+/// `all_merged_regions[sheet]` (a cell target's backing sheet). Read after the
+/// caller's held grid and style guards, as `formatting_result` always read
+/// the mirror.
+fn report_merges(state: &AppState, report_sheet: usize, active_sheet: usize) -> Vec<MergedRegion> {
+    if report_sheet == active_sheet {
+        state.merged_regions.read().unwrap().iter().cloned().collect()
+    } else {
+        state
+            .all_merged_regions
+            .read()
+            .unwrap()
+            .get(report_sheet)
+            .map(|set| set.iter().cloned().collect())
+            .unwrap_or_default()
+    }
 }
 
 /// THE WALK of `apply_formatting`, on ONE sheet: for every (row, col) in
@@ -613,21 +746,24 @@ fn write_style_delta(
 }
 
 /// The `FormattingResult` the frontend primes its caches from: a `CellData`
-/// for every written ACTIVE-sheet cell, and the styles -- `Some(indices)` for
-/// just those, `None` for the WHOLE registry (a tier's style is referenced by
-/// no returned cell, and the style cache must still know it to paint the
-/// column). Takes the merges, the locale and the theme after the caller's held
-/// guards, the order every style command has always used.
+/// for every written cell of the REPORTED sheet (`grid`), and the styles --
+/// `Some(indices)` for just those, `None` for the WHOLE registry (a tier's
+/// style is referenced by no returned cell, and the style cache must still
+/// know it to paint the column). `merges` are the reported sheet's merged
+/// regions, passed EXPLICITLY (`report_merges`) so a cell target's result
+/// spans the BACKING sheet's merges, never the active sheet's mirror (P3).
+/// Takes the locale and the theme after the caller's held guards, the order
+/// every style command has always used.
 fn formatting_result(
     state: &AppState,
     grid: &engine::Grid,
     styles: &engine::StyleRegistry,
     written: &[(u32, u32, usize)],
+    merges: &[MergedRegion],
     returned_styles: Option<Vec<usize>>,
 ) -> FormattingResult {
-    let merged_regions = state.merged_regions.read().unwrap();
     let locale = state.locale.lock().unwrap();
-    let merge_at: std::collections::HashMap<(u32, u32), (u32, u32)> = merged_regions
+    let merge_at: std::collections::HashMap<(u32, u32), (u32, u32)> = merges
         .iter()
         .map(|r| ((r.start_row, r.start_col), (r.end_row - r.start_row + 1, r.end_col - r.start_col + 1)))
         .collect();
@@ -657,7 +793,6 @@ fn formatting_result(
         });
     }
     drop(locale);
-    drop(merged_regions);
 
     let theme = state.theme.read().unwrap();
     let all = styles.all_styles();
@@ -705,7 +840,8 @@ pub(crate) fn apply_formatting_to_sheets_core(
         let locale = state.locale.lock().unwrap();
         ParsedFormatting::parse(params, &locale)?
     };
-    format_cells_on_sheets(state, file_state, &parsed, &params.rows, &params.cols, sheet_indices, false).map(|_| ())
+    let route = StyleTargets::Sheets { group: sheet_indices, include_active: false };
+    format_cells_on_sheets(state, file_state, &parsed, &params.rows, &params.cols, route).map(|_| ())
 }
 
 /// Preview a custom number format string against a sample value.
@@ -1535,6 +1671,9 @@ pub fn get_style_count(state: State<AppState>) -> usize {
 ///
 /// Returns Result (it used to return a bare Option) so a protection refusal
 /// can reach the user instead of silently writing through the gate.
+///
+/// `target` (P3): the cell is a floating grid's cell -- written on its backing
+/// sheet ONLY, inside the extent, gated by the HOST's protection.
 #[tauri::command]
 pub fn set_cell_rich_text(
     state: State<AppState>,
@@ -1542,47 +1681,99 @@ pub fn set_cell_rich_text(
     row: u32,
     col: u32,
     runs: Option<Vec<crate::api_types::RichTextRunData>>,
+    target: Option<CellTargetRef>,
 ) -> Result<Option<CellData>, String> {
-    // Sheet protection, before any lock below. Rich text is cell CONTENT.
-    {
-        let active_sheet = *state.active_sheet.read().unwrap();
-        crate::protection::check_sheet_protection_range(&state, active_sheet, row, col, row, col)?;
+    set_cell_rich_text_core(&state, &file_state, row, col, runs, target.as_ref())
+}
+
+/// `set_cell_rich_text` without the Tauri wrappers (tests drive the real body).
+pub(crate) fn set_cell_rich_text_core(
+    state: &AppState,
+    file_state: &FileState,
+    row: u32,
+    col: u32,
+    runs: Option<Vec<crate::api_types::RichTextRunData>>,
+    target: Option<&CellTargetRef>,
+) -> Result<Option<CellData>, String> {
+    // A cell target resolves, holding nothing, before any guard below.
+    let resolved = match target {
+        Some(target) => {
+            let t = crate::cell_target::resolve_cell_target(state, target)?;
+            crate::cell_target::ensure_in_extent(&t, row, col, row, col)?;
+            Some(t)
+        }
+        None => None,
+    };
+    // Sheet protection, before any lock below. Rich text is cell CONTENT: for
+    // a cell target, the HOST's protection over the backing cell's lock flag.
+    match &resolved {
+        Some(t) => crate::cell_target::gate_target_cells(
+            state,
+            t,
+            (row, col, row, col),
+            crate::cell_target::EDIT_CELLS,
+            "edit a floating grid's cells",
+        )?,
+        None => {
+            let active_sheet = *state.active_sheet.read().unwrap();
+            crate::protection::check_sheet_protection_range(state, active_sheet, row, col, row, col)?;
+        }
+    }
+
+    let grid = state.grid.lock_pending().unwrap();
+    let grids = state.grids.lock_pending().unwrap();
+    let active_sheet = *state.active_sheet.read().unwrap();
+    // The sheet written: the active sheet, or the target's backing sheet --
+    // re-checked under the held grid guards (`sheet_ids` after `grids`).
+    let sheet = match &resolved {
+        Some(t) => {
+            crate::cell_target::ensure_target_still_at(state, t)?;
+            t.backing_index
+        }
+        None => active_sheet,
+    };
+    if sheet != active_sheet && sheet >= grids.len() {
+        return Err("Floating range backing sheet is missing".to_string());
     }
 
     // Every gate above has passed; from here this command commits. Constructed
     // HERE and not at the top so a refusal cannot leave a spuriously dirty
     // document -- see DocumentEffect::mutates on ordering.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let mut grid = state.grid.write(&effect).unwrap();
-    let mut grids = state.grids.write(&effect).unwrap();
-    let active_sheet = *state.active_sheet.read().unwrap();
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let mut grid = grid.authorize(&effect);
+    let mut grids = grids.authorize(&effect);
     let styles = state.style_registry.read().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
-    let merged_regions = state.merged_regions.read().unwrap();
+    let merges = report_merges(state, sheet, active_sheet);
     let locale = state.locale.lock().unwrap();
 
-    // Record undo
-    let previous = grid.get_cell(row, col).cloned();
-    undo_stack.record_cell_change(active_sheet, row, col, previous);
+    // The grid written, and the active sheet's second copy when it is the one.
+    let (sheet_grid, mirror): (&mut engine::Grid, Option<&mut engine::Grid>) = if sheet == active_sheet {
+        (&mut *grid, grids.get_mut(active_sheet))
+    } else {
+        (&mut grids[sheet], None)
+    };
+
+    // Record undo, against the sheet the cell is on.
+    let previous = sheet_grid.get_cell(row, col).cloned();
+    undo_stack.record_cell_change(sheet, row, col, previous);
 
     // Get or create the cell, update rich_text
     let engine_runs = runs.as_ref().map(|r| crate::api_types::data_to_rich_text_runs(r));
-    let mut cell = grid.get_cell(row, col).cloned().unwrap_or_else(Cell::new);
+    let mut cell = sheet_grid.get_cell(row, col).cloned().unwrap_or_else(Cell::new);
     cell.rich_text = engine_runs;
-    grid.set_cell(row, col, cell);
+    sheet_grid.set_cell(row, col, cell.clone());
 
-    // Sync to grids vector
-    if active_sheet < grids.len() {
-        if let Some(c) = grid.get_cell(row, col) {
-            grids[active_sheet].set_cell(row, col, c.clone());
-        }
+    // Sync to the active sheet's grids-vector copy
+    if let Some(m) = mirror {
+        m.set_cell(row, col, cell);
     }
 
     // Build response
-    let Some(cell) = grid.get_cell(row, col) else {
+    let Some(cell) = sheet_grid.get_cell(row, col) else {
         return Ok(None);
     };
-    let effective_style_index = grid.effective_style_index(row, col);
+    let effective_style_index = sheet_grid.effective_style_index(row, col);
     let style = styles.get(effective_style_index);
     let result = format_cell_value_with_color(&cell.value, style, &locale);
     let accounting_layout = result.accounting.map(|a| crate::api_types::AccountingLayout {
@@ -1590,16 +1781,13 @@ pub fn set_cell_rich_text(
         symbol_before: a.symbol_before,
         value: a.value,
     });
-    let (row_span, col_span) = match merged_regions
+    let (row_span, col_span) = match merges
         .iter()
         .find(|m| m.start_row == row && m.start_col == col)
     {
         Some(m) => (m.end_row - m.start_row + 1, m.end_col - m.start_col + 1),
         None => (1, 1),
     };
-
-    // Mark workbook as dirty
-    let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
 
     Ok(Some(CellData {
         row,
@@ -2162,8 +2350,9 @@ pub fn apply_border_preset(
     color: String,
     width: u8,
     sheet_indices: Option<Vec<usize>>,
+    target: Option<CellTargetRef>,
 ) -> Result<FormattingResult, String> {
-    apply_border_preset_core(
+    apply_border_preset_on(
         &state,
         &file_state,
         CellRect::new(start_row, start_col, end_row, end_col),
@@ -2172,6 +2361,7 @@ pub fn apply_border_preset(
         &color,
         width,
         sheet_indices.as_deref().unwrap_or(&[]),
+        target.as_ref(),
     )
 }
 
@@ -2186,7 +2376,30 @@ fn apply_border_preset_core(
     width: u8,
     group: &[usize],
 ) -> Result<FormattingResult, String> {
-    border_preset_on_sheets(state, file_state, rect, preset, style, color, width, group, true)
+    apply_border_preset_on(state, file_state, rect, preset, style, color, width, group, None)
+}
+
+/// [`apply_border_preset_core`] with an optional cell target (P3): with
+/// `Some`, ONLY the target's backing sheet is written, inside its extent.
+#[allow(clippy::too_many_arguments)]
+fn apply_border_preset_on(
+    state: &AppState,
+    file_state: &FileState,
+    rect: CellRect,
+    preset: &str,
+    style: &str,
+    color: &str,
+    width: u8,
+    group: &[usize],
+    target: Option<&CellTargetRef>,
+) -> Result<FormattingResult, String> {
+    let bounds = (rect.start_row, rect.start_col, rect.end_row, rect.end_col);
+    let resolved = resolve_style_target(state, target, !group.is_empty(), Some(bounds))?;
+    let route = match &resolved {
+        Some(t) => StyleTargets::Only(t),
+        None => StyleTargets::Sheets { group, include_active: true },
+    };
+    border_preset_on_sheets(state, file_state, rect, preset, style, color, width, route)
 }
 
 /// The grouped-sheets half of a border preset (survey D4): repeat the preset
@@ -2231,7 +2444,8 @@ fn apply_border_preset_to_sheets_core(
     color: &str,
     width: u8,
 ) -> Result<(), String> {
-    border_preset_on_sheets(state, file_state, rect, preset, style, color, width, sheet_indices, false).map(|_| ())
+    let route = StyleTargets::Sheets { group: sheet_indices, include_active: false };
+    border_preset_on_sheets(state, file_state, rect, preset, style, color, width, route).map(|_| ())
 }
 
 /// The body of both border commands. Under the HELD guards (`StyleLocks`):
@@ -2248,15 +2462,14 @@ fn border_preset_on_sheets(
     style: &str,
     color: &str,
     width: u8,
-    group: &[usize],
-    include_active: bool,
+    route: StyleTargets<'_>,
 ) -> Result<FormattingResult, String> {
     // An unknown preset or style is refused before any guard is taken.
     let delta = BorderPresetDelta::new(preset, style, color, width)?;
 
     let locks = StyleLocks::take(state);
-    let targets = locks.targets(group, include_active);
-    gate_style_targets(state, &locks, &targets, StyleArea::Range(rect), "apply borders")?;
+    let (targets, report_sheet) = locks.route_targets(&route);
+    gate_style_targets(state, &locks, &targets, route.cell_target(), StyleArea::Range(rect), "apply borders")?;
     let mut plans: Vec<(usize, RangeStylePlan)> = Vec::new();
     for &sheet in &targets {
         let Some(grid) = locks.sheet_grid(sheet) else { continue };
@@ -2287,19 +2500,16 @@ fn border_preset_on_sheets(
     let txn = undo_stack.begin_owned_transaction(label.clone());
     let mut written = Vec::new();
     for (sheet, plan) in plans {
-        if sheet == active_sheet {
-            written = write_range_style_plan(
-                &mut grid,
-                grids.get_mut(active_sheet),
-                &mut styles,
-                &mut undo_stack,
-                sheet,
-                plan,
-                &label,
-            )
-            .cells;
+        let outcome = if sheet == active_sheet {
+            write_range_style_plan(&mut grid, grids.get_mut(active_sheet), &mut styles, &mut undo_stack, sheet, plan, &label)
         } else if let Some(sheet_grid) = grids.get_mut(sheet) {
-            write_range_style_plan(sheet_grid, None, &mut styles, &mut undo_stack, sheet, plan, &label);
+            write_range_style_plan(sheet_grid, None, &mut styles, &mut undo_stack, sheet, plan, &label)
+        } else {
+            continue;
+        };
+        // The REPORTED sheet's cells (a cell target's backing sheet's too).
+        if sheet == report_sheet {
+            written = outcome.cells;
         }
     }
     undo_stack.commit_owned(txn);
@@ -2307,7 +2517,9 @@ fn border_preset_on_sheets(
 
     // The WHOLE registry: a tier's style is referenced by no returned cell, and
     // the frontend's style cache must still know it to paint the column.
-    Ok(formatting_result(state, &grid, &styles, &written, None))
+    let merges = report_merges(state, report_sheet, active_sheet);
+    let report_grid = if report_sheet == active_sheet { &*grid } else { &grids[report_sheet] };
+    Ok(formatting_result(state, report_grid, &styles, &written, &merges, None))
 }
 
 // ============================================================================
@@ -2596,8 +2808,17 @@ pub fn adjust_number_format_decimals(
     cols: Vec<u32>,
     delta: i32,
     sheet_indices: Option<Vec<usize>>,
+    target: Option<CellTargetRef>,
 ) -> Result<FormattingResult, String> {
-    adjust_number_format_decimals_core(&state, &file_state, &rows, &cols, delta, sheet_indices.as_deref().unwrap_or(&[]))
+    adjust_number_format_decimals_on(
+        &state,
+        &file_state,
+        &rows,
+        &cols,
+        delta,
+        sheet_indices.as_deref().unwrap_or(&[]),
+        target.as_ref(),
+    )
 }
 
 /// `rows` and `cols` as ONE rectangle, when they are: each list holds every
@@ -2652,6 +2873,21 @@ pub(crate) fn adjust_number_format_decimals_core(
     delta: i32,
     group: &[usize],
 ) -> Result<FormattingResult, String> {
+    adjust_number_format_decimals_on(state, file_state, rows, cols, delta, group, None)
+}
+
+/// [`adjust_number_format_decimals_core`] with an optional cell target (P3):
+/// with `Some`, the step is decided from the BACKING sheet's active cell and
+/// written ONLY there, inside the extent, gated by the host's protection.
+pub(crate) fn adjust_number_format_decimals_on(
+    state: &AppState,
+    file_state: &FileState,
+    rows: &[u32],
+    cols: &[u32],
+    delta: i32,
+    group: &[usize],
+    target: Option<&CellTargetRef>,
+) -> Result<FormattingResult, String> {
     if delta != 1 && delta != -1 {
         return Err(format!("delta must be 1 or -1 (got {})", delta));
     }
@@ -2669,11 +2905,23 @@ pub(crate) fn adjust_number_format_decimals_core(
         }
     }
 
+    let resolved = resolve_style_target(state, target, !group.is_empty(), bounds_of_lists(rows, cols))?;
+    let route = match &resolved {
+        Some(t) => StyleTargets::Only(t),
+        None => StyleTargets::Sheets { group, include_active: true },
+    };
+
     let locks = StyleLocks::take(state);
-    // Decide from the ACTIVE cell, under the guards the write will use.
+    let (targets, report_sheet) = locks.route_targets(&route);
+    // Decide from the ACTIVE cell OF THE SHEET WRITTEN (the backing sheet for a
+    // cell target -- never the active sheet's cell at the same coordinates),
+    // under the guards the write will use.
     let next = {
-        let style = locks.styles.get(locks.grid.effective_style_index(active_row, active_col));
-        let value = locks.grid.get_cell(active_row, active_col).map(|c| &c.value);
+        let Some(decide_grid) = locks.sheet_grid(report_sheet) else {
+            return Ok(unchanged());
+        };
+        let style = locks.styles.get(decide_grid.effective_style_index(active_row, active_col));
+        let value = decide_grid.get_cell(active_row, active_col).map(|c| &c.value);
         next_decimal_format(&style.number_format, value, delta)
     };
     let Some(next) = next else {
@@ -2681,12 +2929,11 @@ pub(crate) fn adjust_number_format_decimals_core(
     };
 
     // The same gates as apply_formatting, and only for a REAL change.
-    let targets = locks.targets(group, true);
     let area = match rect {
         Some(r) => StyleArea::Range(r),
         None => StyleArea::Cells { rows, cols },
     };
-    gate_style_targets(state, &locks, &targets, area, "format cells")?;
+    gate_style_targets(state, &locks, &targets, route.cell_target(), area, "format cells")?;
 
     let set_format = |style: &mut CellStyle| style.number_format = next.clone();
     let mut plans: Vec<(usize, RangeStylePlan)> = Vec::new();
@@ -2726,7 +2973,7 @@ pub(crate) fn adjust_number_format_decimals_core(
         };
         used.extend(outcome.cells.iter().map(|&(_, _, index)| index));
         used.extend(outcome.tier_styles.iter().copied());
-        if sheet == active_sheet {
+        if sheet == report_sheet {
             written = outcome.cells;
         }
     }
@@ -2738,7 +2985,9 @@ pub(crate) fn adjust_number_format_decimals_core(
     // recorder, and a Select All writes tiers and no cell at all.
     used.sort_unstable();
     used.dedup();
-    Ok(formatting_result(state, &grid, &styles, &written, Some(used)))
+    let merges = report_merges(state, report_sheet, active_sheet);
+    let report_grid = if report_sheet == active_sheet { &*grid } else { &grids[report_sheet] };
+    Ok(formatting_result(state, report_grid, &styles, &written, &merges, Some(used)))
 }
 
 #[cfg(test)]

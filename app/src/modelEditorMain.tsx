@@ -10,6 +10,7 @@ import { initSkinLoader } from "./core/theme/skinLoader";
 import { getBootPreferredSkinId } from "./api/appearancePolicy";
 import { ModelEditorApp } from "../extensions/ModelEditor/components/ModelEditorApp";
 import { installModelEditorStyles } from "../extensions/ModelEditor/components/theme";
+import { initAppLocale } from "./api/locale";
 
 // Stamp the active skin's CSS variables BEFORE first paint, exactly as
 // main.tsx:34 does. Without this the model-editor window was skin-BLIND: it is
@@ -45,10 +46,16 @@ window.addEventListener("drop", (e) => e.preventDefault());
 // A render-time exception with no boundary above it unmounts the tree and
 // leaves this window blank -- and a standalone Tauri window has no devtools
 // and no address bar, so blank is indistinguishable from hung. BUG-0083.
-ReactDOM.createRoot(document.getElementById("root")!).render(
-  <RootErrorBoundary surface="Model Editor">
-    <React.StrictMode>
-      <ModelEditorApp />
-    </React.StrictMode>
-  </RootErrorBoundary>,
-);
+//
+// The app locale is read from Rust BEFORE the first render (P2), so this window
+// formats numbers and dates like the main one from its first frame and follows
+// locale:changed afterwards. initAppLocale never rejects.
+void initAppLocale().finally(() => {
+  ReactDOM.createRoot(document.getElementById("root")!).render(
+    <RootErrorBoundary surface="Model Editor">
+      <React.StrictMode>
+        <ModelEditorApp />
+      </React.StrictMode>
+    </RootErrorBoundary>,
+  );
+});

@@ -24,8 +24,21 @@
 //   toast) because Core cannot import the API layer; without one the refusal
 //   still refuses and says so on the console.
 //
-// NOTE: A Core primitive with NO imports. It reads neither the DOM nor the
-// grid state.
+// CELL TARGETS (P3, owner finding G3). A claim could only REFUSE: it could not
+//   say "act on MY cells instead". An owner may now answer `cellTarget()` (the
+//   cells it holds) and declare the capability KINDS a door may act on through
+//   it (`actsOn`). A door that supports targets asks
+//   `resolveCellTarget(action, capability)` instead of `refuseIfSelectionOwned`:
+//   no owner -> the GRID target (Core's selection); an owner that admits the
+//   capability and answers -> the OBJECT target; otherwise refused, announced
+//   once, null. A door that has no target support keeps asking
+//   `refuseIfSelectionOwned` -- that question is unchanged.
+//
+// NOTE: A Core primitive with no RUNTIME imports (type-only ones). It reads
+// neither the DOM nor the grid state: Core registers its selection reader
+// (`setGridSelectionReader`) and its editor opener (`setGridCellEditorOpener`).
+
+import type { CellTargetRef, Selection } from "../types";
 
 /**
  * A KIND of door a claim may let through (`SelectionOwner.admits`). A door of
@@ -40,6 +53,79 @@
  *     grid's selected CELL (wave-B B8) does not.
  */
 export type SelectionDoorKind = "objectInsert";
+
+/**
+ * A KIND of cell act a door performs through a cell target. An owner lists the
+ * kinds it admits (`SelectionOwner.actsOn`) -- kinds, never door ids, so a new
+ * door of a known kind needs nothing from the owner.
+ */
+export type CellTargetCapability =
+  | "read" // Copy, ribbon state, Format Cells seed, Find, Go To Special
+  | "format" // font/fill/borders/alignment/wrap/indent/orientation/cell styles/Lock Cell/Format Painter dest/super-subscript
+  | "numberFormat" // Number group incl. Increase/Decrease Decimal
+  | "content" // paste, fill, AutoSum, Insert Function, Fill Series, Flash Fill, Replace
+  | "clear" // Clear menu + Delete
+  | "sort"
+  | "structure" // insert/delete sheet rows/cols (table semantics)
+  | "shiftCells" // Insert/Delete Cells with a shift -- no owner admits it this round
+  | "lineSize" // row height/column width/AutoFit/hide/unhide
+  | "merge"
+  | "conditionalFormat"
+  | "table" // Format as Table -- no owner admits it
+  | "filter"; // AutoFilter -- no owner admits it
+
+/** Every capability, once (tests and censuses iterate it). */
+export const CELL_TARGET_CAPABILITIES: readonly CellTargetCapability[] = [
+  "read",
+  "format",
+  "numberFormat",
+  "content",
+  "clear",
+  "sort",
+  "structure",
+  "shiftCells",
+  "lineSize",
+  "merge",
+  "conditionalFormat",
+  "table",
+  "filter",
+];
+
+/**
+ * The capabilities a WHOLE-OBJECT selection (the object selected, not a cell
+ * of it) admits: formatting the whole window, as Excel formats every cell of a
+ * selected range. Everything else needs cells.
+ */
+export const WHOLE_OBJECT_CAPABILITIES: readonly CellTargetCapability[] = [
+  "format",
+  "numberFormat",
+  "conditionalFormat",
+  "read",
+];
+
+/** The cells an owner holds (`SelectionOwner.cellTarget`). */
+export interface OwnedCellTarget {
+  /** What the backend resolves (sent as `opts.target` on a wrapper). */
+  ref: CellTargetRef;
+  /** Local coords == backing coords; activeRow/activeCol set; additionalRanges for multi-area. */
+  selection: Selection;
+  /** The write extent (rows x cols), the content extent the owner scrolls over. */
+  bounds: { rows: number; cols: number };
+  /** The object's own name ("Float1"), for sentences and Paste Link. */
+  label: string;
+  /** The OBJECT is selected, not a cell: selection = the whole window, active = (0,0). */
+  wholeObject: boolean;
+}
+
+/**
+ * What a door acts on. `grid`: Core's selection on the active sheet (null when
+ * Core has not reported one -- the door then does what it did with no
+ * selection). `object`: an owner's cells; `ownerId` names the owner that
+ * answered, so `selectTargetCells` / `editTargetCell` reach the same one.
+ */
+export type CellTarget =
+  | { kind: "grid"; selection: Selection | null }
+  | ({ kind: "object"; ownerId: string } & OwnedCellTarget);
 
 /** Something that can hold the selection instead of Core's grid. */
 export interface SelectionOwner {
@@ -56,8 +142,32 @@ export interface SelectionOwner {
    * able to take formatting away from the whole app by failing.
    */
   ownsSelection: () => boolean;
-  /** The sentence a refused door shows, given the action's name ("Bold"). */
-  refusal?: (action: string) => string;
+  /**
+   * The sentence a refused door shows, given the action's name ("Bold").
+   * `capability`: the kind of act a target-aware door asked for, so an owner
+   * can explain WHY ("table" / "filter": the object cannot hold the concept).
+   * `reason` "wholeObject": the owner admits the capability but the OBJECT,
+   * not a cell, is selected -- the sentence should ask for cells.
+   */
+  refusal?: (action: string, capability?: CellTargetCapability, reason?: "wholeObject") => string;
+  /**
+   * The cells this owner holds, or null. Asked only while it owns the
+   * selection, at the moment a target-aware door acts. A throw or a null is a
+   * refusal: a door never falls through to Core's hidden cell.
+   */
+  cellTarget?: () => OwnedCellTarget | null;
+  /**
+   * The capability KINDS a door may act on through `cellTarget` (never door
+   * ids). Absent or empty: every target-aware door refuses, as before.
+   */
+  actsOn?: readonly CellTargetCapability[];
+  /** Replace the owner's own selection (Find, Go To Special, a paste result). */
+  selectCells?: (selection: Selection) => void;
+  /**
+   * Open the owner's own in-cell editor on its active cell with `text`
+   * (Insert Function, AutoSum's single-cell guess). False: it did not open.
+   */
+  editActiveCell?: (text: string) => boolean;
   /**
    * Whether a character typed right now lands in the OWNER's own cell -- its
    * own type-to-edit takes it (a floating grid with one of its CELLS
@@ -180,10 +290,10 @@ export function defaultSelectionRefusal(action: string, label: string): string {
 }
 
 /** `owner`'s sentence for a refused `action` (its own, else the default). */
-function sentenceOf(owner: SelectionOwner, action: string): string {
+function sentenceOf(owner: SelectionOwner, action: string, capability?: CellTargetCapability): string {
   if (owner.refusal) {
     try {
-      const sentence = owner.refusal(action);
+      const sentence = capability === undefined ? owner.refusal(action) : owner.refusal(action, capability);
       if (typeof sentence === "string" && sentence.trim() !== "") return sentence;
     } catch (err) {
       console.error(`[selectionOwner] '${owner.id}' refusal threw; using the default sentence:`, err);
@@ -224,8 +334,13 @@ function announces(owner: SelectionOwner, sentence: string): boolean {
 export function refuseIfSelectionOwned(action: string, door?: SelectionDoorKind): boolean {
   const owner = getSelectionOwner(door);
   if (owner === null) return false;
-  const sentence = sentenceOf(owner, action);
-  if (!announces(owner, sentence)) return true;
+  announceRefusal(owner, sentenceOf(owner, action));
+  return true;
+}
+
+/** Announce `sentence` once for `owner` (unless it asked for silence). */
+function announceRefusal(owner: SelectionOwner, sentence: string): void {
+  if (!announces(owner, sentence)) return;
   if (announcer) {
     try {
       announcer(sentence);
@@ -235,10 +350,157 @@ export function refuseIfSelectionOwned(action: string, door?: SelectionDoorKind)
   } else {
     console.warn(`[selectionOwner] ${sentence}`);
   }
-  return true;
 }
 
 /** Wire where refusals are announced (@api does, to the toast). Null unwires. */
 export function setSelectionRefusalAnnouncer(fn: ((message: string) => void) | null): void {
   announcer = fn;
+}
+
+// ============================================================================
+// Cell targets: the door's NEW question
+// ============================================================================
+
+/** Core's selection, as Core last reported it (registered by the Spreadsheet). */
+let gridSelectionReader: (() => Selection | null) | null = null;
+
+/** Opens Core's in-cell editor on its active cell with a text (registered by Core). */
+let gridCellEditorOpener: ((text: string) => boolean) | null = null;
+
+/**
+ * Core registers its selection reader here: a lib cannot read React state, so
+ * the Spreadsheet component hands it over where it already feeds
+ * `gridCommands.setSelection`. Null unregisters.
+ */
+export function setGridSelectionReader(read: (() => Selection | null) | null): void {
+  gridSelectionReader = read;
+}
+
+/** Core's selection right now (null when no reader is registered or it threw). */
+export function readGridSelection(): Selection | null {
+  if (!gridSelectionReader) return null;
+  try {
+    return gridSelectionReader() ?? null;
+  } catch (err) {
+    console.error("[selectionOwner] the grid selection reader threw:", err);
+    return null;
+  }
+}
+
+/**
+ * Core registers how its own in-cell editor opens on the active cell with a
+ * text (Insert Function's "=", AutoSum's guess). Null unregisters.
+ */
+export function setGridCellEditorOpener(open: ((text: string) => boolean) | null): void {
+  gridCellEditorOpener = open;
+}
+
+/** Open Core's editor with `text` (false when none is registered, it refused or threw). */
+export function openGridCellEditor(text: string): boolean {
+  if (!gridCellEditorOpener) return false;
+  try {
+    return gridCellEditorOpener(text) === true;
+  } catch (err) {
+    console.error("[selectionOwner] the grid cell editor opener threw:", err);
+    return false;
+  }
+}
+
+/** The owner registered under `id` (a target's `ownerId`), or null. */
+export function getSelectionOwnerById(id: string): SelectionOwner | null {
+  return owners.get(id) ?? null;
+}
+
+/** The sentence when the owner admits the act but its OBJECT, not a cell, is selected. */
+export function defaultWholeObjectRefusal(action: string, label: string): string {
+  return `${action} needs cells: select cells inside ${label} first. Nothing was changed.`;
+}
+
+/** Whether `owner` declares `capability` in `actsOn`. */
+function actsOnCapability(owner: SelectionOwner, capability: CellTargetCapability): boolean {
+  return Array.isArray(owner.actsOn) && owner.actsOn.includes(capability);
+}
+
+/** A structurally sound answer from `cellTarget` (a malformed one is a refusal). */
+function isOwnedCellTarget(value: unknown): value is OwnedCellTarget {
+  if (value === null || typeof value !== "object") return false;
+  const t = value as { ref?: unknown; selection?: unknown; bounds?: unknown };
+  if (t.ref === null || typeof t.ref !== "object") return false;
+  const ref = t.ref as { kind?: unknown; id?: unknown };
+  return (
+    typeof ref.kind === "string" &&
+    typeof ref.id === "string" &&
+    ref.id !== "" &&
+    t.selection !== null &&
+    typeof t.selection === "object" &&
+    t.bounds !== null &&
+    typeof t.bounds === "object"
+  );
+}
+
+type TargetAnswer = { target: CellTarget } | { refusal: string; owner: SelectionOwner };
+
+/** The whole-object sentence: the owner's own, else the default. */
+function wholeObjectSentence(owner: SelectionOwner, action: string, capability: CellTargetCapability, label: string): string {
+  if (owner.refusal) {
+    try {
+      const own = owner.refusal(action, capability, "wholeObject");
+      if (typeof own === "string" && own.trim() !== "") return own;
+    } catch (err) {
+      console.error(`[selectionOwner] '${owner.id}' refusal threw; using the default sentence:`, err);
+    }
+  }
+  return defaultWholeObjectRefusal(action, label);
+}
+
+/** The one decision behind `resolveCellTarget` and `cellTargetFor`. */
+function decideCellTarget(action: string, capability: CellTargetCapability): TargetAnswer {
+  // Asked with NO door kind: a kind is for refuse-only doors (objectInsert),
+  // and the objectInsertDoorCensus scanner must see no new kind-passing call.
+  const owner = getSelectionOwner();
+  if (owner === null) return { target: { kind: "grid", selection: readGridSelection() } };
+  if (!actsOnCapability(owner, capability) || !owner.cellTarget) {
+    return { refusal: sentenceOf(owner, action, capability), owner };
+  }
+  let owned: OwnedCellTarget | null = null;
+  try {
+    const answer = owner.cellTarget();
+    if (isOwnedCellTarget(answer)) owned = answer;
+    else if (answer != null) console.error(`[selectionOwner] '${owner.id}' cellTarget returned a malformed target; refusing.`);
+  } catch (err) {
+    console.error(`[selectionOwner] '${owner.id}' cellTarget threw; refusing:`, err);
+  }
+  // The owner holds the selection but names no cells: refused -- NEVER the
+  // hidden Core cell under the object (BUG-0185).
+  if (owned === null) return { refusal: sentenceOf(owner, action, capability), owner };
+  if (owned.wholeObject === true && !WHOLE_OBJECT_CAPABILITIES.includes(capability)) {
+    return { refusal: wholeObjectSentence(owner, action, capability, owned.label || owner.label), owner };
+  }
+  return { target: { kind: "object", ownerId: owner.id, ...owned } };
+}
+
+/**
+ * THE DOOR'S NEW QUESTION, for a door that can act on an object's cells.
+ * No owner: the grid target (Core's selection, from the registered reader).
+ * An owner that lists `capability` in `actsOn` and answers `cellTarget()`:
+ * the object target. Otherwise: refused, announced ONCE with
+ * `refusal(action, capability)` (or silently, `shouldAnnounce`), and null --
+ * the caller returns without writing. A whole-object selection is admitted
+ * only for "format" | "numberFormat" | "conditionalFormat" | "read".
+ */
+export function resolveCellTarget(action: string, capability: CellTargetCapability): CellTarget | null {
+  const answer = decideCellTarget(action, capability);
+  if ("target" in answer) return answer.target;
+  announceRefusal(answer.owner, answer.refusal);
+  return null;
+}
+
+/**
+ * The same answer as `resolveCellTarget` WITHOUT announcing (ribbon state,
+ * enablement). A refusal comes back as `{ refusal: sentence }`; `action`
+ * names the act in that sentence.
+ */
+export function cellTargetFor(capability: CellTargetCapability, action = "This command"): CellTarget | { refusal: string } {
+  const answer = decideCellTarget(action, capability);
+  return "target" in answer ? answer.target : { refusal: answer.refusal };
 }

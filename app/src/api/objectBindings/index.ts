@@ -11,7 +11,7 @@
 //              them SYNCHRONOUSLY at paint time (`getResolved`,
 //              `overlayResolved`) and repaints on `onBindingsChanged`;
 //            * is the trigger that tells Rust to re-evaluate (bridge.ts);
-//            * mirrors @api/pageFilters to Rust (the page's slicers filter
+//            * mirrors @api/reportFilters to Rust (the page's slicers filter
 //              `[Measure]` refs);
 //            * holds the catalog mirror (catalog.ts) and the per-kind registry
 //              of what the UI offers to bind (registry.ts).
@@ -20,7 +20,7 @@
 //          invalidate their own caches and call `requestOverlayRedraw()` (the
 //          feedback-loop rule, bridge.ts header).
 //
-//          Imported as `@api/objectBindings` (a subpath, the @api/pageFilters
+//          Imported as `@api/objectBindings` (a subpath, the @api/reportFilters
 //          precedent); not part of the `@api` barrel. Imports nothing from
 //          app/extensions.
 
@@ -33,6 +33,8 @@ export type {
   BindingEditSource,
   ChangedCellRef,
   PageFilterWire,
+  TupleFilterWire,
+  ObjectFilterOverrideWire,
   PageFilterPageWire,
   BindingFormulaAnalysis,
   BindingModelMeasures,

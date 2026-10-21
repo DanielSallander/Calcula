@@ -1855,13 +1855,15 @@ test.describe("fix-all live: model value lists name the blank member (W6)", () =
       ]);
       expect(slicer, "precondition: the model slicer was created").toBeTruthy();
       const items = await eventually(
-        () => callModule<Array<{ value: string }> | undefined>(page, SLICER_STORE, "getCachedItems", [slicer!.id]),
+        () => callModule<Array<{ key: string; label: string }> | undefined>(page, SLICER_STORE, "getCachedItems", [slicer!.id]),
         (it) => (it?.length ?? 0) > 0,
         "the model slicer shows no items",
       );
-      const values = items!.map((i) => i.value);
-      expect(values[values.length - 1], `the list does not end with (blank): ${JSON.stringify(values)}`).toBe("(blank)");
-      expect(values.filter((x) => x === "(blank)").length, "(blank) is listed more than once").toBe(1);
+      // Items are members (P2): the blank's KEY is "" and its LABEL "(Blank)" (ruling Q8).
+      const values = items!.map((i) => i.key);
+      expect(values[values.length - 1], `the list does not end with the blank member: ${JSON.stringify(values)}`).toBe("");
+      expect(items![items!.length - 1].label, "the blank member's label").toBe("(Blank)");
+      expect(values.filter((x) => x === "").length, "the blank member is listed more than once").toBe(1);
 
       await callModule(page, SLICER_STORE, "updateSlicerSelectionAsync", [slicer!.id, ["East"]]);
       const east = await eventually(() => pivotRows(page, pivotId), (r) => !("West" in r), "selecting East did not filter the pivot");
@@ -1900,19 +1902,22 @@ test.describe("fix-all live: model value lists name the blank member (W6)", () =
       await newFile(page);
       conn = await blankModel(page, name);
       // The value list every model filter surface reads (Filter pane, CUBE builder, model slicer).
-      const values = await invoke<string[]>(page, "bi_get_column_values", { connectionId: conn.connectionId, table: "Sales", column: "region" });
-      expect(values[values.length - 1], `the Filter pane's region list does not end with (blank): ${JSON.stringify(values)}`).toBe("(blank)");
+      // Members (P2): the list carries { key, label }; the blank's key is "" and its label "(Blank)" (ruling Q8).
+      const members = await invoke<Array<{ key: string; label: string }>>(page, "bi_get_column_values", { connectionId: conn.connectionId, table: "Sales", column: "region" });
+      const values = members.map((v) => v.key);
+      expect(values[values.length - 1], `the Filter pane's region list does not end with the blank member: ${JSON.stringify(values)}`).toBe("");
+      expect(members[members.length - 1].label, "the blank member's label").toBe("(Blank)");
       const only2025 = await invoke<string[]>(page, "bi_get_column_available_values", {
         connectionId: conn.connectionId,
         table: "Sales",
         column: "region",
-        crossFilters: [{ table: "Sales", column: "year", values: ["2025"] }],
+        constraints: [{ table: "Sales", column: "year", values: ["2025"] }],
       });
-      expect(only2025, "with year 2025 (only blank-region rows), only (blank) has data").toEqual(["(blank)"]);
+      expect(only2025, "with year 2025 (only blank-region rows), only the blank member (key \"\") has data").toEqual([""]);
       const y2023 = await invoke<string[]>(page, "bi_get_column_available_values", {
-        connectionId: conn.connectionId, table: "Sales", column: "region", crossFilters: [{ table: "Sales", column: "year", values: ["2023"] }],
+        connectionId: conn.connectionId, table: "Sales", column: "region", constraints: [{ table: "Sales", column: "year", values: ["2023"] }],
       });
-      expect(y2023.sort(), "POSITIVE CONTROL: 2023 has East, West and blank rows").toEqual(["(blank)", "East", "West"].sort());
+      expect(y2023.sort(), "POSITIVE CONTROL: 2023 has East, West and blank rows").toEqual(["", "East", "West"].sort());
 
       await setCells(page, 0, [
         ["E20", `=CUBEVALUE("${name}";"[Revenue]";"Sales[region]='(blank)'")`],

@@ -110,8 +110,8 @@ describe("progress cell type", () => {
     expect(progressCellType.render(renderContext("42", { max: 100 }))).toBe(true);
   });
 
-  it("tolerates locale decimal commas and percent suffixes", () => {
-    expect(progressCellType.render(renderContext("0,42"))).toBe(true);
+  it("reads percent suffixes (decimal commas follow the APP locale: progressLocale.test.ts)", () => {
+    expect(progressCellType.render(renderContext("0.42"))).toBe(true);
     expect(progressCellType.render(renderContext("42%"))).toBe(true);
   });
 

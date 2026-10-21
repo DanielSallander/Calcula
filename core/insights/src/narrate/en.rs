@@ -30,6 +30,15 @@ impl EnNarrator {
             locale,
         }
     }
+
+    /// English templates over exactly these number settings (the app
+    /// locale's): no collapse to the template language's own numbers.
+    pub fn with_numbers(numbers: LocaleSettings) -> Self {
+        EnNarrator {
+            locale: Locale::from_locale_id(&numbers.locale_id),
+            numbers,
+        }
+    }
 }
 
 fn plural(n: usize, one: &str, many: &str) -> String {

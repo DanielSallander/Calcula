@@ -27,6 +27,6 @@ pub use registry::{AnyConnector, SourceBinding, SourceRegistry};
 pub use request::{
     CalculationGroupApplication, ColumnRef, DetailRequest, HierarchyGroupBy, InFilter,
     LookupColumn, MeasureFilter, OrderByClause, OrderTarget, QueryRequest, ScopedFilter,
-    ScopedInFilter, TotalsMode, GROUPING_ID_COLUMN,
+    ScopedInFilter, ScopedTupleFilter, TotalsMode, TupleColumn, GROUPING_ID_COLUMN,
 };
 pub use rest_connector::{RestConnector, REST_SOURCE_SCHEMA};

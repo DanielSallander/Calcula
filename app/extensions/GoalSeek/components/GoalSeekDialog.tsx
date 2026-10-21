@@ -11,6 +11,7 @@ import {
   goalSeek,
   columnToLetter,
 } from "@api";
+import { formatGoalSeekValue, parseGoalSeekTarget } from "../lib/goalSeekParse";
 
 // ============================================================================
 // Styles (CSS variables from app theme)
@@ -281,8 +282,8 @@ export function GoalSeekDialog(props: DialogProps): React.ReactElement | null {
       return;
     }
 
-    const valueNum = parseFloat(toValue);
-    if (isNaN(valueNum)) {
+    const valueNum = parseGoalSeekTarget(toValue);
+    if (valueNum === null) {
       setValidationError("To value must be a number.");
       return;
     }
@@ -397,9 +398,7 @@ export function GoalSeekDialog(props: DialogProps): React.ReactElement | null {
 
               <span style={styles.detailLabel}>Current value:</span>
               <span style={styles.detailValue}>
-                {Number.isFinite(result.targetResult)
-                  ? result.targetResult.toPrecision(10).replace(/\.?0+$/, "")
-                  : String(result.targetResult)}
+                {formatGoalSeekValue(result.targetResult)}
               </span>
             </div>
           </div>

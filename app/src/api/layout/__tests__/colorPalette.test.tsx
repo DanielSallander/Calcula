@@ -438,6 +438,22 @@ describe("ColorPalette in a MenuSub (Format > Tab Color >)", () => {
     expect(s.onChange).not.toHaveBeenCalled();
   });
 
+  it("Enter in the hex field applies the colour the palette ALREADY shows (a pick, like a swatch click)", async () => {
+    // Fill Color's value is the REMEMBERED colour (Excel's yellow by default),
+    // not the cell's: typing that colour and pressing Enter must still fill
+    // the selection (BUG-0537, found live in floating-grid-home FG2).
+    const s = spies();
+    render(<FormatMenu s={s} value="#0070c0" />);
+    await openTabColorFromKeys();
+    const hex = byTestId<HTMLInputElement>("tab-palette-hex");
+    act(() => hex.focus());
+    setInputValue(hex, "#0070C0");
+    key(hex, "Enter");
+    await settle();
+    expect(s.onChange.mock.calls).toEqual([["#0070c0"]]);
+    expect(menus()).toHaveLength(0);
+  });
+
   it("Escape in a FOCUSED hex field drops the draft: one level back, nothing applied", async () => {
     const s = spies();
     render(<FormatMenu s={s} />);

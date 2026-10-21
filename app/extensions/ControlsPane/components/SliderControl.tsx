@@ -24,6 +24,7 @@
 import React, { useState, useCallback, useEffect, useRef } from "react";
 import { Slider, useSurfaceLayout } from "@api/layout";
 import { setChartParamValue } from "@api/chartParams";
+import { formatNumber } from "@api/locale";
 import type { ControlValue } from "@api/controlValues";
 import type { PaneControl } from "../lib/controlsPaneTypes";
 import { commitValue, previewValue } from "../lib/controlsPaneStore";
@@ -138,9 +139,8 @@ export function SliderControl({ control }: Props): React.ReactElement {
   // advanced baseline. Closes over committedValue (re-bound every render) so
   // the no-commit branch can resync a display frozen during the interaction.
   const commit = useCallback(
-    (raw: string) => {
+    (v: number) => {
       interactingRef.current = false;
-      const v = Number(raw);
       if (Number.isNaN(v)) return;
       if (v === baselineRef.current) {
         // Nothing to commit. If the committed value moved externally mid-drag
@@ -164,14 +164,14 @@ export function SliderControl({ control }: Props): React.ReactElement {
 
   const handlePointerUp = useCallback(
     (e: React.PointerEvent<HTMLInputElement>) => {
-      commit(e.currentTarget.value);
+      commit(rangeValue(e.currentTarget));
     },
     [commit],
   );
 
   const handleKeyUp = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
-      if (COMMIT_KEYS.has(e.key)) commit(e.currentTarget.value);
+      if (COMMIT_KEYS.has(e.key)) commit(rangeValue(e.currentTarget));
     },
     [commit],
   );
@@ -180,7 +180,7 @@ export function SliderControl({ control }: Props): React.ReactElement {
   // commit whatever the input holds. No-op when nothing changed.
   const handleBlur = useCallback(
     (e: React.FocusEvent<HTMLInputElement>) => {
-      commit(e.target.value);
+      commit(rangeValue(e.target));
     },
     [commit],
   );
@@ -201,7 +201,7 @@ export function SliderControl({ control }: Props): React.ReactElement {
       // The card is the width: the track takes what the readout leaves.
       width={band ? BAND_TRACK_WIDTH : undefined}
       ariaLabel={control.name}
-      title={`${control.name}: ${formatValue(localValue, config.step)}`}
+      title={`${control.name}: ${formatSliderControlValue(localValue, config.step)}`}
       style={styles.row}
     />
   );
@@ -210,13 +210,27 @@ export function SliderControl({ control }: Props): React.ReactElement {
 /** Band track width: fills a card at its minimum width beside the readout. */
 const BAND_TRACK_WIDTH = 96;
 
-/** Format the readout to the step's precision (avoids float noise). */
-function formatValue(value: number, step: number): string {
-  const stepStr = String(step);
-  const dotIdx = stepStr.indexOf(".");
-  if (dotIdx === -1) return String(value);
-  const decimals = stepStr.length - dotIdx - 1;
-  return value.toFixed(decimals);
+/**
+ * The range input's position as a NUMBER. A range's value is the browser's
+ * invariant wire text ("1.5" in every locale), so it is read as the typed
+ * `valueAsNumber`, never through a text parser -- the app-locale reader would
+ * refuse "1.5" under de-DE, and the old `Number(raw)` was a text parse of it.
+ */
+function rangeValue(el: HTMLInputElement): number {
+  return el.valueAsNumber;
+}
+
+/**
+ * The title's value: the step's precision (no float noise), in the APP
+ * locale ("1,5" under de-DE). The readout beside the track is the @api Slider's
+ * own, which formats the same way.
+ */
+export function formatSliderControlValue(value: number, step: number): string {
+  const stepText = String(step);
+  const dotIdx = stepText.indexOf(".");
+  if (dotIdx === -1) return formatNumber(value);
+  const decimals = stepText.length - dotIdx - 1;
+  return formatNumber(value, { decimals });
 }
 
 const styles: Record<string, React.CSSProperties> = {

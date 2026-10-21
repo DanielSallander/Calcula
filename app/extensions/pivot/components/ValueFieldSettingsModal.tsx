@@ -6,6 +6,7 @@ import React, { useState, useCallback, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { css } from "@emotion/css";
 import { useDialogWindow } from "@api/dialogWindow";
+import type { MemberRef } from "@api/pivotMembers";
 import {
   type AggregationType,
   type ShowValuesAs,
@@ -29,7 +30,9 @@ export interface ValueFieldSettingsModalProps {
   isOpen: boolean;
   field: ZoneField;
   /** Available row/column fields for base field selection */
-  availableFields?: { name: string; items: string[] }[];
+  /** Base field choices; each item's KEY is what is saved as the base item,
+   *  its LABEL (app locale) is what the dialog shows. */
+  availableFields?: { name: string; items: MemberRef[] }[];
   onSave: (settings: ValueFieldSettings) => void;
   onCancel: () => void;
 }
@@ -425,8 +428,8 @@ export function ValueFieldSettingsModal({
                 <option value="(previous)">(previous)</option>
                 <option value="(next)">(next)</option>
                 {baseFieldItems.map((item) => (
-                  <option key={item} value={item}>
-                    {item}
+                  <option key={item.key} value={item.key}>
+                    {item.label}
                   </option>
                 ))}
               </select>

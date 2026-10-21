@@ -17,6 +17,12 @@ export interface AuditEntry {
   ok: boolean;
   /** Denial/error code when ok=false (PermissionDenied, ValidationError, ...). */
   error?: string;
+  /**
+   * A one-line summary of the call's arguments, for rows whose policy declares
+   * one (`MethodPolicy.auditDetail`): shape only -- a ref, a count -- never data
+   * the script read or wrote.
+   */
+  detail?: string;
 }
 
 const RING_CAPACITY = 2000;

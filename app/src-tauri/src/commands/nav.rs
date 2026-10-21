@@ -177,21 +177,95 @@ pub struct GoToSpecialResult {
 /// `criteria` can be: "blanks", "formulas", "constants", "errors", "comments", "notes",
 ///   "conditionalFormats", "dataValidation"
 /// `search_range` is optional: (startRow, startCol, endRow, endCol). If None, uses entire used range.
+///
+/// `target` (P3): an OBJECT's cells (a floating grid). The object's BACKING
+/// sheet is searched, the bounds are clipped to its write extent, and
+/// "lastCell" -- answered by the frontend for a sheet -- is answered here as
+/// the backing sheet's last used cell inside the extent (the active sheet's
+/// used range would be the wrong sheet's corner).
 #[tauri::command]
 pub fn go_to_special(
     state: State<AppState>,
     criteria: String,
     search_range: Option<(u32, u32, u32, u32)>,
-) -> GoToSpecialResult {
-    let grid = state.grid.read().unwrap();
-    let active_sheet = *state.active_sheet.read().unwrap();
+    target: Option<crate::api_types::CellTargetRef>,
+) -> Result<GoToSpecialResult, String> {
+    match target {
+        Some(target) => go_to_special_on_target(&state, &criteria, search_range, &target),
+        None => {
+            let grid = state.grid.read().unwrap();
+            let active_sheet = *state.active_sheet.read().unwrap();
+            // Determine search bounds
+            let (sr, sc, er, ec) = search_range.unwrap_or((0, 0, grid.max_row, grid.max_col));
+            Ok(GoToSpecialResult {
+                cells: special_cells_in(&state, &grid, active_sheet, &criteria, sr, sc, er, ec),
+            })
+        }
+    }
+}
 
-    // Determine search bounds
-    let (sr, sc, er, ec) = search_range.unwrap_or((0, 0, grid.max_row, grid.max_col));
+/// Go To Special over an OBJECT's cells (P3): see [`go_to_special`]. A READ.
+/// LOCKS: the resolver's (released), then `grid` | `grids` held while the
+/// per-sheet stores (comments, notes, CF, validation) are read one at a time.
+pub(crate) fn go_to_special_on_target(
+    state: &AppState,
+    criteria: &str,
+    search_range: Option<(u32, u32, u32, u32)>,
+    target: &crate::api_types::CellTargetRef,
+) -> Result<GoToSpecialResult, String> {
+    let t = crate::cell_target::resolve_cell_target(state, target)?;
+    if t.extent_rows == 0 || t.extent_cols == 0 {
+        return Ok(GoToSpecialResult { cells: Vec::new() });
+    }
+    let (last_row, last_col) = (t.extent_rows - 1, t.extent_cols - 1);
+    let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
+    let run = |grid: &engine::Grid| -> GoToSpecialResult {
+        if criteria == "lastCell" {
+            // Excel's Last cell: the used range's far corner, whatever is
+            // selected; an empty grid answers its first cell.
+            let (row, col) = engine::navigation::used_range(grid)
+                .map(|(_, _, er, ec)| (er.min(last_row), ec.min(last_col)))
+                .unwrap_or((0, 0));
+            return GoToSpecialResult { cells: vec![CellCoord { row, col }] };
+        }
+        let (sr, sc, er, ec) = search_range
+            .map(|(a, b, c, d)| (a.min(c), b.min(d), a.max(c), b.max(d)))
+            .unwrap_or((0, 0, last_row, last_col));
+        if sr > last_row || sc > last_col {
+            return GoToSpecialResult { cells: Vec::new() };
+        }
+        let (er, ec) = (er.min(last_row), ec.min(last_col));
+        GoToSpecialResult { cells: special_cells_in(state, grid, t.backing_index, criteria, sr, sc, er, ec) }
+    };
+    if t.backing_index == active {
+        let grid = state.grid.read().map_err(|e| e.to_string())?;
+        Ok(run(&grid))
+    } else {
+        let grids = state.grids.read().map_err(|e| e.to_string())?;
+        crate::cell_target::ensure_target_still_at(state, &t)?;
+        let grid = grids
+            .get(t.backing_index)
+            .ok_or_else(|| "Floating range backing sheet is missing".to_string())?;
+        Ok(run(grid))
+    }
+}
 
+/// The Go To Special matcher over ONE sheet's grid and its sheet-keyed stores,
+/// inside the inclusive bounds; sorted in reading order.
+#[allow(clippy::too_many_arguments)]
+fn special_cells_in(
+    state: &AppState,
+    grid: &engine::Grid,
+    active_sheet: usize,
+    criteria: &str,
+    sr: u32,
+    sc: u32,
+    er: u32,
+    ec: u32,
+) -> Vec<CellCoord> {
     let mut cells = Vec::new();
 
-    match criteria.as_str() {
+    match criteria {
         "blanks" => {
             for row in sr..=er {
                 for col in sc..=ec {
@@ -304,7 +378,7 @@ pub fn go_to_special(
     // Sort by row then col for consistent ordering
     cells.sort_by(|a, b| a.row.cmp(&b.row).then(a.col.cmp(&b.col)));
 
-    GoToSpecialResult { cells }
+    cells
 }
 
 // ============================================================================

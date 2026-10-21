@@ -3,7 +3,7 @@
 // CONTEXT: Determines if the user is typing a function name and which argument
 // they're in (for argument hints).
 
-import { getCachedLocale } from "@api/locale";
+import { getAppLocale } from "@api/locale";
 
 /**
  * The character range one argument of a call occupies in the formula text.
@@ -47,7 +47,7 @@ const ROW_REF_PATTERN = /^\$?\d+:\$?\d+$/;
  * Get the locale's list separator (argument separator), defaulting to ",".
  */
 function getListSeparator(): string {
-  return getCachedLocale()?.listSeparator ?? ",";
+  return getAppLocale().listSeparator;
 }
 
 /**

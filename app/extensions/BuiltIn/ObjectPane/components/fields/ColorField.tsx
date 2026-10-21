@@ -4,10 +4,16 @@
 // CONTEXT: While the picker DRAGS (its `input` events) the colour is PREVIEWED
 //          on the object (@api/objectFormat `previewObjectFormat`: the family's
 //          local cache only -- no write, no undo, no dirty flag). The picker's
-//          `change` (it closed on a colour) COMMITS once; a blur without a
-//          change ends the preview. The hex box commits a typed #rgb, #rrggbb
-//          or #rrggbbaa on blur or Enter; anything else is shown as refused
-//          and writes nothing.
+//          native `change` (it closed on a colour) COMMITS once: the LAST step
+//          of the pick, compared with the colour STORED when the pick started
+//          (the preview rewrites `value` while it drags, so `value` at `change`
+//          time is the picked colour itself). Picking the stored colour back,
+//          or a blur without a change, ends the preview. The picker is driven
+//          by the shared `useNativeColorPick` (round 2, G1: this box used to be
+//          CONTROLLED by `value`, so React's restore put the old colour back
+//          into the DOM and the `change` never committed). The hex box commits
+//          a typed #rgb, #rrggbb or #rrggbbaa on blur or Enter; anything else
+//          is shown as refused and writes nothing.
 
 import React, { useEffect, useRef, useState } from "react";
 import { isSafeVisualColor, readContainerField, type ContainerFieldId } from "@api/visualContainer";
@@ -15,17 +21,11 @@ import { useFormatContext } from "../formatContext";
 import { literalFieldValue } from "../../lib/formatValues";
 import { paneStyles } from "../paneStyles";
 import { FormatRow } from "./FormatRow";
+import { pickerHex, useNativeColorPick } from "../../../../_shared/components/colorPick";
 
-/** The 6-digit form an `<input type="color">` accepts (it refuses #rgb and alpha). */
-export function pickerHex(color: string): string {
-  const c = color.trim();
-  if (/^#[0-9a-fA-F]{6}$/.test(c)) return c.toLowerCase();
-  if (/^#[0-9a-fA-F]{8}$/.test(c)) return c.slice(0, 7).toLowerCase();
-  if (/^#[0-9a-fA-F]{3}$/.test(c)) {
-    return ("#" + c[1] + c[1] + c[2] + c[2] + c[3] + c[3]).toLowerCase();
-  }
-  return "#000000";
-}
+/** The 6-digit form an `<input type="color">` accepts -- ONE definition, in the
+ *  shared colour-pick module; re-exported so existing importers are unchanged. */
+export { pickerHex };
 
 export interface ColorBoxProps {
   /** The colour shown (hex), or "" for none / default. */
@@ -50,34 +50,16 @@ export function ColorBox({
   ariaLabel,
   testId,
 }: ColorBoxProps): React.ReactElement {
-  const pickerRef = useRef<HTMLInputElement>(null);
+  // `input` = a preview step, the native `change` = ONE commit (one undo step).
+  const picker = useNativeColorPick({ value, onStep: onPreview, onCommit, onEnd: onEndPreview });
   const [hexDraft, setHexDraft] = useState(value);
   const [invalid, setInvalid] = useState(false);
   const editingHex = useRef(false);
-  const latest = useRef({ value, onCommit, onEndPreview });
-  latest.current = { value, onCommit, onEndPreview };
 
   useEffect(() => {
     if (!editingHex.current) setHexDraft(value);
     setInvalid(false);
   }, [value]);
-
-  // The picker's native `change` (it closed on a colour) is the commit; React's
-  // onChange is the `input` stream while it drags (the preview).
-  useEffect(() => {
-    const el = pickerRef.current;
-    if (!el) return;
-    const onNativeChange = (): void => {
-      const { value: current, onCommit: commit, onEndPreview: end } = latest.current;
-      if (el.value.toLowerCase() === pickerHex(current) && current !== "") {
-        end?.();
-        return;
-      }
-      commit(el.value);
-    };
-    el.addEventListener("change", onNativeChange);
-    return () => el.removeEventListener("change", onNativeChange);
-  }, []);
 
   const commitHex = (raw: string): void => {
     const text = raw.trim();
@@ -97,15 +79,11 @@ export function ColorBox({
   return (
     <div style={paneStyles.inline}>
       <input
-        ref={pickerRef}
-        type="color"
-        value={pickerHex(value)}
+        {...picker}
         disabled={disabled}
         aria-label={ariaLabel}
         data-testid={testId}
         style={{ width: 28, height: 24, padding: 0, border: "none", background: "transparent", cursor: "pointer" }}
-        onChange={(e) => onPreview?.(e.target.value)}
-        onBlur={() => onEndPreview?.()}
       />
       <input
         type="text"

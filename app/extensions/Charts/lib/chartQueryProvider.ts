@@ -4,16 +4,20 @@
 //   invalidated + repainted when that bound value changes (the same targeted,
 //   coalesced pass that re-materializes grid reports).
 //
-//   And re-run them when their PAGE's model filters move (@api/pageFilters,
-//   CONTRACT-CANVAS §4.8): a model slicer on a chart's sheet or canvas keeps
-//   some items of a model column, and every design-query chart on THAT page
-//   against THAT model follows it -- the reader merges the filter into the
-//   query (designQueryChartDataReader.ts), this file makes the chart read
-//   again. A chart on another sheet, or on another model, is not touched:
-//   re-running it would cost a model query and change nothing.
+//   And re-run them when what they RESOLVE moves (@api/reportFilters,
+//   CONTRACT-CANVAS §4.8, P4): a model slicer on a chart's sheet or canvas
+//   keeps some items of a model column, and every design-query chart on THAT
+//   page (by sheet id) against THAT model follows it -- the reader merges the
+//   resolved filters into the query (designQueryChartDataReader.ts), this file
+//   makes the chart read again. A change for every page ("*", an all-pages
+//   ribbon filter) reaches every chart on the model; a change that names
+//   TARGETS (a visuals-scoped filter, an interaction pair) reaches those charts
+//   whatever their page. A chart on another sheet, or on another model, is not
+//   touched: re-running it would cost a model query and change nothing.
 
 import { emitAppEvent, AppEvents } from "@api/events";
-import { onPageFiltersChange, type PageFiltersChange } from "@api/pageFilters";
+import { onReportFiltersChange, type ReportFiltersChange } from "@api/reportFilters";
+import { getReportPagesSnapshot, sheetIdAt } from "@api/reportPages";
 import {
   registerQueryObjectProvider,
   type QueryObjectBinding,
@@ -24,18 +28,61 @@ import { isDesignQueryDataSource } from "../types";
 import { invalidateChartCache } from "../rendering/chartRenderer";
 
 /**
- * The design-query charts a page-filter change reaches: the chart sits on a
- * changed page AND queries the changed page's model. Pure over the store.
+ * The design-query charts a report-filter change reaches: the chart queries a
+ * changed connection on a changed page (its sheet's id, or "*" for every page),
+ * or the change names the chart as a target. Pure over the store and the page
+ * list.
  */
-export function chartsReachedByPageFilters(change: PageFiltersChange): string[] {
-  const pages = new Set(change.pages.map((p) => `${p.sheetIndex}\u0000${p.connectionId}`));
+export function chartsReachedByReportFilters(change: ReportFiltersChange): string[] {
+  const pages = new Set(change.pages.map((p) => `${p.sheetId}|${p.connectionId}`));
+  const targets = new Set(change.targets.filter((t) => t.kind === "chart").map((t) => t.id));
+  const snapshot = getReportPagesSnapshot();
   const ids: string[] = [];
   for (const chart of getAllCharts()) {
     const data = chart.spec?.data;
     if (!isDesignQueryDataSource(data) || !data.connectionId) continue;
-    if (pages.has(`${chart.sheetIndex}\u0000${String(data.connectionId)}`)) ids.push(chart.chartId);
+    if (targets.has(chart.chartId)) {
+      ids.push(chart.chartId);
+      continue;
+    }
+    const conn = String(data.connectionId);
+    const sheetId = sheetIdAt(snapshot, chart.sheetIndex);
+    if (pages.has(`*|${conn}`) || (sheetId !== null && pages.has(`${sheetId}|${conn}`))) ids.push(chart.chartId);
   }
   return ids;
+}
+
+/**
+ * ONE overlay repaint per frame for report-filter changes. A click on a model
+ * slicer can move the page's filters and a visual's selection in the same
+ * tick (two changes); each invalidates its charts at once, and the repaint
+ * that makes them refetch is asked for once. `requestAnimationFrame` where the
+ * host has it, else a 16 ms timer (a worker, a test without frames).
+ */
+let repaintPending = false;
+let repaintHandle: { cancel: () => void } | null = null;
+
+function scheduleChartsRepaint(): void {
+  if (repaintPending) return;
+  repaintPending = true;
+  const run = () => {
+    repaintPending = false;
+    repaintHandle = null;
+    emitAppEvent(AppEvents.GRID_REFRESH);
+  };
+  if (typeof requestAnimationFrame === "function") {
+    const h = requestAnimationFrame(run);
+    repaintHandle = { cancel: () => cancelAnimationFrame(h) };
+  } else {
+    const h = setTimeout(run, 16);
+    repaintHandle = { cancel: () => clearTimeout(h) };
+  }
+}
+
+function cancelChartsRepaint(): void {
+  repaintHandle?.cancel();
+  repaintHandle = null;
+  repaintPending = false;
 }
 
 /** Register the "chart" family. Returns an unregister fn. */
@@ -66,17 +113,19 @@ export function registerChartQueryProvider(): () => void {
     },
   });
 
-  // The page's model slicers. Same refresh as a control change: invalidate
-  // the reached charts, then ONE repaint (they refetch on redraw, with the
-  // page's new filters merged into their query).
-  const unsubscribePageFilters = onPageFiltersChange((change) => {
-    const ids = chartsReachedByPageFilters(change);
+  // The page's model filters and the visuals' cross-filter selections. Same
+  // refresh as a control change: invalidate the reached charts at once, then
+  // ONE repaint per frame however many changes landed in it (they refetch on
+  // redraw, with the newly resolved filters merged into their query).
+  const unsubscribePageFilters = onReportFiltersChange((change) => {
+    const ids = chartsReachedByReportFilters(change);
     if (ids.length === 0) return;
     for (const id of ids) invalidateChartCache(id);
-    emitAppEvent(AppEvents.GRID_REFRESH);
+    scheduleChartsRepaint();
   });
 
   return () => {
+    cancelChartsRepaint();
     unsubscribePageFilters();
     unregisterControls();
   };

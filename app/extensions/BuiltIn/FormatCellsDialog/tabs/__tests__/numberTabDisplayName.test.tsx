@@ -19,10 +19,8 @@ import { createRoot, type Root } from "react-dom/client";
 
 vi.mock("@api", () => ({
   previewNumberFormat: vi.fn(async () => ({ display: "Sample" })),
-  getCachedLocale: () => null,
-  getLocaleSettings: async () => {
-    throw new Error("no locale in this test");
-  },
+  // The invariant locale, as getAppLocale() answers before the app locale lands.
+  getAppLocale: () => ({ decimalSeparator: ".", thousandsSeparator: "," }),
   // REJECTS on purpose. The regional rows are an enhancement, never a
   // requirement: a backend that cannot answer must cost those rows and nothing
   // else, and every BUG-0065 expectation below must still hold.

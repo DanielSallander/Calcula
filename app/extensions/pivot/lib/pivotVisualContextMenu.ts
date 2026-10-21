@@ -48,6 +48,7 @@ import {
   setPivotCellAnchor,
 } from "./pivotVisualCellSelection";
 import { isPivotVisualSelected } from "../handlers/selectionHandler";
+import { clearSelectionsFiltering, isShowingFilteredView } from "./pivotCrossFilterView";
 
 export { isPivotBoxMenuOpen } from "./pivotVisualMenuState";
 
@@ -118,6 +119,10 @@ export function pivotBoxMenuTargetAt(clientX: number, clientY: number): PivotBox
 export const PIVOT_BOX_SIZE_POSITION_ITEM_ID = "pivot.box.sizeAndPosition";
 /** The id of the box menu's "Format..." row (opens the object pane on Format). */
 export const PIVOT_BOX_FORMAT_ITEM_ID = "pivot.box.format";
+/** The id of the filtered box's "Clear visual selection" row (P4 S7). */
+export const PIVOT_BOX_CLEAR_SELECTION_ITEM_ID = "pivot.box.clearVisualSelection";
+/** The one pivot item a FILTERED box's cells keep: Copy (it copies what is shown). */
+const FILTERED_BOX_KEPT_ITEM_IDS: ReadonlySet<string> = new Set(["pivot:copy"]);
 
 /**
  * The pivot group's items for a context (visible ones, labels resolved) and,
@@ -125,7 +130,21 @@ export const PIVOT_BOX_FORMAT_ITEM_ID = "pivot.box.format";
  * under them.
  */
 export function pivotBoxMenuItems(context: GridMenuContext, region: GridRegion | null = null): GridContextMenuItem[] {
-  const items = gridExtensions.getContextMenuItemsForContext(context).filter((item) => item.group === PIVOT_MENU_GROUP);
+  let items = gridExtensions.getContextMenuItemsForContext(context).filter((item) => item.group === PIVOT_MENU_GROUP);
+  // A box showing a FILTERED view (P4 S7): its cells are a transient view's,
+  // and every pivot item acts on the REAL pivot by a cell's groupPath or field
+  // index -- so the cells offer only Copy (what is shown) and "Clear visual
+  // selection" (back to the real view). The object rows below stay.
+  const pivotId = region ? pivotIdOfVisual(region) : null;
+  if (pivotId !== null && isShowingFilteredView(pivotId)) {
+    items = items.filter((item) => FILTERED_BOX_KEPT_ITEM_IDS.has(item.id));
+    items.push({
+      id: PIVOT_BOX_CLEAR_SELECTION_ITEM_ID,
+      label: "Clear visual selection",
+      group: PIVOT_MENU_GROUP,
+      onClick: () => clearSelectionsFiltering(pivotId),
+    });
+  }
   if (!region) return items;
   const entry = sizeAndPositionMenuEntry(region);
   const last = items[items.length - 1];

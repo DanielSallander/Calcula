@@ -320,8 +320,9 @@ describe("createDefaultExportOptions", () => {
     expect(createDefaultExportOptions().delimiter).toBe(",");
   });
 
-  it("uses semicolon for comma-decimal locales", () => {
-    expect(createDefaultExportOptions(",").delimiter).toBe(";");
+  it("uses the locale's list separator (semicolon in comma-decimal locales)", () => {
+    expect(createDefaultExportOptions(";").delimiter).toBe(";");
+    expect(createDefaultExportOptions(",").delimiter).toBe(",");
   });
 
   it("defaults to CRLF line ending", () => {

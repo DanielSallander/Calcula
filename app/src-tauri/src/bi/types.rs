@@ -350,11 +350,12 @@ fn default_filter_level() -> u8 {
     1
 }
 
-/// A cross-filter constraint: only include rows where the given column's value
-/// is in the provided list. Used for cross-filtering between ribbon filters.
+/// A value constraint: only include rows where the given column's value is in
+/// the provided list. Used for dependent-filter narrowing between ribbon filters
+/// and for a model slicer's has-data shading.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BiCrossFilter {
+pub struct BiValueConstraint {
     pub table: String,
     pub column: String,
     pub values: Vec<String>,
@@ -505,6 +506,12 @@ pub struct BiQueryResult {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Option<String>>>,
     pub row_count: usize,
+    /// The declared TYPE of each column, parallel to `columns` (P2 DC1), so
+    /// the grid writers decide number / date / boolean / text from the
+    /// source's type instead of guessing from the machine text. Empty for a
+    /// hand-built result: every column is then `Unknown` (today's guess).
+    #[serde(default)]
+    pub column_kinds: Vec<super::member::BiColumnKind>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

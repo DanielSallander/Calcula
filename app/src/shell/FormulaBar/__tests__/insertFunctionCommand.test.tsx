@@ -173,4 +173,34 @@ describe("Insert Function without the formula bar", () => {
     expect(h.startEditing).not.toHaveBeenCalled();
     expect(toasts.map((t) => t.message)).toEqual(["Insert Function is not available while an object is selected."]);
   });
+
+  it("on a floating grid's cells (P3, a cell target admitting content): the OBJECT's editor opens with '=', never Core's", async () => {
+    const edited: string[] = [];
+    const release = registerSelectionOwner({
+      id: "test.floating-grid",
+      label: "a floating grid's cells",
+      ownsSelection: () => true,
+      actsOn: ["content"],
+      cellTarget: () => ({
+        ref: { kind: "floatingRange", id: "fr-1" },
+        selection: { startRow: 1, startCol: 1, endRow: 1, endCol: 1, type: "cells", activeRow: 1, activeCol: 1 },
+        bounds: { rows: 5, cols: 5 },
+        label: "Float1",
+        wholeObject: false,
+      }),
+      editActiveCell: (text) => {
+        edited.push(text);
+        return true;
+      },
+    });
+    try {
+      await run();
+    } finally {
+      release();
+    }
+    expect(edited).toEqual(["="]);
+    expect(h.startEditing, "Core's hidden cell was put in edit mode").not.toHaveBeenCalled();
+    expect(isInsertFunctionOpen()).toBe(true);
+    expect(toasts).toEqual([]);
+  });
 });

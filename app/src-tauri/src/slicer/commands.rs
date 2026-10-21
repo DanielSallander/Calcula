@@ -5,6 +5,7 @@
 use crate::pivot::PivotState;
 use crate::pivot::commands::PivotCmdCtx;
 use crate::slicer::types::*;
+use crate::api_types::MemberRef;
 use crate::{format_cell_value, AppState};
 use std::collections::HashMap;
 use tauri::State;
@@ -141,7 +142,7 @@ pub(crate) fn create_slicer_core(
 /// Delete a slicer.
 ///
 /// §3bn: a slicer is not only a dependent, it is also something depended ON.
-/// Ribbon filters name canvas slicers in `crossFilterSlicerTargets`, and a
+/// Ribbon filters name canvas slicers in `dependentSlicers`, and a
 /// deleted slicer used to stay in those lists forever — every item fetch went
 /// on re-evaluating cross-filter candidacy against an id that resolved to
 /// nothing. The prune is [`crate::object_deps::cascade_deleted_slicers`], and
@@ -1264,9 +1265,14 @@ pub async fn set_slicer_item_selected(
         SlicerSourceType::Table => {
             get_table_column_values(&state, slicer.cache_source_id, &slicer.field_name).unwrap_or_default()
         }
-        SlicerSourceType::Pivot => {
-            get_pivot_field_values(&pivot_state, slicer.cache_source_id, &slicer.field_name).unwrap_or_default()
-        }
+        SlicerSourceType::Pivot => get_pivot_field_members(
+            &pivot_state,
+            slicer.cache_source_id,
+            &slicer.field_name,
+            &engine::LocaleSettings::invariant(),
+        )
+        .map(|members| members.into_iter().map(|m| m.key).collect())
+        .unwrap_or_default(),
         SlicerSourceType::BiConnection => model_slicer_values(&bi_state, &slicer).await?,
     };
 
@@ -1341,7 +1347,7 @@ pub fn get_slicers_for_sheet(
 pub(crate) struct RibbonCrossCandidate {
     pub field_name: String,
     pub selection: Vec<String>,
-    /// `crossFilterSlicerTargets` names the slicer asking.
+    /// `dependentSlicers` names the slicer asking.
     pub explicit: bool,
     pub connection_id: identity::EntityId,
     pub mode: crate::ribbon_filter::ConnectionMode,
@@ -1360,12 +1366,15 @@ pub(crate) struct RibbonCrossCandidate {
 ///   page: they name this slicer, or run in Workbook mode, or By-sheet with
 ///   this sheet, or Manual with a target pivot on this sheet.
 /// A filter on the slicer's own column is skipped (it is not a cross filter).
-/// Pure.
+/// A sibling slicer whose visual interaction with this one is `none` on the
+/// page's canvas (`interactions`, P4 S4d) is skipped too: the author said it
+/// does not reach this slicer, so it must not dim its items either. Pure.
 pub(crate) fn model_slicer_cross_filters<'s, I>(
     slicer: &Slicer,
     slicers: I,
     ribbon: &[RibbonCrossCandidate],
     pivots_on_page: &std::collections::HashSet<identity::EntityId>,
+    interactions: Option<&::persistence::CanvasInteractions>,
 ) -> Vec<(String, Vec<String>)>
 where
     I: IntoIterator<Item = &'s Slicer>,
@@ -1382,6 +1391,7 @@ where
             || other.sheet_index != slicer.sheet_index
             || !same_connection(other)
             || other.field_name == slicer.field_name
+            || sibling_ignored(interactions, other, slicer)
         {
             continue;
         }
@@ -1406,6 +1416,18 @@ where
     out
 }
 
+/// Whether the canvas stores the pair `source -> target` (two slicers) as
+/// `none`. `None` interactions (a worksheet page) ignore nothing.
+fn sibling_ignored(
+    interactions: Option<&::persistence::CanvasInteractions>,
+    source: &Slicer,
+    target: &Slicer,
+) -> bool {
+    let Some(interactions) = interactions else { return false };
+    let as_ref = |s: &Slicer| ::persistence::CanvasObjectRef { kind: "slicer".to_string(), id: s.id.to_string() };
+    interactions.explicit(&as_ref(source), &as_ref(target)) == Some(::persistence::VisualInteractionMode::None)
+}
+
 /// The model tables of a connection's engine, for splitting "Table.Column"
 /// keys (table names can contain dots).
 async fn model_table_names(
@@ -1417,8 +1439,9 @@ async fn model_table_names(
     Ok(engine.model().tables().iter().map(|t| t.name().to_string()).collect())
 }
 
-/// Every value of a MODEL slicer's column, read from the model (never from a
-/// pivot cache, so the domain cannot collapse to what a filtered pivot shows).
+/// Every value KEY of a MODEL slicer's column, read from the model (never
+/// from a pivot cache, so the domain cannot collapse to what a filtered pivot
+/// shows). The blank member is its key "" (ruling Q8).
 async fn model_slicer_values(
     bi_state: &crate::bi::types::BiState,
     slicer: &Slicer,
@@ -1432,10 +1455,213 @@ async fn model_slicer_values(
     crate::bi::commands::bi_get_column_values_core(bi_state, slicer.cache_source_id, &table, &column).await
 }
 
+/// One visual's tuple filter (`TupleFilterWire`) resolved onto model columns:
+/// keep a row whose `columns` equal, column by column, one of `tuples`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct VisualTupleConstraint {
+    pub columns: Vec<(String, String)>,
+    pub tuples: Vec<Vec<String>>,
+}
+
+impl VisualTupleConstraint {
+    /// Resolve the wire's "Table.Column" fields with `split`. A field that is
+    /// not a model column drops the WHOLE filter (the BUG-0527 rule: dropping
+    /// one column would WIDEN the selection, and for has-data a dropped
+    /// filter can only show more items, never hide one wrongly). A tuple of
+    /// the wrong length is dropped.
+    pub(crate) fn resolve(
+        wire: &crate::api_types::TupleFilterWire,
+        split: &impl Fn(&str) -> (String, String),
+    ) -> Option<VisualTupleConstraint> {
+        let mut columns = Vec::with_capacity(wire.fields.len());
+        for field in &wire.fields {
+            let (table, column) = split(field);
+            if table.is_empty() {
+                crate::log_warn!("SLICER", "a visual's tuple filter names '{}', not a model column; ignored", field);
+                return None;
+            }
+            columns.push((table, column));
+        }
+        if columns.is_empty() {
+            return None;
+        }
+        let tuples = wire.tuples.iter().filter(|t| t.len() == columns.len()).cloned().collect();
+        Some(VisualTupleConstraint { columns, tuples })
+    }
+}
+
+/// A key as the availability read compares it: the blank member in any
+/// spelling is "" (ruling Q8).
+fn availability_key(value: &str) -> String {
+    if pivot_engine::is_blank_member_key(value) {
+        pivot_engine::BLANK_MEMBER_KEY.to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+/// `constraints` merged into what ONE availability read of `table.column`
+/// can take: one constraint per column (two on the same column intersect),
+/// and the constraints on the TARGET column itself taken out as a set the
+/// answer is intersected with (a read never groups by its own column twice).
+/// `None` when the constraints contradict (some column admits nothing): no
+/// row passes, so nothing is available.
+fn merge_availability_constraints(
+    table: &str,
+    column: &str,
+    constraints: &[crate::bi::types::BiValueConstraint],
+) -> Option<(Vec<crate::bi::types::BiValueConstraint>, Option<std::collections::HashSet<String>>)> {
+    let mut merged: Vec<(String, String, std::collections::HashSet<String>)> = Vec::new();
+    for c in constraints {
+        let values: std::collections::HashSet<String> = c.values.iter().map(|v| availability_key(v)).collect();
+        match merged.iter_mut().find(|(t, col, _)| *t == c.table && *col == c.column) {
+            Some((_, _, held)) => held.retain(|v| values.contains(v)),
+            None => merged.push((c.table.clone(), c.column.clone(), values)),
+        }
+    }
+    if merged.iter().any(|(_, _, values)| values.is_empty()) {
+        return None;
+    }
+    let mut own: Option<std::collections::HashSet<String>> = None;
+    let mut rest = Vec::new();
+    for (t, c, values) in merged {
+        if t == table && c == column {
+            own = Some(values);
+        } else {
+            let mut values: Vec<String> = values.into_iter().collect();
+            values.sort();
+            rest.push(crate::bi::types::BiValueConstraint { table: t, column: c, values });
+        }
+    }
+    Some((rest, own))
+}
+
+/// The keys of `table.column` that still have rows under `constraints`, read
+/// once (see [`merge_availability_constraints`]).
+async fn available_under(
+    bi_state: &crate::bi::types::BiState,
+    connection_id: identity::EntityId,
+    table: &str,
+    column: &str,
+    constraints: &[crate::bi::types::BiValueConstraint],
+) -> Result<std::collections::HashSet<String>, String> {
+    let Some((rest, own)) = merge_availability_constraints(table, column, constraints) else {
+        return Ok(std::collections::HashSet::new());
+    };
+    let mut available: std::collections::HashSet<String> = if rest.is_empty() {
+        crate::bi::commands::bi_get_column_values_core(bi_state, connection_id, table, column)
+            .await?
+            .into_iter()
+            .collect()
+    } else {
+        crate::bi::commands::bi_get_column_available_values_core(bi_state, connection_id, table, column, &rest)
+            .await?
+            .into_iter()
+            .collect()
+    };
+    if let Some(own) = own {
+        available.retain(|v| own.contains(&availability_key(v)));
+    }
+    Ok(available)
+}
+
+/// A MODEL slicer's has-data set under its page's constraints AND the other
+/// visuals' tuple filters, or `None` when nothing constrains it (every item
+/// has data).
+///
+/// EXACT for tuples: availability under an OR is the OR of availability, so
+/// the answer is the UNION, over every combination of one tuple per filter
+/// (the filters AND together), of the availability under the plain
+/// constraints plus that combination's columns. A one-column tuple filter is
+/// a plain IN constraint and is folded into the list first (no combinations).
+/// An empty tuple list keeps nothing: no item has data.
+///
+/// THE CAP: above [`SLICER_TUPLE_HAS_DATA_CAP`] combinations the tuples are
+/// NOT applied -- the answer is the availability under the plain constraints
+/// alone, a superset of the exact one, logged -- so an item is never hidden
+/// wrongly by a selection too large to answer.
+pub(crate) async fn available_under_visual_constraints(
+    bi_state: &crate::bi::types::BiState,
+    connection_id: identity::EntityId,
+    table: &str,
+    column: &str,
+    constraints: &[crate::bi::types::BiValueConstraint],
+    tuples: &[VisualTupleConstraint],
+) -> Result<Option<std::collections::HashSet<String>>, String> {
+    let mut plain: Vec<crate::bi::types::BiValueConstraint> = constraints.to_vec();
+    let mut multi: Vec<&VisualTupleConstraint> = Vec::new();
+    for t in tuples {
+        if t.tuples.is_empty() {
+            return Ok(Some(std::collections::HashSet::new()));
+        }
+        if t.columns.len() == 1 {
+            let (tbl, col) = t.columns[0].clone();
+            plain.push(crate::bi::types::BiValueConstraint {
+                table: tbl,
+                column: col,
+                values: t.tuples.iter().map(|tuple| tuple[0].clone()).collect(),
+            });
+        } else {
+            multi.push(t);
+        }
+    }
+    if plain.is_empty() && multi.is_empty() {
+        return Ok(None);
+    }
+    let combinations = multi.iter().try_fold(1usize, |n, t| n.checked_mul(t.tuples.len()));
+    let within_cap = combinations.is_some_and(|n| n <= SLICER_TUPLE_HAS_DATA_CAP);
+    if multi.is_empty() || !within_cap {
+        if !multi.is_empty() {
+            crate::log_warn!(
+                "SLICER",
+                "a visual's selection holds {} tuple combination(s), over the cap of {}: the slicer's has-data \
+                 shading ignores it (no item is dimmed by it)",
+                combinations.map_or_else(|| "too many".to_string(), |n| n.to_string()),
+                SLICER_TUPLE_HAS_DATA_CAP
+            );
+            if plain.is_empty() {
+                return Ok(None);
+            }
+        }
+        return Ok(Some(available_under(bi_state, connection_id, table, column, &plain).await?));
+    }
+    // Every combination of one tuple per multi-column filter.
+    let mut picks: Vec<Vec<crate::bi::types::BiValueConstraint>> = vec![Vec::new()];
+    for t in &multi {
+        let mut next = Vec::with_capacity(picks.len() * t.tuples.len());
+        for pick in &picks {
+            for tuple in &t.tuples {
+                let mut extended = pick.clone();
+                for ((tbl, col), value) in t.columns.iter().zip(tuple.iter()) {
+                    extended.push(crate::bi::types::BiValueConstraint {
+                        table: tbl.clone(),
+                        column: col.clone(),
+                        values: vec![value.clone()],
+                    });
+                }
+                next.push(extended);
+            }
+        }
+        picks = next;
+    }
+    let mut union: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for pick in picks {
+        let mut all = plain.clone();
+        all.extend(pick);
+        union.extend(available_under(bi_state, connection_id, table, column, &all).await?);
+    }
+    Ok(Some(union))
+}
+
 /// Get the unique items for a slicer (reads from the data source).
 /// Returns items with their selection state and data availability.
 /// Cross-filtering: checks other slicers AND ribbon filters that share
 /// connected sources to determine which items still have matching data.
+///
+/// `visual_constraints` (P4 S4d, optional on the wire): the cross-filter
+/// selections of OTHER visuals on the page that reach this MODEL slicer, as
+/// `@api/reportFilters` resolved them. They narrow its has-data shading only
+/// (never its selection); a non-model slicer ignores them.
 #[tauri::command]
 pub async fn get_slicer_items(
     state: State<'_, AppState>,
@@ -1444,9 +1670,24 @@ pub async fn get_slicer_items(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     bi_state: State<'_, crate::bi::types::BiState>,
     slicer_id: identity::EntityId,
+    visual_constraints: Option<crate::api_types::SlicerVisualConstraints>,
 ) -> Result<Vec<SlicerItem>, String> {
-    get_slicer_items_core(&state, &pivot_state, &slicer_state, &ribbon_filter_state, &bi_state, slicer_id).await
+    get_slicer_items_core(
+        &state,
+        &pivot_state,
+        &slicer_state,
+        &ribbon_filter_state,
+        &bi_state,
+        slicer_id,
+        visual_constraints,
+    )
+    .await
 }
+
+/// The most tuples of one tuple filter whose has-data answer is computed
+/// exactly (one availability read per tuple). Above it every item is answered
+/// `has_data = true` and the cap is logged: an item is never HIDDEN wrongly.
+pub(crate) const SLICER_TUPLE_HAS_DATA_CAP: usize = 64;
 
 /// [`get_slicer_items`] over borrowed state.
 pub(crate) async fn get_slicer_items_core(
@@ -1456,7 +1697,12 @@ pub(crate) async fn get_slicer_items_core(
     ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
     bi_state: &crate::bi::types::BiState,
     slicer_id: identity::EntityId,
+    visual_constraints: Option<crate::api_types::SlicerVisualConstraints>,
 ) -> Result<Vec<SlicerItem>, String> {
+    // The app locale for the item LABELS (leaf lock: taken, cloned and
+    // dropped here, before any other guard). Keys never depend on it.
+    let display_locale = crate::pivot::utils::display_locale_of(state);
+
     // Pre-resolve each active ribbon filter's cross-filter candidacy BEFORE
     // taking the slicer lock: its field + selection, whether it explicitly
     // targets this slicer, and its effective target-pivot set. Targets are
@@ -1473,7 +1719,7 @@ pub(crate) async fn get_slicer_items_core(
                 .map(|f| (
                     f.field_name.clone(),
                     f.selected_items.clone().unwrap(),
-                    f.cross_filter_slicer_targets.contains(&slicer_id),
+                    f.dependent_slicers.contains(&slicer_id),
                     f.connection_id,
                     f.connection_mode,
                     f.connected_pivots.clone(),
@@ -1508,7 +1754,12 @@ pub(crate) async fn get_slicer_items_core(
 
     // A MODEL slicer's page: the BI pivots of its connection on its sheet,
     // resolved before the slicer lock too (the helper takes the pivot locks).
-    let model_page: Option<std::collections::HashSet<identity::EntityId>> = {
+    // Its page's visual interactions too (P4 2.5 lock order item 3): copied
+    // out of `sheet_kinds` and released here, never under the slicer lock.
+    let (model_page, page_interactions): (
+        Option<std::collections::HashSet<identity::EntityId>>,
+        Option<::persistence::CanvasInteractions>,
+    ) = {
         let head = slicer_state
             .slicers
             .read()
@@ -1516,13 +1767,19 @@ pub(crate) async fn get_slicer_items_core(
             .get(&slicer_id)
             .filter(|s| s.is_model_slicer())
             .map(|s| (s.cache_source_id, s.sheet_index));
-        head.map(|(conn, sheet)| {
-            crate::pivot::commands::bi_pivots_for_connection(state, pivot_state, conn)
-                .into_iter()
-                .filter(|p| p.sheet_index == sheet)
-                .map(|p| p.id)
-                .collect()
-        })
+        match head {
+            None => (None, None),
+            Some((conn, sheet)) => (
+                Some(
+                    crate::pivot::commands::bi_pivots_for_connection(state, pivot_state, conn)
+                        .into_iter()
+                        .filter(|p| p.sheet_index == sheet)
+                        .map(|p| p.id)
+                        .collect(),
+                ),
+                crate::sheets::canvas_interactions_of(state, sheet),
+            ),
+        }
     };
 
     // Everything lock-holding happens in this block (the command is async —
@@ -1537,7 +1794,8 @@ pub(crate) async fn get_slicer_items_core(
         // Items come from the MODEL (phase 2); cross filters are page scoped
         // and REPLACE the generic sibling path below.
         let page = model_page.clone().unwrap_or_default();
-        let cross = model_slicer_cross_filters(slicer, slicers.values(), &ribbon_candidates, &page);
+        let cross =
+            model_slicer_cross_filters(slicer, slicers.values(), &ribbon_candidates, &page, page_interactions.as_ref());
         (slicer.clone(), None, None, None, Some(cross))
     } else {
 
@@ -1564,7 +1822,7 @@ pub(crate) async fn get_slicer_items_core(
     // Also collect cross-filters from ribbon filters.
     // Match if: (a) their effective target pivots overlap this slicer's
     //               connected sources (both filter the same pivot), OR
-    //           (b) they explicitly target this slicer via crossFilterSlicerTargets.
+    //           (b) they explicitly target this slicer via dependentSlicers.
     {
         let ribbon_siblings: Vec<(String, Vec<String>)> = ribbon_candidates
             .iter()
@@ -1606,12 +1864,20 @@ pub(crate) async fn get_slicer_items_core(
         None
     };
 
-    let unique_values: Option<Vec<String>> = if pinned_bi.is_some() {
+    // THE member shape: a table source's items are their display text (key =
+    // label, DC2 -- AutoFilter matches display text); a pivot source's are
+    // its cache members (invariant key, app-locale label).
+    let unique_values: Option<Vec<MemberRef>> = if pinned_bi.is_some() {
         None // fetched async in phase 2
     } else {
         Some(match slicer.source_type {
-            SlicerSourceType::Table => get_table_column_values(state, reference_source_id, &slicer.field_name)?,
-            SlicerSourceType::Pivot => get_pivot_field_values(pivot_state, reference_source_id, &slicer.field_name)?,
+            SlicerSourceType::Table => get_table_column_values(state, reference_source_id, &slicer.field_name)?
+                .into_iter()
+                .map(MemberRef::verbatim)
+                .collect(),
+            SlicerSourceType::Pivot => {
+                get_pivot_field_members(pivot_state, reference_source_id, &slicer.field_name, &display_locale)?
+            }
             SlicerSourceType::BiConnection => unreachable!("model slicers take the branch above"),
         })
     };
@@ -1639,7 +1905,7 @@ pub(crate) async fn get_slicer_items_core(
     }; // locks drop here — phase 2 may await
 
     // Phase 2 (async): model reads.
-    let (unique_values, has_data_set): (Vec<String>, Option<std::collections::HashSet<String>>) =
+    let (unique_values, has_data_set): (Vec<MemberRef>, Option<std::collections::HashSet<String>>) =
         match (&model_cross, unique_values_sync, &pinned_bi) {
             (Some(cross), _, _) => {
                 let tables = model_table_names(bi_state, slicer.cache_source_id).await?;
@@ -1650,64 +1916,70 @@ pub(crate) async fn get_slicer_items_core(
                 if table.is_empty() {
                     return Err(format!("'{}' is not a model column", slicer.field_name));
                 }
-                let values = crate::bi::commands::bi_get_column_values_core(
+                let values = crate::bi::commands::bi_get_column_members_core(
                     bi_state,
                     slicer.cache_source_id,
                     &table,
                     &column,
+                    &display_locale,
                 )
                 .await?;
-                let cross_filters: Vec<crate::bi::types::BiCrossFilter> = cross
+                let mut constraints: Vec<crate::bi::types::BiValueConstraint> = cross
                     .iter()
                     .filter_map(|(key, values)| {
                         let (t, c) = split(key);
-                        (!t.is_empty()).then(|| crate::bi::types::BiCrossFilter {
+                        (!t.is_empty()).then(|| crate::bi::types::BiValueConstraint {
                             table: t,
                             column: c,
                             values: values.clone(),
                         })
                     })
                     .collect();
-                let available = if cross_filters.is_empty() {
-                    None
-                } else {
-                    Some(
-                        crate::bi::commands::bi_get_column_available_values_core(
-                            bi_state,
-                            slicer.cache_source_id,
-                            &table,
-                            &column,
-                            &cross_filters,
-                        )
-                        .await?
-                        .into_iter()
-                        .collect(),
-                    )
-                };
+                // The other visuals' selections (P4 S4d): plain value
+                // constraints join the list; tuple filters are answered below.
+                let visual = visual_constraints.unwrap_or_default();
+                constraints.extend(visual.filters.iter().cloned());
+                let tuples: Vec<VisualTupleConstraint> = visual
+                    .tuples
+                    .iter()
+                    .filter_map(|t| VisualTupleConstraint::resolve(t, &split))
+                    .collect();
+                let available = Box::pin(available_under_visual_constraints(
+                    bi_state,
+                    slicer.cache_source_id,
+                    &table,
+                    &column,
+                    &constraints,
+                    &tuples,
+                ))
+                .await?;
                 (values, available)
             }
             (None, Some(values), _) => (values, has_data_set),
             (None, None, Some((conn_id, table, column))) => (
-                crate::bi::commands::bi_get_column_values_core(bi_state, *conn_id, table, column).await?,
+                crate::bi::commands::bi_get_column_members_core(bi_state, *conn_id, table, column, &display_locale)
+                    .await?,
                 has_data_set,
             ),
             (None, None, None) => (Vec::new(), has_data_set),
         };
 
-    // Build items with selection state and data availability
+    // Build items with selection state and data availability -- both by KEY
+    // (BUG-0166): a label is display text and never an identity.
     let mut items: Vec<SlicerItem> = unique_values
         .into_iter()
-        .map(|value| {
+        .map(|member| {
             let selected = match &slicer.selected_items {
                 None => true,
-                Some(selected) => selection_holds_item(selected, &value),
+                Some(selected) => selection_holds_item(selected, &member.key),
             };
             let has_data = match &has_data_set {
                 None => true,
-                Some(available) => available.contains(&value),
+                Some(available) => available.contains(&member.key),
             };
             SlicerItem {
-                value,
+                key: member.key,
+                label: member.label,
                 selected,
                 has_data,
             }
@@ -1884,14 +2156,17 @@ fn get_table_available_values(
     Ok(available)
 }
 
-/// Get unique values from a pivot table field.
-fn get_pivot_field_values(
+/// The members of a pivot table field, as a PIVOT slicer lists them: the
+/// cache's members in its sorted order (`pivot::utils::field_members`: the
+/// invariant key of `FieldCache::member_key`, the label in `locale`), and
+/// the BLANK member LAST (key "", label "(Blank)") when the column has one --
+/// NULL records or an empty string, ONE member under ruling Q8.
+fn get_pivot_field_members(
     pivot_state: &PivotState,
     source_id: identity::EntityId,
     field_name: &str,
-) -> Result<Vec<String>, String> {
-    use pivot_engine::VALUE_ID_EMPTY;
-
+    locale: &engine::LocaleSettings,
+) -> Result<Vec<MemberRef>, String> {
     let pivot_id = source_id;
     let mut pivot_tables = pivot_state.pivot_tables.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::DerivedCache)).unwrap();
     let (_def, cache) = pivot_tables
@@ -1905,64 +2180,21 @@ fn get_pivot_field_values(
         .iter()
         .position(|f| field_name_matches(&f.name, field_name))
         .ok_or_else(|| format!("Field '{}' not found in pivot cache", field_name))?;
-    // The BLANK item is listed (last) when the column has blank records: a
-    // level-1 selection hides the blank rows unless it names the blank item
+    // The BLANK member is listed (last) when the column has one: a level-1
+    // selection hides the blank rows unless it names the blank member
     // (`hidden_for_selection`), so the list must offer it -- without it,
     // deselecting one item from "all" dropped the blank rows too, with no
-    // item to bring them back (the review of A1). Excel lists "(blank)".
-    let has_blank = cache.has_blank_values(field_index);
-
-    let field = cache
-        .fields
-        .get_mut(field_index)
-        .ok_or_else(|| format!("Field index {} out of range in cache", field_index))?;
-
-    let sorted_ids = field.sorted_ids().to_vec();
-    let unique_values: Vec<String> = sorted_ids
-        .iter()
-        .filter_map(|&id| {
-            if id == VALUE_ID_EMPTY {
-                return None;
-            }
-            field.get_value(id).map(|value| {
-                // Convert pivot cache value to string
-                match value {
-                    pivot_engine::CacheValue::Number(n) => {
-                        if n.0.fract() == 0.0 {
-                            format!("{}", n.0 as i64)
-                        } else {
-                            format!("{}", n.0)
-                        }
-                    }
-                    pivot_engine::CacheValue::Text(s) => s.to_string(),
-                    pivot_engine::CacheValue::Boolean(b) => {
-                        if *b {
-                            "TRUE".to_string()
-                        } else {
-                            "FALSE".to_string()
-                        }
-                    }
-                    pivot_engine::CacheValue::Error(e) => e.to_string(),
-                    pivot_engine::CacheValue::Empty => String::new(),
-                }
-            })
-        })
-        .filter(|s| !s.is_empty())
-        .collect();
-    let mut unique_values = unique_values;
-    if has_blank {
-        unique_values.push(pivot_engine::BLANK_ITEM_LABEL.to_string());
-    }
-
-    Ok(unique_values)
+    // item to bring them back (the review of A1). Key "", label "(Blank)":
+    // the NULL records and the empty strings are ONE member (ruling Q8).
+    Ok(crate::pivot::utils::field_members(cache, field_index, locale))
 }
 
-/// Whether a listed slicer item is in `selection`: by its exact text, and the
-/// BLANK item by any spelling of its label (or the empty string a model uses).
-fn selection_holds_item(selection: &[String], value: &str) -> bool {
-    selection.iter().any(|s| s == value)
-        || (pivot_engine::is_blank_item_label(value)
-            && selection.iter().any(|s| s.is_empty() || pivot_engine::is_blank_item_label(s)))
+/// Whether a listed slicer item -- its KEY -- is in `selection`: by its exact
+/// key, and the BLANK member (key "", ruling Q8) by either of its spellings
+/// ("" or the legacy "(blank)" in any case). Never by label (BUG-0166).
+pub(crate) fn selection_holds_item(selection: &[String], key: &str) -> bool {
+    selection.iter().any(|s| s == key)
+        || (pivot_engine::is_blank_member_key(key) && selection.iter().any(|s| pivot_engine::is_blank_member_key(s)))
 }
 
 /// Get values from a pivot field that still have data given cross-slicer filters.
@@ -1997,13 +2229,13 @@ fn get_pivot_available_values(
                 .iter()
                 .position(|f| field_name_matches(&f.name, field_name))
                 .map(|idx| {
-                    // Any spelling of the blank item (or a model's empty
-                    // NULL spelling) is the one label a blank record reads as.
+                    // Any spelling of the blank member ("" or "(blank)" in
+                    // any case) is the one KEY a blank record reads as.
                     let allowed_set: std::collections::HashSet<String> = allowed
                         .iter()
                         .map(|v| {
-                            if v.is_empty() || pivot_engine::is_blank_item_label(v) {
-                                pivot_engine::BLANK_ITEM_LABEL.to_string()
+                            if pivot_engine::is_blank_member_key(v) {
+                                pivot_engine::BLANK_MEMBER_KEY.to_string()
                             } else {
                                 v.clone()
                             }
@@ -2014,33 +2246,19 @@ fn get_pivot_available_values(
         })
         .collect();
 
-    // Helper: convert a cache value to string (same logic as get_pivot_field_values).
-    // A BLANK record reads as the blank item's label, the one the slicer lists
-    // (`get_pivot_field_values`): a sibling that selects the blank item keeps
-    // it, and the blank item has data when a passing record is blank.
+    // A record's value as the slicer KEYS it (`FieldCache::member_key`, the
+    // spelling `get_pivot_field_members` lists): a BLANK record and an empty
+    // string read as the blank member's key "" (ruling Q8), so a sibling that
+    // selects the blank member keeps it, and the blank member has data when a
+    // passing record is blank.
     let value_to_string = |field_idx: usize, value_id: pivot_engine::ValueId| -> String {
         if value_id == VALUE_ID_EMPTY {
-            return pivot_engine::BLANK_ITEM_LABEL.to_string();
+            return pivot_engine::BLANK_MEMBER_KEY.to_string();
         }
         cache
             .fields
             .get(field_idx)
-            .and_then(|f| f.get_value(value_id))
-            .map(|value| match value {
-                pivot_engine::CacheValue::Number(n) => {
-                    if n.0.fract() == 0.0 {
-                        format!("{}", n.0 as i64)
-                    } else {
-                        format!("{}", n.0)
-                    }
-                }
-                pivot_engine::CacheValue::Text(s) => s.to_string(),
-                pivot_engine::CacheValue::Boolean(b) => {
-                    if *b { "TRUE".to_string() } else { "FALSE".to_string() }
-                }
-                pivot_engine::CacheValue::Error(e) => e.to_string(),
-                pivot_engine::CacheValue::Empty => String::new(),
-            })
+            .map(|f| f.member_key(value_id))
             .unwrap_or_default()
     };
 
@@ -2058,10 +2276,8 @@ fn get_pivot_available_values(
 
         if passes {
             if target_field_idx < record.values.len() {
-                let value = value_to_string(target_field_idx, record.values[target_field_idx]);
-                if !value.is_empty() {
-                    available.insert(value);
-                }
+                // The blank member's key is "" -- it has data too.
+                available.insert(value_to_string(target_field_idx, record.values[target_field_idx]));
             }
         }
     }

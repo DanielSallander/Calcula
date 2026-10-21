@@ -27,7 +27,8 @@ import {
   type FormulaScope,
   type FormulaValue,
 } from "./chartFormula";
-import { parseDisplayNumber } from "./chartFieldTypes";
+import { formatNumber } from "@api/locale";
+import { readShownNumber } from "./chartFieldTypes";
 import { customOrderKey, resolveCustomOrder } from "./customOrderLists";
 import { getChartTransform } from "@api/chartTransforms";
 import { evaluateScoped, type EvalScope, type EvalResultValue } from "@api/formulaEval";
@@ -735,7 +736,7 @@ function applyBin(
 }
 
 function formatBinEdge(value: number): string {
-  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+  return Number.isInteger(value) ? String(value) : formatNumber(value, { decimals: 1 });
 }
 
 // ============================================================================
@@ -840,7 +841,7 @@ function applyPivot(
   for (let r = 0; r < rowCount; r++) {
     const cat = catField.values[r] ?? "";
     const key = keyField.values[r] ?? "";
-    const num = parseDisplayNumber(valField.values[r] ?? "");
+    const num = readShownNumber(valField.values[r] ?? "") ?? NaN;
 
     let ci = catIndex.get(cat);
     if (ci === undefined) {

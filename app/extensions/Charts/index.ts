@@ -255,7 +255,16 @@ import {
   setChartDragActive,
   type ChartFormatElementDetail,
 } from "./handlers/chartTextEditing";
-import { chartZoneAt } from "./lib/chartZoneAt";
+import { chartZoneAt, CROSS_FILTER_PART } from "./lib/chartZoneAt";
+import { applyCrossFilterClick, chartVisualRef, isMemberHit } from "./handlers/crossFilterClick";
+import {
+  beginCrossFilterPress,
+  takeCrossFilterPress,
+  cancelCrossFilterPress,
+  isCrossFilterPressActive,
+  crossFilterHitIdentity,
+  type CrossFilterPressState,
+} from "./lib/crossFilterPress";
 import {
   chartButtonOfPart,
   isChartButtonPart,
@@ -314,6 +323,9 @@ import {
   isDesignQueryDataSource,
 } from "./types";
 import { registerChartQueryProvider } from "./lib/chartQueryProvider";
+import { registerChartModelVisuals } from "./lib/chartModelVisuals";
+import { startReportFilters, clearCrossFilter } from "@api/reportFilters";
+import { pruneVanishedChartSelections } from "./lib/chartCrossFilterPrune";
 import { installHiddenLinesWatch, resetHiddenLinesWatch } from "./lib/hiddenLinesWatch";
 import type { PivotChartFieldButton } from "./types";
 import { PivotEvents } from "../_shared/lib/pivotEvents";
@@ -524,9 +536,13 @@ function performChartDeleteLanded(chartId: string, opts?: DeleteChartOptions): P
   // refused delete (a sheet protecting its objects) puts the chart back, and
   // announcing it first told every listener about a deletion that never
   // happened. The store's promise resolves to null when it landed.
-  const landed = announceWhenDeleteLands(deleteChart(chartId, opts), () =>
-    emitAppEvent(ChartEvents.CHART_DELETED, { chartId }),
-  );
+  // A deleted chart's cross-filter selection goes with it (P4 S6): a page must
+  // not stay filtered by a visual that is no longer there. Only a delete that
+  // LANDED: a refused one keeps the chart, and its selection with it.
+  const landed = announceWhenDeleteLands(deleteChart(chartId, opts), () => {
+    clearCrossFilter(chartVisualRef(chartId));
+    emitAppEvent(ChartEvents.CHART_DELETED, { chartId });
+  });
   removeChartFromCache(chartId);
   syncChartRegions();
   emitAppEvent(AppEvents.GRID_REFRESH);
@@ -1331,6 +1347,12 @@ function activate(context: ExtensionContext): void {
   // through the SHARED query-object refresh service (one debounce/targeting/
   // coalescing brain for reports + charts) — register this family's provider.
   cleanupFunctions.push(registerChartQueryProvider());
+  // Cross-filter (P4): the seam's lifetime (the page list a chart's page is
+  // read from by sheet id, and the File > New / Open selection reset), and the
+  // Charts provider that tells Edit interactions, "Selected visuals" and the
+  // script host which charts read a model and what part each can play.
+  cleanupFunctions.push(startReportFilters());
+  cleanupFunctions.push(registerChartModelVisuals());
   // A range chart leaves its source's HIDDEN rows out (an AutoFilter, and so a
   // table slicer, filters it by hiding them). Nothing that hides rows speaks
   // to Charts, so on every repaint request the watch asks the source sheets
@@ -1358,16 +1380,25 @@ function activate(context: ExtensionContext): void {
   // press. Ended by that release, by the next press, by a move whose primary
   // button is up, by Escape, by a window blur and by deactivation.
 
+  // Whether the chart of THIS press was selected before it (Core selects it at
+  // the press, `floatingObject:selected`, before `bodyDragStart`): a
+  // cross-filter press reads it (DC-8: an unselected chart is selected at
+  // object level and its ladder does not advance).
+  let pressSelection: { chartId: string; wasSelected: boolean } | null = null;
+
   // Handle floating object selection (mousedown on chart body)
   const handleFloatingSelected = (e: Event) => {
     const detail = (e as CustomEvent).detail;
     // Every press ends a button press whose release was never heard: it acts
     // on nothing now. (A press ON a button arms a fresh one at bodyDragStart,
-    // which Core dispatches after this.)
+    // which Core dispatches after this.) A held cross-filter press likewise.
     cancelChartButtonPress();
+    cancelCrossFilterPress();
+    pressSelection = null;
     if (detail.regionType !== "chart") return;
     const chartId = detail.data?.chartId as string;
     if (chartId == null) return;
+    pressSelection = { chartId, wasSelected: isChartSelected(chartId) };
 
     // For THIS press only: its release completes a pending click (armed
     // below) and unbinds. (Binding the same listener twice is a no-op.)
@@ -1556,6 +1587,8 @@ function activate(context: ExtensionContext): void {
       part?: string | null;
       canvasX?: number;
       canvasY?: number;
+      ctrlKey?: boolean;
+      metaKey?: boolean;
     };
     if (detail.regionType !== "chart") return;
     const cid = detail.data?.chartId;
@@ -1578,6 +1611,29 @@ function activate(context: ExtensionContext): void {
         pressX,
         pressY,
       });
+    } else if (part === CROSS_FILTER_PART) {
+      // A cross-filter press (P4 S6): NOTHING acts here. Its release acts, over
+      // the same datum only (handleMouseUp -> releaseCrossFilter). The press
+      // keeps its OWN record -- its chart, point and hit -- because the pending
+      // click is cleared now (it would also step the ladder at the release),
+      // and the cue and the gesture read that record, never the pending click.
+      clearPendingClick();
+      const pressX = typeof detail.canvasX === "number" ? detail.canvasX : lastCanvasX;
+      const pressY = typeof detail.canvasY === "number" ? detail.canvasY : lastCanvasY;
+      const loc = getChartLocalCoords(cid, pressX, pressY);
+      const cached = getCachedChartData(cid);
+      if (!loc || !cached?.hitGeometry || !cached.layout) return;
+      beginCrossFilterPress({
+        chartId: cid,
+        regionId: typeof detail.regionId === "string" ? detail.regionId : null,
+        canvasX: pressX,
+        canvasY: pressY,
+        localX: loc.localX,
+        localY: loc.localY,
+        hit: hitTestGeometry(loc.localX, loc.localY, cached.hitGeometry, cached.layout),
+        ctrl: detail.ctrlKey === true || detail.metaKey === true,
+        wasSelected: pressSelection?.chartId === cid ? pressSelection.wasSelected : isChartSelected(cid),
+      });
     } else {
       // The interval brush ('brush'). Use the extension's own canvas basis
       // (lastCanvasX/Y from the prior mousemove ~ the mousedown position) so
@@ -1596,6 +1652,8 @@ function activate(context: ExtensionContext): void {
   cleanupFunctions.push(() => window.removeEventListener("floatingObject:bodyDragStart", handleBodyDragStart));
   // A button press still held when the extension goes acts on nothing.
   cleanupFunctions.push(cancelChartButtonPress);
+  // Nor does a held cross-filter press.
+  cleanupFunctions.push(cancelCrossFilterPress);
 
   // -----------------------------------------------------------------------
   // Mousemove for Tooltips
@@ -1605,6 +1663,7 @@ function activate(context: ExtensionContext): void {
     // A button press whose release was never heard (the primary button is
     // UP): it acts on nothing now -- never on a later, unrelated release.
     if ((e.buttons & 1) === 0 && isChartButtonPressActive()) cancelChartButtonPress();
+    if ((e.buttons & 1) === 0 && isCrossFilterPressActive()) cancelCrossFilterPress();
 
     // Find the grid container if not cached yet
     if (!gridContainer) {
@@ -1722,6 +1781,66 @@ function activate(context: ExtensionContext): void {
     }
   };
 
+  /**
+   * Which insight cue sits on the datum at this chart-local point, recorded as
+   * the chart's selected cue -- unconditionally: a point on no cue CLEARS it
+   * (see the long note at the pending-click call below). Shared by the pending
+   * click and a cross-filter release, which passes its PRESS's own point
+   * (DC-8; the pending click is cleared at a cross-filter press).
+   */
+  const assignCueAtDatum = (chartId: string, localX: number, localY: number) => {
+    const cachedData = getCachedChartData(chartId);
+    if (!cachedData) return;
+    if (getChartOverlay(chartId).cues.length === 0) return;
+    const datumHit = hitTestGeometry(localX, localY, cachedData.hitGeometry, cachedData.layout);
+    const cue = isDatumHit(datumHit) ? cueAtDatum(cuesShownOn(getChartById(chartId)?.spec.mark ?? "", visibleChartCues(chartId)), datumHit) : null;
+    setSelectedChartCue(chartId, cue ? cue.cueId : null);
+    requestOverlayRedraw();
+  };
+
+  /**
+   * The RELEASE of a cross-filter press (P4 S6). It acts only when released
+   * over the SAME datum (or legend entry, or -- for a background press -- the
+   * background inside the chart) and where no other object covers the point,
+   * in this order (DC-8): (1) a chart that was not selected before the press
+   * is selected at OBJECT level (the ladder does not advance); (2) the insight
+   * cue on the pressed datum is assigned, from the press's own record; (3) the
+   * cross-filter gesture runs (handlers/crossFilterClick.ts).
+   */
+  const releaseCrossFilter = (p: CrossFilterPressState, e: MouseEvent) => {
+    if (e.button !== 0) return;
+    if (!gridContainer) {
+      gridContainer = document.querySelector("canvas")?.parentElement ?? null;
+    }
+    if (!gridContainer) return;
+    const rect = gridContainer.getBoundingClientRect();
+    const at = clientToChartCanvas(e.clientX, e.clientY, rect, currentGridZoom());
+    const chart = getChartById(p.chartId);
+    const cached = getCachedChartData(p.chartId);
+    const loc = getChartLocalCoords(p.chartId, at.x, at.y);
+    if (!chart || !cached?.hitGeometry || !cached.layout || !loc) return;
+    const released = hitTestGeometry(loc.localX, loc.localY, cached.hitGeometry, cached.layout);
+    if (crossFilterHitIdentity(released, isMemberHit) !== crossFilterHitIdentity(p.hit, isMemberHit)) return;
+    if (
+      !isMemberHit(released) &&
+      (loc.localX < 0 || loc.localY < 0 || loc.localX > chart.width || loc.localY > chart.height)
+    ) {
+      return;
+    }
+    if (p.regionId !== null && isFloatingRegionCoveredAtClient(p.regionId, e.clientX, e.clientY)) return;
+
+    // 1. Object-level selection of a chart that was not selected before.
+    if (!p.wasSelected && !isChartSelected(p.chartId)) {
+      selectChart(p.chartId);
+      void emitChartSelectionEvent();
+    }
+    // 2. The cue on the pressed datum, from the press's own point.
+    assignCueAtDatum(p.chartId, p.localX, p.localY);
+    // 3. The gesture.
+    applyCrossFilterClick({ chart, data: cached.data, hit: p.hit, ctrl: p.ctrl });
+    context.events.emit(AppEvents.GRID_REFRESH);
+  };
+
   // Bound by the chart press that may arm a pending click
   // (handleFloatingSelected), start a brush or press one of the chart's own
   // buttons (handleBodyDragStart) and
@@ -1755,6 +1874,14 @@ function activate(context: ExtensionContext): void {
     const buttonPress = takeChartButtonPress();
     if (buttonPress) {
       releaseChartButton(buttonPress, e);
+      return;
+    }
+
+    // A cross-filter press (P4 S6): it acts only when released over the SAME
+    // datum; nothing below (the pending click, the ladder) runs for it.
+    const crossPress = takeCrossFilterPress();
+    if (crossPress) {
+      releaseCrossFilter(crossPress, e);
       return;
     }
 
@@ -1825,12 +1952,7 @@ function activate(context: ExtensionContext): void {
     // pixel by both e2e/journeys/chart-interaction.spec.ts and
     // e2e/journeys/insight-overlays.spec.ts — so a reader who "fixes" the
     // behaviour to match the old sentence breaks two live journeys.
-    if (getChartOverlay(click.chartId).cues.length > 0) {
-      const datumHit = hitTestGeometry(local.localX, local.localY, cachedData.hitGeometry, cachedData.layout);
-      const cue = isDatumHit(datumHit) ? cueAtDatum(cuesShownOn(getChartById(click.chartId)?.spec.mark ?? "", visibleChartCues(click.chartId)), datumHit) : null;
-      setSelectedChartCue(click.chartId, cue ? cue.cueId : null);
-      requestOverlayRedraw();
-    }
+    assignCueAtDatum(click.chartId, local.localX, local.localY);
 
     // Interactive point-selection (C5): if this chart declares a select:'point'
     // param AND its mark highlights via data.selection, a click sets/clears the
@@ -2180,6 +2302,12 @@ function activate(context: ExtensionContext): void {
         await loadChartsFromBackend();
       }
       if (reloadsDisposed) return;
+      // A chart that is gone takes its cross-filter selection with it, by
+      // WHATEVER route it went (undo of its creation, a script/MCP/AI removal,
+      // a sheet delete) -- not only by the Delete command (P4: "cleared on
+      // source delete"). Otherwise the page stayed filtered, and every other
+      // visual badged "Filtered by" a chart nobody can click to clear.
+      pruneVanishedChartSelections();
       const idx = await getActiveSheet();
       setActiveSheetIndex(idx);
       deselectChart();
@@ -2547,6 +2675,22 @@ function activate(context: ExtensionContext): void {
   };
   cleanupFunctions.push(
     onAppEvent(AppEvents.TABLE_DEFINITIONS_UPDATED, handleTableDefsUpdated),
+  );
+
+  // App locale switch (P2 S8): every chart re-reads its data (the engine's
+  // display text is now in the new locale) and repaints its ticks, labels and
+  // tiles with the new separators. The cached rasters were painted in the old
+  // locale, so they are dropped, exactly like a table-definition change.
+  // Design-query and pivot charts hold NO read cache of their own (P2 S7):
+  // `readDesignQueryData` runs `run_design_query` on every render, whose
+  // member labels and formatted values the backend writes in the locale of
+  // that moment, so dropping the rasters IS the design-query cache clear.
+  const handleLocaleChanged = () => {
+    invalidateAllChartCaches();
+    context.events.emit(AppEvents.GRID_REFRESH);
+  };
+  cleanupFunctions.push(
+    onAppEvent(AppEvents.LOCALE_CHANGED, handleLocaleChanged),
   );
 
   // -----------------------------------------------------------------------

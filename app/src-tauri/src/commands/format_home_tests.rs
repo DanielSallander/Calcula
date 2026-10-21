@@ -823,7 +823,8 @@ fn style_and_cell_shift_commands_gate_plan_and_write_in_one_critical_section() {
     const CELLS: &str = include_str!("structure_cells.rs");
     let cases = [
         (STYLES, "fn border_preset_on_sheets(", "gate_style_targets("),
-        (STYLES, "pub(crate) fn adjust_number_format_decimals_core(", "gate_style_targets("),
+        // The body moved into the target-aware twin (P3); _core delegates to it.
+        (STYLES, "pub(crate) fn adjust_number_format_decimals_on(", "gate_style_targets("),
         (STYLES, "fn format_cells_on_sheets(", "gate_style_targets("),
         (CELLS, "pub(crate) fn shift_cells_impl(", "ensure_not_canvas_in_state("),
     ];
@@ -912,3 +913,312 @@ fn a_grouped_format_and_decimal_step_are_one_undo_step_and_gated_whole() {
     assert!(!b.file.is_dirty());
 }
 
+
+// ---------------------------------------------------------------------------
+// 7. P3 (owner finding G3): the style commands on a floating grid's cells
+// ---------------------------------------------------------------------------
+//
+// A cell TARGET names an object (a floating grid); its cells live on a hidden
+// BACKING sheet. Every style command with a target writes ONLY that sheet,
+// decides from it, reports it (its merges included), refuses outside the
+// write extent, refuses a target together with a sheet group (never ignores
+// either), and is gated by the HOST sheet's protection.
+
+/// A floating grid `rows` x `cols` on the active sheet 0. Returns (target,
+/// backing sheet index), with the document clean and no undo history.
+fn float_target(b: &Book, rows: u32, cols: u32) -> (crate::api_types::CellTargetRef, usize) {
+    let info = crate::floating_range::create_floating_range_inner(&b.state, &b.file, None, 100.0, 50.0)
+        .expect("create a floating range");
+    crate::floating_range::update_floating_range_inner(
+        &b.state,
+        &b.file,
+        info.range.id,
+        crate::api_types::FloatingRangePatch { row_count: Some(rows), col_count: Some(cols), ..Default::default() },
+        crate::floating_range::PatchGate::ObjectEdit,
+    )
+    .expect("size the window");
+    // Creating the object is not what these tests measure.
+    crate::document_effect::mark_saved(&b.file);
+    b.state.undo_stack.lock().unwrap().clear();
+    (crate::api_types::CellTargetRef::FloatingRange { id: info.range.id }, info.backing_sheet_index)
+}
+
+/// Make the active (host) sheet 0 a canvas page.
+fn make_host_canvas(b: &Book) {
+    let seed = crate::document_effect::test_seed_effect();
+    b.state.sheet_kinds.write(&seed).unwrap()[0] = persistence::SheetKind::new_canvas();
+}
+
+fn bold_on(
+    b: &Book,
+    target: Option<&crate::api_types::CellTargetRef>,
+    rows: Vec<u32>,
+    cols: Vec<u32>,
+    group: &[usize],
+) -> Result<FormattingResult, String> {
+    let params = FormattingParams { rows, cols, bold: Some(true), ..Default::default() };
+    apply_formatting_on(&b.state, &b.file, &params, group, target)
+}
+
+/// The backing sheet has B2:C2 merged; the ACTIVE sheet has no merge at all.
+/// Bold on the target reports B2 spanning two columns -- the backing merge,
+/// not the active sheet's mirror (`formatting_result` used to read only that).
+#[test]
+fn a_target_result_reports_backing_merges() {
+    let b = Book::new(1);
+    let (target, backing) = float_target(&b, 4, 4);
+    let seed = crate::document_effect::test_seed_effect();
+    b.state.all_merged_regions.write(&seed).unwrap()[backing]
+        .insert(MergedRegion { start_row: 1, start_col: 1, end_row: 1, end_col: 2 });
+    assert!(b.state.merged_regions.read().unwrap().is_empty(), "the active sheet has nothing merged");
+
+    let result = bold_on(&b, Some(&target), vec![1], vec![1], &[]).expect("bold on the target");
+    let b2 = result.cells.iter().find(|c| (c.row, c.col) == (1, 1)).expect("B2 is reported");
+    assert_eq!((b2.row_span, b2.col_span), (1, 2), "B2 spans the backing merge B2:C2");
+}
+
+/// Bold on a floating grid writes ONLY the backing sheet -- on a worksheet
+/// host AND on a canvas host -- the result cells are the backing cells, and
+/// one undo restores them. A group beside a target is refused, never ignored.
+#[test]
+fn bold_on_a_floating_grid_target_writes_only_the_backing_sheet() {
+    for canvas_host in [false, true] {
+        let b = Book::new(2);
+        let (target, backing) = float_target(&b, 4, 3);
+        if canvas_host {
+            make_host_canvas(&b);
+        }
+        b.seed_cell(backing, 1, 1, CellValue::Number(7.0), CellStyle::new());
+
+        let result = bold_on(&b, Some(&target), vec![0, 1], vec![1], &[]).expect("bold on the target");
+        assert!(b.style_on(backing, 0, 1).font.bold, "backing B1 (canvas host: {canvas_host})");
+        assert!(b.style_on(backing, 1, 1).font.bold, "backing B2");
+        assert!(!b.style_at(0, 1).font.bold, "the ACTIVE sheet's B1 is untouched");
+        assert!(!b.style_at(1, 1).font.bold, "the ACTIVE sheet's B2 is untouched");
+        assert!(b.state.grid.read().unwrap().get_cell(1, 1).is_none(), "no cell was created on the host");
+        assert!(!b.style_on(1, 1, 1).font.bold, "the other sheet is untouched");
+        let mut reported: Vec<(u32, u32)> = result.cells.iter().map(|c| (c.row, c.col)).collect();
+        reported.sort_unstable();
+        assert_eq!(reported, vec![(0, 1), (1, 1)], "the result reports the BACKING cells");
+        let b2 = result.cells.iter().find(|c| (c.row, c.col) == (1, 1)).unwrap();
+        assert_eq!(b2.display, "7", "the backing value is what is reported");
+        assert!(b.file.is_dirty());
+        assert_eq!(b.undo_depth(), 1, "ONE undo step");
+
+        b.undo();
+        assert!(!b.style_on(backing, 0, 1).font.bold, "undo restores backing B1");
+        assert!(!b.style_on(backing, 1, 1).font.bold, "undo restores backing B2");
+        assert_eq!(b.value_on(backing, 1, 1), CellValue::Number(7.0), "the value survives undo");
+
+        // A group beside a target: refused, nothing written, still clean.
+        crate::document_effect::mark_saved(&b.file);
+        let err = bold_on(&b, Some(&target), vec![0], vec![0], &[1]).expect_err("target + group refuses");
+        assert_eq!(err, "Pass a floating grid target or a sheet, not both.");
+        assert!(!b.style_on(1, 0, 0).font.bold);
+        assert!(!b.style_on(backing, 0, 0).font.bold);
+        assert!(!b.file.is_dirty());
+    }
+}
+
+/// The step is decided from the BACKING cell: backing B2 shows "0.00", the
+/// active sheet's B2 shows "0.0000". Decrease Decimal on the target gives
+/// "0.0" on the backing sheet and leaves the active sheet alone.
+#[test]
+fn decrease_decimal_on_a_target_decides_from_the_backing_cell() {
+    let b = Book::new(1);
+    b.locale("en-US");
+    let (target, backing) = float_target(&b, 4, 3);
+    b.seed_cell(backing, 1, 1, CellValue::Number(1.5), CellStyle::new().with_number_format(num(2, false)));
+    b.seed_cell(0, 1, 1, CellValue::Number(1.5), CellStyle::new().with_number_format(num(4, false)));
+
+    let result = adjust_number_format_decimals_on(&b.state, &b.file, &[1], &[1], -1, &[], Some(&target))
+        .expect("decrease decimal on the target");
+    assert_eq!(b.style_on(backing, 1, 1).number_format, num(1, false), "0.00 -> 0.0 on the backing sheet");
+    assert_eq!(b.style_at(1, 1).number_format, num(4, false), "the active sheet keeps 0.0000");
+    let b2 = result.cells.iter().find(|c| (c.row, c.col) == (1, 1)).expect("backing B2 reported");
+    assert_eq!(b2.display, "1.5");
+    assert_eq!(b.undo_depth(), 1);
+}
+
+/// A rectangle reaching past the write extent is refused, naming the cell,
+/// and the document stays clean -- for every style command.
+#[test]
+fn a_target_outside_the_extent_is_refused_and_the_document_stays_clean() {
+    let b = Book::new(1);
+    crate::named_styles_cmd::init_builtin_named_styles(&b.state);
+    let (target, backing) = float_target(&b, 4, 3);
+    let err = bold_on(&b, Some(&target), vec![4], vec![0], &[]).expect_err("row 5 is outside a 4-row grid");
+    assert_eq!(err, "Cell A5 is outside floating grid 'Float1'. Nothing was changed.");
+    let err = adjust_number_format_decimals_on(&b.state, &b.file, &[0], &[3], 1, &[], Some(&target))
+        .expect_err("column D is outside a 3-column grid");
+    assert!(err.starts_with("Cell D1 is outside floating grid"), "got: {err}");
+    let err = apply_border_preset_on(
+        &b.state, &b.file, CellRect::new(0, 0, 5, 1), "outside", "solid", "#000000", 1, &[], Some(&target),
+    )
+    .expect_err("borders past the extent");
+    assert!(err.contains("is outside floating grid 'Float1'"), "got: {err}");
+    let err = set_cell_rich_text_core(&b.state, &b.file, 9, 0, None, Some(&target)).expect_err("rich text past it");
+    assert!(err.contains("is outside floating grid"), "got: {err}");
+    let err = crate::named_styles_cmd::apply_named_style_impl(&b.state, &b.file, "Good", &[0, 7], &[0], Some(&target))
+        .expect_err("a named style past it");
+    assert!(err.contains("is outside floating grid"), "got: {err}");
+    assert!(!b.file.is_dirty(), "a refusal must not dirty the document");
+    assert_eq!(b.undo_depth(), 0);
+    assert!(b.state.grids.read().unwrap()[backing].get_cell(4, 0).is_none());
+}
+
+/// A PROTECTED HOST protects its floating grid's cells: the host's own
+/// sentence, nothing written, the document clean -- even though the backing
+/// sheet itself carries no protection.
+#[test]
+fn a_protected_host_refuses_every_style_command_on_its_grid() {
+    let b = Book::new(1);
+    crate::named_styles_cmd::init_builtin_named_styles(&b.state);
+    let (target, backing) = float_target(&b, 4, 3);
+    // A number in backing A1, so Increase Decimal has a step to gate.
+    b.seed_cell(backing, 0, 0, CellValue::Number(1.5), CellStyle::new());
+    let seed = crate::document_effect::test_seed_effect();
+    b.state.sheet_protection.write(&seed).unwrap().entry(0).or_default().protected = true;
+    assert!(b.state.sheet_protection.read().unwrap().get(&backing).is_none(), "the backing sheet is not protected");
+
+    let err = bold_on(&b, Some(&target), vec![0], vec![0], &[]).expect_err("the host's protection refuses");
+    assert!(err.starts_with("Cannot format cells on a protected sheet."), "got: {err}");
+    let err = adjust_number_format_decimals_on(&b.state, &b.file, &[0], &[0], 1, &[], Some(&target))
+        .expect_err("decimals refused");
+    assert!(err.starts_with("Cannot format cells on a protected sheet."), "got: {err}");
+    let err = apply_border_preset_on(
+        &b.state, &b.file, CellRect::new(0, 0, 1, 1), "outside", "solid", "#000000", 1, &[], Some(&target),
+    )
+    .expect_err("borders refused");
+    assert!(err.starts_with("Cannot apply borders on a protected sheet."), "got: {err}");
+    let err = set_cell_rich_text_core(&b.state, &b.file, 0, 0, None, Some(&target)).expect_err("rich text refused");
+    assert!(err.contains("protected"), "got: {err}");
+    let err = crate::named_styles_cmd::apply_named_style_impl(&b.state, &b.file, "Good", &[0], &[0], Some(&target))
+        .expect_err("a named style refused");
+    assert!(err.contains("protected"), "got: {err}");
+
+    assert!(!b.style_on(backing, 0, 0).font.bold);
+    assert!(!b.file.is_dirty(), "every refusal left the document clean");
+    assert_eq!(b.undo_depth(), 0);
+
+    // Unprotected again, the same Bold lands: the refusal was the HOST's.
+    b.state.sheet_protection.write(&seed).unwrap().remove(&0);
+    bold_on(&b, Some(&target), vec![0], vec![0], &[]).expect("an unprotected host takes it");
+    assert!(b.style_on(backing, 0, 0).font.bold);
+}
+
+/// Borders, rich text and a named style reach the backing cell, each as ONE
+/// undo step, and the host's same cell stays untouched.
+#[test]
+fn borders_rich_text_and_a_named_style_write_only_the_backing_sheet() {
+    let b = Book::new(1);
+    crate::named_styles_cmd::init_builtin_named_styles(&b.state);
+    let (target, backing) = float_target(&b, 4, 3);
+
+    let result = apply_border_preset_on(
+        &b.state, &b.file, CellRect::new(0, 0, 1, 1), "outside", "solid", "#000000", 1, &[], Some(&target),
+    )
+    .expect("borders on the target");
+    assert_eq!(b.style_on(backing, 0, 0).borders.top, thin());
+    assert_eq!(b.style_on(backing, 1, 1).borders.right, thin());
+    assert_eq!(b.style_at(0, 0).borders, engine::Borders::default(), "the host's A1 has no border");
+    assert!(result.cells.iter().any(|c| (c.row, c.col) == (1, 1)), "the backing cells are reported");
+    assert_eq!(b.undo_depth(), 1);
+
+    let runs: Vec<crate::api_types::RichTextRunData> =
+        serde_json::from_str(r#"[{"text":"Hi","bold":true}]"#).expect("runs");
+    b.seed_cell(backing, 2, 0, CellValue::Text("Hi".into()), CellStyle::new());
+    let cell = set_cell_rich_text_core(&b.state, &b.file, 2, 0, Some(runs), Some(&target))
+        .expect("rich text on the target")
+        .expect("the cell is returned");
+    assert_eq!(cell.display, "Hi");
+    assert!(b.state.grids.read().unwrap()[backing].get_cell(2, 0).unwrap().rich_text.is_some());
+    assert!(b.state.grid.read().unwrap().get_cell(2, 0).is_none(), "the host's A3 is untouched");
+    assert_eq!(b.undo_depth(), 2);
+    b.undo();
+    assert!(b.state.grids.read().unwrap()[backing].get_cell(2, 0).unwrap().rich_text.is_none(), "undo restores it");
+
+    let good = b.state.named_styles.read().unwrap().get("Good").expect("built-in Good").style_index;
+    crate::named_styles_cmd::apply_named_style_impl(&b.state, &b.file, "Good", &[0, 1], &[2], Some(&target))
+        .expect("a named style on the target");
+    assert_eq!(b.state.grids.read().unwrap()[backing].get_cell(1, 2).unwrap().style_index, good);
+    assert!(b.state.grid.read().unwrap().get_cell(1, 2).is_none(), "the host's C2 is untouched");
+}
+
+/// LOCK ORDER (R9). A targeted style command takes `StyleLocks` (`grid` ->
+/// `grids` -> `style_registry`) and then `sheet_ids` (`ensure_target_still_at`);
+/// the styled read and the resolver take `sheet_ids` alone. Run targeted
+/// formatting, targeted rich text, untargeted formatting and the styled read
+/// side by side, 200 times each, under a 60 s deadline.
+#[test]
+fn targeted_style_commands_run_beside_the_styled_read_without_deadlocking() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let state = Arc::new(crate::create_app_state());
+    let file = Arc::new(FileState::default());
+    let info = crate::floating_range::create_floating_range_inner(&state, &file, None, 0.0, 0.0).unwrap();
+    crate::floating_range::update_floating_range_inner(
+        &state,
+        &file,
+        info.range.id,
+        crate::api_types::FloatingRangePatch { row_count: Some(5), col_count: Some(3), ..Default::default() },
+        crate::floating_range::PatchGate::ObjectEdit,
+    )
+    .unwrap();
+    let target = crate::api_types::CellTargetRef::FloatingRange { id: info.range.id };
+    let finished = Arc::new(AtomicUsize::new(0));
+    let mut handles = Vec::new();
+
+    let mut spawn = |work: Box<dyn Fn(u32) + Send>| {
+        let finished = Arc::clone(&finished);
+        handles.push(std::thread::spawn(move || {
+            // Counted even when `work` panics, so a failure surfaces through
+            // join below instead of as a 60 s "deadlock".
+            struct Done(Arc<AtomicUsize>);
+            impl Drop for Done {
+                fn drop(&mut self) {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            let _done = Done(finished);
+            for i in 0..200u32 {
+                work(i);
+            }
+        }));
+    };
+    {
+        let (state, file, target) = (Arc::clone(&state), Arc::clone(&file), target.clone());
+        spawn(Box::new(move |i| {
+            let params = FormattingParams { rows: vec![i % 5], cols: vec![0], bold: Some(i % 2 == 0), ..Default::default() };
+            apply_formatting_on(&state, &file, &params, &[], Some(&target)).unwrap();
+        }));
+    }
+    {
+        let (state, file, target) = (Arc::clone(&state), Arc::clone(&file), target.clone());
+        spawn(Box::new(move |i| {
+            set_cell_rich_text_core(&state, &file, i % 5, 1, None, Some(&target)).unwrap();
+        }));
+    }
+    {
+        let (state, file) = (Arc::clone(&state), Arc::clone(&file));
+        spawn(Box::new(move |i| {
+            let params = FormattingParams { rows: vec![i % 5], cols: vec![2], italic: Some(true), ..Default::default() };
+            apply_formatting_core(&state, &file, &params, &[]).unwrap();
+        }));
+    }
+    {
+        let (state, target) = (Arc::clone(&state), target.clone());
+        spawn(Box::new(move |_| {
+            crate::cell_target::get_cell_target_cells_inner(&state, &target, 0, 0, 4, 2).unwrap();
+        }));
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while finished.load(Ordering::SeqCst) < 4 {
+        assert!(std::time::Instant::now() < deadline, "a targeted style command and the styled read deadlocked");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    for handle in handles {
+        handle.join().expect("every worker ran to the end without an error");
+    }
+}

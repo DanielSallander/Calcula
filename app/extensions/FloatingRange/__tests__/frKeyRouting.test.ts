@@ -21,6 +21,12 @@
 //            own door decides;
 //          - only a key with no command behind it (Data Validation's
 //            Alt+Down) is still refused as a combination;
+//          - P3 (owner finding G3): the claim now ANSWERS too. A door that
+//            supports cell targets (the grid commands' bridge: Copy, Paste,
+//            the fills; Delete) acts on the RANGE's cells through
+//            `cellTarget` -- never on Core's hidden cell -- while a door with
+//            no target support keeps refusing with the range's sentence,
+//            which now names "a floating grid";
 //          - positive controls: no range selection -> the grid's commands run;
 //            focus in a pane button -> the range's binding stands down.
 
@@ -70,10 +76,37 @@ vi.mock("@api/floatingRanges", () => ({
   ]),
 }));
 
+const clearRangeWithOptions = vi.fn(async (..._args: unknown[]): Promise<unknown> => ({ count: 1, updatedCells: [] }));
 vi.mock("@api/lib", () => ({
   getActiveSheet: vi.fn(async () => HOST),
   getUsedRange: vi.fn(async () => ({ startRow: 0, startCol: 0, endRow: 0, endCol: 0, empty: true })),
+  clearRangeWithOptions: (...args: unknown[]) => clearRangeWithOptions(...args),
+  beginUndoTransaction: vi.fn(async () => null),
+  commitUndoTransaction: vi.fn(async () => {}),
+  cancelUndoTransaction: vi.fn(async () => {}),
 }));
+
+// The CORE grid-command registry the CommandRegistry bridge executes through
+// (its handlers receive the door's target as `ctx.target`). Captured from the
+// real module rather than imported: an extension test may import only @api.
+type CoreGridCommands = {
+  register(command: string, handler: (args: unknown, ctx?: { target: unknown }) => void): void;
+  unregister(command: string): void;
+};
+const core = vi.hoisted(() => ({ gridCommands: null as CoreGridCommands | null }));
+vi.mock("../../../src/core/lib/gridCommands", async (importOriginal) => {
+  const real = await importOriginal<{ gridCommands: CoreGridCommands }>();
+  core.gridCommands = real.gridCommands;
+  return real;
+});
+const gridCommands = {
+  register: (command: string, handler: (args: unknown, ctx?: { target: unknown }) => void) =>
+    core.gridCommands!.register(command, handler),
+  unregister: (command: string) => core.gridCommands!.unregister(command),
+};
+
+/** The target a write through the range's cells carries. */
+const FR_TARGET = { target: { kind: "floatingRange", id: FR_ID } };
 
 const confirmAsync = vi.fn(async (..._args: unknown[]) => false);
 vi.mock("@api/dialogs", () => ({
@@ -97,6 +130,7 @@ import {
   commandRefusalFor,
 } from "@api/keybindings";
 import { CommandRegistry } from "@api/commands";
+
 import { onAppEvent } from "@api/events";
 import { registerToastSink, type ToastPayload } from "@api/notifications";
 import {
@@ -104,6 +138,7 @@ import {
   isSelectionOwned,
   refuseIfSelectionOwned,
   selectionRefusalFor,
+  cellTargetFor,
 } from "@api/selectionOwner";
 import extension from "../index";
 import {
@@ -116,8 +151,12 @@ import {
 import { cancelFrEditor, isFrEditorOpen } from "../editor/frEditor";
 import { setFrActiveSheetIndex, upsertFromInfo } from "../lib/floatingRangeStore";
 import {
+  FR_ACTS_ON,
+  FR_FILTER_REFUSAL,
   FR_REFUSED_COMBOS,
   FR_SELECTION_OWNER_ID,
+  FR_TABLE_REFUSAL,
+  FR_WHOLE_OBJECT_REFUSAL,
   frRefusalSlug,
   frSelectionRefusal,
 } from "../lib/frKeyRouting";
@@ -225,6 +264,7 @@ beforeEach(async () => {
   ran.length = 0;
   toasts.length = 0;
   updateFloatingRangeCell.mockClear();
+  clearRangeWithOptions.mockClear();
   confirmAsync.mockClear();
   resetAllKeybindings();
   for (const id of GRID_COMMANDS) CommandRegistry.register(id, () => void ran.push(id));
@@ -247,13 +287,16 @@ afterEach(() => {
 });
 
 describe("Delete with a floating range's cell selected", () => {
-  it("clears the range's cell ONCE and never the grid's hidden active cell", async () => {
+  it("clears the range's cell ONCE, through its cell target, and never the grid's hidden active cell", async () => {
     selectCell();
     const e = press("Delete");
     await flush();
     expect(ran).not.toContain("core.edit.clearContents");
-    expect(updateFloatingRangeCell).toHaveBeenCalledTimes(1);
-    expect(updateFloatingRangeCell).toHaveBeenCalledWith(FR_ID, 0, 0, "");
+    // P3: ONE clear of the selection with the target (one undo step), never
+    // a write per cell.
+    expect(clearRangeWithOptions).toHaveBeenCalledTimes(1);
+    expect(clearRangeWithOptions).toHaveBeenCalledWith(0, 0, 0, 0, "contents", undefined, FR_TARGET);
+    expect(updateFloatingRangeCell).not.toHaveBeenCalled();
     expect(e.defaultPrevented).toBe(true);
   });
 
@@ -261,7 +304,7 @@ describe("Delete with a floating range's cell selected", () => {
     selectCell();
     press("Backspace");
     await flush();
-    expect(updateFloatingRangeCell).toHaveBeenCalledTimes(1);
+    expect(clearRangeWithOptions).toHaveBeenCalledTimes(1);
   });
 
   it("with only the OBJECT selected, asks to delete the object -- the grid clears nothing", async () => {
@@ -279,6 +322,7 @@ describe("Delete with a floating range's cell selected", () => {
     await flush();
     expect(ran).toEqual(["core.edit.clearContents"]);
     expect(updateFloatingRangeCell).not.toHaveBeenCalled();
+    expect(clearRangeWithOptions).not.toHaveBeenCalled();
   });
 
   it("with the keyboard in a pane's button, the range's binding stands down", async () => {
@@ -297,26 +341,41 @@ describe("Delete with a floating range's cell selected", () => {
   });
 });
 
-describe("clipboard and fill keys with a floating range's cell selected", () => {
+describe("clipboard and fill keys with a floating range's cell selected (P3: they ACT on the range's cells)", () => {
   // Through the REAL grid-command bridge (CommandRegistry -> gridCommands),
-  // as in the app: the stand-in handler is taken away, so the only thing that
-  // can refuse is the bridge's own owner check -- the range adds no refusal
-  // of its own (W18), and the user hears ONE sentence.
+  // as in the app: the stand-in handler is taken away, so the bridge's door
+  // (`resolveCellTarget`) decides. The range admits these kinds of act, so
+  // the grid command's handler runs with the RANGE's cells as its target --
+  // never Core's hidden cell -- and nobody is refused.
   const cases: [string, KeyboardEventInit, string, string][] = [
-    ["v", { ctrlKey: true }, "core.clipboard.paste", "Paste"],
-    ["x", { ctrlKey: true }, "core.clipboard.cut", "Cut"],
-    ["c", { ctrlKey: true }, "core.clipboard.copy", "Copy"],
-    ["d", { ctrlKey: true }, "core.edit.fillDown", "Fill Down"],
-    ["r", { ctrlKey: true }, "core.edit.fillRight", "Fill Right"],
+    ["v", { ctrlKey: true }, "core.clipboard.paste", "paste"],
+    ["x", { ctrlKey: true }, "core.clipboard.cut", "cut"],
+    ["c", { ctrlKey: true }, "core.clipboard.copy", "copy"],
+    ["d", { ctrlKey: true }, "core.edit.fillDown", "fillDown"],
+    ["r", { ctrlKey: true }, "core.edit.fillRight", "fillRight"],
   ];
-  for (const [key, init, gridCommand, action] of cases) {
-    it(`Ctrl+${key.toUpperCase()} is refused ONCE by the grid commands' owner check, never ${gridCommand} over the hidden cell`, async () => {
-      CommandRegistry.unregister(gridCommand);
-      selectCell();
-      press(key, init);
-      await flush();
-      expect(ran).not.toContain(gridCommand);
-      expect(toastTexts()).toEqual([frSelectionRefusal(action)]);
+  for (const [key, init, coreCommand, gridCommand] of cases) {
+    it(`Ctrl+${key.toUpperCase()} runs the grid command ${gridCommand} ONCE on the range's cells, never ${coreCommand} over the hidden cell`, async () => {
+      CommandRegistry.unregister(coreCommand);
+      const seen: unknown[] = [];
+      gridCommands.register(gridCommand as never, (_args, ctx) => void seen.push(ctx?.target));
+      try {
+        selectCell();
+        press(key, init);
+        await flush();
+        expect(ran).not.toContain(coreCommand);
+        expect(toasts).toEqual([]);
+        expect(seen).toHaveLength(1);
+        expect(seen[0]).toMatchObject({
+          kind: "object",
+          ref: { kind: "floatingRange", id: FR_ID },
+          label: "Float1",
+          wholeObject: false,
+          selection: { startRow: 0, startCol: 0, endRow: 0, endCol: 0, activeRow: 0, activeCol: 0 },
+        });
+      } finally {
+        gridCommands.unregister(gridCommand as never);
+      }
     });
   }
 
@@ -329,16 +388,24 @@ describe("clipboard and fill keys with a floating range's cell selected", () => 
 });
 
 describe("a REMAPPED command is refused on its new key (BUG-0199, E7)", () => {
-  it("Copy moved to Ctrl+Shift+Q: the new key is refused, the hidden cell is never copied", async () => {
+  it("Copy moved to Ctrl+Shift+Q: the new key copies the RANGE's cells, never the hidden cell", async () => {
     expect(setUserKeybinding("core.copy", "Ctrl+Shift+Q")).toBeNull();
-    // The real bridge (see above): the owner check refuses whatever key ran it.
+    // The real bridge (see above): its door answers whatever key ran it.
     CommandRegistry.unregister("core.clipboard.copy");
-    selectCell();
-    const e = press("Q", { ctrlKey: true, shiftKey: true });
-    await flush();
-    expect(ran, "the remapped Copy copied Core's hidden cell").not.toContain("core.clipboard.copy");
-    expect(toastTexts()).toEqual([frSelectionRefusal("Copy")]);
-    expect(e.defaultPrevented).toBe(true);
+    const seen: unknown[] = [];
+    gridCommands.register("copy", (_args, ctx) => void seen.push(ctx?.target));
+    try {
+      selectCell();
+      const e = press("Q", { ctrlKey: true, shiftKey: true });
+      await flush();
+      expect(ran, "the remapped Copy copied Core's hidden cell").not.toContain("core.clipboard.copy");
+      expect(toasts).toEqual([]);
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toMatchObject({ kind: "object", ref: { kind: "floatingRange", id: FR_ID } });
+      expect(e.defaultPrevented).toBe(true);
+    } finally {
+      gridCommands.unregister("copy");
+    }
   });
 
   it("the OLD key is no longer Copy: pressing it refuses nothing and copies nothing", async () => {
@@ -756,7 +823,62 @@ describe("Delete and Backspace WITH A MODIFIER (review 2026-09-28)", () => {
     selectCell();
     press("Backspace");
     await flush();
-    expect(updateFloatingRangeCell).toHaveBeenCalledTimes(1);
+    expect(clearRangeWithOptions).toHaveBeenCalledTimes(1);
     expect(gridKeyboardClears).toEqual([]);
+  });
+});
+
+describe("the claim ANSWERS with the range's cells (P3, owner finding G3)", () => {
+  it("a selected CELL range answers its cells: the ref, the extent, the name, the ACTIVE cell", () => {
+    setLocalSelection({ frId: FR_ID, anchorRow: 2, anchorCol: 1, endRow: 0, endCol: 2 });
+    const t = cellTargetFor("format");
+    expect(t).toMatchObject({
+      kind: "object",
+      ownerId: FR_SELECTION_OWNER_ID,
+      ref: { kind: "floatingRange", id: FR_ID },
+      bounds: { rows: 4, cols: 3 },
+      label: "Float1",
+      wholeObject: false,
+      selection: { startRow: 0, startCol: 1, endRow: 2, endCol: 2, activeRow: 2, activeCol: 1 },
+    });
+  });
+
+  it("the OBJECT selected answers the whole window, active A1 -- admitted for formatting, refused for acts that need cells", () => {
+    clearLocalSelection();
+    selectFloatingRange(FR_ID);
+    expect(cellTargetFor("format")).toMatchObject({
+      kind: "object",
+      wholeObject: true,
+      selection: { startRow: 0, startCol: 0, endRow: 3, endCol: 2, activeRow: 0, activeCol: 0 },
+    });
+    expect(cellTargetFor("sort", "Sort")).toEqual({ refusal: FR_WHOLE_OBJECT_REFUSAL });
+  });
+
+  it("a range on ANOTHER sheet than the one shown answers nothing: the grid's own selection is the target", () => {
+    selectCell();
+    setFrActiveSheetIndex(HOST + 3);
+    try {
+      expect(cellTargetFor("format")).toMatchObject({ kind: "grid" });
+    } finally {
+      setFrActiveSheetIndex(HOST);
+    }
+  });
+
+  it("admits every Home kind of act but Format as Table, Filter and the shifting Insert/Delete Cells", () => {
+    expect([...FR_ACTS_ON].sort()).toEqual(
+      ["clear", "conditionalFormat", "content", "format", "lineSize", "merge", "numberFormat", "read", "sort", "structure"],
+    );
+    selectCell();
+    expect(cellTargetFor("table", "Format as Table")).toEqual({ refusal: FR_TABLE_REFUSAL });
+    expect(cellTargetFor("filter", "Filter")).toEqual({ refusal: FR_FILTER_REFUSAL });
+    expect(cellTargetFor("shiftCells", "Insert Cells")).toEqual({
+      refusal: "Insert Cells is not available inside a floating grid yet. Nothing was changed.",
+    });
+  });
+
+  it("the refusal of a door with no target support names the floating grid", () => {
+    expect(frSelectionRefusal("Insert Table")).toBe(
+      "Insert Table is not available inside a floating grid yet. Nothing was changed.",
+    );
   });
 });

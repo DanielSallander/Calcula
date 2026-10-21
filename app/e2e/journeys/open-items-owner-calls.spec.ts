@@ -296,7 +296,12 @@ test.describe("open-items §1 owner calls, proved live", () => {
       longDateFormat: string;
       timeFormat: string;
       currencySymbol: string;
+      overrideId: string | null;
     }>(appPage, "get_locale_settings", {});
+    // The override the profile held at boot (P2: an explicit set_locale
+    // persists to %LOCALAPPDATA%\Calcula\app-settings.json). Read BEFORE any
+    // write, because the restore below must put back exactly this.
+    const bootOverride: string | null = boot.overrideId ?? null;
 
     // THIS TEST CANNOT DISTINGUISH THE FIX FROM THE BUG ON AN en-US MACHINE:
     // the defect was that `set_locale("system")` silently returned en-US, so on
@@ -335,36 +340,57 @@ test.describe("open-items §1 owner calls, proved live", () => {
     // ',' as the formula argument separator, which is a parse error in every
     // `SUM(A1;B1)` the suite contains.
     try {
-    const reread = await invoke<{ localeId: string; listSeparator: string }>(
+    // Every set_locale is wrapped in `resolves`, so an Err (an unknown id) fails
+    // HERE with the backend's message rather than as an unhandled rejection.
+    await expect(
+      invoke<{ localeId: string; listSeparator: string }>(appPage, "set_locale", { localeId: "system" }),
+    ).resolves.toBeTruthy();
+    const reread = await invoke<{ localeId: string; listSeparator: string; overrideId: string | null }>(
       appPage,
-      "set_locale",
-      { localeId: "system" },
+      "get_locale_settings",
+      {},
     );
-    expect(
-      reread.localeId,
-      `"system" must ask Windows, not fall through to the invariant locale. ` +
-        `Boot said ${boot.localeId}; the re-read said ${reread.localeId}`,
-    ).toBe(boot.localeId);
-    expect(reread.listSeparator).toBe(boot.listSeparator);
+    expect(reread.overrideId ?? null, '"system" clears the persisted override').toBeNull();
+    if (bootOverride === null) {
+      // Booted on the OS regional format, so the live re-read must land there
+      // again. (With a boot override the app was NOT on the OS format, and
+      // the comparison would be meaningless.)
+      expect(
+        reread.localeId,
+        `"system" must ask Windows, not fall through to the invariant locale. ` +
+          `Boot said ${boot.localeId}; the re-read said ${reread.localeId}`,
+      ).toBe(boot.localeId);
+      expect(reread.listSeparator).toBe(boot.listSeparator);
+    } else {
+      expect(reread.localeId, '"system" answers a real regional format').toMatch(
+        /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/,
+      );
+    }
 
     // An EXPLICIT override is still answered by the table, byte for byte — a
     // user who picks de-DE is asking for Germany, not for Germany-as-
     // configured-on-this-machine.
-    const german = await invoke<{ localeId: string; decimalSeparator: string }>(
-      appPage,
-      "set_locale",
-      { localeId: "de-DE" },
-    );
-    expect(german.localeId).toBe("de-DE");
-    expect(german.decimalSeparator).toBe(",");
+    await expect(
+      invoke<{ localeId: string; decimalSeparator: string }>(appPage, "set_locale", { localeId: "de-DE" }),
+    ).resolves.toMatchObject({ localeId: "de-DE", decimalSeparator: "," });
 
     } finally {
-      // Restored to the locale the app was ACTUALLY IN, not to "system":
-      // `app/src/api/locale.ts` pushes any saved localStorage override into the
-      // backend on first read, so "system" is not necessarily where we started.
-      await invoke(appPage, "set_locale", { localeId: boot.localeId });
+      // Restored to the OVERRIDE the profile held at boot, or "system" when it
+      // held none. NOT to boot.localeId: since P2 every explicit id persists as
+      // an override, so restoring "sv-SE" explicitly would pin the owner's
+      // profile to sv-SE for every later launch, even after Windows changes.
+      await expect(
+        invoke(appPage, "set_locale", { localeId: bootOverride ?? "system" }),
+      ).resolves.toBeTruthy();
     }
-    const restored = await invoke<{ localeId: string }>(appPage, "get_locale_settings", {});
+    const restored = await invoke<{ localeId: string; overrideId: string | null }>(
+      appPage,
+      "get_locale_settings",
+      {},
+    );
+    expect(restored.overrideId ?? null, "the profile's persisted override must be the one it had at boot").toBe(
+      bootOverride,
+    );
     expect(restored.localeId, "the suite must be left on the locale it found").toBe(
       boot.localeId,
     );

@@ -989,7 +989,17 @@ test.describe("reference picks on floating objects and canvas pivot cells (WP-A)
       expect(st1!.cellSelection).toMatchObject({ anchorRow: c1.viewRow, anchorCol: c1.viewCol, endRow: c1.viewRow, endCol: c1.viewCol });
       await eventually(() => nameBox(page), (t) => new RegExp(`^${sheetRe}!${a1(g1.row, g1.col)}$`).test(t), `the Name Box does not show ${s.canvasName}!${a1(g1.row, g1.col)}`);
       const raw = cellAt(view, c1.viewRow, c1.viewCol)?.value;
-      await eventually(() => formulaBarValue(page), (t) => t === String(raw), `the formula bar does not show the raw value ${String(raw)}`);
+      // The bar shows the UNFORMATTED value (General) in the APP locale since round 2 (P2):
+      // "3816543,327616..." under sv-SE. Read it back with the locale's decimal mark and no
+      // group separator (a formatted "3 816 543" would fail both).
+      const loc = await invoke<{ decimalSeparator: string; thousandsSeparator: string }>(page, "get_locale_settings", {});
+      const rawInBar = (t: string): boolean => {
+        if (typeof raw !== "number") return t === String(raw ?? "");
+        if (!/^-?\d+$/.test(t.split(loc.decimalSeparator).join(""))) return false;
+        if (t.split(loc.decimalSeparator).length > 2) return false;
+        return Math.abs(Number(t.split(loc.decimalSeparator).join(".")) - raw) < 1e-6;
+      };
+      await eventually(() => formulaBarValue(page), rawInBar, `the formula bar does not show the raw value ${String(raw)} in the app locale (decimal ${JSON.stringify(loc.decimalSeparator)}, no grouping)`);
 
       // ---- Shift+click: a rectangle.
       await clickViewCell(page, s.P, c2, { shift: true });

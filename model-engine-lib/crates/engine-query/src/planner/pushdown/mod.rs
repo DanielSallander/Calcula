@@ -14,7 +14,7 @@ mod test_util;
 mod totals_order;
 
 pub use hierarchy::{effective_group_by, HierarchyLevelSpec, HierarchySpec};
-pub use scoped_filters::{ContestedFilter, ContestedPredicate};
+pub use scoped_filters::{ContestedFilter, ContestedPredicate, TuplePlan, TupleValue};
 
 // Re-exported for the executor's drillthrough path (`executor::pipeline::detail`),
 // which must enforce the *same* RLS relevance / fail-closed check and seal the
@@ -23,7 +23,6 @@ pub use scoped_filters::{ContestedFilter, ContestedPredicate};
 pub(crate) use security::{rls_relevance, role_conditions_for_table};
 
 use engine_connectors::{AggregateExpr, FetchRequest, FilterCondition};
-use engine_core::compute::context::LEVEL_SLICER;
 use engine_core::compute::expression::{expand_measure_refs, infer_fact_table, FilterPredicate};
 use engine_core::compute::measure::Measure;
 use engine_core::model::DataModel;
@@ -110,6 +109,12 @@ pub enum QueryPlan {
         /// measure — clearing measures evaluate without it (REMOVEFILTERS),
         /// everything else gets it as a conditional-aggregation condition.
         contested_filters: Vec<ContestedFilter>,
+        /// Request tuple (multi-column) filters. Never in a fetch WHERE as
+        /// such (their uncleared columns pre-narrow the fetches with
+        /// per-column INs); the executor applies the exact OR-of-AND
+        /// predicate per measure, projected onto the columns the measure
+        /// does not clear, and keeps only result groups with a matching row.
+        tuple_filters: Vec<TuplePlan>,
     },
 }
 
@@ -769,6 +774,12 @@ impl PushdownPlanner {
                     .flat_map(|(owners, _)| owners.iter()),
             )
             .chain(scoped_plan.contested.iter().map(|c| &c.table))
+            .chain(
+                scoped_plan
+                    .tuple
+                    .iter()
+                    .flat_map(|t| t.columns.iter().map(|(table, _)| table)),
+            )
             .map(|s| s.as_str())
             .collect();
 
@@ -922,7 +933,10 @@ impl PushdownPlanner {
             // applied per measure in the local SQL.
             || !request.scoped_filters.is_empty()
             || !request.scoped_in_filters.is_empty()
-            || !scoped_plan.contested.is_empty();
+            || !scoped_plan.contested.is_empty()
+            // A tuple filter's exact predicate is applied per measure in the
+            // local SQL, like a contested filter.
+            || !scoped_plan.tuple.is_empty();
 
         // Statistical aggregates (MEDIAN, STDEV, etc.) cannot be pushed down.
         let all_pushable = measures.iter().all(|m| {
@@ -1383,22 +1397,41 @@ impl PushdownPlanner {
         // by projection).
         let projection_request: QueryRequest;
         let projection_request_ref: &QueryRequest =
-            if request.scoped_filters.is_empty() && request.scoped_in_filters.is_empty() {
+            if request.scoped_filters.is_empty()
+                && request.scoped_in_filters.is_empty()
+                && request.scoped_tuple_filters.is_empty()
+            {
                 request
             } else {
                 let mut widened = request.clone();
+                // A tuple filter's columns are read by the LOCAL predicate
+                // over the joined frame: without them in the projection a
+                // tuple on a column in no group-by and no other filter
+                // would reference a column the fetched batch does not have.
+                let tuple_columns: Vec<String> = request
+                    .scoped_tuple_filters
+                    .iter()
+                    .flat_map(|f| f.columns.iter().map(|c| c.column.clone()))
+                    .collect();
                 widened.filters.extend(
                     request
                         .scoped_filters
                         .iter()
                         .map(|f| f.condition.clone())
-                        .chain(request.scoped_in_filters.iter().map(|f| {
-                            FilterCondition::new(
-                                f.filter.column.clone(),
-                                engine_connectors::FilterOperator::Equal,
-                                String::new(),
-                            )
-                        })),
+                        .chain(
+                            request
+                                .scoped_in_filters
+                                .iter()
+                                .map(|f| f.filter.column.clone())
+                                .chain(tuple_columns)
+                                .map(|column| {
+                                    FilterCondition::new(
+                                        column,
+                                        engine_connectors::FilterOperator::Equal,
+                                        String::new(),
+                                    )
+                                }),
+                        ),
                 );
                 projection_request = widened;
                 &projection_request
@@ -1584,6 +1617,7 @@ impl PushdownPlanner {
                 totals: request.totals,
                 hierarchy: hierarchy_spec,
                 contested_filters: scoped_plan.contested,
+                tuple_filters: scoped_plan.tuple,
             },
             diagnostics,
         ))
@@ -2249,5 +2283,68 @@ mod tests {
 
         let result = PushdownPlanner::plan(&request, &model, &registry, &[]);
         assert!(result.is_err());
+    }
+
+    /// A tuple filter over `Sales[id]` x `Products[category]` (two columns in
+    /// no group-by and no other filter) on a SINGLE pushdown-capable source:
+    /// the plan still takes LocalAggregation (the exact predicate is local),
+    /// each fetch PROJECTS its tuple column (the local predicate reads it from
+    /// the joined frame), and each fetch carries only the per-column
+    /// pre-narrowing IN -- never the exact predicate.
+    #[test]
+    fn a_tuple_filter_plans_local_with_widened_projection_and_pre_narrowing() {
+        let model = test_model_star_schema();
+        let registry = mock_registry_star(0);
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            scoped_tuple_filters: vec![crate::request::ScopedTupleFilter {
+                columns: vec![
+                    crate::request::TupleColumn::new("Sales", "id"),
+                    crate::request::TupleColumn::new("Products", "category"),
+                ],
+                tuples: vec![
+                    vec!["1".into(), "Bikes".into()],
+                    vec!["2".into(), "Helmets".into()],
+                ],
+                level: 1,
+            }],
+            ..Default::default()
+        };
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
+        let sales = fetch_for(&plan, "Sales");
+        assert!(
+            sales.columns.iter().any(|c| c == "id"),
+            "the tuple column must reach the joined frame: {:?}",
+            sales.columns
+        );
+        let products = fetch_for(&plan, "Products");
+        assert!(
+            products.columns.iter().any(|c| c == "category"),
+            "the tuple column must reach the joined frame: {:?}",
+            products.columns
+        );
+        let narrowing: Vec<(&str, usize)> = sales
+            .in_filters
+            .iter()
+            .chain(products.in_filters.iter())
+            .map(|f| (f.column.as_str(), f.values.len()))
+            .collect();
+        assert_eq!(narrowing, vec![("id", 2), ("category", 2)]);
+        assert!(sales.or_groups.is_empty() && products.or_groups.is_empty());
+        match &plan {
+            QueryPlan::LocalAggregation { tuple_filters, .. } => {
+                assert_eq!(tuple_filters.len(), 1);
+                assert_eq!(
+                    tuple_filters[0].columns,
+                    vec![
+                        ("Sales".to_string(), "id".to_string()),
+                        ("Products".to_string(), "category".to_string())
+                    ]
+                );
+                assert_eq!(tuple_filters[0].tuples.len(), 2);
+                assert!(tuple_filters[0].cleared_by.is_empty());
+            }
+            other => panic!("Expected LocalAggregation, got {other:?}"),
+        }
     }
 }

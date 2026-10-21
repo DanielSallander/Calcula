@@ -2197,6 +2197,8 @@ mod tests {
             show_column_headers: true,
             show_row_headers: false,
             container: None,
+            hidden_rows: Vec::new(),
+            hidden_cols: Vec::new(),
         }];
 
         let result = publish::publish(&reg, &publish_objects_req(&wb, "fr-pkg", vec![0, 2]), prof.path()).unwrap();
@@ -2252,6 +2254,8 @@ mod tests {
             show_column_headers: true,
             show_row_headers: true,
             container: None,
+            hidden_rows: Vec::new(),
+            hidden_cols: Vec::new(),
         }];
         let result = publish::publish(&reg, &publish_objects_req(&wb, "fr-half", vec![0]), prof.path()).unwrap();
         assert_eq!(result.floating_ranges_published, 0);
@@ -2298,6 +2302,8 @@ mod tests {
             show_column_headers: true,
             show_row_headers: true,
             container: None,
+            hidden_rows: Vec::new(),
+            hidden_cols: Vec::new(),
         };
         let good = row(dashboard, float1);
         let visible_backing = row(dashboard, data);
@@ -2657,6 +2663,88 @@ mod tests {
         assert_eq!(hostile.wallpaper, "", "a wallpaper that is not a hex colour is repaired to the theme's");
     }
 
+    /// P4: a canvas's VISUAL INTERACTIONS ride the signed per-sheet metadata
+    /// through a real publish + pull VERBATIM (refs are object ids inside one
+    /// canvas, so nothing is remapped), and a dangerous pair -- a kind outside
+    /// the interaction kinds -- is REPAIRED on the way in, never installed.
+    #[test]
+    fn a_pulled_canvas_keeps_its_interactions_and_drops_a_bad_pair() {
+        let publish_and_pull = |layout: persistence::CanvasLayout| {
+            let mut wb = make_test_workbook();
+            wb.sheets[0].kind = persistence::SheetKind::Canvas(layout);
+            let dir = TempDir::new().unwrap();
+            let prof = TempDir::new().unwrap();
+            let reg = LocalWorkspace::open(dir.path()).unwrap();
+            let req = PublishRequest {
+                model_writebacks: None,
+                workbook: &wb,
+                package_name: "canvas-interactions".to_string(),
+                version: SemVer::new(1, 0, 0),
+                kind: "report".to_string(),
+                mode: PushMode::CreateNew,
+                change_summary: String::new(),
+                sheet_indices: vec![0],
+                now: "2026-10-17T00:00:00Z".to_string(),
+                published_by: "tester".to_string(),
+                writeback_regions: None,
+                object_scripts: None,
+                module_scripts: None,
+                notebooks: None,
+                data_sources: Vec::new(),
+                excluded_regions: Vec::new(),
+                custom_objects: Vec::new(),
+                include_comments: false,
+                min_app_version: String::new(),
+            };
+            publish::publish(&reg, &req, prof.path()).unwrap();
+            let pull_req = PullRequest {
+                package_name: "canvas-interactions".to_string(),
+                target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
+                now: "2026-10-17T01:00:00Z".to_string(),
+            };
+            let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+            result.sheets[0].sheet.kind.canvas_layout().expect("still a canvas").clone()
+        };
+        let r = |kind: &str, id: &str| persistence::CanvasObjectRef { kind: kind.to_string(), id: id.to_string() };
+        let good = vec![
+            persistence::CanvasInteraction {
+                source: r("slicer", "s-1"),
+                target: r("pivot", "p-1"),
+                mode: persistence::VisualInteractionMode::None,
+            },
+            persistence::CanvasInteraction {
+                source: r("chart", "7"),
+                target: r("chart", "8"),
+                mode: persistence::VisualInteractionMode::Highlight,
+            },
+        ];
+
+        let layout = persistence::CanvasLayout {
+            interactions: persistence::CanvasInteractions {
+                default_mode: Some(persistence::VisualInteractionMode::Filter),
+                pairs: good.clone(),
+            },
+            ..persistence::CanvasLayout::default()
+        };
+        assert_eq!(publish_and_pull(layout.clone()), layout, "the interactions arrive exactly as published");
+
+        let mut hostile_pairs = good.clone();
+        hostile_pairs.insert(
+            1,
+            persistence::CanvasInteraction {
+                source: r("script", "evil"),
+                target: r("chart", "7"),
+                mode: persistence::VisualInteractionMode::Filter,
+            },
+        );
+        let hostile = publish_and_pull(persistence::CanvasLayout {
+            interactions: persistence::CanvasInteractions { default_mode: None, pairs: hostile_pairs },
+            ..persistence::CanvasLayout::default()
+        });
+        hostile.validate().unwrap();
+        assert_eq!(hostile.interactions.pairs, good, "the pair of an unknown kind is dropped; the rest arrive in order");
+    }
+
     /// A package whose canvas layout this build cannot express (a newer
     /// build's page preset, a zero grid) is REPAIRED on pull, not installed
     /// raw: installed raw, every later layout edit would fail on a field the
@@ -2730,10 +2818,11 @@ mod tests {
             connection_mode: persistence::SavedConnectionMode::Workbook,
             connected_pivots: Vec::new(),
             connected_sheets: Vec::new(),
+            connected_visuals: Vec::new(),
             display_mode: persistence::SavedRibbonFilterDisplayMode::Dropdown,
             selected_items: Some(vec!["2026".to_string()]),
-            cross_filter_targets: Vec::new(),
-            cross_filter_slicer_targets: Vec::new(),
+            dependent_filters: Vec::new(),
+            dependent_slicers: Vec::new(),
             advanced_filter: None,
             hide_no_data: false,
             indicate_no_data: true,

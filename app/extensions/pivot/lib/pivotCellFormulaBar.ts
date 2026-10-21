@@ -39,7 +39,8 @@ import { publishStatusBarRange } from "@api/statusBarRange";
 import { AppEvents, onAppEvent, type SheetRenamedPayload } from "@api/events";
 import { PivotEvents } from "../../_shared/lib/pivotEvents";
 import { getCellDisplayValue, getPivotCellWindow } from "./pivot-api";
-import { ensureCellWindow, getCachedPivotView } from "./pivotViewStore";
+import { ensureCellWindow } from "./pivotViewStore";
+import { getDisplayedPivotView } from "./pivotCrossFilterView";
 import { getPivotViewRow } from "./pivotChromeActions";
 import {
   getPivotCellSelection,
@@ -89,7 +90,9 @@ function activeSheetName(): string | null {
  * cached (a windowed pivot's row is then fetched, and this publishes again).
  */
 function activeCellContent(pivotId: string, row: number, col: number): string | null {
-  const view = getCachedPivotView(pivotId);
+  // What the box SHOWS (a filtered view while another visual's selection
+  // reaches it, P4 S7); the bar is read-only either way.
+  const view = getDisplayedPivotView(pivotId);
   if (!view) return null;
   const rowData = getPivotViewRow(pivotId, view, row);
   if (!rowData) {

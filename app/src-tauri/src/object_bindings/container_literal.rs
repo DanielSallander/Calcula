@@ -90,14 +90,46 @@ pub fn normalize_if_container_colour(kind: ObjectBindingKind, path: &str, value:
 }
 
 /// The container after setting ONE leaf (`Value::Null` clears it); `None` when
-/// nothing is left, so the family stores no key.
+/// nothing is left, so the family stores no key. A solid background colour
+/// also clears the gradient and shows the background ([`apply_solid_background`]).
 fn next_container(
     current: Option<&VisualContainerFormat>,
     suffix: &str,
     value: Value,
+    default_show: bool,
 ) -> Result<Option<VisualContainerFormat>, String> {
-    let next = current.cloned().unwrap_or_default().with_field(suffix, value)?;
+    let solid = is_solid_background_write(suffix, &value);
+    let mut next = current.cloned().unwrap_or_default().with_field(suffix, value)?;
+    if solid {
+        apply_solid_background(&mut next, default_show);
+    }
     Ok((!next.is_empty()).then_some(next))
+}
+
+/// A family's default `background.show` when nothing is stored: true for a
+/// chart, PivotTable box, slicer and timeline; false for a floating range
+/// (`frObjectFormat.ts`, whose background is off until the user sets one).
+const BACKGROUND_SHOWN_BY_DEFAULT: bool = true;
+const FLOATING_RANGE_BACKGROUND_SHOWN_BY_DEFAULT: bool = false;
+
+/// Does this write set the background to a SOLID colour (a non-empty colour at
+/// `/background/color`)? `""` (the family default) and a clear are not.
+fn is_solid_background_write(suffix: &str, value: &Value) -> bool {
+    suffix == "/background/color" && value.as_str().is_some_and(|s| !s.trim().is_empty())
+}
+
+/// A solid background commit (round 2, owner finding G1 / ruling Q9): setting a
+/// colour means "paint this colour", so a stored gradient (which paints over
+/// it) is cleared and a background that resolves hidden is switched on. The
+/// same rule as the Format pane's `solidBackgroundPatch` (@api/visualContainer):
+/// a script, MCP or binding-literal write must not report a colour as written
+/// while a gradient or a hidden background keeps it off the screen.
+fn apply_solid_background(container: &mut VisualContainerFormat, default_show: bool) {
+    let bg = container.background.get_or_insert_with(Default::default);
+    bg.gradient = None;
+    if !bg.show.unwrap_or(default_show) {
+        bg.show = Some(true);
+    }
 }
 
 /// A stored container compared as the family stores it (an empty one is none).
@@ -187,7 +219,7 @@ fn write_chart(
             .filter(|v| !v.is_null())
             .and_then(VisualContainerFormat::from_value_lenient),
     );
-    let next = next_container(current.as_ref(), suffix, value)?;
+    let next = next_container(current.as_ref(), suffix, value, BACKGROUND_SHOWN_BY_DEFAULT)?;
     if let Some(c) = &next {
         c.forbid_chart_title_leaves()?;
     }
@@ -233,7 +265,7 @@ fn write_pivot(
             .to_string()
     })?;
     let current = effective(frame.container.clone());
-    let next = next_container(current.as_ref(), suffix, value)?;
+    let next = next_container(current.as_ref(), suffix, value, BACKGROUND_SHOWN_BY_DEFAULT)?;
     if next == current {
         return Ok(LiteralWriteOutcome::Unchanged);
     }
@@ -277,7 +309,7 @@ fn write_slicer(
     }
     .ok_or_else(|| not_found(object))?;
     let current = effective(current);
-    let next = next_container(current.as_ref(), suffix, value)?;
+    let next = next_container(current.as_ref(), suffix, value, BACKGROUND_SHOWN_BY_DEFAULT)?;
     if next == current {
         return Ok(LiteralWriteOutcome::Unchanged);
     }
@@ -300,7 +332,7 @@ fn write_timeline(
     }
     .ok_or_else(|| not_found(object))?;
     let current = effective(current);
-    let next = next_container(current.as_ref(), suffix, value)?;
+    let next = next_container(current.as_ref(), suffix, value, BACKGROUND_SHOWN_BY_DEFAULT)?;
     if next == current {
         return Ok(LiteralWriteOutcome::Unchanged);
     }
@@ -330,11 +362,11 @@ fn write_floating_range(
     }
     .ok_or_else(|| not_found(object))?;
     let current = effective(current);
-    let next = next_container(current.as_ref(), suffix, value)?;
+    let next = next_container(current.as_ref(), suffix, value, FLOATING_RANGE_BACKGROUND_SHOWN_BY_DEFAULT)?;
     if next == current {
         return Ok(LiteralWriteOutcome::Unchanged);
     }
     let patch = crate::api_types::FloatingRangePatch { container: Some(next), ..Default::default() };
-    crate::floating_range::update_floating_range_inner(ctx.state, ctx.file_state, id, patch)?;
+    crate::floating_range::update_floating_range_inner(ctx.state, ctx.file_state, id, patch, crate::floating_range::PatchGate::ObjectEdit)?;
     Ok(written("floatingRanges"))
 }

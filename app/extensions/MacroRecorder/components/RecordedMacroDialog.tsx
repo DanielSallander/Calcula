@@ -24,7 +24,7 @@ import {
 import type { DialogProps } from "@api/uiTypes";
 import { showToast } from "@api/notifications";
 import { requestMacroToNotebook } from "@api/lib";
-import { getCachedLocale } from "@api/locale";
+import { getAppLocale } from "@api/locale";
 import { generateMacroSource } from "../lib/actionCodegen";
 import {
   getAnchorCell,
@@ -82,7 +82,7 @@ export function RecordedMacroDialog(props: DialogProps): React.ReactElement | nu
         target,
         wrapper: target === "notebook" ? "notebookCell" : "objectScript",
         name: recording.name,
-        decimalSeparator: getCachedLocale()?.decimalSeparator ?? ".",
+        decimalSeparator: getAppLocale().decimalSeparator,
         // Pinned to the recording, not `now`: the source shown here has to be
         // byte-identical to the module that was already stored, or the user is
         // reading something subtly different from what they will find later.

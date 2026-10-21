@@ -9,9 +9,13 @@
 //          replaced it. Each door asks @api/selectionOwner first and refuses
 //          with one toast. The menu items and the commands each had their own
 //          one-liner before; one copy per door is how a door misses a check.
+//          P3: Go To Special acts on a floating grid's OWN cells (a cell
+//          target, "read"); Insert Table keeps refusing (an Insert-tab door,
+//          and a floating grid holds no table).
 
 import { showDialog } from "@api/ui";
 import { refuseIfSelectionOwned } from "@api/selectionOwner";
+import { resolveCellTarget } from "@api/cellTarget";
 
 /** Registered by the Table extension (its CreateTableDialog). */
 export const TABLE_DIALOG_ID = "table:createDialog";
@@ -24,8 +28,12 @@ export function openInsertTableDialog(): void {
   showDialog(TABLE_DIALOG_ID);
 }
 
-/** View > Go To Special...: searches (within) the selection and replaces it. */
+/**
+ * View > Go To Special...: searches (within) the selection and replaces it --
+ * Core's, or a floating grid's own cells (the dialog's OK asks again: the
+ * selection can move while it is open).
+ */
 export function openGoToSpecialDialog(): void {
-  if (refuseIfSelectionOwned("Go To Special")) return;
+  if (resolveCellTarget("Go To Special", "read") === null) return;
   showDialog(GO_TO_SPECIAL_DIALOG_ID);
 }

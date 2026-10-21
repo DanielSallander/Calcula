@@ -24,6 +24,20 @@ const h = vi.hoisted(() => ({
   cancel: vi.fn(async (_t?: number | null) => undefined),
   refreshState: vi.fn(async () => undefined),
   refreshGridData: vi.fn(),
+  // P3: a floating grid's cells take the flag through their target.
+  applyFormatting: vi.fn(async (..._a: unknown[]) => ({ cells: [], styles: [] })),
+  getStyle: vi.fn(async (_i: number) => ({ locked: true })),
+  readTargetCell: vi.fn(async (..._a: unknown[]) => ({ row: 4, col: 2, styleIndex: 6, display: "", valueKind: "empty" })),
+}));
+
+vi.mock("@api/lib", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@api/lib")>()),
+  applyFormatting: (...a: unknown[]) => h.applyFormatting(...a),
+  getStyle: (i: number) => h.getStyle(i),
+}));
+vi.mock("@api/cellTarget", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@api/cellTarget")>()),
+  readTargetCell: (...a: unknown[]) => h.readTargetCell(...a),
 }));
 
 vi.mock("@api", async (importOriginal) => ({
@@ -201,6 +215,65 @@ describe("Lock Cell", () => {
   it("no selection, nothing", async () => {
     select(null);
     await CommandRegistry.execute(ExtensionCommands.LOCK_CELL_TOGGLE);
+    expect(h.setCellProtection).not.toHaveBeenCalled();
+  });
+});
+
+describe("Lock Cell on a floating grid's cells (P3)", () => {
+  const REF = { kind: "floatingRange" as const, id: "fr-5" };
+  const floatingGrid = (actsOn?: readonly "format"[]): (() => void) =>
+    registerSelectionOwner({
+      id: "floatingRange",
+      label: "a floating grid's cells",
+      ownsSelection: () => true,
+      cellTarget: () => ({
+        ref: REF,
+        selection: { startRow: 3, startCol: 2, endRow: 4, endCol: 2, activeRow: 4, activeCol: 2, type: "cells" },
+        bounds: { rows: 10, cols: 5 },
+        label: "Float1",
+        wholeObject: false,
+      }),
+      ...(actsOn ? { actsOn } : {}),
+    });
+
+  it("reads the grid's ACTIVE cell's flag through the target and writes the opposite to ITS cells", async () => {
+    const releaseOwner = floatingGrid(["format"]);
+    try {
+      await CommandRegistry.execute(ExtensionCommands.LOCK_CELL_TOGGLE);
+    } finally {
+      releaseOwner();
+    }
+    expect(toasts).toEqual([]);
+    expect(h.readTargetCell).toHaveBeenCalledWith(REF, 4, 2);
+    expect(h.getStyle).toHaveBeenCalledWith(6);
+    expect(h.applyFormatting.mock.calls).toEqual([[[3, 4], [2], { locked: false }, { target: REF }]]);
+    // The active sheet's protection command is never asked about them.
+    expect(h.getCellProtection).not.toHaveBeenCalled();
+    expect(h.setCellProtection).not.toHaveBeenCalled();
+    expect(h.commit).toHaveBeenCalledWith(11);
+  });
+
+  it("is still refused on a protected host (Excel greys it)", async () => {
+    h.sheetProtected = true;
+    const releaseOwner = floatingGrid(["format"]);
+    try {
+      await CommandRegistry.execute(ExtensionCommands.LOCK_CELL_TOGGLE);
+    } finally {
+      releaseOwner();
+    }
+    expect(toasts.length).toBe(1);
+    expect(h.applyFormatting).not.toHaveBeenCalled();
+  });
+
+  it("inert until S8: a floating grid that admits nothing refuses, once, writing nothing", async () => {
+    const releaseOwner = floatingGrid(undefined);
+    try {
+      await CommandRegistry.execute(ExtensionCommands.LOCK_CELL_TOGGLE);
+    } finally {
+      releaseOwner();
+    }
+    expect(toasts.length).toBe(1);
+    expect(h.applyFormatting).not.toHaveBeenCalled();
     expect(h.setCellProtection).not.toHaveBeenCalled();
   });
 });

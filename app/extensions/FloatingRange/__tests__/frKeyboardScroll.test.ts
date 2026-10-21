@@ -5,10 +5,12 @@
 //          - F2 / type-to-edit on an active cell that was scrolled away bring it
 //            back into view before the editor opens over it;
 //          - Delete (the registry binding's command, lib/frKeyRouting.ts) over a
-//            selection that reaches past the window clears what
-//            the backend accepts and REPORTS what it refuses (until the
-//            backend's write gate follows the extent, cells past the window are
-//            refused) -- never a silent partial clear.
+//            selection that reaches past the window is ONE clear of the whole
+//            EXTENT-wide selection through the cell target (P3: one undo
+//            step, the backing sheet only), and a refusal is REPORTED once --
+//            never a silent partial clear;
+//          - (P3) arrows step OVER hidden rows / columns and onto a merge as a
+//            whole, and leave a merge from its far edge.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { FloatingRangeInfo } from "@api/floatingRanges";
@@ -66,6 +68,12 @@ vi.mock("@api/floatingRanges", () => ({
   getFloatingRangeCells: (...args: [string, number, number, number, number]) => getFloatingRangeCells(...args),
 }));
 
+const clearRangeWithOptions = vi.fn(async (..._args: unknown[]): Promise<unknown> => ({ count: 0, updatedCells: [] }));
+vi.mock("@api/lib", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@api/lib")>()),
+  clearRangeWithOptions: (...args: unknown[]) => clearRangeWithOptions(...args),
+}));
+
 const showToast = vi.fn();
 vi.mock("@api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@api")>()),
@@ -78,6 +86,9 @@ import { getLocalSelection, setLocalSelection, clearLocalSelection } from "../li
 import { getFrScroll, setFrScroll } from "../lib/frScroll";
 import { recordFrUsedExtent, resetFrExtents } from "../lib/frExtent";
 import { FR_DEFAULT_ROW_H } from "../lib/frDimensions";
+import { installFrKeyRouting } from "../lib/frKeyRouting";
+import { recordFrCellRead, resetFrRenderCaches } from "../rendering/frRenderer";
+import { styledRead } from "./helpers/frStyledRead";
 
 const FR_ID = "fr-keys";
 
@@ -118,7 +129,9 @@ beforeEach(() => {
   updateFloatingRangeCell.mockClear();
   getFloatingRangeCells.mockClear();
   showToast.mockClear();
+  clearRangeWithOptions.mockClear();
   resetFloatingRangeStore();
+  resetFrRenderCaches();
   resetFrExtents();
   clearLocalSelection();
   upsertFromInfo(INFO);
@@ -199,27 +212,86 @@ describe("editing a scrolled-away active cell", () => {
   });
 });
 
-describe("Delete past the window", () => {
-  it("clears what the backend accepts and reports what it refuses, once", async () => {
-    vi.spyOn(console, "error").mockImplementation(() => {});
+describe("Delete past the window (P3: one clear through the cell target)", () => {
+  // The floating grid's owner claim, as the extension installs it: the Delete
+  // door asks the cell-target question like every Clear door.
+  let uninstall: () => void = () => {};
+  beforeEach(() => {
+    uninstall = installFrKeyRouting({ extensionId: "test", deleteSelection: deleteFrSelection });
+  });
+  afterEach(() => uninstall());
+
+  it("clears the EXTENT-wide selection in ONE call with the target, never cell by cell", async () => {
     setLocalSelection({ frId: FR_ID, anchorRow: 0, anchorCol: 0, endRow: 7, endCol: 0 });
     deleteFrSelection();
     await flush();
+    expect(clearRangeWithOptions).toHaveBeenCalledTimes(1);
+    expect(clearRangeWithOptions).toHaveBeenCalledWith(0, 0, 7, 0, "contents", undefined, {
+      target: { kind: "floatingRange", id: FR_ID },
+    });
+    expect(updateFloatingRangeCell).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalled();
+  });
 
-    // Every non-empty cell of the EXTENT-wide selection was attempted...
-    expect(getFloatingRangeCells).toHaveBeenCalledWith(FR_ID, 0, 0, 7, 0);
-    expect(updateFloatingRangeCell.mock.calls.map((c) => c[1])).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
-    // ...and the four the backend refused are not lost in silence.
+  it("reports a refusal ONCE, visibly", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    clearRangeWithOptions.mockRejectedValueOnce(new Error("Cell A5 is outside floating grid 'Float1'. Nothing was changed."));
+    setLocalSelection({ frId: FR_ID, anchorRow: 0, anchorCol: 0, endRow: 7, endCol: 0 });
+    deleteFrSelection();
+    await flush();
     expect(showToast).toHaveBeenCalledTimes(1);
-    expect(String(showToast.mock.calls[0][0])).toMatch(/^4 cells could not be cleared: .*outside/);
+    expect(String(showToast.mock.calls[0][0])).toMatch(/^The cells could not be cleared: .*outside floating grid/);
     expect(showToast.mock.calls[0][1]).toEqual({ type: "error" });
   });
 
-  it("says nothing when every cell cleared", async () => {
-    setLocalSelection({ frId: FR_ID, anchorRow: 0, anchorCol: 0, endRow: 3, endCol: 2 });
+  it("a multi-area selection is one call per area", async () => {
+    setLocalSelection({
+      frId: FR_ID,
+      anchorRow: 0,
+      anchorCol: 0,
+      endRow: 0,
+      endCol: 0,
+      areas: [{ startRow: 2, startCol: 1, endRow: 3, endCol: 2 }],
+    });
     deleteFrSelection();
     await flush();
-    expect(updateFloatingRangeCell).toHaveBeenCalledTimes(12);
-    expect(showToast).not.toHaveBeenCalled();
+    expect(clearRangeWithOptions.mock.calls.map((c) => c.slice(0, 4))).toEqual([
+      [0, 0, 0, 0],
+      [2, 1, 3, 2],
+    ]);
+  });
+});
+
+describe("arrows over hidden lines and merges (P3)", () => {
+  it("steps OVER a hidden row, both ways", () => {
+    upsertFromInfo({ ...INFO, hiddenRows: [1, 2] } as FloatingRangeInfo);
+    selectCell(0, 0);
+    handleFrKeyDown(key("ArrowDown"));
+    expect(getLocalSelection()).toMatchObject({ anchorRow: 3, endRow: 3 });
+    handleFrKeyDown(key("ArrowUp"));
+    expect(getLocalSelection()).toMatchObject({ anchorRow: 0, endRow: 0 });
+  });
+
+  it("steps over a hidden column, and Shift-extend skips it too", () => {
+    upsertFromInfo({ ...INFO, hiddenCols: [1] } as FloatingRangeInfo);
+    selectCell(0, 0);
+    handleFrKeyDown(key("ArrowRight", { shiftKey: true }));
+    expect(getLocalSelection()).toMatchObject({ anchorCol: 0, endCol: 2 });
+  });
+
+  it("lands on a merge as a whole and leaves it from its far edge", () => {
+    // B1:C2 merged.
+    recordFrCellRead(FR_ID, { startRow: 0, startCol: 0, endRow: 7, endCol: 2 }, styledRead(
+      { startRow: 0, startCol: 0, endRow: 7, endCol: 2 },
+      () => null,
+      {},
+      { merges: [{ startRow: 0, startCol: 1, endRow: 1, endCol: 2 }] },
+    ));
+    selectCell(0, 0);
+    handleFrKeyDown(key("ArrowRight"));
+    expect(getLocalSelection()).toMatchObject({ anchorRow: 0, anchorCol: 1, endRow: 1, endCol: 2 });
+    // Down from the merge leaves from its BOTTOM edge: row 2, not row 1.
+    handleFrKeyDown(key("ArrowDown"));
+    expect(getLocalSelection()).toMatchObject({ anchorRow: 2, anchorCol: 1, endRow: 2, endCol: 1 });
   });
 });

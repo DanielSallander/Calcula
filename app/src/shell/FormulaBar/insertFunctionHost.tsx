@@ -24,6 +24,8 @@
 //              BAR before the dialog exists (the dialog focuses its search box
 //              on mount, which blurred the in-cell view, whose deferred blur
 //              committed the half-typed formula -- review 2026-09-27);
+//            - an owner whose CELLS take content (a cell target, P3): its own
+//              editor opens with "=" through @api/cellTarget editTargetCell;
 //            - an OBJECT holding the selection: refused, out loud, no dialog
 //              (BUG-0270 review: "=" and the function chosen would have been
 //              written into the cell hidden behind the object);
@@ -47,7 +49,7 @@ import {
   endExternalFormulaSession,
 } from "../../api/externalEdit";
 import { useGridContext } from "../../api";
-import { refuseIfSelectionOwned } from "../../api/selectionOwner";
+import { resolveCellTarget, editTargetCell } from "../../api/cellTarget";
 import { CommandRegistry, CoreCommands } from "../../api/commands";
 import { registerShellComponent } from "../../api/ui";
 import { showToast } from "../../api/notifications";
@@ -110,7 +112,18 @@ export function openInsertFunction(): boolean {
     if (src.kind === "session") src.session.adoptBarView();
     else if (src.kind === "cell") src.cell.beginEdit("=");
     else {
-      if (refuseIfSelectionOwned("Insert Function")) return false;
+      // The cells the door targets: Core's, or an owner's own (its editor
+      // takes the "="). Any other owner refuses, announced once.
+      const t = resolveCellTarget("Insert Function", "content");
+      if (t === null) return false;
+      if (t.kind === "object") {
+        if (!editTargetCell(t, "=")) {
+          showToast("Insert Function could not open the cell for editing.", { variant: "error" });
+          return false;
+        }
+        setRequest({ open: true, seq: request.seq + 1, beginCoreEdit: false });
+        return true;
+      }
       if (getGridStateSnapshot()?.surface === "canvas") {
         showToast("Insert Function is not available on a canvas sheet: it holds objects, not cells.", { variant: "info" });
         return false;

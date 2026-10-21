@@ -18,6 +18,13 @@ const h = vi.hoisted(() => ({
   setCellProtection: vi.fn(),
   getCellProtection: vi.fn(),
   openDialog: vi.fn(),
+  getCell: vi.fn(async (..._a: unknown[]) => null),
+  readTargetCell: vi.fn(async (..._a: unknown[]) => null),
+}));
+// The cell-target seam is REAL (P3); only its backend read is doubled.
+vi.mock("@api/cellTarget", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@api/cellTarget")>()),
+  readTargetCell: (...a: unknown[]) => h.readTargetCell(...a),
 }));
 
 vi.mock("@api", () => ({
@@ -25,7 +32,7 @@ vi.mock("@api", () => ({
   cellEvents: { emit: vi.fn() },
 }));
 vi.mock("@api/lib", () => ({
-  getCell: vi.fn(async () => null),
+  getCell: (...a: unknown[]) => h.getCell(...a),
   getStyle: vi.fn(),
   applyFormatting: (...a: unknown[]) => h.applyFormatting(...a),
   applyBorderPreset: vi.fn(),
@@ -160,5 +167,72 @@ describe("positive controls: nothing owns the selection", () => {
     expect(h.applyFormatting).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(toasts).toEqual([]);
+  });
+});
+
+describe("Format Cells on a floating grid's cells (P3)", () => {
+  const REF = { kind: "floatingRange" as const, id: "fr-6" };
+  const floatingGrid = (actsOn?: readonly "format"[]): void => {
+    release = registerSelectionOwner({
+      id: "floatingRange",
+      label: "a floating grid's cells",
+      ownsSelection: () => true,
+      cellTarget: () => ({
+        ref: REF,
+        selection: { startRow: 2, startCol: 1, endRow: 3, endCol: 1, activeRow: 3, activeCol: 1, type: "cells" },
+        bounds: { rows: 10, cols: 4 },
+        label: "Float1",
+        wholeObject: false,
+      }),
+      ...(actsOn ? { actsOn } : {}),
+    });
+  };
+
+  beforeEach(() => {
+    h.getCell.mockClear();
+    h.readTargetCell.mockClear();
+  });
+
+  it("the command opens the dialog for a grid that admits the act", async () => {
+    floatingGrid(["format"]);
+    await handlers.get(CoreCommands.FORMAT_CELLS)!();
+    expect(h.openDialog).toHaveBeenCalledWith("format-cells");
+    expect(toasts).toEqual([]);
+  });
+
+  it("the dialog seeds from the grid's ACTIVE cell through the target, and OK writes ITS cells with { target }", async () => {
+    floatingGrid(["format"]);
+    const onClose = vi.fn();
+    await renderDialog(onClose);
+    expect(h.readTargetCell).toHaveBeenCalledWith(REF, 3, 1);
+    expect(h.getCell, "the dialog read the active sheet's cell under the grid").not.toHaveBeenCalled();
+    act(() => {
+      useFormatCellsStore.getState().setBold(true);
+      useFormatCellsStore.getState().setLocked(false);
+    });
+    await pressEnter();
+    expect(toasts).toEqual([]);
+    expect(h.applyFormatting.mock.calls).toEqual([
+      [[2, 3], [1], { bold: true }, { target: REF }],
+      [[2, 3], [1], { locked: false, formulaHidden: false }, { target: REF }],
+    ]);
+    expect(h.setCellProtection, "a floating grid's lock went to the active sheet's protection command").not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("inert until S8: a floating grid that admits nothing -- the command does not open, OK writes nothing", async () => {
+    floatingGrid(undefined);
+    await handlers.get(CoreCommands.FORMAT_CELLS)!();
+    expect(h.openDialog).not.toHaveBeenCalled();
+    expect(toasts.length).toBe(1);
+    release?.();
+    release = null;
+    const onClose = vi.fn();
+    await renderDialog(onClose);
+    act(() => useFormatCellsStore.getState().setBold(true));
+    floatingGrid(undefined);
+    await pressEnter();
+    expect(h.applyFormatting).not.toHaveBeenCalled();
+    expect(toasts.length).toBe(2);
   });
 });

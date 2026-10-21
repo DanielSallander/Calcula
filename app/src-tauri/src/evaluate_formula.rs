@@ -410,6 +410,22 @@ pub(crate) fn value_to_display(val: &Value) -> String {
     }
 }
 
+/// An evaluated step's RESULT as the user reads it: a number keeps exactly the
+/// digits `value_to_display` writes (same precision, no grouping) with the app
+/// locale's decimal separator ("1234,5" under de-DE); text, booleans, errors
+/// and the omitted argument read exactly as `value_to_display` writes them.
+///
+/// P2 DC5: only the evaluated VALUE localises. Literals INSIDE the rendered
+/// formula text stay on the invariant `value_to_display`, because the formula
+/// text keeps the invariant argument separator and underline spans; a
+/// localised literal there would read `SUM(1,5,2)`.
+pub(crate) fn value_to_display_localized(val: &Value, locale: &engine::LocaleSettings) -> String {
+    match val {
+        Value::Number(_) => value_to_display(val).replace('.', &locale.decimal_separator.to_string()),
+        other => value_to_display(other),
+    }
+}
+
 /// Render a table specifier for the Evaluate-Formula display.
 ///
 /// Delegates to the canonical renderer. The hand-written copy that used to

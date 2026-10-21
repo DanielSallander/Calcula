@@ -14,6 +14,7 @@ import { exposeExtensionRuntimeGlobals } from "./api/extensionRuntime";
 import { initObjectScriptBadges } from "./api/objectScriptBadge";
 import { initSkinLoader } from "./core/theme/skinLoader";
 import { getBootPreferredSkinId, applyAppearancePolicyAfterPaint } from "./api/appearancePolicy";
+import { initAppLocale, getAppLocale } from "./api/locale";
 import "./index.css";
 
 // C2: publish the host's React singleton BEFORE any extension loads, so
@@ -55,10 +56,23 @@ if (import.meta.env.DEV) {
 // render-time exception unmounts the tree and leaves `<div id="root">` empty,
 // which under Tauri is a white window with no message and no devtools. See
 // src/shell/RootErrorBoundary (BUG-0083).
-ReactDOM.createRoot(document.getElementById("root")!).render(
-  <RootErrorBoundary surface="Calcula">
-    <React.StrictMode>
-      <App />
-    </React.StrictMode>
-  </RootErrorBoundary>
-);
+//
+// THE APP LOCALE FIRST (P2). Rust owns the locale; the first frame must already
+// format with it, so the render waits for initAppLocale(), which never rejects
+// (a failed read keeps the invariant locale and logs once). The build target
+// (es2021) has no top-level await, hence .finally(render).
+function render(): void {
+  if (import.meta.env.DEV) {
+    // E2E (app-locale journey): which locale the first frame rendered with.
+    (window as unknown as { __calcLocaleAtFirstRender?: string }).__calcLocaleAtFirstRender =
+      getAppLocale().localeId;
+  }
+  ReactDOM.createRoot(document.getElementById("root")!).render(
+    <RootErrorBoundary surface="Calcula">
+      <React.StrictMode>
+        <App />
+      </React.StrictMode>
+    </RootErrorBoundary>
+  );
+}
+void initAppLocale().finally(render);

@@ -14,6 +14,13 @@
 //            BiValueFieldRef.number_format        -> numberFormat (WP-C)
 //            ZoneFieldInfo.number_format_from_model -> numberFormatFromModel
 //            MeasureFieldInfo.format_string       -> BiMeasureFieldInfo.formatString
+//          and P2 S7's member wire (identity from the key, display from the label):
+//            PivotCellData.member                 -> member (optional)
+//            FilterRowData.members                -> members (replaces uniqueValues)
+//            FieldUniqueValuesResponse.members    -> members (replaces uniqueValues)
+//            SlicerItem.key / label               -> key / label (replaces value),
+//              in BOTH TS mirrors (Slicer and ControlsPane)
+//            MemberRef.key / label                -> key / label (api_types.rs)
 //          Read as TEXT, as `biPivotModelInfoMirrors.test.ts` and
 //          `interpreterReachDrift.test.ts` read their sources: the Rust side
 //          cannot be imported, and the contract is the field NAME.
@@ -104,6 +111,15 @@ const PINNED: ReadonlyArray<{ rust: string; ts: string; fields: string[]; option
     optional: true,
   },
   { rust: "pub struct MeasureFieldInfo", ts: "export interface BiMeasureFieldInfo", fields: ["format_string"], optional: true },
+  // P2 S7: the member shape on pivot headers and filter lists.
+  { rust: "pub struct PivotCellData", ts: "export interface PivotCellData", fields: ["member"], optional: true },
+  { rust: "pub struct FilterRowData", ts: "export interface FilterRowData", fields: ["members", "selected_values"], optional: false },
+  {
+    rust: "pub struct FieldUniqueValuesResponse",
+    ts: "export interface FieldUniqueValuesResponse",
+    fields: ["members"],
+    optional: false,
+  },
 ];
 
 describe("the pivot transport fields mirror Rust under serde's camelCase names", () => {
@@ -150,6 +166,16 @@ describe("the pivot transport fields mirror Rust under serde's camelCase names",
     });
   }
 
+  it("the member lists no longer carry the retired `uniqueValues` on either side", () => {
+    for (const [rust, ts] of [
+      ["pub struct FilterRowData", "export interface FilterRowData"],
+      ["pub struct FieldUniqueValuesResponse", "export interface FieldUniqueValuesResponse"],
+    ]) {
+      expect(rustFields(blockAfter(rustSrc, rust))).not.toContain("unique_values");
+      expect(tsFields(blockAfter(tsSrc, ts))).not.toContain("uniqueValues");
+    }
+  });
+
   it("the Pivot extension does not hand-write a second PivotRegionData (it re-exports the facade's)", () => {
     const ext = read("extensions/Pivot/types.ts");
     expect(ext).not.toMatch(/export\s+interface\s+PivotRegionData\b/);
@@ -161,5 +187,52 @@ describe("the pivot transport fields mirror Rust under serde's camelCase names",
     expect(rustFields(planted)).toEqual(["a_b", "c_d"]);
     expect(attributesOf(planted, "c_d").some((a) => /rename\s*=/.test(a))).toBe(true);
     expect(attributesOf(planted, "a_b")).toEqual([]);
+  });
+});
+
+/** Exact field pin: the Rust struct's fields, camel-cased, are EXACTLY the TS interface's. */
+function expectSameFields(rustSrc: string, rustHead: string, tsSrc: string, tsHead: string): void {
+  const rustBody = blockAfter(rustSrc, rustHead);
+  const head = rustSrc.slice(Math.max(0, rustSrc.indexOf(rustHead) - 200), rustSrc.indexOf(rustHead));
+  expect(head, `${rustHead} renames at the struct level`).toMatch(/#\[serde\(rename_all = "camelCase"\)\]\s*$/);
+  for (const field of rustFields(rustBody)) {
+    expect(
+      attributesOf(rustBody, field).filter((a) => /rename\s*=/.test(a)),
+      `${field} carries a per-field rename`,
+    ).toEqual([]);
+  }
+  expect([...tsFields(blockAfter(tsSrc, tsHead))].sort(), `${tsHead} mirrors ${rustHead}`).toEqual(
+    rustFields(rustBody).map(camel).sort(),
+  );
+}
+
+describe("the member shape mirrors Rust (P2 S7: key = identity, label = display)", () => {
+  it("MemberRef { key, label } (api_types.rs -> app/src/api/types.ts)", () => {
+    const rustSrc = read("src-tauri/src/api_types.rs");
+    expect(rustFields(blockAfter(rustSrc, "pub struct MemberRef"))).toEqual(["key", "label"]);
+    expectSameFields(rustSrc, "pub struct MemberRef", read("src/api/types.ts"), "export interface MemberRef");
+  });
+
+  it("SlicerItem { key, label, selected, hasData } in BOTH TS mirrors (slicer/types.rs)", () => {
+    const rustSrc = read("src-tauri/src/slicer/types.rs");
+    const fields = rustFields(blockAfter(rustSrc, "pub struct SlicerItem"));
+    expect(fields).toContain("key");
+    expect(fields).toContain("label");
+    expect(fields, "the retired `value` is gone from the wire").not.toContain("value");
+    expectSameFields(rustSrc, "pub struct SlicerItem", read("extensions/Slicer/lib/slicerTypes.ts"), "export interface SlicerItem");
+    expectSameFields(
+      rustSrc,
+      "pub struct SlicerItem",
+      read("extensions/ControlsPane/lib/filterPaneTypes.ts"),
+      "export interface SlicerItem",
+    );
+  });
+
+  it("non-vacuity: a renamed Rust field fails the exact pin", () => {
+    const rust = '#[serde(rename_all = "camelCase")]\npub struct MemberRef {\n    pub key: String,\n    pub text: String,\n}\n';
+    const ts = "export interface MemberRef {\n  key: string;\n  label: string;\n}\n";
+    expect(() => expectSameFields(rust, "pub struct MemberRef", ts, "export interface MemberRef")).toThrow();
+    const same = '#[serde(rename_all = "camelCase")]\npub struct MemberRef {\n    pub key: String,\n    pub label: String,\n}\n';
+    expect(() => expectSameFields(same, "pub struct MemberRef", ts, "export interface MemberRef")).not.toThrow();
   });
 });

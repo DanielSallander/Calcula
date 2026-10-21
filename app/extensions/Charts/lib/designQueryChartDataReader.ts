@@ -11,16 +11,20 @@
 //   Two things a Power BI page needs live here (CONTRACT-CANVAS §4.8, owner
 //   decision 5 of 2026-10-08):
 //
-//   - THE PAGE'S MODEL SLICERS. A model slicer on the chart's sheet or canvas
-//     publishes what it keeps on @api/pageFilters; the compiled request takes
-//     those filters for the chart's OWN page and connection before it runs
-//     (`mergePageFilters`). The chart re-runs when they change through
-//     chartQueryProvider. The page is the chart's sheet: a caller names the
-//     chart (`DesignQueryReadContext.chartId`) or the page itself; a caller
-//     that names neither is matched to the stored chart whose spec holds THIS
+//   - THE PAGE'S MODEL FILTERS. A model slicer on the chart's sheet or canvas
+//     (and, with P4, a ribbon filter scoped to the page or the chart)
+//     publishes what it keeps on @api/reportFilters; the compiled request
+//     takes what the seam RESOLVES for this chart on its OWN page and
+//     connection (`resolveFiltersFor`, the page's interactions applied)
+//     before it runs (`mergePageFilters`). The chart re-runs when they change
+//     through chartQueryProvider. The page is the chart's sheet, by SHEET ID
+//     (@api/reportPages): a caller names the chart
+//     (`DesignQueryReadContext.chartId`) or the page itself; a caller that
+//     names neither is matched to the stored chart whose spec holds THIS
 //     source object (the render path hands the stored spec through by
 //     reference), and a source no stored chart holds -- the create dialog's
-//     preview -- reads unfiltered, exactly as before.
+//     preview -- reads unfiltered, exactly as before. A read that names only
+//     a page reads the page's BASE filters (`resolvePageBase`).
 //
 //   - THE MEASURE-ONLY QUERY. `VALUES: [Sales]` with no ROWS is a Card's
 //     query: one number. Its view has no data rows, only the grand total, and
@@ -29,24 +33,37 @@
 //     data (`designQueryChartData`).
 
 import type { PivotViewResponse } from "@api/pivot";
+import { pivotCellDisplayText } from "@api/pivotMembers";
 import { getControlValue } from "@api/controlValues";
-import { getPageFilters, type PageFilter } from "@api/pageFilters";
+import {
+  getCrossFilters,
+  pruneCrossFilter,
+  resolveFiltersFor,
+  resolvePageBase,
+  type ResolvedFieldFilter,
+  type ResolvedTupleFilter,
+  type VisualRef,
+} from "@api/reportFilters";
+import { getReportPagesSnapshot, sheetIdAt } from "@api/reportPages";
+import { chartMarkCrossFilter } from "@api/chartMarks";
 import type { BiPivotModelInfo } from "../../_shared/components/types";
 import {
   compileDesignQuery,
   type DesignQueryFieldRef,
   type DesignQueryRequest,
+  type DesignQueryTupleFilter,
 } from "../../_shared/dsl/pivotLayout/designQuery";
 import { substituteControlParams } from "../../_shared/dsl/pivotLayout/paramSubstitution";
 import { splitBiFieldKey } from "../../_shared/lib/biFieldKey";
 import { chartsBackend } from "./chartsBackend";
 import { getAllCharts, getChartById } from "./chartStore";
 import { extractChartData } from "./pivotChartDataReader";
+import { alignHighlightValues, crossFilterSelfOf, tupleIsLive } from "./chartMemberPaths";
 import type { ParsedChartData, DesignQueryDataSource } from "../types";
 
 /**
  * Which chart (or page) a design-query read is for. The page decides which
- * model-slicer filters apply (@api/pageFilters): only the chart's own sheet or
+ * model filters apply (@api/reportFilters): only the chart's own sheet or
  * canvas.
  */
 export interface DesignQueryReadContext {
@@ -105,23 +122,46 @@ export function applyFieldFormats(
 }
 
 /**
- * The page a read is for, or undefined when it is for no stored chart (a
- * preview of a chart not created yet). See the file header for the order.
+ * The stored chart a read is for: the context's chart, else the stored chart
+ * whose spec holds THIS source object (by IDENTITY, never by content: two
+ * charts on different pages may hold the same DSL text against the same
+ * connection, and only the object tells them apart). Undefined for a preview.
+ */
+function designQueryChartOf(source: DesignQueryDataSource, context?: DesignQueryReadContext) {
+  if (context?.chartId !== undefined) return getChartById(context.chartId);
+  return getAllCharts().find((c) => c.spec?.data === source);
+}
+
+/**
+ * The page a read is for, as its SHEET ID (@api/reportPages), or undefined
+ * when it is for no stored chart (a preview of a chart not created yet) or the
+ * page list has no id for the sheet yet. The sheet index is the context's
+ * page, else the chart's sheet. See the file header for the order.
  */
 export function designQueryPageOf(
   source: DesignQueryDataSource,
   context?: DesignQueryReadContext,
-): number | undefined {
-  if (context?.sheetIndex !== undefined) return context.sheetIndex;
-  if (context?.chartId !== undefined) return getChartById(context.chartId)?.sheetIndex;
-  // By IDENTITY, never by content: two charts on different pages may hold the
-  // same DSL text against the same connection, and only the object tells
-  // them apart.
-  return getAllCharts().find((c) => c.spec?.data === source)?.sheetIndex;
+): string | undefined {
+  const index =
+    context?.sheetIndex !== undefined ? context.sheetIndex : designQueryChartOf(source, context)?.sheetIndex;
+  if (index === undefined) return undefined;
+  return sheetIdAt(getReportPagesSnapshot(), index) ?? undefined;
 }
 
 /**
- * The request with the page's model filters merged in, pure. Each filter
+ * A "Table.Column" field split against the model, or empty parts when it
+ * names no table OF THE MODEL. `splitBiFieldKey` falls back to the first dot
+ * when no model table prefixes the key, so "Gone.Thing" would come back as
+ * table "Gone" -- a table the backend refuses, failing the whole query
+ * instead of skipping only that filter.
+ */
+function splitModelField(field: string, tableNames: readonly string[]): { table: string; column: string } {
+  const split = splitBiFieldKey(field, [...tableNames]);
+  return tableNames.includes(split.table) ? split : { table: "", column: "" };
+}
+
+/**
+ * The request with the resolved model filters merged in, pure. Each filter
  * KEEPS its items of one model column and travels in `pageFilterFields`,
  * APART from the query's own zones:
  *
@@ -146,23 +186,77 @@ export function designQueryPageOf(
  */
 export function mergePageFilters(
   request: DesignQueryRequest,
-  filters: readonly PageFilter[],
+  filters: readonly ResolvedFieldFilter[],
   tableNames: readonly string[],
 ): DesignQueryRequest {
   if (filters.length === 0) return request;
   const pageFilterFields: DesignQueryFieldRef[] = [...(request.pageFilterFields ?? [])];
   for (const filter of filters) {
-    const { table, column } = splitBiFieldKey(filter.field, [...tableNames]);
+    const { table, column } = splitModelField(filter.field, tableNames);
     if (!table || !column) {
       console.warn(
-        `[Charts] "${filter.sourceName}" filters "${filter.field}", which this model has no table for; not applied.`,
+        `[Charts] "${filter.from}" filters "${filter.field}", which this model has no table for; not applied.`,
       );
       continue;
     }
-    const level = typeof filter.filterLevel === "number" && filter.filterLevel > 1 ? { level: filter.filterLevel } : {};
-    pageFilterFields.push({ table, column, includedItems: [...filter.includedItems], ...level });
+    const level = typeof filter.level === "number" && filter.level > 1 ? { level: filter.level } : {};
+    pageFilterFields.push({ table, column, includedItems: [...filter.includedKeys], ...level });
   }
   return { ...request, pageFilterFields };
+}
+
+/**
+ * The request with the resolved TUPLE filters (OR-of-AND: a non-rectangular
+ * cross-filter selection, P4) appended to `tupleFilters`, pure. Each field is
+ * split against the model the way `mergePageFilters` splits one; a tuple
+ * filter naming a column the model does not have is skipped whole (and said
+ * in the console) -- dropping only that column would WIDEN it to every member
+ * of the column, a filter the user never made. Keys travel as they are (the
+ * blank member is key "", ruling Q8; the backend maps it to the engine's
+ * blank). Always level 1: a selection is never pinned.
+ */
+export function mergeTupleFilters(
+  request: DesignQueryRequest,
+  tupleFilters: readonly ResolvedTupleFilter[],
+  tableNames: readonly string[],
+): DesignQueryRequest {
+  if (tupleFilters.length === 0) return request;
+  const out: DesignQueryTupleFilter[] = [...(request.tupleFilters ?? [])];
+  for (const tf of tupleFilters) {
+    const fields: Array<{ table: string; column: string }> = [];
+    let missing: string | null = null;
+    for (const field of tf.fields) {
+      const { table, column } = splitModelField(field, tableNames);
+      if (!table || !column) {
+        missing = field;
+        break;
+      }
+      fields.push({ table, column });
+    }
+    if (missing !== null) {
+      console.warn(`[Charts] "${tf.from}" filters "${missing}", which this model has no table for; not applied.`);
+      continue;
+    }
+    out.push({ fields, tuples: tf.tuples.map((t) => [...t]) });
+  }
+  if (out.length === (request.tupleFilters ?? []).length) return request;
+  return { ...request, tupleFilters: out };
+}
+
+/**
+ * What a design-query read runs (see {@link compileDesignQueryPlan}).
+ */
+export interface DesignQueryPlan {
+  /** The query the chart draws: its DSL plus the filters that reach it. */
+  request: DesignQueryRequest;
+  /**
+   * The CROSS-HIGHLIGHT query, or null when no selection highlights the chart:
+   * `request` plus the highlight-mode selections' filters. Its result is
+   * aligned onto the base by member key (`highlightValues`).
+   */
+  highlightRequest: DesignQueryRequest | null;
+  /** The chart the read is for and its page (sheet id), when it is a stored chart on a known page. */
+  self: { ref: VisualRef; pageSheetId: string; connectionId: string } | null;
 }
 
 /**
@@ -179,6 +273,29 @@ export async function compileDesignQuerySource(
   source: DesignQueryDataSource,
   context?: DesignQueryReadContext,
 ): Promise<DesignQueryRequest> {
+  return (await compileDesignQueryPlan(source, context)).request;
+}
+
+/**
+ * {@link compileDesignQuerySource} plus what only the READ needs: the
+ * cross-highlight query and the chart's own identity (P4, S5).
+ *
+ * The chart asks the seam ONE question -- `resolveFiltersFor(page, chart,
+ * connection)` with its mark's `canHighlight` (@api/chartMarks) -- and routes
+ * the answer:
+ *   - `filters` (page / ribbon filters and rectangular filter-mode selections)
+ *     go to `pageFilterFields`, keyed by member KEY;
+ *   - `tupleFilters` (non-rectangular filter-mode selections) go to
+ *     `tupleFilters`;
+ *   - `highlights`, when any, make a SECOND request: the base plus the
+ *     highlight filters. A mark that cannot highlight never gets one (the
+ *     resolver forced its selections to filter).
+ * The chart's OWN selection never filters it (the resolver drops it).
+ */
+export async function compileDesignQueryPlan(
+  source: DesignQueryDataSource,
+  context?: DesignQueryReadContext,
+): Promise<DesignQueryPlan> {
   if (!source.connectionId) {
     throw new Error("This design-query chart has no BI connection selected.");
   }
@@ -210,16 +327,37 @@ export async function compileDesignQuerySource(
   // value fields, so the backend writes `formattedValue` in them.
   const formatted = applyFieldFormats(compiled.request, designQueryFieldFormatsOf(source, context));
 
-  // The page's model slicers (@api/pageFilters): only this chart's own sheet
-  // or canvas, only this connection's model.
+  // The page's model filters (@api/reportFilters): only this chart's own
+  // sheet or canvas, only this connection's model, under the page's
+  // interactions for THIS chart. A read that names a page and no chart reads
+  // the page's base.
   const page = designQueryPageOf(source, context);
-  if (page === undefined) return formatted;
-  const filters = getPageFilters(page, String(source.connectionId));
-  return mergePageFilters(
-    formatted,
-    filters,
-    biModel.tables.map((t) => t.name),
-  );
+  if (page === undefined) return { request: formatted, highlightRequest: null, self: null };
+  const connectionId = String(source.connectionId);
+  const chart =
+    context?.sheetIndex !== undefined && context.chartId === undefined ? undefined : designQueryChartOf(source, context);
+  const ref: VisualRef | null = chart ? { kind: "chart", id: chart.chartId } : null;
+  const resolved = ref
+    ? resolveFiltersFor(
+        page,
+        { ref, canHighlight: chartMarkCrossFilter(chart?.spec?.mark ?? "").canHighlight },
+        connectionId,
+      )
+    : resolvePageBase(page, connectionId);
+  const tables = biModel.tables.map((t) => t.name);
+  const request = mergeTupleFilters(mergePageFilters(formatted, resolved.filters, tables), resolved.tupleFilters, tables);
+  const highlightRequest = resolved.highlights
+    ? mergeTupleFilters(
+        mergePageFilters(request, resolved.highlights.filters, tables),
+        resolved.highlights.tupleFilters,
+        tables,
+      )
+    : null;
+  return {
+    request,
+    highlightRequest,
+    self: ref ? { ref, pageSheetId: page, connectionId } : null,
+  };
 }
 
 /**
@@ -310,6 +448,9 @@ function designQueryViewData(
  */
 function modelCellText(cell: PivotViewResponse["rows"][number]["cells"][number] | undefined): string {
   if (!cell) return "";
+  // A header names a member: show its app-locale LABEL (the one reading,
+  // `pivotCellDisplayText`); a value cell carries no member and falls through.
+  if (cell.member) return pivotCellDisplayText(cell);
   if (cell.formattedValue) return cell.formattedValue;
   const v = cell.value;
   if (typeof v === "string") return v;
@@ -356,24 +497,79 @@ function withDisplayValues(
 }
 
 /**
+ * The chart's OWN cross-filter selection laid onto its data (P4): first its
+ * vanished tuples are pruned (a member the query no longer returns cannot stay
+ * selected -- `pruneCrossFilter`), then the datums still selected are marked
+ * (`crossFilterSelf`) so the painter can fade the rest. Data without member
+ * paths leaves the selection alone: it cannot tell which members vanished.
+ */
+function withOwnSelection(data: ParsedChartData, self: NonNullable<DesignQueryPlan["self"]>): ParsedChartData {
+  if (!data.categoryMembers || !data.seriesMembers) return data;
+  const own = () =>
+    getCrossFilters(self.pageSheetId).find(
+      (s) => s.source.kind === self.ref.kind && s.source.id === self.ref.id && s.connectionId === self.connectionId,
+    );
+  if (!own()) return data;
+  pruneCrossFilter(self.ref, (fields, tuple) => tupleIsLive(data, fields, tuple));
+  const held = own();
+  if (!held) return data;
+  const crossFilterSelf = crossFilterSelfOf(data, held);
+  return crossFilterSelf ? { ...data, crossFilterSelf } : data;
+}
+
+/** Charts already told their highlight could not be aligned (one console line each). */
+const unalignedHighlightNoted = new Set<string>();
+
+/**
  * Read data for a design-query chart and return it as ParsedChartData.
  *
  * Flow: fetch the connection's BI model → compile the DSL into a
  * `DesignQueryRequest` (page filters merged) → run it headlessly on the
  * backend → extract categories and series from the returned pivot view.
+ *
+ * Cross-filter (P4): the chart's own selection is pruned and marked
+ * (`crossFilterSelf`); when another visual's selection HIGHLIGHTS the chart, a
+ * second query runs with the highlight filters and its values are aligned
+ * onto the base datums BY MEMBER KEY (`highlightValues`). A highlight that
+ * cannot be aligned (no member paths) or whose query fails is left off -- the
+ * chart paints unhighlighted and says so in the console, never a value at the
+ * wrong datum.
  */
 export async function readDesignQueryData(
   source: DesignQueryDataSource,
   context?: DesignQueryReadContext,
 ): Promise<ParsedChartData> {
-  const request = await compileDesignQuerySource(source, context);
+  const plan = await compileDesignQueryPlan(source, context);
 
   const view = await chartsBackend.invoke<PivotViewResponse>("run_design_query", {
-    request: request satisfies DesignQueryRequest,
+    request: plan.request satisfies DesignQueryRequest,
   });
   if (!view) {
     return { categories: [], series: [] };
   }
 
-  return designQueryChartData(view, request);
+  let data = designQueryChartData(view, plan.request);
+  if (plan.self) data = withOwnSelection(data, plan.self);
+
+  if (plan.highlightRequest) {
+    const noteKey = plan.self ? plan.self.ref.id : source.dslText;
+    try {
+      const highlightView = await chartsBackend.invoke<PivotViewResponse>("run_design_query", {
+        request: plan.highlightRequest satisfies DesignQueryRequest,
+      });
+      const highlighted = highlightView ? designQueryChartData(highlightView, plan.highlightRequest) : null;
+      const aligned = highlighted ? alignHighlightValues(data, highlighted) : null;
+      if (aligned) {
+        data = { ...data, highlightValues: aligned };
+        unalignedHighlightNoted.delete(noteKey);
+      } else if (!unalignedHighlightNoted.has(noteKey)) {
+        unalignedHighlightNoted.add(noteKey);
+        console.warn("[Charts] A cross-highlight could not be matched to this chart's datums by member; painted without it.");
+      }
+    } catch (err) {
+      console.warn("[Charts] The cross-highlight query failed; the chart is painted without the highlight:", err);
+    }
+  }
+
+  return data;
 }

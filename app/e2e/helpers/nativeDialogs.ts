@@ -102,3 +102,51 @@ export function sweepNativeDialogs(max = 30, timeoutMs = 2500): DialogSweep {
   }
   return { dismissed };
 }
+
+export interface NativeColorPick {
+  /** The driver's full output (TITLE / SET / CLICKED / GONE lines, or why not). */
+  output: string;
+  /** The picker closed after OK (the driver printed GONE). */
+  gone: boolean;
+}
+
+/**
+ * Answer the OS colour picker (ChooseColor) an `<input type="color">` opened:
+ * type `rgb` ("r,g,b", 0..255 each) into its Red / Green / Blue boxes and
+ * press OK (`answer-native-dialog.ps1 -Action setcolor`). The picker is found
+ * by its edit boxes, not by its title, which is in the SYSTEM locale.
+ *
+ * SYNCHRONOUS, like every driver here: the Node event loop is blocked while it
+ * runs, so a Playwright call that has not been SENT yet is not sent until it
+ * returns (memory note "an unawaited call before execFileSync is never sent").
+ * Issue the click that opens the picker and let it dispatch first.
+ */
+export function setNativeColor(rgb: string, timeoutMs = 20_000): NativeColorPick {
+  let output: string;
+  try {
+    output = execFileSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        ANSWER_SCRIPT,
+        "-TitleLike",
+        "Calcula",
+        "-Action",
+        "setcolor",
+        "-Rgb",
+        rgb,
+        "-TimeoutMs",
+        String(timeoutMs),
+      ],
+      { encoding: "utf8", timeout: timeoutMs + 15_000, windowsHide: true },
+    );
+  } catch (err) {
+    const out = (err as { stdout?: string }).stdout;
+    output = `DRIVERFAILED:${String(err).slice(0, 300)}${typeof out === "string" ? " " + out : ""}`;
+  }
+  const lines = output.split(/\r?\n/).map((l) => l.trim());
+  return { output: output.trim(), gone: lines.includes("GONE") };
+}

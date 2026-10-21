@@ -559,6 +559,7 @@ fn a_pulled_navigator_binding_follows_its_page_to_the_local_id() {
         pivots: &h.pivot,
         pane: &h.pane,
         ribbon: &h.ribbon,
+        user_files: Box::leak(Box::new(crate::persistence::UserFilesState::default())),
     };
     super::resolve_all_core(&cx);
     let painted = crate::controls::resolve_control_properties_core(&h.state, anchor.0, anchor.1, anchor.2);

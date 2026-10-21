@@ -900,3 +900,137 @@ describe("api/externalEdit.ts and api/editing.ts are one binding", () => {
     }
   });
 });
+
+// ============================================================================
+// locale.ts -- THE APP LOCALE (P2): sync accessor + helpers, getCachedLocale gone
+// ============================================================================
+// getCachedLocale returned null before an un-awaited load finished, so every
+// caller carried its own "?? ','" en-US fallback -- the drift P2 removes. It is
+// deleted, not aliased; getAppLocale() is never null.
+
+describe("api/locale.ts app-locale surface (P2)", () => {
+  it("exports the sync accessor and the formatting/parsing helpers, from the barrel too", async () => {
+    const barrel = (await import("../index")) as Record<string, unknown>;
+    const mod = (await import("../locale")) as Record<string, unknown>;
+    for (const name of [
+      "initAppLocale",
+      "getAppLocale",
+      "getLocaleSettings",
+      "setLocale",
+      "onLocaleChanged",
+      "decimalSeparator",
+      "listSeparator",
+      "formatNumber",
+      "formatNumberWithCode",
+      "formatDate",
+      "formatDateTime",
+      "monthName",
+      "dayName",
+      "quarterLabel",
+      "parseNumber",
+      "parseDate",
+    ]) {
+      expect(typeof mod[name], `@api/locale does not export ${name}`).toBe("function");
+      expect(barrel[name], `${name} is not re-exported from @api as the same binding`).toBe(mod[name]);
+    }
+    expect(mod.LOCALE_CHANGED_EVENT).toBe("locale:changed");
+  });
+
+  it("no longer exports getCachedLocale (removed, not aliased)", async () => {
+    const barrel = (await import("../index")) as Record<string, unknown>;
+    const mod = (await import("../locale")) as Record<string, unknown>;
+    expect(mod.getCachedLocale).toBeUndefined();
+    expect(barrel.getCachedLocale).toBeUndefined();
+  });
+});
+
+// ============================================================================
+// pivotMembers.ts -- THE MEMBER SHAPE (P2 S7): identity from the key, display
+// from the label
+// ============================================================================
+// The Pivot extension's `pivotCellLabel` named an item by its FORMATTED text
+// (display) and every caller used it as the identity too. It is deleted, not
+// aliased: identity is `pivotCellItemKey`, display is `pivotCellDisplayText`.
+
+describe("api/pivotMembers.ts member surface (P2 S7)", () => {
+  it("exports the member readers, from the barrel too", async () => {
+    const barrel = (await import("../index")) as Record<string, unknown>;
+    const mod = (await import("../pivotMembers")) as Record<string, unknown>;
+    for (const name of [
+      "pivotCellItemKey",
+      "pivotCellDisplayText",
+      "memberKeyNumber",
+      "memberKeyDate",
+      "memberKeys",
+      "memberLabelOf",
+    ]) {
+      expect(typeof mod[name], `@api/pivotMembers does not export ${name}`).toBe("function");
+      expect(barrel[name], `${name} is not re-exported from @api as the same binding`).toBe(mod[name]);
+    }
+  });
+
+  it("MemberRef is a declared, exported type of the facade", () => {
+    const types = fs.readFileSync(path.resolve(__dirname, "../types.ts"), "utf8");
+    expect(types).toMatch(/export interface MemberRef \{\s*key: string;\s*label: string;\s*\}/);
+    const index = fs.readFileSync(path.resolve(__dirname, "../index.ts"), "utf8");
+    expect(index).toMatch(/export type \{ MemberRef \} from "\.\/types";/);
+    expect(index).not.toMatch(/\bpivotCellLabel\b/);
+  });
+});
+
+// ============================================================================
+// reportFilters/ + modelVisuals.ts -- P4: one target-aware resolver
+// ============================================================================
+// @api/pageFilters is REMOVED (not aliased); @api/reportFilters replaces it.
+// Both new seams are SUBPATH imports (the @api/objectBindings precedent), never
+// re-exported from the barrel.
+
+describe("api/reportFilters + api/modelVisuals surface (P4)", () => {
+  it("pageFilters.ts is gone", () => {
+    expect(fs.existsSync(path.resolve(__dirname, "../pageFilters.ts"))).toBe(false);
+  });
+
+  it("@api/reportFilters exports the resolver, publishers, selections, interactions and lifetime", async () => {
+    const mod = (await import("../reportFilters")) as Record<string, unknown>;
+    for (const name of [
+      "publishReportFilters",
+      "getReportFilters",
+      "setCrossFilter",
+      "addToCrossFilter",
+      "clearCrossFilter",
+      "clearCrossFilters",
+      "getCrossFilters",
+      "pruneCrossFilter",
+      "pruneMissingCrossFilterSources",
+      "isCrossFilterSource",
+      "publishPageInteractions",
+      "interactionFor",
+      "resolvePageBase",
+      "resolveFiltersFor",
+      "isRectangular",
+      "onReportFiltersChange",
+      "startReportFilters",
+    ]) {
+      expect(typeof mod[name], `@api/reportFilters does not export ${name}`).toBe("function");
+    }
+    for (const gone of ["publishPageFilters", "getPageFilters", "listPageFilterPages", "onPageFiltersChange"]) {
+      expect(mod[gone], `${gone} must not survive as an alias`).toBeUndefined();
+    }
+  });
+
+  it("@api/modelVisuals and the chart-mark capability exist", async () => {
+    const visuals = (await import("../modelVisuals")) as Record<string, unknown>;
+    for (const name of ["registerModelVisualProvider", "listModelVisuals", "modelVisualOf"]) {
+      expect(typeof visuals[name], `@api/modelVisuals does not export ${name}`).toBe("function");
+    }
+    const marks = (await import("../chartMarks")) as Record<string, unknown>;
+    expect(typeof marks.chartMarkCrossFilter).toBe("function");
+  });
+
+  it("neither seam is re-exported from the barrel", () => {
+    const index = fs.readFileSync(path.resolve(__dirname, "../index.ts"), "utf8");
+    expect(index).not.toMatch(/from "\.\/reportFilters/);
+    expect(index).not.toMatch(/from "\.\/modelVisuals"/);
+    expect(index).not.toMatch(/from "\.\/pageFilters"/);
+  });
+});

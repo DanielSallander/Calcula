@@ -8,6 +8,7 @@
 //       extensions/Pivot/components/types.ts) so the contract is self-contained.
 
 import type { BiHierarchyMeta } from "./backend";
+import type { MemberRef } from "./types";
 import type { DesignStrategySummary } from "./designQueryAssist/types";
 import type { VisualContainerFormat } from "./visualContainer";
 
@@ -338,6 +339,12 @@ export interface PivotCellData {
   /** Which value field (index into the definition's value fields, named by
    *  `PivotViewResponse.valueFieldNames`) a data/total cell shows. Absent on labels. */
   valueFieldIndex?: number;
+  /** THE member a header (or filter-item) cell shows: `key` is the invariant
+   *  identity (selections, filters, GETPIVOTDATA), `label` the app-locale
+   *  display. Absent on data, total and value cells, and on any header whose
+   *  text is not one member's own ("East Total"). Read it through
+   *  `pivotCellItemKey` / `pivotCellDisplayText` (@api/pivotMembers). */
+  member?: MemberRef;
 }
 
 /** Row data from the backend */
@@ -365,8 +372,10 @@ export interface PivotColumnData {
 export interface FilterRowData {
   fieldIndex: number;
   fieldName: string;
+  /** The KEYS of the members the filter keeps (`members[i].key`). */
   selectedValues: string[];
-  uniqueValues: string[];
+  /** The field's members: show `label`, select by `key`. */
+  members: MemberRef[];
   displayValue: string;
   viewRow: number;
 }
@@ -438,6 +447,19 @@ export interface PivotViewResponse {
   /** The value fields' display names in definition order: what a cell's
    *  `valueFieldIndex` points into. Absent when the pivot has no value fields. */
   valueFieldNames?: string[];
+  /** The member KEY of every grouping valueId present in this window, per
+   *  grouping field (P4): what a data cell's `groupPath` (valueIds only) means
+   *  as member keys. BI pivots and design-query views only; absent elsewhere.
+   *  Every key comes from the ONE key function behind `PivotCellData.member`. */
+  groupMembers?: PivotGroupMembers[];
+}
+
+/** The member keys of one grouping field's valueIds (Rust `PivotGroupMembers`). */
+export interface PivotGroupMembers {
+  fieldIndex: number;
+  /** "Table.Column". */
+  fieldKey: string;
+  members: Array<[valueId: number, key: string]>;
 }
 
 /** Response for a cell window fetch (scroll-triggered). */
@@ -767,7 +789,9 @@ export interface GetPivotDataFormulaResult {
 export interface FieldUniqueValuesResponse {
   fieldIndex: number;
   fieldName: string;
-  uniqueValues: string[];
+  /** The field's members in the cache's sorted order, the blank member
+   *  (key "", label "(Blank)") LAST. Filters speak `key`. */
+  members: MemberRef[];
 }
 
 // ============================================================================

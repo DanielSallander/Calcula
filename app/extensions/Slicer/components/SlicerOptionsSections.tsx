@@ -647,7 +647,7 @@ export function SlicerActionsSection(_props: PanelSectionProps): React.ReactElem
         tooltip={
           isMulti
             ? "Manage report connections for the last selected slicer"
-            : "Report Connections: choose which PivotTables this slicer filters"
+            : "Report Connections: which visuals this slicer filters"
         }
         disabled={isMulti}
       />

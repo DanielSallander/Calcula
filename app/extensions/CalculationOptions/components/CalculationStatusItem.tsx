@@ -28,6 +28,7 @@ import {
   AppEvents,
   type UnlistenFn,
 } from "@api";
+import { formatNumber } from "@api/locale";
 
 /** Mirrors `CalcProgressEvent` in app/src-tauri/src/eval_budget.rs. */
 interface CalcProgressPayload {
@@ -52,8 +53,9 @@ const CALC_PROGRESS_EVENT = "app:calc-progress";
  */
 export const PROGRESS_VISIBLE_AFTER_MS = 1500;
 
-function formatCount(n: number): string {
-  return n.toLocaleString();
+/** A cell count with the app locale's group separator (de-DE "12.345"). */
+export function formatCount(n: number): string {
+  return formatNumber(n, { grouping: true, decimals: 0 });
 }
 
 export function CalculationStatusItem(): React.ReactElement | null {

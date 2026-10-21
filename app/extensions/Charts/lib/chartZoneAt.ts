@@ -22,6 +22,14 @@
 //                     and hands the press to `floatingObject:bodyDragStart`,
 //                     where the interval brush takes it (index.ts); the chart
 //                     never moves from there.
+//            content  a cross-filter SOURCE's datum or legend entry (P4 S6;
+//            pointer  `crossFilterPressAt`), and its background while it holds
+//                     a selection -- `{kind:'content', cursor:'pointer',
+//                     part:'crossFilter'}`, asked BEFORE the brush. Only on a
+//                     canvas design-query chart whose mark is a source, with no
+//                     `select:"point"` param, outside Design Mode: in Design
+//                     Mode the ladder and the move keep every press. The press
+//                     acts at its release over the same datum (index.ts).
 //            frame    everything else (null): the chart moves by its body, as
 //                     in Excel -- its bars, points, slices and axes included,
 //                     and the insight overlay's cue stepper and comment boxes
@@ -62,6 +70,52 @@ import { getCachedChartData, getChartLocalCoords } from "../rendering/chartRende
 import { isComposed } from "../rendering/chartDispatch";
 import { isInWidgetArea } from "../rendering/paramWidgets";
 import { SELECTION_SUPPORTED_MARKS } from "../handlers/chartPointSelection";
+import { getDesignMode } from "@api/designMode";
+import { isCrossFilterSource } from "@api/reportFilters";
+import { getReportPagesSnapshot } from "@api/reportPages";
+import { hitTestGeometry } from "../rendering/chartHitTesting";
+import { chartVisualRef, isMemberHit } from "../handlers/crossFilterClick";
+import { chartModelVisualInfo } from "./chartModelVisuals";
+import type { ChartDefinition } from "../types";
+
+/** The zone part of a cross-filter press (index.ts `handleBodyDragStart` arms it). */
+export const CROSS_FILTER_PART = "crossFilter";
+
+/**
+ * Whether a press at this canvas point of the chart is a CROSS-FILTER press
+ * (P4 S6). All of these must hold:
+ *   - Design Mode is OFF (in Design Mode the ladder and the move keep the press);
+ *   - the chart is a cross-filter source (@api/modelVisuals role, Charts'
+ *     provider `chartModelVisualInfo`): a DESIGN-QUERY chart with a model
+ *     connection, on a CANVAS page, whose mark declares the source capability
+ *     (@api/chartMarks `chartMarkCrossFilter`) and whose data is not transformed;
+ *   - it has NO `select:"point"` param (that param's own click wins);
+ *   - its painted data is not composed (facet/repeat/concat panels carry no
+ *     member paths), and the point is off the widget strip;
+ *   - the point is over a datum or a legend entry -- or, while the chart HOLDS a
+ *     selection, anywhere else inside it (a background click clears it).
+ * Pure: it reads the chart, its cached layout, the page list, Design Mode and
+ * the selections, and writes nothing.
+ */
+export function crossFilterPressAt(
+  ch: ChartDefinition,
+  cached: ReturnType<typeof getCachedChartData>,
+  canvasX: number,
+  canvasY: number,
+): boolean {
+  if (getDesignMode()) return false;
+  if (ch.spec.params?.some((p) => p.select === "point")) return false;
+  if (!chartModelVisualInfo(ch, getReportPagesSnapshot()).role.source) return false;
+  if (!cached?.layout || !cached.hitGeometry) return false;
+  if (cached.data && isComposed(ch.spec, cached.data)) return false;
+  if (cached.widgetControls && isInWidgetArea(canvasX, canvasY, cached.widgetControls)) return false;
+  const loc = getChartLocalCoords(ch.chartId, canvasX, canvasY);
+  if (!loc) return false;
+  const hit = hitTestGeometry(loc.localX, loc.localY, cached.hitGeometry, cached.layout);
+  if (isMemberHit(hit)) return true;
+  if (!isCrossFilterSource(chartVisualRef(ch.chartId))) return false;
+  return loc.localX >= 0 && loc.localY >= 0 && loc.localX <= ch.width && loc.localY <= ch.height;
+}
 
 /** The zone a press or a hover at this point of a chart is in (null = frame). */
 export const chartZoneAt: OverlayZoneFn = (ctx) => {
@@ -75,6 +129,15 @@ export const chartZoneAt: OverlayZoneFn = (ctx) => {
   if (button) return { kind: "content", cursor: "pointer", part: button.part };
 
   const cached = getCachedChartData(cid);
+
+  // A cross-filter SOURCE's datums and legend entries (P4 S6), before the
+  // brush: content with a hand -- the press acts at its release over the same
+  // datum (index.ts), and outside Design Mode a bar of such a chart no longer
+  // moves it (the frame, the grip and Design Mode still do).
+  if (crossFilterPressAt(ch, cached, ctx.canvasX, ctx.canvasY)) {
+    return { kind: "content", cursor: "pointer", part: CROSS_FILTER_PART };
+  }
+
   if (!SELECTION_SUPPORTED_MARKS.has(ch.spec.mark)) return null;
   if (!ch.spec.params?.some((p) => p.select === "point" && p.brush)) return null;
   const pa = cached?.layout?.plotArea;

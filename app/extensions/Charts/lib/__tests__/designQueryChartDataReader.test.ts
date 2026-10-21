@@ -14,7 +14,12 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { PivotViewResponse } from "@api/pivot";
-import { publishPageFilters, type PageFilter } from "@api/pageFilters";
+import {
+  publishPageInteractions,
+  publishReportFilters,
+  type ReportFilterInput,
+  type ResolvedFieldFilter,
+} from "@api/reportFilters";
 import type { BiPivotModelInfo } from "../../../_shared/components/types";
 import type { DesignQueryRequest } from "../../../_shared/dsl/pivotLayout/designQuery";
 
@@ -28,6 +33,20 @@ const mockGetChartById = vi.fn();
 vi.mock("../chartStore", () => ({
   getAllCharts: (...a: unknown[]) => mockGetAllCharts(...a),
   getChartById: (...a: unknown[]) => mockGetChartById(...a),
+}));
+
+// The page list (P4: pages are sheet IDS): sheet 1 is "id-1", sheet 2 "id-2".
+vi.mock("@api/reportPages", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@api/reportPages")>()),
+  getReportPagesSnapshot: () => ({
+    pages: [],
+    sheetIdByIndex: new Map([
+      [1, "id-1"],
+      [2, "id-2"],
+    ]),
+    activeIndex: 1,
+    version: 1,
+  }),
 }));
 
 import {
@@ -55,16 +74,26 @@ const MODEL: BiPivotModelInfo = {
 };
 const TABLES = MODEL.tables.map((t) => t.name);
 
-function pf(field: string, includedItems: string[], over: Partial<PageFilter> = {}): PageFilter {
+function pf(field: string, includedKeys: string[], over: Partial<ResolvedFieldFilter> = {}): ResolvedFieldFilter {
   return {
-    publisher: "slicer",
-    sourceId: `s-${field}`,
-    sourceName: `Slicer ${field}`,
-    sheetIndex: 1,
-    connectionId: "conn-a",
     field,
-    includedItems,
-    filterLevel: 1,
+    includedKeys,
+    level: 1,
+    from: `Slicer ${field}`,
+    ...over,
+  };
+}
+
+/** A model slicer's filter on page "id-1", as the Slicer extension publishes it. */
+function slicerFilter(over: Partial<ReportFilterInput> = {}): ReportFilterInput {
+  return {
+    sourceId: "s-1",
+    sourceName: "Slicer_Region",
+    sourceRef: { kind: "slicer", id: "s-1" },
+    scope: { kind: "page", sheetId: "id-1" },
+    connectionId: "conn-a",
+    field: "Geo.Region",
+    includedKeys: ["East"],
     ...over,
   };
 }
@@ -249,7 +278,7 @@ describe("mergePageFilters", () => {
   it("two slicers on one column are two entries (the engine applies both)", () => {
     const out = mergePageFilters(
       request(),
-      [pf("Geo.Region", ["East", "West"]), pf("Geo.Region", ["West", "South"], { sourceId: "s-2" })],
+      [pf("Geo.Region", ["East", "West"]), pf("Geo.Region", ["West", "South"], { from: "Slicer 2" })],
       TABLES,
     );
 
@@ -260,7 +289,7 @@ describe("mergePageFilters", () => {
   });
 
   it("a PINNED slicer carries its level, so a CLEAR in a measure treats it as the BI pivot does", () => {
-    const out = mergePageFilters(request(), [pf("Geo.Region", ["East"], { filterLevel: 3 })], TABLES);
+    const out = mergePageFilters(request(), [pf("Geo.Region", ["East"], { level: 3 })], TABLES);
 
     expect(out.pageFilterFields).toEqual([{ table: "Geo", column: "Region", includedItems: ["East"], level: 3 }]);
   });
@@ -283,6 +312,15 @@ describe("mergePageFilters", () => {
 
     expect(out.pageFilterFields!.map((f) => `${f.table}.${f.column}`)).toEqual(["Geo.Region"]);
     expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("skips a DOTTED field whose table the model does not have (no first-dot guess at a table)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const out = mergePageFilters(request(), [pf("Gone.Region", ["x"]), pf("Geo.Region", ["East"])], TABLES);
+
+    expect(out.pageFilterFields!.map((f) => `${f.table}.${f.column}`)).toEqual(["Geo.Region"]);
+    expect(warn).toHaveBeenCalledTimes(1);
     warn.mockRestore();
   });
 
@@ -322,13 +360,13 @@ beforeEach(() => {
     if (cmd === "run_design_query") return view([{ type: "GrandTotal", label: "Grand Total", value: 5 }]);
     throw new Error(`unexpected ${cmd}`);
   });
-  publishPageFilters("slicer", [
-    { sourceId: "s-1", sourceName: "Slicer_Region", sheetIndex: 1, connectionId: "conn-a", field: "Geo.Region", includedItems: ["East"] },
-  ]);
+  publishReportFilters("slicer", [slicerFilter()]);
 });
 
 afterEach(() => {
-  publishPageFilters("slicer", []);
+  publishReportFilters("slicer", []);
+  publishReportFilters("ribbon", []);
+  publishPageInteractions("id-1", null);
 });
 
 describe("compileDesignQuerySource takes the filters of the chart's OWN page", () => {
@@ -348,8 +386,8 @@ describe("compileDesignQuerySource takes the filters of the chart's OWN page", (
   it("by IDENTITY of the stored source when no context is given -- never by equal content", async () => {
     // SOURCE_ON_1 and SOURCE_ON_2 are equal in content; only the object
     // tells their pages apart.
-    expect(designQueryPageOf(SOURCE_ON_1)).toBe(1);
-    expect(designQueryPageOf(SOURCE_ON_2)).toBe(2);
+    expect(designQueryPageOf(SOURCE_ON_1)).toBe("id-1");
+    expect(designQueryPageOf(SOURCE_ON_2)).toBe("id-2");
     expect((await compileDesignQuerySource(SOURCE_ON_1)).pageFilterFields ?? []).toHaveLength(1);
     expect((await compileDesignQuerySource(SOURCE_ON_2)).pageFilterFields ?? []).toHaveLength(0);
   });
@@ -361,10 +399,54 @@ describe("compileDesignQuerySource takes the filters of the chart's OWN page", (
   });
 
   it("ignores another model's filters on the same page", async () => {
-    publishPageFilters("slicer", [
-      { sourceId: "s-9", sourceName: "Other", sheetIndex: 1, connectionId: "conn-b", field: "Geo.Region", includedItems: ["West"] },
+    publishReportFilters("slicer", [
+      slicerFilter({ sourceId: "s-9", sourceName: "Other", connectionId: "conn-b", includedKeys: ["West"] }),
     ]);
     expect((await compileDesignQuerySource(SOURCE_ON_1, { chartId: "c-1" })).pageFilterFields ?? []).toEqual([]);
+  });
+
+  it("a page whose sheet has no id in the page list yet reads unfiltered (never under a guessed page)", async () => {
+    expect(designQueryPageOf(SOURCE_ON_1, { sheetIndex: 7 })).toBeUndefined();
+    expect((await compileDesignQuerySource(SOURCE_ON_1, { sheetIndex: 7 })).pageFilterFields ?? []).toEqual([]);
+  });
+
+  it("an interaction pair slicer -> chart = none drops the slicer for THAT chart only (P4)", async () => {
+    const twin = { ...SOURCE_ON_1 };
+    mockGetAllCharts.mockReturnValue([
+      { chartId: "c-1", name: "Chart 1", sheetIndex: 1, spec: { data: SOURCE_ON_1 } },
+      { chartId: "c-3", name: "Chart 3", sheetIndex: 1, spec: { data: twin } },
+    ]);
+    publishPageInteractions("id-1", {
+      pairs: [{ source: { kind: "slicer", id: "s-1" }, target: { kind: "chart", id: "c-1" }, mode: "none" }],
+    });
+    expect((await compileDesignQuerySource(SOURCE_ON_1, { chartId: "c-1" })).pageFilterFields ?? []).toEqual([]);
+    expect((await compileDesignQuerySource(twin, { chartId: "c-3" })).pageFilterFields).toEqual([
+      { table: "Geo", column: "Region", includedItems: ["East"] },
+    ]);
+  });
+
+  it("a ribbon filter scoped to the chart (visuals) reaches it and no other chart of the page", async () => {
+    const twin = { ...SOURCE_ON_1 };
+    mockGetAllCharts.mockReturnValue([
+      { chartId: "c-1", name: "Chart 1", sheetIndex: 1, spec: { data: SOURCE_ON_1 } },
+      { chartId: "c-3", name: "Chart 3", sheetIndex: 1, spec: { data: twin } },
+    ]);
+    publishReportFilters("slicer", []);
+    publishReportFilters("ribbon", [
+      slicerFilter({
+        sourceId: "rf-1",
+        sourceName: "Year",
+        sourceRef: null,
+        scope: { kind: "visuals", targets: [{ kind: "chart", id: "c-3" }] },
+        field: "Time.Year",
+        includedKeys: ["2024"],
+        filterLevel: 2,
+      }),
+    ]);
+    expect((await compileDesignQuerySource(SOURCE_ON_1, { chartId: "c-1" })).pageFilterFields ?? []).toEqual([]);
+    expect((await compileDesignQuerySource(twin, { chartId: "c-3" })).pageFilterFields).toEqual([
+      { table: "Time", column: "Year", includedItems: ["2024"], level: 2 },
+    ]);
   });
 
   it("readDesignQueryData sends the merged request and reads a measure-only result as one category", async () => {

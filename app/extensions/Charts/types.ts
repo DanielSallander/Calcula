@@ -5,6 +5,7 @@
 
 import { getChartMarkMeta, chartMarkFurniture, type ChartMarkFurniture } from "@api/chartMarks";
 import type { VisualContainerFormat, VisualTitle } from "@api/visualContainer";
+import type { MemberPath } from "@api/reportFilters";
 
 // ============================================================================
 // Chart Types
@@ -1929,6 +1930,52 @@ export interface ParsedChartData {
    * describes rows the chart no longer shows) and by any transform.
    */
   seriesTotals?: Array<SeriesTotal | null>;
+  /**
+   * WHO each category IS in the model: one {@link MemberPath} per category,
+   * aligned with `categories`, each coordinate a grouping field ("Table.Column")
+   * and the member's invariant KEY (P2 `MemberRef.key`, "" for the blank
+   * member). Read from the pivot view's `groupMembers` + each row's data-cell
+   * `groupPath` -- never from the joined " > " label, which is display text in
+   * the app locale and cannot be parsed back.
+   *
+   * Present only when the reader had the keys (a design-query view, or a BI
+   * pivot view, with `groupMembers`) AND every category resolved: a partial
+   * list would let a click filter on another datum's member. A measure-only
+   * query's one category has the empty path. P4 (G4): a cross-filter click
+   * selects these keys; a highlight is ALIGNED by them, never by index.
+   *
+   * REPLACES P2's planned flat `categoryKeys: string[]` (P4 DC-7), which could
+   * not carry a category made of two fields.
+   *
+   * Kept aligned exactly like {@link displayValues}: the chart filters and the
+   * selection keep drop the same categories; a transform drops the field.
+   */
+  categoryMembers?: MemberPath[];
+  /**
+   * The COLUMN-field members of each series, aligned with `series` (the empty
+   * path when the query has no column fields). Two series may share a path
+   * (two measures under one column member); they are told apart by their
+   * order. Present under the same rule as {@link categoryMembers}.
+   */
+  seriesMembers?: MemberPath[];
+  /**
+   * The CROSS-HIGHLIGHT values: `highlightValues[seriesIndex][categoryIndex]`
+   * is the datum's value under the page's highlight-mode selections, aligned
+   * with `series[i].values` by MEMBER KEY (a datum the highlighted result does
+   * not have reads 0). Set only while some selection highlights this chart; a
+   * mark that cannot highlight is FILTERED instead and never gets it.
+   * Bar/column paint the faded whole and the highlighted part, pie/donut an
+   * inner arc, scatter/bubble dim a point whose highlighted value is 0.
+   */
+  highlightValues?: (number | null)[][];
+  /**
+   * THIS chart's own cross-filter selection, when it is a source: which datums
+   * the user selected. Power BI keeps the selected datums at full strength and
+   * fades the rest. `datums[seriesIndex][categoryIndex]` is authoritative;
+   * `categories` / `series` say whether ANY datum of a category / series is
+   * selected (a legend entry, an axis label).
+   */
+  crossFilterSelf?: { categories: boolean[]; series?: boolean[]; datums: boolean[][] };
 }
 
 /** What one datum is in its source (see {@link ParsedChartData.datumKinds}). */

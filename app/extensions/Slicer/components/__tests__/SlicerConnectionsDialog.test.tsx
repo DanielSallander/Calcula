@@ -6,6 +6,11 @@
 //          ticks, keep the hidden "biConnection" key, and let the user add
 //          pivots, which gave the slicer mixed semantics.
 //
+//          P4: the page is every VISUAL of the model there -- its BI pivots
+//          and its design-query charts (@api/modelVisuals) -- and a visual the
+//          page's Edit interactions set to None for this slicer is listed
+//          unticked with "(None -- Edit interactions)".
+//
 //          A PIVOT slicer's Save is ONE step asked about once when it grew a
 //          pivot over the user's cells -- and never while a script batch holds
 //          a transaction open on the BACKEND, which the frontend's own flag
@@ -77,12 +82,34 @@ const mockPage = vi.fn(async (_conn: string, _sheet: number) => [
   { id: "p-b", name: "Units by Year", sheetIndex: 2 },
 ]);
 const mockSync = vi.fn();
+/** The page's Edit interactions for the slicer, "kind:id" -> mode (absent = filter). */
+const interactionModes = new Map<string, "filter" | "none">();
 vi.mock("../../lib/slicerFilterBridge", () => ({
-  getModelSlicerPageTargets: (conn: string, sheet: number) => mockPage(conn, sheet),
+  getModelSlicerPagePivots: (conn: string, sheet: number) => mockPage(conn, sheet),
+  slicerVisualRef: (id: string) => ({ kind: "slicer", id }),
+  slicerInteractionLookup:
+    () =>
+    (_slicer: { kind: string; id: string }, target: { kind: string; id: string }) =>
+      interactionModes.get(`${target.kind}:${target.id}`) ?? "filter",
   syncReportConnections: (...a: unknown[]) => mockSync(...a),
 }));
 
-import { SlicerConnectionsDialog } from "../SlicerConnectionsDialog";
+import { SlicerConnectionsDialog, NONE_INTERACTION_NOTE } from "../SlicerConnectionsDialog";
+import { registerModelVisualProvider, type ModelVisualInfo } from "@api/modelVisuals";
+
+/** A design-query chart of model c1 as the Charts provider would list it. */
+function chartVisual(id: string, name: string, overrides: Partial<ModelVisualInfo> = {}): ModelVisualInfo {
+  return {
+    ref: { kind: "chart", id },
+    name,
+    sheetIndex: 2,
+    sheetId: "canvas-2",
+    connectionId: "c1",
+    role: { source: true, target: true, canHighlight: true, reason: null },
+    label: "Column chart",
+    ...overrides,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -127,9 +154,12 @@ function slicer(overrides: Partial<Slicer> = {}): Slicer {
   };
 }
 
+let offProvider: (() => void) | null = null;
+
 beforeEach(() => {
   Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
   vi.clearAllMocks();
+  interactionModes.clear();
   h.backendTxOpen = false;
   h.txLabels.length = 0;
   container = document.createElement("div");
@@ -138,6 +168,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  offProvider?.();
+  offProvider = null;
   act(() => root.unmount());
   document.body.innerHTML = "";
 });
@@ -175,7 +207,7 @@ describe("Report Connections for a model slicer", () => {
     const page = container.querySelector('[data-testid="model-slicer-page"]');
     expect(page?.textContent).toContain("Revenue by Region");
     expect(page?.textContent).toContain("Units by Year");
-    // Design-query charts on the page follow the slicer (@api/pageFilters,
+    // Design-query charts on the page follow the slicer (@api/reportFilters,
     // owner decision 5 of 2026-10-08): the dialog names them, and never says
     // the old "not filtered yet" any more -- that would be a lie now.
     expect(page?.textContent).toContain("every chart that queries this model directly");
@@ -183,6 +215,69 @@ describe("Report Connections for a model slicer", () => {
     const boxes = Array.from(page!.querySelectorAll("input[type=checkbox]")) as HTMLInputElement[];
     expect(boxes).toHaveLength(2);
     expect(boxes.every((b) => b.checked && b.disabled)).toBe(true);
+  });
+
+  it("names VISUALS of the page: the header, the pivots and the model's charts there, read-only", async () => {
+    offProvider = registerModelVisualProvider({
+      kind: "chart",
+      list: () => [
+        chartVisual("bar", "Sales by Year"),
+        chartVisual("card", "Total", { label: "Card", role: { source: false, target: true, canHighlight: false, reason: "x" } }),
+        // Not this page, not this model, not a target: never listed.
+        chartVisual("elsewhere", "Other page", { sheetIndex: 3, sheetId: "canvas-3" }),
+        chartVisual("other-model", "Other model", { connectionId: "c2" }),
+        chartVisual("range", "Range chart", {
+          connectionId: null,
+          role: { source: false, target: false, canHighlight: false, reason: "Reads cells, not the model" },
+        }),
+      ],
+    });
+    current = slicer();
+    await open();
+
+    const page = container.querySelector('[data-testid="model-slicer-page"]')!;
+    expect(page.textContent).toContain("Visuals this model slicer filters (this page):");
+    expect(page.textContent).not.toContain("PivotTables this model slicer filters");
+    const rows = Array.from(page.querySelectorAll("label[data-visual-ref]")).map((l) => l.getAttribute("data-visual-ref"));
+    expect(rows).toEqual(["pivot:p-a", "pivot:p-b", "chart:bar", "chart:card"]);
+    const bar = page.querySelector('label[data-visual-ref="chart:bar"]')!;
+    expect(bar.textContent).toContain("Sales by Year");
+    expect(bar.textContent).toContain("Column chart");
+    expect(page.querySelector('label[data-visual-ref="chart:card"]')!.textContent).toContain("Card");
+    expect(page.querySelector('label[data-visual-ref="pivot:p-a"]')!.textContent).toContain("PivotTable");
+    const boxes = Array.from(page.querySelectorAll("input[type=checkbox]")) as HTMLInputElement[];
+    expect(boxes.every((b) => b.checked && b.disabled)).toBe(true);
+    expect(page.textContent).not.toContain(NONE_INTERACTION_NOTE);
+  });
+
+  it("a visual set to None in Edit interactions is listed UNticked with the None note", async () => {
+    offProvider = registerModelVisualProvider({ kind: "chart", list: () => [chartVisual("bar", "Sales by Year")] });
+    interactionModes.set("pivot:p-b", "none");
+    interactionModes.set("chart:bar", "none");
+    current = slicer();
+    await open();
+
+    const row = (ref: string) =>
+      container.querySelector(`label[data-visual-ref="${ref}"]`) as HTMLLabelElement;
+    const box = (ref: string) => row(ref).querySelector("input") as HTMLInputElement;
+    expect(NONE_INTERACTION_NOTE).toBe("(None -- Edit interactions)");
+    expect(box("pivot:p-a").checked).toBe(true);
+    expect(row("pivot:p-a").textContent).not.toContain(NONE_INTERACTION_NOTE);
+    expect(box("pivot:p-b").checked).toBe(false);
+    expect(row("pivot:p-b").textContent).toContain(NONE_INTERACTION_NOTE);
+    expect(box("chart:bar").checked).toBe(false);
+    expect(row("chart:bar").textContent).toContain("Column chart (None -- Edit interactions)");
+    expect([box("pivot:p-b"), box("chart:bar")].every((b) => b.disabled)).toBe(true);
+  });
+
+  it("an empty page says visuals added later are filtered automatically", async () => {
+    mockPage.mockResolvedValueOnce([]);
+    current = slicer();
+    await open();
+    const page = container.querySelector('[data-testid="model-slicer-page"]')!;
+    expect(page.textContent).toContain(
+      "No visual of this model on this page yet. Visuals added here later are filtered automatically.",
+    );
   });
 
   it("OK writes nothing -- the connection list of a model slicer is fixed", async () => {

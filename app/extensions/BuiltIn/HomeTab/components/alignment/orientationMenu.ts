@@ -39,7 +39,7 @@ import { CommandRegistry, CoreCommands } from "@api/commands";
 import { alertAsync } from "@api/dialogs";
 import { beginUndoTransaction, commitUndoTransaction, cancelUndoTransaction } from "@api/lib";
 import { ownUndoTransaction } from "@api/undoTicket";
-import { refuseIfSelectionOwned } from "@api/selectionOwner";
+import { resolveCellTarget } from "@api/cellTarget";
 import type { RibbonIconKey } from "@api";
 import type { HomeTabState } from "../homeItemProps";
 
@@ -106,7 +106,10 @@ export async function chooseOrientation(state: HomeTabState, row: OrientationRow
     // Asked HERE, once, before a transaction is opened: the door below would
     // refuse the write itself, but the AutoFit after it is a second door with
     // a second refusal toast, and an opened step would have nothing in it.
-    if (refuseIfSelectionOwned(action)) return;
+    // WHICH cells (P3): a floating grid that admits the act answers with its
+    // own; applyFormat asks again and writes there, and the AutoFit goes
+    // through the grid command, which asks the same owner ("lineSize").
+    if (resolveCellTarget(action, "format") === null) return;
 
     // A begin that fails still lets the rotation apply, as two steps (what
     // every formatting button does without a transaction). A begin that JOINS

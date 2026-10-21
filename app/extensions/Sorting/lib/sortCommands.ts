@@ -40,6 +40,8 @@ export async function openCustomSort(): Promise<void> {
     range: { ...target.range },
     hasHeaders: target.hasHeaders,
     sortCol: target.sortCol,
+    // A floating grid's cells (P3): the dialog reads and sorts the OBJECT.
+    ...(target.objectTarget ? { target: target.objectTarget } : {}),
   });
 }
 

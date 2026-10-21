@@ -31,7 +31,7 @@ const h = vi.hoisted(() => ({
     selectedItems: null,
     selectionMode: "standard",
   },
-  items: ["North", "South", "West"].map((value) => ({ value, selected: true, hasData: true })),
+  items: ["North", "South", "West"].map((value) => ({ key: value, label: value, selected: true, hasData: true })),
   commits: 0,
 }));
 

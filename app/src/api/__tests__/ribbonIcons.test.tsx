@@ -267,6 +267,14 @@ const MENU_FAMILIES: Readonly<Record<string, readonly (keyof typeof RibbonIcon)[
   // (chart Gridlines drew Snap to Grid, Pencil drew Design Mode) or sit
   // beside (Arrange's Lock; Home's ProtectSheet, the known look-alike).
   View: ["ShowGrid", "SnapToGrid", "LockObjects", "DesignMode", "Gridlines", "Pencil", "Lock", "ProtectSheet"],
+  // Edit interactions (P4, 2026-10-17): the Arrange hero, the three buttons
+  // it puts on every other visual (side by side in one strip), and the
+  // pictures they must not echo (Filter's funnel, the plain column chart,
+  // Arrange's neighbours).
+  "Edit interactions": [
+    "EditInteractions", "InteractionFilter", "InteractionHighlight", "InteractionNone",
+    "Filter", "ClearFilter", "ChartColumn", "Stacked", "AlignObjects", "BringForward",
+  ],
 };
 /* eslint-enable @typescript-eslint/naming-convention */
 
@@ -612,6 +620,33 @@ function rectBoxes(key: keyof typeof RibbonIcon): Array<{ x: number; y: number; 
     fill: r.getAttribute("fill"),
   }));
 }
+
+/** The Edit interactions keys (P4 S10, 2026-10-17). */
+const INTERACTION_KEYS = ["EditInteractions", "InteractionFilter", "InteractionHighlight", "InteractionNone"] as const;
+
+describe("Edit interactions (P4, 2026-10-17)", () => {
+  it("registers the four keys as components of their own", () => {
+    for (const key of INTERACTION_KEYS) {
+      expect(key in RibbonIcon, key).toBe(true);
+      expect(typeof RibbonIcon[key]).toBe("function");
+    }
+    expect(new Set(INTERACTION_KEYS.map((k) => RibbonIcon[k])).size).toBe(4);
+  });
+
+  it("draws them in the frame's own coordinates (no transform)", () => {
+    const turned = INTERACTION_KEYS.filter((key) => renderIcon(key, { size: 20 }).querySelector("[transform]"));
+    expect(turned).toEqual([]);
+  });
+
+  it("None draws no accent (nothing passes through); Filter and Highlight draw it", () => {
+    const fills = (key: (typeof INTERACTION_KEYS)[number]) =>
+      shapesOf(renderIcon(key, { size: 20 })).map((el) => el.getAttribute("fill") ?? el.getAttribute("stroke"));
+    expect(fills("InteractionNone")).not.toContain(ACCENT);
+    expect(fills("InteractionFilter")).toContain(ACCENT);
+    expect(fills("InteractionHighlight")).toContain(ACCENT);
+    expect(fills("InteractionHighlight")).toContain(SOFT);
+  });
+});
 
 describe("Power BI's report authoring on the Canvas tab (2026-10-08)", () => {
   const CANVAS_KEYS = CONTRACT_KEYS.slice(CONTRACT_KEYS.indexOf("ChartBarStacked"));

@@ -82,6 +82,9 @@ import { useHomeTabState } from "../components/useHomeTabState";
 import { registerSelectionOwner } from "@api/selectionOwner";
 import { registerToastSink, type ToastPayload } from "@api/notifications";
 
+/** The options a write on Core's own selection carries: no target (P3). */
+const GRID = { target: undefined };
+
 // --- Harness ----------------------------------------------------------------
 
 let container: HTMLDivElement;
@@ -293,13 +296,13 @@ describe("Comma Style and the decimal buttons", () => {
     await mount({}, { startRow: 0, startCol: 0, endRow: 2, endCol: 1 });
     await click("increaseDecimal");
     expect(h.applyFormatting, "no format code is computed in the ribbon").not.toHaveBeenCalled();
-    expect(h.adjustNumberFormatDecimals.mock.calls).toEqual([[[2, 0, 1], [1, 0], 1]]);
+    expect(h.adjustNumberFormatDecimals.mock.calls).toEqual([[[2, 0, 1], [1, 0], 1, GRID]]);
   });
 
   it("Decrease Decimal does the same with -1, honouring activeRow/activeCol", async () => {
     await mount({}, { startRow: 0, startCol: 0, endRow: 2, endCol: 1, activeRow: 1, activeCol: 0 });
     await click("decreaseDecimal");
-    expect(h.adjustNumberFormatDecimals.mock.calls).toEqual([[[1, 0, 2], [0, 1], -1]]);
+    expect(h.adjustNumberFormatDecimals.mock.calls).toEqual([[[1, 0, 2], [0, 1], -1, GRID]]);
   });
 
   it("a written step makes the ribbon re-read the active cell", async () => {
@@ -472,7 +475,7 @@ describe("a Ctrl+click / Go To Special selection: every block, ONE undo step", (
       styles: [{ index: 4, style: { numberFormat: "Number (3 decimals)" } }],
     }));
     await click("increaseDecimal");
-    expect(h.adjustNumberFormatDecimals.mock.calls).toEqual([[[2, 0, 1], [1, 0], 1]]);
+    expect(h.adjustNumberFormatDecimals.mock.calls).toEqual([[[2, 0, 1], [1, 0], 1, GRID]]);
     expect(writes()).toEqual([[[5, 6], [3], { numberFormat: "Number (3 decimals)" }]]);
     expect(h.beginUndoTransaction.mock.calls).toEqual([["increaseDecimal"]]);
     expect(h.commitUndoTransaction).toHaveBeenCalledTimes(1);

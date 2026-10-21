@@ -491,7 +491,18 @@ fn reset_clears_bindings_and_runtime() {
         );
         runtime.page_filters.insert(
             (identity::SheetId::from_bytes(identity::generate_uuid_v7()), "conn".to_string()),
-            vec![PageFilterWire { field: "T.C".to_string(), included_items: vec!["x".to_string()], filter_level: 1 }],
+            crate::object_bindings::measures::PageFilterSet::new(
+                vec![PageFilterWire { field: "T.C".to_string(), included_items: vec!["x".to_string()], filter_level: 1 }],
+                Vec::new(),
+            ),
+        );
+        // P4: an object's own override of the page set describes A's objects.
+        runtime.object_filters.entry(key.object.clone()).or_default().insert(
+            "conn".to_string(),
+            crate::object_bindings::measures::ObjectFilterOverride {
+                page: identity::SheetId::from_bytes(identity::generate_uuid_v7()),
+                set: crate::object_bindings::measures::PageFilterSet::default(),
+            },
         );
         // The measure pass's caches (WP-D S4): workbook A's measure values, its
         // model resolution and its CUBE results must not answer in workbook B.
@@ -521,6 +532,7 @@ fn reset_clears_bindings_and_runtime() {
     let runtime = s.state.object_binding_runtime.lock().unwrap();
     assert!(runtime.resolved.is_empty(), "workbook A's resolved values would paint in workbook B");
     assert!(runtime.page_filters.is_empty(), "workbook A's page-filter mirror would filter workbook B's measures");
+    assert!(runtime.object_filters.is_empty(), "workbook A's per-object overrides would filter workbook B's objects");
     assert!(runtime.measure_cache.is_empty(), "workbook A's measure values would answer workbook B's bindings");
     assert!(runtime.measure_models.is_empty(), "workbook A's model resolution would be reused in workbook B");
     assert!(runtime.cube_prefetch.results.is_empty(), "workbook A's CUBE results would answer workbook B");

@@ -46,7 +46,8 @@ import type { FormulaValue } from "./chartFormula";
 import { readPivotChartData } from "./pivotChartDataReader";
 import { readDesignQueryData } from "./designQueryChartDataReader";
 import { applyChartFilters, applySelectionKeep } from "./chartFilters";
-import { parseDisplayNumber, detectCategoryField } from "./chartFieldTypes";
+import { parseDate } from "@api/locale";
+import { detectCategoryField, readShownNumber, serialToEpochMs } from "./chartFieldTypes";
 import { lowerEncoding } from "./lowerEncoding";
 import { forgetHiddenSignature, rememberHiddenSignature } from "./hiddenLinesWatch";
 
@@ -311,7 +312,7 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
     let parsedData = isPivotDataSource(resolvedSpec.data)
       ? await readPivotChartData(resolvedSpec.data)
       // The chart id lets the design-query reader find the chart's PAGE, and
-      // so the model slicers on it (@api/pageFilters, model lane). The data
+      // so the model slicers on it (@api/reportFilters, model lane). The data
       // formats are the ones of the spec being DRAWN (a preview included).
       : await readDesignQueryData(resolvedSpec.data, {
           ...(chartId ? { chartId } : {}),
@@ -379,6 +380,13 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
     ? parseColumnOriented(grid, numRows, numCols, hasHeaders, lowered.categoryIndex, lowered.series, typedGrid.numbers)
     : parseRowOriented(grid, numRows, numCols, hasHeaders, lowered.categoryIndex, lowered.series, typedGrid.numbers);
 
+  // What the engine said each category cell IS (a number, a date, neither),
+  // for the X-axis typing. Only valid while the categories are still the ones
+  // read here: a transform rebuilds them, and then the text decides.
+  let categoryTypes: CategoryTypes | undefined = categoryTypesOf(
+    grid, numRows, numCols, hasHeaders, seriesOrientation, lowered.categoryIndex, typedGrid.numbers,
+  );
+
   // Long-format view of the source columns, for the pivot transform.
   const tidyData = buildTidyData(grid, numRows, numCols, hasHeaders, seriesOrientation);
 
@@ -393,6 +401,7 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
   // Async pipeline: sandboxed transforms await IN ORDER; built-ins/in-process run sync.
   if (lowered.transform && lowered.transform.length > 0) {
     parsedData = withoutSourceText(await applyTransformsAsync(parsedData, lowered.transform, sandboxTransformRunner, diagnostics, lookupData, tidyData, params));
+    categoryTypes = undefined;
   }
 
   const unfilteredData = parsedData;
@@ -413,12 +422,12 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
   // re-running transforms per panel). Unsupported specs return undefined → the
   // top-level data renders as a single chart.
   const facets = lowered.facet?.field
-    ? await partitionByFacet(grid, numRows, numCols, hasHeaders, seriesOrientation, lowered.facet.field, lowered, lookupData, params)
+    ? await partitionByFacet(grid, numRows, numCols, hasHeaders, seriesOrientation, lowered.facet.field, lowered, lookupData, params, typedGrid.numbers)
     : undefined;
 
   applySeriesColorOverrides(parsedData, lowered.seriesColors);
 
-  let finalData = withCategoryField(parsedData);
+  let finalData = withCategoryField(parsedData, categoryTypes);
   if (facets) finalData = { ...finalData, facets };
   if (selection) finalData = { ...finalData, selection };
   return {
@@ -638,12 +647,12 @@ async function readLookupRange(from: DataSource): Promise<ParsedChartData> {
   const ref = await resolveDataSource(from);
   // ONE read of the lookup's own sheet serves both the series detection and the
   // parse (it used to read the range twice, both times from the active sheet).
-  const grid = await readRangeDisplayGrid(ref);
+  const { display: grid, numbers } = await readRangeGrid(ref);
   const numRows = ref.endRow - ref.startRow + 1;
   const numCols = ref.endCol - ref.startCol + 1;
-  const detected = detectColumnSeries(grid, numRows, numCols, true, ref.startCol);
+  const detected = detectColumnSeries(grid, numRows, numCols, true, ref.startCol, numbers);
 
-  return parseColumnOriented(grid, numRows, numCols, true, detected.categoryIndex, detected.series);
+  return parseColumnOriented(grid, numRows, numCols, true, detected.categoryIndex, detected.series, numbers);
 }
 
 /**
@@ -654,10 +663,34 @@ async function readLookupRange(from: DataSource): Promise<ParsedChartData> {
  * recomputed 198. Without it the visuals format the number themselves.
  */
 function withoutSourceText(d: ParsedChartData): ParsedChartData {
-  if (d.displayValues === undefined && d.datumKinds === undefined && d.seriesTotals === undefined) return d;
+  if (
+    d.displayValues === undefined &&
+    d.datumKinds === undefined &&
+    d.seriesTotals === undefined &&
+    d.categoryMembers === undefined &&
+    d.seriesMembers === undefined &&
+    d.highlightValues === undefined &&
+    d.crossFilterSelf === undefined
+  ) {
+    return d;
+  }
   // The kinds and the source's totals describe the SOURCE rows just as the
   // text does: after a transform they describe rows that are no longer there.
-  const { displayValues: _text, datumKinds: _kinds, seriesTotals: _totals, ...rest } = d;
+  // So do the member paths and everything aligned by them (P4): a transform may
+  // reorder, aggregate or reshape the categories, and a member key beside a
+  // datum it no longer names would cross-filter on the wrong member. A
+  // transformed chart is therefore not a cross-filter source and paints no
+  // highlight (it is still FILTERED: its query takes the page's filters).
+  const {
+    displayValues: _text,
+    datumKinds: _kinds,
+    seriesTotals: _totals,
+    categoryMembers: _categoryMembers,
+    seriesMembers: _seriesMembers,
+    highlightValues: _highlight,
+    crossFilterSelf: _self,
+    ...rest
+  } = d;
   return rest;
 }
 
@@ -667,10 +700,90 @@ function withoutSourceText(d: ParsedChartData): ParsedChartData {
  * scatter/bubble. Computed here, after transforms/filters, so the values always
  * align with the final categories (transforms rebuild categories and drop any
  * stale typing).
+ *
+ * `types` is what the read knew about each category text (see
+ * {@link categoryTypesOf}). The chart filters only DROP categories, so every
+ * category still left is in it; a category it does not know (or knows two
+ * ways) means the categories are no longer the ones read, and the text decides
+ * in the app locale.
  */
-function withCategoryField(d: ParsedChartData): ParsedChartData {
-  const categoryField = detectCategoryField(d.categories);
+function withCategoryField(d: ParsedChartData, types?: CategoryTypes): ParsedChartData {
+  let typed: Array<number | Date | null> | undefined;
+  if (types) {
+    typed = [];
+    for (const c of d.categories) {
+      const t = types.get(c);
+      if (t === undefined || t === AMBIGUOUS) {
+        typed = undefined;
+        break;
+      }
+      typed.push(t);
+    }
+  }
+  const categoryField = detectCategoryField(d.categories, typed);
   return categoryField ? { ...d, categoryField } : d;
+}
+
+/** A category text the read saw holding two different typed values. */
+const AMBIGUOUS: unique symbol = Symbol("ambiguous category");
+
+/** Category text -> what the engine said that cell is. */
+type CategoryTypes = Map<string, number | Date | null | typeof AMBIGUOUS>;
+
+/**
+ * What ONE category cell is, from its TYPED value: a number cell shown as a
+ * number is that number; a number cell shown as a date (its display reads as
+ * a date in the app locale) is that date -- the serial, never the text; any
+ * other cell is null. A number cell whose display is neither (a long date with
+ * a weekday, a fraction) stays a number.
+ */
+export function typedCategoryValue(display: string, typed: RangeCellNumber | "untyped"): number | Date | null {
+  if (typeof typed !== "number") return null;
+  if (readShownNumber(display) !== null) return typed;
+  const serial = parseDate(display);
+  if (serial !== null && serial >= 1) return new Date(serialToEpochMs(typed));
+  return typed;
+}
+
+/**
+ * The typed view of every category a range read produced, keyed by the
+ * category TEXT exactly as the parsers write it (an empty cell's "Row N" /
+ * "Col N" included, as null). Undefined without typed values.
+ */
+function categoryTypesOf(
+  grid: string[][],
+  numRows: number,
+  numCols: number,
+  hasHeaders: boolean,
+  orientation: SeriesOrientation,
+  categoryIndex: number,
+  numbers?: RangeCellNumber[][],
+): CategoryTypes | undefined {
+  if (!numbers) return undefined;
+  const out: CategoryTypes = new Map();
+  const put = (text: string, value: number | Date | null) => {
+    if (!out.has(text)) {
+      out.set(text, value);
+      return;
+    }
+    const prev = out.get(text);
+    const same =
+      prev === value ||
+      (prev instanceof Date && value instanceof Date && prev.getTime() === value.getTime());
+    if (!same) out.set(text, AMBIGUOUS);
+  };
+  if (orientation === "columns") {
+    for (let row = hasHeaders ? 1 : 0; row < numRows; row++) {
+      const raw = grid[row]?.[categoryIndex] ?? "";
+      put(raw || `Row ${row + 1}`, raw ? typedCategoryValue(raw, numbers[row]?.[categoryIndex]) : null);
+    }
+  } else {
+    for (let col = hasHeaders ? 1 : 0; col < numCols; col++) {
+      const raw = grid[categoryIndex]?.[col] ?? "";
+      put(raw || `Col ${col + 1}`, raw ? typedCategoryValue(raw, numbers[categoryIndex]?.[col]) : null);
+    }
+  }
+  return out;
 }
 
 /** Upper bound on facet panels — guards against cardinality explosion. */
@@ -732,6 +845,7 @@ export async function partitionByFacet(
   lowered: ChartSpec,
   lookupData: Map<number, ParsedChartData>,
   params?: ReadonlyMap<string, FormulaValue>,
+  numbers?: RangeCellNumber[][],
 ): Promise<Array<{ value: string; data: ParsedChartData }> | undefined> {
   // v1: needs a header row in columns orientation to reference the field by name.
   if (orientation !== "columns" || !hasHeaders) return undefined;
@@ -762,12 +876,17 @@ export async function partitionByFacet(
   return Promise.all(order.map(async (value) => {
     // Header row + only the rows whose facet cell matches this value.
     const subGrid: string[][] = [header];
+    const subNumbers: RangeCellNumber[][] | undefined = numbers ? [numbers[0] ?? []] : undefined;
     for (let r = 1; r < numRows; r++) {
-      if ((grid[r]?.[facetCol] ?? "").trim() === value) subGrid.push(grid[r]);
+      if ((grid[r]?.[facetCol] ?? "").trim() === value) {
+        subGrid.push(grid[r]);
+        subNumbers?.push(numbers?.[r] ?? []);
+      }
     }
     const subRows = subGrid.length;
 
-    let parsed = parseColumnOriented(subGrid, subRows, numCols, hasHeaders, lowered.categoryIndex, lowered.series);
+    let parsed = parseColumnOriented(subGrid, subRows, numCols, hasHeaders, lowered.categoryIndex, lowered.series, subNumbers);
+    let types = categoryTypesOf(subGrid, subRows, numCols, hasHeaders, "columns", lowered.categoryIndex, subNumbers);
     if (lowered.transform && lowered.transform.length > 0) {
       const subTidy = buildTidyData(subGrid, subRows, numCols, hasHeaders, orientation);
       // Per-panel pipeline: built-ins + in-process custom transforms only.
@@ -777,11 +896,12 @@ export async function partitionByFacet(
       // throwaway sink rather than blocking the panel. filter/calculate evaluate
       // via the real engine (async) just like the single-chart path.
       parsed = withoutSourceText(await applyTransformsAsync(parsed, lowered.transform, () => null, sink, lookupData, subTidy, params));
+      types = undefined;
     }
     // NOTE: chart filters (hiddenCategories/hiddenSeries) are POSITIONAL indices
     // into the top-level chart's arrays — they don't map onto each panel's own
     // category/series set, so they are intentionally not applied per panel (v1).
-    return { value: value || "(blank)", data: withCategoryField(parsed) };
+    return { value: value || "(blank)", data: withCategoryField(parsed, types) };
   }));
 }
 
@@ -832,6 +952,7 @@ function detectColumnSeries(
   numCols: number,
   hasHeaders: boolean,
   startCol: number,
+  numbers?: RangeCellNumber[][],
 ): { categoryIndex: number; series: ChartSeries[] } {
   const categoryIndex = 0;
   const dataStartRow = hasHeaders ? 1 : 0;
@@ -843,8 +964,7 @@ function detectColumnSeries(
     // Check if this column has any numeric data
     let hasNumeric = false;
     for (let row = dataStartRow; row < numRows; row++) {
-      const val = parseDisplayNumber(grid[row][col]);
-      if (!isNaN(val)) {
+      if (holdsNumber(grid[row]?.[col], numbers ? numbers[row]?.[col] : "untyped")) {
         hasNumeric = true;
         break;
       }
@@ -879,13 +999,13 @@ export async function autoDetectSeries(
   orientation: SeriesOrientation;
 }> {
   const ref = await resolveRangeRefSheet(dataRange);
-  const grid = await readRangeDisplayGrid(ref);
+  const { display: grid, numbers } = await readRangeGrid(ref);
   const numRows = ref.endRow - ref.startRow + 1;
   const numCols = ref.endCol - ref.startCol + 1;
 
   // Default: columns orientation, first column as category
   const orientation: SeriesOrientation = "columns";
-  const { categoryIndex, series } = detectColumnSeries(grid, numRows, numCols, hasHeaders, ref.startCol);
+  const { categoryIndex, series } = detectColumnSeries(grid, numRows, numCols, hasHeaders, ref.startCol, numbers);
 
   return { categoryIndex, series, orientation };
 }
@@ -904,7 +1024,7 @@ export async function autoDetectSeriesForOrientation(
   series: ChartSeries[];
 }> {
   const ref = await resolveRangeRefSheet(dataRange);
-  const grid = await readRangeDisplayGrid(ref);
+  const { display: grid, numbers } = await readRangeGrid(ref);
   const numRows = ref.endRow - ref.startRow + 1;
   const numCols = ref.endCol - ref.startCol + 1;
 
@@ -912,14 +1032,14 @@ export async function autoDetectSeriesForOrientation(
   const series: ChartSeries[] = [];
 
   if (orientation === "columns") {
-    return detectColumnSeries(grid, numRows, numCols, hasHeaders, ref.startCol);
+    return detectColumnSeries(grid, numRows, numCols, hasHeaders, ref.startCol, numbers);
   } else {
     const dataStartCol = hasHeaders ? 1 : 0;
     for (let row = 0; row < numRows; row++) {
       if (row === categoryIndex) continue;
       let hasNumeric = false;
       for (let col = dataStartCol; col < numCols; col++) {
-        if (!isNaN(parseDisplayNumber(grid[row][col]))) { hasNumeric = true; break; }
+        if (holdsNumber(grid[row]?.[col], numbers[row]?.[col])) { hasNumeric = true; break; }
       }
       if (!hasNumeric) continue;
       const name = hasHeaders && grid[row][0] ? grid[row][0] : `Row ${ref.startRow + row + 1}`;
@@ -943,7 +1063,8 @@ export async function autoDetectSeriesForOrientation(
  *   zero, as before), "blank" in its kind, so a Card writes "(Blank)" and an
  *   average skips it.
  * - Anything else (text, a boolean, an error) is TEXT; its number is what its
- *   display text reads as, or 0 -- the lenient reading a bar chart always had.
+ *   display text reads as IN THE APP LOCALE, or 0 -- the lenient reading a bar
+ *   chart always had.
  * - Without a typed value (`numbers` absent: a lookup table, a caller that
  *   only read text) the display text decides, as it always did.
  */
@@ -952,12 +1073,23 @@ function rangeDatum(raw: string | undefined, typed: RangeCellNumber | "untyped")
   if (typed !== "untyped") {
     if (typeof typed === "number") return { value: typed, kind: "number" };
     if (typed === null) return { value: 0, kind: "blank" };
-    const n = parseDisplayNumber(text);
-    return { value: isNaN(n) ? 0 : n, kind: "text" };
+    return { value: readShownNumber(text) ?? 0, kind: "text" };
   }
   if (text === "") return { value: 0, kind: "blank" };
-  const n = parseDisplayNumber(text);
-  return isNaN(n) ? { value: 0, kind: "text" } : { value: n, kind: "number" };
+  const n = readShownNumber(text);
+  return n === null ? { value: 0, kind: "text" } : { value: n, kind: "number" };
+}
+
+/**
+ * Does a cell hold a number, for series detection? The typed value answers
+ * when the read has one (a number cell, a date included); a text cell, or a
+ * cell read without types, counts when its text reads as a number in the APP
+ * locale -- the lenient reading series detection always had.
+ */
+function holdsNumber(raw: string | undefined, typed: RangeCellNumber | "untyped"): boolean {
+  if (typeof typed === "number") return true;
+  if (typed === null) return false;
+  return readShownNumber(raw ?? "") !== null;
 }
 
 function parseColumnOriented(

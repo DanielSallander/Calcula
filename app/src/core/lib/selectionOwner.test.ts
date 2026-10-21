@@ -22,8 +22,16 @@ import {
   selectionOwnerReceivesTyping,
   selectionRefusalFor,
   setSelectionRefusalAnnouncer,
+  resolveCellTarget,
+  cellTargetFor,
+  setGridSelectionReader,
+  CELL_TARGET_CAPABILITIES,
+  WHOLE_OBJECT_CAPABILITIES,
+  type CellTargetCapability,
+  type OwnedCellTarget,
 } from "./selectionOwner";
-import { gridCommands, GRID_COMMANDS } from "./gridCommands";
+import { gridCommands, GRID_COMMANDS, GRID_COMMAND_CAPABILITY } from "./gridCommands";
+import type { Selection } from "../types";
 import { alertAsync } from "./dialogs";
 
 const announced: string[] = [];
@@ -38,6 +46,7 @@ function owner(owns: () => boolean, extra: Partial<Parameters<typeof registerSel
 afterEach(() => {
   while (cleanups.length > 0) cleanups.pop()!();
   setSelectionRefusalAnnouncer(null);
+  setGridSelectionReader(null);
   announced.length = 0;
   gridCommands.clear();
   vi.mocked(alertAsync).mockClear();
@@ -273,5 +282,217 @@ describe("gridCommands.execute refuses every grid command while the selection is
     owner(() => false);
     await expect(gridCommands.execute("fillDown")).resolves.toBe(true);
     expect(handler).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ============================================================================
+// P3 (owner finding G3): resolveCellTarget -- a door acts on an OWNER's cells
+// instead of refusing, when the owner admits the kind of act.
+// ============================================================================
+
+const GRID_SEL: Selection = { startRow: 4, startCol: 4, endRow: 4, endCol: 4, type: "cells" };
+const OWNED: OwnedCellTarget = {
+  ref: { kind: "floatingRange", id: "fr-1" },
+  selection: { startRow: 1, startCol: 1, endRow: 2, endCol: 2, type: "cells", activeRow: 1, activeCol: 1 },
+  bounds: { rows: 5, cols: 4 },
+  label: "Float1",
+  wholeObject: false,
+};
+
+describe("resolveCellTarget: the door's new question", () => {
+  it("no owner: the GRID target, carrying Core's selection from the registered reader", () => {
+    setGridSelectionReader(() => GRID_SEL);
+    const t = resolveCellTarget("Bold", "format");
+    expect(t).toEqual({ kind: "grid", selection: GRID_SEL });
+  });
+
+  it("no owner and no reader: still the grid target (a door with no selection behaves as before)", () => {
+    expect(resolveCellTarget("Bold", "format")).toEqual({ kind: "grid", selection: null });
+  });
+
+  it("an owner that admits the capability and answers: the OBJECT target, naming the owner that answered", () => {
+    setSelectionRefusalAnnouncer((m) => announced.push(m));
+    setGridSelectionReader(() => GRID_SEL);
+    owner(() => true, { id: "fr", actsOn: ["format", "numberFormat"], cellTarget: () => OWNED });
+    const t = resolveCellTarget("Decrease Decimal", "numberFormat");
+    expect(t?.kind).toBe("object");
+    if (t?.kind !== "object") throw new Error("unreachable");
+    expect(t.ownerId).toBe("fr");
+    expect(t.ref).toEqual({ kind: "floatingRange", id: "fr-1" });
+    expect(t.selection, "the door must act on the OWNER's cells, not Core's hidden one").toEqual(OWNED.selection);
+    expect(t.bounds).toEqual({ rows: 5, cols: 4 });
+    expect(announced, "an admitted door announced a refusal").toEqual([]);
+  });
+
+  it("an owner that does NOT admit the capability refuses ONCE, with refusal(action, capability)", () => {
+    setSelectionRefusalAnnouncer((m) => announced.push(m));
+    const asked: [string, CellTargetCapability | undefined][] = [];
+    owner(() => true, {
+      id: "fr",
+      actsOn: ["format"],
+      cellTarget: () => OWNED,
+      refusal: (action, capability) => {
+        asked.push([action, capability]);
+        return `${action}: not inside this object (${capability}).`;
+      },
+    });
+    expect(resolveCellTarget("Format as Table", "table")).toBeNull();
+    expect(asked).toEqual([["Format as Table", "table"]]);
+    expect(announced).toEqual(["Format as Table: not inside this object (table)."]);
+  });
+
+  it("an owner with NO actsOn (every owner before P3) refuses every capability, as before", () => {
+    setSelectionRefusalAnnouncer((m) => announced.push(m));
+    const cellTarget = vi.fn(() => OWNED);
+    owner(() => true, { id: "fr", cellTarget });
+    for (const capability of CELL_TARGET_CAPABILITIES) {
+      expect(resolveCellTarget("Act", capability), `${capability} was admitted with no actsOn`).toBeNull();
+    }
+    expect(cellTarget, "cellTarget was asked although nothing is admitted").not.toHaveBeenCalled();
+    expect(announced.length).toBe(CELL_TARGET_CAPABILITIES.length);
+  });
+
+  it("actsOn without a cellTarget answer: refused (the door has no cells to act on)", () => {
+    owner(() => true, { id: "fr", actsOn: ["format"] });
+    expect(resolveCellTarget("Bold", "format")).toBeNull();
+  });
+
+  it("a WHOLE-OBJECT selection admits format/numberFormat/conditionalFormat/read and refuses structure", () => {
+    setSelectionRefusalAnnouncer((m) => announced.push(m));
+    const whole: OwnedCellTarget = { ...OWNED, wholeObject: true };
+    owner(() => true, {
+      id: "fr",
+      actsOn: [...CELL_TARGET_CAPABILITIES],
+      cellTarget: () => whole,
+    });
+    for (const capability of WHOLE_OBJECT_CAPABILITIES) {
+      expect(resolveCellTarget("Act", capability)?.kind, `${capability} refused on the whole object`).toBe("object");
+    }
+    expect(announced).toEqual([]);
+    expect(resolveCellTarget("Insert Sheet Rows", "structure")).toBeNull();
+    expect(announced).toEqual(["Insert Sheet Rows needs cells: select cells inside Float1 first. Nothing was changed."]);
+  });
+
+  it("a whole-object refusal uses the owner's own sentence when it gives one for reason 'wholeObject'", () => {
+    setSelectionRefusalAnnouncer((m) => announced.push(m));
+    owner(() => true, {
+      id: "fr",
+      actsOn: ["structure"],
+      cellTarget: () => ({ ...OWNED, wholeObject: true }),
+      refusal: (action, _capability, reason) =>
+        reason === "wholeObject" ? "Select cells inside the floating grid first." : `${action}: no.`,
+    });
+    expect(resolveCellTarget("Delete Sheet Rows", "structure")).toBeNull();
+    expect(announced).toEqual(["Select cells inside the floating grid first."]);
+  });
+
+  it("a THROWING cellTarget refuses -- it never falls through to Core's hidden cell", () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    setSelectionRefusalAnnouncer((m) => announced.push(m));
+    setGridSelectionReader(() => GRID_SEL);
+    owner(() => true, {
+      id: "fr",
+      actsOn: ["format"],
+      cellTarget: () => {
+        throw new Error("boom");
+      },
+      refusal: (a) => `${a}: refused.`,
+    });
+    expect(resolveCellTarget("Bold", "format"), "a broken owner handed the door Core's hidden selection").toBeNull();
+    expect(announced).toEqual(["Bold: refused."]);
+    err.mockRestore();
+  });
+
+  it("a null or malformed cellTarget answer refuses too", () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    let answer: unknown = null;
+    owner(() => true, { id: "fr", actsOn: ["format"], cellTarget: () => answer as OwnedCellTarget | null });
+    expect(resolveCellTarget("Bold", "format")).toBeNull();
+    answer = { ref: { kind: "floatingRange", id: "" }, selection: OWNED.selection, bounds: OWNED.bounds };
+    expect(resolveCellTarget("Bold", "format")).toBeNull();
+    err.mockRestore();
+  });
+
+  it("an owner that does not hold the selection right now is not asked: the grid target", () => {
+    const cellTarget = vi.fn(() => OWNED);
+    owner(() => false, { id: "fr", actsOn: ["format"], cellTarget });
+    expect(resolveCellTarget("Bold", "format")?.kind).toBe("grid");
+    expect(cellTarget).not.toHaveBeenCalled();
+  });
+
+  it("shouldAnnounce false: still refused, silently", () => {
+    setSelectionRefusalAnnouncer((m) => announced.push(m));
+    owner(() => true, { id: "fr", shouldAnnounce: () => false });
+    expect(resolveCellTarget("Bold", "format")).toBeNull();
+    expect(announced).toEqual([]);
+  });
+
+  it("cellTargetFor answers the same WITHOUT announcing", () => {
+    setSelectionRefusalAnnouncer((m) => announced.push(m));
+    owner(() => true, { id: "fr", actsOn: ["read"], cellTarget: () => OWNED, refusal: (a, c) => `${a}/${c}: no.` });
+    const read = cellTargetFor("read");
+    expect("kind" in read && read.kind).toBe("object");
+    expect(cellTargetFor("sort", "Sort A to Z")).toEqual({ refusal: "Sort A to Z/sort: no." });
+    expect(announced).toEqual([]);
+  });
+
+  it("an admitted owner's target outranks a fallback claim (the specific owner answers)", () => {
+    owner(() => true, { id: "generic", fallback: true, refusal: (a) => `${a}: generic.` });
+    owner(() => true, { id: "fr", actsOn: ["format"], cellTarget: () => OWNED });
+    const t = resolveCellTarget("Bold", "format");
+    expect(t?.kind === "object" && t.ownerId).toBe("fr");
+  });
+});
+
+describe("gridCommands.execute hands the resolved target to the handler", () => {
+  it("every grid command has a capability, and the table matches the spec's kinds", () => {
+    for (const command of GRID_COMMANDS) {
+      expect(CELL_TARGET_CAPABILITIES, `${command} has no capability`).toContain(GRID_COMMAND_CAPABILITY[command]);
+    }
+    expect(GRID_COMMAND_CAPABILITY.copy).toBe("read");
+    expect(GRID_COMMAND_CAPABILITY.cut).toBe("content");
+    expect(GRID_COMMAND_CAPABILITY.paste).toBe("content");
+    expect(GRID_COMMAND_CAPABILITY.unmergeCells).toBe("merge");
+    expect(GRID_COMMAND_CAPABILITY.insertRow).toBe("structure");
+    expect(GRID_COMMAND_CAPABILITY.autoFitColumnWidth).toBe("lineSize");
+    expect(GRID_COMMAND_CAPABILITY.removeHyperlinks).toBe("clear");
+    expect(GRID_COMMAND_CAPABILITY.fillLeft).toBe("content");
+  });
+
+  it("an OBJECT target skips the grid guards (they describe Core's sheet) and reaches the handler as ctx.target", async () => {
+    const handler = vi.fn();
+    const guard = vi.fn(() => "a sheet guard's modal");
+    gridCommands.register("clearContents", handler);
+    cleanups.push(gridCommands.registerGuard(["clearContents"], guard));
+    owner(() => true, { id: "fr", actsOn: ["clear"], cellTarget: () => OWNED });
+    await expect(gridCommands.execute("clearContents", { why: "test" })).resolves.toBe(true);
+    expect(guard, "a sheet guard judged the object's cells").not.toHaveBeenCalled();
+    expect(handler).toHaveBeenCalledTimes(1);
+    const [args, ctx] = handler.mock.calls[0];
+    expect(args).toEqual({ why: "test" });
+    expect(ctx.target.kind).toBe("object");
+    expect(ctx.target.ref).toEqual({ kind: "floatingRange", id: "fr-1" });
+    expect(ctx.target.selection).toEqual(OWNED.selection);
+  });
+
+  it("the GRID target still runs the guards and reaches the handler as ctx.target", async () => {
+    const handler = vi.fn();
+    const guard = vi.fn(() => true);
+    setGridSelectionReader(() => GRID_SEL);
+    gridCommands.register("fillDown", handler);
+    cleanups.push(gridCommands.registerGuard(["fillDown"], guard));
+    await expect(gridCommands.execute("fillDown")).resolves.toBe(true);
+    expect(guard).toHaveBeenCalledTimes(1);
+    expect(handler.mock.calls[0][1]).toEqual({ target: { kind: "grid", selection: GRID_SEL } });
+  });
+
+  it("an owner that admits OTHER kinds still refuses this command, once, and the handler never runs", async () => {
+    const handler = vi.fn();
+    setSelectionRefusalAnnouncer((m) => announced.push(m));
+    gridCommands.register("insertRow", handler);
+    owner(() => true, { id: "fr", actsOn: ["format", "clear"], cellTarget: () => OWNED, refusal: (a) => `${a}: no.` });
+    await expect(gridCommands.execute("insertRow")).resolves.toBe(false);
+    expect(handler).not.toHaveBeenCalled();
+    expect(announced).toEqual(["Insert Row: no."]);
   });
 });

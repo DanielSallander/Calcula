@@ -53,7 +53,10 @@ import {
 import { ALLOWLIST } from "../allowlist";
 import { buildWorkerContext, type WorkerRuntime } from "../worker/contextShims";
 import type { MountSpec, W2H } from "../protocol";
+import { registerModelVisualProvider, type ModelVisualInfo } from "../../modelVisuals";
 import {
+  CANVAS_INTERACTION_KINDS,
+  CANVAS_MAX_OBJECT_REFS,
   CANVAS_MAX_GRID_SIZE_PX,
   CANVAS_MIN_GRID_SIZE_PX,
   CANVAS_PAGE_PRESETS,
@@ -200,10 +203,11 @@ describe("vCanvasLayout", () => {
     expect(vCanvasLayout([{ background: "" }])).toBe(true);
   });
 
-  it("the settable keys are exactly the eight cosmetic layout scalars (wallpaper included)", () => {
+  it("the settable keys are the eight cosmetic layout scalars plus interactions (DC-5)", () => {
     expect(Object.keys(CANVAS_LAYOUT_SCRIPT_KEYS).sort()).toEqual(
-      ["background", "gridSizePx", "pageHeight", "pagePreset", "pageWidth", "showGrid", "snapToGrid", "wallpaper"],
+      ["background", "gridSizePx", "interactions", "pageHeight", "pagePreset", "pageWidth", "showGrid", "snapToGrid", "wallpaper"],
     );
+    expect(CANVAS_LAYOUT_SCRIPT_KEYS.interactions).toBe("interactions");
   });
 
   it("refuses the READ-ONLY keys by name (zOrder / locked name other objects)", () => {
@@ -231,6 +235,113 @@ describe("vCanvasLayout", () => {
     expect(verdict).toMatch(/"objectsLocked" cannot be set from a script/);
     expect(verdict).toMatch(/Lock Objects/);
     expect(verdict).not.toMatch(/unknown/);
+  });
+
+  // P4 S12 (owner decision DC-5): interactions became SETTABLE. Its shape is
+  // checked here; that both refs of every pair exist on THAT canvas is the
+  // host's check (executeSetCanvasLayout below). zOrder / locked stay read-only.
+  describe("interactions (settable, DC-5)", () => {
+    const chart = (id: string) => ({ kind: "chart", id });
+    const pivot = (id: string) => ({ kind: "pivot", id });
+    const one = (pair: Record<string, unknown>) => vCanvasLayout([{ interactions: { pairs: [pair] } }]);
+
+    it("is settable, not read-only", () => {
+      expect(CANVAS_LAYOUT_READ_ONLY_KEYS.has("interactions")).toBe(false);
+      expect(CANVAS_LAYOUT_READ_ONLY_KEYS.has("zOrder")).toBe(true);
+      expect(CANVAS_LAYOUT_READ_ONLY_KEYS.has("locked")).toBe(true);
+    });
+
+    it("accepts an empty value, a default mode, and pairs of every mode", () => {
+      expect(vCanvasLayout([{ interactions: {} }])).toBe(true);
+      expect(vCanvasLayout([{ interactions: { pairs: [] } }])).toBe(true);
+      expect(vCanvasLayout([{ interactions: { defaultMode: "filter" } }])).toBe(true);
+      expect(vCanvasLayout([{ interactions: { defaultMode: "highlight" } }, "Board"])).toBe(true);
+      expect(
+        vCanvasLayout([
+          {
+            interactions: {
+              pairs: [
+                { source: chart("c1"), target: pivot("p1"), mode: "none" },
+                { source: chart("c1"), target: chart("c2"), mode: "highlight" },
+                { source: { kind: "slicer", id: "s1" }, target: chart("c2"), mode: "filter" },
+              ],
+            },
+          },
+        ]),
+      ).toBe(true);
+    });
+
+    it("refuses a 'none' or unknown default mode", () => {
+      expect(vCanvasLayout([{ interactions: { defaultMode: "none" } }])).toMatch(
+        /defaultMode must be "filter" or "highlight"/,
+      );
+      expect(vCanvasLayout([{ interactions: { defaultMode: "Filter" } }])).toMatch(/defaultMode/);
+    });
+
+    it("refuses a non-object value, an unknown key, and non-array pairs", () => {
+      expect(vCanvasLayout([{ interactions: [] }])).toMatch(/interactions must be an object/);
+      expect(vCanvasLayout([{ interactions: null }])).toMatch(/interactions must be an object/);
+      expect(vCanvasLayout([{ interactions: { pair: [] } }])).toMatch(/unknown key "pair"/);
+      expect(vCanvasLayout([{ interactions: { pairs: {} } }])).toMatch(/pairs must be an array/);
+      expect(one({ source: chart("a"), target: chart("b"), mode: "none", note: 1 })).toMatch(/unknown key "note"/);
+    });
+
+    it("refuses a ref of a kind outside CANVAS_INTERACTION_KINDS, or a blank / padded id", () => {
+      for (const kind of CANVAS_INTERACTION_KINDS) {
+        expect(one({ source: { kind, id: "a" }, target: chart("b"), mode: "filter" }), kind).toBe(true);
+      }
+      expect(one({ source: { kind: "shape", id: "a" }, target: chart("b"), mode: "filter" })).toMatch(
+        /source\.kind must be one of chart, pivot, slicer \(got "shape"\)/,
+      );
+      expect(one({ source: chart("a"), target: chart(""), mode: "filter" })).toMatch(
+        /target\.id must be a non-empty object id/,
+      );
+      expect(one({ source: chart(" a"), target: chart("b"), mode: "filter" })).toMatch(/source\.id/);
+      expect(one({ source: chart("a"), target: chart("b"), mode: "dim" })).toMatch(
+        /mode must be "filter", "highlight" or "none"/,
+      );
+    });
+
+    it("refuses a visual paired with itself, and a pair named twice", () => {
+      expect(one({ source: chart("a"), target: chart("a"), mode: "none" })).toMatch(/cannot interact with itself/);
+      expect(
+        vCanvasLayout([
+          {
+            interactions: {
+              pairs: [
+                { source: chart("a"), target: chart("b"), mode: "none" },
+                { source: chart("a"), target: chart("b"), mode: "filter" },
+              ],
+            },
+          },
+        ]),
+      ).toMatch(/names the pair chart "a" -> chart "b" twice/);
+      // The reverse direction is a different pair.
+      expect(
+        vCanvasLayout([
+          {
+            interactions: {
+              pairs: [
+                { source: chart("a"), target: chart("b"), mode: "none" },
+                { source: chart("b"), target: chart("a"), mode: "none" },
+              ],
+            },
+          },
+        ]),
+      ).toBe(true);
+    });
+
+    it("refuses more than CANVAS_MAX_OBJECT_REFS pairs (the @api/canvasSheet mirror, no literal)", () => {
+      const pairs = Array.from({ length: CANVAS_MAX_OBJECT_REFS + 1 }, (_x, i) => ({
+        source: chart("a"),
+        target: chart(`t${i}`),
+        mode: "none",
+      }));
+      expect(vCanvasLayout([{ interactions: { pairs } }])).toMatch(
+        new RegExp(`${CANVAS_MAX_OBJECT_REFS + 1} entries; the limit is ${CANVAS_MAX_OBJECT_REFS}`),
+      );
+      expect(vCanvasLayout([{ interactions: { pairs: pairs.slice(1) } }])).toBe(true);
+    });
   });
 
   // THE CENSUS: every field the Rust CanvasLayout declares is classified for
@@ -269,9 +380,11 @@ describe("vCanvasLayout", () => {
     for (const p of CANVAS_PAGE_PRESETS) expect(readBody, p.id).toContain(`"${p.id}"`);
     expect(readBody).toMatch(/wallpaper\?: string;/);
     expect(readBody).toMatch(/objectsLocked\?: boolean;/);
+    expect(readBody).toMatch(/interactions\?: ScriptCanvasInteractions;/);
     const patch = dts.slice(dts.indexOf("declare interface ScriptCanvasLayoutPatch {"));
     const patchBody = patch.slice(0, patch.indexOf("\n}"));
     expect(patchBody).toMatch(/wallpaper\?: string;/);
+    expect(patchBody).toMatch(/interactions\?: ScriptCanvasInteractions;/);
     expect(patchBody).not.toMatch(/objectsLocked/);
   });
 
@@ -434,6 +547,66 @@ describe("executeSetCanvasLayout", () => {
       /Sheet 'Data' is not a canvas sheet/,
     );
     expect(lib.setCanvasLayout).not.toHaveBeenCalled();
+  });
+
+  // DC-5: every ref of an interaction pair must be a visual on THAT canvas,
+  // asked of @api/modelVisuals. A pair naming nothing would be stored and do
+  // nothing; a pair naming another page's visual likewise.
+  describe("interactions: both refs must exist on that canvas", () => {
+    const visual = (kind: "chart" | "pivot" | "slicer", id: string, sheetIndex: number): ModelVisualInfo => ({
+      ref: { kind, id },
+      name: id,
+      sheetIndex,
+      sheetId: null,
+      connectionId: "conn-1",
+      role: { source: true, target: true, canHighlight: kind === "chart", reason: null },
+      label: kind,
+    });
+    let off: () => void = () => {};
+    beforeEach(() => {
+      off = registerModelVisualProvider({
+        kind: "chart",
+        // c1 and p1 on Board (1); c9 on another sheet (3).
+        list: () => [visual("chart", "c1", 1), visual("pivot", "p1", 1), visual("chart", "c9", 3)],
+      });
+      return () => off();
+    });
+
+    it("forwards a patch whose pairs name visuals on the canvas", async () => {
+      const lib = makeLib();
+      const patch = {
+        interactions: { pairs: [{ source: { kind: "chart" as const, id: "c1" }, target: { kind: "pivot" as const, id: "p1" }, mode: "none" as const }] },
+      };
+      await executeSetCanvasLayout(asLib(lib), patch, "Board");
+      expect(lib.setCanvasLayout).toHaveBeenCalledWith(patch, 1);
+    });
+
+    it("refuses an unknown ref by name, listing the canvas's visuals, WITHOUT calling the backend", async () => {
+      const lib = makeLib();
+      const patch = {
+        interactions: { pairs: [{ source: { kind: "chart" as const, id: "c1" }, target: { kind: "chart" as const, id: "ghost" }, mode: "none" as const }] },
+      };
+      await expect(executeSetCanvasLayout(asLib(lib), patch, "Board")).rejects.toThrow(
+        /interactions\.pairs\[0\]\.target names chart "ghost", which is not a visual on canvas 'Board' \(visuals there: chart "c1", pivot "p1"\)/,
+      );
+      expect(lib.setCanvasLayout).not.toHaveBeenCalled();
+    });
+
+    it("refuses a visual that lives on ANOTHER sheet", async () => {
+      const lib = makeLib();
+      const patch = {
+        interactions: { pairs: [{ source: { kind: "chart" as const, id: "c9" }, target: { kind: "chart" as const, id: "c1" }, mode: "filter" as const }] },
+      };
+      await expect(executeSetCanvasLayout(asLib(lib), patch, "Board")).rejects.toThrow(/source names chart "c9"/);
+      expect(lib.setCanvasLayout).not.toHaveBeenCalled();
+    });
+
+    it("an empty pair list (clearing every pair) needs no lookup", async () => {
+      const lib = makeLib();
+      await executeSetCanvasLayout(asLib(lib), { interactions: { pairs: [] } }, "Board");
+      await executeSetCanvasLayout(asLib(lib), { interactions: { defaultMode: "filter" } }, "Board");
+      expect(lib.setCanvasLayout).toHaveBeenCalledTimes(2);
+    });
   });
 });
 

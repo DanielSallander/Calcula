@@ -35,7 +35,7 @@ export function selectionAfterItemClick(
   if (isToggle) {
     if (slicer.selectedItems === null) {
       // All selected -> deselect this one item (select all except this one).
-      return items.map((i) => i.value).filter((v) => v !== itemValue);
+      return items.map((i) => i.key).filter((v) => v !== itemValue);
     }
     if (slicer.selectedItems.includes(itemValue)) {
       const next = slicer.selectedItems.filter((v) => v !== itemValue);
@@ -114,7 +114,7 @@ export function selectionAfterItemRun(
   additive: boolean,
 ): SlicerSelectionChange {
   if (!items) return undefined;
-  const known = new Set(items.map((i) => i.value));
+  const known = new Set(items.map((i) => i.key));
   const run = values.filter((v) => known.has(v));
   if (run.length === 0) return undefined;
   const mode = slicer.selectionMode ?? "standard";
@@ -131,7 +131,7 @@ export function selectionAfterItemRun(
   }
 
   // In the item list's order, so the stored selection reads like the slicer.
-  const next = items.map((i) => i.value).filter((v) => chosen.has(v));
+  const next = items.map((i) => i.key).filter((v) => chosen.has(v));
   const result = next.length >= known.size ? null : next;
   return sameSelection(slicer.selectedItems, result) ? undefined : result;
 }

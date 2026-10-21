@@ -187,9 +187,24 @@ pub(crate) fn build_cache_from_arrow_batches(
     let field_count = schema.fields().len();
     let mut cache = PivotCache::new(pivot_id, field_count);
 
-    // Set field names from schema
+    // Set field names from schema -- and say which fields hold ISO date KEYS:
+    // a Date32 / Timestamp column is interned as its ISO text ("2024-01-15",
+    // `arrow_cell_to_value`, unchanged), so the member LABEL can be written as
+    // a date for the app locale (`FieldCache::member_source`) without any
+    // string pattern being guessed for a text column.
     for (i, field) in schema.fields().iter().enumerate() {
         cache.set_field_name(i, field.name().clone());
+        // A Decimal keeps its scale for the KEY ("5.50"), the spelling the
+        // model's value list gives it (`arrow_value_to_string`).
+        let kind = match field.data_type() {
+            ArrowDataType::Date32 => pivot_engine::MemberKind::IsoDate,
+            ArrowDataType::Timestamp(_, _) => pivot_engine::MemberKind::IsoDateTime,
+            ArrowDataType::Decimal128(_, scale) => pivot_engine::MemberKind::Decimal { scale: (*scale).max(0) as u32 },
+            _ => pivot_engine::MemberKind::Plain,
+        };
+        if let Some(fc) = cache.fields.get_mut(i) {
+            fc.member_kind = kind;
+        }
     }
 
     // Add records from all batches
@@ -1775,6 +1790,19 @@ pub(crate) fn update_pivot_in_grid(
     Ok(())
 }
 
+/// How many character widths a pivot cell's shown text needs for auto-fit:
+/// its CHARACTERS (never its UTF-8 bytes) plus the compact-layout indent
+/// (~20px per level = ~3.2 chars) and the expand button.
+///
+/// BUG-0541: this counted bytes, so a number shown in a locale whose group
+/// separator is a non-breaking space (U+00A0 in sv-SE, two bytes per
+/// separator) or any non-ASCII member label (a, o with ring/umlaut, CJK)
+/// fitted wider than it is drawn; a canvas pivot box then lost its last
+/// columns off its right edge.
+pub(crate) fn auto_fit_text_len(display: &str, indent_level: u8, is_expandable: bool) -> usize {
+    display.chars().count() + (indent_level as usize) * 3 + if is_expandable { 3 } else { 0 }
+}
+
 /// Auto-fit column widths for a pivot table based on cell content.
 /// Scans all visible cells in the view and sets each column width to fit
 /// the longest formatted value, using a character-based width estimate.
@@ -1807,6 +1835,9 @@ pub(crate) fn auto_fit_pivot_columns(
     if view.col_count == 0 || view.row_count == 0 {
         return Vec::new();
     }
+    // The app locale the cells are SHOWN in, so the width fits what is drawn
+    // (leaf lock: taken, cloned and dropped at once).
+    let display_locale = crate::pivot::utils::display_locale_of(state);
 
     let (_dest_row, dest_col) = destination;
 
@@ -1833,12 +1864,15 @@ pub(crate) fn auto_fit_pivot_columns(
             if col_idx >= max_len.len() {
                 break;
             }
-            // Get the display text: use formatted number if available,
-            // fall back to formatted_value, then raw number string
-            let display = if let Some(ref fmt) = cell.number_format {
+            // Get the display text: a header's member LABEL, else the number
+            // formatted with its code in the app locale, else formatted_value,
+            // then the raw number string
+            let display = if let Some(member) = crate::pivot::utils::view_cell_member(cell, &display_locale) {
+                member.label
+            } else if let Some(ref fmt) = cell.number_format {
                 if !fmt.is_empty() {
                     if let pivot_engine::PivotCellValue::Number(n) = &cell.value {
-                        engine::format_number(*n, &parse_number_format(fmt), &engine::LocaleSettings::invariant())
+                        engine::format_number(*n, &parse_number_format(fmt), &display_locale)
                     } else {
                         cell.formatted_value.clone()
                     }
@@ -1861,11 +1895,7 @@ pub(crate) fn auto_fit_pivot_columns(
             } else {
                 cell.formatted_value.clone()
             };
-            let len = display.len();
-            // Account for indent in compact layout (~20px per level = ~3.2 chars)
-            let extra = (cell.indent_level as usize) * 3
-                + if cell.is_expandable { 3 } else { 0 };
-            let effective_len = len + extra;
+            let effective_len = auto_fit_text_len(&display, cell.indent_level, cell.is_expandable);
             if effective_len > max_len[col_idx] {
                 max_len[col_idx] = effective_len;
             }
@@ -2016,7 +2046,9 @@ pub fn lookup_pivot_data(
         let shown = field_name_by_index.get(&field_index).cloned();
         let source = cache.field_name(field_index);
         let named = shown.iter().chain(source.iter()).any(|n| n.eq_ignore_ascii_case(req_field));
-        named && group_path_item_label(cache, field_index, value_id).eq_ignore_ascii_case(req_item)
+        named
+            && (group_path_item_label(cache, field_index, value_id).eq_ignore_ascii_case(req_item)
+                || group_path_item_key(cache, field_index, value_id).eq_ignore_ascii_case(req_item))
     };
 
     // The cell whose group path names EXACTLY the requested fields and items
@@ -2067,6 +2099,25 @@ fn group_path_item_label(cache: &PivotCache, field_index: usize, value_id: pivot
         return pivot_engine::BLANK_ITEM_LABEL.to_string();
     }
     cache.get_value_label(field_index, value_id).unwrap_or_default()
+}
+
+/// The member KEY a group-path entry names (`member_key_of`, the invariant
+/// canonical text P2 matches selections, filters and GETPIVOTDATA on), or
+/// `pivot_engine::BLANK_ITEM_LABEL` for the blank member, which GETPIVOTDATA
+/// keeps naming "(blank)" (ruling Q8: its key "" is an item nobody can type).
+/// It differs from [`group_path_item_label`] for a BI Decimal member, whose
+/// key carries the column's scale ("2.2900000000", BUG-0518) while the cache
+/// label is the f64's shortest text ("2.29"): a formula written before
+/// BUG-0518 names the label, one written since names the key, and the lookup
+/// accepts both (BUG-0539).
+fn group_path_item_key(cache: &PivotCache, field_index: usize, value_id: pivot_engine::ValueId) -> String {
+    if pivot_engine::is_blank_member_id(value_id) {
+        return pivot_engine::BLANK_ITEM_LABEL.to_string();
+    }
+    match crate::pivot::utils::member_key_of(cache, field_index, value_id) {
+        Some(key) if !key.is_empty() => key,
+        _ => group_path_item_label(cache, field_index, value_id),
+    }
 }
 
 /// Resolves a grid cell position of pivot `pivot_id` into GETPIVOTDATA
@@ -2143,8 +2194,9 @@ pub fn resolve_pivot_data_formula(
                     .unwrap_or_else(|| format!("Field{}", field_index + 1))
             });
 
-        // Get the item value from the cache ("(blank)" for the blank member)
-        let item_value = group_path_item_label(cache, field_index, value_id);
+        // The item is the member KEY (P2: GETPIVOTDATA matches on the key),
+        // "(blank)" for the blank member.
+        let item_value = group_path_item_key(cache, field_index, value_id);
 
         field_item_pairs.push((field_name, item_value));
     }
@@ -2766,5 +2818,31 @@ mod dest_sheet_tests {
             "test out of date: the copy-then-resolve pattern is gone"
         );
         assert!(offenders.is_empty(), "resolved under the pivot guard:\n{}", offenders.join("\n"));
+    }
+}
+
+/// BUG-0541: auto-fit measures what is DRAWN, in characters.
+#[cfg(test)]
+mod auto_fit_len_tests {
+    use super::auto_fit_text_len;
+
+    #[test]
+    fn a_non_breaking_space_group_separator_fits_like_a_comma() {
+        let sv = "21\u{00A0}143\u{00A0}338";
+        assert_eq!(sv.len(), 12, "fixture: two two-byte separators");
+        let en = "21,143,338";
+        assert_eq!(auto_fit_text_len(sv, 0, false), 10, "sv-SE grouping is ten characters wide");
+        assert_eq!(auto_fit_text_len(sv, 0, false), auto_fit_text_len(en, 0, false));
+    }
+
+    #[test]
+    fn a_non_ascii_member_label_counts_characters() {
+        assert_eq!(auto_fit_text_len("\u{00C5}ngstr\u{00F6}m", 0, false), 8);
+        assert_eq!(auto_fit_text_len("\u{6771}\u{4EAC}", 0, false), 2);
+    }
+
+    #[test]
+    fn indent_and_the_expand_button_still_add_room() {
+        assert_eq!(auto_fit_text_len("France", 2, true), 6 + 6 + 3);
     }
 }

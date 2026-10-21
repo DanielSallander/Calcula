@@ -402,7 +402,7 @@ renders or registers it. No component, no markup, no closure, ever.
 | **Worksheet functions** | `ctx.formulas.registerFunction(name, {params, description, volatile}, impl)` | a real `registerFunction` UDF whose `implementation` RPCs back into the worker | needs `formula.udf` ⇒ effectively signature-gated |
 | Commands | `ctx.commands.register(id, handler)` | `CommandRegistry` under `ext:<extId>:<id>`, never `scriptSafe` | pre-existing; now ceiling-gated |
 | Menu items | `ctx.ui.menus.registerMenuItem(menuId, item)` | a real menu item whose action runs the extension's own command | pre-existing; now ceiling-gated |
-| **Ribbon buttons** | `ctx.ui.ribbon.registerButton({id,label,group,icon,tooltip,command,order})` | a host-drawn `CommandButton` hero in the **Add-ins** ribbon tab, one cluster per group (§8) | `icon` is a TOKEN from `RibbonIcon` (180 keys, §8.3); unknown ⇒ generic glyph |
+| **Ribbon buttons** | `ctx.ui.ribbon.registerButton({id,label,group,icon,tooltip,command,order})` | a host-drawn `CommandButton` hero in the **Add-ins** ribbon tab, one cluster per group (§8) | `icon` is a TOKEN from `RibbonIcon` (274 keys, §8.3); unknown ⇒ generic glyph |
 | **Keyboard shortcuts** | `ctx.keybindings.register({id,combo,command,label})` | a real `KeyBinding` with `category` = the extension's name | host owns the listener; no keystroke reaches the sandbox |
 | **Cell styling** | `ctx.grid.cellStyles.register(id, batchHandler)` + `.invalidate()` | a `registerCellRenderCache` SWR cache | one-frame lag by construction; every override sanitized key-by-key |
 | **File import** | `ctx.fileFormats.registerImporter(format, importer)` | a `registerFileFormat` with an importer only | host does the I/O; result rebuilt field-by-field |
@@ -907,7 +907,7 @@ renamed or removed, so a token that resolves today resolves in every later build
 example add-in's `"Percent"` (`docs/examples/addin-tax-tools/tax-tools.js`) is one of the 34 keys
 frozen since before this redesign.
 
-### 8.3 The token vocabulary (270 keys, 2026-10-08)
+### 8.3 The token vocabulary (274 keys, 2026-10-17)
 
 Authoritative list and drawing rules: `docs/design/ICONS.md` §4. By family:
 
@@ -939,6 +939,7 @@ Authoritative list and drawing rules: `docs/design/ICONS.md` §4. By family:
 | **Report visuals** (Power BI's pane, 2026-10-08) | ChartBarStacked, ChartBarStacked100, ChartAreaStacked, ChartAreaStacked100, ChartComboStacked, ChartCard, ChartMultiRowCard, ChartKpi, ChartGauge, Matrix, AllVisuals |
 | **Report page** (2026-10-08) | NewPage, PageNavigator, NavigateBack, ClearSlicers, FloatingGrid, Shapes, ButtonControl, Wallpaper |
 | **Page view and grid** (2026-10-08) | FitToPage, FitToWidth, ActualSize, ShowGrid, SnapToGrid, LockObjects, DesignMode |
+| **Visual interactions** (2026-10-17) | EditInteractions, InteractionFilter, InteractionHighlight, InteractionNone |
 
 Tokens are case-sensitive PascalCase: `"Refresh"` resolves, `"refresh"` falls back to the generic
 glyph. Pick the icon for what the button DOES (a verb) or the object it acts on, and prefer a verb
@@ -966,6 +967,12 @@ Edit) for design mode. The same day's icon review redrew ChartComboStacked, Char
 PageNavigator, LockObjects, ChartBarStacked, ChartAreaStacked and AllVisuals, all with the same
 meaning. AllVisuals is drawn for a 30px hero button only; at 20px it is busy and soft, so an add-in
 should not use it as a small button.
+
+**Added 2026-10-17** (canvas round 2, Edit interactions): EditInteractions is the Canvas tab's toggle
+(one visual reaching another); InteractionFilter, InteractionHighlight and InteractionNone are the
+three per-visual choices it shows -- the target keeps only the selection, shows everything with the
+selection emphasised, or ignores the source. Use them for those three meanings only; Filter remains
+the general "filter" verb.
 
 ### 8.4 A trusted (built-in) extension, for comparison
 

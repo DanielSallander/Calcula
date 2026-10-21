@@ -23,6 +23,10 @@
 //            the block (the default) or continue with the column (C10).
 //          - Several separate areas: refused ("This command cannot be used on
 //            multiple selections.").
+//          - A FLOATING GRID's cells (P3, owner finding G3): the same rules
+//            over the object's own cells -- read through @api/cellTarget,
+//            sorted with the target. An object holds no table and no
+//            AutoFilter, so only the current region and the guess apply.
 
 import {
   beginUndoTransaction,
@@ -31,6 +35,7 @@ import {
   detectDataRegion,
   getRangeCellsTyped,
   getUsedRange,
+  sortRange,
   sortRangeByColumn,
   type TypedCellData,
 } from "@api/lib";
@@ -44,7 +49,12 @@ import {
   requireAutoFilterController,
 } from "@api/autoFilterService";
 import { showToast } from "@api/notifications";
-import { refuseIfSelectionOwned } from "@api/selectionOwner";
+import {
+  resolveCellTarget,
+  getCellTargetCellsTyped,
+  type CellTarget,
+  type CellTargetRef,
+} from "@api/cellTarget";
 import { askSortWarning } from "./sortWarning";
 
 /** A rectangle, inclusive, normalised (start <= end). */
@@ -63,6 +73,11 @@ export interface SortTarget {
   hasHeaders: boolean;
   /** The range is an AutoFilter's: re-run its criteria after the rows move. */
   reapplyFilter: boolean;
+  /**
+   * The OBJECT whose cells are sorted (a floating grid's, P3); absent for the
+   * active sheet. Every read and the sort itself go through it.
+   */
+  objectTarget?: CellTargetRef;
 }
 
 // ============================================================================
@@ -116,18 +131,24 @@ export function guessHasHeaders(cells: readonly TypedCellData[], range: SortRang
   return topCells > 0 && textOverValue;
 }
 
-/** Read the cells the guess needs (the first row plus a sample below it) and guess. */
-async function readAndGuessHeaders(range: SortRange): Promise<boolean> {
+/**
+ * Read the cells the guess needs (the first row plus a sample below it) and
+ * guess. `objectTarget`: read the object's own cells, not the active sheet's.
+ */
+async function readAndGuessHeaders(range: SortRange, objectTarget?: CellTargetRef): Promise<boolean> {
   if (range.endRow <= range.startRow) return false;
   const cols = range.endCol - range.startCol + 1;
   const rowsWanted = Math.min(range.endRow - range.startRow + 1, HEADER_SAMPLE_ROWS + 1);
   const rows = Math.max(2, Math.min(rowsWanted, Math.floor(TYPED_READ_CAP / Math.max(1, cols))));
-  const cells = await getRangeCellsTyped(
-    range.startRow,
-    range.startCol,
-    Math.min(range.endRow, range.startRow + rows - 1),
-    range.endCol,
-  );
+  const sample = {
+    startRow: range.startRow,
+    startCol: range.startCol,
+    endRow: Math.min(range.endRow, range.startRow + rows - 1),
+    endCol: range.endCol,
+  };
+  const cells = objectTarget
+    ? await getCellTargetCellsTyped(objectTarget, sample)
+    : await getRangeCellsTyped(sample.startRow, sample.startCol, sample.endRow, sample.endCol);
   return guessHasHeaders(cells, range);
 }
 
@@ -202,9 +223,12 @@ async function blockAround(row: number, col: number): Promise<SortTarget | null>
  * `action` is the user-facing name of the door ("Sort A to Z", "Custom Sort").
  */
 export async function decideSortTarget(action: string): Promise<SortTarget | null> {
-  // It reads (and rewrites) Core's selection's cells: refuse while something
-  // else owns the selection (a floating grid's cell, a selected object), D4.
-  if (refuseIfSelectionOwned(action)) return null;
+  // It reads (and rewrites) the cells the door targets: Core's selection, or
+  // a floating grid's own cells (P3). Any other owner of the selection -- a
+  // selected object -- refuses, announced once (D4).
+  const t = resolveCellTarget(action, "sort");
+  if (t === null) return null;
+  if (t.kind === "object") return decideObjectSortTarget(t);
   const snapshot = getGridStateSnapshot();
   if (snapshot?.surface === "canvas") {
     showToast(`${action} is not available on a canvas sheet: it holds objects, not cells.`, { variant: "info" });
@@ -272,6 +296,123 @@ export async function decideSortTarget(action: string): Promise<SortTarget | nul
 }
 
 // ============================================================================
+// What to sort inside an object (a floating grid's cells, P3)
+// ============================================================================
+
+/** A sparse set of the object's non-empty cells, keyed "row,col". */
+type FilledCells = Set<string>;
+
+async function filledCellsOf(ref: CellTargetRef, bounds: { rows: number; cols: number }): Promise<FilledCells> {
+  const filled: FilledCells = new Set();
+  if (bounds.rows <= 0 || bounds.cols <= 0) return filled;
+  const cells = await getCellTargetCellsTyped(ref, {
+    startRow: 0,
+    startCol: 0,
+    endRow: bounds.rows - 1,
+    endCol: bounds.cols - 1,
+  });
+  for (const c of cells) if (kindOf(c) !== "empty") filled.add(`${c.row},${c.col}`);
+  return filled;
+}
+
+/**
+ * Excel's CURRENT REGION around (row, col) over a sparse cell set: the
+ * rectangle grown while any cell touching its edge (diagonals included) holds
+ * something, never past `bounds`. Null when the cell and every neighbour are
+ * empty (there is no data here).
+ */
+export function currentRegionIn(
+  filled: ReadonlySet<string>,
+  row: number,
+  col: number,
+  bounds: { rows: number; cols: number },
+): SortRange | null {
+  const has = (r: number, c: number) => r >= 0 && c >= 0 && r < bounds.rows && c < bounds.cols && filled.has(`${r},${c}`);
+  let r0 = row;
+  let r1 = row;
+  let c0 = col;
+  let c1 = col;
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (let c = c0 - 1; c <= c1 + 1; c++) {
+      if (has(r0 - 1, c)) { r0--; grew = true; break; }
+    }
+    for (let c = c0 - 1; c <= c1 + 1; c++) {
+      if (has(r1 + 1, c)) { r1++; grew = true; break; }
+    }
+    for (let r = r0 - 1; r <= r1 + 1; r++) {
+      if (has(r, c0 - 1)) { c0--; grew = true; break; }
+    }
+    for (let r = r0 - 1; r <= r1 + 1; r++) {
+      if (has(r, c1 + 1)) { c1++; grew = true; break; }
+    }
+  }
+  if (r0 === r1 && c0 === c1 && !has(row, col)) return null;
+  return { startRow: r0, startCol: c0, endRow: r1, endCol: c1 };
+}
+
+/** `decideSortTarget` over an OBJECT's cells: the same rules, the object's data. */
+async function decideObjectSortTarget(t: Extract<CellTarget, { kind: "object" }>): Promise<SortTarget | null> {
+  const sel = t.selection;
+  if ((sel.additionalRanges?.length ?? 0) > 0) {
+    showToast("This command cannot be used on multiple selections.", { variant: "info" });
+    return null;
+  }
+  const ref = t.ref;
+  const activeRow = sel.activeRow ?? sel.endRow;
+  const activeCol = sel.activeCol ?? sel.endCol;
+  const range: SortRange = {
+    startRow: Math.min(sel.startRow, sel.endRow),
+    startCol: Math.min(sel.startCol, sel.endCol),
+    endRow: Math.min(Math.max(sel.startRow, sel.endRow), t.bounds.rows - 1),
+    endCol: Math.min(Math.max(sel.startCol, sel.endCol), t.bounds.cols - 1),
+  };
+  if (range.endRow < range.startRow || range.endCol < range.startCol) return null;
+
+  let filled: FilledCells | null = null;
+  const regionAround = async (): Promise<SortRange | null> => {
+    filled ??= await filledCellsOf(ref, t.bounds);
+    return currentRegionIn(filled, activeRow, activeCol, t.bounds);
+  };
+  const blockAt = async (): Promise<SortTarget | null> => {
+    const region = await regionAround();
+    if (!region) return null;
+    return {
+      range: region,
+      sortCol: activeCol,
+      hasHeaders: await readAndGuessHeaders(region, ref),
+      reapplyFilter: false,
+      objectTarget: ref,
+    };
+  };
+
+  if (range.startRow === range.endRow) {
+    const block = await blockAt();
+    if (!block) showToast("There is no data here to sort.", { variant: "info" });
+    return block;
+  }
+
+  if (range.startCol === range.endCol) {
+    const region = await regionAround();
+    const wider = region !== null && (region.startCol < range.startCol || region.endCol > range.endCol);
+    if (wider) {
+      const choice = await askSortWarning();
+      if (choice === "cancel") return null;
+      if (choice === "expand") return blockAt();
+    }
+  }
+
+  return {
+    range,
+    sortCol: Math.min(Math.max(activeCol, range.startCol), range.endCol),
+    hasHeaders: await readAndGuessHeaders(range, ref),
+    reapplyFilter: false,
+    objectTarget: ref,
+  };
+}
+
+// ============================================================================
 // The quick sort
 // ============================================================================
 
@@ -306,6 +447,29 @@ export async function runQuickSort(ascending: boolean): Promise<void> {
   if (!target) return;
 
   const { range, sortCol, hasHeaders } = target;
+  if (target.objectTarget) {
+    // An object's cells: ONE backend sort (its own undo step); no filter.
+    try {
+      const result = await sortRange<SortRangeResult>(
+        range.startRow,
+        range.startCol,
+        range.endRow,
+        range.endCol,
+        [{ key: sortCol - range.startCol, ascending }],
+        { hasHeaders },
+        { target: target.objectTarget },
+      );
+      if (result && result.success === false) {
+        showToast(result.error || `${action} was refused.`, { variant: "error" });
+        return;
+      }
+    } catch (err) {
+      showToast(messageOf(err), { variant: "error" });
+      return;
+    }
+    refreshGridData();
+    return;
+  }
   const reapply = target.reapplyFilter && hasAutoFilterController();
   let tx: OwnedUndoTransaction | null = null;
   try {

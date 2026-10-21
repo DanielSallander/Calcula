@@ -15,6 +15,7 @@ import React, { useState, useCallback, useRef, useEffect, useMemo } from "react"
 import type { DialogProps } from "@api/uiTypes";
 import { DEFAULT_GRID_CONFIG } from "@api/types";
 import { useDialogWindow } from "@api/dialogWindow";
+import { formatNumber, parseNumber } from "@api/locale";
 import * as S from "./DimensionInputDialog.styles";
 
 export const DIMENSION_INPUT_DIALOG_ID = "core:dimension-input";
@@ -84,7 +85,7 @@ export function DimensionInputDialog(props: DialogProps): React.ReactElement | n
 
   const win = useDialogWindow({ minWidth: 320, minHeight: 160, resizable: false });
   const inputRef = useRef<HTMLInputElement>(null);
-  const [value, setValue] = useState<string>(() => String(pxToUnits(mode, currentPx)));
+  const [value, setValue] = useState<string>(() => formatNumber(pxToUnits(mode, currentPx)));
 
   useEffect(() => {
     const el = inputRef.current;
@@ -94,11 +95,11 @@ export function DimensionInputDialog(props: DialogProps): React.ReactElement | n
   const unitWord = inCharacters(mode) ? "characters" : "points";
   const text = MODE_TEXT[mode] ?? MODE_TEXT.columnWidth;
 
-  // Parse tolerantly: accept both '.' and ',' (sv-SE) decimal separators.
-  const parsed = useMemo(() => {
-    const n = parseFloat(value.replace(",", "."));
-    return Number.isFinite(n) ? n : NaN;
-  }, [value]);
+  // Shown and read in the APP locale (P2 S11), as Excel's box is: "8,43"
+  // under sv-SE and de-DE. It used to accept either mark by folding "," into
+  // "." -- which read de-DE "1.000" (one thousand) as 1 and could never be
+  // the same rule as the cell it sizes.
+  const parsed = useMemo(() => parseNumber(value) ?? NaN, [value]);
 
   const valid = !Number.isNaN(parsed) && parsed > 0;
   const previewPx = valid ? unitsToPx(mode, parsed) : NaN;

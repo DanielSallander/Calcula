@@ -154,7 +154,7 @@ describe("BI API caching layer", () => {
 
   describe("query", () => {
     it("caches query result, request, and active connection ID", async () => {
-      const queryResult = { columns: ["a"], rows: [[1]] };
+      const queryResult = { columns: ["a"], rows: [[1]], columnKinds: [] };
       const queryRequest = { tableName: "Sales" };
       mockApiQuery.mockResolvedValue(queryResult);
 
@@ -176,7 +176,7 @@ describe("BI API caching layer", () => {
 
     it("passes cached result and request to backend", async () => {
       // First execute a query to populate cache
-      const queryResult = { columns: ["x"], rows: [[1]] };
+      const queryResult = { columns: ["x"], rows: [[1]], columnKinds: [] };
       const queryRequest = { tableName: "T" };
       mockApiQuery.mockResolvedValue(queryResult);
       await biApi.query(1, queryRequest as any);

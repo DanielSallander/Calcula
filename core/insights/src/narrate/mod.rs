@@ -76,6 +76,15 @@ pub fn narrator_for(locale: Locale) -> Box<dyn Narrator> {
     Box::new(en::EnNarrator::new(locale))
 }
 
+/// The narrator for the app locale `settings`: English prose (as above) with
+/// THESE settings' digits and separators, for every locale. `narrator_for`
+/// collapses every non-Swedish locale to en-US numbers (`number_settings`),
+/// so a de-DE reader read "1,234.50" -- a value off by three orders of
+/// magnitude to a German eye (P2 A15).
+pub fn narrator_for_settings(settings: &LocaleSettings) -> Box<dyn Narrator> {
+    Box::new(en::EnNarrator::with_numbers(settings.clone()))
+}
+
 pub fn narrator_for_locale_id(id: &str) -> Box<dyn Narrator> {
     narrator_for(Locale::from_locale_id(id))
 }
@@ -90,6 +99,43 @@ mod tests {
         assert_eq!(n.locale(), Locale::Sv);
         assert_eq!(n.numbers().decimal_separator, ',');
         assert_eq!(number::num(1234.5, n.numbers()), "1\u{00A0}234,5");
+    }
+
+    fn change_fact() -> FactKind {
+        FactKind::Change {
+            subject: crate::types::Subject::measure("Revenue"),
+            first_label: "Jan".to_string(),
+            last_label: "Dec".to_string(),
+            first: 1234.5,
+            last: 12.5,
+            pct: -0.5,
+        }
+    }
+
+    /// P2 A15: the narrator for the APP locale's settings writes that
+    /// locale's digits for EVERY locale -- de-DE included, which
+    /// `narrator_for` collapses to en-US numbers -- while the prose stays
+    /// English.
+    #[test]
+    fn a_settings_narrator_writes_every_locales_numbers_in_english_prose() {
+        let de = narrator_for_settings(&LocaleSettings::from_locale_id("de-DE"));
+        assert_eq!(de.locale(), Locale::En, "a de-DE reader got non-English prose");
+        let text = de.narrate(&change_fact());
+        assert!(text.contains("1.234,5"), "{text}");
+        assert!(text.contains("12,50"), "{text}");
+        assert!(text.starts_with("Revenue moved from"), "{text}");
+
+        // The collapse this replaces: the same fact read "1,234.5" for de-DE.
+        let collapsed = narrator_for_locale_id("de-DE").narrate(&change_fact());
+        assert!(collapsed.contains("1,234.5"), "{collapsed}");
+
+        // en-US and sv-SE are unchanged by the move.
+        let en = narrator_for_settings(&LocaleSettings::invariant()).narrate(&change_fact());
+        assert_eq!(en, narrator_for(Locale::En).narrate(&change_fact()));
+        let sv_settings = LocaleSettings::from_locale_id("sv-SE");
+        let sv = narrator_for_settings(&sv_settings);
+        assert_eq!(sv.locale(), Locale::Sv);
+        assert_eq!(sv.narrate(&change_fact()), narrator_for(Locale::Sv).narrate(&change_fact()));
     }
 
     #[test]

@@ -564,6 +564,38 @@ pub struct SavedFloatingRange {
         deserialize_with = "visual_format::deserialize_container_lenient"
     )]
     pub container: Option<visual_format::VisualContainerFormat>,
+    /// Window rows / columns the author HID (Home > Format > Hide & Unhide on a
+    /// floating grid's cells), as window-relative indices. Written ASCENDING and
+    /// deduplicated (`serialize_sorted_u32_set`), the `col_widths` rule: the same
+    /// set must always produce the same bytes. No key when empty.
+    ///
+    /// FORMAT-VERSION LINKED (`FLOATING_GRID_HIDDEN_LINES_MIN_FORMAT_VERSION`,
+    /// 11): an older reader that drops these shows the rows the author hid --
+    /// the "hidden rows come back VISIBLE" lie, not a cosmetic loss. The
+    /// writer stamps 11 only when some floating range carries a non-empty set.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "serialize_sorted_u32_set"
+    )]
+    pub hidden_rows: Vec<u32>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "serialize_sorted_u32_set"
+    )]
+    pub hidden_cols: Vec<u32>,
+}
+
+/// Serialize a `u32` index set in ascending order without duplicates, so the
+/// same set always produces the same bytes whatever order the caller held it
+/// in (see `SavedFloatingRange::hidden_rows`).
+fn serialize_sorted_u32_set<S: serde::Serializer>(
+    set: &[u32],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let sorted: std::collections::BTreeSet<&u32> = set.iter().collect();
+    sorted.serialize(serializer)
 }
 
 /// Serialize a `u32 -> f64` map in ascending key order, so identical content
@@ -959,7 +991,7 @@ pub const CANVAS_PAGE_PRESETS: &[(&str, u32, u32)] = &[
 /// The preset id meaning "the width/height fields are authoritative".
 pub const CANVAS_CUSTOM_PAGE_PRESET: &str = "custom";
 /// The most refs a canvas's `z_order` may hold -- and, separately, its `locked`
-/// list. Far above any page a person would build, and low enough that a list
+/// list, and the most pairs its `interactions` may hold. Far above any page a person would build, and low enough that a list
 /// arriving from a file, a package or a script cannot grow without bound.
 pub const CANVAS_MAX_OBJECT_REFS: usize = 4096;
 /// The longest `kind` or `id` a [`CanvasObjectRef`] may carry, in characters.
@@ -1137,6 +1169,230 @@ fn sanitize_object_refs(name: &str, refs: Vec<CanvasObjectRef>) -> (Vec<CanvasOb
     (kept, repairs)
 }
 
+/// The object kinds that take part in visual interactions (Power BI's Edit
+/// interactions): a model visual (`chart`, which covers design-query charts,
+/// cards, KPIs and gauges), a BI pivot box (`pivot`) and a slicer (`slicer`).
+/// A pair naming any other kind is refused on edit and dropped on load.
+pub const CANVAS_INTERACTION_KINDS: &[&str] = &["chart", "pivot", "slicer"];
+
+/// How a selection in one visual (the SOURCE) acts on another visual on the
+/// same canvas (the TARGET) -- Power BI's Edit interactions icons.
+///
+/// * `Filter` -- the target shows only the data the selection keeps;
+/// * `Highlight` -- the target keeps its full data and draws the selected
+///   portion over a faded whole;
+/// * `None` -- the selection does not reach the target at all.
+///
+/// Wire spelling: `"filter"`, `"highlight"`, `"none"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VisualInteractionMode {
+    Filter,
+    Highlight,
+    None,
+}
+
+/// One explicit source -> target interaction on a canvas. A pair that is not
+/// listed behaves as the canvas's `default_mode` (or the target's own default
+/// when that is unset), so the list only ever names the pairs someone changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasInteraction {
+    pub source: CanvasObjectRef,
+    pub target: CanvasObjectRef,
+    pub mode: VisualInteractionMode,
+}
+
+/// A canvas's visual interactions: the page-wide default and the explicit
+/// pairs. View-affecting document state -- saved with the canvas, carried
+/// verbatim by a `.calp` (refs are object ids inside ONE canvas), and declared
+/// by the manifest feature id `canvas_interactions` with no format-version
+/// link (P4 DC-1). Omitted from the wire when it holds nothing, so a canvas
+/// that never had an interaction edited keeps its bytes (the signed `.calp`
+/// precedent `wallpaper` set).
+///
+/// A pair naming an object that no longer exists is INERT at run time and is
+/// dropped at save by [`CanvasInteractions::retain_live`] (P4 DC-2); undoing
+/// the delete brings the object, and so the pair, back alive.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CanvasInteractions {
+    /// The page-wide default for pairs not listed: `Filter` or `Highlight`.
+    /// Unset means each target's own default. `None` is refused here (a page
+    /// whose every visual ignores every other is expressed by pairs, never by
+    /// a default that would silently swallow newly inserted visuals).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_mode: Option<VisualInteractionMode>,
+    /// Explicit pairs. No (source, target) twice, at most
+    /// [`CANVAS_MAX_OBJECT_REFS`] entries.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pairs: Vec<CanvasInteraction>,
+}
+
+impl CanvasInteractions {
+    /// True when nothing is set: no default and no pairs. Used to keep the
+    /// field off the wire.
+    pub fn is_default(&self) -> bool {
+        self.default_mode.is_none() && self.pairs.is_empty()
+    }
+
+    /// The explicitly stored mode of `source -> target`, or None when the pair
+    /// is not listed (it then follows the default).
+    pub fn explicit(&self, source: &CanvasObjectRef, target: &CanvasObjectRef) -> Option<VisualInteractionMode> {
+        self.pairs
+            .iter()
+            .find(|p| &p.source == source && &p.target == target)
+            .map(|p| p.mode)
+    }
+
+    /// Why one ref may not take part in an interaction, or None when it may.
+    fn ref_problem(r: &CanvasObjectRef) -> Option<String> {
+        if let Some(why) = r.problem() {
+            return Some(why);
+        }
+        if !CANVAS_INTERACTION_KINDS.contains(&r.kind.as_str()) {
+            return Some(format!(
+                "the kind '{}' cannot take part in interactions (use one of {})",
+                r.kind,
+                CANVAS_INTERACTION_KINDS.join(", ")
+            ));
+        }
+        None
+    }
+
+    /// Why one pair may not be stored, or None when it may (the duplicate and
+    /// count rules are list-level and live in `validate`/`sanitized`).
+    fn pair_problem(p: &CanvasInteraction) -> Option<String> {
+        if let Some(why) = Self::ref_problem(&p.source) {
+            return Some(format!("source: {}", why));
+        }
+        if let Some(why) = Self::ref_problem(&p.target) {
+            return Some(format!("target: {}", why));
+        }
+        if p.source == p.target {
+            return Some(format!(
+                "{{kind: '{}', id: '{}'}} cannot interact with itself",
+                p.source.kind, p.source.id
+            ));
+        }
+        None
+    }
+
+    /// Refuse interactions a VALID layout cannot carry, naming the first
+    /// problem: a `none` default, more than [`CANVAS_MAX_OBJECT_REFS`] pairs, a
+    /// ref that is blank / padded / over-long or of a kind outside
+    /// [`CANVAS_INTERACTION_KINDS`], a visual paired with itself, or the same
+    /// (source, target) twice. Every EDIT goes through it (via
+    /// [`CanvasLayout::validate`]); a load or pull is repaired by
+    /// [`CanvasInteractions::sanitized`] instead.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.default_mode == Some(VisualInteractionMode::None) {
+            return Err(
+                "Canvas interactions: the default mode must be 'filter' or 'highlight'; set 'none' per pair."
+                    .to_string(),
+            );
+        }
+        if self.pairs.len() > CANVAS_MAX_OBJECT_REFS {
+            return Err(format!(
+                "Canvas interactions has {} pairs; the limit is {}.",
+                self.pairs.len(),
+                CANVAS_MAX_OBJECT_REFS
+            ));
+        }
+        let mut seen: HashSet<(&CanvasObjectRef, &CanvasObjectRef)> = HashSet::with_capacity(self.pairs.len());
+        for p in &self.pairs {
+            if let Some(why) = Self::pair_problem(p) {
+                return Err(format!("Canvas interactions: {}.", why));
+            }
+            if !seen.insert((&p.source, &p.target)) {
+                return Err(format!(
+                    "Canvas interactions names the pair {{kind: '{}', id: '{}'}} -> {{kind: '{}', id: '{}'}} twice.",
+                    p.source.kind, p.source.id, p.target.kind, p.target.id
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// These interactions REPAIRED, plus one line per kind of repair (each
+    /// prefixed `interactions:`, like the `zOrder:` / `locked:` lines):
+    ///
+    /// * a `none` default is cleared (the targets' own defaults apply);
+    /// * refs are trimmed;
+    /// * a pair with a blank / over-long ref, a kind outside
+    ///   [`CANVAS_INTERACTION_KINDS`], or a source equal to its target is dropped;
+    /// * of duplicate (source, target) pairs the LAST is kept -- the latest
+    ///   edit wins -- at the position of that last occurrence;
+    /// * the list is cut to [`CANVAS_MAX_OBJECT_REFS`], keeping the LATEST
+    ///   pairs (the end of the list).
+    ///
+    /// The result always passes [`CanvasInteractions::validate`].
+    pub fn sanitized(self) -> (CanvasInteractions, Vec<String>) {
+        let mut repairs = Vec::new();
+        let mut default_mode = self.default_mode;
+        if default_mode == Some(VisualInteractionMode::None) {
+            repairs.push("interactions: default mode 'none' -> unset".to_string());
+            default_mode = None;
+        }
+        let trim = |r: &CanvasObjectRef| CanvasObjectRef { kind: r.kind.trim().to_string(), id: r.id.trim().to_string() };
+        let mut untrimmed = 0usize;
+        let mut bad = 0usize;
+        let mut trimmed: Vec<CanvasInteraction> = Vec::with_capacity(self.pairs.len());
+        for p in self.pairs {
+            let fixed = CanvasInteraction { source: trim(&p.source), target: trim(&p.target), mode: p.mode };
+            if fixed.source != p.source || fixed.target != p.target {
+                untrimmed += 1;
+            }
+            if Self::pair_problem(&fixed).is_some() {
+                bad += 1;
+                continue;
+            }
+            trimmed.push(fixed);
+        }
+        // Latest edit wins: walk from the end, keep the first sighting of each
+        // pair, then restore list order.
+        let candidates = trimmed.len();
+        let mut seen: HashSet<(CanvasObjectRef, CanvasObjectRef)> = HashSet::with_capacity(candidates);
+        let mut kept: Vec<CanvasInteraction> = Vec::with_capacity(candidates);
+        for p in trimmed.into_iter().rev() {
+            if seen.insert((p.source.clone(), p.target.clone())) {
+                kept.push(p);
+            }
+        }
+        kept.reverse();
+        let duplicates = candidates - kept.len();
+        if untrimmed > 0 {
+            repairs.push(format!("interactions: {} pair(s) with padded refs trimmed", untrimmed));
+        }
+        if bad > 0 {
+            repairs.push(format!(
+                "interactions: {} pair(s) dropped (a blank or over-long ref, a kind outside {}, or a visual paired with itself)",
+                bad,
+                CANVAS_INTERACTION_KINDS.join("/")
+            ));
+        }
+        if duplicates > 0 {
+            repairs.push(format!("interactions: {} duplicate pair(s) dropped (the last one kept)", duplicates));
+        }
+        if kept.len() > CANVAS_MAX_OBJECT_REFS {
+            repairs.push(format!("interactions: {} pairs -> {}", kept.len(), CANVAS_MAX_OBJECT_REFS));
+            let excess = kept.len() - CANVAS_MAX_OBJECT_REFS;
+            kept.drain(..excess);
+        }
+        (CanvasInteractions { default_mode, pairs: kept }, repairs)
+    }
+
+    /// Drop every pair whose source or target is not in `live` (the refs of
+    /// the objects that exist on this canvas), returning how many were
+    /// dropped. Called at SAVE time (P4 DC-2): a deleted object's pairs never
+    /// reach the file.
+    pub fn retain_live(&mut self, live: &HashSet<CanvasObjectRef>) -> usize {
+        let before = self.pairs.len();
+        self.pairs.retain(|p| live.contains(&p.source) && live.contains(&p.target));
+        before - self.pairs.len()
+    }
+}
+
 /// The layout of a canvas sheet: its page, its snap grid, its background and
 /// wallpaper, the page-wide object lock, and the stacking/lock state of the
 /// objects on it. All sizes are LOGICAL px, the
@@ -1224,6 +1480,13 @@ pub struct CanvasLayout {
     /// dropped and order carries no meaning. Capped like `z_order`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub locked: Vec<CanvasObjectRef>,
+    /// Visual interactions (Canvas > Edit interactions): how a selection in
+    /// one visual filters, highlights or leaves alone each other visual on
+    /// this page. Undoable (one step per edit, in the app crate), omitted from
+    /// the wire when empty, feature id `canvas_interactions`. See
+    /// [`CanvasInteractions`].
+    #[serde(skip_serializing_if = "CanvasInteractions::is_default")]
+    pub interactions: CanvasInteractions,
 }
 
 impl Default for CanvasLayout {
@@ -1240,6 +1503,7 @@ impl Default for CanvasLayout {
             objects_locked: false,
             z_order: Vec::new(),
             locked: Vec::new(),
+            interactions: CanvasInteractions::default(),
         }
     }
 }
@@ -1305,6 +1569,7 @@ impl CanvasLayout {
         }
         validate_object_refs("stacking order (zOrder)", &self.z_order)?;
         validate_object_refs("lock list (locked)", &self.locked)?;
+        self.interactions.validate()?;
         Ok(())
     }
 
@@ -1322,7 +1587,9 @@ impl CanvasLayout {
     /// * `objects_locked` is a plain flag and is kept as it is;
     /// * `z_order` and `locked` are trimmed, lose blank or over-long refs and
     ///   duplicates (the FIRST occurrence is kept), and are cut to
-    ///   [`CANVAS_MAX_OBJECT_REFS`].
+    ///   [`CANVAS_MAX_OBJECT_REFS`];
+    /// * `interactions` are repaired by [`CanvasInteractions::sanitized`]
+    ///   (bad pairs dropped, the LAST duplicate kept, a `none` default unset).
     ///
     /// The result always passes [`CanvasLayout::validate`].
     pub fn sanitized(mut self) -> (CanvasLayout, Vec<String>) {
@@ -1374,6 +1641,9 @@ impl CanvasLayout {
         let (locked, lock_repairs) = sanitize_object_refs("locked", std::mem::take(&mut self.locked));
         self.locked = locked;
         repairs.extend(lock_repairs);
+        let (interactions, interaction_repairs) = std::mem::take(&mut self.interactions).sanitized();
+        self.interactions = interactions;
+        repairs.extend(interaction_repairs);
         (self, repairs)
     }
 
@@ -2017,13 +2287,19 @@ pub struct SavedRibbonFilter {
     pub connected_pivots: Vec<EntityId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connected_sheets: Vec<usize>,
+    /// For manual mode ("Selected visuals"): the NON-pivot model visuals the
+    /// filter targets -- design-query charts, cards, KPIs, gauges -- as canvas
+    /// object refs. Pivots stay in `connected_pivots` (P4 DC-3), which the
+    /// pivot backend route reads; the UI shows both as one checklist.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connected_visuals: Vec<CanvasObjectRef>,
     #[serde(default)]
     pub display_mode: SavedRibbonFilterDisplayMode,
     pub selected_items: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cross_filter_targets: Vec<EntityId>,
+    pub dependent_filters: Vec<EntityId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cross_filter_slicer_targets: Vec<EntityId>,
+    pub dependent_slicers: Vec<EntityId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advanced_filter: Option<SavedAdvancedFilter>,
     #[serde(default)]
@@ -2565,6 +2841,7 @@ mod sheet_kind_tests {
             objects_locked: true,
             z_order: vec![CanvasObjectRef { kind: "chart".into(), id: "7".into() }],
             locked: Vec::new(),
+            interactions: CanvasInteractions::default(),
         };
         assert!(bad.validate().is_err());
         let (fixed, repairs) = bad.sanitized();
@@ -2811,5 +3088,291 @@ mod sheet_kind_tests {
         assert_eq!(layout.grid_size_px, 30);
         assert_eq!(layout.page_width, CANVAS_DEFAULT_PAGE_WIDTH);
         assert_eq!(partial.wire_name(), "canvas");
+    }
+}
+
+#[cfg(test)]
+mod floating_range_hidden_lines_tests {
+    use super::*;
+
+    fn a_row(hidden_rows: Vec<u32>, hidden_cols: Vec<u32>) -> SavedFloatingRange {
+        let sheet = SheetId::from_bytes(identity::generate_uuid_v7());
+        SavedFloatingRange {
+            id: EntityId::from_bytes(identity::generate_uuid_v7()),
+            backing_sheet_id: SheetId::from_bytes(identity::generate_uuid_v7()),
+            host_sheet_id: sheet,
+            x: 0.0,
+            y: 0.0,
+            rotation: 0.0,
+            pin_to_grid: false,
+            row_count: 4,
+            col_count: 3,
+            col_widths: HashMap::new(),
+            row_heights: HashMap::new(),
+            show_title: true,
+            show_column_headers: true,
+            show_row_headers: true,
+            container: None,
+            hidden_rows,
+            hidden_cols,
+        }
+    }
+
+    /// A row written before the sets existed (no `hiddenRows`/`hiddenCols`
+    /// keys) loads with empty sets: `#[serde(default)]`.
+    #[test]
+    fn an_old_row_loads_with_empty_hidden_sets() {
+        let mut json = serde_json::to_value(a_row(vec![1], vec![2])).unwrap();
+        let obj = json.as_object_mut().unwrap();
+        assert!(obj.remove("hiddenRows").is_some(), "the camelCase key is written");
+        assert!(obj.remove("hiddenCols").is_some(), "the camelCase key is written");
+        let back: SavedFloatingRange = serde_json::from_value(json).unwrap();
+        assert!(back.hidden_rows.is_empty());
+        assert!(back.hidden_cols.is_empty());
+    }
+
+    /// Empty sets write no key; non-empty sets are written ascending and
+    /// deduplicated, so the same set always produces the same bytes.
+    #[test]
+    fn hidden_sets_are_omitted_when_empty_and_written_ascending() {
+        let empty = serde_json::to_value(a_row(Vec::new(), Vec::new())).unwrap();
+        assert!(empty.get("hiddenRows").is_none());
+        assert!(empty.get("hiddenCols").is_none());
+
+        let json = serde_json::to_value(a_row(vec![7, 2, 7, 0], vec![3, 1])).unwrap();
+        assert_eq!(json["hiddenRows"], serde_json::json!([0, 2, 7]));
+        assert_eq!(json["hiddenCols"], serde_json::json!([1, 3]));
+        let back: SavedFloatingRange = serde_json::from_value(json).unwrap();
+        assert_eq!(back.hidden_rows, vec![0, 2, 7]);
+        assert_eq!(back.hidden_cols, vec![1, 3]);
+    }
+}
+
+#[cfg(test)]
+mod canvas_interactions_tests {
+    use super::*;
+
+    fn obj(kind: &str, id: &str) -> CanvasObjectRef {
+        CanvasObjectRef { kind: kind.to_string(), id: id.to_string() }
+    }
+
+    fn pair(source: CanvasObjectRef, target: CanvasObjectRef, mode: VisualInteractionMode) -> CanvasInteraction {
+        CanvasInteraction { source, target, mode }
+    }
+
+    fn with_pairs(pairs: Vec<CanvasInteraction>) -> CanvasInteractions {
+        CanvasInteractions { default_mode: None, pairs }
+    }
+
+    /// The wire spelling (camelCase, mode words in lowercase) and a full
+    /// round trip through the canvas kind.
+    #[test]
+    fn interactions_round_trip_the_wire_in_camel_case() {
+        let layout = CanvasLayout {
+            interactions: CanvasInteractions {
+                default_mode: Some(VisualInteractionMode::Highlight),
+                pairs: vec![
+                    pair(obj("slicer", "s1"), obj("pivot", "p1"), VisualInteractionMode::None),
+                    pair(obj("chart", "7"), obj("chart", "8"), VisualInteractionMode::Filter),
+                ],
+            },
+            ..CanvasLayout::default()
+        };
+        let json = serde_json::to_value(SheetKind::Canvas(layout.clone())).unwrap();
+        assert_eq!(json["interactions"]["defaultMode"], "highlight", "{json}");
+        assert_eq!(json["interactions"]["pairs"][0]["mode"], "none", "{json}");
+        assert_eq!(json["interactions"]["pairs"][0]["source"]["kind"], "slicer", "{json}");
+        assert_eq!(json["interactions"]["pairs"][1]["target"]["id"], "8", "{json}");
+        let back: SheetKind = serde_json::from_value(json).unwrap();
+        assert_eq!(back, SheetKind::Canvas(layout));
+    }
+
+    /// An unchanged canvas keeps its BYTES: default interactions are never
+    /// written (the signed `.calp` precedent), and a layout written before the
+    /// field existed reads it as the default. Pairs without a default, and a
+    /// default without pairs, each write only what they carry.
+    #[test]
+    fn default_interactions_never_reach_the_wire_so_an_unchanged_canvas_keeps_its_bytes() {
+        let before_field = r#"{"type":"canvas","snapToGrid":true,"gridSizePx":20,"showGrid":true,"pagePreset":"16:9","pageWidth":1280,"pageHeight":720,"background":""}"#;
+        let read: SheetKind = serde_json::from_str(before_field).unwrap();
+        assert_eq!(read.canvas_layout().unwrap().interactions, CanvasInteractions::default());
+        assert_eq!(serde_json::to_string(&read).unwrap(), before_field, "the bytes did not survive");
+        let fresh = serde_json::to_string(&SheetKind::new_canvas()).unwrap();
+        assert!(!fresh.contains("interactions"), "a fresh canvas writes no interactions key: {fresh}");
+        let reread: SheetKind = serde_json::from_str(&fresh).unwrap();
+        assert_eq!(serde_json::to_string(&reread).unwrap(), fresh, "a fresh canvas re-serializes to its own bytes");
+
+        let only_default = CanvasInteractions { default_mode: Some(VisualInteractionMode::Filter), pairs: vec![] };
+        assert_eq!(serde_json::to_value(&only_default).unwrap(), serde_json::json!({ "defaultMode": "filter" }));
+        let only_pairs = with_pairs(vec![pair(obj("chart", "1"), obj("slicer", "2"), VisualInteractionMode::None)]);
+        let v = serde_json::to_value(&only_pairs).unwrap();
+        assert!(v.get("defaultMode").is_none(), "{v}");
+        assert!(!only_default.is_default() && !only_pairs.is_default());
+        assert!(CanvasInteractions::default().is_default());
+    }
+
+    #[test]
+    fn explicit_reads_only_the_listed_direction() {
+        let i = with_pairs(vec![pair(obj("chart", "1"), obj("pivot", "2"), VisualInteractionMode::Highlight)]);
+        assert_eq!(i.explicit(&obj("chart", "1"), &obj("pivot", "2")), Some(VisualInteractionMode::Highlight));
+        assert_eq!(i.explicit(&obj("pivot", "2"), &obj("chart", "1")), None, "a pair is directed");
+        assert_eq!(i.explicit(&obj("chart", "1"), &obj("pivot", "3")), None);
+    }
+
+    /// Every EDIT refusal, each through the whole layout's `validate` so the
+    /// edit path (CanvasLayoutPatch -> validate) is what is pinned.
+    #[test]
+    fn validate_refuses_each_bad_interaction() {
+        let valid = with_pairs(vec![
+            pair(obj("chart", "1"), obj("pivot", "2"), VisualInteractionMode::Filter),
+            pair(obj("pivot", "2"), obj("chart", "1"), VisualInteractionMode::None),
+            pair(obj("slicer", "3"), obj("chart", "1"), VisualInteractionMode::Highlight),
+        ]);
+        CanvasLayout { interactions: valid, ..CanvasLayout::default() }.validate().expect("a valid set passes");
+
+        let cases: Vec<(&str, CanvasInteractions, &str)> = vec![
+            (
+                "same source and target",
+                with_pairs(vec![pair(obj("chart", "1"), obj("chart", "1"), VisualInteractionMode::Filter)]),
+                "itself",
+            ),
+            (
+                "unknown source kind",
+                with_pairs(vec![pair(obj("control", "0:1"), obj("chart", "1"), VisualInteractionMode::Filter)]),
+                "'control'",
+            ),
+            (
+                "unknown target kind",
+                with_pairs(vec![pair(obj("chart", "1"), obj("shape", "9"), VisualInteractionMode::Filter)]),
+                "'shape'",
+            ),
+            (
+                "blank id",
+                with_pairs(vec![pair(obj("chart", ""), obj("pivot", "2"), VisualInteractionMode::Filter)]),
+                "empty id",
+            ),
+            (
+                "padded ref",
+                with_pairs(vec![pair(obj("chart", "1"), obj("pivot", " 2"), VisualInteractionMode::Filter)]),
+                "whitespace",
+            ),
+            (
+                "duplicate pair",
+                with_pairs(vec![
+                    pair(obj("chart", "1"), obj("pivot", "2"), VisualInteractionMode::Filter),
+                    pair(obj("chart", "1"), obj("pivot", "2"), VisualInteractionMode::None),
+                ]),
+                "twice",
+            ),
+            (
+                "defaultMode none",
+                CanvasInteractions { default_mode: Some(VisualInteractionMode::None), pairs: vec![] },
+                "default mode",
+            ),
+            (
+                "over the cap",
+                with_pairs(
+                    (0..=CANVAS_MAX_OBJECT_REFS)
+                        .map(|i| pair(obj("chart", &i.to_string()), obj("pivot", "p"), VisualInteractionMode::Filter))
+                        .collect(),
+                ),
+                "the limit is 4096",
+            ),
+        ];
+        for (label, interactions, needle) in cases {
+            let err = CanvasLayout { interactions, ..CanvasLayout::default() }
+                .validate()
+                .expect_err(label);
+            assert!(err.contains("interactions"), "{label}: the refusal names the field: {err}");
+            assert!(err.contains(needle), "{label}: expected {needle:?} in {err}");
+        }
+
+        // Exactly the cap is allowed.
+        let at_cap = with_pairs(
+            (0..CANVAS_MAX_OBJECT_REFS)
+                .map(|i| pair(obj("chart", &i.to_string()), obj("pivot", "p"), VisualInteractionMode::Filter))
+                .collect(),
+        );
+        at_cap.validate().expect("exactly the cap is allowed");
+    }
+
+    /// A load or pull REPAIRS: bad pairs dropped, padded refs trimmed, the LAST
+    /// duplicate kept (latest edit wins) at its own position, a `none` default
+    /// unset, the latest pairs kept under the cap -- and the result validates.
+    #[test]
+    fn sanitized_repairs_and_the_last_duplicate_wins() {
+        let raw = CanvasInteractions {
+            default_mode: Some(VisualInteractionMode::None),
+            pairs: vec![
+                pair(obj("chart", "1"), obj("pivot", "2"), VisualInteractionMode::Filter),
+                pair(obj("chart", "1"), obj("chart", "1"), VisualInteractionMode::Filter),
+                pair(obj("button", "x"), obj("chart", "1"), VisualInteractionMode::Filter),
+                pair(obj("slicer", "3"), obj("chart", "1"), VisualInteractionMode::Highlight),
+                pair(obj(" chart ", "1"), obj("pivot", "2 "), VisualInteractionMode::None),
+            ],
+        };
+        let layout = CanvasLayout { interactions: raw, ..CanvasLayout::default() };
+        assert!(layout.validate().is_err());
+        let (fixed, repairs) = layout.sanitized();
+        fixed.validate().expect("a sanitized layout always validates");
+        assert_eq!(fixed.interactions.default_mode, None);
+        assert_eq!(
+            fixed.interactions.pairs,
+            vec![
+                pair(obj("slicer", "3"), obj("chart", "1"), VisualInteractionMode::Highlight),
+                pair(obj("chart", "1"), obj("pivot", "2"), VisualInteractionMode::None),
+            ],
+            "the trimmed LAST occurrence of chart:1 -> pivot:2 wins, at its own position"
+        );
+        for needle in [
+            "interactions: default mode 'none' -> unset",
+            "interactions: 1 pair(s) with padded refs trimmed",
+            "interactions: 2 pair(s) dropped",
+            "interactions: 1 duplicate pair(s) dropped",
+        ] {
+            assert!(repairs.iter().any(|r| r.contains(needle)), "no repair line containing {needle:?}: {repairs:?}");
+        }
+
+        // Over the cap: the latest pairs survive.
+        let many = with_pairs(
+            (0..CANVAS_MAX_OBJECT_REFS + 3)
+                .map(|i| pair(obj("chart", &i.to_string()), obj("pivot", "p"), VisualInteractionMode::Filter))
+                .collect(),
+        );
+        let (capped, repairs) = many.sanitized();
+        capped.validate().unwrap();
+        assert_eq!(capped.pairs.len(), CANVAS_MAX_OBJECT_REFS);
+        assert_eq!(capped.pairs[0].source, obj("chart", "3"), "the oldest pairs go first");
+        assert!(repairs.iter().any(|r| r.contains("pairs -> 4096")), "{repairs:?}");
+
+        // A valid set comes back untouched with no lines.
+        let ok = with_pairs(vec![pair(obj("chart", "1"), obj("pivot", "2"), VisualInteractionMode::Filter)]);
+        let (same, repairs) = ok.clone().sanitized();
+        assert_eq!(same, ok);
+        assert!(repairs.is_empty(), "{repairs:?}");
+    }
+
+    /// DC-2: at save, a pair naming an object that no longer exists on the
+    /// canvas -- as source OR target -- is dropped; live pairs are untouched.
+    #[test]
+    fn retain_live_drops_pairs_naming_a_missing_object() {
+        let mut i = with_pairs(vec![
+            pair(obj("chart", "1"), obj("pivot", "2"), VisualInteractionMode::Filter),
+            pair(obj("chart", "gone"), obj("pivot", "2"), VisualInteractionMode::None),
+            pair(obj("slicer", "3"), obj("chart", "gone"), VisualInteractionMode::Highlight),
+            pair(obj("slicer", "3"), obj("chart", "1"), VisualInteractionMode::None),
+        ]);
+        let live: HashSet<CanvasObjectRef> = [obj("chart", "1"), obj("pivot", "2"), obj("slicer", "3")].into_iter().collect();
+        assert_eq!(i.retain_live(&live), 2);
+        assert_eq!(
+            i.pairs,
+            vec![
+                pair(obj("chart", "1"), obj("pivot", "2"), VisualInteractionMode::Filter),
+                pair(obj("slicer", "3"), obj("chart", "1"), VisualInteractionMode::None),
+            ]
+        );
+        assert_eq!(i.retain_live(&live), 0, "a second pass drops nothing");
+        assert_eq!(i.retain_live(&HashSet::new()), 2);
+        assert!(i.pairs.is_empty());
     }
 }

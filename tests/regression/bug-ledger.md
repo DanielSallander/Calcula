@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 501 | Open: 61 | Triaged: 0 | Fixed: 440 | Other: 0
+Total: 541 | Open: 66 | Triaged: 0 | Fixed: 475 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -4723,7 +4723,7 @@ THE CHART QUICK-ACCESS ELEMENTS POPUP STILL OFFERS AXIS TITLES AND GRIDLINES ON 
 
 **Repro:** Select a pie chart, open the quick-access Elements button.
 
-## BUG-0447 `[open]`
+## BUG-0447 `[fixed]`
 
 **Found:** 2026-10-08 (manual)
 **Oracle:** tile-visuals-locale-separators
@@ -4731,6 +4731,8 @@ THE CHART QUICK-ACCESS ELEMENTS POPUP STILL OFFERS AXIS TITLES AND GRIDLINES ON 
 THE TILE VISUALS WRITE '.' DECIMALS AND ',' GROUPING WHATEVER THE LOCALE: an sv-SE Card shows '1.2K kr' beside cells showing '1 234,50 kr', and a percent Card's source text '34,20%' sits beside '$4.5M' on the same page.
 
 **Repro:** sv-SE workbook, Cards over a currency cell and a percent cell (seen live in icons/canvas-powerbi-live-visuals.png).
+**Fix:** fixed
+  Files: app/extensions/Charts/rendering/visuals/visualValues.ts, app/extensions/Charts/lib/chartFieldTypes.ts, app/extensions/Charts/rendering/visuals/kpiPainter.ts, app/extensions/Charts/index.ts
 
 ## BUG-0448 `[open]`
 
@@ -5112,7 +5114,7 @@ set_pivot_number_format DIRTIES THE DOCUMENT WHEN IT REFUSES, AND RECORDS NO UND
 
 **Repro:** Headless: create a pivot with one value field, mark the document saved, call set_pivot_number_format { pivotId, valueFieldIndex: 5, numberFormat: "0.0" } -> Err("Value field index 5 out of range") AND is_modified() == true. Then a valid call with index 0 -> the format changes, and undo restores nothing from it. Reachable from the Pivot service's `setNumberFormat` (Pivot/lib/pivot-api.ts:1639, backend.ts setPivotNumberFormat). WP-C's Data format card does NOT use this door (it rides the fields update, Pivot/lib/pivotDataFormats.ts), so the Format tab is unaffected.
 
-## BUG-0489 `[open]`
+## BUG-0489 `[fixed]`
 
 **Found:** 2026-10-16 (manual)
 **Oracle:** chart-style-preset-leaves-previous-theme-keys
@@ -5228,3 +5230,390 @@ BACKGROUND TRANSPARENCY WAS NOT OFFERED FOR TEXT BOXES, SHAPES OR BUTTONS. contr
 BINDINGS OUTLIVED THE SLICERS, TIMELINES AND PIVOTS A SOURCE CASCADE DELETED. Delete Table, Convert to Range and a row/column delete that swallows a pivot end in object_deps::cascade_deleted_sources, which deleted the slicers / timelines and ran their ribbon-filter and script cascades but not drop_bindings_for_objects (only delete_pivot_table dropped them itself). Formulas > Bound Properties then listed '(no longer in this workbook)' rows, and an .xlsx save warned 'Bound properties ... stop following their formula' because xlsx_save_loss_report tested the RAW store.
 
 **Repro:** Bind a table slicer's header (/headerText := =Data!B1), Delete Table: the slicer goes, its binding row stays. Unit: object_bindings::cascade_tests a_source_cascade_drops_the_bindings_of_every_object_it_destroys.
+
+## BUG-0502 `[fixed]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** chart-spec-schema-refuses-seriesColors
+
+THE CHART SPEC SCHEMA REFUSED `seriesColors`. ChartSpec declares seriesColors (types.ts) and every series-colour surface writes it, but chartSpecJsonSchema had no such property and is additionalProperties:false at the top level, so validateChartSpec answered "spec: unknown property 'seriesColors'". The object pane's Data tab commits through commitChartDataPatch, whose schema gate therefore refused EVERY series colour pick (shown inline as 'This chart's data settings are not valid'); scripts were refused at the broker gate and the JSON editor red-underlined a valid spec. The drift guard missed it because its key list (CHART_SPEC_KEYS) was a hand copy that lacked the key too.
+
+**Repro:** Chart on a range, object pane > Data > pick a series colour (input then change): nothing is written and the range field shows "spec: unknown property 'seriesColors'". Unit: Charts/components/pane/__tests__/ChartRangeDataTab.test.tsx 'input then change writes the picked colour once, and the draft is dropped'.
+
+## BUG-0503 `[fixed]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** format-tab-colorbox-never-commits
+
+THE FORMAT TAB COLOUR SWATCH NEVER COMMITTED A PICKED COLOUR. ColorBox (BuiltIn/ObjectPane/components/fields/ColorField.tsx:99-109 at aff01683) was a CONTROLLED <input type="color">: React's onChange (the native `input`) only previewed, React's controlled restore then wrote the OLD value back into the DOM, and the native `change` listener (:67-80) saw el.value === pickerHex(current) and returned without committing. Every Format-tab colour row of every family (chart, pivot, slicer, timeline, control, floating grid, navigator) -- among them the chart's Effects > Background the owner reported -- previewed the pick and then reverted it.
+
+**Repro:** Select a chart, Format tab > Effects > Background, pick a colour in the native picker: the preview shows, then the swatch and the chart revert and nothing is written. Unit: BuiltIn/ObjectPane/__tests__/colorBox.test.tsx '[A] input then change commits the picked colour (failed on the controlled picker)'.
+
+## BUG-0504 `[fixed]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** chart-data-tab-series-colour-never-persists
+
+A SERIES COLOUR PICKED ON THE CHART DATA TAB NEVER PERSISTED: the commit patch was diffed against the on-screen DRAFT and came out empty. Each `input` step set the pane's draftColors (pane/ChartRangeDataTab.tsx:321-330 at aff01683), the editor received the draft as `spec` (shownSpec, :286-288), and the native `change` built its patch against that draft (data/RangeSourceEditor.tsx:178-183), so seriesColorPatch saw current[name] === hex and returned null (lib/chartDataReader.ts:580). Nothing was written and the draft stayed on screen, unpersisted.
+
+**Repro:** Chart on a range, object pane > Data > pick a series colour: the bar recolours, nothing is saved, and reselecting the chart shows the old colour. Unit: Charts/components/pane/__tests__/ChartRangeDataTab.test.tsx 'input then change writes the picked colour once, and the draft is dropped'.
+
+## BUG-0505 `[fixed]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** chart-element-card-colour-commits-per-input
+
+THE CHART ELEMENTS CARD'S COLOUR SWATCHES COMMITTED ON EVERY `input` EVENT (ChartFormatPane.tsx:1185 at aff01683), so dragging in the picker wrote, and recorded an undo step, per drag step; its Background swatch also showed #ffffff whatever was painted, because ChartAreaSections resolved the theme with no container (:2051).
+
+**Repro:** Select a chart, Format tab > Chart elements > Chart area fill, drag in the picker: each drag step is one undo entry. Unit: Charts/components/__tests__/elementCardOneStep.test.tsx "the chart area's Background writes the CONTAINER (Format Object), never the theme -- once, on the pick's change".
+
+## BUG-0506 `[fixed]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** chart-plot-area-default-fill-hides-container
+
+THE PLOT AREA'S DEFAULT FILL HID THE VISUAL CONTAINER BACKGROUND ON EVERY CARTESIAN CHART AND MULTI-ROW CARD. DEFAULT_CHART_THEME.plotBackground was "#fafafa" (chartTheme.ts:71 at aff01683), filled by drawPlotBackground from 12 painters and the 2 chrome helpers, and multi-row card rows filled theme.plotBackground directly (multiRowCardPainter.ts:103-105, ignoring the plot gradient), so a background colour set on the visual showed only in the margin around the plot.
+
+**Repro:** Column chart, Format tab > Effects > Background = dark blue: only the frame around the plot turns blue; the plot stays near-white. Unit: Charts/rendering/__tests__/plotFill.test.ts 'the DEFAULT theme paints nothing and touches no fillStyle'.
+
+## BUG-0507 `[fixed]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** ribbon-filter-first-dot-split-hides-failure
+
+A RIBBON FILTER ON A SCHEMA-QUALIFIED TABLE SHOWED NO VALUES, AND HID WHY. refreshFilterItems (filterPaneStore.ts:486-544 at aff01683) split the field key "BI.dim_date.year" at the FIRST dot (parseBiFieldName, :546-553) and sent table "BI" to bi_get_column_values, which failed; the sibling constraints (:510) and getBiColumnAvailableValues (:519-527) used the same splitter. The error went only to console.error (:541-543), the card marked itself loaded anyway (RibbonFilterCard.tsx:89-95) so it never retried, and the dropdown printed 'No matching values' -- which reads as an empty column, not a failure.
+
+**Repro:** AdventureWorks model (tables named BI.dim_*), Controls > Add > Filter on BI.dim_date.year, open it: 'No matching values'. Unit: ControlsPane/lib/__tests__/filterPaneStore.test.ts "a dotted table name reaches the engine whole (never the first-dot split 'BI')"; ControlsPane/__tests__/ribbonFilterItemsError.test.tsx "a failed load shows the alert (the whole field key named), never 'No matching values'; Retry loads".
+
+## BUG-0508 `[fixed]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** getBiModelInfo-typed-non-null
+
+getBiModelInfo (ControlsPane/lib/filterPaneApi.ts) was typed Promise<BiModelInfo> while the Rust command returns Result<Option<BiModelInfo>, String> (app/src-tauri/src/bi/commands.rs bi_get_model_info), so a connection with no model loaded resolved null where callers read .tables -- a TypeError the type system said could not happen.
+
+**Repro:** Unit: ControlsPane/lib/__tests__/filterPaneStore.test.ts "a connection with no model loaded fails with the 'not loaded' sentence".
+
+## BUG-0509 `[fixed]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** container-literal-solid-colour-keeps-gradient
+
+A SCRIPT / MCP / OBJECT-BINDING LITERAL WRITE OF A CONTAINER BACKGROUND COLOUR LEFT A STORED GRADIENT VISIBLE (and a background switched off stayed off), so the write showed nothing -- the same 'a pick that does nothing' as G1, through the Rust container-literal door instead of the Format pane.
+
+**Repro:** Chart with a stored container gradient; a script or MCP literal write of /container/background/color = #ff0000: the gradient still paints. Rust: object_bindings/container_literal_tests.rs a_solid_background_colour_clears_the_gradient_and_shows_the_background.
+
+## BUG-0510 `[open]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** solid-background-rule-unrouted-doors
+
+TWO BACKGROUND-COLOUR DOORS STILL SKIP THE SOLID-COMMIT RULE. (1) A page navigator's flat `containerBackgroundColor` key goes through the control arm (set_control_property_core), not object_bindings/container_literal.rs, and the navigator's default show is false (Controls navigatorModel.ts:228), so a script/MCP colour write on a navigator whose background is off shows nothing. (2) A FORMULA-bound background colour is an overlay applied at resolve time, not a literal write, so it still sits under a stored gradient.
+
+**Repro:** (1) Page navigator, background not shown: a script setProperty('containerBackgroundColor', '#ff0000') paints nothing. (2) Chart with a stored container gradient; bind /container/background/color to =A1 holding #ff0000: the gradient still paints. Not reproduced live.
+
+## BUG-0511 `[open]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** cf-glyph-rule-options-ignored
+
+DATA BARS AND ICON SETS IGNORE MOST OF THEIR RULE'S OPTIONS. The one data-bar painter (app/extensions/ConditionalFormatting/rendering/dataBarRenderer.ts paintDataBar) reads only fillColor and gradientFill: borderColor, negativeFillColor/negativeBorderColor, axisColor/axisPosition, direction and showValue (Excel's 'Show Bar Only') are never read, so a negative value paints a positive-coloured bar from the left edge and 'Show Bar Only' still shows the value. The icon painter (iconSetRenderer.ts paintIconSetIcon) has no reader for IconSetRule.showIconOnly anywhere in the app, so 'Show Icon Only' still shows the number. A rule-option search of app/ finds showIconOnly/showValue only in lib/presetRules.ts. Pre-existing; found by reading, not seen on screen.
+
+**Repro:** Data Bars on a range holding -5 and 10: Excel draws the -5 bar red, leftwards from an axis; Calcula draws it in the fill colour from the left edge (percent from the backend). New Rule > Icon Sets > Show Icon Only: the value is still painted. Not reproduced live.
+
+## BUG-0512 `[fixed]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** protection-gate-parity
+
+TYPING INTO A FLOATING GRID IGNORED THE HOST SHEET'S PROTECTION. update_floating_range_cell_inner (the in-cell editor, the floating grid's Delete fallback and the script floatingRangeSetCells loop) gated only through update_cell_on_sheets_inner on the BACKING sheet, whose protection is never set, so a locked cell of a floating grid on a protected host was written freely while the same sheet refused the same edit in its own cells (and refused moving the grid, BUG-0176).
+
+**Repro:** Protect Sheet1 with every cell locked; type 9 into a cell of a floating grid on Sheet1: the value is stored and the document is dirty.
+**Fix:** fixed
+
+## BUG-0513 `[open]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** cell-target-route-gap
+
+NO STYLE-ONLY WRITE REACHES A FLOATING GRID'S CELLS. Format Painter into a floating grid, Paste Formatting and Paste (No Borders) onto a floating grid assign a source style INDEX per destination cell (set_cell_style), and no backend command that sets a style index takes a cell target: set_cell_style acts on the active sheet only, and update_cells_batch's target route always writes a VALUE with the style. Owner finding G3 asks for Format Painter sheet-to-floating-grid; P3 S10 refuses these doors on a floating grid with one sentence instead of painting the host's hidden cells.
+
+**Repro:** Select a sheet cell with a fill, Home > Format Painter, click a floating grid's cell: 'Format Painter cannot paint into a floating grid's cells yet' (expected: the fill is painted there). Same for Home > Paste > Formatting on a floating grid's cell.
+
+## BUG-0514 `[open]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** cell-target-route-gap
+
+CUSTOM SORT OFFERS NO CELL ICON ON A FLOATING GRID. The Sort dialog's 'Cell Icon' order list asks get_range_icons which icons a column SHOWS; that command reads the ACTIVE sheet only and takes no cell target, and re-deriving the answer from the rule list is BUG-0107's mistake. So on a floating grid's cells the list is empty ('no icons found') and a sort by cell icon cannot be chosen there. Every other sort (values, cell colour, font colour, custom lists) works on the object's cells with its target.
+
+**Repro:** Put an icon-set rule on a floating grid's column, select a cell of it, Home > Sort & Filter > Custom Sort, Sort On 'Cell Icon': the Order list says no icons were found.
+
+## BUG-0515 `[fixed]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** formula-text-spelling
+
+AN OFF-SHEET ROW/COLUMN INSERT OR DELETE SHOUTED THE SHEET NAME IN EVERY FORMULA IT RE-POINTED. shift_cross_sheet_formulas_for_off_sheet_edit (commands/structure.rs) re-parses the rewritten text, and the lexer uppercases bare sheet qualifiers, so =Sheet2!A3 on Sheet1 became =SHEET2!A5 after inserting two rows on the non-active Sheet2 -- and, through P3's table semantics, every host formula reading a floating grid (=Float1!A3 -> =FLOAT1!A5). The value and the dependency edge were right (lookups are case-insensitive); the formula bar showed the wrong spelling and it was saved that way.
+
+**Repro:** Two sheets, Sheet1 active. Sheet1!E1 = =Sheet2!A3. Insert two rows at row 2 on Sheet2 without activating it (off_sheet_structural_edit, or insertRows with sheetIndex 1): Sheet1!E1 reads =SHEET2!A5.
+**Fix:** fixed
+
+## BUG-0516 `[fixed]`
+
+**Found:** 2026-10-16 (manual)
+**Oracle:** selection-owner-door-parity
+
+Home commands refused on floating-grid cells (owner G3). With a floating grid's cell selected, every Home command (Bold, fills, borders, number formats and decimals, alignment, wrap, Clear, Sort, Fill, AutoSum, Insert Function, Merge, Conditional Formatting, Row Height / Column Width, Hide / Unhide, Insert / Delete Sheet Rows and Columns, Copy / Paste / Paste Special, Format Painter from the grid, Find & Replace, Go To Special) refused with "... is not available for a floating range's cells yet". BUG-0185 had made those doors refuse instead of writing Core's hidden sheet cell under the grid; BUG-0493 owned the selection without a cell target. Nothing could act on the grid's own cells.
+
+**Repro:** Select a cell of a floating grid on Sheet1 and press Home > Bold (or Decrease Decimal, Sort A to Z, ...): one refusal toast, nothing changes.
+**Fix:** fixed
+
+## BUG-0517 `[fixed]`
+
+**Found:** 2026-10-17 (manual)
+**Oracle:** member-key-identity
+
+A BI Decimal value between -1 and 0 lost its sign in its text: arrow_value_to_string computed `raw / divisor` (0 for -0.50) and printed the absolute fraction, so -0.50 read "0.50" -- in query results written to the grid, in every model value list (slicer, ribbon filter, CUBE builder) and so as the member KEY, where -0.50 and +0.50 became one member and selecting one selected both.
+
+**Repro:** Arrow Decimal128(10,2) value -50 -> bi::commands::arrow_value_to_string gives "0.50" (expected "-0.50").
+**Fix:** fixed
+
+## BUG-0518 `[fixed]`
+
+**Found:** 2026-10-17 (manual)
+**Oracle:** member-key-identity
+
+A model pivot keyed a Decimal member differently from the model's value list: the BI pivot cache interns a Decimal128 as an f64 and spelled its member key format!("{}", f64) ("5.5", "10"), while bi_get_column_values keys it by the exact decimal text ("5.50", "10.00"). The P2/P4 contract (member_key_of == the model list's key, byte for byte) did not hold for any Decimal column; a hidden item named by a list key ("5.50") resolved to nothing in the pivot engine.
+
+**Repro:** BI table with a Decimal(10,2) price 5.50: bi_get_column_values -> "5.50"; a BI pivot on price -> header key "5.5".
+**Fix:** fixed
+
+## BUG-0519 `[fixed]`
+
+**Found:** 2026-10-17 (manual)
+**Oracle:** member-key-identity
+
+The ribbon filter's advanced conditions (ControlsPane FilterDropdown evalCondition) compared DISPLAY text: 'is blank' / 'is empty' tested the item text, which for the model's blank member was "(blank)", so it never matched the blank member; the numeric conditions ran parseFloat on both sides, so a de-DE target "3.000,5" read as 3 (and kept 1234.5 for 'is greater than'); the date conditions were plain string comparisons of the item text against what the user typed, so 'is after 01.02.2024' compared "2024-03-01" > "01.02.2024" lexically.
+
+**Repro:** Model column with values 1234.5, 3578.27 and a NULL; ribbon filter > Advanced: 'is greater than' 3.000,5 under de-DE kept both numbers; 'is blank' kept nothing.
+**Fix:** fixed
+
+## BUG-0520 `[fixed]`
+
+**Found:** 2026-10-17 (manual)
+**Oracle:** app-locale-input
+
+A value typed into a BI pivot's writeback column under a comma-decimal app locale was rewritten before submission: submitWritebackValue folded any "<digits>,<digits>" into "<digits>.<digits>" for EVERY column type, so a TEXT writeback column (a note, a code such as "1,5") stored "1.5" -- not what the user typed. For NUMBER columns the same fold left the foreign spelling to the backend's lenient parse_value (which replaces ',' with '.'), so a de-DE "1.5" was accepted as one and a half and a de-DE "1.234,5" was refused instead of read as 1234.5.
+
+**Repro:** sv-SE app locale; a model with a String writeback column placed as a lookup row field of a BI pivot; type 1,5 into a leaf cell -> the stored entry is "1.5". de-DE with a Float64 writeback column: type 1.234,5 -> refused ('expects a number'); type 1.5 -> stored 1.5.
+**Fix:** fixed
+  Files: app/extensions/Pivot/lib/writebackEditing.ts, app/extensions/Pivot/lib/__tests__/writebackEditing.test.ts
+
+## BUG-0521 `[fixed]`
+
+**Found:** 2026-10-17 (manual)
+**Oracle:** app-locale-fill-series
+
+The fill handle (drag, double-click fill to the edge, Fill > Series > AutoFill) and the script api.fillRange({type:"series"}) read each source cell's DISPLAY text with parseFloat and wrote generated numbers as String(n). Under a comma-decimal app locale this produced a WRONG SERIES with nothing on screen to say so: de-DE cells 1,5 and 2,5 read as 1 and 2 and filled 3, 4, 5; de-DE 1.000 / 2.000 read as 1 and 2; and a generated fraction was written as "3.5", which the batch write parses in the app locale (de-DE: a mis-grouped TEXT). parseFloat also read "10 kg" as 10, so a unit column filled "30" with its unit dropped.
+
+**Repro:** App locale de-DE (File > Options > General). Type 1,5 in A1 and 2,5 in A2, select both, drag the fill handle down to A5 -> A3:A5 hold 3, 4, 5 (expected 3,5 / 4,5 / 5,5). Same with 0,1 / 0,2 under sv-SE -> 0 / 0 / 0 or text.
+**Fix:** fixed
+  Files: app/src/core/lib/fillEngine.ts, app/src/api/scriptHost/host.ts, app/src/core/lib/__tests__/fillEngine.locale.test.ts
+
+## BUG-0522 `[open]`
+
+**Found:** 2026-10-17 (manual)
+**Oracle:** dax-format-not-app-locale
+
+DAX FORMAT() does not format in the app locale, nor with .NET semantics in ANY locale: model-engine-lib compiles FORMAT to SQL TO_CHAR (engine-core compute/expression/text.rs:221-225), which is pushed down to Postgres for DirectQuery. TO_CHAR does not implement .NET format strings ("Currency", "#,0.00", "Percent"), so FORMAT([Revenue], "#,0.00") is wrong under en-US too, and a de-DE or sv-SE user gets en-US-shaped text from a measure that formats itself.
+
+**Repro:** A model measure =FORMAT(SUM(Sales[Amount]), "#,0.00") on the AdventureWorks Postgres source, shown in a canvas Card under app locale de-DE: the text is not 1.234,50-shaped (and is not .NET's #,0.00 under en-US either).
+
+## BUG-0523 `[open]`
+
+**Found:** 2026-10-17 (manual)
+**Oracle:** table-slicer-key-is-display-text
+
+A TABLE-source slicer's member key is the app-locale DISPLAY text of each cell (slicer/commands.rs format_cell_value(&cell.value, style, &locale)), because its selection is applied through AutoFilter value matching, which is display text by Excel's semantics (autofilter.rs, tables.rs). So after an app-locale switch a stored selection on a numeric or date column ('1.234,5', '15.01.2024' under de-DE) no longer matches the new display ('1 234,5', '2024-01-15' under sv-SE): the slicer shows nothing selected and the table comes back unfiltered or empty. Pivot, BI, model-slicer and design-query members ARE invariant-keyed (MemberRef.key); only table slicers are not.
+
+**Repro:** Table with a number column (1234.5, 99) and a slicer on it; app locale de-DE; select '1.234,5'. Switch File > Options > Locale to sv-SE: the slicer's stored selection '1.234,5' matches no item, the table filter no longer keeps the row.
+
+## BUG-0524 `[fixed]`
+
+**Found:** 2026-10-17 (manual)
+**Oracle:** app-locale-display
+
+The Value Field Settings dialog's Base item list (Show Values As: Difference From / % Of) showed member KEYS as its option text: P2 S7 projected getPivotFieldUniqueValues().members to keys for the dialog, so a de-DE user saw invariant "1234.5" instead of "1234,5", sv-SE month groups read "Jan" instead of "jan", and the blank member was an EMPTY option instead of "(Blank)".
+
+**Repro:** Range pivot with a numeric row field holding 1234.5 and a blank; app locale de-DE; Value Field Settings > Show Values As: Difference From > Base field = that field: the Base item options read "1234.5" and an empty option.
+**Fix:** fixed
+
+## BUG-0525 `[fixed]`
+
+**Found:** 2026-10-17 (manual)
+**Oracle:** engine-contested-empty-in-list
+
+An EMPTY contested IN-list (a scoped IN slicer with nothing selected that some requested measure CLEARs) made the whole query fail with DataFusion Internal("predicate did not evaluate to an array") instead of keeping no row for the honouring measures: the local executor rendered the empty list as the constant FALSE inside CASE WHEN and the row-domain probe, and DataFusion refuses a constant CASE predicate there.
+
+**Repro:** model-engine-lib: measures [Revenue, Total=SUM(amount, RESET())], scoped_in_filters [Store[region] IN ()] level 1 -> Err(DataFusion Internal). Test: tuple_filter_tests::an_empty_contested_in_list_matches_nothing.
+**Fix:** fixed
+
+## BUG-0526 `[fixed]`
+
+**Found:** 2026-10-17 (manual)
+**Oracle:** engine-contested-probe-join
+
+A GROUPED query whose every measure clears a contested DIMENSION filter (e.g. group by Store[region], measure SUM(amount, CLEAR(Product)), scoped IN on Product[cat]) failed with DataFusion SchemaError FieldNotFound product.cat: the row-domain probe in HAVING reads the contested column, but the dimension was joined only when some measure kept the filter.
+
+**Repro:** Test: tuple_filter_tests::a_contested_filter_cleared_by_every_measure_still_bounds_the_grouped_rows (cached and connector engines).
+**Fix:** fixed
+
+## BUG-0527 `[fixed]`
+
+**Found:** 2026-10-17 (manual)
+**Oracle:** charts-design-query-unknown-table-filter
+
+mergePageFilters (Charts/lib/designQueryChartDataReader.ts) promised to skip a filter whose field names no table of the model, but splitBiFieldKey falls back to a first-dot split, so a DOTTED field on a table the model lacks ('Gone.Region') was sent as table 'Gone' and the backend refused the WHOLE design query instead of dropping that one filter. The new tuple-filter merge inherited the same split.
+
+**Repro:** Tests: designQueryChartDataReader.test.ts 'skips a DOTTED field whose table the model does not have'; designQueryCrossFilter.test.ts 'a tuple filter naming a column the model does not have is skipped WHOLE'.
+**Fix:** fixed
+
+## BUG-0528 `[fixed]`
+
+**Found:** 2026-10-17 (manual)
+**Oracle:** script-crossfilter-slicer-source
+
+api.setCrossFilter accepted a MODEL SLICER as the source once S8 registered the Slicer @api/modelVisuals provider (role.source true). The script then held a cross-filter 'selection' on the slicer that filtered every other visual of the page while the slicer itself showed nothing selected, and Clear All Slicers did not clear it (visual selections are kept apart from slicers): a filter nobody can see. No gesture creates such a selection; only charts and pivots hold one.
+
+**Repro:** Script: api.setCrossFilter({kind:'slicer', id:<model slicer>}, {fields:['Geo.Region'], tuples:[['Pacific']]}) on a canvas page -> accepted; getCrossFilters() lists it. Test: crossFilterScriptRows.test.ts 'refuses a model slicer as a source'.
+**Fix:** fixed
+
+## BUG-0529 `[fixed]`
+
+**Found:** 2026-10-17 (manual)
+**Oracle:** pivot-filtered-view-model-format
+
+A canvas BI pivot box lost its model number formats as soon as another visual cross-filtered it: run_bi_pivot_filtered_view rebuilt the query through bi_request_from_definition, which leaves a format ADOPTED from the model out of the request, and nothing on the design-query path re-adopts it, so every value cell of the filtered view painted in General.
+
+**Repro:** Measure Money = SUM(amount) FORMAT "#,##0.00" on a BI pivot; run_bi_pivot_filtered_view with a tuple -> grand total formattedValue "60" instead of "60.00". Test: filtered_view_tests::the_filtered_view_paints_the_model_format_the_real_pivot_adopted.
+**Fix:** fixed
+
+## BUG-0530 `[fixed]`
+
+**Found:** 2026-10-17 (manual)
+**Oracle:** crossfilter-source-vanished
+
+A cross-filter selection outlived its source when the chart or pivot box disappeared any way other than the explicit Delete command (Ctrl+Z of its creation, a script/MCP/AI removal, a sheet delete): only performChartDeleteLanded / notePivotDeleted cleared it, so the page stayed filtered and every other visual badged 'Filtered by' a visual that no longer existed.
+
+**Repro:** Selection on chart A, Ctrl+Z removes A, Charts reloads the store -> getCrossFilters() still lists chart:A. Tests: reportFilters.pruneMissing.test.ts, chartCrossFilterPrune.test.ts, pivotCrossFilterView.test.ts 'a pivot box gone from its page by any route'.
+**Fix:** fixed
+
+## BUG-0531 `[fixed]`
+
+**Found:** 2026-10-17 (manual)
+**Oracle:** timeline-labels-locale-switch
+
+Timeline period labels kept the old locale after a runtime locale switch: the labels are written by Rust in the app locale and cached per timeline, and TimelineSlicer had no LOCALE_CHANGED listener (nothing else reached its store on a switch).
+
+**Repro:** Months timeline under en-US, switch to sv-SE -> labels stay 'Jan', 'Q1'. Test: TimelineSlicer/__tests__/timelineLocaleRefresh.test.ts.
+**Fix:** fixed
+
+## BUG-0532 `[fixed]`
+
+**Found:** 2026-10-17 (manual)
+**Oracle:** pivot-filtered-view-locale-signature
+
+A cross-filtered canvas pivot box kept its filtered view in the OLD locale after a locale switch: the view's cache signature was {version, request}, neither of which a locale switch moves, so the re-fetch after LOCALE_CHANGED returned early with the stale Rust-formatted text.
+
+**Repro:** Selection filters box p1, switch en-US -> de-DE -> no second run_bi_pivot_filtered_view. Tests: pivotCrossFilterView.test.ts 'a locale switch re-reads the filtered view', 'a real view re-announced after a locale switch re-asks'.
+**Fix:** fixed
+
+## BUG-0533 `[fixed]`
+
+**Found:** 2026-10-17 (manual)
+**Oracle:** paste-special-operation-display-parse
+
+Paste Special Add/Subtract/Multiply/Divide re-parsed DISPLAY text with Number() (a de-DE '1,5', or an en-US '1,234.00' / '$5.00' / '50%', read as 0) and wrote String(result) ('3.5') back as user input, which a comma-decimal locale does not read as 3,5 -- on sheets and on the new floating-grid route.
+
+**Repro:** de-DE: A1=1,5, B1=2; copy A1, Paste Special Add on B1 -> 2. Test: PasteSpecial/__tests__/pasteSpecialOperationTyped.test.ts.
+**Fix:** fixed
+
+## BUG-0534 `[fixed]`
+
+**Found:** 2026-10-17 (manual)
+**Oracle:** design-query-decimal-inclusion-inversion
+
+On the host-mask route a design query's inclusion list hid exactly the SELECTED members of a Decimal column: apply_design_query_zones compared the member KEYS ('5.50') with get_unique_values_for_filter's display spelling ('5.5'), so the selected member was pushed into hidden_items and the chart answered empty or wrong totals with no error.
+
+**Repro:** Cache field with MemberKind::Decimal{scale:2}, values 5.5/10/7.25; included_items ['5.50'] -> hidden_items held '5.5'. Test: headless.rs design_query_filter_tests::an_inclusion_of_a_decimal_member_key_keeps_that_member.
+**Fix:** fixed
+
+## BUG-0535 `[fixed]`
+
+**Found:** 2026-10-17 (manual)
+**Oracle:** setstate-style-property-unvalidated
+
+object.setState aspects chart.setStyleProperty and slicer.setStyleProperty had no vSetState row: they reached the `return true` tail, so a restricted script with no capability could write a value of any type and size into the chart's persisted spec as _style_<name> (the schema skips _style_* keys) and from there into a signed .calp -- the shape.setProperty class.
+
+**Repro:** vSetState(['chart.setStyleProperty', ['bg', 'x'.repeat(3e6)]]) -> true. Test: setStateAspectRows.test.ts 'each style-override aspect has its own vSetState row'.
+**Fix:** fixed
+
+## BUG-0536 `[open]`
+
+**Found:** 2026-10-17 (manual)
+**Oracle:** native-colour-input-commits-per-step
+
+WebView2 opens Chromium's in-page colour popup (not the OS ChooseColor) for <input type="color">, and one pick there fires MANY `input` events before its one `change` (measured live: 8 inputs + 1 change for a keyboard pick of R=100 G=30 B=200; a drag fires one per pointer step). The colour inputs that still commit on React onChange (= every `input`) therefore write once per step: the layout kit's ColorPopover custom picker (src/api/layout/primitives/Color.tsx, the `${testId}-custom` input) and the page navigator buttons' colour rows (extensions/Controls/PropertiesPane/PageNavigatorButtonsSection.tsx). Expected: one write and one undo step per pick, as useNativeColorPick gives the object pane.
+
+**Repro:** Live: canvas-round2-quick Q7 records native-pick-events input=8 change=1. The per-step commit of the two listed inputs is inferred from their onChange={(e) => onChange(e.target.value)} wiring, not yet driven live: pick a custom colour through either and count undo steps.
+
+## BUG-0537 `[fixed]`
+
+**Found:** 2026-10-17 (manual)
+**Oracle:** colour-hex-enter-same-colour-noop
+
+Typing a hex colour into a colour palette's hex box and pressing Enter applied NOTHING when it equalled the palette's `value`. For Home > Fill Color / Font Color `value` is the REMEMBERED colour (Excel's yellow by default), not the cell's, so typing #FFFF00 + Enter filled nothing -- on sheets and floating grids alike -- while a click on the same yellow swatch did apply.
+
+**Repro:** Home > Fill Color chevron, hex box '#FFFF00', Enter on any selection: the cells stay white. Test: colorPalette.test.tsx 'Enter in the hex field applies the colour the palette ALREADY shows'.
+**Fix:** fixed
+
+## BUG-0538 `[fixed]`
+
+**Found:** 2026-10-17 (manual)
+**Oracle:** fill-menu-greying-reads-hidden-selection
+
+Home > Fill's Down/Right/Up/Left greying read Core's selection even while a floating grid's cells held the selection. Core's hidden selection is then usually A1, where Down and Right are always grey, so Fill Down on Float1!B1:B2 could not be clicked at all although the command supports floating grids (P3).
+
+**Repro:** Select Float1!B1:B2 (Sheet1 A1 active underneath), Home > Fill: Down is disabled. Test: fillMenuButton.test.tsx 'a floating grid's cells: the greying reads ITS selection'.
+**Fix:** fixed
+
+## BUG-0539 `[fixed]`
+
+**Found:** 2026-10-17 (manual)
+**Oracle:** getpivotdata-names-the-member-key
+
+GETPIVOTDATA on a model pivot's DECIMAL member named and matched the cache's f64 label ("2.29") instead of the member KEY ("2.2900000000", which carries the column's scale since BUG-0518). The round-2 contract is that selections, filters, cross-filter tuples and GETPIVOTDATA match on the key, so a GETPIVOTDATA that names a list price by the key the value list, the slicers and the cross-filter carry answered #REF!.
+
+**Repro:** Canvas BI pivot with rows BI.dim_product.listprice: get_pivot_data_formula on the 2.29 row's value answered the item "2.29" while the header's member.key was "2.2900000000"; GETPIVOTDATA(.., "listprice", "2.2900000000") answered #REF!.
+**Fix:** fixed
+
+## BUG-0540 `[fixed]`
+
+**Found:** 2026-10-17 (manual)
+**Oracle:** cross-sheet-edges-after-load
+
+After File > Open, a formula on any sheet other than the one active at load did not follow its precedents on other sheets until that sheet was visited. open_file rebuilds cross-sheet edges for the ACTIVE sheet only (the installer register_object_sheet_edges covered floating-range backing sheets alone), and the off-sheet cascade finds dependents through the cross-sheet map only. Live: Sheet1!B1 = Sheet2!A1*10 in a file saved on Sheet2 stayed 20 after Sheet2!A1 became 3; a Sheet1 GETPIVOTDATA on a canvas pivot kept the old value after the pivot re-folded. Stale values, silently.
+
+**Repro:** Sheet1!B1 = Sheet2!A1*10, Sheet2!A1 = 2; save with Sheet2 active; reopen; set Sheet2!A1 = 3: Sheet1!B1 still reads 20 (30 after a visit to Sheet1 and the next edit).
+**Fix:** fixed
+
+## BUG-0541 `[fixed]`
+
+**Found:** 2026-10-17 (manual)
+**Oracle:** pivot-autofit-measures-characters
+
+Pivot auto-fit (auto_fit_pivot_columns) sized each column from the UTF-8 BYTE length of its widest shown text, not its character count. Since round 2 (P2) a pivot's numbers are shown in the app locale, and sv-SE groups with a non-breaking space (two bytes), so every value column fitted about 12 px wider than drawn ('21 143 338' = 12 bytes, 10 characters). On a 640 px canvas pivot box the last year column (2026) moved entirely past the box's right edge and could not be clicked, picked or selected; any non-ASCII member label (a/o with ring or umlaut, CJK) over-widened the same way.
+
+**Repro:** App locale sv-SE; a canvas model pivot box 640 px wide, rows territorygroup/territoryname, columns year, values Revenue: the year columns fit 86.4 px each (12 x 6.2 + 12) instead of 74, so the fourth year column started at 659 px and the box (638 px of content) showed none of it; cellSheetRect(view row, 4) was null.
+**Fix:** fixed

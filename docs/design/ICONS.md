@@ -4,7 +4,7 @@
 **Code:** the drawings live in `app/src/api/icons/` (`frame.tsx` + four groups: `home.tsx`,
 `chart.tsx`, `data.tsx`, `generic.tsx`); `app/src/api/ribbonIcons.tsx` aggregates them into the one
 `RibbonIcon` namespace every ribbon, rail, sidebar, launcher, menu and add-in token resolves against.
-**Guard:** `app/src/api/__tests__/ribbonIcons.test.tsx` (2,769 cases over 270 keys, 2026-10-08).
+**Guard:** `app/src/api/__tests__/ribbonIcons.test.tsx` (2,813 cases over 274 keys, 2026-10-17).
 **Approved drawings:** the mockup artifact https://claude.ai/artifact/W2RwKUxBA79azM4Qznargi (the
 Icons board, rev 2).
 
@@ -235,7 +235,7 @@ never drift apart; the test checks identity with `toBe`.
 
 ---
 
-## 4. The vocabulary (270 keys, 2026-10-08)
+## 4. The vocabulary (274 keys, 2026-10-17)
 
 Recount from the source rather than trusting this list (it is what an add-in author reads, and it
 must be current). **Home** (`icons/home.tsx`, 104):
@@ -358,7 +358,7 @@ must be current). **Home** (`icons/home.tsx`, 104):
   ActualSize (STRONG "1:1" with an ACCENT colon through a SOFT page), and Wallpaper (an ACCENT
   surround round a STRONG page: the colour outside the page, where Background has it inside)
 
-**Generic** (`icons/generic.tsx`, 65):
+**Generic** (`icons/generic.tsx`, 69):
 
 - *Structure and navigation:* Group (the fallback section/launcher glyph), More, MoreHorizontal,
   Close, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Sidebar, Ribbon, Panel, Layout, Resize
@@ -385,6 +385,16 @@ must be current). **Home** (`icons/home.tsx`, 104):
   (Shapes' SOFT square and circle and an all-ACCENT padlock: View's Lock Objects, which must not be
   Arrange's Lock; the review of 2026-10-08 replaced two grey blocks that made it Home's
   ProtectSheet), DesignMode (an ACCENT pencil on a SOFT set square, Excel's metaphor; Pencil drew it)
+- *Edit interactions (2026-10-17, canvas round 2 P4):* Power BI's Format > Edit interactions and the
+  three buttons it puts on every other visual of the page. EditInteractions (the Arrange hero beside
+  Lock: a STRONG source visual top-left, a SOFT target visual bottom-right and an ACCENT elbow arrow
+  from one to the other), InteractionFilter (a SOFT funnel head with the two ACCENT columns that pass
+  through below it -- the subject is what is LEFT, where Filter is a whole funnel), InteractionHighlight
+  (three columns, each a SOFT upper part over an ACCENT lower part: exactly how a highlighted bar is
+  painted, the faded whole then the highlighted portion), InteractionNone (Power BI's circle with a
+  slash in one STRONG channel; no ACCENT, because nothing is selected through). Drawn in
+  `app/src/api/icons/generic.tsx`; used by `CanvasSheet/components/CanvasArrangeSection.tsx` (the hero)
+  and `CanvasSheet/components/InteractionIcons.tsx` (the per-visual strips)
 
 ---
 

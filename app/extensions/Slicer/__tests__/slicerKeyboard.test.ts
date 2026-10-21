@@ -26,11 +26,11 @@
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 
-type Item = { value: string; selected: boolean; hasData: boolean };
+type Item = { key: string; label: string; selected: boolean; hasData: boolean };
 
 const h = vi.hoisted(() => ({
   slicers: new Map<string, Record<string, unknown>>(),
-  items: new Map<string, Array<{ value: string; selected: boolean; hasData: boolean }>>(),
+  items: new Map<string, Array<{ key: string; label: string; selected: boolean; hasData: boolean }>>(),
   clickItem: vi.fn(async (..._args: unknown[]) => undefined),
   clickRun: vi.fn(async (..._args: unknown[]) => undefined),
   clickClear: vi.fn(async (..._args: unknown[]) => undefined),
@@ -158,7 +158,7 @@ function slicerRow(id: string, x: number): Record<string, unknown> {
 }
 
 function itemsOf(values: string[], selected: string[] | null = null): Item[] {
-  return values.map((value) => ({ value, selected: selected === null || selected.includes(value), hasData: true }));
+  return values.map((value) => ({ key: value, label: value, selected: selected === null || selected.includes(value), hasData: true }));
 }
 
 function region(id: string, x: number): GridRegion {

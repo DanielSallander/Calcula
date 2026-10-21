@@ -69,7 +69,9 @@ describe("renderChartPng", () => {
     setChartCues("c1", [{ cueId: "f#0", factId: "f", kind: "ring", polarity: "bad", anchor: { type: "datum", series: "Sales", categoryIndex: 2, categoryLabel: "Mar" } }]);
     const blob = await renderChartPng("c1", { withOverlay: false });
     expect(blob.type).toBe("image/png");
-    expect(calls).toContain("fillRect"); // the chart was painted
+    // The chart was painted: its (rounded, radius 2) bars. The plot area paints
+    // nothing by default (Power BI), so fillRect is not the signal.
+    expect(calls).toContain("fill");
     expect(calls).not.toContain("ellipse"); // no ring
   });
 

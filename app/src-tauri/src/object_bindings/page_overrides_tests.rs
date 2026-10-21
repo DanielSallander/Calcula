@@ -87,6 +87,7 @@ impl Wb {
             pivots: &self.pivots,
             pane: &self.pane,
             ribbon: &self.ribbon,
+            user_files: &self.files,
         }
     }
 

@@ -1411,7 +1411,7 @@ pub fn narrate_fact(
             dimension
         ),
         ModelFactKind::Series { inner } => {
-            narrate::narrator_for(narrate::Locale::from_locale_id(&locale.locale_id)).narrate(inner)
+            narrate::narrator_for_settings(locale).narrate(inner)
         }
     }
 }

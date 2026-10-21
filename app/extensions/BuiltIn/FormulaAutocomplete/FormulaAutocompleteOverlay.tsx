@@ -4,7 +4,7 @@
 
 import React, { useRef, useEffect, useState, useCallback } from "react";
 import type { OverlayProps } from "@api/uiTypes";
-import { getCachedLocale } from "@api/locale";
+import { getAppLocale } from "@api/locale";
 import { useAutocompleteStore } from "./useAutocompleteStore";
 import { findArgumentSpans } from "./tokenParser";
 import type { ScoredSuggestion } from "../../_shared/lib/functionCatalog";
@@ -334,7 +334,7 @@ function ArgumentHint({
 
   // Split on commas (respecting nested brackets/parens)
   const args = splitArguments(argsStr);
-  const displaySep = (getCachedLocale()?.listSeparator ?? ",") + " ";
+  const displaySep = getAppLocale().listSeparator + " ";
 
   // Which listed parameter to treat as active. For variadic functions the
   // cursor can move past the last listed parameter -- keep the last repeatable

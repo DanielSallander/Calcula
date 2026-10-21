@@ -10,6 +10,7 @@ import {
   type OverlayRegistration,
 } from "@api";
 import { getGridStateSnapshot } from "@api/grid";
+import { registerConditionalFormatPainter } from "@api/conditionalFormatPaint";
 
 import {
   refreshRules,
@@ -22,6 +23,7 @@ import { setMenuSelection, registerCFMenuItems, refreshClearScopes } from "./han
 import { QUICK_CF_DIALOG_ID, RULES_MANAGER_DIALOG_ID, NEW_RULE_DIALOG_ID } from "./handlers/homeMenuBuilder";
 import { renderDataBars } from "./rendering/dataBarRenderer";
 import { renderIconSets } from "./rendering/iconSetRenderer";
+import { conditionalFormatGlyphPainter } from "./rendering/conditionalFormatPainter";
 import { QuickCFDialog } from "./components/QuickCFDialog";
 import { RulesManagerDialog } from "./components/RulesManagerDialog";
 import { NewRuleDialog } from "./components/NewRuleDialog";
@@ -96,6 +98,12 @@ function activate(context: ExtensionContext): void {
     priority: 6,
   } as OverlayRegistration);
   cleanupFns.push(unregIconSetOverlay);
+
+  // 3b. Register the same glyphs with @api/conditionalFormatPaint, so an object
+  // that shows cells of its own (a floating grid) paints this sheet's data bars
+  // and icon sets on them -- from the rules IT hands over (the backing sheet's),
+  // never from this extension's active-sheet rule store.
+  cleanupFns.push(registerConditionalFormatPainter(conditionalFormatGlyphPainter));
 
   // 4. Register dialogs
   context.ui.dialogs.register({

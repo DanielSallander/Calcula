@@ -65,7 +65,7 @@ describe("BI API deep tests", () => {
       expect(biApi.getCachedConnections()).toBeNull();
 
       // Query
-      const queryResult = { columns: ["name", "value"], rows: [["A", 1], ["B", 2]] };
+      const queryResult = { columns: ["name", "value"], rows: [["A", 1], ["B", 2]], columnKinds: [] };
       mockApiQuery.mockResolvedValue(queryResult);
       const qr = await biApi.query(1, { tableName: "Sales" } as any);
       expect(qr.rows).toHaveLength(2);
@@ -91,8 +91,8 @@ describe("BI API deep tests", () => {
 
   describe("multiple simultaneous connections", () => {
     it("tracks the active connection as queries switch between connections", async () => {
-      const qr1 = { columns: ["a"], rows: [[1]] };
-      const qr2 = { columns: ["b"], rows: [[2]] };
+      const qr1 = { columns: ["a"], rows: [[1]], columnKinds: [] };
+      const qr2 = { columns: ["b"], rows: [[2]], columnKinds: [] };
       mockApiQuery.mockResolvedValueOnce(qr1).mockResolvedValueOnce(qr2);
 
       await biApi.query(10, { tableName: "T1" } as any);
@@ -161,8 +161,8 @@ describe("BI API deep tests", () => {
 
   describe("query result caching across connection switches", () => {
     it("overrides cached query when switching connections", async () => {
-      const qr1 = { columns: ["x"], rows: [[1]] };
-      const qr2 = { columns: ["y"], rows: [[2], [3]] };
+      const qr1 = { columns: ["x"], rows: [[1]], columnKinds: [] };
+      const qr2 = { columns: ["y"], rows: [[2], [3]], columnKinds: [] };
       mockApiQuery.mockResolvedValueOnce(qr1).mockResolvedValueOnce(qr2);
 
       await biApi.query(1, { tableName: "T1" } as any);
@@ -174,8 +174,8 @@ describe("BI API deep tests", () => {
     });
 
     it("insertResult uses the most recent query result after switching", async () => {
-      const qr1 = { columns: ["a"], rows: [[1]] };
-      const qr2 = { columns: ["b"], rows: [[2]] };
+      const qr1 = { columns: ["a"], rows: [[1]], columnKinds: [] };
+      const qr2 = { columns: ["b"], rows: [[2]], columnKinds: [] };
       mockApiQuery.mockResolvedValueOnce(qr1).mockResolvedValueOnce(qr2);
 
       await biApi.query(1, { tableName: "T1" } as any);

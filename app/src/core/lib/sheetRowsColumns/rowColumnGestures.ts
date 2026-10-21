@@ -26,7 +26,7 @@
 //   refuses to insert when non-blank cells would be pushed off the sheet, and
 //   inserting as many rows as the sheet has pushes off every one of them.
 
-import type { Selection } from "../../types";
+import type { CellTargetRef, Selection } from "../../types";
 import {
   beginUndoTransaction,
   cancelUndoTransaction,
@@ -45,8 +45,16 @@ export type RowColumnGestureKind = "insertRow" | "insertColumn" | "deleteRow" | 
 
 /** What a gesture needs from the grid that runs it. */
 export interface RowColumnGestureHost {
-  /** The selection the gesture acts on. */
+  /** The selection the gesture acts on (the target's own coordinates with a target). */
   selection: Selection | null;
+  /**
+   * The OBJECT whose lines the gesture inserts / deletes (a floating grid's,
+   * P3: table semantics -- its content shifts and its window grows or shrinks),
+   * or absent for the active sheet. Every backend call names it; the backend
+   * enforces the object's own caps ("A floating grid holds at most 1000 rows",
+   * "keeps at least one row"), so the sheet-size refusal does not apply.
+   */
+  target?: CellTargetRef;
   /** The sheet's size, for the push-off-the-sheet refusal. */
   totalRows: number;
   totalCols: number;
@@ -95,16 +103,21 @@ function messageOf(error: unknown): string {
 }
 
 /** The one backend call a span makes. */
-function apply(kind: RowColumnGestureKind, span: IndexSpan): Promise<unknown> {
+function apply(kind: RowColumnGestureKind, span: IndexSpan, target?: CellTargetRef): Promise<unknown> {
+  // The sheet's call is spelled exactly as it always was; an object's names it.
   switch (kind) {
     case "insertRow":
-      return insertRows(span.start, span.count);
+      return target ? insertRows(span.start, span.count, undefined, { target }) : insertRows(span.start, span.count);
     case "insertColumn":
-      return insertColumns(span.start, span.count);
+      return target
+        ? insertColumns(span.start, span.count, undefined, { target })
+        : insertColumns(span.start, span.count);
     case "deleteRow":
-      return deleteRows(span.start, span.count);
+      return target ? deleteRows(span.start, span.count, undefined, { target }) : deleteRows(span.start, span.count);
     case "deleteColumn":
-      return deleteColumns(span.start, span.count);
+      return target
+        ? deleteColumns(span.start, span.count, undefined, { target })
+        : deleteColumns(span.start, span.count);
   }
 }
 
@@ -121,7 +134,7 @@ export async function runRowColumnGesture(kind: RowColumnGestureKind, host: RowC
   const spans = answer.spans;
   if (spans.length === 0) return;
 
-  if (kind === "insertRow" || kind === "insertColumn") {
+  if (!host.target && (kind === "insertRow" || kind === "insertColumn")) {
     const total = kind === "insertRow" ? host.totalRows : host.totalCols;
     if (spans.some((s) => s.count >= total)) {
       await alertAsync(shiftOffSheetRefusal(kind));
@@ -133,7 +146,7 @@ export async function runRowColumnGesture(kind: RowColumnGestureKind, host: RowC
   // joins a script's open batch), exactly as the right-click menu always ran.
   if (spans.length === 1) {
     try {
-      await apply(kind, spans[0]);
+      await apply(kind, spans[0], host.target);
     } catch (error) {
       console.error(`[rowColumnGestures] ${kind} failed:`, error);
       await alertAsync(messageOf(error));
@@ -152,7 +165,7 @@ export async function runRowColumnGesture(kind: RowColumnGestureKind, host: RowC
   try {
     tx = ownUndoTransaction(await beginUndoTransaction(STEP_LABELS[kind]), UNDO_CLOSES);
     for (const span of [...spans].reverse()) {
-      await apply(kind, span);
+      await apply(kind, span, host.target);
       landed.push(span);
     }
     await tx.commit();

@@ -15,6 +15,7 @@ import {
   NumberField,
   formatNumberFieldValue,
   parseNumberFieldText,
+  stepNumberFieldValue,
 } from "../primitives/fields";
 import { Input } from "../primitives/Input";
 import { Select } from "../primitives/Select";
@@ -23,6 +24,7 @@ import {
   LAYOUTS,
   blur,
   declared,
+  fire,
   hardcodedColours,
   mount,
   q,
@@ -317,14 +319,6 @@ describe("Select", () => {
 // NumberField
 // ============================================================================
 
-/** Make jsdom report the browser's "half-typed" state for the next edit. */
-function markBadInput(input: HTMLInputElement, bad: boolean): void {
-  Object.defineProperty(input, "validity", {
-    configurable: true,
-    value: { badInput: bad, valid: !bad },
-  });
-}
-
 function Controlled(props: {
   initial?: number | null;
   onChange?: (v: number | null) => void;
@@ -369,10 +363,27 @@ describe("NumberField helpers", () => {
   it("parseNumberFieldText separates blank (null) from half-typed (undefined)", () => {
     expect(parseNumberFieldText("")).toBeNull();
     expect(parseNumberFieldText("  ")).toBeNull();
-    expect(parseNumberFieldText("", true)).toBeUndefined();
+    expect(parseNumberFieldText("-")).toBeUndefined();
+    expect(parseNumberFieldText("1e")).toBeUndefined();
     expect(parseNumberFieldText("42")).toBe(42);
     expect(parseNumberFieldText("-0.5")).toBe(-0.5);
     expect(parseNumberFieldText("abc")).toBeUndefined();
+  });
+
+  it("formatNumberFieldValue keeps fifteen significant digits and never groups", () => {
+    expect(formatNumberFieldValue(1234567.25)).toBe("1234567.25");
+    expect(formatNumberFieldValue(1234.1)).toBe("1234.1");
+    expect(formatNumberFieldValue(0.000123)).toBe("0.000123");
+    expect(formatNumberFieldValue(-0)).toBe("0");
+  });
+
+  it("stepNumberFieldValue steps by the step (1 by default) without float noise, clamped", () => {
+    expect(stepNumberFieldValue(0.1, 1, 0.2)).toBe(0.3);
+    expect(stepNumberFieldValue(5, -1)).toBe(4);
+    expect(stepNumberFieldValue(5, 1, "any")).toBe(6);
+    expect(stepNumberFieldValue(null, 1)).toBe(1);
+    expect(stepNumberFieldValue(99.5, 1, 1, 0, 100)).toBe(100);
+    expect(stepNumberFieldValue(0, -1, 1, 0, 100)).toBe(0);
   });
 });
 
@@ -380,7 +391,11 @@ describe("NumberField", () => {
   it("is a 62px number input on the field chrome, with tabular figures", () => {
     m.render(<Controlled />);
     const input = numberInput();
-    expect(input.type).toBe("number");
+    // A TEXT box read in the app locale (P2), still a spinbutton with a
+    // decimal keypad on touch.
+    expect(input.type).toBe("text");
+    expect(input.inputMode).toBe("decimal");
+    expect(input.getAttribute("role")).toBe("spinbutton");
     expect(input.value).toBe("12");
     expect(input.style.width).toBe(`${NUMBER_FIELD_WIDTH}px`);
     expect(input.getAttribute("aria-label")).toBe("Value");
@@ -401,13 +416,14 @@ describe("NumberField", () => {
     expect(numberInput().value).toBe("");
   });
 
-  it("never reports half-typed text ('-', '1.') as blank", () => {
+  it("never reports half-typed text ('-', '1e') as anything", () => {
     const onChange = vi.fn();
     m.render(<Controlled onChange={onChange} />);
     const input = numberInput();
-    markBadInput(input, true);
-    typeValue(input, "");
+    typeValue(input, "-");
+    typeValue(input, "1e");
     expect(onChange).not.toHaveBeenCalled();
+    expect(input.value).toBe("1e");
   });
 
   it("shows 'auto' for blank when blank means auto, and nothing otherwise", () => {
@@ -447,25 +463,44 @@ describe("NumberField", () => {
   });
 
   it("clears half-typed garbage on blur when the committed value is blank", () => {
-    // jsdom sanitises a number input's value itself, so the garbage cannot be
-    // put on screen here; what can be proven is that the field WRITES "" on
-    // blur. React would not: it compares "" (what a browser reports for "1.")
-    // with the committed "" and skips the write, leaving "1." displayed.
-    m.render(<Controlled initial={null} />);
+    const onChange = vi.fn();
+    m.render(<Controlled initial={null} onChange={onChange} />);
     const input = numberInput();
-    markBadInput(input, true);
-    typeValue(input, "");
-    const write = vi.spyOn(input, "value", "set");
+    typeValue(input, "-");
+    expect(input.value).toBe("-");
     blur(input);
-    expect(write).toHaveBeenCalledWith("");
-    write.mockRestore();
+    expect(input.value).toBe("");
+    expect(onChange).not.toHaveBeenCalled();
+  });
 
-    // A clean blank is left alone.
-    markBadInput(input, false);
-    const clean = vi.spyOn(input, "value", "set");
-    blur(input);
-    expect(clean).not.toHaveBeenCalled();
-    clean.mockRestore();
+  it("ArrowUp / ArrowDown step the value by `step`, clamped, like a native spinner", () => {
+    const onChange = vi.fn();
+    function Stepper() {
+      const [value, setValue] = React.useState<number | null>(9);
+      return (
+        <NumberField
+          testId="n"
+          value={value}
+          step={0.5}
+          min={0}
+          max={10}
+          onChange={(v) => {
+            onChange(v);
+            setValue(v);
+          }}
+        />
+      );
+    }
+    m.render(<Stepper />);
+    const input = numberInput();
+    fire(input, "keydown", { key: "ArrowUp" });
+    expect(onChange).toHaveBeenLastCalledWith(9.5);
+    expect(input.value).toBe("9.5");
+    fire(input, "keydown", { key: "ArrowUp" });
+    fire(input, "keydown", { key: "ArrowUp" });
+    expect(onChange).toHaveBeenLastCalledWith(10);
+    fire(input, "keydown", { key: "ArrowDown" });
+    expect(onChange).toHaveBeenLastCalledWith(9.5);
   });
 
   it("labels the input and describes it with its unit", () => {

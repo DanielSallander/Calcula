@@ -14,6 +14,7 @@
 
 import React, { useState, useCallback, useEffect } from "react";
 import { RibbonIcon } from "@api";
+import { onLocaleChanged } from "@api/locale";
 import { Chip, DropdownChevron, IconButton, LT, useSurfaceLayout } from "@api/layout";
 import type { RibbonFilter, SlicerItem } from "../lib/filterPaneTypes";
 import {
@@ -23,6 +24,9 @@ import {
   deleteFilterAsync,
   getFilterById,
   getConnectionName,
+  getFilterItemsError,
+  getFilterNarrowingError,
+  type FilterItemsOutcome,
 } from "../lib/filterPaneStore";
 import { FilterDropdown } from "./FilterDropdown";
 import { FilterPaneEvents } from "../lib/filterPaneEvents";
@@ -56,46 +60,70 @@ export function RibbonFilterCard({ filter }: Props): React.ReactElement {
   // This avoids taking the BI engine during card creation which would
   // conflict with pivot operations the user might be doing.
   const [itemsLoaded, setItemsLoaded] = useState(false);
+  // Bumped when a load FAILS: the failure lives in the store's error map, and
+  // a failed load may leave `items` unchanged (already empty), so this is
+  // what makes the card re-render and read the sentence.
+  const [, setErrorRevision] = useState(0);
+
+  /** Show what a load came to. A failure clears the list -- never stale
+   *  values -- and leaves `itemsLoaded` false, so the next open retries. */
+  const showOutcome = useCallback(
+    (outcome: FilterItemsOutcome) => {
+      if (outcome.ok) {
+        setItems(getCachedItems(filter.id) ?? []);
+        setItemsLoaded(true);
+      } else {
+        setItems([]);
+        setItemsLoaded(false);
+        setErrorRevision((r) => r + 1);
+      }
+    },
+    [filter.id],
+  );
+
+  const loadItems = useCallback(async () => {
+    showOutcome(await refreshFilterItems(filter.id));
+  }, [filter.id, showOutcome]);
 
   useEffect(() => {
-    // Refresh on cross-filter events from OTHER filters or slicers
+    // Refresh on dependent-filter events from OTHER filters or slicers
     const onFilterChanged = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (detail?.filterId && detail.filterId !== filter.id && itemsLoaded) {
-        refreshFilterItems(filter.id).then(() => {
-          const cached = getCachedItems(filter.id);
-          if (cached) setItems(cached);
-        });
+        void loadItems();
       }
     };
     const onSlicerChanged = () => {
       if (itemsLoaded) {
-        refreshFilterItems(filter.id).then(() => {
-          const cached = getCachedItems(filter.id);
-          if (cached) setItems(cached);
-        });
+        void loadItems();
       }
     };
     window.addEventListener(FilterPaneEvents.FILTER_SELECTION_CHANGED, onFilterChanged);
     window.addEventListener("slicer:selectionChanged", onSlicerChanged);
+    // App locale switch (P2 S7): the item LABELS are written in the app locale,
+    // so loaded items are re-read; the selection holds keys and is unchanged.
+    const offLocale = onLocaleChanged(() => {
+      if (itemsLoaded) {
+        void loadItems();
+      }
+    });
     return () => {
       window.removeEventListener(FilterPaneEvents.FILTER_SELECTION_CHANGED, onFilterChanged);
       window.removeEventListener("slicer:selectionChanged", onSlicerChanged);
+      offLocale();
     };
-  }, [filter.id, itemsLoaded]);
+  }, [filter.id, itemsLoaded, loadItems]);
 
   const toggleDropdown = useCallback(async () => {
     if (!dropdownOpen) {
-      // Load items on first open (lazy loading)
+      // Load items on first open (lazy loading), and again on every open
+      // after a failed load.
       if (!itemsLoaded) {
-        await refreshFilterItems(filter.id);
-        const cached = getCachedItems(filter.id);
-        if (cached) setItems(cached);
-        setItemsLoaded(true);
+        await loadItems();
       }
     }
     setDropdownOpen((prev) => !prev);
-  }, [dropdownOpen, itemsLoaded, filter.id]);
+  }, [dropdownOpen, itemsLoaded, loadItems]);
 
   const handleDropdownClose = useCallback(() => {
     setDropdownOpen(false);
@@ -127,7 +155,9 @@ export function RibbonFilterCard({ filter }: Props): React.ReactElement {
     summaryText = "(None)";
     summary = summaryText;
   } else if (localSelectedItems.length === 1) {
-    summaryText = localSelectedItems[0];
+    // The selection holds a member KEY; the card SHOWS its label.
+    const only = localSelectedItems[0];
+    summaryText = items.find((i) => i.key === only)?.label ?? (only === "" ? "(Blank)" : only);
     summary = summaryText;
   } else {
     summaryText = `${localSelectedItems.length} of ${totalCount}`;
@@ -155,6 +185,7 @@ export function RibbonFilterCard({ filter }: Props): React.ReactElement {
         ref={setCardEl}
         style={paneCardStyle(band, hasFilter)}
         data-pane-card="filter"
+        data-filter-id={filter.id}
         data-filtered={hasFilter ? "true" : "false"}
         title={
           `${filter.fieldName}\nModel: ${connectionName ?? "(connection missing)"}\n` +
@@ -209,6 +240,7 @@ export function RibbonFilterCard({ filter }: Props): React.ReactElement {
           aria-haspopup="dialog"
           aria-expanded={dropdownOpen}
           data-testid="controls-pane-filter-open"
+          data-filter-id={filter.id}
           onClick={() => void toggleDropdown()}
         />
       </div>
@@ -221,7 +253,11 @@ export function RibbonFilterCard({ filter }: Props): React.ReactElement {
         return (
           <FilterDropdown
             fieldName={f.fieldName}
+            fieldLabel={f.fieldName}
             items={items}
+            itemsError={getFilterItemsError(f.id)}
+            narrowingError={getFilterNarrowingError(f.id)}
+            onRetry={() => void loadItems()}
             selectedItems={localSelectedItems}
             anchorEl={cardEl}
             onApply={handleSelectionApply}
@@ -230,12 +266,13 @@ export function RibbonFilterCard({ filter }: Props): React.ReactElement {
             onDelete={handleDelete}
             connectionId={f.connectionId}
             connectionMode={f.connectionMode ?? "manual"}
-            crossFilterTargets={f.crossFilterTargets ?? []}
-            crossFilterSlicerTargets={f.crossFilterSlicerTargets ?? []}
+            dependentFilters={f.dependentFilters ?? []}
+            dependentSlicers={f.dependentSlicers ?? []}
             advancedFilter={f.advancedFilter ?? null}
             fieldDataType={f.fieldDataType ?? "unknown"}
             connectedPivots={f.connectedPivots}
             connectedSheets={f.connectedSheets}
+            connectedVisuals={f.connectedVisuals}
             hideNoData={f.hideNoData ?? false}
             indicateNoData={f.indicateNoData ?? true}
             sortNoDataLast={f.sortNoDataLast ?? true}

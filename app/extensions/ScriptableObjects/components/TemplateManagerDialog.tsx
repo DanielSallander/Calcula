@@ -12,6 +12,7 @@ import {
   importTemplate,
 } from "../lib/templateManager";
 import type { TemplateSummary, ObjectTemplate } from "../lib/templateManager";
+import { formatDate } from "@api/locale";
 
 // ============================================================================
 // Styles
@@ -251,7 +252,7 @@ export default function TemplateManagerDialog({ onClose }: DialogProps): React.R
                   <div style={{ flex: 1 }}>
                     <div style={nameStyle}>{t.name}</div>
                     <div style={metaStyle}>
-                      {t.objectType} | {new Date(t.createdAt).toLocaleDateString()}
+                      {t.objectType} | {formatDate(new Date(t.createdAt), "short")}
                       {t.description && ` | ${t.description}`}
                     </div>
                   </div>

@@ -34,7 +34,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 const h = vi.hoisted(() => ({
   slicer: null as Record<string, unknown> | null,
-  items: [] as Array<{ value: string; selected: boolean; hasData: boolean }>,
+  items: [] as Array<{ key: string; label: string; selected: boolean; hasData: boolean }>,
   clicks: [] as unknown[][],
   runs: [] as unknown[][],
   clears: [] as unknown[][],
@@ -124,7 +124,7 @@ function load(over: Record<string, unknown> = {}, count = 4): void {
     selectionMode: "standard",
     ...over,
   };
-  h.items = NAMES.slice(0, count).map((value) => ({ value, selected: true, hasData: true }));
+  h.items = NAMES.slice(0, count).map((value) => ({ key: value, label: value, selected: true, hasData: true }));
 }
 
 function press(x: number, y: number, over: Partial<SlicerContentPress> = {}): boolean {

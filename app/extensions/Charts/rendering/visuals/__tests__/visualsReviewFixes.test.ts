@@ -10,7 +10,7 @@
 //          - computed values keep the source's format ("75%", "Goal: $10K");
 //          - a Gauge's default range takes its target in.
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const h = vi.hoisted(() => ({
   getRangeCellsTyped: vi.fn(),
@@ -36,7 +36,9 @@ vi.mock("@api/grid", () => ({
 }));
 
 import { readChartDataResolved } from "../../../lib/chartDataReader";
-import { parseDisplayNumber } from "../../../lib/chartFieldTypes";
+import { readShownNumber } from "../../../lib/chartFieldTypes";
+import { parseNumber } from "@api/locale";
+import { useAppLocale, useInvariantLocale } from "../../../lib/__tests__/appLocaleTestKit";
 import { extractChartData } from "../../../lib/pivotChartDataReader";
 import { designQueryChartData } from "../../../lib/designQueryChartDataReader";
 import { applyChartFilters, applySelectionKeep } from "../../../lib/chartFilters";
@@ -68,6 +70,8 @@ function cardText(data: ParsedChartData, spec: ChartSpec): string[] {
   return textsOf(paintVisual(spec.mark, spec, data).calls);
 }
 
+afterEach(async () => { await useInvariantLocale(); });
+
 beforeEach(() => {
   h.getRangeCellsTyped.mockReset();
   h.getHiddenRowsInfo.mockReset();
@@ -80,33 +84,51 @@ beforeEach(() => {
 // HIGH: typed values, not re-parsed display text
 // ---------------------------------------------------------------------------
 
-describe("parseDisplayNumber: sv-SE text and partly-numeric strings", () => {
-  it("reads a kr-formatted sv-SE amount with its decimal comma", () => {
-    expect(parseDisplayNumber("1 234,50 kr")).toBe(1234.5);
-    expect(parseDisplayNumber("1 234,50 kr")).toBe(1234.5);
-    expect(parseDisplayNumber("12,5 kg")).toBe(12.5);
+// The display-text locale GUESSER is gone (P2 S8): a number is read in the APP
+// locale -- strict `parseNumber` for the locale's own spelling,
+// `readShownNumber` for an engine rendering with currency or unit text around
+// its digits.
+describe("app-locale number reading: sv-SE text and partly-numeric strings", () => {
+  afterEach(async () => { await useInvariantLocale(); });
+
+  it("reads a kr-formatted sv-SE amount with its decimal comma (sv-SE)", async () => {
+    await useAppLocale("sv-SE");
+    expect(parseNumber("1 234,50 kr")).toBe(1234.5);
+    expect(parseNumber("1 234,50 kr")).toBe(1234.5);
+    expect(readShownNumber("12,5 kg")).toBe(12.5);
   });
-  it("refuses a string it can only partly read (an ISO date, a time)", () => {
-    expect(parseDisplayNumber("2026-10-08")).toBeNaN();
-    expect(parseDisplayNumber("10:30")).toBeNaN();
+  it("refuses a string it can only partly read (an ISO date, a time)", async () => {
+    await useAppLocale("sv-SE");
+    expect(parseNumber("2026-10-08")).toBeNull();
+    expect(readShownNumber("2026-10-08")).toBeNull();
+    expect(readShownNumber("10:30")).toBeNull();
   });
-  it("still reads the formats it always did", () => {
-    expect(parseDisplayNumber("$11,732.00")).toBe(11732);
-    expect(parseDisplayNumber("(1,234)")).toBe(-1234);
-    expect(parseDisplayNumber("45%")).toBeCloseTo(0.45);
-    expect(parseDisplayNumber("1.5e3")).toBe(1500);
+  it("still reads the en-US formats it always did (en-US)", async () => {
+    await useAppLocale("en-US");
+    expect(parseNumber("$11,732.00")).toBe(11732);
+    expect(readShownNumber("(1,234)")).toBe(-1234);
+    expect(parseNumber("45%")).toBeCloseTo(0.45);
+    expect(parseNumber("1.5e3")).toBe(1500);
+  });
+  it("never reads one locale's spelling in the other", async () => {
+    await useAppLocale("en-US");
+    expect(readShownNumber("1 234,50 kr")).toBeNull();
+    await useAppLocale("sv-SE");
+    expect(readShownNumber("$11,732.00")).toBeNull();
   });
 });
 
 describe("range reader: the typed value is the number", () => {
-  it("a Card over an sv-SE currency cell shows 1.2K kr, not 123K kr", async () => {
+  it("a Card over an sv-SE currency cell shows 1,2K kr, not 123K kr", async () => {
+    // The engine writes "1 234,50 kr" only under an sv-SE app locale.
+    await useAppLocale("sv-SE");
     h.getRangeCellsTyped.mockResolvedValue([
       typed(0, 0, "Item", "text"), typed(0, 1, "Amount", "text"),
       typed(1, 0, "A", "text"), typed(1, 1, "1 234,50 kr", "number", 1234.5),
     ]);
     const { data } = await readChartDataResolved(rangeSpec("card", 1));
     expect(data.series[0].values).toEqual([1234.5]);
-    expect(cardText(data, rangeSpec("card", 1))).toContain("1.2K kr");
+    expect(cardText(data, rangeSpec("card", 1))).toContain("1,2K kr");
   });
 
   it("a Card over a date cell shows the date, never '2K'", async () => {

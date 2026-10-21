@@ -5,7 +5,7 @@ pub mod pushdown;
 
 pub use pushdown::{
     effective_group_by, ContestedFilter, ContestedPredicate, HierarchyLevelSpec, HierarchySpec,
-    LookupSpec, PushdownPlanner, QueryPlan,
+    LookupSpec, PushdownPlanner, QueryPlan, TuplePlan, TupleValue,
 };
 
 // RLS helpers shared with the executor's drillthrough path so it enforces the

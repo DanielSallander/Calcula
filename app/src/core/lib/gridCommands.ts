@@ -6,7 +6,7 @@
 
 import type { Selection, DimensionOverrides } from "../types";
 import { alertAsync } from "./dialogs";
-import { refuseIfSelectionOwned } from "./selectionOwner";
+import { resolveCellTarget, type CellTarget, type CellTargetCapability } from "./selectionOwner";
 
 /** Names a word split would get wrong ("Merge Center" is Excel's "Merge & Center"). */
 const GRID_COMMAND_LABELS: Partial<Record<GridCommand, string>> = {
@@ -50,12 +50,25 @@ export interface GridMenuContext {
 // ============================================================================
 
 /**
+ * What `gridCommands.execute` hands a handler beside its args: the cells the
+ * command acts on, decided ONCE at the door (`resolveCellTarget`). `grid`:
+ * Core's selection, as before. `object`: an owner's cells (a floating grid's),
+ * written through the wrappers' `{ target }` option -- never Core's hidden
+ * selection under the object.
+ */
+export interface GridCommandContext {
+  target: CellTarget;
+}
+
+/**
  * Command handler function type. `args` is whatever the caller passed to
  * `gridCommands.execute` / `CommandRegistry.execute` (undefined from every
  * door that passes none: menus, keys, the right-click menu); a handler that
  * takes options reads them defensively, since a script can pass anything.
+ * `ctx` carries the resolved target (absent only when a caller invokes a
+ * handler directly, outside `execute`).
  */
-type CommandHandler = (args?: unknown) => void | Promise<void>;
+export type CommandHandler = (args?: unknown, ctx?: GridCommandContext) => void | Promise<void>;
 
 /**
  * Guard function type. Called before a command executes.
@@ -102,6 +115,37 @@ export const GRID_COMMANDS = [
 
 /** Available command names */
 export type GridCommand = (typeof GRID_COMMANDS)[number];
+
+/**
+ * The kind of cell act each grid command performs, for `resolveCellTarget`.
+ * A `Record` over `GridCommand`, so the compiler demands one entry per command
+ * in `GRID_COMMANDS` -- a pattern row ("merge*") would leave one undefined.
+ */
+export const GRID_COMMAND_CAPABILITY: Record<GridCommand, CellTargetCapability> = {
+  cut: "content",
+  copy: "read",
+  paste: "content",
+  clearContents: "clear",
+  clearFormatting: "clear",
+  clearComments: "clear",
+  clearHyperlinks: "clear",
+  clearAll: "clear",
+  insertRow: "structure",
+  insertColumn: "structure",
+  deleteRow: "structure",
+  deleteColumn: "structure",
+  mergeCells: "merge",
+  unmergeCells: "merge",
+  mergeCenter: "merge",
+  mergeAcross: "merge",
+  fillDown: "content",
+  fillRight: "content",
+  fillUp: "content",
+  fillLeft: "content",
+  autoFitRowHeight: "lineSize",
+  autoFitColumnWidth: "lineSize",
+  removeHyperlinks: "clear",
+};
 
 /** Command registry for direct handler invocation */
 class GridCommandRegistry {
@@ -167,16 +211,20 @@ class GridCommandRegistry {
    * @returns true if the command was executed, false otherwise
    */
   async execute(command: GridCommand, args?: unknown): Promise<boolean> {
-    // Every grid command acts on Core's SELECTION. While something else owns
-    // the selection (a floating grid's selected cell, with Core's selection
-    // HIDDEN under it -- BUG-0185), none of them may run: refused here, once,
-    // before any command-specific guard adds a second message.
-    if (refuseIfSelectionOwned(gridCommandLabel(command))) {
+    // Every grid command acts on a SELECTION. While something else owns the
+    // selection (a floating grid's selected cell, with Core's selection HIDDEN
+    // under it -- BUG-0185), the command acts on the OWNER's cells when the
+    // owner admits this kind of act (`actsOn`), and is otherwise refused here,
+    // once, before any command-specific guard adds a second message.
+    const target = resolveCellTarget(gridCommandLabel(command), GRID_COMMAND_CAPABILITY[command]);
+    if (target === null) {
       return false;
     }
 
-    // Check guards
-    const guards = this.guards.get(command);
+    // Check guards. They describe Core's SHEET (tables, pivots, spills on the
+    // active sheet), so they run for the grid target only; for an object
+    // target the backend gates the object's own (backing) cells.
+    const guards = target.kind === "grid" ? this.guards.get(command) : undefined;
     if (guards) {
       for (const guard of guards) {
         const result = guard(this.currentSelection);
@@ -189,7 +237,7 @@ class GridCommandRegistry {
 
     const handler = this.handlers.get(command);
     if (handler) {
-      await handler(args);
+      await handler(args, { target });
       return true;
     }
     console.warn(

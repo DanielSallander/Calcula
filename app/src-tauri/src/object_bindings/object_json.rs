@@ -213,6 +213,37 @@ pub fn live_object_refs(cx: &ObjectStores<'_>) -> HashSet<ObjectBindingRef> {
     enumerate_objects(cx).into_iter().map(|(r, _)| r).collect()
 }
 
+/// The canvas object ref (`CanvasLayout` stacking / interactions spelling) of
+/// a bindable object, for the kinds that take part in visual interactions --
+/// chart, pivot, slicer (`persistence::CANVAS_INTERACTION_KINDS`) -- and
+/// `None` for every other kind. The kind strings are the binding wire names,
+/// which equal the canvas spelling for these three.
+pub fn canvas_ref_of(r: &ObjectBindingRef) -> Option<::persistence::CanvasObjectRef> {
+    match r.kind {
+        ObjectBindingKind::Chart | ObjectBindingKind::Pivot | ObjectBindingKind::Slicer => {
+            Some(::persistence::CanvasObjectRef { kind: r.kind.wire_name().to_string(), id: r.id.clone() })
+        }
+        _ => None,
+    }
+}
+
+/// The interaction-capable objects (see [`canvas_ref_of`]) of every sheet,
+/// keyed by sheet id, from one walk's `locations`. A save prunes each
+/// canvas's interactions against ITS OWN set: a pair names objects inside one
+/// canvas.
+pub fn canvas_refs_by_sheet(
+    locations: &[(ObjectBindingRef, ObjectLocation)],
+) -> std::collections::HashMap<identity::SheetId, HashSet<::persistence::CanvasObjectRef>> {
+    let mut out: std::collections::HashMap<identity::SheetId, HashSet<::persistence::CanvasObjectRef>> =
+        std::collections::HashMap::new();
+    for (r, loc) in locations {
+        if let Some(c) = canvas_ref_of(r) {
+            out.entry(loc.sheet_id).or_default().insert(c);
+        }
+    }
+    out
+}
+
 fn not_found(object: &ObjectBindingRef) -> String {
     format!(
         "There is no {} with id '{}' in this workbook.",

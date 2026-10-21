@@ -194,7 +194,7 @@ fn fixtures() -> Vec<(&'static str, Dataset)> {
 fn emit_facts(locale: Locale) {
     let mut out = Vec::new();
     for (label, data) in fixtures() {
-        let options = AnalyzeOptions { locale, ..AnalyzeOptions::default() };
+        let options = AnalyzeOptions::for_settings(&locale.number_settings());
         let bundle = insights::analyze(&data, &options);
         out.push(serde_json::json!({
             "label": label,

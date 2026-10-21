@@ -715,3 +715,43 @@ describe("undo/redo mutation-refresh domains", () => {
     ]);
   });
 });
+
+describe("app locale event — Rust app_locale.rs vs the TypeScript listener", () => {
+  // Rust EMITS `locale:changed` after `set_locale` (app_locale::LOCALE_CHANGED_EVENT)
+  // and every window LISTENS through `initAppLocale` in app/src/api/locale.ts.
+  // A rename on either side is a switch that updates only the window that made
+  // it: the other windows keep the old separators and nothing reports an error,
+  // because `listen()` on a name nobody emits is simply silent.
+  const appLocaleRs = readRepo("app/src-tauri/src/app_locale.rs");
+  const localeTs = readRepo("app/src/api/locale.ts");
+
+  const rustEvent = (): string | undefined =>
+    /pub const LOCALE_CHANGED_EVENT: &str = "([^"]+)";/.exec(stripRustNoise(appLocaleRs))?.[1];
+  const tsEvent = (): string | undefined =>
+    /export const LOCALE_CHANGED_EVENT = "([^"]+)";/.exec(localeTs.replace(/^[ \t]*\/\/.*$/gm, ""))?.[1];
+
+  it("both sides declare the constant", () => {
+    expect(rustEvent(), "LOCALE_CHANGED_EVENT not found in app/src-tauri/src/app_locale.rs").toBeDefined();
+    expect(tsEvent(), "LOCALE_CHANGED_EVENT not found in app/src/api/locale.ts").toBeDefined();
+  });
+
+  it("the event name Rust emits is the one the frontend listens for", () => {
+    expect(
+      tsEvent(),
+      `LOCALE_CHANGED_EVENT differs: app/src-tauri/src/app_locale.rs emits "${rustEvent()}" but ` +
+        `app/src/api/locale.ts listens for "${tsEvent()}". FIX: make them equal -- the Rust ` +
+        `constant is the source (set_locale emits it), so change locale.ts unless the rename ` +
+        `was deliberate on both sides.`,
+    ).toBe(rustEvent());
+  });
+
+  it("the TS listener actually subscribes through the constant", () => {
+    // Non-vacuity: a literal "locale:changed" in listen() would pass the
+    // equality above while bypassing the constant it checks.
+    expect(localeTs).toMatch(/listen<[^>]*>\(\s*LOCALE_CHANGED_EVENT\b/);
+    // And Rust emits THROUGH its constant (set_locale, locale_commands.rs).
+    expect(stripRustNoise(readRepo("app/src-tauri/src/locale_commands.rs"))).toMatch(
+      /\.emit\(\s*app_locale::LOCALE_CHANGED_EVENT\b/,
+    );
+  });
+});

@@ -13,6 +13,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { RibbonIcon, type DialogProps } from "@api";
 import { Button, IconButton, LT } from "@api/layout";
+import { parseNumber } from "@api/locale";
 import {
   listAnimatableCharts,
   listChartParams,
@@ -159,19 +160,17 @@ export function AddControlDialog({
             value: { kind: "boolean", value: false },
           };
         case "slider": {
-          const min = Number(sliderMin);
-          const max = Number(sliderMax);
-          const step = Number(sliderStep);
-          if (
-            sliderMin.trim() === "" ||
-            sliderMax.trim() === "" ||
-            sliderStep.trim() === "" ||
-            !Number.isFinite(min) ||
-            !Number.isFinite(max) ||
-            !Number.isFinite(step)
-          ) {
+          // Typed in the APP locale ("0,5" under de-DE); the foreign spelling
+          // is not a number there and is refused, never misread.
+          const typedMin = parseNumber(sliderMin);
+          const typedMax = parseNumber(sliderMax);
+          const typedStep = parseNumber(sliderStep);
+          if (typedMin === null || typedMax === null || typedStep === null) {
             return { error: "Min, max, and step must be numbers." };
           }
+          const min = typedMin;
+          const max = typedMax;
+          const step = typedStep;
           if (min >= max) {
             return { error: "Min must be less than max." };
           }
@@ -366,7 +365,8 @@ export function AddControlDialog({
                 <div style={styles.numberField}>
                   <label style={styles.label}>Min</label>
                   <input
-                    type="number"
+                    type="text"
+                    inputMode="decimal"
                     style={styles.input}
                     value={sliderMin}
                     onChange={(e) => setSliderMin(e.target.value)}
@@ -375,7 +375,8 @@ export function AddControlDialog({
                 <div style={styles.numberField}>
                   <label style={styles.label}>Max</label>
                   <input
-                    type="number"
+                    type="text"
+                    inputMode="decimal"
                     style={styles.input}
                     value={sliderMax}
                     onChange={(e) => setSliderMax(e.target.value)}
@@ -384,7 +385,8 @@ export function AddControlDialog({
                 <div style={styles.numberField}>
                   <label style={styles.label}>Step</label>
                   <input
-                    type="number"
+                    type="text"
+                    inputMode="decimal"
                     style={styles.input}
                     value={sliderStep}
                     onChange={(e) => setSliderStep(e.target.value)}

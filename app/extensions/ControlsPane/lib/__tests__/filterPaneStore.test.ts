@@ -14,7 +14,25 @@ const mockUpdateRibbonFilterSelection = vi.fn();
 const mockGetAllRibbonFilters = vi.fn();
 const mockGetBiConnections = vi.fn();
 const mockGetBiColumnValues = vi.fn();
+
+/** bi_get_column_values answers MEMBERS (P2): key = label for plain text. */
+const members = (keys: string[]) => keys.map((key) => ({ key, label: key }));
 const mockGetBiColumnAvailableValues = vi.fn();
+// The model behind every connection: its table names decide how a field key
+// splits. The implementation reads `modelTables`, so it survives
+// vi.clearAllMocks(); a test that needs other tables sets the variable (reset
+// to the default before every test) or queues a one-off result.
+const DEFAULT_MODEL_TABLES = ["Products", "Employees"];
+let modelTables: string[] | null = DEFAULT_MODEL_TABLES;
+const mockGetBiModelInfo = vi.fn(async (_connectionId: string) =>
+  modelTables === null
+    ? null
+    : {
+        tables: modelTables.map((name) => ({ name, columns: [] })),
+        measures: [],
+        relationships: [],
+      },
+);
 // Fire-and-forget GET.CONTROLVALUE recalc: must return a promise (the store
 // chains .then/.catch on it). Implementation survives vi.clearAllMocks().
 const mockRecalcControlDependents = vi.fn(() => Promise.resolve([]));
@@ -26,6 +44,7 @@ vi.mock("../filterPaneApi", () => ({
   updateRibbonFilterSelection: (...args: unknown[]) => mockUpdateRibbonFilterSelection(...args),
   getAllRibbonFilters: (...args: unknown[]) => mockGetAllRibbonFilters(...args),
   getBiConnections: (...args: unknown[]) => mockGetBiConnections(...args),
+  getBiModelInfo: (connectionId: string) => mockGetBiModelInfo(connectionId),
   getBiColumnValues: (...args: unknown[]) => mockGetBiColumnValues(...args),
   getBiColumnAvailableValues: (...args: unknown[]) => mockGetBiColumnAvailableValues(...args),
   recalcControlDependents: (...args: unknown[]) => mockRecalcControlDependents(...args),
@@ -81,6 +100,9 @@ import {
   refreshFilterItems,
   refreshCache,
   clearCache,
+  getFilterItemsError,
+  getFilterNarrowingError,
+  getFilterLoadAttempts,
 } from "../filterPaneStore";
 
 // ============================================================================
@@ -102,8 +124,8 @@ function makeFilter(overrides: Partial<RibbonFilter> = {}): RibbonFilter {
     connectedSheets: [],
     displayMode: "checklist",
     selectedItems: null,
-    crossFilterTargets: [],
-    crossFilterSlicerTargets: [],
+    dependentFilters: [],
+    dependentSlicers: [],
     advancedFilter: null,
     hideNoData: false,
     indicateNoData: true,
@@ -118,6 +140,7 @@ function makeFilter(overrides: Partial<RibbonFilter> = {}): RibbonFilter {
 }
 
 beforeEach(() => {
+  modelTables = DEFAULT_MODEL_TABLES;
   mockGetBiConnections.mockResolvedValue([
     { id: CONN_A, name: "Sales Model", description: "", isConnected: true, modelPath: null },
     { id: CONN_B, name: "HR Model", description: "", isConnected: true, modelPath: null },
@@ -536,18 +559,18 @@ describe("refreshFilterItems", () => {
   });
 
   it("fetches values from the BI engine and marks selection", async () => {
-    mockGetBiColumnValues.mockResolvedValue(["A", "B"]);
+    mockGetBiColumnValues.mockResolvedValue(members(["A", "B"]));
 
     await refreshFilterItems("f-1");
 
     expect(mockGetBiColumnValues).toHaveBeenCalledWith(CONN_A, "Products", "Category");
     expect(getCachedItems("f-1")).toEqual([
-      { value: "A", selected: true, hasData: true },
-      { value: "B", selected: false, hasData: true },
+      { key: "A", label: "A", selected: true, hasData: true },
+      { key: "B", label: "B", selected: false, hasData: true },
     ]);
   });
 
-  it("only cross-filters against siblings on the same connection", async () => {
+  it("only narrows by dependent-filter siblings on the same connection", async () => {
     // Seed: f-1 (CONN_A) is targeted by f-2 (CONN_A) and f-3 (CONN_B, other model)
     mockGetAllRibbonFilters.mockResolvedValue([
       makeFilter({ id: "f-1", selectedItems: null }),
@@ -556,24 +579,24 @@ describe("refreshFilterItems", () => {
         connectionId: CONN_A,
         fieldName: "Products.Color",
         selectedItems: ["Red"],
-        crossFilterTargets: ["f-1"],
+        dependentFilters: ["f-1"],
       }),
       makeFilter({
         id: "f-3",
         connectionId: CONN_B,
         fieldName: "Employees.Dept",
         selectedItems: ["IT"],
-        crossFilterTargets: ["f-1"],
+        dependentFilters: ["f-1"],
       }),
     ]);
     await refreshCache();
 
-    mockGetBiColumnValues.mockResolvedValue(["A", "B"]);
+    mockGetBiColumnValues.mockResolvedValue(members(["A", "B"]));
     mockGetBiColumnAvailableValues.mockResolvedValue(["A"]);
 
     await refreshFilterItems("f-1");
 
-    // Only the same-connection sibling contributes a cross-filter constraint
+    // Only the same-connection sibling contributes a value constraint
     expect(mockGetBiColumnAvailableValues).toHaveBeenCalledWith(
       CONN_A,
       "Products",
@@ -581,9 +604,223 @@ describe("refreshFilterItems", () => {
       [{ table: "Products", column: "Color", values: ["Red"] }],
     );
     expect(getCachedItems("f-1")).toEqual([
-      { value: "A", selected: true, hasData: true },
-      { value: "B", selected: true, hasData: false },
+      { key: "A", label: "A", selected: true, hasData: true },
+      { key: "B", label: "B", selected: true, hasData: false },
     ]);
+  });
+});
+
+// ============================================================================
+// refreshFilterItems -- dotted table names and reported failures (P1 S5)
+// ============================================================================
+
+describe("refreshFilterItems splits against the model's tables and reports failures", () => {
+  const DATE_YEAR = makeFilter({
+    id: "f-year",
+    fieldName: "BI.dim_date.year",
+    selectedItems: null,
+  });
+
+  async function seed(filters: RibbonFilter[]): Promise<void> {
+    mockGetAllRibbonFilters.mockResolvedValue(filters);
+    await refreshCache();
+    vi.clearAllMocks();
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearCache();
+    modelTables = ["BI.dim_date", "BI.fact_sales", "BI.dim_territory"];
+  });
+
+  it("a dotted table name reaches the engine whole (never the first-dot split 'BI')", async () => {
+    await seed([DATE_YEAR]);
+    mockGetBiColumnValues.mockResolvedValue(members(["2023", "2024"]));
+
+    const outcome = await refreshFilterItems("f-year");
+
+    expect(outcome).toEqual({ ok: true, narrowingError: null });
+    expect(mockGetBiModelInfo).toHaveBeenCalledWith(CONN_A);
+    expect(mockGetBiColumnValues).toHaveBeenCalledWith(CONN_A, "BI.dim_date", "year");
+    expect(getCachedItems("f-year")?.map((i) => i.key)).toEqual(["2023", "2024"]);
+    expect(getFilterItemsError("f-year")).toBeNull();
+  });
+
+  it("the longest table prefix wins when one table name prefixes another", async () => {
+    modelTables = ["BI.dim", "BI.dim_date"];
+    await seed([DATE_YEAR]);
+    mockGetBiColumnValues.mockResolvedValue(members(["2024"]));
+
+    await refreshFilterItems("f-year");
+
+    expect(mockGetBiColumnValues).toHaveBeenCalledWith(CONN_A, "BI.dim_date", "year");
+  });
+
+  it("a dependent-filter sibling's constraint is split the same way", async () => {
+    await seed([
+      DATE_YEAR,
+      makeFilter({
+        id: "f-territory",
+        fieldName: "BI.dim_territory.territorygroup",
+        selectedItems: ["Europe"],
+        dependentFilters: ["f-year"],
+      }),
+    ]);
+    mockGetBiColumnValues.mockResolvedValue(members(["2023", "2024"]));
+    mockGetBiColumnAvailableValues.mockResolvedValue(["2024"]);
+
+    const outcome = await refreshFilterItems("f-year");
+
+    expect(outcome).toEqual({ ok: true, narrowingError: null });
+    expect(mockGetBiColumnAvailableValues).toHaveBeenCalledWith(CONN_A, "BI.dim_date", "year", [
+      { table: "BI.dim_territory", column: "territorygroup", values: ["Europe"] },
+    ]);
+    expect(getCachedItems("f-year")).toEqual([
+      { key: "2023", label: "2023", selected: true, hasData: false },
+      { key: "2024", label: "2024", selected: true, hasData: true },
+    ]);
+  });
+
+  it("a failed value load is REPORTED: outcome, sentence, and no cached list", async () => {
+    await seed([DATE_YEAR]);
+    // A first load succeeds, so a stale list would be there to keep.
+    mockGetBiColumnValues.mockResolvedValueOnce(members(["2024"]));
+    await refreshFilterItems("f-year");
+    expect(getCachedItems("f-year")).toHaveLength(1);
+
+    mockGetBiColumnValues.mockRejectedValueOnce("Table 'BI' not found");
+    const outcome = await refreshFilterItems("f-year");
+
+    expect(outcome).toEqual({ ok: false, error: "Table 'BI' not found" });
+    expect(getFilterItemsError("f-year")).toBe("Table 'BI' not found");
+    expect(getCachedItems("f-year")).toBeUndefined();
+  });
+
+  it("a success after a failure clears the reported sentence", async () => {
+    await seed([DATE_YEAR]);
+    mockGetBiColumnValues.mockRejectedValueOnce(new Error("timeout"));
+    await refreshFilterItems("f-year");
+    expect(getFilterItemsError("f-year")).toBe("timeout");
+
+    mockGetBiColumnValues.mockResolvedValueOnce(members(["2024"]));
+    const outcome = await refreshFilterItems("f-year");
+
+    expect(outcome.ok).toBe(true);
+    expect(getFilterItemsError("f-year")).toBeNull();
+    expect(getCachedItems("f-year")).toHaveLength(1);
+  });
+
+  it("a connection with no model loaded fails with the 'not loaded' sentence", async () => {
+    modelTables = null;
+    await seed([DATE_YEAR]);
+
+    const outcome = await refreshFilterItems("f-year");
+
+    expect(outcome).toEqual({
+      ok: false,
+      error: "The model of this filter's connection is not loaded.",
+    });
+    expect(getFilterItemsError("f-year")).toBe(
+      "The model of this filter's connection is not loaded.",
+    );
+    expect(mockGetBiColumnValues).not.toHaveBeenCalled();
+  });
+
+  it("a dotted key whose table is NOT in the model is refused, never sent as table 'BI'", async () => {
+    modelTables = ["BI.dim_date"];
+    await seed([makeFilter({ id: "f-gone", fieldName: "BI.dim_dat.year" })]);
+
+    const outcome = await refreshFilterItems("f-gone");
+
+    expect(outcome).toEqual({
+      ok: false,
+      error: '"BI.dim_dat.year" names no table of this model.',
+    });
+    expect(mockGetBiColumnValues).not.toHaveBeenCalled();
+    expect(getCachedItems("f-gone")).toBeUndefined();
+  });
+
+  it("a failed narrowing keeps the values, un-narrowed, and says why", async () => {
+    await seed([
+      DATE_YEAR,
+      makeFilter({
+        id: "f-territory",
+        fieldName: "BI.dim_territory.territorygroup",
+        selectedItems: ["Europe"],
+        dependentFilters: ["f-year"],
+      }),
+    ]);
+    mockGetBiColumnValues.mockResolvedValue(members(["2023", "2024"]));
+    mockGetBiColumnAvailableValues.mockRejectedValueOnce("relationship is ambiguous");
+
+    const outcome = await refreshFilterItems("f-year");
+
+    expect(outcome).toEqual({ ok: true, narrowingError: "relationship is ambiguous" });
+    expect(getFilterNarrowingError("f-year")).toBe("relationship is ambiguous");
+    expect(getFilterItemsError("f-year")).toBeNull();
+    const items = getCachedItems("f-year")!;
+    expect(items).toHaveLength(2);
+    expect(items.every((i) => i.hasData)).toBe(true);
+  });
+
+  it("a dependent sibling whose table is not in the model is skipped and named", async () => {
+    await seed([
+      DATE_YEAR,
+      makeFilter({
+        id: "f-old",
+        fieldName: "BI.dim_region.name",
+        selectedItems: ["North"],
+        dependentFilters: ["f-year"],
+      }),
+    ]);
+    mockGetBiColumnValues.mockResolvedValue(members(["2023", "2024"]));
+
+    const outcome = await refreshFilterItems("f-year");
+
+    expect(outcome).toEqual({
+      ok: true,
+      narrowingError: '"BI.dim_region.name" names no table of this model.',
+    });
+    expect(mockGetBiColumnAvailableValues).not.toHaveBeenCalled();
+    expect(getCachedItems("f-year")!.every((i) => i.hasData)).toBe(true);
+  });
+
+  it("counts every load it starts, and clearCache resets the count", async () => {
+    await seed([DATE_YEAR]);
+    mockGetBiColumnValues.mockResolvedValue(members(["2024"]));
+
+    expect(getFilterLoadAttempts("f-year")).toBe(0);
+    await refreshFilterItems("f-year");
+    await refreshFilterItems("f-year");
+    expect(getFilterLoadAttempts("f-year")).toBe(2);
+
+    clearCache();
+    expect(getFilterLoadAttempts("f-year")).toBe(0);
+  });
+
+  it("a filter that is not in the store is a reported failure, not a silent no-op", async () => {
+    await seed([DATE_YEAR]);
+
+    const outcome = await refreshFilterItems("f-missing");
+
+    expect(outcome.ok).toBe(false);
+    expect(getFilterItemsError("f-missing")).toBe("This filter is no longer in the workbook.");
+    expect(mockGetBiModelInfo).not.toHaveBeenCalled();
+  });
+
+  it("deleting a filter drops its error and its load count", async () => {
+    await seed([DATE_YEAR]);
+    mockGetBiColumnValues.mockRejectedValueOnce("engine down");
+    await refreshFilterItems("f-year");
+    expect(getFilterItemsError("f-year")).toBe("engine down");
+
+    mockClearRibbonFilter.mockResolvedValue(undefined);
+    mockDeleteRibbonFilter.mockResolvedValue(undefined);
+    mockGetAllRibbonFilters.mockResolvedValue([]);
+    await deleteFilterAsync("f-year");
+
+    expect(getFilterItemsError("f-year")).toBeNull();
+    expect(getFilterLoadAttempts("f-year")).toBe(0);
   });
 });
 
@@ -637,7 +874,7 @@ describe("clearCache", () => {
   it("clears all cached data", async () => {
     mockGetAllRibbonFilters.mockResolvedValue([makeFilter({ id: "f-1" })]);
     await refreshCache();
-    mockGetBiColumnValues.mockResolvedValue(["X"]);
+    mockGetBiColumnValues.mockResolvedValue(members(["X"]));
     await refreshFilterItems("f-1");
 
     clearCache();
@@ -645,5 +882,20 @@ describe("clearCache", () => {
     expect(getAllFilters()).toEqual([]);
     expect(getCachedItems("f-1")).toBeUndefined();
     expect(getConnectionName(CONN_A)).toBeUndefined();
+  });
+
+  it("clears the item errors, the narrowing errors and the load counter", async () => {
+    mockGetAllRibbonFilters.mockResolvedValue([makeFilter({ id: "f-1" })]);
+    await refreshCache();
+    mockGetBiColumnValues.mockRejectedValueOnce("engine down");
+    await refreshFilterItems("f-1");
+    expect(getFilterItemsError("f-1")).toBe("engine down");
+    expect(getFilterLoadAttempts("f-1")).toBe(1);
+
+    clearCache();
+
+    expect(getFilterItemsError("f-1")).toBeNull();
+    expect(getFilterNarrowingError("f-1")).toBeNull();
+    expect(getFilterLoadAttempts("f-1")).toBe(0);
   });
 });

@@ -9,15 +9,49 @@ Design spike for the architecture audit's deepest seam: the Rust backend is a
 Re-audited against source. The **design is intact and shipped**; the counts had drifted and one
 resolved-asymmetry paragraph named two symbols that no longer exist.
 
-| Figure | 2026-08-16 | 08-27 | 08-29 | 09-01 | 09-03 | 09-05 | 09-07 | 09-10 | 09-25 | 09-30 | 09-30 (anchor) | 09-30 (M6 seal) | 10-01 (M6 door) | 10-01 (owner B trail) | 10-01 (owner B all-or-nothing) | 10-01 (review of M6b) | 10-01 (M8 command allowlist) | 10-04/05 (Home tab) | 10-08 (Canvas = Power BI) | 10-15 (WP-D bindings) | Recounted (2026-10-15, WP-C S7) | How counted |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| Commands in `generate_handler!` | 761 | 773 | 783 | 788 | 787 | 792 | 800 | 806 | 809 | 812 | 813 | 815 | 817 | 819 | 821 | 821 | 822 | 829 | 829 | 830 | **831** | bracket-matched parse of `lib.rs`, comments stripped LINE-WISE (all unique) |
-| `#[tauri::command]` attributes | 798 | 815 | 822 | 827 | 826 | 831 | 839 | 845 | 849 | 853 | 854 | 856 | 858 | 860 | 862 | 862 | 863 | 871 | 872 | 873 | **874** | `#[tauri::command]` occurrences under `app/src-tauri/src` |
-| Privileged (denylisted) commands | ~30 | 94 | 100 | 101 | 101 | 101 | 102 | 108 | 107 | 107 | 108 | 109 | 111 | 111 | 111 | 114 | 115 | 115 | 115 | 115 | **115** | unique quoted names inside `PRIVILEGED_BACKEND_COMMANDS` (`app/src/api/backendCommands.ts`), comments stripped line-wise |
-| Feature-open commands | 667 | 673 | 683 | 687 | 686 | 691 | 698 | 698 | 702 | 705 | 705 | 706 | 706 | 708 | 710 | 707 | 707 | 714 | 714 | 715 | **716** | 831 − 115 |
-| Typed wrappers in `backend.ts` | ~229 | 327 | 338 | 338 | 338 | 338 | 339 | 339 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | **340** | exported functions/consts in `backend.ts` (lines starting `export async function` / `export function` / `export const`) |
+| Figure | 2026-08-16 | 08-27 | 08-29 | 09-01 | 09-03 | 09-05 | 09-07 | 09-10 | 09-25 | 09-30 | 09-30 (anchor) | 09-30 (M6 seal) | 10-01 (M6 door) | 10-01 (owner B trail) | 10-01 (owner B all-or-nothing) | 10-01 (review of M6b) | 10-01 (M8 command allowlist) | 10-04/05 (Home tab) | 10-08 (Canvas = Power BI) | 10-15 (WP-D bindings) | 10-15 (WP-C S7) | 10-16 (round 2 P3) | Recounted (2026-10-17, round 2 P4) | How counted |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| Commands in `generate_handler!` | 761 | 773 | 783 | 788 | 787 | 792 | 800 | 806 | 809 | 812 | 813 | 815 | 817 | 819 | 821 | 821 | 822 | 829 | 829 | 830 | 831 | 832 | **833** | bracket-matched parse of `lib.rs`, comments stripped LINE-WISE (all unique) |
+| `#[tauri::command]` attributes | 798 | 815 | 822 | 827 | 826 | 831 | 839 | 845 | 849 | 853 | 854 | 856 | 858 | 860 | 862 | 862 | 863 | 871 | 872 | 873 | 874 | 875 | **877** | `#[tauri::command]` occurrences under `app/src-tauri/src` |
+| Privileged (denylisted) commands | ~30 | 94 | 100 | 101 | 101 | 101 | 102 | 108 | 107 | 107 | 108 | 109 | 111 | 111 | 111 | 114 | 115 | 115 | 115 | 115 | 115 | 115 | **115** | unique quoted names inside `PRIVILEGED_BACKEND_COMMANDS` (`app/src/api/backendCommands.ts`), comments stripped line-wise |
+| Feature-open commands | 667 | 673 | 683 | 687 | 686 | 691 | 698 | 698 | 702 | 705 | 705 | 706 | 706 | 708 | 710 | 707 | 707 | 714 | 714 | 715 | 716 | 717 | **718** | 833 − 115 |
+| Typed wrappers in `backend.ts` | ~229 | 327 | 338 | 338 | 338 | 338 | 339 | 339 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | **340** | exported functions/consts in `backend.ts` (lines starting `export async function` / `export function` / `export const`) |
 
-The "Recounted (2026-10-15, WP-C S7)" column is the visual-container step of the object pane / Format pane
+The "Recounted (2026-10-17, round 2 P4)" column is package P4 of canvas round 2, the LAST package to land (one filter
+resolver, ribbon filters on every model visual, visual cross-filter and Canvas > Edit interactions, owner findings
+G2-B and G4; `docs/design/canvas-sheets.md` §16.4, `docs/design/open-items.md` §2.al). It added exactly ONE command,
+`pivot::headless::run_bi_pivot_filtered_view`, FEATURE-OPEN (a read like `run_design_query`, which it sits beside;
+it is not in `PRIVILEGED_BACKEND_COMMANDS`, and `backendCommands.test.ts` lists it under
+`KNOWN_SAFE_HEURISTIC_MATCHES` because the `run_` heuristic flags the name): the PAINT-ONLY view of a canvas BI
+pivot under another visual's selection, computed on a transient definition and never stored, recorded or dirtying
+(`bi_pivot_filtered_view` is never handed a FileState or the undo stack). Its frontend door is the Pivot extension
+(`Pivot/lib/pivotCrossFilterView.ts`), not a typed wrapper in `backend.ts`, which stays at 340. Everything else P4
+changed rides EXISTING commands: interactions through `set_canvas_layout` (now async, with the slicer -> pivot
+re-fold in its own undo step), tuple filters through `run_design_query` and the `object_bindings` op
+`setPageFilters`, slicer visual constraints as an optional argument of `get_slicer_items`, and a ribbon filter's
+`connected_visuals` through its create/update commands. All five figures were re-run together, line-wise, the same
+parse as the P3 column: 833 / 877 / 115 / 718 / 340, all 833 unique and every entry a valid path; 831 of the 877
+attribute occurrences are bare attribute lines (830 + 1). The attribute total rose by TWO while the bare lines rose by
+one: the second occurrence is the text `#[tauri::command]` inside a comment or test string (the census tests quote
+it), which is why "bare lines" is the figure to diff. The app has NOT yet been linked and launched with the 833rd
+command (no `tauri` build or E2E run in the implementation steps): the 32 MB main-thread stack headroom is proved
+only by the round's live E2E run.
+
+The "10-16 (round 2 P3)" column (recounted then) is package P3 of canvas round 2 (floating grids take every Home
+command, owner finding G3; `docs/design/canvas-sheets.md` §16.2, `docs/design/open-items.md` §2.al). It added exactly
+ONE command, `cell_target::get_cell_target_cells`, FEATURE-OPEN (a `get_` read; it is not in
+`PRIVILEGED_BACKEND_COMMANDS`): the STYLED read a floating grid paints from (display in the app locale, styles,
+merges, conditional-format results with the backing sheet's rules). Every other P3 change rides an optional
+`target: CellTargetRef` on an EXISTING command (30 of them, listed in `TARGET_COMMANDS`,
+`app/src/api/cellTargetCommands.ts`), so it costs no dispatch-frame entry. Its frontend door is `@api/cellTarget`
+(`getCellTargetCells`), not a typed wrapper in `backend.ts`, which stays at 340. P1, landed before it, added no
+command. All five figures were re-run together, line-wise, the same parse as the WP-C S7 column: 832 / 875 / 115 /
+717 / 340, all 832 unique; 830 of the 875 attribute occurrences are bare attribute lines (829 + 1). Round 2's P4 is
+expected to add one more (`run_bi_pivot_filtered_view`), and the last package to land writes the CLAUDE.md
+paragraph (round-2 ruling Q2). The app has NOT yet been linked and launched with the 832nd command: the 32 MB
+main-thread stack headroom is proved only by the round's live E2E run.
+
+The "10-15 (WP-C S7)" column is the visual-container step of the object pane / Format pane
 package (`docs/design/open-items.md` §2.ak, WP-C). It added exactly ONE command, `controls::set_control_appearance`,
 FEATURE-OPEN beside `controls::set_control_geometry` (whose shape it copies; neither is in
 `PRIVILEGED_BACKEND_COMMANDS`): the Format pane writes several appearance keys on several controls as ONE undo step

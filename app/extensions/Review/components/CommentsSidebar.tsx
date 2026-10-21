@@ -15,6 +15,7 @@ import {
   AppEvents,
 } from "@api";
 import { refreshAnnotationState } from "../lib/annotationStore";
+import { formatDate } from "@api/locale";
 
 // ============================================================================
 // Styles
@@ -128,12 +129,9 @@ function cellRef(row: number, colNum: number): string {
 }
 
 function formatTimestamp(iso: string): string {
-  try {
-    const d = new Date(iso);
-    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-  } catch {
-    return "";
-  }
+  // The app locale's short date, never the WebView's own locale.
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "" : formatDate(d, "short");
 }
 
 // ============================================================================

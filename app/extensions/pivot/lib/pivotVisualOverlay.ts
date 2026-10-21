@@ -55,7 +55,7 @@ import type { DimensionOverrides } from "@api/types";
 import { registerObjectWheelTarget } from "../../_shared/lib/objectWheelScroll";
 import { paintInnerSelection, paintPickPreview, type PaintRect } from "../../_shared/lib/innerSelectionPaint";
 import { PivotEvents } from "../../_shared/lib/pivotEvents";
-import { onDesignModeChange } from "@api/designMode";
+import { getDesignMode, onDesignModeChange } from "@api/designMode";
 import type { PivotViewResponse } from "./pivot-api";
 import { deletePivotTable, getPivotCellWindow, updatePivotProperties } from "./pivot-api";
 import { joinUndoTransaction, registerObjectGeometryProvider } from "@api/objectGeometry";
@@ -66,7 +66,6 @@ import {
 } from "./pivotVisualGeometry";
 import {
   deleteCachedPivotView,
-  getCachedPivotView,
   getCellWindowCache,
   ensureCellWindow,
   isLoading,
@@ -126,6 +125,14 @@ import {
   getPivotViewCell,
 } from "./pivotChromeActions";
 import { runPivotCellDoubleClick } from "./pivotCellDoubleClick";
+import {
+  getDisplayedPivotView,
+  getPivotCrossFilterBadge,
+  onPivotFilteredViewChange,
+  refuseWhileFiltered,
+} from "./pivotCrossFilterView";
+import { applyPivotCrossFilterClick } from "./pivotCrossFilterClick";
+import { paintPivotCrossFilterBadge } from "../rendering/pivotCrossFilterBadge";
 import { beginPivotChromePress, cancelPivotChromePress } from "./pivotChromePress";
 import { chromeReleaseActs, forgetChromeReleases } from "./pivotChromeRepeat";
 import { registerPivotVisualSelection } from "./pivotVisualSelection";
@@ -322,7 +329,9 @@ export function renderPivotVisualRegion(oc: OverlayRenderContext, deps: PivotVis
 
   const ctx = oc.ctx;
   const isEmpty = region.data?.isEmpty === true;
-  const view = isEmpty ? undefined : getCachedPivotView(pivotId);
+  // What the box SHOWS: the filtered view while another visual's selection
+  // reaches it (P4 S7, pivotCrossFilterView.ts), else the real one.
+  const view = isEmpty ? undefined : getDisplayedPivotView(pivotId);
 
   withContainerContentClip(ctx, region as ContainerRegion, outer, box, () => {
     if (view) {
@@ -366,6 +375,11 @@ export function renderPivotVisualRegion(oc: OverlayRenderContext, deps: PivotVis
       ctx.restore();
     }
   });
+
+  // "Filtered by <source>" -- or, over the real view, "Not filtered by
+  // <source>: <reason>" when the backend refused the filtered one.
+  const badge = isEmpty ? null : getPivotCrossFilterBadge(pivotId);
+  if (badge) paintPivotCrossFilterBadge(ctx, box, badge, deps.getTheme(pivotId));
 
   const loading = isLoading(pivotId) ? getLoadingState(pivotId) : undefined;
   if (loading) {
@@ -543,6 +557,9 @@ export function pivotVisualDoubleClick(hitCtx: OverlayHitTestContext): boolean {
 
   const at = viewCellAtCanvasPoint(record, hitCtx.canvasX, hitCtx.canvasY);
   if (!at) return true;
+  // A filtered box shows cells of a transient view: drilling or toggling
+  // the REAL cell at those coordinates would act on a cell the user never saw.
+  if (refuseWhileFiltered(record.pivotId)) return true;
   const cell = getPivotViewCell(record.pivotId, at.viewRow, at.viewCol);
   if (!cell) return true;
   runPivotCellDoubleClick(
@@ -619,6 +636,10 @@ export function handlePivotVisualPress(
   if (!chromeReleaseActs(pressKey(pivotId, hit), hit.kind !== "cancel", now)) {
     return null;
   }
+  // A filtered box's chrome is painted over the TRANSIENT view: its +/- and
+  // filter buttons name displayed cells and field indices, which the real
+  // pivot's commands must never be handed (P4 S7). Cancel stays.
+  if (hit.kind !== "cancel" && refuseWhileFiltered(pivotId)) return hit;
 
   switch (hit.kind) {
     case "cancel":
@@ -730,6 +751,9 @@ interface FloatingDetail {
   part?: string;
   /** The RAW Shift of a content press (Shift+click extends the cell selection). */
   shiftKey?: boolean;
+  /** The RAW Ctrl (Cmd) of a content press (Ctrl+click toggles a cross-filter tuple). */
+  ctrlKey?: boolean;
+  metaKey?: boolean;
 }
 
 function detailOf(e: Event): FloatingDetail {
@@ -842,13 +866,20 @@ export function installPivotVisual(
     if (!pivotId || typeof d.canvasX !== "number" || typeof d.canvasY !== "number") return;
     const regionId = typeof d.regionId === "string" ? d.regionId : undefined;
     if (d.part === "cell") {
+      const shiftKey = d.shiftKey === true;
+      const ctrl = d.ctrlKey === true || d.metaKey === true;
       beginPivotCellPress({
         pivotId,
         regionId,
         canvasX: d.canvasX,
         canvasY: d.canvasY,
-        shiftKey: d.shiftKey === true,
+        shiftKey,
         clientToCanvas: canvasPointOf,
+        // A plain or Ctrl CLICK on a cell also cross-filters the page (P4
+        // S7) -- outside Design Mode, never on a Shift-extend or a drag.
+        ...(!shiftKey && !getDesignMode()
+          ? { onClick: (cell: { viewRow: number; viewCol: number }) => void applyPivotCrossFilterClick({ pivotId, ...cell, ctrl }) }
+          : {}),
       });
       return;
     }
@@ -866,10 +897,18 @@ export function installPivotVisual(
   listen(PivotEvents.PIVOT_VIEW_UPDATED, (e) => {
     const pivotId = ((e as CustomEvent).detail as { pivotId?: unknown } | undefined)?.pivotId;
     if (typeof pivotId !== "string") return;
-    const view = getCachedPivotView(pivotId);
+    const view = getDisplayedPivotView(pivotId);
     if (!view) return;
     clampPivotCellSelection(pivotId, viewRowCount(view), viewColCount(view));
   });
+  // The same when a filtered view comes, changes or goes: the cells are
+  // clamped into the grid the box shows now.
+  cleanups.push(
+    onPivotFilteredViewChange((pivotId) => {
+      const view = getDisplayedPivotView(pivotId);
+      if (view) clampPivotCellSelection(pivotId, viewRowCount(view), viewColCount(view));
+    }),
+  );
 
   // Move / resize: previews patch the live frame (the box follows the pointer);
   // completes persist it. Snap, page clamp and consume mode are Core's.

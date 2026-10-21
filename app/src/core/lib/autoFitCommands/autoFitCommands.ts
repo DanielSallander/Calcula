@@ -26,8 +26,12 @@
 // its height, and nothing is unhidden -- so rotating text never undoes a size
 // the user chose (Excel's automatic row height does the same for rotated text).
 
-import type { CellData, DimensionOverrides, GridConfig, Selection } from "../../types";
+import type { CellData, CellTargetRef, DimensionOverrides, GridConfig, Selection } from "../../types";
 import {
+  setColsHidden,
+  setColumnWidths,
+  setRowHeights,
+  setRowsHidden,
   beginUndoTransaction,
   cancelUndoTransaction,
   commitUndoTransaction,
@@ -44,6 +48,12 @@ import { alertAsync } from "../dialogs";
 import { getActiveGridTheme } from "../../theme/skinLoader";
 import { setColumnWidth, setRowHeight } from "../../state/gridActions";
 import { selectionBlocks, type Block } from "../merge/mergeGeometry";
+import {
+  announceCellTargetObjectChanged,
+  getCellTargetCells,
+  getCellTargetLines,
+  type CellTargetLines,
+} from "../../../api/cellTarget";
 
 /** The commands' optional arguments (`CommandRegistry.execute(id, args)`). */
 export interface AutoFitArgs {
@@ -75,6 +85,16 @@ export interface AutoFitCommandHost {
   onRowResized(row: number, height: number): void;
   /** Repaint once the fit is done. */
   redraw(): void;
+  /**
+   * The OBJECT whose lines are fitted (a floating grid's, P3), with its write
+   * extent, or absent for the active sheet. With a target the cells are
+   * measured from the object's styled read (`getCellTargetCells`) with the
+   * SAME measure functions, compared with the object's OWN sizes and hidden
+   * lines, and written to the object with `setRowHeights` / `setColumnWidths` /
+   * `setRowsHidden` / `setColsHidden` and the target -- never to the sheet's
+   * sizes or the reducer's mirror, which describe the host under the object.
+   */
+  target?: { ref: CellTargetRef; bounds: { rows: number; cols: number } };
 }
 
 /** The closes an owned transaction uses, read when the close runs. */
@@ -174,6 +194,10 @@ async function applyFit(
 export async function runAutoFitColumnWidth(host: AutoFitCommandHost, args?: unknown): Promise<void> {
   const blocks = selectionBlocks(host.selection);
   if (blocks.length === 0) return;
+  if (host.target) {
+    await runTargetAutoFit("cols", host, host.target, blocks, readAutoFitArgs(args).growOnly);
+    return;
+  }
   const { growOnly } = readAutoFitArgs(args);
   const { config } = host;
   const dims = host.dimensions;
@@ -256,6 +280,10 @@ export async function runAutoFitColumnWidth(host: AutoFitCommandHost, args?: unk
 export async function runAutoFitRowHeight(host: AutoFitCommandHost, args?: unknown): Promise<void> {
   const blocks = selectionBlocks(host.selection);
   if (blocks.length === 0) return;
+  if (host.target) {
+    await runTargetAutoFit("rows", host, host.target, blocks, readAutoFitArgs(args).growOnly);
+    return;
+  }
   const { growOnly } = readAutoFitArgs(args);
   const { config } = host;
   const dims = host.dimensions;
@@ -323,5 +351,133 @@ export async function runAutoFitRowHeight(host: AutoFitCommandHost, args?: unkno
       host.onRowResized(index, size);
     },
   });
+  host.redraw();
+}
+
+// ============================================================================
+// AutoFit on an OBJECT's cells (a floating grid's, P3)
+// ============================================================================
+
+/** `blocks` clipped to the object's extent; blocks wholly outside it are dropped. */
+function clipToBounds(blocks: Block[], bounds: { rows: number; cols: number }): Block[] {
+  const out: Block[] = [];
+  for (const b of blocks) {
+    const endRow = Math.min(b.endRow, bounds.rows - 1);
+    const endCol = Math.min(b.endCol, bounds.cols - 1);
+    if (b.startRow > endRow || b.startCol > endCol) continue;
+    out.push({ startRow: b.startRow, startCol: b.startCol, endRow, endCol });
+  }
+  return out;
+}
+
+/**
+ * The same rules as the sheet's fit, on an object's cells: a column fits the
+ * SELECTED cells, a row fits its WHOLE row of the object; lines the object
+ * hides inside the selection are unhidden (never for growOnly); one undo step.
+ */
+async function runTargetAutoFit(
+  axis: "rows" | "cols",
+  host: AutoFitCommandHost,
+  target: { ref: CellTargetRef; bounds: { rows: number; cols: number } },
+  selected: Block[],
+  growOnly: boolean,
+): Promise<void> {
+  const label = axis === "cols" ? "AutoFit Column Width" : "AutoFit Row Height";
+  const blocks = clipToBounds(selected, target.bounds);
+  if (blocks.length === 0) return;
+  const { config } = host;
+
+  let lines: CellTargetLines | null;
+  let styles;
+  const cellsByLine = new Map<number, Map<string, CellData>>();
+  try {
+    lines = await getCellTargetLines(target.ref);
+    if (!lines) return;
+    for (const b of blocks) {
+      // A column fits the selected cells; a row fits its whole row of the object.
+      const rect =
+        axis === "cols"
+          ? b
+          : { startRow: b.startRow, startCol: 0, endRow: b.endRow, endCol: Math.max(0, target.bounds.cols - 1) };
+      const read = await getCellTargetCells(target.ref, rect);
+      for (const cell of read.cells) {
+        const key = axis === "cols" ? cell.col : cell.row;
+        let line = cellsByLine.get(key);
+        if (!line) cellsByLine.set(key, (line = new Map()));
+        line.set(`${cell.row}:${cell.col}`, cell);
+      }
+    }
+    styles = await getAllStyles();
+  } catch (error) {
+    console.error(`[autoFitCommands] ${label}: reading the floating grid's cells failed:`, error);
+    await alertAsync(messageOf(error));
+    return;
+  }
+
+  const inBlocks = (index: number) =>
+    blocks.some((b) => (axis === "cols" ? within(index, b.startCol, b.endCol) : within(index, b.startRow, b.endRow)));
+  const hiddenNow = axis === "cols" ? lines.hiddenCols : lines.hiddenRows;
+  const unhide = growOnly ? [] : hiddenNow.filter(inBlocks).sort((a, b) => a - b);
+  const sizes = axis === "cols" ? lines.colWidths : lines.rowHeights;
+  const ownSized = Object.keys(sizes)
+    .map(Number)
+    .filter((i) => Number.isFinite(i) && inBlocks(i));
+  const defaultSize = axis === "cols" ? config.defaultCellWidth : config.defaultCellHeight;
+
+  const theme = themeFonts();
+  const columnWidths = new Map<number, number>(
+    Object.entries(lines.colWidths).map(([k, v]): [number, number] => [Number(k), v]),
+  );
+  // The lines that can change: those with content; for rows also those with a
+  // height of their own (an empty one goes back to the standard height); and
+  // those unhidden.
+  const indices = [...new Set([...cellsByLine.keys(), ...(axis === "rows" ? ownSized : []), ...unhide])].sort(
+    (a, b) => a - b,
+  );
+  const changes: SizeChange[] = [];
+  for (const index of indices) {
+    const cells = [...(cellsByLine.get(index)?.values() ?? [])];
+    const optimal =
+      axis === "cols"
+        ? measureOptimalColumnWidth(index, cells, styles, theme, config.minColumnWidth, false)
+        : measureOptimalRowHeight(
+            cells,
+            styles,
+            columnWidths,
+            config.defaultCellWidth,
+            theme,
+            config.minRowHeight,
+            config.defaultCellHeight,
+            index,
+            false,
+          );
+    let size: number;
+    if (optimal === null) {
+      // Nothing to fit: a column keeps its width; an empty row goes back to the
+      // standard height -- unless growing only.
+      if (axis === "cols" || growOnly) continue;
+      size = defaultSize;
+    } else {
+      size = optimal;
+    }
+    const current = sizes[index] ?? defaultSize;
+    if (size === current) continue;
+    if (growOnly && size < current) continue;
+    changes.push({ index, size });
+  }
+
+  const ref = target.ref;
+  await applyFit(label, unhide, changes, {
+    unhide: async (indices) => {
+      if (axis === "cols") await setColsHidden(indices, false, { target: ref });
+      else await setRowsHidden(indices, false, { target: ref });
+      return true;
+    },
+    write: async ({ index, size }) => {
+      if (axis === "cols") await setColumnWidths([[index, index]], size, { target: ref });
+      else await setRowHeights([[index, index]], size, { target: ref });
+    },
+  });
+  announceCellTargetObjectChanged(ref);
   host.redraw();
 }

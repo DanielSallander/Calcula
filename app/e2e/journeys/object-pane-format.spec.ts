@@ -162,6 +162,7 @@ import {
   REGION_TYPE,
   averageRgb,
   bindFormatField,
+  clickRegion,
   clickSliderMiddle,
   closeObjectPaneQuietly,
   commitFormatHex,
@@ -395,13 +396,6 @@ function controlRegion(page: Page, row: number, col: number): Promise<LiveRegion
   return regionWhere(page, (r) => r.type === REGION_TYPE.control && r.data.row === row && r.data.col === col, `the control at (${row}, ${col})`);
 }
 
-/** A hand's click at a point inside a region (sheet offsets from its top-left). */
-async function clickRegion(page: Page, r: LiveRegion, at: { dx: number; dy: number } = { dx: 24, dy: 24 }): Promise<void> {
-  const p = await sheetPointToPage(page, r.floating.x + at.dx, r.floating.y + at.dy);
-  await humanClick(page, p.x, p.y);
-  await page.waitForTimeout(250);
-}
-
 /** Click a region and wait until the pane shows it (a press opens one task after the mouseup). */
 async function openPaneOn(page: Page, r: LiveRegion, at?: { dx: number; dy: number }): Promise<PaneState> {
   await clickRegion(page, r, at);
@@ -592,8 +586,8 @@ test.describe("the ONE object pane + the visual-container Format pane (WP-C), li
     expect(slicer, "the model slicer was not created").toBeTruthy();
     sc.slicerId = slicer!.id;
     await eventually(
-      () => callModule<Array<{ value: string }> | undefined>(page, MOD.SLICER_STORE, "getCachedItems", [sc.slicerId]),
-      (it) => (it ?? []).some((x) => x.value === EUROPE),
+      () => callModule<Array<{ key: string }> | undefined>(page, MOD.SLICER_STORE, "getCachedItems", [sc.slicerId]),
+      (it) => (it ?? []).some((x) => x.key === EUROPE),
       `the model slicer does not list ${EUROPE}`,
       30_000,
     );
@@ -767,7 +761,7 @@ test.describe("the ONE object pane + the visual-container Format pane (WP-C), li
   });
 
   // -------------------------------------------------------------------------
-  test("J6 the Card's Data format: Revenue -> #,##0.00 persists in spec.fieldFormats and the Card WRITES the row's Rust-formatted text (invariant locale); Use source format deletes the key", async ({ appPage: page }) => {
+  test("J6 the Card's Data format: Revenue -> #,##0.00 persists in spec.fieldFormats and the Card WRITES the row's Rust-formatted text (app locale); Use source format deletes the key", async ({ appPage: page }) => {
     const s = need();
     await onCanvas(page);
     await openPaneOn(page, await chartRegion(page, s.cardId));
@@ -777,10 +771,16 @@ test.describe("the ONE object pane + the visual-container Format pane (WP-C), li
     await startTextRecorder(page);
     await selectFormat(page, "data-Revenue", "#,##0.00");
     await eventually(async () => ((await chartRow(page, s.cardId)).spec as { fieldFormats?: Record<string, string> }).fieldFormats?.Revenue, (f) => f === "#,##0.00", "the data format did not persist in spec.fieldFormats");
+    // Since round 2 (P2) a tile formats in the APP locale (owner rule), so #,##0.00 is
+    // "1 234,50"-shaped under sv-SE and "1,234.50"-shaped under en-US: read the separators.
+    const loc = await invoke<{ decimalSeparator: string; thousandsSeparator: string }>(page, "get_locale_settings", {});
+    const esc = (c: string): string => c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const group = loc.thousandsSeparator.trim() === "" ? "[\\s\\u00a0\\u202f]" : esc(loc.thousandsSeparator);
+    const formatRe = new RegExp(`^\\d{1,3}(?:${group}\\d{3})*${esc(loc.decimalSeparator)}\\d{2}$`);
     const row = await eventually(
       () => cachedData(page, s.cardId),
-      (d) => /^[\d,]+\.\d{2}$/.test(d?.displayValues?.[0]?.[0] ?? ""),
-      "the Card's data row is not formatted #,##0.00 (invariant locale: 1,234.50-shaped)",
+      (d) => formatRe.test(d?.displayValues?.[0]?.[0] ?? ""),
+      `the Card's data row is not formatted #,##0.00 in the app locale (group ${JSON.stringify(loc.thousandsSeparator)}, decimal ${JSON.stringify(loc.decimalSeparator)})`,
       60_000,
     );
     const formatted = row!.displayValues![0][0];
@@ -1007,7 +1007,9 @@ test.describe("the ONE object pane + the visual-container Format pane (WP-C), li
     await expect(formatInput(page, "data-0"), "the pivot's Data format card has no row for its value field").toBeVisible({ timeout: 15_000 });
     await selectFormat(page, "data-0", "__custom__");
     await commitFormatText(page, "data-0-code", "#,##0.0");
-    const oneDecimal = (t: string): boolean => /\.\d$/.test(t) && !/\.\d\d$/.test(t);
+    // The pivot's cells are written in the APP locale since round 2 (P2): "21 143 338,3" under sv-SE.
+    const dec = (await invoke<{ decimalSeparator: string }>(page, "get_locale_settings", {})).decimalSeparator;
+    const oneDecimal = (t: string): boolean => t.length > 2 && t[t.length - 2] === dec && /\d/.test(t[t.length - 1]) && /\d/.test(t[t.length - 3]);
     await eventually(async () => firstValueCell(await awPivotView(page, s.pivotId)).text, oneDecimal, "the value cells do not show one decimal after #,##0.0", 60_000);
 
     // Fields: drag year (BI.dim_date) into Columns, the editor's own gesture.

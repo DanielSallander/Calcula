@@ -5,6 +5,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import type { DialogProps } from "@api/uiTypes";
 import { useDialogWindow } from "@api/dialogWindow";
+import { NumberInput } from "@api/layout";
 import {
   getPageSetup,
   setPageSetup,
@@ -377,14 +378,13 @@ export function PageSetupDialog({ isOpen, onClose }: DialogProps) {
                 </div>
                 <div style={styles.row}>
                   <span style={styles.label}>Scale (%):</span>
-                  <input
-                    type="number"
+                  <NumberInput
                     style={styles.input}
                     value={setup.scale}
                     min={10}
                     max={400}
-                    onChange={(e) =>
-                      update("scale", Math.max(10, Math.min(400, parseInt(e.target.value) || 100)))
+                    onChange={(n) =>
+                      update("scale", Math.max(10, Math.min(400, Math.trunc(n ?? 0) || 100)))
                     }
                   />
                 </div>
@@ -404,16 +404,14 @@ export function PageSetupDialog({ isOpen, onClose }: DialogProps) {
                   ).map(([key, label]) => (
                     <div key={key} style={styles.row}>
                       <span style={{ ...styles.label, width: 60 }}>{label}:</span>
-                      <input
-                        type="number"
+                      <NumberInput
                         style={styles.input}
                         value={setup[key]}
                         min={0}
                         max={5}
                         step={0.05}
-                        onChange={(e) =>
-                          update(key, Math.max(0, parseFloat(e.target.value) || 0))
-                        }
+                        // Typed and shown in the APP locale ("0,75" under de-DE).
+                        onChange={(n) => update(key, Math.max(0, n ?? 0))}
                       />
                     </div>
                   ))}

@@ -19,7 +19,7 @@ Use DATEVALUE to convert text-formatted dates into numeric date values that can 
 ## Remarks
 
 - DATEVALUE ignores any time information in the text string; only the date portion is converted.
-- The function recognizes date formats based on your system's regional settings.
+- The function first reads the date the way Calcula's app locale writes it (15.01.2024 in de-DE, 15/01/2024 in en-GB, the region's month names), then falls back to ISO (2024-01-15) and US month-first (01/15/2024) text.
 - If date_text is not a recognizable date format, DATEVALUE returns a #VALUE! error.
 - If the cell already contains a proper date value (not text), DATEVALUE is not needed.
 - Format the result cell as a date to see the date displayed in a readable format.

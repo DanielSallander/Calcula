@@ -64,7 +64,10 @@ vi.mock("../tabs/ProtectionTab", () => ({ ProtectionTab: () => null }));
 import { FormatCellsDialog } from "../FormatCellsDialog";
 import { useFormatCellsStore } from "../hooks/useFormatCellsState";
 import extension from "../index";
-import { CoreCommands } from "@api/commands";
+import { CoreCommands } from "@api/commands";
+
+/** The options a write on Core's own selection carries: no target (P3). */
+const GRID = { target: undefined };
 
 let container: HTMLDivElement;
 let root: Root;
@@ -153,7 +156,7 @@ describe("OK writes only what the user changed (D5)", () => {
     act(() => useFormatCellsStore.getState().setItalic(true));
     await pressOk();
     expect(h.applyFormatting).toHaveBeenCalledTimes(1);
-    expect(h.applyFormatting).toHaveBeenCalledWith([0, 1, 2], [0, 1, 2], { italic: true });
+    expect(h.applyFormatting).toHaveBeenCalledWith([0, 1, 2], [0, 1, 2], { italic: true }, GRID);
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
@@ -193,8 +196,8 @@ describe("Borders on a range, and the undo step", () => {
       s.setBold(false); // FORMATTED is bold: a second write in the same OK
     });
     await pressOk();
-    expect(h.applyBorderPreset).toHaveBeenCalledWith(0, 0, 2, 2, "outside", "solid", "#000000", 1);
-    expect(h.applyFormatting).toHaveBeenCalledWith([0, 1, 2], [0, 1, 2], { bold: false });
+    expect(h.applyBorderPreset).toHaveBeenCalledWith(0, 0, 2, 2, "outside", "solid", "#000000", 1, GRID);
+    expect(h.applyFormatting).toHaveBeenCalledWith([0, 1, 2], [0, 1, 2], { bold: false }, GRID);
     expect(h.begin).toHaveBeenCalledTimes(1);
     expect(h.commit).toHaveBeenCalledWith(41);
   });
@@ -272,7 +275,7 @@ describe("a value the user re-chose is written (review finding (k))", () => {
     });
     await pressOk();
     expect(h.applyFormatting, "OK wrote nothing: A2 stayed plain").toHaveBeenCalledTimes(1);
-    expect(h.applyFormatting).toHaveBeenCalledWith([0, 1], [0], { bold: true, numberFormat: "currency_usd" });
+    expect(h.applyFormatting).toHaveBeenCalledWith([0, 1], [0], { bold: true, numberFormat: "currency_usd" }, GRID);
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 

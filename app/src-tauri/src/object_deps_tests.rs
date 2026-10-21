@@ -116,10 +116,11 @@ fn ribbon_filter(name: &str) -> RibbonFilter {
         connection_mode: ConnectionMode::Manual,
         connected_pivots: vec![],
         connected_sheets: vec![],
+        connected_visuals: vec![],
         display_mode: Default::default(),
         selected_items: None,
-        cross_filter_targets: vec![],
-        cross_filter_slicer_targets: vec![],
+        dependent_filters: vec![],
+        dependent_slicers: vec![],
         advanced_filter: None,
         hide_no_data: false,
         indicate_no_data: true,
@@ -386,7 +387,7 @@ fn deleting_a_pivot_prunes_it_from_every_ribbon_filter_but_keeps_the_filter() {
     let alive = id();
     let mut f = ribbon_filter("Region");
     f.connected_pivots = vec![dead, alive];
-    f.cross_filter_targets = vec![dead];
+    f.dependent_filters = vec![dead];
     let filter_id = f.id;
     filter_state.filters.write(&e).unwrap().insert(filter_id, f);
 
@@ -406,7 +407,7 @@ fn deleting_a_pivot_prunes_it_from_every_ribbon_filter_but_keeps_the_filter() {
         vec![alive],
         "the dead target must go and the live one must stay"
     );
-    assert!(f.cross_filter_targets.is_empty());
+    assert!(f.dependent_filters.is_empty());
     assert_eq!(cascade.rebound_filters.len(), 1);
     assert_eq!(
         cascade.rebound_filters[0].connected_pivots,
@@ -416,7 +417,7 @@ fn deleting_a_pivot_prunes_it_from_every_ribbon_filter_but_keeps_the_filter() {
 }
 
 // ===========================================================================
-// PAIR: slicer -> ribbonFilter.crossFilterSlicerTargets
+// PAIR: slicer -> ribbonFilter.dependentSlicers
 // ===========================================================================
 
 #[test]
@@ -427,7 +428,7 @@ fn deleting_a_slicer_prunes_it_from_ribbon_filter_cross_links() {
     let dead = id();
     let alive = id();
     let mut f = ribbon_filter("Region");
-    f.cross_filter_slicer_targets = vec![dead, alive];
+    f.dependent_slicers = vec![dead, alive];
     let filter_id = f.id;
     filter_state.filters.write(&e).unwrap().insert(filter_id, f);
 
@@ -435,11 +436,11 @@ fn deleting_a_slicer_prunes_it_from_ribbon_filter_cross_links() {
 
     let filters = filter_state.filters.read().unwrap();
     assert_eq!(
-        filters[&filter_id].cross_filter_slicer_targets,
+        filters[&filter_id].dependent_slicers,
         vec![alive]
     );
     assert_eq!(previous.len(), 1);
-    assert_eq!(previous[0].cross_filter_slicer_targets, vec![dead, alive]);
+    assert_eq!(previous[0].dependent_slicers, vec![dead, alive]);
 }
 
 #[test]
@@ -447,7 +448,7 @@ fn a_filter_that_names_no_deleted_slicer_is_not_reported_for_undo() {
     let filter_state = RibbonFilterState::new();
     let e = effect();
     let mut f = ribbon_filter("Region");
-    f.cross_filter_slicer_targets = vec![id()];
+    f.dependent_slicers = vec![id()];
     filter_state.filters.write(&e).unwrap().insert(f.id, f);
 
     let previous = cascade_deleted_slicers(&filter_state, &e, &[id()]);
@@ -459,7 +460,7 @@ fn a_filter_that_names_no_deleted_slicer_is_not_reported_for_undo() {
 }
 
 // ===========================================================================
-// PAIR: ribbonFilter -> sibling ribbonFilter.crossFilterTargets
+// PAIR: ribbonFilter -> sibling ribbonFilter.dependentFilters
 // ===========================================================================
 
 #[test]
@@ -469,14 +470,14 @@ fn deleting_a_ribbon_filter_prunes_it_from_its_siblings_cross_links() {
 
     let dead = id();
     let mut sibling = ribbon_filter("Category");
-    sibling.cross_filter_targets = vec![dead];
+    sibling.dependent_filters = vec![dead];
     let sibling_id = sibling.id;
     filter_state.filters.write(&e).unwrap().insert(sibling_id, sibling);
 
     let previous = cascade_deleted_filters(&filter_state, &e, &[dead]);
 
     let filters = filter_state.filters.read().unwrap();
-    assert!(filters[&sibling_id].cross_filter_targets.is_empty());
+    assert!(filters[&sibling_id].dependent_filters.is_empty());
     assert_eq!(previous.len(), 1);
 }
 

@@ -17,6 +17,45 @@ use crate::planner::PushdownPlanner;
 use crate::registry::SourceRegistry;
 use crate::request::QueryRequest;
 
+/// One line describing a planned tuple filter for EXPLAIN: its columns and
+/// level, the tuple count, which measures clear which columns (and so see a
+/// PROJECTED tuple set), and which columns pre-narrow their fetch.
+pub(crate) fn describe_tuple_filter(tf: &crate::planner::TuplePlan) -> String {
+    let column_name = |i: usize| -> String {
+        let (t, c) = &tf.columns[i];
+        format!("{t}[{c}]")
+    };
+    let columns: Vec<String> = (0..tf.columns.len()).map(column_name).collect();
+    let cleared: Vec<String> = tf
+        .cleared_by
+        .iter()
+        .map(|(m, idx)| {
+            let cols: Vec<String> = idx.iter().map(|&i| column_name(i)).collect();
+            format!("{m} clears {}", cols.join(", "))
+        })
+        .collect();
+    let narrowed: Vec<String> = (0..tf.columns.len())
+        .filter(|i| !tf.cleared_by.iter().any(|(_, idx)| idx.contains(i)))
+        .map(column_name)
+        .collect();
+    format!(
+        "({}) level {}: {} tuple(s), exact OR-of-AND applied per measure; {}; pre-narrowed at fetch: {}",
+        columns.join(", "),
+        tf.level,
+        tf.tuples.len(),
+        if cleared.is_empty() {
+            "no measure clears a column".to_string()
+        } else {
+            cleared.join("; ")
+        },
+        if narrowed.is_empty() {
+            "none".to_string()
+        } else {
+            narrowed.join(", ")
+        }
+    )
+}
+
 impl PushdownPlanner {
     /// Plan a query and produce an execution plan node describing the decision.
     ///
@@ -162,6 +201,7 @@ impl PushdownPlanner {
                 group_by,
                 lookup_specs,
                 totals,
+                tuple_filters,
                 ..
             } => {
                 node.add_property("decision", PlanValue::Text("LocalAggregation".into()));
@@ -207,6 +247,29 @@ impl PushdownPlanner {
                     .collect();
                 if !context_pushed.is_empty() {
                     node.add_property("context_filters_pushed", PlanValue::List(context_pushed));
+                }
+
+                // Report IN-lists pushed to source fetches (slicers, and the
+                // per-column pre-narrowing of a tuple filter's UNCLEARED
+                // columns), one `table.column IN (n value(s))` entry each.
+                let in_pushed: Vec<String> = fetches
+                    .iter()
+                    .flat_map(|(name, req)| {
+                        req.in_filters.iter().map(move |f| {
+                            format!("{}.{} IN ({} value(s))", name, f.column, f.values.len())
+                        })
+                    })
+                    .collect();
+                if !in_pushed.is_empty() {
+                    node.add_property("in_filters_pushed", PlanValue::List(in_pushed));
+                }
+
+                // Tuple (multi-column) filters: applied per measure locally.
+                if !tuple_filters.is_empty() {
+                    node.add_property(
+                        "tuple_filters",
+                        PlanValue::List(tuple_filters.iter().map(describe_tuple_filter).collect()),
+                    );
                 }
 
                 if !group_by.is_empty() {

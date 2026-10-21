@@ -66,7 +66,8 @@ vi.mock("../slicerBackend", () => ({
             },
           ]);
         case "bi_get_column_values":
-          return Promise.resolve(columnValues);
+          // The backend answers MEMBERS (P2): key = label for plain text.
+          return Promise.resolve(columnValues.map((key) => ({ key, label: key })));
         default:
           return Promise.resolve(undefined);
       }
@@ -104,6 +105,23 @@ vi.mock("@api/pivotNotices", () => ({
   surfacePivotNotices: (...a: unknown[]) => mockSurface(...a),
 }));
 
+/** The page list: sheet 2 is the canvas "canvas-2" (Edit interactions key pages by sheet id). */
+vi.mock("@api/reportPages", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@api/reportPages")>();
+  return {
+    ...real,
+    getReportPagesSnapshot: () => ({
+      pages: [{ sheetId: "canvas-2", name: "Report", index: 2, visibility: "visible", isTooltipPage: false }],
+      sheetIdByIndex: new Map<number, string>([
+        [0, "sheet-0"],
+        [2, "canvas-2"],
+      ]),
+      activeIndex: 2,
+      version: 1,
+    }),
+  };
+});
+
 import {
   applySlicerFilter,
   listPivotSlicerItemsFromModel,
@@ -113,6 +131,7 @@ import {
   syncReportConnections,
 } from "../slicerFilterBridge";
 import { createPivotOverwriteTally } from "@api/pivotOverwrite";
+import { publishPageInteractions, type InteractionMode, type VisualRef } from "@api/reportFilters";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -182,11 +201,27 @@ beforeEach(() => {
 // The page rule
 // ---------------------------------------------------------------------------
 
+const SLICER_REF: VisualRef = { kind: "slicer", id: "s-1" };
+const everyPairFilters = (): InteractionMode => "filter";
+
 describe("pageTargets (pure)", () => {
   it("keeps the model's pivots on the slicer's sheet and only those", () => {
-    expect(pageTargets(pivotsForConnection, 2).map((p) => p.id)).toEqual(["p-canvas-a", "p-canvas-b"]);
-    expect(pageTargets(pivotsForConnection, 0).map((p) => p.id)).toEqual(["p-sheet1"]);
-    expect(pageTargets(pivotsForConnection, 5)).toEqual([]);
+    expect(pageTargets(pivotsForConnection, 2, SLICER_REF, everyPairFilters).map((p) => p.id)).toEqual([
+      "p-canvas-a",
+      "p-canvas-b",
+    ]);
+    expect(pageTargets(pivotsForConnection, 0, SLICER_REF, everyPairFilters).map((p) => p.id)).toEqual(["p-sheet1"]);
+    expect(pageTargets(pivotsForConnection, 5, SLICER_REF, everyPairFilters)).toEqual([]);
+  });
+
+  it("drops a pivot whose pair with THIS slicer is None, and asks about this slicer only", () => {
+    const asked: string[] = [];
+    const lookup = (source: VisualRef, target: VisualRef): InteractionMode => {
+      asked.push(`${source.kind}:${source.id}>${target.kind}:${target.id}`);
+      return target.id === "p-canvas-a" ? "none" : "filter";
+    };
+    expect(pageTargets(pivotsForConnection, 2, SLICER_REF, lookup).map((p) => p.id)).toEqual(["p-canvas-b"]);
+    expect(asked).toEqual(["slicer:s-1>pivot:p-canvas-a", "slicer:s-1>pivot:p-canvas-b"]);
   });
 });
 
@@ -229,6 +264,25 @@ describe("a model slicer's apply", () => {
       { pivotId: "p-canvas-a", biFieldKey: "Geo.Region" },
       { pivotId: "p-canvas-b", biFieldKey: "Geo.Region" },
     ]);
+  });
+
+  it("a pivot the page's Edit interactions set to None for this slicer is never written, on apply or clear", async () => {
+    publishPageInteractions("canvas-2", {
+      pairs: [
+        { source: { kind: "slicer", id: "s-1" }, target: { kind: "pivot", id: "p-canvas-a" }, mode: "none" },
+        // Another slicer's None pair does not concern this one.
+        { source: { kind: "slicer", id: "s-2" }, target: { kind: "pivot", id: "p-canvas-b" }, mode: "none" },
+      ],
+    });
+    try {
+      await applySlicerFilter(slicer());
+      expect(writes().map((c) => [c.cmd, requestOf(c).pivotId])).toEqual([["apply_pivot_filter", "p-canvas-b"]]);
+      calls.length = 0;
+      await applySlicerFilter(slicer({ selectedItems: null }));
+      expect(writes().map((c) => [c.cmd, requestOf(c).pivotId])).toEqual([["clear_pivot_filter", "p-canvas-b"]]);
+    } finally {
+      publishPageInteractions("canvas-2", null);
+    }
   });
 
   it("a page with no pivot of the model writes nothing (a pivot added later is folded in by the backend)", async () => {
@@ -396,9 +450,9 @@ describe("listPivotSlicerItemsFromModel", () => {
     columnValues = ["East", "North", "West"];
     const items = await listPivotSlicerItemsFromModel(pivotSlicer());
     expect(items).toEqual([
-      { value: "East", selected: true, hasData: true },
-      { value: "North", selected: false, hasData: true },
-      { value: "West", selected: false, hasData: true },
+      { key: "East", label: "East", selected: true, hasData: true },
+      { key: "North", label: "North", selected: false, hasData: true },
+      { key: "West", label: "West", selected: false, hasData: true },
     ]);
     const values = calls.find((c) => c.cmd === "bi_get_column_values");
     expect(values?.args).toEqual({ connectionId: "c9", table: "Geo", column: "Region" });

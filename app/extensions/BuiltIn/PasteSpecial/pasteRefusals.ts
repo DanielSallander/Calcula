@@ -57,6 +57,9 @@ export const pasteRefusalSentence = {
     `${label} is not available on a canvas sheet: a canvas has no cells to paste into. ${NOTHING_CHANGED}`,
   noSelection: (label: string): string =>
     `${label}: select the cells to paste into first. ${NOTHING_CHANGED}`,
+  /** A paste with no route onto a floating grid's cells (style only, comments, validation, column widths). */
+  notOnFloatingGrid: (label: string): string =>
+    `${label} is not available inside a floating grid yet. ${NOTHING_CHANGED}`,
 };
 
 /**

@@ -8,10 +8,12 @@
 //! whether they should show (wave B withdrew A1's blank-hiding for model lists
 //! for exactly that reason), a pinned selection -- an IN-list the ENGINE
 //! applies -- silently dropped them, and the has-data shading never matched a
-//! blank record. The lists now offer the blank member as
-//! `pivot_engine::BLANK_ITEM_LABEL` ("(blank)"), last, as Excel lists it and as
-//! a pivot's own lists already did; a cross filter that selects it matches the
-//! blank records; and the engine's scoped IN-list reads the label as BLANK.
+//! blank record. The lists now offer the blank member, last -- since ruling Q8
+//! (P2 S4) keyed "" and labelled "(Blank)" (`MemberRef::blank()`); the KEY
+//! projection (`bi_get_column_values_core`) lists it as "". A cross filter
+//! that selects it (by "" or the legacy "(blank)") matches the blank records;
+//! and the engine's scoped IN-list reads it as BLANK in the engine's own
+//! spelling (`bi::member::engine_in_value` -> `bi_engine::BLANK_MEMBER_LABEL`).
 //!
 //! Engine-backed over an in-memory model (no database), like
 //! `slicer/model_slicer_tests.rs`.
@@ -28,7 +30,7 @@ use bi_engine::{
 };
 use tokio::sync::Mutex as TokioMutex;
 
-use crate::bi::types::{BiCrossFilter, BiState, Connection, ConnectionId, ConnectionType};
+use crate::bi::types::{BiValueConstraint, BiState, Connection, ConnectionId, ConnectionType};
 
 fn sales_model() -> DataModel {
     DataModel::builder()
@@ -128,7 +130,9 @@ fn strings(v: &[&str]) -> Vec<String> {
     v.iter().map(|s| s.to_string()).collect()
 }
 
-/// The label the host lists and the label the engine reads are ONE spelling.
+/// The label the host lists and the label the engine reads are ONE spelling,
+/// and the blank member's KEY ("" under ruling Q8) reaches the engine in that
+/// spelling through the ONE translation every IN-list builder uses.
 #[test]
 fn the_host_and_the_engine_spell_the_blank_member_alike() {
     assert!(
@@ -137,6 +141,13 @@ fn the_host_and_the_engine_spell_the_blank_member_alike() {
         pivot_engine::BLANK_ITEM_LABEL,
         bi_engine::BLANK_MEMBER_LABEL
     );
+    for key in [pivot_engine::BLANK_MEMBER_KEY, "(blank)", "(Blank)"] {
+        assert!(
+            bi_engine::is_blank_member_label(&super::member::engine_in_value(key)),
+            "the blank member's spelling {key:?} does not reach the engine as BLANK"
+        );
+    }
+    assert_eq!(super::member::engine_in_value("East"), "East", "a plain key passes unchanged");
 }
 
 #[tokio::test]
@@ -145,8 +156,8 @@ async fn a_model_value_list_offers_the_blank_member_last() {
     let values = super::commands::bi_get_column_values_core(&bi, conn, "Sales", "region").await.expect("the values");
     assert_eq!(
         values,
-        strings(&["East", "North", "West", pivot_engine::BLANK_ITEM_LABEL]),
-        "the model's value list does not offer the blank member (NULL and empty) exactly once, last"
+        strings(&["East", "North", "West", pivot_engine::BLANK_MEMBER_KEY]),
+        "the model's value list does not offer the blank member (NULL and empty) exactly once, last, keyed \"\" (Q8)"
     );
 }
 
@@ -169,11 +180,11 @@ async fn available_values_carry_the_blank_member_both_ways() {
         conn,
         "Sales",
         "region",
-        &[BiCrossFilter { table: "Sales".into(), column: "year".into(), values: strings(&["Y2"]) }],
+        &[BiValueConstraint { table: "Sales".into(), column: "year".into(), values: strings(&["Y2"]) }],
     )
     .await
     .expect("available");
-    assert_eq!(by_y2, strings(&[pivot_engine::BLANK_ITEM_LABEL]), "a blank-region record has no available item");
+    assert_eq!(by_y2, strings(&[pivot_engine::BLANK_MEMBER_KEY]), "a blank-region record has no available item");
 
     // Cross filter year = (blank): the only NULL-year record is North's.
     let by_blank_year = super::commands::bi_get_column_available_values_core(
@@ -181,7 +192,7 @@ async fn available_values_carry_the_blank_member_both_ways() {
         conn,
         "Sales",
         "region",
-        &[BiCrossFilter { table: "Sales".into(), column: "year".into(), values: strings(&["(Blank)"]) }],
+        &[BiValueConstraint { table: "Sales".into(), column: "year".into(), values: strings(&["(Blank)"]) }],
     )
     .await
     .expect("available");

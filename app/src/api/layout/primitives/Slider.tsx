@@ -33,6 +33,7 @@
 
 import React, { forwardRef, useId, useRef } from "react";
 import { css } from "@emotion/css";
+import { formatNumberIn, getActiveLocale } from "../../../core/lib/locale";
 import { useSurfaceLayout } from "../context";
 import { LT } from "../theme";
 import { CONTROL_HEIGHT_MD, FONT_FAMILY, FONT_MONO, GAP_MD } from "../tokens";
@@ -63,12 +64,17 @@ function stepDecimals(step: number): number {
 
 /**
  * The readout text: the value at the precision its step implies (so 0.1 + 0.2
- * never shows as 0.30000000000000004), then the suffix after a space, the way
- * the mockup writes it ("150 %", "10 px").
+ * never shows as 0.30000000000000004), in the APP locale ("1,5" under de-DE,
+ * P2), then the suffix after a space, the way the mockup writes it ("150 %",
+ * "10 px").
  */
 export function formatSliderValue(value: number, step = 1, suffix?: string): string {
   const decimals = stepDecimals(step);
-  const number = decimals > 0 ? value.toFixed(decimals) : String(Math.round(value * 1e9) / 1e9);
+  const locale = getActiveLocale();
+  const number =
+    decimals > 0
+      ? formatNumberIn(locale, value, { decimals })
+      : formatNumberIn(locale, Math.round(value * 1e9) / 1e9);
   return suffix ? `${number} ${suffix}` : number;
 }
 
@@ -308,7 +314,8 @@ export const Slider = forwardRef<HTMLInputElement, SliderProps>(function Slider(
         disabled={disabled}
         aria-label={ariaLabel ?? rest["aria-label"]}
         aria-valuetext={rest["aria-valuetext"] ?? text}
-        onChange={(e) => onChange(Number(e.target.value))}
+        // The range position is wire, not user text: read it as a number.
+        onChange={(e) => onChange(e.target.valueAsNumber)}
         onPointerDown={(e) => {
           rest.onPointerDown?.(e);
           begin(e.currentTarget);

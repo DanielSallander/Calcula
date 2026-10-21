@@ -6,6 +6,7 @@ import { create } from "zustand";
 import type { SortLevel, SortDialogState } from "../types";
 import type { SortOn, SortDataOption, SortOrientation } from "@api/lib";
 import { MAX_SORT_LEVELS } from "../types";
+import type { CellTargetRef } from "@api/cellTarget";
 
 // ============================================================================
 // Helpers
@@ -54,6 +55,7 @@ interface SortStore extends SortDialogState {
     endCol: number,
     headers: string[],
     hasHeaders: boolean,
+    cellTarget?: CellTargetRef | null,
   ) => void;
   reset: () => void;
 }
@@ -73,6 +75,7 @@ const DEFAULT_STATE: SortDialogState = {
   rangeEndCol: 0,
   columnHeaders: [],
   selectedLevelId: null,
+  cellTarget: null,
 };
 
 // ============================================================================
@@ -196,10 +199,12 @@ export const useSortStore = create<SortStore>((set, get) => ({
     endCol: number,
     headers: string[],
     hasHeaders: boolean,
+    cellTarget: CellTargetRef | null = null,
   ) => {
     const firstLevel = createLevel(0);
     set({
       ...DEFAULT_STATE,
+      cellTarget,
       rangeStartRow: startRow,
       rangeStartCol: startCol,
       rangeEndRow: endRow,

@@ -50,6 +50,7 @@ import {
   vRangeEdge, vUsedRange, vTabColor,
   vMoveSheet, vCopySheet, vAddSheet, vSplit,
   vCanvasLayout, vCanvasLayoutQuery,
+  vCrossFilterQuery, vSetCrossFilter, vClearCrossFilters,
   vPageSetupPatch, vPrintArea, vPageBreak, vGroupSpan, vOutlineLevel,
   vAutoFilterRange, vAutoFilterColumn, vAutoFilterClear, vAutoFilterCriteria,
   MAX_AUTOFILTER_COLUMNS, MAX_AUTOFILTER_VALUES,
@@ -96,6 +97,27 @@ export interface MethodPolicy {
   limits?: Record<string, number>;
   /** Rendered verbatim in the transparency panel and consent UI. */
   desc: string;
+  /**
+   * A one-line summary of the call's ARGUMENTS for its audit-ring entry, when
+   * the row's audit should say more than the method name. It must never carry
+   * data a script read or wrote (member keys, cell values): only shape, like
+   * a ref and a count. Called defensively -- it may see a malformed call that
+   * the validator is about to refuse, and a throw is dropped, never raised.
+   */
+  auditDetail?: (args: unknown[]) => string;
+}
+
+/** "chart:abc, 3 tuple(s)" -- a cross-filter call's audit detail: the source
+ *  ref and the tuple count, never the member keys. */
+function crossFilterAuditDetail(args: unknown[]): string {
+  const [source, selection] = args as [{ kind?: unknown; id?: unknown } | undefined, unknown];
+  const ref =
+    source && typeof source === "object"
+      ? `${String(source.kind).slice(0, 16)}:${String(source.id).slice(0, 64)}`
+      : "?";
+  if (selection === null) return `${ref}, cleared`;
+  const tuples = (selection as { tuples?: unknown } | undefined)?.tuples;
+  return `${ref}, ${Array.isArray(tuples) ? tuples.length : 0} tuple(s)`;
 }
 
 export const ALLOWLIST: Record<string, MethodPolicy> = {
@@ -525,7 +547,21 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   "api.getCanvasLayout":   { tier: "unlocked", class: "read",   validate: vCanvasLayoutQuery,
                              desc: "Read a canvas sheet's page layout (page size, snap grid, background)" },
   "api.setCanvasLayout":   { tier: "unlocked", class: "mutate", validate: vCanvasLayout,
-                             desc: "Change a canvas sheet's page layout (page size, snap grid, grid display, background) — only the settings named are touched" },
+                             desc: "Change a canvas sheet's page layout (page size, snap grid, grid display, background) and how its visuals filter each other (interactions) — only the settings named are touched" },
+  // ---- unlocked: CROSS-FILTER (P4). A visual's selection on a canvas page is
+  //      VIEW STATE: no document change, no undo, not saved, no capability --
+  //      the same act as clicking a bar, which any user may do. "emit", never
+  //      "ui": that class means "blocks until the user answers a modal" (it
+  //      gets UI_DIALOG_DEADLINE_MS and reads as "shows a dialog"), and every
+  //      "ui" row carries a ui.* capability. The host proves the source exists
+  //      on that canvas and can be a source; the audit entry names the source
+  //      and the tuple count, never the member keys.
+  "api.getCrossFilters":   { tier: "unlocked", class: "read",   validate: vCrossFilterQuery,
+                             desc: "Read which visuals' selections are filtering the other visuals of a canvas page (or of every page)" },
+  "api.setCrossFilter":    { tier: "unlocked", class: "emit",   validate: vSetCrossFilter, auditDetail: crossFilterAuditDetail,
+                             desc: "Select data points of a visual on a canvas page, so the page's other visuals filter or highlight to them — like clicking a bar; nothing is saved" },
+  "api.clearCrossFilters": { tier: "unlocked", class: "emit",   validate: vClearCrossFilters,
+                             desc: "Clear the visual selections filtering a canvas page (or every page); nothing is saved" },
   // ---- unlocked: RANGE DISCOVERY (Wave 2). VBA's Range.End / CurrentRegion /
   //      UsedRange, answered by the SAME engine::navigation functions the
   //      grid's own Ctrl+Arrow and Ctrl+A use. All three are COORDINATES ONLY

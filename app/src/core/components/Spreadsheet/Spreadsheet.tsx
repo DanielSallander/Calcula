@@ -54,7 +54,10 @@ import {
   gridCommands,
   isClickWithinSelection,
 } from "../../lib/gridCommands";
-import type { GridMenuContext } from "../../lib/gridCommands";
+import type { GridMenuContext, GridCommandContext } from "../../lib/gridCommands";
+import type { CellTarget } from "../../lib/selectionOwner";
+import { announceCellTargetObjectChanged } from "../../../api/cellTarget";
+import { setGridSelectionReader } from "../../lib/selectionOwner";
 
 // Styles
 import * as S from "./Spreadsheet.styles";
@@ -82,6 +85,18 @@ interface SheetState {
  * Using module-level to persist across component re-renders.
  */
 const sheetStatesMap = new Map<number, SheetState>();
+
+
+/**
+ * The OBJECT target a grid command was handed (a floating grid's cells, P3),
+ * or null for Core's own selection. `gridCommands.execute` resolves it once
+ * (`resolveCellTarget`) and hands it to the handler as `ctx.target`; a handler
+ * invoked directly (no ctx) acts on Core's selection, as it always did.
+ */
+function objectTargetOf(ctx?: GridCommandContext): Extract<CellTarget, { kind: "object" }> | null {
+  const t = ctx?.target;
+  return t && t.kind === "object" ? t : null;
+}
 
 function SpreadsheetContent({
   className,
@@ -663,9 +678,12 @@ function SpreadsheetContent({
   // Formats it kept Bold / Center / the number format lit until the selection
   // moved (review finding (b), 2026-10-04).
   const clearHandler = useCallback(
-    (kind: ClearGestureKind) => async () => {
+    (kind: ClearGestureKind) => async (_args?: unknown, ctx?: GridCommandContext) => {
+      // An OBJECT target (a floating grid's cells, P3): its selection and ref.
+      const owned = objectTargetOf(ctx);
       await runClearGesture(kind, {
-        selection,
+        selection: owned ? owned.selection : selection,
+        target: owned?.ref,
         refresh: async ({ formats }) => {
           await canvasRef.current?.refreshCells();
           canvasRef.current?.redraw();
@@ -695,7 +713,25 @@ function SpreadsheetContent({
   // the one-block case below. (ROWS/COLUMNS_INSERTED/DELETED is emitted by the
   // tauri-api wrappers, so every caller announces it -- not just this one.)
   const rowColumnHandler = useCallback(
-    (kind: RowColumnGestureKind) => async () => {
+    (kind: RowColumnGestureKind) => async (_args?: unknown, ctx?: GridCommandContext) => {
+      const owned = objectTargetOf(ctx);
+      if (owned) {
+        // An OBJECT's lines (a floating grid's, P3: table semantics). The
+        // backend shifts the object's backing sheet and grows or shrinks its
+        // window; the active sheet did not change, so nothing of it animates
+        // or re-reads its dimensions -- the object re-reads its row and cells.
+        await runRowColumnGesture(kind, {
+          selection: owned.selection,
+          target: owned.ref,
+          totalRows: owned.bounds.rows,
+          totalCols: owned.bounds.cols,
+          afterChange: async () => {
+            announceCellTargetObjectChanged(owned.ref);
+            canvasRef.current?.redraw();
+          },
+        });
+        return;
+      }
       await runRowColumnGesture(kind, {
         selection,
         totalRows: gridState.config.totalRows,
@@ -743,8 +779,11 @@ function SpreadsheetContent({
   // console, so a refused merge looked like a dead button). "grid:refresh"
   // is dispatched so the ribbon's pressed state re-reads -- nothing did before.
   const mergeHost = useCallback(
-    (): MergeGestureHost => ({
-      selection,
+    (ctx?: GridCommandContext): MergeGestureHost => ({
+      // An OBJECT target (a floating grid's cells, P3): the gesture acts on its
+      // selection, in its own (backing) coordinates, and names it everywhere.
+      selection: objectTargetOf(ctx)?.selection ?? selection,
+      target: objectTargetOf(ctx)?.ref,
       refresh: async () => {
         await canvasRef.current?.refreshCells();
         canvasRef.current?.redraw();
@@ -754,20 +793,20 @@ function SpreadsheetContent({
     [selection, canvasRef],
   );
 
-  const handleMergeCells = useCallback(async () => {
-    await runMergeGesture("mergeCells", mergeHost());
+  const handleMergeCells = useCallback(async (_args?: unknown, ctx?: GridCommandContext) => {
+    await runMergeGesture("mergeCells", mergeHost(ctx));
   }, [mergeHost]);
 
-  const handleUnmergeCells = useCallback(async () => {
-    await runMergeGesture("unmergeCells", mergeHost());
+  const handleUnmergeCells = useCallback(async (_args?: unknown, ctx?: GridCommandContext) => {
+    await runMergeGesture("unmergeCells", mergeHost(ctx));
   }, [mergeHost]);
 
-  const handleMergeCenter = useCallback(async () => {
-    await runMergeGesture("mergeCenter", mergeHost());
+  const handleMergeCenter = useCallback(async (_args?: unknown, ctx?: GridCommandContext) => {
+    await runMergeGesture("mergeCenter", mergeHost(ctx));
   }, [mergeHost]);
 
-  const handleMergeAcross = useCallback(async () => {
-    await runMergeGesture("mergeAcross", mergeHost());
+  const handleMergeAcross = useCallback(async (_args?: unknown, ctx?: GridCommandContext) => {
+    await runMergeGesture("mergeAcross", mergeHost(ctx));
   }, [mergeHost]);
 
   // -------------------------------------------------------------------------
@@ -831,10 +870,14 @@ function SpreadsheetContent({
     handleMergeAcross,
   ]);
 
-  // Keep gridCommands aware of the current selection for guard checks
+  // Keep gridCommands aware of the current selection for guard checks, and
+  // hand the same selection to the cell-target door (resolveCellTarget's GRID
+  // target reads it: a lib cannot read React state).
   useEffect(() => {
     gridCommands.setSelection(selection);
+    setGridSelectionReader(() => selection);
   }, [selection]);
+  useEffect(() => () => setGridSelectionReader(null), []);
 
   // -------------------------------------------------------------------------
   // Context Menu Handler - Now emits event instead of rendering

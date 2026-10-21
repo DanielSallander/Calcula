@@ -1746,6 +1746,7 @@ fn getpivotdata_built_on_the_anchor_answers_the_picked_value() {
         &wb.file,
         fr.range.id,
         crate::api_types::FloatingRangePatch { row_count: Some(2), col_count: Some(1), ..Default::default() },
+        crate::floating_range::PatchGate::ObjectEdit,
     )
     .expect("grow the floating grid to two rows");
     for (row, text) in [(0, &text_a), (1, &text_b)] {
@@ -2862,4 +2863,77 @@ fn undoing_a_style_on_an_unrefreshed_bi_pivot_keeps_its_cells() {
     );
     assert_eq!(stored_definition(&wb, id).style, Some(dark.into()), "redo brings the style back");
     assert_eq!(block(), saved_output, "redo must not clear it either");
+}
+
+/// P4 S4a: an INVALID interactions patch (a self-pair, a kind that takes no
+/// part in interactions, a `none` default) is refused BEFORE the effect: the
+/// layout is unchanged, the document stays clean and the dirty flag announces
+/// nothing at all -- not a dirty-then-clean blip. The positive control proves
+/// the observer is wired to this flag.
+#[test]
+fn an_invalid_interactions_patch_is_refused_before_the_effect() {
+    use persistence::{CanvasInteraction, CanvasInteractions, CanvasObjectRef, VisualInteractionMode};
+    use std::sync::{Arc, Mutex};
+    let obj = |kind: &str, id: &str| CanvasObjectRef { kind: kind.to_string(), id: id.to_string() };
+    let wb = Workbook::new(1);
+    let canvas = add_canvas(&wb).active_index;
+    crate::document_effect::mark_saved(&wb.file);
+    let announced: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&announced);
+    wb.file.dirty_flag().set_observer(move |is_dirty| sink.lock().unwrap().push(is_dirty));
+    let before = kinds(&wb);
+
+    let with_pairs = |pairs: Vec<CanvasInteraction>| crate::api_types::CanvasLayoutPatch {
+        interactions: Some(CanvasInteractions { default_mode: None, pairs }),
+        ..Default::default()
+    };
+    for (label, bad) in [
+        (
+            "a self-pair",
+            with_pairs(vec![CanvasInteraction {
+                source: obj("chart", "1"),
+                target: obj("chart", "1"),
+                mode: VisualInteractionMode::Filter,
+            }]),
+        ),
+        (
+            "a shape as a target",
+            with_pairs(vec![CanvasInteraction {
+                source: obj("slicer", "1"),
+                target: obj("shape", "2"),
+                mode: VisualInteractionMode::None,
+            }]),
+        ),
+        (
+            "a 'none' default",
+            crate::api_types::CanvasLayoutPatch {
+                interactions: Some(CanvasInteractions {
+                    default_mode: Some(VisualInteractionMode::None),
+                    pairs: vec![],
+                }),
+                ..Default::default()
+            },
+        ),
+    ] {
+        let err = crate::sheets::set_canvas_layout_inner(&wb.state, &wb.file, Some(canvas), &bad)
+            .expect_err(&format!("{label} must be refused"));
+        assert!(err.contains("Canvas interactions"), "{label}: the refusal names the interactions: {err}");
+    }
+    assert_eq!(kinds(&wb), before, "a refused patch changes nothing");
+    assert!(!wb.file.is_dirty(), "a refused patch leaves the document clean");
+    assert!(announced.lock().unwrap().is_empty(), "a refusal announced a dirty transition");
+
+    // Positive control: a valid pair dirties, and the observer hears it once.
+    crate::sheets::set_canvas_layout_inner(
+        &wb.state,
+        &wb.file,
+        Some(canvas),
+        &with_pairs(vec![CanvasInteraction {
+            source: obj("slicer", "1"),
+            target: obj("chart", "2"),
+            mode: VisualInteractionMode::None,
+        }]),
+    )
+    .expect("a valid pair applies");
+    assert_eq!(*announced.lock().unwrap(), vec![true], "fixture: the observer hears this flag");
 }

@@ -23,7 +23,20 @@
 //       // the owner's takes typing, and a Ctrl+Alt character (sv-SE AltGr+9)
 //       // is read as the shortcut it collides with, not as typing (W17).
 //       receivesTyping: () => myCellIsSelected(),
+//       // Optional (P3): the cells the owner holds, and the KINDS of cell act
+//       // a door may perform on them instead of refusing. Doors that ask
+//       // resolveCellTarget(action, capability) then act on THESE cells.
+//       cellTarget: () => ({ ref, selection, bounds, label: "Obj1", wholeObject: false }),
+//       actsOn: ["read", "format", "numberFormat"],
+//       selectCells: (selection) => mySelect(selection),
+//       editActiveCell: (text) => myOpenEditor(text),
 //     });
+//
+// USE, as a DOOR that can act on an owner's cells (see @api/cellTarget):
+//
+//     const target = resolveCellTarget("Bold", "format");
+//     if (target === null) return;                  // refused and announced
+//     await applyFormatting(rows, cols, { bold: true }, { target: targetRefOf(target) });
 //
 // USE, as a DOOR that writes to Core's selection:
 //
@@ -69,7 +82,22 @@ export {
   refuseIfSelectionOwned,
   defaultSelectionRefusal,
 } from "../core/lib/selectionOwner";
-export type { SelectionOwner, SelectionDoorKind } from "../core/lib/selectionOwner";
+export type {
+  SelectionOwner,
+  SelectionDoorKind,
+  CellTargetCapability,
+  OwnedCellTarget,
+  CellTarget,
+} from "../core/lib/selectionOwner";
+// The cell-target door (P3). @api/cellTarget is its full seam (reads, wrappers'
+// targets, selection and editor); the question itself is re-exported here
+// beside refuseIfSelectionOwned, the question it replaces for target-aware doors.
+export {
+  resolveCellTarget,
+  cellTargetFor,
+  CELL_TARGET_CAPABILITIES,
+  WHOLE_OBJECT_CAPABILITIES,
+} from "../core/lib/selectionOwner";
 
 // One sentence per refused action, as a toast (not a modal: the user did
 // nothing wrong, the selection simply is not the sheet's).

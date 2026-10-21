@@ -99,6 +99,19 @@ import {
   runAutoFitRowHeight,
   type AutoFitCommandHost,
 } from "../../lib/autoFitCommands";
+import type { GridCommandContext } from "../../lib/gridCommands";
+import type { CellTarget } from "../../lib/selectionOwner";
+import { runClearGesture } from "../../lib/clearGestures";
+import { notifyCellTargetChanged, readTargetCell } from "../../../api/cellTarget";
+
+/** An OBJECT cell target (a floating grid's cells, P3). */
+type ObjectCellTarget = Extract<CellTarget, { kind: "object" }>;
+
+/** The OBJECT target among `t` (a key's resolved target or a grid command's ctx), or null for Core's selection. */
+function objectTargetOf(t?: CellTarget | GridCommandContext | null): ObjectCellTarget | null {
+  const target = t && "kind" in t ? t : t?.target;
+  return target && target.kind === "object" ? target : null;
+}
 
 /**
  * The closes the resize / auto-fit / hide gestures make, bound to the begin's
@@ -660,7 +673,23 @@ export function useSpreadsheetSelection({
   }, [autoFillToEdge]);
 
   // Handle DELETE key - clear contents of selection
-  const handleDeleteContents = useCallback(async () => {
+  const handleDeleteContents = useCallback(async (target?: CellTarget) => {
+    const owned = objectTargetOf(target);
+    if (owned) {
+      // An OBJECT's cells (a floating grid's, P3): Clear Contents through the
+      // target -- one undo step per block, bracketed into one -- never Core's
+      // hidden cell under the object, and no edit guard (the guards describe
+      // the ACTIVE sheet's regions; the backend gates the object's own cells).
+      await runClearGesture("clearContents", {
+        selection: owned.selection,
+        target: owned.ref,
+        refresh: async () => {
+          window.dispatchEvent(new CustomEvent("grid:refresh"));
+          notifyCellTargetChanged();
+        },
+      });
+      return;
+    }
     if (!selection) {
       console.log("[useSpreadsheetSelection] No selection to clear");
       return;
@@ -1607,8 +1636,11 @@ export function useSpreadsheetSelection({
    * and every refusal is SHOWN (it was logged only). Then "grid:refresh", so
    * the ribbon's pressed Bold re-reads after the keyboard changed it.
    */
-  const applyFormattingToSelection = useCallback(async (formatting: FormattingOptions) => {
-    const blocks = selectionBlocks(selection);
+  const applyFormattingToSelection = useCallback(async (formatting: FormattingOptions, target?: CellTarget) => {
+    // An OBJECT target (a floating grid's cells, P3): its blocks, written with
+    // its ref; Core's selection otherwise.
+    const owned = objectTargetOf(target);
+    const blocks = selectionBlocks(owned ? owned.selection : selection);
     if (blocks.length === 0) return;
 
     let tx: OwnedUndoTransaction | null = null;
@@ -1622,7 +1654,8 @@ export function useSpreadsheetSelection({
         const cols: number[] = [];
         for (let r = b.startRow; r <= b.endRow; r++) rows.push(r);
         for (let c = b.startCol; c <= b.endCol; c++) cols.push(c);
-        await applyFormatting(rows, cols, formatting);
+        if (owned) await applyFormatting(rows, cols, formatting, { target: owned.ref });
+        else await applyFormatting(rows, cols, formatting);
         landed++;
       }
       await tx?.commit();
@@ -1641,6 +1674,10 @@ export function useSpreadsheetSelection({
       canvas.redraw();
     }
     window.dispatchEvent(new CustomEvent("grid:refresh"));
+    if (owned) {
+      window.dispatchEvent(new CustomEvent("styles:refresh"));
+      notifyCellTargetChanged();
+    }
   }, [selection, canvasRef]);
 
   /**
@@ -1651,13 +1688,21 @@ export function useSpreadsheetSelection({
    * cell, so the shortcut and the button agree). If the active cell has the
    * property ON, turns it OFF for the entire selection (and vice versa).
    */
-  const toggleFormatProperty = useCallback(async (property: "bold" | "italic" | "underline" | "strikethrough") => {
-    const active = activeCellOf(selection);
+  const toggleFormatProperty = useCallback(async (
+    property: "bold" | "italic" | "underline" | "strikethrough",
+    target?: CellTarget,
+  ) => {
+    // An OBJECT target (a floating grid's cells, P3): ITS active cell decides
+    // the direction, read through its styled read -- never Core's hidden cell.
+    const owned = objectTargetOf(target);
+    const active = activeCellOf(owned ? owned.selection : selection);
     if (!active) return;
 
     try {
       // Read the active cell's style to determine current state
-      const activeCell = await getCell(active.row, active.col);
+      const activeCell = owned
+        ? await readTargetCell(owned.ref, active.row, active.col)
+        : await getCell(active.row, active.col);
       const styleIndex = activeCell?.styleIndex ?? 0;
       const style = await getStyle(styleIndex);
 
@@ -1672,7 +1717,7 @@ export function useSpreadsheetSelection({
         formatting[property] = !currentValue;
       }
 
-      await applyFormattingToSelection(formatting);
+      await applyFormattingToSelection(formatting, target);
     } catch (error) {
       console.error(`[useSpreadsheetSelection] toggleFormatProperty(${property}) failed:`, error);
     }
@@ -1687,7 +1732,19 @@ export function useSpreadsheetSelection({
    * protected sheet) is SHOWN, where it used to be logged only.
    */
   const fillHandler = useCallback(
-    (direction: FillDirection) => async () => {
+    (direction: FillDirection) => async (_args?: unknown, ctx?: GridCommandContext) => {
+      // An OBJECT target (a floating grid's cells, P3): its selection, its
+      // extent as the edge, its ref on the fill.
+      const owned = objectTargetOf(ctx);
+      if (owned) {
+        await runFillCommand(direction, {
+          selection: owned.selection,
+          totalRows: owned.bounds.rows,
+          totalCols: owned.bounds.cols,
+          target: owned.ref,
+        });
+        return;
+      }
       await runFillCommand(direction, {
         selection,
         totalRows: config.totalRows,
@@ -1725,8 +1782,14 @@ export function useSpreadsheetSelection({
   // always fitted whole, hidden rows / columns in the selection are unhidden,
   // and the whole fit is one undo step.
   const autoFitHost = useCallback(
-    (): AutoFitCommandHost => ({
-      selection,
+    (ctx?: GridCommandContext): AutoFitCommandHost => ({
+      // An OBJECT target (a floating grid's cells, P3): its selection, and the
+      // object to measure and size (autoFitCommands' target route).
+      selection: objectTargetOf(ctx)?.selection ?? selection,
+      target: (() => {
+        const owned = objectTargetOf(ctx);
+        return owned ? { ref: owned.ref, bounds: owned.bounds } : undefined;
+      })(),
       config,
       dimensions,
       dispatch,
@@ -1740,8 +1803,8 @@ export function useSpreadsheetSelection({
   );
 
   useEffect(() => {
-    gridCommands.register("autoFitColumnWidth", (args) => runAutoFitColumnWidth(autoFitHost(), args));
-    gridCommands.register("autoFitRowHeight", (args) => runAutoFitRowHeight(autoFitHost(), args));
+    gridCommands.register("autoFitColumnWidth", (args, ctx) => runAutoFitColumnWidth(autoFitHost(ctx), args));
+    gridCommands.register("autoFitRowHeight", (args, ctx) => runAutoFitRowHeight(autoFitHost(ctx), args));
 
     return () => {
       gridCommands.unregister("autoFitColumnWidth");
@@ -1825,43 +1888,46 @@ export function useSpreadsheetSelection({
    * Central command handler for keyboard shortcuts.
    * Dispatches formatting, fill, and data entry commands.
    */
-  const handleCommand = useCallback(async (command: string) => {
+  const handleCommand = useCallback(async (command: string, target?: CellTarget) => {
+    // `target`: what the keyboard resolved for a format key (useGridKeyboard
+    // asks resolveCellTarget) -- an OBJECT's cells (a floating grid's, P3), or
+    // Core's selection. The format keys write there.
     switch (command) {
       // Font style toggles
       case 'format.toggleBold':
-        await toggleFormatProperty('bold');
+        await toggleFormatProperty('bold', target);
         break;
       case 'format.toggleItalic':
-        await toggleFormatProperty('italic');
+        await toggleFormatProperty('italic', target);
         break;
       case 'format.toggleUnderline':
-        await toggleFormatProperty('underline');
+        await toggleFormatProperty('underline', target);
         break;
       case 'format.toggleStrikethrough':
-        await toggleFormatProperty('strikethrough');
+        await toggleFormatProperty('strikethrough', target);
         break;
 
       // Number format shortcuts
       case 'format.numberGeneral':
-        await applyFormattingToSelection({ numberFormat: 'general' });
+        await applyFormattingToSelection({ numberFormat: 'general' }, target);
         break;
       case 'format.numberCurrency':
-        await applyFormattingToSelection({ numberFormat: 'currency_usd' });
+        await applyFormattingToSelection({ numberFormat: 'currency_usd' }, target);
         break;
       case 'format.numberPercentage':
-        await applyFormattingToSelection({ numberFormat: 'percentage' });
+        await applyFormattingToSelection({ numberFormat: 'percentage' }, target);
         break;
       case 'format.numberScientific':
-        await applyFormattingToSelection({ numberFormat: 'scientific' });
+        await applyFormattingToSelection({ numberFormat: 'scientific' }, target);
         break;
       case 'format.numberDate':
-        await applyFormattingToSelection({ numberFormat: 'date_us' });
+        await applyFormattingToSelection({ numberFormat: 'date_us' }, target);
         break;
       case 'format.numberTime':
-        await applyFormattingToSelection({ numberFormat: 'time_12h' });
+        await applyFormattingToSelection({ numberFormat: 'time_12h' }, target);
         break;
       case 'format.numberNumber':
-        await applyFormattingToSelection({ numberFormat: 'number_sep' });
+        await applyFormattingToSelection({ numberFormat: 'number_sep' }, target);
         break;
 
       // Data entry

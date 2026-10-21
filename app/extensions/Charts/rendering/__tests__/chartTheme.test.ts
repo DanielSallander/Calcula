@@ -19,7 +19,8 @@ import {
 describe("DEFAULT_CHART_THEME", () => {
   it("has all required properties", () => {
     expect(DEFAULT_CHART_THEME.background).toBeTruthy();
-    expect(DEFAULT_CHART_THEME.plotBackground).toBeTruthy();
+    // "" = no plot fill: the plot area is transparent by default (Power BI).
+    expect(DEFAULT_CHART_THEME.plotBackground).toBe("");
     expect(DEFAULT_CHART_THEME.gridLineColor).toBeTruthy();
     expect(DEFAULT_CHART_THEME.axisColor).toBeTruthy();
     expect(DEFAULT_CHART_THEME.axisLabelColor).toBeTruthy();
@@ -93,6 +94,13 @@ describe("mergeTheme", () => {
     };
     const result = mergeTheme(DEFAULT_CHART_THEME, { plotBackgroundGradient: gradient });
     expect(result.plotBackgroundGradient).toBe(gradient);
+  });
+
+  it("an explicit undefined override falls back to the base (a preset's reset key, before any JSON round trip)", () => {
+    const result = mergeTheme(DEFAULT_CHART_THEME, { axisColor: undefined, titleColor: undefined, gridLineWidth: 3 });
+    expect(result.axisColor).toBe(DEFAULT_CHART_THEME.axisColor);
+    expect(result.titleColor).toBe(DEFAULT_CHART_THEME.titleColor);
+    expect(result.gridLineWidth).toBe(3);
   });
 
   it("does not mutate the base theme", () => {

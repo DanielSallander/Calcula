@@ -29,6 +29,11 @@
 //          2026-10-08: Resize drew it AND Fit to Window, two commands on one
 //          tab with one picture (ICONS.md 2.3).
 //
+//          Edit interactions (P4 S10) is the toggle after Lock: Power BI's
+//          Format > Edit interactions. Enabled with exactly one selected visual
+//          that can be a source, on a canvas that is not subscribed; while on it
+//          always turns the mode off (lib/editInteractions.ts).
+//
 //          The section follows the selection (@api/objectSelection) and the
 //          canvas store (the lock state lives in the layout), so a selection
 //          made by a click, the marquee or Tab is reflected at once.
@@ -62,6 +67,12 @@ import { STACKING_LABELS, allLocked, restackObjects, setObjectsLocked } from "..
 import { NOTHING_SELECTED_NOTE, SUBSCRIBED_NOTE } from "../lib/canvasNotes";
 import { canvasObjectsLocked } from "@api/canvasSheet";
 import { OBJECTS_LOCKED_NOTE } from "../lib/objectsLock";
+import {
+  editInteractionsAvailability,
+  getEditInteractionsState,
+  subscribeEditInteractions,
+  toggleEditInteractions,
+} from "../lib/editInteractions";
 
 /** Re-render on every selection change (a family's own, or the set's). */
 function useSelectionTick(): number {
@@ -96,8 +107,16 @@ const DISTRIBUTE_ITEMS: ReadonlyArray<{ axis: DistributeAxis; icon: React.ReactN
 export function CanvasArrangeSection(_props: PanelSectionProps): React.ReactElement | null {
   const snapshot = useSyncExternalStore(subscribeCanvasSheets, getCanvasSheetSnapshot, getCanvasSheetSnapshot);
   useSelectionTick();
+  const interactions = useSyncExternalStore(
+    subscribeEditInteractions,
+    getEditInteractionsState,
+    getEditInteractionsState,
+  );
   const { active, activeSubscribed } = snapshot;
   if (!active) return null;
+  // Edit interactions: one selected visual that can be a source, on a canvas
+  // that is not subscribed (lib/editInteractions.ts).
+  const canEditInteractions = editInteractionsAvailability();
 
   const selected = getSelectedObjectRegions();
   const count = selected.length;
@@ -244,6 +263,24 @@ export function CanvasArrangeSection(_props: PanelSectionProps): React.ReactElem
         }
         data-testid="canvas-arrange-lock"
         onClick={() => void setObjectsLocked(!locked)}
+      />
+
+      <CommandButton
+        icon={<RibbonIcon.EditInteractions size={HERO_ICON_SIZE} />}
+        label="Edit interactions"
+        labelLines={2}
+        active={interactions.active}
+        // While on, the toggle always turns it off; otherwise it needs one
+        // source-capable visual on an editable canvas.
+        disabled={!interactions.active && !canEditInteractions.ok}
+        tooltip={
+          interactions.active
+            ? "Stop editing interactions"
+            : (canEditInteractions.reason ??
+              "Choose how the selected visual filters or highlights every other visual on the page")
+        }
+        data-testid="canvas-edit-interactions"
+        onClick={() => void toggleEditInteractions()}
       />
 
       <CommandButton

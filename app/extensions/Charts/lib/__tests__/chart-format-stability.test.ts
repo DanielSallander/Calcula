@@ -264,7 +264,8 @@ describe("Palette color values stability", () => {
 
   it("DEFAULT_CHART_THEME values are stable", () => {
     expect(DEFAULT_CHART_THEME.background).toBe("#ffffff");
-    expect(DEFAULT_CHART_THEME.plotBackground).toBe("#fafafa");
+    // Power BI: the plot area paints nothing by default ("" = no fill).
+    expect(DEFAULT_CHART_THEME.plotBackground).toBe("");
     expect(DEFAULT_CHART_THEME.gridLineColor).toBe("#e8e8e8");
     expect(DEFAULT_CHART_THEME.gridLineWidth).toBe(1);
     expect(DEFAULT_CHART_THEME.fontFamily).toBe("'Segoe UI', system-ui, -apple-system, sans-serif");

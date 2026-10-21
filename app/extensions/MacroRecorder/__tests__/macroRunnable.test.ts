@@ -85,7 +85,7 @@ vi.mock("@api", async () => {
 vi.mock("@api/ui", () => ({ showDialog: () => undefined }));
 vi.mock("@api/lib", () => ({ getActiveSheet: async () => 0 }));
 vi.mock("@api/locale", () => ({
-  getCachedLocale: () => ({ decimalSeparator: "." }),
+  getAppLocale: () => ({ decimalSeparator: "." }),
 }));
 vi.mock("../lib/actionRecorder", () => ({
   getRecorderSnapshot: () => ({ status: "idle", actionCount: 0, name: "", startedAt: 0 }),

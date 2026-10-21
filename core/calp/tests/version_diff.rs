@@ -786,6 +786,8 @@ fn a_moved_floating_range_and_an_added_timeline_are_reported_by_domain() {
             show_column_headers: true,
             show_row_headers: true,
             container: None,
+            hidden_rows: Vec::new(),
+            hidden_cols: Vec::new(),
         }
     };
     let pivot = persistence::SavedPivotDefinition {

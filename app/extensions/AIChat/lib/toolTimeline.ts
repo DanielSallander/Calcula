@@ -25,6 +25,8 @@
 //          wiring. Every function below returns a NEW array; none mutates its
 //          argument, so React's identity check sees the change.
 
+import { formatNumber } from "@api/locale";
+
 /**
  * What a transcript entry is.
  *
@@ -78,7 +80,7 @@ export function stateMarker(state: ToolState | undefined): string {
 export function formatMs(ms: number | undefined): string {
   if (ms === undefined || !Number.isFinite(ms) || ms < 0) return "";
   if (ms < 1000) return `${Math.round(ms)}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
+  return `${formatNumber(ms / 1000, { decimals: 1 })}s`;
 }
 
 /**

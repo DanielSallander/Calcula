@@ -157,6 +157,7 @@ impl Fixture {
 
 fn cf_params(threshold: &str, background: &str) -> AddCFParams {
     AddCFParams {
+        target: None,
         rule: ConditionalFormatRule::CellValue(CellValueRule {
             operator: CellValueOperator::GreaterThan,
             value1: threshold.to_string(),
@@ -297,6 +298,7 @@ fn updating_a_rule_is_undoable_and_a_refused_update_records_nothing() {
         &f.state,
         &f.file,
         UpdateCFParams {
+            target: None,
             rule_id: 999,
             rule: None,
             format: None,
@@ -316,6 +318,7 @@ fn updating_a_rule_is_undoable_and_a_refused_update_records_nothing() {
         &f.state,
         &f.file,
         UpdateCFParams {
+            target: None,
             rule_id: 1,
             rule: None,
             format: None,

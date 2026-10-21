@@ -4,8 +4,9 @@
 //          chrome actions; only the backend calls are doubled.
 //          - BUG-0455: windowed views -- a header past the view's first window
 //            resolves (sync helpers AND the click handlers);
-//          - BUG-0454: items name an item by its label, falling back from an
-//            empty `formattedValue` to the value (a numeric header "2013");
+//          - BUG-0454: items name an item by its KEY (`pivotCellItemKey`),
+//            falling back to the value (a numeric header "2013"); captions
+//            show its LABEL (P2 S7: identity from the key, display from the label);
 //          - Expand / Collapse on a VALUE cell act on the governing row item's
 //            group path, only when its state differs, else disabled + reason;
 //            Entire Field acts on that item's field;
@@ -68,7 +69,7 @@ vi.mock("../../lib/pivot-api", async (importOriginal) => {
     getPivotView: vi.fn(() => Promise.resolve(h.fetchedView)),
     togglePivotGroup: vi.fn(() => Promise.resolve({})),
     applyPivotFilter: vi.fn(() => Promise.resolve({})),
-    getPivotFieldUniqueValues: vi.fn(() => Promise.resolve({ uniqueValues: [] })),
+    getPivotFieldUniqueValues: vi.fn(() => Promise.resolve({ members: [] })),
     expandCollapseLevel: vi.fn(() => Promise.resolve({})),
     expandCollapseAll: vi.fn(() => Promise.resolve({})),
     sortPivotField: vi.fn(() => Promise.resolve({})),
@@ -87,6 +88,7 @@ import {
   getPivotAtCell,
   togglePivotGroup,
   applyPivotFilter,
+  getPivotFieldUniqueValues,
   expandCollapseLevel,
   deletePivotTable,
   type PivotCellData,
@@ -313,6 +315,55 @@ describe("item labels fall back to the value (BUG-0454)", () => {
     install(smallView());
     const move = findItem("pivot:move");
     expect(typeof move.label === "function" ? move.label(ctxAt(4, 0)) : move.label).toBe('Move "2013"');
+  });
+});
+
+describe("identity from the KEY, display from the LABEL (P2 S7)", () => {
+  /** The small fixture with row 4 a de-DE date header: key ISO, label localised. */
+  function dateView(): PivotViewResponse {
+    const v = smallView();
+    v.rows[4].cells[0] = header("2024-01-15", {
+      formattedValue: "",
+      groupPath: [[3, 9]],
+      member: { key: "2024-01-15", label: "15.01.2024" },
+    });
+    return v;
+  }
+
+  it("Keep Only sends the member KEY, never the label the cell shows", async () => {
+    install(dateView());
+    await findItem("pivot:filter:keepOnly").onClick(ctxAt(4, 0));
+    expect(applyPivotFilter).toHaveBeenCalledWith({
+      pivotId: "p1",
+      fieldIndex: 3,
+      filters: { manualFilter: { selectedItems: ["2024-01-15"] } },
+    });
+  });
+
+  it("Hide sends every OTHER member's key (the field's members, by key)", async () => {
+    install(dateView());
+    vi.mocked(getPivotFieldUniqueValues).mockResolvedValueOnce({
+      fieldIndex: 3,
+      fieldName: "Date",
+      members: [
+        { key: "2024-01-15", label: "15.01.2024" },
+        { key: "2024-02-01", label: "01.02.2024" },
+        { key: "", label: "(Blank)" },
+      ],
+    });
+    await findItem("pivot:filter:hide").onClick(ctxAt(4, 0));
+    expect(applyPivotFilter).toHaveBeenCalledWith({
+      pivotId: "p1",
+      fieldIndex: 3,
+      filters: { manualFilter: { selectedItems: ["2024-02-01", ""] } },
+    });
+  });
+
+  it("a caption NAMES the item by its label", () => {
+    install(dateView());
+    const move = findItem("pivot:move");
+    expect(typeof move.label === "function" ? move.label(ctxAt(4, 0)) : move.label).toBe('Move "15.01.2024"');
+    expect(getItemLabelForCell(ctxAt(4, 0))).toBe("15.01.2024");
   });
 });
 

@@ -50,7 +50,7 @@ describe("the Canvas tab's pictures", () => {
   it.each([
     "NewPage", "AllVisuals", "Shapes", "ButtonControl", "FloatingGrid", "SizePosition", "FitToPage",
     "FitToWidth", "ActualSize", "SnapToGrid", "ShowGrid", "LockObjects", "DesignMode", "Wallpaper",
-    "PageNavigator", "NavigateBack", "ClearSlicers", "Report",
+    "PageNavigator", "NavigateBack", "ClearSlicers", "Report", "EditInteractions",
   ])("the tab draws the new RibbonIcon.%s", (key) => {
     expect(all).toMatch(new RegExp(`RibbonIcon\\.${key}\\b`));
   });

@@ -13,6 +13,7 @@ import { getGridBounds } from "@api/lib";
 import { save } from "@tauri-apps/plugin-dialog";
 import { csvBackend } from "../lib/csvBackend";
 import { exportToCsv, createDefaultExportOptions } from "../lib/csvExporter";
+import { listSeparator } from "@api/locale";
 
 // ============================================================================
 // Styles
@@ -148,7 +149,8 @@ const ENCODINGS: { label: string; value: string }[] = [
 // ============================================================================
 
 export const CsvExportDialog: React.FC<DialogProps> = ({ onClose }) => {
-  const [delimiter, setDelimiter] = useState(",");
+  // The default delimiter is the app locale's list separator (de-DE ";").
+  const [delimiter, setDelimiter] = useState(() => createDefaultExportOptions(listSeparator()).delimiter);
   const [encoding, setEncoding] = useState("utf-8");
   const [textQualifier, setTextQualifier] = useState('"');
   const [exporting, setExporting] = useState(false);

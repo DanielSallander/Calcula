@@ -29,6 +29,7 @@ import {
   type GridMenuContext,
 } from "@api";
 import { emitAppEvent } from "@api/events";
+import { pivotCellItemKey } from "@api/pivotMembers";
 import { PivotEvents } from "../../_shared/lib/pivotEvents";
 
 import {
@@ -73,7 +74,7 @@ import {
   type PivotCellData,
   type PivotRegionInfo,
 } from "../lib/pivot-api";
-import { pivotCellLabel, setPivotItemExpandedAt } from "../lib/pivotChromeActions";
+import { setPivotItemExpandedAt } from "../lib/pivotChromeActions";
 
 import { deleteCachedPivotView } from "../lib/pivotViewStore";
 
@@ -618,13 +619,16 @@ export function registerPivotContextMenuItems(): () => void {
           label: "Keep Only Selected Items",
           onClick: menuAction("Keep Only Selected Items", async (ctx) => {
             const { pivotInfo, cell, fieldIndex } = await clickedHeader(ctx);
-            const itemLabel = pivotCellLabel(cell);
-            if (!itemLabel) throw new Error("the item under the pointer has no name");
+            // The member KEY: a manual filter matches keys, never a label.
+            // The blank member's key is "" (ruling Q8), so emptiness is only
+            // "no name" when the cell names no member at all.
+            const itemKey = pivotCellItemKey(cell);
+            if (!itemKey && !cell.member) throw new Error("the item under the pointer has no name");
             await applyPivotFilter({
               pivotId: pivotInfo.pivotId,
               fieldIndex,
               filters: {
-                manualFilter: { selectedItems: [itemLabel] },
+                manualFilter: { selectedItems: [itemKey] },
               },
             });
             window.dispatchEvent(new Event("pivot:refresh"));
@@ -635,12 +639,12 @@ export function registerPivotContextMenuItems(): () => void {
           label: "Hide Selected Items",
           onClick: menuAction("Hide Selected Items", async (ctx) => {
             const { pivotInfo, cell, fieldIndex } = await clickedHeader(ctx);
-            const itemLabel = pivotCellLabel(cell);
-            if (!itemLabel) throw new Error("the item under the pointer has no name");
+            const itemKey = pivotCellItemKey(cell);
+            if (!itemKey && !cell.member) throw new Error("the item under the pointer has no name");
 
-            // Get all unique values, then remove the selected item
+            // Every member KEY but the clicked one (keys, never labels).
             const fieldValues = await getPivotFieldUniqueValues(pivotInfo.pivotId, fieldIndex);
-            const selectedItems = fieldValues.uniqueValues.filter((v) => v !== itemLabel);
+            const selectedItems = fieldValues.members.map((m) => m.key).filter((k) => k !== itemKey);
             await applyPivotFilter({
               pivotId: pivotInfo.pivotId,
               fieldIndex,

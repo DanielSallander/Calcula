@@ -9,6 +9,7 @@ import type {
   OverlayDefinition,
 } from "@api";
 import { emitAppEvent } from "@api";
+import { memberKeys, memberLabelOf, type MemberRef } from "@api/pivotMembers";
 import type { PanelDefinition } from "@api/uiTypes";
 import { RibbonIcon } from "@api/ribbonIcons";
 import { ICON_SIZE_MD, ICON_SIZE_SM } from "@api/layout";
@@ -321,7 +322,10 @@ function FilterDropdownWrapper(props: OverlayProps): React.ReactElement {
   return React.createElement(FilterDropdown, {
     fieldName: (data.fieldName as string) ?? "",
     fieldIndex: (data.fieldIndex as number) ?? 0,
-    uniqueValues: (data.uniqueValues as string[]) ?? [],
+    // The overlay data carries MEMBERS: the list holds keys (what the apply
+    // callback returns) and shows each key's app-locale label.
+    uniqueValues: memberKeys((data.members as MemberRef[] | undefined) ?? []),
+    labelOf: memberLabelOf((data.members as MemberRef[] | undefined) ?? []),
     selectedValues: (data.selectedValues as string[]) ?? [],
     anchorRect: props.anchorRect ?? { x: 0, y: 0, width: 150, height: 24 },
     onApply: (data.onApply as (

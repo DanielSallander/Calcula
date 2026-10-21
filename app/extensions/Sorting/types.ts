@@ -3,6 +3,7 @@
 // CONTEXT: Local types used by the Sort dialog state and components.
 
 import type { SortOn, SortDataOption, SortOrientation, IconSetType } from "@api/lib";
+import type { CellTargetRef } from "@api/cellTarget";
 
 /**
  * A single sort level (criterion) in the dialog.
@@ -59,6 +60,12 @@ export interface SortDialogState {
   columnHeaders: string[];
   /** The currently selected level ID (for move/delete operations) */
   selectedLevelId: string | null;
+  /**
+   * The OBJECT whose cells the dialog sorts (a floating grid's, P3), or null
+   * for the active sheet. Header names, colour scans and the sort read and
+   * write through it.
+   */
+  cellTarget: CellTargetRef | null;
 }
 
 /** Maximum number of sort levels allowed (Excel supports 64) */

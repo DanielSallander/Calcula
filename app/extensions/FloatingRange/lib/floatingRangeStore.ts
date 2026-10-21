@@ -67,6 +67,14 @@ export interface FloatingRangeEntry {
   cols: number;
   colWidths: Record<number, number>;
   rowHeights: Record<number, number>;
+  /**
+   * The rows / columns the OBJECT hides (Home > Format > Hide & Unhide on its
+   * cells, P3): local == backing indices, ascending, unique. A hidden line is
+   * 0 px wide (frDimensions), so the frame shrinks by it, and it keeps its
+   * stored size in `rowHeights` / `colWidths` for when it is shown again.
+   */
+  hiddenRows: number[];
+  hiddenCols: number[];
   /** Frame chrome (see frDimensions: the frame size DERIVES from these). */
   showTitle: boolean;
   showColumnHeaders: boolean;
@@ -115,6 +123,19 @@ function normalizeSizeMap(value: unknown): Record<number, number> {
 }
 
 /**
+ * A hidden-line set as the entry promises it: non-negative integers, sorted,
+ * de-duplicated; `[]` when absent or not an array. Exported for the unit tier.
+ */
+export function normalizeLineSet(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<number>();
+  for (const v of value) {
+    if (typeof v === "number" && Number.isInteger(v) && v >= 0) seen.add(v);
+  }
+  return [...seen].sort((a, b) => a - b);
+}
+
+/**
  * THE ONLY PLACE a backend FloatingRangeInfo becomes a store entry, and
  * therefore the only place the entry type's promises can be made true (the
  * chartStore fromEntry rule). Counts clamp to >= 1, geometry to finite >= 0,
@@ -139,6 +160,10 @@ export function fromInfo(info: FloatingRangeInfo): FloatingRangeEntry {
     cols: Math.max(1, Math.trunc(finiteNumber(info.colCount, 1))),
     colWidths: normalizeSizeMap(info.colWidths),
     rowHeights: normalizeSizeMap(info.rowHeights),
+    // Field by field, like every other: a field added only to the @api type
+    // would otherwise never reach the renderer (P3 spec review finding 4).
+    hiddenRows: normalizeLineSet(info.hiddenRows),
+    hiddenCols: normalizeLineSet(info.hiddenCols),
     // `!== false`, not `=== true`: the backend defaults these to true, so an
     // info that predates the field (or a hand-built test double) must land on
     // SHOWN. `Boolean(undefined)` would silently strip every FR's chrome.
@@ -168,6 +193,8 @@ export function toInfo(entry: FloatingRangeEntry): FloatingRangeInfo {
     colCount: entry.cols,
     colWidths: { ...entry.colWidths },
     rowHeights: { ...entry.rowHeights },
+    hiddenRows: [...(entry.hiddenRows ?? [])],
+    hiddenCols: [...(entry.hiddenCols ?? [])],
     showTitle: entry.showTitle,
     showColumnHeaders: entry.showColumnHeaders,
     showRowHeaders: entry.showRowHeaders,

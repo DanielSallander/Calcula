@@ -19,6 +19,7 @@ import {
   DEFAULT_COMMENT_AUTHOR,
 } from "@api";
 import { refreshAnnotationState } from "../lib/annotationStore";
+import { formatDateTime } from "@api/locale";
 
 // ============================================================================
 // Styles
@@ -281,17 +282,8 @@ const CommentPanelOverlay: React.FC<OverlayProps> = ({
 
   // Format timestamp
   const formatTime = (iso: string): string => {
-    try {
-      const d = new Date(iso);
-      return d.toLocaleString(undefined, {
-        month: "short",
-        day: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-      });
-    } catch {
-      return "";
-    }
+    // The app locale's date and time, never the WebView's own locale.
+    return formatDateTime(iso);
   };
 
   // Handle key events

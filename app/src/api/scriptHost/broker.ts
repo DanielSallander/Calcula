@@ -265,7 +265,7 @@ export function buildPreviewHandle(opts: {
 function checkPolicy(handle: ScriptHandle, method: string, args: unknown[]): MethodPolicy {
   const decision = decidePolicy(handle, method, args);
   if (!decision.admitted) {
-    audit(handle, method, decision.class, false, decision.code);
+    audit(handle, method, decision.class, false, decision.code, args);
     throw new BrokerError(decision.code, decision.message, decision.capability);
   }
   return decision.policy;
@@ -443,12 +443,26 @@ function persistCapabilityAudit(handle: ScriptHandle, method: string, ok: boolea
   });
 }
 
+/** The row's argument summary for its audit entry, or undefined. A summary
+ *  that throws (a malformed call about to be refused) is dropped: the audit
+ *  must never be the thing that fails a call. */
+function auditDetailOf(method: string, args: unknown[] | undefined): string | undefined {
+  const summarize = ALLOWLIST[method]?.auditDetail;
+  if (!summarize || !args) return undefined;
+  try {
+    return summarize(args);
+  } catch {
+    return undefined;
+  }
+}
+
 function audit(
   handle: ScriptHandle,
   method: string,
   cls: MethodPolicy["class"],
   ok: boolean,
   error?: string,
+  args?: unknown[],
 ): void {
   // A DRY RUN is not an event in the workbook's history (§5c). It mounts
   // nothing, is registered nowhere, and its calls are served by a backend that
@@ -465,6 +479,7 @@ function audit(
     class: cls,
     ok,
     error,
+    detail: auditDetailOf(method, args),
   });
   persistCapabilityAudit(handle, method, ok, error);
 }
@@ -503,10 +518,10 @@ export function brokerCallSync<T>(
   const policy = checkPolicy(handle, method, args);
   try {
     const result = executor();
-    audit(handle, method, policy.class, true);
+    audit(handle, method, policy.class, true, undefined, args);
     return result;
   } catch (e) {
-    audit(handle, method, policy.class, false, auditCodeForError(e));
+    audit(handle, method, policy.class, false, auditCodeForError(e), args);
     throw e;
   }
 }
@@ -526,7 +541,7 @@ export async function brokerCall<T>(
   // Limits that are statically checkable land here (per-method, data-driven).
   if (policy.limits?.maxCells !== undefined && Array.isArray(args[0])
       && args[0].length > policy.limits.maxCells) {
-    audit(handle, method, policy.class, false, "ValidationError");
+    audit(handle, method, policy.class, false, "ValidationError", args);
     throw new BrokerError(
       "ValidationError",
       `${method}: batch of ${args[0].length} exceeds the limit of ${policy.limits.maxCells} cells`,
@@ -535,10 +550,10 @@ export async function brokerCall<T>(
 
   try {
     const result = await executor();
-    audit(handle, method, policy.class, true);
+    audit(handle, method, policy.class, true, undefined, args);
     return result;
   } catch (e) {
-    audit(handle, method, policy.class, false, auditCodeForError(e));
+    audit(handle, method, policy.class, false, auditCodeForError(e), args);
     throw e;
   }
 }

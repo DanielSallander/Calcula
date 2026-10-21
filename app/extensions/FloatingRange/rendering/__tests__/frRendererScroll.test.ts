@@ -9,7 +9,8 @@
 //          - the sticky column letters / row numbers show the scrolled labels,
 //            each clipped to its own strip;
 //          - scroll indicators appear only on an axis that overflows;
-//          - a window over 100,000 cells still paints (every read <= 100,000).
+//          - a window over 100,000 cells still paints (every read <= 100,000);
+//          - (P3) the cells come from the STYLED read, get_cell_target_cells.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { FloatingRangeInfo } from "@api/floatingRanges";
@@ -22,22 +23,30 @@ vi.mock("@api/floatingRanges", () => ({
   FLOATING_RANGE_MAX_COLS: 256,
   listFloatingRanges: vi.fn(async () => []),
   updateFloatingRange: vi.fn(async () => ({})),
-  // Every cell exists and displays "r{row}c{col}" -- so a painted string names
-  // the cell it came from.
-  getFloatingRangeCells: vi.fn(async (_id: string, startRow: number, startCol: number, endRow: number, endCol: number) => {
-    reads.push({ startRow, startCol, endRow, endCol });
-    if ((endRow - startRow + 1) * (endCol - startCol + 1) > 100_000) {
-      throw new Error("range too large");
-    }
-    const out = [];
-    for (let r = startRow; r <= endRow; r++) {
-      for (let c = startCol; c <= endCol; c++) {
-        out.push({ row: r, col: c, type: "text", value: `r${r}c${c}`, display: `r${r}c${c}` });
-      }
-    }
-    return out;
-  }),
+  getFloatingRangeCells: vi.fn(async () => []),
 }));
+
+// The renderer paints from the STYLED read (P3): `get_cell_target_cells`,
+// banded by @api/cellTarget. Every cell exists and displays "r{row}c{col}" --
+// so a painted string names the cell it came from. The band limit is the
+// backend's: a read over 100,000 cells is refused.
+vi.mock("@tauri-apps/api/core", async (importOriginal) => {
+  const helpers = await import("../../__tests__/helpers/frStyledRead");
+  return {
+    ...(await importOriginal<typeof import("@tauri-apps/api/core")>()),
+    invoke: vi.fn(async (cmd: string, args: Record<string, number>) => {
+      if (cmd !== "get_cell_target_cells") throw new Error(`unexpected invoke ${cmd}`);
+      const { startRow, startCol, endRow, endCol } = args;
+      reads.push({ startRow, startCol, endRow, endCol });
+      if ((endRow - startRow + 1) * (endCol - startCol + 1) > 100_000) {
+        throw new Error("range too large");
+      }
+      return helpers.styledRead({ startRow, startCol, endRow, endCol }, (r, c) =>
+        helpers.targetCell(r, c, `r${r}c${c}`),
+      );
+    }),
+  };
+});
 
 vi.mock("@api/lib", () => ({
   getUsedRange: vi.fn(async () => ({ startRow: 0, startCol: 0, endRow: 0, endCol: 0, empty: true })),

@@ -21,6 +21,7 @@ import type { SectionId } from "./editorShared";
 import { buildModelIndex, groupByKind, KIND_LABEL, searchIndex } from "../lib/modelIndex";
 import type { ScoredEntry } from "../lib/modelIndex";
 import { VERBS } from "../cli/parse";
+import { formatNumber } from "@api/locale";
 
 /** Verbs that flip the input into command mode without a `>` prefix. */
 const VERB_WORDS = new Set<string>(VERBS as unknown as string[]);
@@ -200,7 +201,7 @@ export function SearchPalette({
           </div>
         ) : query.trim() === "" ? (
           <div style={{ padding: SPACE.xl, color: ME.text3, fontSize: FONT.sm }}>
-            Type to search {index.length.toLocaleString()} objects. Narrow with{" "}
+            Type to search {formatNumber(index.length, { grouping: true, decimals: 0 })} objects. Narrow with{" "}
             <code style={{ fontFamily: ME.mono }}>measure:</code>,{" "}
             <code style={{ fontFamily: ME.mono }}>table:</code>,{" "}
             <code style={{ fontFamily: ME.mono }}>column:</code>, or a qualified reference like{" "}

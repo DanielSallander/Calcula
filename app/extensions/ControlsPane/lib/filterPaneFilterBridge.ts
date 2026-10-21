@@ -11,6 +11,11 @@
 //          worked. The other pivots still filter. A filter whose pivots cannot
 //          even be LISTED (the model is not connected) is reported the same
 //          way: it used to look exactly like a filter with no pivots.
+//
+//          Pivots only. The filter's other visuals (charts, cards, KPIs,
+//          gauges) have no backend state to write: they read the filter from
+//          @api/reportFilters, where filterReportPublisher.ts publishes it
+//          with its scope, and re-query themselves.
 
 import type { RibbonFilter } from "./filterPaneTypes";
 import type {

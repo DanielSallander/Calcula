@@ -106,6 +106,9 @@ vi.mock("@api", () => ({
   },
 }));
 vi.mock("@api/events", () => ({ onAppEvent: () => () => undefined }));
+// The editor follows the APP locale for caption translation (P2); this suite
+// mocks @api/events, so the locale seam is stubbed here too.
+vi.mock("@api/locale", () => ({ getAppLocale: () => ({ localeId: "en-US" }), onLocaleChanged: () => () => undefined }));
 vi.mock("@api/dialogs", () => ({ confirmAsync: vi.fn(() => Promise.resolve(false)) }));
 vi.mock("../../lib/pivot-api", () => ({
   getConnectionBiModel: vi.fn(() => Promise.resolve(null)),

@@ -161,18 +161,54 @@ export interface ChangedCellRef {
   col: number;
 }
 
-/** One page filter mirrored from `@api/pageFilters` to Rust. */
+/** One per-column filter mirrored from `@api/reportFilters` to Rust. `includedItems` are member KEYS. */
 export interface PageFilterWire {
   field: string;
   includedItems: string[];
   filterLevel: number;
 }
 
-/** Every page filter of one (page, connection), mirrored to Rust. */
+/** One OR-of-AND filter (a non-rectangular cross-filter selection): `tuples` are KEYS aligned to `fields`. */
+export interface TupleFilterWire {
+  fields: string[];
+  tuples: string[][];
+}
+
+/** One object whose resolved filters differ from its page's base set: its bound measures read these instead. */
+export interface ObjectFilterOverrideWire {
+  object: ObjectBindingRef;
+  filters: PageFilterWire[];
+  tupleFilters: TupleFilterWire[];
+}
+
+/**
+ * Every filter of one (page, connection), mirrored to Rust: the page's BASE
+ * set (`resolvePageBase`) plus per-object overrides. The page is its SHEET ID.
+ */
 export interface PageFilterPageWire {
-  sheetIndex: number;
+  sheetId: string;
   connectionId: string;
   filters: PageFilterWire[];
+  tupleFilters: TupleFilterWire[];
+  objects: ObjectFilterOverrideWire[];
+}
+
+/** One value constraint (mirror of Rust `bi::types::BiValueConstraint`): keep rows whose `table.column` is one of `values` (member KEYS). */
+export interface BiValueConstraint {
+  table: string;
+  column: string;
+  values: string[];
+}
+
+/**
+ * The cross-filter selections of OTHER visuals that reach one MODEL slicer, as
+ * `@api/reportFilters` resolved them (Rust `api_types::SlicerVisualConstraints`,
+ * the optional `visualConstraints` argument of `get_slicer_items`). They narrow
+ * the slicer's has-data shading only, never its selection.
+ */
+export interface SlicerVisualConstraints {
+  filters: BiValueConstraint[];
+  tuples: TupleFilterWire[];
 }
 
 /** What a binding formula reads and how it would be stored. */
@@ -269,4 +305,20 @@ export interface TraceBoundObject {
   object: ObjectBindingRef;
   path: string;
   formula: string;
+}
+
+/**
+ * THE member shape at the Rust boundary (mirrors `api_types.rs` `MemberRef`):
+ * one pivot item, BI column value, slicer item or design-query header member.
+ *
+ * - `key` is the INVARIANT canonical text. Selections, filters, page filters,
+ *   GETPIVOTDATA and cross-filter tuples match on it, and only on it.
+ * - `label` is the app-locale display text ("15.01.2024" for the key
+ *   "2024-01-15" under de-DE; "(Blank)" for the blank member, whose key is "").
+ *
+ * Never parse one into the other: show `label`, send `key`.
+ */
+export interface MemberRef {
+  key: string;
+  label: string;
 }

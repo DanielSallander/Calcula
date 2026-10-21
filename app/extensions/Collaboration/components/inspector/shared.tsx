@@ -5,6 +5,7 @@
 
 import React from "react";
 import { Badge as ApiBadge } from "@api/layout";
+import { formatNumber } from "@api/locale";
 
 export const ACCENT = "#0f6cbd";
 export const MUTED = "#6b7076";
@@ -166,6 +167,6 @@ export function StatusLine({
 
 export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  if (n < 1024 * 1024) return `${formatNumber(n / 1024, { decimals: 1 })} KB`;
+  return `${formatNumber(n / (1024 * 1024), { decimals: 1 })} MB`;
 }

@@ -11,6 +11,7 @@
 //          value-cell menu's "Show Details" runs the very same drill.
 
 import { AppEvents, showToast } from "@api";
+import { pivotCellItemKey } from "@api/pivotMembers";
 import { emitAppEvent } from "@api/events";
 import { setActiveSheet } from "@api/lib";
 import type { PivotCellData } from "./pivot-api";
@@ -21,7 +22,6 @@ import {
   isTotalCell,
   getPivotDrillBehavior,
 } from "./pivot-api";
-import { pivotCellLabel } from "./pivotChromeActions";
 import { decideDrillDispatch, diagnoseScriptDrill } from "./drillDispatch";
 
 /**
@@ -53,8 +53,9 @@ export function runPivotCellDoubleClick(
  * Toggle an expandable row header. The toggle names the header by its GROUP
  * PATH, the one identity the backend matches exactly (two "Female" headers
  * under two different cities are two different groups), with the shown label
- * as the fallback name (`pivotCellLabel`: `formattedValue` is empty for text
- * labels and unformatted numbers, and an empty name toggles nothing). A
+ * as the fallback name (`pivotCellItemKey`: the member KEY, else the value as
+ * invariant text -- never "" for an unformatted number, BUG-0454, and never a
+ * localised label). A
  * failure is TOLD (BUG-0096): a double-click is never a silent no-op.
  */
 function togglePivotRowHeader(pivotId: string, cell: PivotCellData, viewCol: number): void {
@@ -65,7 +66,7 @@ function togglePivotRowHeader(pivotId: string, cell: PivotCellData, viewCol: num
         pivotId,
         isRow: true,
         fieldIndex: cell.indentLevel || viewCol,
-        value: pivotCellLabel(cell),
+        value: pivotCellItemKey(cell),
         groupPath,
       });
       window.dispatchEvent(new CustomEvent("pivot:refresh"));

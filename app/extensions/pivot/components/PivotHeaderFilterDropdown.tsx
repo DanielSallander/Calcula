@@ -6,6 +6,7 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { pivot } from '@api/pivot';
 import type { HeaderFieldSummary, PivotId } from '@api/pivot';
+import { memberLabelOf } from '@api/pivotMembers';
 
 // =============================================================================
 // TYPES
@@ -43,7 +44,10 @@ export const PivotHeaderFilterDropdown: React.FC<PivotHeaderFilterDropdownProps>
     fields[0]?.fieldIndex ?? -1
   );
   const [searchText, setSearchText] = useState('');
-  const [uniqueValues, setUniqueValues] = useState<string[]>([]);
+  // The field's member KEYS (what a selection and the filter speak) and the
+  // key -> app-locale label lookup the list shows and searches.
+  const [itemKeys, setItemKeys] = useState<string[]>([]);
+  const [labelOf, setLabelOf] = useState<(key: string) => string>(() => (key: string) => key);
   const [selectedValues, setSelectedValues] = useState<Set<string>>(new Set());
   const [isLoadingValues, setIsLoadingValues] = useState(false);
 
@@ -99,8 +103,10 @@ export const PivotHeaderFilterDropdown: React.FC<PivotHeaderFilterDropdownProps>
         const valuesResponse = await pivot.getFieldUniqueValues(pivotId, selectedFieldIndex);
         if (cancelled) return;
 
-        const allValues = valuesResponse.uniqueValues;
-        setUniqueValues(allValues);
+        const allValues = valuesResponse.members.map((m) => m.key);
+        setItemKeys(allValues);
+        const lookup = memberLabelOf(valuesResponse.members);
+        setLabelOf(() => lookup);
 
         // Fetch field info for current filter state
         try {
@@ -129,7 +135,7 @@ export const PivotHeaderFilterDropdown: React.FC<PivotHeaderFilterDropdownProps>
       } catch (err) {
         console.error('Failed to fetch field data:', err);
         if (!cancelled) {
-          setUniqueValues([]);
+          setItemKeys([]);
           setSelectedValues(new Set());
         }
       } finally {
@@ -146,17 +152,18 @@ export const PivotHeaderFilterDropdown: React.FC<PivotHeaderFilterDropdownProps>
 
   // Filter values by search text
   const filteredValues = useMemo(() => {
-    if (!searchText) return uniqueValues;
+    if (!searchText) return itemKeys;
     const lower = searchText.toLowerCase();
-    return uniqueValues.filter(v => v.toLowerCase().includes(lower));
-  }, [uniqueValues, searchText]);
+    // Search what the user SEES (the label); the list still holds keys.
+    return itemKeys.filter(v => labelOf(v).toLowerCase().includes(lower));
+  }, [itemKeys, labelOf, searchText]);
 
   // Select all state
   const selectAllState = useMemo((): 'all' | 'none' | 'partial' => {
     if (selectedValues.size === 0) return 'none';
-    if (selectedValues.size === uniqueValues.length) return 'all';
+    if (selectedValues.size === itemKeys.length) return 'all';
     return 'partial';
-  }, [selectedValues, uniqueValues]);
+  }, [selectedValues, itemKeys]);
 
   // Handlers
   const handleFieldChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -176,8 +183,8 @@ export const PivotHeaderFilterDropdown: React.FC<PivotHeaderFilterDropdownProps>
   }, []);
 
   const handleSelectAll = useCallback(() => {
-    setSelectedValues(new Set(uniqueValues));
-  }, [uniqueValues]);
+    setSelectedValues(new Set(itemKeys));
+  }, [itemKeys]);
 
   const handleSelectNone = useCallback(() => {
     setSelectedValues(new Set());
@@ -213,7 +220,7 @@ export const PivotHeaderFilterDropdown: React.FC<PivotHeaderFilterDropdownProps>
 
   const handleApply = useCallback(async () => {
     try {
-      if (selectedValues.size === uniqueValues.length) {
+      if (selectedValues.size === itemKeys.length) {
         // All selected - clear filter
         await pivot.clearFilter({
           pivotId,
@@ -236,7 +243,7 @@ export const PivotHeaderFilterDropdown: React.FC<PivotHeaderFilterDropdownProps>
     } catch (err) {
       console.error('Failed to apply filter:', err);
     }
-  }, [pivotId, selectedFieldIndex, selectedValues, uniqueValues.length, onApply, onClose]);
+  }, [pivotId, selectedFieldIndex, selectedValues, itemKeys.length, onApply, onClose]);
 
   // Position the dropdown
   const dropdownStyle: React.CSSProperties = {
@@ -436,7 +443,7 @@ export const PivotHeaderFilterDropdown: React.FC<PivotHeaderFilterDropdownProps>
                 textOverflow: 'ellipsis',
                 whiteSpace: 'nowrap',
               }}>
-                {value || '(Blank)'}
+                {labelOf(value) || '(Blank)'}
               </span>
             </label>
           ))

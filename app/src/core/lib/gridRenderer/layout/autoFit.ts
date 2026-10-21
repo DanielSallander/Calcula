@@ -215,6 +215,10 @@ function maxRichTextFontSize(runs: RichTextRun[], baseFontSize: number): number 
  * @param styles - All styles from getAllStyles() (index-ordered array)
  * @param theme - Font defaults from the grid theme
  * @param minWidth - Minimum allowed column width
+ * @param includeContributions - Ask the registered AutoFit contributors (they
+ *          describe the ACTIVE sheet's columns). False for cells that are not
+ *          the active sheet's -- an object's own cells (a floating grid's),
+ *          whose column index would alias the host's column.
  * @returns Optimal width in pixels, or null when there is nothing to fit
  *          (Excel leaves the column width unchanged in that case)
  */
@@ -223,13 +227,14 @@ export function measureOptimalColumnWidth(
   cells: CellData[],
   styles: StyleData[],
   theme: { cellFontFamily: string; cellFontSize: number },
-  minWidth: number
+  minWidth: number,
+  includeContributions = true,
 ): number | null {
   const ctx = getMeasureContext();
   let maxWidth = 0;
   let hasContent = false;
 
-  const contributions = hasAutoFitContributors()
+  const contributions = includeContributions && hasAutoFitContributors()
     ? collectAutoFitColumnContributions(col, ctx)
     : [];
 
@@ -362,13 +367,15 @@ export function measureOptimalRowHeight(
   theme: { cellFontFamily: string; cellFontSize: number },
   minHeight: number,
   defaultRowHeight: number,
-  row: number
+  row: number,
+  includeContributions = true,
 ): number | null {
   const ctx = getMeasureContext();
   let maxHeight = 0;
   let hasContent = false;
 
-  const contributions = hasAutoFitContributors()
+  // `includeContributions`: see measureOptimalColumnWidth.
+  const contributions = includeContributions && hasAutoFitContributors()
     ? collectAutoFitRowContributions(row, ctx)
     : [];
 

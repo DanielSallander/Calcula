@@ -83,20 +83,144 @@ fn contested_in_list_expression(
     values: &[String],
     include_null: bool,
 ) -> Expression {
+    in_list_expression(model, &cf.table, &cf.column, values, include_null)
+}
+
+/// Fold `parts` into a BALANCED binary tree of `join` (`And` / `Or`), so a
+/// selection of a thousand tuples renders at depth ~10, never 1000 (the SQL
+/// renderer recurses per node). `None` for an empty list.
+fn balanced_fold(
+    mut parts: Vec<Expression>,
+    join: fn(Box<Expression>, Box<Expression>) -> Expression,
+) -> Option<Expression> {
+    match parts.len() {
+        0 => None,
+        1 => parts.pop(),
+        n => {
+            let right = parts.split_off(n / 2);
+            let l = balanced_fold(parts, join)?;
+            let r = balanced_fold(right, join)?;
+            Some(join(Box::new(l), Box::new(r)))
+        }
+    }
+}
+
+/// One tuple position's member test: an ordinary value is `col IN (v) AND
+/// NOT col IS NULL`; the BLANK member is its NULL rows plus the literal
+/// values the planner's blank rule (`blank_member_split`) attached.
+fn tuple_value_expression(
+    model: &DataModel,
+    table: &str,
+    column: &str,
+    value: &crate::planner::TupleValue,
+) -> Expression {
+    match value {
+        crate::planner::TupleValue::Value(v) => {
+            in_list_expression(model, table, column, std::slice::from_ref(v), false)
+        }
+        crate::planner::TupleValue::Blank { values } => {
+            in_list_expression(model, table, column, values, true)
+        }
+    }
+}
+
+/// The predicate of a tuple filter PROJECTED onto the columns `keep`
+/// (OR over the deduplicated projected tuples of AND over the kept columns).
+/// `None` when `keep` is empty (every column cleared: the filter does not
+/// apply); a never-true predicate when the tuple set is empty. A
+/// one-column projection renders as one IN-list.
+fn tuple_filter_expression(
+    model: &DataModel,
+    tf: &crate::planner::TuplePlan,
+    keep: &[usize],
+) -> Option<Expression> {
+    let tuples = tf.projected(keep)?;
+    if tuples.is_empty() {
+        // Matches nothing, as a predicate over a kept column (see
+        // `in_list_expression`: never a constant FALSE).
+        let (table, column) = &tf.columns[keep[0]];
+        return Some(in_list_expression(model, table, column, &[], false));
+    }
+    if let [only] = keep {
+        let (table, column) = &tf.columns[*only];
+        let mut values: Vec<String> = Vec::new();
+        let mut include_null = false;
+        for t in &tuples {
+            let literal: &[String] = match &t[0] {
+                crate::planner::TupleValue::Value(v) => std::slice::from_ref(v),
+                crate::planner::TupleValue::Blank { values } => {
+                    include_null = true;
+                    values
+                }
+            };
+            for v in literal {
+                if !values.contains(v) {
+                    values.push(v.clone());
+                }
+            }
+        }
+        return Some(in_list_expression(
+            model,
+            table,
+            column,
+            &values,
+            include_null,
+        ));
+    }
+    let ors: Vec<Expression> = tuples
+        .iter()
+        .map(|t| {
+            let ands: Vec<Expression> = keep
+                .iter()
+                .zip(t.iter())
+                .map(|(&i, v)| {
+                    let (table, column) = &tf.columns[i];
+                    tuple_value_expression(model, table, column, v)
+                })
+                .collect();
+            // `keep` is non-empty here, so `ands` is too.
+            balanced_fold(ands, Expression::And).unwrap_or(Expression::LiteralBool(true))
+        })
+        .collect();
+    balanced_fold(ors, Expression::Or)
+}
+
+/// Render an IN-list over `table.column` as a typed `Expression::InList`
+/// (see [`contested_in_list_expression`]); shared by contested IN-lists and
+/// tuple filters so both read NULL rows the same way.
+fn in_list_expression(
+    model: &DataModel,
+    table: &str,
+    column: &str,
+    values: &[String],
+    include_null: bool,
+) -> Expression {
     // The BLANK member (a scoped IN-list naming it): the NULL rows match too.
     let blank = || {
         Expression::IsBlank(Box::new(Expression::QualifiedColumnRef {
-            table_or_var: cf.table.clone(),
-            column: cf.column.clone(),
+            table_or_var: table.to_string(),
+            column: column.to_string(),
         }))
     };
     if values.is_empty() {
-        return if include_null { blank() } else { Expression::LiteralBool(false) };
+        // Matches nothing -- spelled as a predicate OVER THE COLUMN (`col IS
+        // NULL AND NOT col IS NULL`), never the literal FALSE: DataFusion
+        // refused a constant `CASE WHEN false` aggregate and the row-domain
+        // probe with "predicate did not evaluate to an array", so an empty
+        // contested slicer errored instead of keeping no row.
+        return if include_null {
+            blank()
+        } else {
+            Expression::And(
+                Box::new(blank()),
+                Box::new(Expression::Not(Box::new(blank()))),
+            )
+        };
     }
     let needs_quoting = model
-        .table(&cf.table)
+        .table(table)
         .ok()
-        .and_then(|t| t.column(&cf.column).ok())
+        .and_then(|t| t.column(column).ok())
         .map(|c| c.data_type().needs_sql_quoting())
         .unwrap_or(true);
     let literals: Vec<Expression> = values
@@ -112,8 +236,8 @@ fn contested_in_list_expression(
         .collect();
     let in_list = Expression::InList {
         expr: Box::new(Expression::QualifiedColumnRef {
-            table_or_var: cf.table.clone(),
-            column: cf.column.clone(),
+            table_or_var: table.to_string(),
+            column: column.to_string(),
         }),
         values: literals,
         negated: false,
@@ -211,6 +335,7 @@ impl QueryExecutor {
         totals: TotalsMode,
         hierarchy: Option<&crate::planner::HierarchySpec>,
         contested_filters: &[crate::planner::ContestedFilter],
+        tuple_filters: &[crate::planner::TuplePlan],
         model: &DataModel,
         registry: &SourceRegistry,
         cache: Option<&InMemoryCache>,
@@ -1162,6 +1287,26 @@ impl QueryExecutor {
                     cf.table, cf.column, cf.level
                 )));
             }
+            // A tuple (multi-column) selection is applied per measure the same
+            // way -- projected onto the columns a measure does not clear -- so
+            // the same paths cannot thread it. The text keeps the verb
+            // " clears ": hosts read it as the typed contested-clear refusal.
+            if let Some(tf) = tuple_filters.first() {
+                let columns: Vec<String> = tf
+                    .columns
+                    .iter()
+                    .map(|(t, c)| format!("{t}[{c}]"))
+                    .collect();
+                return Err(crate::error::QueryError::InvalidQuery(format!(
+                    "the request carries a multi-column selection on {} (level {}), which the \
+                     engine applies per measure (a measure that clears some of its columns sees \
+                     the selection projected onto the others); that is currently supported only \
+                     for plain aggregate measures on the single-fact local path, not for {path}. \
+                     Remove the measure from this request, or select within one field",
+                    columns.join(", "),
+                    tf.level
+                )));
+            }
             Ok(())
         };
 
@@ -1302,7 +1447,9 @@ impl QueryExecutor {
                 None,
                 totals,
                 hierarchy,
-                // Contested filters were rejected above for the window path.
+                // Contested and tuple filters were rejected above for the
+                // window path.
+                &[],
                 &[],
                 model,
                 registry,
@@ -1377,6 +1524,30 @@ impl QueryExecutor {
                          relationship; per-measure filter removal cannot be applied — remove \
                          the clearing measure or the filter",
                         cf.table, cf.column, cf.level, cf.table
+                    )));
+                }
+            }
+        }
+        // A tuple filter's predicate is rendered per measure over the joined
+        // tables in exactly the same way: every column's table must be the
+        // fact or a safe direct join from it.
+        for tf in tuple_filters {
+            for (table, column) in &tf.columns {
+                if table.eq_ignore_ascii_case(fact_model_name) {
+                    continue;
+                }
+                let safe = model
+                    .find_relationship(fact_model_name, table)
+                    .map(|rel| rel.is_safe_for_direct_join())
+                    .unwrap_or(false);
+                if !safe {
+                    return Err(crate::error::QueryError::InvalidQuery(format!(
+                        "a multi-column selection names '{table}[{column}]' (level {}), but \
+                         '{table}' is not reachable from '{fact_model_name}' through a safe \
+                         direct-join relationship; the selection is applied per measure (a \
+                         measure that clears part of it sees the rest), which needs that join \
+                         -- select within one field, or remove the field from the selection",
+                        tf.level
                     )));
                 }
             }
@@ -1727,6 +1898,25 @@ impl QueryExecutor {
                         }
                     }
                 }
+                // Tuple (multi-column) filters: projected onto the columns
+                // this measure does NOT clear at the filter's level (DAX
+                // REMOVEFILTERS on part of a multi-column filter table);
+                // clearing every column drops the filter for this measure.
+                for tf in tuple_filters {
+                    let keep: Vec<usize> = tf
+                        .columns
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, (t, c))| !eval_ctx.clears_query_filter_ci(t, c, tf.level))
+                        .map(|(i, _)| i)
+                        .collect();
+                    if keep.len() != tf.columns.len() {
+                        dropped_contested = true;
+                    }
+                    if let Some(cond) = tuple_filter_expression(model, tf, &keep) {
+                        contested_conditions.push(cond);
+                    }
+                }
 
                 // Record tables that need JOINs from resolved filters.
                 for f in &effective {
@@ -2021,6 +2211,26 @@ impl QueryExecutor {
             }
         }
 
+        // The grouped row-domain probe (HAVING, below) reads every contested
+        // and tuple column, even when every measure cleared the filter and so
+        // no measure condition pulled its table into the join set (a grouped
+        // query whose only measure cleared a contested dimension slicer
+        // failed with a DataFusion FieldNotFound on that dimension).
+        if !group_by.is_empty() {
+            for cf in contested_filters {
+                if !cf.table.eq_ignore_ascii_case(fact_model_name) {
+                    context_join_tables.push(cf.table.clone());
+                }
+            }
+            for tf in tuple_filters {
+                for (table, _) in &tf.columns {
+                    if !table.eq_ignore_ascii_case(fact_model_name) {
+                        context_join_tables.push(table.clone());
+                    }
+                }
+            }
+        }
+
         // Add JOINs for tables referenced by context filters (KEEP, etc.).
         // For unsafe relationships (ManyToMany, non-equi), use EXISTS subquery
         // instead of JOIN to avoid row explosion.
@@ -2148,10 +2358,17 @@ impl QueryExecutor {
             // Contested filters are not in any fetch WHERE, so re-impose the
             // row domain here: keep only groups with at least one row
             // matching ALL contested predicates.
-            if !contested_filters.is_empty() {
+            if !contested_filters.is_empty() || !tuple_filters.is_empty() {
                 let mut probe_filters: Vec<engine_core::compute::context::ResolvedFilter> =
                     Vec::new();
                 let mut probe_conditions: Vec<Expression> = Vec::new();
+                // Tuple filters: the row domain honours the UNPROJECTED set.
+                for tf in tuple_filters {
+                    let all: Vec<usize> = (0..tf.columns.len()).collect();
+                    if let Some(cond) = tuple_filter_expression(model, tf, &all) {
+                        probe_conditions.push(cond);
+                    }
+                }
                 for cf in contested_filters {
                     match &cf.predicate {
                         crate::planner::ContestedPredicate::Compare { operator, value } => {

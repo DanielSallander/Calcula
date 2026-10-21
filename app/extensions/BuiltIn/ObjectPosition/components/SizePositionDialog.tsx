@@ -26,6 +26,7 @@ import type { DialogProps } from "@api/uiTypes";
 import { Button, Field, LT, NumberField } from "@api/layout";
 import { DialogBody, DialogFieldGrid, DialogPane, DialogSection, dialogWidth } from "@api/dialogLayout";
 import { useDialogWindow } from "@api/dialogWindow";
+import { formatNumber } from "@api/locale";
 import { getGridRegions, type GridRegion } from "@api/gridOverlays";
 import { commitObjectGeometry } from "@api/objectGeometry";
 import { showToast } from "@api/notifications";
@@ -77,9 +78,10 @@ export function lockedFields(
   return key === "width" ? { ...fields, height: locked.height } : { ...fields, width: locked.width };
 }
 
-/** Whole and fractional px alike, without float noise ("100", "100.5"). */
+/** Whole and fractional px alike, without float noise ("100", "100.5"), in
+ *  the APP locale ("100,5" under de-DE). */
 function px(n: number): string {
-  return String(parseFloat(n.toPrecision(12)));
+  return formatNumber(Number(n.toPrecision(12)));
 }
 
 export function SizePositionDialog({ onClose, data }: DialogProps): React.ReactElement | null {

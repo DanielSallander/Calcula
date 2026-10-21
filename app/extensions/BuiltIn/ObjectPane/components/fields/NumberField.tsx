@@ -12,6 +12,7 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import { NumberField as LayoutNumberField, Slider } from "@api/layout";
+import { parseNumber } from "@api/locale";
 import { containerFieldRange, type ContainerFieldId } from "@api/visualContainer";
 import { useFormatContext } from "../formatContext";
 import { literalFieldValue } from "../../lib/formatValues";
@@ -66,9 +67,11 @@ export function NumberBox({
       cancelled.current = false;
       return;
     }
+    // The box's text is in the APP locale ("1,5" under de-DE); text that is no
+    // number there (the foreign "1.5") puts the committed value back.
     const trimmed = raw.trim();
-    const n = trimmed === "" ? null : Number(trimmed);
-    if (n !== null && !Number.isFinite(n)) {
+    const n = trimmed === "" ? null : parseNumber(trimmed);
+    if (trimmed !== "" && n === null) {
       setDraft(value);
       return;
     }

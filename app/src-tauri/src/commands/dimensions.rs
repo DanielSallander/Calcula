@@ -384,15 +384,38 @@ pub(crate) fn set_line_sizes_inner(
 
 /// Excel's Row Height... over every row of `rows` (inclusive runs, e.g.
 /// `[[0, 1048575]]` for Select All), ONE undo step. See the section comment.
+///
+/// With a `target` (P3 2.4) the rows are a FLOATING GRID's: the object's own
+/// row-height map changes (`cell_target::set_line_sizes_on_target`), never
+/// the backing sheet's, gated by the host's Format Rows option.
 #[tauri::command]
-pub fn set_row_heights(state: State<AppState>, file_state: State<FileState>, rows: Vec<(u32, u32)>, height: f64) -> Result<(), String> {
+pub fn set_row_heights(
+    state: State<AppState>,
+    file_state: State<FileState>,
+    rows: Vec<(u32, u32)>,
+    height: f64,
+    target: Option<crate::api_types::CellTargetRef>,
+) -> Result<(), String> {
+    if let Some(target) = &target {
+        return crate::cell_target::set_line_sizes_on_target(&state, &file_state, target, true, &rows, height);
+    }
     set_line_sizes_inner(&state, &file_state, true, &rows, height).map(|_| ())
 }
 
 /// Excel's Column Width... over every column of `cols` (inclusive runs), ONE
-/// undo step.
+/// undo step. With a `target`, a floating grid's own column-width map (see
+/// `set_row_heights`), gated by the host's Format Columns option.
 #[tauri::command]
-pub fn set_column_widths(state: State<AppState>, file_state: State<FileState>, cols: Vec<(u32, u32)>, width: f64) -> Result<(), String> {
+pub fn set_column_widths(
+    state: State<AppState>,
+    file_state: State<FileState>,
+    cols: Vec<(u32, u32)>,
+    width: f64,
+    target: Option<crate::api_types::CellTargetRef>,
+) -> Result<(), String> {
+    if let Some(target) = &target {
+        return crate::cell_target::set_line_sizes_on_target(&state, &file_state, target, false, &cols, width);
+    }
     set_line_sizes_inner(&state, &file_state, false, &cols, width).map(|_| ())
 }
 
@@ -689,7 +712,14 @@ pub fn set_rows_hidden(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     rows: Vec<u32>,
     hidden: bool,
+    target: Option<crate::api_types::CellTargetRef>,
 ) -> Result<Vec<u32>, String> {
+    // A floating grid's rows (P3 2.6): the OBJECT's hidden set, returned as
+    // the result. No SUBTOTAL cascade -- the engine reads row visibility from
+    // the sheets' user-hidden sets only (spec P3, Decision conflicts).
+    if let Some(target) = &target {
+        return crate::cell_target::set_lines_hidden_on_target(&state, &file_state, target, true, &rows, hidden);
+    }
     let result = set_rows_hidden_inner(&state, &file_state, &rows, hidden)?;
     recalc_visibility_after_row_change(
         &app,
@@ -791,7 +821,12 @@ pub fn set_cols_hidden(
     file_state: State<FileState>,
     cols: Vec<u32>,
     hidden: bool,
+    target: Option<crate::api_types::CellTargetRef>,
 ) -> Result<Vec<u32>, String> {
+    // A floating grid's columns: the OBJECT's hidden set (see `set_rows_hidden`).
+    if let Some(target) = &target {
+        return crate::cell_target::set_lines_hidden_on_target(&state, &file_state, target, false, &cols, hidden);
+    }
     set_cols_hidden_inner(&state, &file_state, &cols, hidden)
 }
 

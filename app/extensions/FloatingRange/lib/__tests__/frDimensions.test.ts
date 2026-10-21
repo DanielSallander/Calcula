@@ -39,6 +39,11 @@ import {
   trackedRowIndices,
   contentWidth,
   contentHeight,
+  frColOffsets,
+  frRowOffsets,
+  frStepShown,
+  frNearestShown,
+  frStoredRowHeight,
 } from "../frDimensions";
 import type { FloatingRangeEntry } from "../floatingRangeStore";
 import { FLOATING_HANDLE_HIT_HALF } from "@api/gridOverlays";
@@ -518,5 +523,57 @@ describe("proportional scaling", () => {
         }
       }
     });
+  });
+});
+
+// ============================================================================
+// Hidden lines (P3: Home > Format > Hide & Unhide on a floating grid's cells)
+// ============================================================================
+
+describe("hidden lines", () => {
+  it("a hidden line is 0 px in the offsets, the content size and the frame", () => {
+    const e = entry({ rows: 4, cols: 3, hiddenRows: [1], hiddenCols: [0, 2] });
+    const rows = frRowOffsets(e, 4);
+    expect(Array.from(rows)).toEqual([0, FR_DEFAULT_ROW_H, FR_DEFAULT_ROW_H, 2 * FR_DEFAULT_ROW_H, 3 * FR_DEFAULT_ROW_H]);
+    const cols = frColOffsets(e, 3);
+    expect(Array.from(cols)).toEqual([0, 0, FR_DEFAULT_COL_W, FR_DEFAULT_COL_W]);
+    expect(contentHeight(e)).toBe(3 * FR_DEFAULT_ROW_H);
+    expect(contentWidth(e)).toBe(FR_DEFAULT_COL_W);
+    expect(frameHeight(entry({ rows: 4, cols: 3 })) - frameHeight(e)).toBe(FR_DEFAULT_ROW_H);
+  });
+
+  it("keeps its STORED size for when it is shown again", () => {
+    const e = entry({ rowHeights: { 1: 37 }, hiddenRows: [1] });
+    expect(frRowOffsets(e, 3)[2] - frRowOffsets(e, 3)[1]).toBe(0);
+    expect(frStoredRowHeight(e, 1)).toBe(37);
+  });
+
+  it("is never hit: the router answers the next SHOWN row, and past the end the last shown one", () => {
+    const e = entry({ rows: 4, cols: 2, hiddenRows: [1, 3] });
+    const top = frCellsTop(e);
+    // The second painted row is row 2.
+    expect(localCellFromPoint(e, FR_ROW_HDR_W + 5, top + FR_DEFAULT_ROW_H + 5)).toEqual({ zone: "cells", row: 2, col: 0 });
+    // The exact boundary where row 1 collapsed is row 2's top, never row 1.
+    expect(localCellFromPoint(e, FR_ROW_HDR_W + 5, top + FR_DEFAULT_ROW_H)).toMatchObject({ row: 2 });
+    // The frame's far edge (inclusive) clamps back over the hidden last row.
+    expect(localCellFromPoint(e, FR_ROW_HDR_W + 5, frameHeight(e))).toMatchObject({ zone: "cells", row: 2 });
+  });
+
+  it("the step and nearest-shown helpers skip hidden lines", () => {
+    const hidden = (i: number) => i === 1 || i === 2;
+    expect(frStepShown(hidden, 0, 1, 5)).toBe(3);
+    expect(frStepShown(hidden, 3, -1, 5)).toBe(0);
+    expect(frStepShown((i) => i >= 1, 0, 1, 5)).toBe(0); // nothing shown that way: stay
+    expect(frNearestShown(hidden, 1, 5, 1)).toBe(3);
+    expect(frNearestShown(hidden, 2, 5, -1)).toBe(0);
+  });
+
+  it("is not scaled: the scale skips it and carries its stored size unchanged", () => {
+    const e = entry({ rows: 3, rowHeights: { 1: 37 }, hiddenRows: [1, 2] });
+    expect(trackedRowIndices(e)).toEqual([0]);
+    const out = scaledRowHeights(e, 2);
+    expect(out[0]).toBe(2 * FR_DEFAULT_ROW_H);
+    expect(out[1]).toBe(37);
+    expect(out[2]).toBeUndefined();
   });
 });

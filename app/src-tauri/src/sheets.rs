@@ -1610,22 +1610,29 @@ pub struct CanvasLayoutChanged {
     pub layout: ::persistence::CanvasLayout,
 }
 
-/// The undo restore kind for a canvas's STACKING and LOCKS (`z_order`,
-/// `locked`). The other layout settings (page, snap grid, background) stay
-/// view state with no undo (decision D1); Excel's Bring to Front / Send to
-/// Back and object locking ARE undoable, so these two are (W5, = M4).
+/// The undo restore kind for a canvas's STACKING, LOCKS and VISUAL
+/// INTERACTIONS (`z_order`, `locked`, `interactions`). The other layout
+/// settings (page, snap grid, background) stay view state with no undo
+/// (decision D1); Excel's Bring to Front / Send to Back and object locking ARE
+/// undoable, so these two are (W5, = M4), and so is Power BI's Edit
+/// interactions (P4): one kind, so a step that changes several restores them
+/// together.
 /// Registered in `undo_commands::RESTORE_REGISTRY` with the `Sheets` domain:
 /// the Shell fans that out to `SHEET_CHANGED`, on which the CanvasSheet
 /// extension re-reads every canvas layout and repaints in the restored order.
 pub(crate) const CANVAS_STACKING_RESTORE_KIND: &str = "canvas_stacking";
 
-/// A canvas's stacking and locks before a change, by sheet IDENTITY (an index
-/// would name another sheet after a move or a delete in between).
+/// A canvas's stacking, locks and interactions before a change, by sheet
+/// IDENTITY (an index would name another sheet after a move or a delete in
+/// between). `interactions` is `serde(default)` so a snapshot written before
+/// it existed still restores the two lists it carries.
 #[derive(Serialize, Deserialize)]
 struct CanvasStackingSnapshot {
     sheet_id: identity::SheetId,
     z_order: Vec<::persistence::CanvasObjectRef>,
     locked: Vec<::persistence::CanvasObjectRef>,
+    #[serde(default)]
+    interactions: ::persistence::CanvasInteractions,
 }
 
 /// The `canvas_stacking` restore payload of a canvas's CURRENT stacking.
@@ -1637,11 +1644,12 @@ fn canvas_stacking_restore_bytes(
         sheet_id,
         z_order: layout.z_order.clone(),
         locked: layout.locked.clone(),
+        interactions: layout.interactions.clone(),
     })
     .unwrap_or_default()
 }
 
-/// Restore a canvas's `z_order` and `locked` from a `canvas_stacking`
+/// Restore a canvas's `z_order`, `locked` and `interactions` from a `canvas_stacking`
 /// snapshot, pushing the CURRENT ones as the inverse (redo). A canvas that no
 /// longer exists (or is no longer a canvas) restores nothing and pushes no
 /// inverse. LOCKS: `sheet_ids` is read and released before `sheet_kinds` is
@@ -1665,6 +1673,7 @@ pub(crate) fn apply_canvas_stacking_restore(
         sheet_id: snap.sheet_id,
         z_order: std::mem::replace(&mut layout.z_order, snap.z_order),
         locked: std::mem::replace(&mut layout.locked, snap.locked),
+        interactions: std::mem::replace(&mut layout.interactions, snap.interactions),
     };
     inverse.add_change(engine::CellChange::CustomRestore {
         kind: CANVAS_STACKING_RESTORE_KIND.to_string(),
@@ -1682,35 +1691,378 @@ pub(crate) fn apply_canvas_stacking_restore(
 /// in the same critical section as the write (`lock_pending`), so a refusal
 /// leaves the document clean and a concurrent patch cannot slip in between.
 ///
-/// UNDO: a change to the STACKING (Bring to Front / Send to Back) or the LOCKS
-/// is ONE undo step (W5, see `set_canvas_layout_inner`). The page, snap grid
-/// and background are not undoable, like zoom and the display flags: they are
-/// view/layout state.
+/// UNDO: a change to the STACKING (Bring to Front / Send to Back), the LOCKS
+/// or the VISUAL INTERACTIONS (Edit interactions) is ONE undo step (W5, P4;
+/// see `set_canvas_layout_inner`). The page, snap grid and background are not
+/// undoable, like zoom and the display flags: they are view/layout state.
+///
+/// ASYNC (P4 DC-9): a change to the interactions can move a model slicer ->
+/// BI pivot pair to or from `none`, and the pivot's stored filter must follow
+/// IN THE SAME STEP -- see [`set_canvas_layout_refolding`]. The pivot-family
+/// states are taken for that alone; the invoke arguments are unchanged.
 #[tauri::command]
-pub fn set_canvas_layout(
+#[allow(clippy::too_many_arguments)]
+pub async fn set_canvas_layout(
     app: tauri::AppHandle,
-    state: State<AppState>,
-    file_state: State<FileState>,
+    state: State<'_, AppState>,
+    file_state: State<'_, FileState>,
+    pivot_state: State<'_, PivotState>,
+    bi_state: State<'_, crate::bi::types::BiState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
+    timeline_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     sheet_index: Option<usize>,
     patch: crate::api_types::CanvasLayoutPatch,
 ) -> Result<::persistence::CanvasLayout, String> {
-    let changed = set_canvas_layout_inner(&state, &file_state, sheet_index, &patch)?;
-    let layout = changed.layout.clone();
+    let ctx = crate::pivot::commands::PivotCmdCtx {
+        state: &state,
+        file_state: &file_state,
+        pivot_state: &pivot_state,
+        pane_control_state: &pane_control_state,
+        ribbon_filter_state: &ribbon_filter_state,
+        user_files_state: &user_files_state,
+        bi_state: &bi_state,
+        slicer_state: &slicer_state,
+        record_undo: true,
+    };
+    // Boxed: the re-fold nests the BI pivot rebuild, whose future must live
+    // on the heap, not in a worker's stack.
+    let done = Box::pin(set_canvas_layout_refolding(&ctx, &timeline_state, sheet_index, &patch)).await?;
+    let layout = done.changed.layout.clone();
     // Announce AFTER every guard is dropped (see SHEET_DISPLAY_FLAGS_EVENT).
-    use tauri::Emitter;
-    let _ = app.emit(CANVAS_LAYOUT_EVENT, changed);
+    announce_canvas_layout_done(&app, done);
     Ok(layout)
+}
+
+/// What a canvas layout change through the async door did: the layout
+/// announcement it owes, and the BI pivots the DC-9 re-fold rebuilt.
+#[derive(Debug)]
+pub(crate) struct CanvasLayoutDone {
+    pub changed: CanvasLayoutChanged,
+    pub refreshed: Vec<PivotId>,
+}
+
+/// Emit what a [`CanvasLayoutDone`] owes: the canvas-layout event and, when the
+/// re-fold rebuilt pivots, a `mutation:refresh` of the pivot domain (the
+/// frontend re-reads their views). Call with every guard dropped.
+pub(crate) fn announce_canvas_layout_done(app: &tauri::AppHandle, done: CanvasLayoutDone) {
+    use tauri::Emitter;
+    let _ = app.emit(CANVAS_LAYOUT_EVENT, done.changed);
+    if !done.refreshed.is_empty() {
+        if let Some(domain) = crate::object_deps::UiDomain::Pivot.wire_name() {
+            let _ = app.emit(
+                crate::object_deps::MUTATION_REFRESH_EVENT,
+                crate::object_deps::MutationRefreshEvent {
+                    domains: vec![domain.to_string()],
+                    source: "commit".to_string(),
+                },
+            );
+        }
+    }
+}
+
+/// The undo step a visual-interaction change opens, and the label of a
+/// re-folded pivot recorded into it (P4 DC-9).
+pub(crate) const CHANGE_VISUAL_INTERACTION: &str = "Change visual interaction";
+
+/// "The interaction was not changed: PivotTable '<name>' could not refresh:
+/// <reason>" -- the refusal of an interaction change whose re-fold failed.
+pub(crate) fn interaction_refold_refusal(pivot_name: &str, reason: &str) -> String {
+    format!("The interaction was not changed: PivotTable '{pivot_name}' could not refresh: {reason}")
+}
+
+/// One BI pivot a visual-interaction change re-folds.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RefoldPivot {
+    pub pivot_id: PivotId,
+    pub name: String,
+    pub connection_id: identity::EntityId,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: make the re-fold fail just before it rebuilds the pivot at
+    /// this position (0-based), to prove the all-or-nothing rollback after an
+    /// earlier pivot was already rebuilt.
+    pub(crate) static FAIL_REFOLD_AT_FOR_TEST: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn is_none_pair(
+    interactions: &::persistence::CanvasInteractions,
+    source: &::persistence::CanvasObjectRef,
+    target: &::persistence::CanvasObjectRef,
+) -> bool {
+    interactions.explicit(source, target) == Some(::persistence::VisualInteractionMode::None)
+}
+
+/// The BI pivots of canvas `sheet_index` that a change of its interactions
+/// from `before` to `after` must re-fold (P4 DC-9): each one paired with a
+/// MODEL slicer of that canvas -- one that reads the pivot's connection and
+/// holds a selection (a slicer with none folds nothing either way) -- whose
+/// explicit mode moved to or from `none`. A slicer -> chart or slicer ->
+/// slicer pair re-folds nothing. Sorted by pivot id.
+///
+/// LOCKS: `pivot_tables` + `bi_metadata` (that order, cloned, released),
+/// then the sheet resolution, then the slicer store alone.
+pub(crate) fn affected_refold_pivots(
+    ctx: &crate::pivot::commands::PivotCmdCtx<'_>,
+    sheet_index: usize,
+    before: &::persistence::CanvasInteractions,
+    after: &::persistence::CanvasInteractions,
+) -> Result<Vec<RefoldPivot>, String> {
+    if before == after {
+        return Ok(Vec::new());
+    }
+    let mut moved: Vec<(::persistence::CanvasObjectRef, ::persistence::CanvasObjectRef)> = Vec::new();
+    for pair in before.pairs.iter().chain(after.pairs.iter()) {
+        if pair.source.kind != "slicer" || pair.target.kind != "pivot" {
+            continue;
+        }
+        let key = (pair.source.clone(), pair.target.clone());
+        if moved.contains(&key) {
+            continue;
+        }
+        if is_none_pair(before, &key.0, &key.1) != is_none_pair(after, &key.0, &key.1) {
+            moved.push(key);
+        }
+    }
+    if moved.is_empty() {
+        return Ok(Vec::new());
+    }
+    type Candidate = (PivotId, String, pivot_engine::PivotDefinition, identity::EntityId, Option<String>);
+    let candidates: Vec<Candidate> = {
+        let pivot_tables = ctx.pivot_state.pivot_tables.read().map_err(|e| e.to_string())?;
+        let bi_meta = ctx.pivot_state.bi_metadata.read().map_err(|e| e.to_string())?;
+        bi_meta
+            .iter()
+            .filter(|(id, _)| {
+                let id = id.to_string();
+                moved.iter().any(|(_, target)| target.id == id)
+            })
+            .filter_map(|(id, meta)| {
+                pivot_tables.get(id).map(|(def, _)| {
+                    (
+                        *id,
+                        def.name.clone().unwrap_or_else(|| format!("PivotTable{}", id)),
+                        def.clone(),
+                        meta.connection_id,
+                        meta.data_source_id.clone(),
+                    )
+                })
+            })
+            .collect()
+    };
+    let on_page: Vec<Candidate> = candidates
+        .into_iter()
+        .filter(|(_, _, def, _, _)| crate::pivot::operations::resolve_dest_sheet_index(ctx.state, def) == sheet_index)
+        .collect();
+    if on_page.is_empty() {
+        return Ok(Vec::new());
+    }
+    let slicers = ctx.slicer_state.slicers.read().map_err(|e| e.to_string())?;
+    let mut out: Vec<RefoldPivot> = on_page
+        .into_iter()
+        .filter(|(id, _, _, conn, ds)| {
+            let id = id.to_string();
+            moved.iter().filter(|(_, target)| target.id == id).any(|(source, _)| {
+                slicers.values().any(|s| {
+                    s.id.to_string() == source.id
+                        && s.sheet_index == sheet_index
+                        && s.selected_items.is_some()
+                        && crate::pivot::commands::model_slicer_reads_connection(s, *conn, ds.as_deref())
+                })
+            })
+        })
+        .map(|(pivot_id, name, _, connection_id, _)| RefoldPivot { pivot_id, name, connection_id })
+        .collect();
+    out.sort_by(|a, b| a.pivot_id.cmp(&b.pivot_id));
+    Ok(out)
+}
+
+/// DC-9: re-fold every pivot [`affected_refold_pivots`] names, each through
+/// `refresh_bi_pivot_unrecorded` (the page fold reads the canvas's NEW
+/// interactions), recording each pivot's step INTO the caller's open step.
+/// Called by both doors that change interactions -- [`set_canvas_layout`] and
+/// the async half of `object_bindings` (MCP and script `/interactions`) --
+/// always through [`set_canvas_layout_refolding`], which owns the step and the
+/// rollback. No std guard is held across an `.await`. Answers the pivots
+/// rebuilt; a refresh error is [`interaction_refold_refusal`].
+pub(crate) async fn refold_after_interaction_change(
+    ctx: &crate::pivot::commands::PivotCmdCtx<'_>,
+    sheet_index: usize,
+    before: &::persistence::CanvasInteractions,
+    after: &::persistence::CanvasInteractions,
+) -> Result<Vec<PivotId>, String> {
+    let affected = affected_refold_pivots(ctx, sheet_index, before, after)?;
+    let mut refreshed = Vec::with_capacity(affected.len());
+    for (position, pivot) in affected.iter().enumerate() {
+        #[cfg(test)]
+        if FAIL_REFOLD_AT_FOR_TEST.with(|f| f.get()) == Some(position) {
+            return Err(interaction_refold_refusal(&pivot.name, "the test failed this refresh"));
+        }
+        let _ = position;
+        let (_, undo) = Box::pin(crate::pivot::commands::refresh_bi_pivot_unrecorded(ctx, pivot.pivot_id, Vec::new()))
+            .await
+            .map_err(|e| interaction_refold_refusal(&pivot.name, &e))?;
+        if let Some(undo) = undo {
+            undo.record(ctx.state, CHANGE_VISUAL_INTERACTION);
+        }
+        refreshed.push(pivot.pivot_id);
+    }
+    Ok(refreshed)
+}
+
+/// THE DOOR every interaction write goes through (P4 DC-9): the layout patch
+/// and the pivot re-fold it causes as ONE undo step, all or nothing.
+///
+/// A patch without `interactions` is `set_canvas_layout_inner`, unchanged.
+/// With them:
+/// 1. GATES, holding nothing: the page's "Edit objects" protection, then the
+///    patch is applied to a copy (its validation), then every pivot the
+///    change re-folds must have a live connection -- a dropped connection is
+///    refused HERE, before any write, so the document stays as it was (clean
+///    if it was clean).
+/// 2. ONE owned step "Change visual interaction" (the undo stack alone,
+///    released). A caller's open step -- a granted macro run's, a script
+///    batch -- is JOINED, never closed here.
+/// 3. `set_canvas_layout_inner`, unchanged: its `canvas_stacking` restore
+///    joins the step (when the same patch also reorders or locks, the step
+///    takes that label instead).
+/// 4. [`refold_after_interaction_change`], no std guard held.
+/// 5. A re-fold error takes back EVERYTHING this door recorded -- the layout
+///    and every pivot already rebuilt -- through the restore Ctrl+Z uses
+///    (`undo_commands::roll_back_open_changes_after`), leaves no step, and
+///    answers [`interaction_refold_refusal`]. A caller's own earlier changes
+///    in a joined step are untouched; the caller's own all-or-nothing (a
+///    granted run's rollback) still sees the error.
+/// 6. Commit the step this door opened. The caller announces the result
+///    ([`announce_canvas_layout_done`]) with every guard dropped.
+pub(crate) async fn set_canvas_layout_refolding(
+    ctx: &crate::pivot::commands::PivotCmdCtx<'_>,
+    timelines: &crate::timeline_slicer::TimelineSlicerState,
+    sheet_index: Option<usize>,
+    patch: &crate::api_types::CanvasLayoutPatch,
+) -> Result<CanvasLayoutDone, String> {
+    let state = ctx.state;
+    if patch.interactions.is_none() {
+        let changed = set_canvas_layout_inner(state, ctx.file_state, sheet_index, patch)?;
+        return Ok(CanvasLayoutDone { changed, refreshed: Vec::new() });
+    }
+    let index = match sheet_index {
+        Some(i) => i,
+        None => *state.active_sheet.read().map_err(|e| e.to_string())?,
+    };
+    // 1. Gates. A refusal that is the inner door's own (not a canvas, a patch
+    // that does not validate) is answered BY that door, in its own words.
+    crate::protection::check_sheet_action(state, index, "editObjects", "change the canvas layout")?;
+    let current = {
+        let kinds = state.sheet_kinds.read().map_err(|e| e.to_string())?;
+        kinds.get(index).and_then(|k| k.canvas_layout().cloned())
+    };
+    let planned = current.as_ref().and_then(|c| patch.apply(c.clone()).ok());
+    let (Some(current), Some(planned)) = (current, planned) else {
+        let changed = set_canvas_layout_inner(state, ctx.file_state, Some(index), patch)?;
+        return Ok(CanvasLayoutDone { changed, refreshed: Vec::new() });
+    };
+    for pivot in affected_refold_pivots(ctx, index, &current.interactions, &planned.interactions)? {
+        if let Err(e) = crate::bi::commands::get_engine_arc(ctx.bi_state, pivot.connection_id) {
+            return Err(interaction_refold_refusal(&pivot.name, &e));
+        }
+    }
+    // 2. The step.
+    let (owned, point) = {
+        let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
+        let owned = undo_stack.begin_owned_transaction(CHANGE_VISUAL_INTERACTION);
+        let point = undo_stack.current_transaction_mut().map(|tx| tx.changes.len()).unwrap_or(0);
+        (owned, point)
+    };
+    // 3. The layout.
+    let changed = match set_canvas_layout_inner(state, ctx.file_state, Some(index), patch) {
+        Ok(changed) => changed,
+        Err(e) => {
+            if let Ok(mut undo_stack) = state.undo_stack.lock() {
+                undo_stack.cancel_owned(owned);
+            }
+            return Err(e);
+        }
+    };
+    if owned.opened() {
+        if let Some(label) = canvas_step_description(&current, &changed.layout) {
+            if let Ok(mut undo_stack) = state.undo_stack.lock() {
+                if let Some(tx) = undo_stack.current_transaction_mut() {
+                    tx.description = label.to_string();
+                }
+            }
+        }
+    }
+    // 4. The re-fold; 5. all or nothing.
+    let refold = refold_after_interaction_change(ctx, index, &current.interactions, &changed.layout.interactions);
+    let refreshed = match Box::pin(refold).await {
+        Ok(refreshed) => refreshed,
+        Err(e) => {
+            crate::undo_commands::roll_back_open_changes_after(
+                state,
+                ctx.file_state,
+                ctx.user_files_state,
+                ctx.pivot_state,
+                ctx.slicer_state,
+                ctx.ribbon_filter_state,
+                ctx.pane_control_state,
+                timelines,
+                point,
+            );
+            if let Ok(mut undo_stack) = state.undo_stack.lock() {
+                undo_stack.cancel_owned(owned);
+            }
+            return Err(e);
+        }
+    };
+    // 6. Commit.
+    {
+        let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
+        undo_stack.commit_owned(owned);
+    }
+    Ok(CanvasLayoutDone { changed, refreshed })
+}
+
+/// The label of the undo step a layout change records, or `None` when it
+/// changes none of the undoable parts (stacking, locks, interactions). Never
+/// "Lock objects": that is the page's View > Lock Objects toggle, which is
+/// deliberately NOT undoable, so the label would tell the user Ctrl+Z undoes
+/// the toggle while it undoes this.
+fn canvas_step_description(
+    current: &::persistence::CanvasLayout,
+    next: &::persistence::CanvasLayout,
+) -> Option<&'static str> {
+    if current.z_order != next.z_order {
+        Some("Reorder objects")
+    } else if current.locked != next.locked {
+        if next.locked.iter().any(|r| !current.locked.contains(r)) {
+            Some("Lock selected objects")
+        } else {
+            Some("Unlock selected objects")
+        }
+    } else if current.interactions != next.interactions {
+        Some(CHANGE_VISUAL_INTERACTION)
+    } else {
+        None
+    }
 }
 
 /// Command body over plain references (unit-testable without a Tauri State).
 ///
-/// A change to the STACKING (`z_order`) or the LOCKS (`locked`) is ONE undo
-/// step (W5): Bring to Front / Send to Back and Lock are Excel-undoable, so
-/// each records a `canvas_stacking` restore of the previous lists -- JOINING
-/// the caller's open transaction (a cross-family arrange) or as a step of its
-/// own. Every other layout setting stays non-undoable view state (decision
-/// D1), and a patch that leaves both lists as they were records nothing. A
-/// patch that changes nothing at all leaves the document clean.
+/// A change to the STACKING (`z_order`), the LOCKS (`locked`) or the VISUAL
+/// INTERACTIONS (`interactions`) is ONE undo step (W5, P4): Bring to Front /
+/// Send to Back and Lock are Excel-undoable and Edit interactions is
+/// Power BI-undoable, so each records a `canvas_stacking` restore of the
+/// previous state -- JOINING the caller's open transaction (a cross-family
+/// arrange) or as a step of its own. Every other layout setting stays
+/// non-undoable view state (decision D1), and a patch that leaves all three
+/// as they were records nothing. A patch that changes nothing at all leaves
+/// the document clean.
 /// Recorded after the `sheet_kinds` guard drops: the undo stack is never
 /// taken while holding a store.
 pub(crate) fn set_canvas_layout_inner(
@@ -1758,23 +2110,12 @@ pub(crate) fn set_canvas_layout_inner(
     let mut kinds = kinds.authorize(&effect);
     kinds[index] = ::persistence::SheetKind::Canvas(next.clone());
     drop(kinds);
-    let reordered = current.z_order != next.z_order;
-    if reordered || current.locked != next.locked {
+    if let Some(description) = canvas_step_description(&current, &next) {
         // Bound FIRST, so the `sheet_ids` guard drops here: in an `if let`
         // scrutinee (edition 2021) it would live through the whole body --
         // held while the recorder waits for the undo stack.
         let id = state.sheet_ids.read().unwrap().get(index).copied();
         if let Some(id) = id {
-            // Never "Lock objects": that is the page's View > Lock Objects
-            // toggle, which is deliberately NOT undoable, so the label would
-            // tell the user Ctrl+Z undoes the toggle while it undoes this.
-            let description = if reordered {
-                "Reorder objects"
-            } else if next.locked.iter().any(|r| !current.locked.contains(r)) {
-                "Lock selected objects"
-            } else {
-                "Unlock selected objects"
-            };
             crate::undo_commands::record_restores_joining_open_transaction(
                 state,
                 description,
@@ -1787,6 +2128,19 @@ pub(crate) fn set_canvas_layout_inner(
         sheet_id,
         layout: next,
     })
+}
+
+/// The visual interactions of the canvas at `sheet_index`, CLONED out (the
+/// `sheet_kinds` guard is released before this returns), or `None` when that
+/// sheet is not a canvas. LOCK ORDER (P4 2.5 item 2): callers take this BEFORE
+/// any family store (the slicer store in the page fold, and
+/// `get_slicer_items`'s sibling shading), never while holding one.
+pub(crate) fn canvas_interactions_of(
+    state: &AppState,
+    sheet_index: usize,
+) -> Option<::persistence::CanvasInteractions> {
+    let kinds = state.sheet_kinds.read().ok()?;
+    kinds.get(sheet_index).and_then(|k| k.canvas_layout()).map(|l| l.interactions.clone())
 }
 
 /// Set the gridlines visibility for the active sheet.

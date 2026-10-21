@@ -465,6 +465,7 @@ fn a_bound_rgb_container_colour_resolves_to_hex() {
         pivots: &h.pivots,
         pane: &h.pane,
         ribbon: &h.ribbon,
+        user_files: &h.files,
     };
     let set = |object: &ObjectBindingRef, path: &str| {
         let request: crate::api_types::ObjectBindingsRequest = serde_json::from_value(json!({
@@ -648,4 +649,94 @@ fn the_pivot_projection_carries_the_container_only_when_set() {
     def_frame.container = Some(container(json!({})));
     h.pivots.pivot_tables.write(&test_seed_effect()).unwrap().get_mut(&id).unwrap().0.canvas_frame = Some(def_frame);
     assert!(json_of()["canvasFrame"].get("container").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// A solid background colour (round 2, G1 / ruling Q9)
+// ---------------------------------------------------------------------------
+
+const GRADIENT: &str = r##"{"type":"linear","stops":[{"offset":0.0,"color":"#ff0000"},{"offset":1.0,"color":"#0000ff"}]}"##;
+
+/// Give a chart a stored container (the Fill card's gradient, a hidden background).
+fn seed_chart_container(h: &H, chart: &ObjectBindingRef, c: Value) {
+    let mut charts = h.state.charts.write(&test_seed_effect()).unwrap();
+    let entry = charts.iter_mut().find(|e| e.id.to_string() == chart.id).expect("the chart");
+    let mut envelope: Value = serde_json::from_str(&entry.spec_json).unwrap();
+    envelope["spec"]["container"] = c;
+    entry.spec_json = envelope.to_string();
+}
+
+/// A script / MCP / binding-literal write of a solid background colour is the
+/// same commit as the Format pane's `solidBackgroundPatch`: a stored gradient
+/// (which paints OVER the colour) is cleared and a hidden background is shown,
+/// in ONE step that undo takes back whole.
+///
+/// SABOTAGE (confirmed): drop `bg.gradient = None;` from
+/// `apply_solid_background` -> the gradient survives the write.
+#[test]
+fn a_solid_background_colour_clears_the_gradient_and_shows_the_background() {
+    let h = H::new();
+    let chart = h.chart();
+    let gradient: Value = serde_json::from_str(GRADIENT).unwrap();
+    let seeded = json!({ "background": { "show": false, "gradient": gradient } });
+    seed_chart_container(&h, &chart, seeded.clone());
+    h.clean();
+    let depth = h.depth();
+    match h.write(&chart, "/spec/container/background/color", json!("#123456")).unwrap() {
+        LiteralWriteOutcome::Written { .. } => {}
+        LiteralWriteOutcome::Unchanged => panic!("a new colour must be written"),
+    }
+    assert_eq!(
+        h.chart_container(&chart),
+        Some(json!({ "background": { "show": true, "color": "#123456" } })),
+        "the gradient is gone and the background shows"
+    );
+    assert!(h.file.is_dirty());
+    assert_eq!(h.depth(), depth + 1, "ONE step");
+    h.undo();
+    assert_eq!(h.chart_container(&chart), Some(seeded), "undo restores the gradient and the hidden background");
+
+    // The colour that is ALREADY stored, under a gradient, is still a write: it clears the gradient.
+    let under = json!({ "background": { "color": "#123456", "gradient": gradient } });
+    seed_chart_container(&h, &chart, under);
+    assert!(matches!(
+        h.write(&chart, "/spec/container/background/color", json!("#123456")),
+        Ok(LiteralWriteOutcome::Written { .. })
+    ));
+    assert_eq!(h.chart_container(&chart), Some(json!({ "background": { "color": "#123456" } })));
+    // ...and once it is plain, the same colour again is Unchanged.
+    h.clean();
+    assert!(matches!(
+        h.write(&chart, "/spec/container/background/color", json!("#123456")),
+        Ok(LiteralWriteOutcome::Unchanged)
+    ));
+    assert!(!h.file.is_dirty());
+
+    // "" (back to the family default) is not a solid colour: show and the gradient are left alone.
+    let hidden = json!({ "background": { "color": "#123456", "show": false, "gradient": gradient } });
+    seed_chart_container(&h, &chart, hidden);
+    h.write(&chart, "/spec/container/background/color", json!("")).unwrap();
+    let after = h.chart_container(&chart).unwrap();
+    assert_eq!(after.pointer("/background/show"), Some(&json!(false)));
+    assert_eq!(after.pointer("/background/gradient"), Some(&gradient));
+}
+
+/// A plain slicer gets the colour alone (its background shows by default); a
+/// floating range, whose background is OFF by default, is switched on.
+///
+/// SABOTAGE (confirmed): pass `BACKGROUND_SHOWN_BY_DEFAULT` for the floating
+/// range -> no `show` is stored and the colour stays invisible.
+#[test]
+fn a_solid_background_colour_shows_a_background_that_is_off_by_default() {
+    let h = H::new();
+    let slicer = h.slicer();
+    h.write(&slicer, "/container/background/color", json!("#abcdef")).unwrap();
+    assert_eq!(h.slicer_container(&slicer), Some(container(json!({ "background": { "color": "#abcdef" } }))));
+
+    let fr = h.floating_range();
+    h.write(&fr, "/container/background/color", json!("#abcdef")).unwrap();
+    assert_eq!(
+        h.floating_range_container(&fr),
+        Some(container(json!({ "background": { "show": true, "color": "#abcdef" } })))
+    );
 }

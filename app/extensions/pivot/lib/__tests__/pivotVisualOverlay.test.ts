@@ -42,6 +42,7 @@ const api = vi.hoisted(() => ({
   cancelPivotLoading: vi.fn(),
   getPivotViewCell: vi.fn(),
   runPivotCellDoubleClick: vi.fn(() => true),
+  applyPivotCrossFilterClick: vi.fn(() => "selected"),
   /** What Core's reference-pick session publishes for a drag (D-PICK); null = no pick drag. */
   pickPreview: null as unknown,
 }));
@@ -107,6 +108,10 @@ vi.mock("../pivotCellDoubleClick", () => ({
   runPivotCellDoubleClick: api.runPivotCellDoubleClick,
 }));
 
+vi.mock("../pivotCrossFilterClick", () => ({
+  applyPivotCrossFilterClick: api.applyPivotCrossFilterClick,
+}));
+
 import type { OverlayRegistration } from "@api/gridOverlays";
 import { setGridRegions, getGridRegions, contentGestureCursorFor, clearContentGestureCursor } from "@api/gridOverlays";
 import { setCachedPivotView, deleteCachedPivotView } from "../pivotViewStore";
@@ -138,6 +143,7 @@ import {
 } from "../pivotVisualCellSelection";
 import { isPivotCellPressLive } from "../pivotCellPress";
 import { prunePivotVisualRecords } from "../pivotVisualHits";
+import { setFilteredPivotViewForTest } from "../pivotCrossFilterView";
 import { setDesignMode } from "@api/designMode";
 import { PivotEvents } from "../../../_shared/lib/pivotEvents";
 import { INNER_SELECTION_BORDER, INNER_SELECTION_FILL } from "../../../_shared/lib/innerSelectionPaint";
@@ -1289,5 +1295,171 @@ describe("cells are content (D-CELLS): the press, the clearing rules, the paint"
     expect(pivotCellSheetRect("cp1", 20, 1)).toBeNull();
     expect(pivotCellSheetRect("cp1", 0, 7)).toBeNull();
     expect(pivotCellSheetRect("nope", 0, 0)).toBeNull();
+  });
+});
+
+describe("cross-filter (P4 S7): the filtered view, its badge, the click, the refusals", () => {
+  function cellView(label: string, rowCount = 20): PivotViewResponse {
+    const rows = Array.from({ length: rowCount }, (_, i) => ({
+      viewRow: i,
+      rowType: i === 0 ? "ColumnHeader" : "Data",
+      depth: 0,
+      visible: true,
+      cells: [
+        { cellType: i === 0 ? "RowLabelHeader" : "RowHeader", value: null, formattedValue: i === 0 ? "Row Labels" : `${label} ${i}`, backgroundStyle: "Normal" },
+        { cellType: "Data", value: i, formattedValue: String(i), backgroundStyle: "Normal" },
+      ],
+    }));
+    return {
+      pivotId: "cp1",
+      version: 1,
+      rowCount,
+      colCount: 2,
+      rowLabelColCount: 1,
+      columnHeaderRowCount: 1,
+      filterRowCount: 0,
+      filterRows: [],
+      rowFieldSummaries: [],
+      columnFieldSummaries: [],
+      rows,
+      columns: [],
+    } as unknown as PivotViewResponse;
+  }
+
+  function renderTexts(): string[] {
+    const rec = createRecordingCtx();
+    const region = getGridRegions().find((r) => r.type === PIVOT_VISUAL_REGION_TYPE)!;
+    overlay!.render({
+      ctx: rec.ctx,
+      region,
+      config: { rowHeaderWidth: 0, colHeaderHeight: 0, defaultCellWidth: 100, defaultCellHeight: 24 } as never,
+      viewport: { scrollX: 0, scrollY: 0 } as never,
+      dimensions: { columnWidths: new Map(), rowHeights: new Map() } as never,
+      canvasWidth: 1200,
+      canvasHeight: 800,
+    });
+    return rec.texts().map((t) => String(t.text ?? ""));
+  }
+
+  let gridArea: HTMLElement | null = null;
+  beforeEach(() => {
+    gridArea = document.createElement("div");
+    gridArea.setAttribute("data-grid-area", "");
+    document.body.appendChild(gridArea);
+    setCachedPivotView("cp1", cellView("Real"));
+  });
+  afterEach(() => {
+    gridArea?.remove();
+    gridArea = null;
+    setFilteredPivotViewForTest("cp1", null);
+    deleteCachedPivotView("cp1");
+  });
+
+  it("paints the FILTERED view and 'Filtered by <source>'; the real view stays in the store", () => {
+    setFilteredPivotViewForTest("cp1", { view: cellView("Shown"), sources: ["Sales chart"] });
+    const texts = renderTexts();
+    expect(texts).toContain("Shown 1");
+    expect(texts.some((t) => t.startsWith("Real "))).toBe(false);
+    expect(texts).toContain("Filtered by Sales chart");
+  });
+
+  it("a refusal paints the REAL view and 'Not filtered by <source>: <reason>'", () => {
+    setFilteredPivotViewForTest("cp1", {
+      error: "This PivotTable uses hierarchies, which a visual's selection cannot filter yet.",
+      sources: ["Sales chart"],
+    });
+    const texts = renderTexts();
+    expect(texts).toContain("Real 1");
+    // The sentence wraps inside the box (300 px) rather than being cut off.
+    const at = texts.findIndex((t) => t.startsWith("Not filtered by Sales chart:"));
+    expect(at, texts.join("|")).toBeGreaterThanOrEqual(0);
+    const badge = texts.slice(at).join(" ");
+    expect(badge).toContain("Not filtered by Sales chart: This PivotTable uses hierarchies");
+    expect(texts.slice(at).length, "it wrapped").toBeGreaterThan(1);
+  });
+
+  it("no selection: the real view and no badge", () => {
+    const texts = renderTexts();
+    expect(texts).toContain("Real 1");
+    expect(texts.some((t) => t.includes("iltered by"))).toBe(false);
+  });
+
+  const releaseAt = (x: number, y: number) =>
+    window.dispatchEvent(new MouseEvent("mouseup", { clientX: x, clientY: y, button: 0 }));
+
+  it("a plain or Ctrl CLICK on a cell cross-filters at its release; Shift and Design Mode do not", () => {
+    renderTexts();
+    // Box at (100, 80); view row 1 (24..48), column 1 (100..200).
+    fire("floatingObject:bodyDragStart", visualDetail({ canvasX: 250, canvasY: 110, part: "cell" }));
+    expect(api.applyPivotCrossFilterClick, "acted on the PRESS").not.toHaveBeenCalled();
+    releaseAt(250, 110);
+    expect(api.applyPivotCrossFilterClick).toHaveBeenCalledWith({ pivotId: "cp1", viewRow: 1, viewCol: 1, ctrl: false });
+
+    fire("floatingObject:bodyDragStart", visualDetail({ canvasX: 250, canvasY: 110, part: "cell", ctrlKey: true }));
+    releaseAt(250, 110);
+    expect(api.applyPivotCrossFilterClick).toHaveBeenLastCalledWith({ pivotId: "cp1", viewRow: 1, viewCol: 1, ctrl: true });
+    expect(api.applyPivotCrossFilterClick).toHaveBeenCalledTimes(2);
+
+    fire("floatingObject:bodyDragStart", visualDetail({ canvasX: 250, canvasY: 110, part: "cell", shiftKey: true }));
+    releaseAt(250, 110);
+    expect(api.applyPivotCrossFilterClick, "a Shift-extend cross-filtered").toHaveBeenCalledTimes(2);
+
+    setDesignMode(true);
+    fire("floatingObject:bodyDragStart", visualDetail({ canvasX: 250, canvasY: 110, part: "cell" }));
+    releaseAt(250, 110);
+    expect(api.applyPivotCrossFilterClick, "Design Mode cross-filtered").toHaveBeenCalledTimes(2);
+    setDesignMode(false);
+
+    // The press kept its cell selection behaviour.
+    expect(getPivotCellSelection()).toMatchObject({ pivotId: "cp1", anchorRow: 1, anchorCol: 1 });
+  });
+
+  it("a drag across cells selects them and never cross-filters", () => {
+    renderTexts();
+    fire("floatingObject:bodyDragStart", visualDetail({ canvasX: 250, canvasY: 110, part: "cell" }));
+    window.dispatchEvent(new MouseEvent("mousemove", { clientX: 250, clientY: 160, buttons: 1 }));
+    releaseAt(250, 160);
+    expect(api.applyPivotCrossFilterClick).not.toHaveBeenCalled();
+    expect(getPivotCellSelection()).toMatchObject({ anchorRow: 1, endRow: 3 });
+  });
+
+  it("while filtered, the box's chrome and its double-click REFUSE with the note and send nothing", () => {
+    setFilteredPivotViewForTest("cp1", { view: cellView("Shown"), sources: ["Sales chart"] });
+    setPivotVisualRecord({
+      pivotId: "cp1",
+      box: { x: 100, y: 80, width: 300, height: 200 },
+      bounds: {
+        expandCollapseIcons: new Map([["7-0", { x: 6, y: 78, width: 12, height: 12, row: 7, col: 0, isExpanded: true, isRow: true }]]),
+        filterButtons: new Map([["filter-2", { x: 150, y: 3, width: 18, height: 18, fieldIndex: 2, row: 0, col: 1 }]]),
+        headerFilterButtons: new Map(),
+      },
+      cancel: null,
+      geometry: buildPivotVisualGeometry(cellView("Shown"), true, { columnWidth: () => 100, rowHeight: () => 24 }),
+      scroll: { left: 0, top: 0 },
+      startRow: 0,
+      startCol: 1024,
+    });
+    const note = "Filtered by Sales chart -- clear the selection to change this PivotTable here";
+    expect(handlePivotVisualPress("cp1", 112, 164, 1_000)).toMatchObject({ kind: "icon" });
+    expect(handlePivotVisualPress("cp1", 259, 90, 5_000)).toMatchObject({ kind: "filter" });
+    expect(api.togglePivotHeaderAt).not.toHaveBeenCalled();
+    expect(api.openPivotReportFilterAt).not.toHaveBeenCalled();
+    expect(api.showToast).toHaveBeenCalledWith(note, { variant: "info" });
+
+    const region = { id: "pivot-visual-cp1", type: PIVOT_VISUAL_REGION_TYPE, startRow: 0, startCol: 1024, endRow: 0, endCol: 0, data: { pivotId: "cp1" } };
+    expect(overlay!.onDoubleClick!({ region, canvasX: 250, canvasY: 110, row: 0, col: 0 })).toBe(true);
+    expect(api.getPivotViewCell).not.toHaveBeenCalled();
+    expect(api.runPivotCellDoubleClick).not.toHaveBeenCalled();
+
+    // Control: once the selection is gone the same +/- acts.
+    setFilteredPivotViewForTest("cp1", null);
+    handlePivotVisualPress("cp1", 112, 164, 9_000);
+    expect(api.togglePivotHeaderAt).toHaveBeenCalledWith("cp1", 7, 0, true);
+  });
+
+  it("a filtered view coming clamps the cell selection into the grid shown", () => {
+    setPivotCellAnchor("cp1", 15, 1);
+    setFilteredPivotViewForTest("cp1", { view: cellView("Shown", 5), sources: ["Sales chart"] });
+    expect(getPivotCellSelection(), "row 15 is not in the 5-row view shown").toBeNull();
   });
 });

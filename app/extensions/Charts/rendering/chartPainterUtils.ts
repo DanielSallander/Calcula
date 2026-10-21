@@ -20,6 +20,7 @@ import { seriesPaletteIndex } from "../lib/encodingResolver";
 import type { LinearScale, BandScale } from "./scales";
 import { createScaleFromSpec, createPointScale, createBandScale } from "./scales";
 import { applyFillStyle } from "./gradientFill";
+import { formatNumber, formatNumberWithCode } from "@api/locale";
 import { timeTicks } from "../lib/chartFieldTypes";
 
 // ============================================================================
@@ -1674,29 +1675,32 @@ export function getDisplayUnitLabel(unit: import("../types").DisplayUnit): strin
   }
 }
 
+/**
+ * The invariant (en-US syntax) Excel format code a d3-style tick format means,
+ * or null for "no code" (the plain tick formatter). "%" / ".1%" -> "0%" /
+ * "0.0%"; "$" / "$.2" -> "$#,##0" / "$#,##0.00"; "," / ",.2" -> "#,##0" /
+ * "#,##0.00"; ".3" -> "0.000".
+ */
+export function tickFormatToCode(format: string): string | null {
+  const decimalsText = format.match(/\.(\d+)/)?.[1];
+  const d = decimalsText ? Math.min(30, parseInt(decimalsText, 10)) : 0;
+  const frac = d > 0 ? "." + "0".repeat(d) : "";
+  if (format.includes("%")) return "0" + frac + "%";
+  if (format.startsWith("$")) return "$#,##0" + frac;
+  if (format.includes(",")) return "#,##0" + frac;
+  if (decimalsText) return "0" + frac;
+  return null;
+}
+
+/**
+ * A tick label under a d3-style format code, written in the APP locale: the
+ * code is mapped to its Excel equivalent ({@link tickFormatToCode}) and
+ * rendered by the shared format-code formatter, so its separators are the app
+ * locale's and never the OS's.
+ */
 export function formatTickValueWithFormat(value: number, format: string): string {
-  // Support common d3-style format codes
-  if (format.includes("%")) {
-    const decimals = format.match(/\.(\d+)/)?.[1];
-    const d = decimals ? parseInt(decimals) : 0;
-    return (value * 100).toFixed(d) + "%";
-  }
-  if (format.startsWith("$")) {
-    const decimals = format.match(/\.(\d+)/)?.[1];
-    const d = decimals ? parseInt(decimals) : 0;
-    const formatted = value.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
-    return "$" + formatted;
-  }
-  if (format.includes(",")) {
-    const decimals = format.match(/\.(\d+)/)?.[1];
-    const d = decimals ? parseInt(decimals) : 0;
-    return value.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
-  }
-  const decimals = format.match(/\.(\d+)/)?.[1];
-  if (decimals) {
-    return value.toFixed(parseInt(decimals));
-  }
-  return formatTickValue(value);
+  const code = tickFormatToCode(format);
+  return code === null ? formatTickValue(value) : formatNumberWithCode(value, code);
 }
 
 /**
@@ -1862,14 +1866,59 @@ export function drawVerticalGridLines(
 // visual container's (`spec.container.background`), painted by Core under the
 // raster (and by `paintChartWithContainer` for the routes that paint without
 // Core). The raster itself is transparent outside what the marks paint.
+//
+// The PLOT AREA paints nothing by default either (Power BI semantics:
+// `DEFAULT_CHART_THEME.plotBackground` is ""), so the container's background
+// recolours the whole visual. A plot fill is an explicit style -- a colour or a
+// gradient the user or a preset set -- and every painter that fills the plot
+// area (or a shape standing for it, like a multi-row card's row cards) goes
+// through `fillPlotShape`, the ONE reader of `theme.plotBackground` under
+// `rendering/` (pinned by the census in `__tests__/plotFill.test.ts`).
+
+/**
+ * True when the theme asks for a plot-area fill: a gradient with two or more
+ * stops, or a non-empty colour other than "transparent".
+ */
+export function hasPlotFill(theme: ChartRenderTheme): boolean {
+  const gradient = theme.plotBackgroundGradient;
+  if (gradient && Array.isArray(gradient.stops) && gradient.stops.length >= 2) return true;
+  const color = (theme.plotBackground ?? "").trim();
+  return color !== "" && color.toLowerCase() !== "transparent";
+}
+
+/**
+ * Fill the plot area (or a shape standing for it) with the theme's plot fill.
+ * Returns false and touches nothing -- not even `fillStyle` -- when the theme
+ * has no plot fill. The guard is REQUIRED, not an optimisation: canvas IGNORES
+ * `ctx.fillStyle = ""`, so an unguarded fill would paint with whatever colour
+ * the previous drawing left in `fillStyle`.
+ *
+ * `rect` sizes a gradient; `path`, when given, builds the shape to fill (e.g. a
+ * rounded rect), else `rect` itself is filled.
+ */
+export function fillPlotShape(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  theme: ChartRenderTheme,
+  rect: { x: number; y: number; width: number; height: number },
+  path?: (ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D) => void,
+): boolean {
+  if (!hasPlotFill(theme)) return false;
+  applyFillStyle(ctx, theme.plotBackground, theme.plotBackgroundGradient, rect.x, rect.y, rect.width, rect.height);
+  if (path) {
+    path(ctx);
+    ctx.fill();
+  } else {
+    ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+  }
+  return true;
+}
 
 export function drawPlotBackground(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   plotArea: { x: number; y: number; width: number; height: number },
   theme: ChartRenderTheme,
 ): void {
-  applyFillStyle(ctx, theme.plotBackground, theme.plotBackgroundGradient, plotArea.x, plotArea.y, plotArea.width, plotArea.height);
-  ctx.fillRect(plotArea.x, plotArea.y, plotArea.width, plotArea.height);
+  fillPlotShape(ctx, theme, plotArea);
 }
 
 // ============================================================================
@@ -1922,7 +1971,7 @@ export function buildChromeYScale(
 }
 
 /**
- * Draw the COMPLETE cartesian chrome (background, plot background, grid lines,
+ * Draw the COMPLETE cartesian chrome (the plot fill when the theme sets one, grid lines,
  * axes with ticks/labels/titles, chart title, and legend) around a plot area into
  * which a sandboxed mark's worker bitmap is later blitted. Used by the sandbox mark
  * shim so an untrusted, opaque-bitmap mark still gets a host-owned, themed frame
@@ -1961,7 +2010,7 @@ export function drawCartesianChrome(
 }
 
 /**
- * Draw the chrome for a RADIAL sandboxed mark: background, plot background, title,
+ * Draw the chrome for a RADIAL sandboxed mark: the plot fill when the theme sets one, title,
  * and a category-keyed legend. No axes (radial marks have none); the worker bitmap
  * supplies the circular plot pixels.
  */
@@ -2036,11 +2085,12 @@ export function widestLabelWidth(
   return widest;
 }
 
+/** A tick / data label number in the APP locale: "1.5M", "2.0K", "0.3" (one decimal). */
 export function formatTickValue(value: number): string {
-  if (Math.abs(value) >= 1_000_000) return (value / 1_000_000).toFixed(1) + "M";
-  if (Math.abs(value) >= 1_000) return (value / 1_000).toFixed(1) + "K";
-  if (Number.isInteger(value)) return value.toString();
-  return value.toFixed(1);
+  if (Math.abs(value) >= 1_000_000) return formatNumber(value / 1_000_000, { decimals: 1 }) + "M";
+  if (Math.abs(value) >= 1_000) return formatNumber(value / 1_000, { decimals: 1 }) + "K";
+  if (Number.isInteger(value)) return formatNumber(value);
+  return formatNumber(value, { decimals: 1 });
 }
 
 // ============================================================================

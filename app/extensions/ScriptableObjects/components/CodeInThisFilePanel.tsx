@@ -95,6 +95,7 @@ import { HeldButtonCodeSection } from "./HeldButtonCodeSection";
 import { ApplicationCommandButtonsSection } from "./ApplicationCommandButtonsSection";
 import { CarriedApprovalsSection } from "./CarriedApprovalsSection";
 import { DeveloperAnchorsSection } from "./DeveloperAnchorsSection";
+import { formatDate, formatDateTime } from "@api/locale";
 
 // ============================================================================
 // Capability labels (short, human; the ids are the single vocabulary source)
@@ -591,7 +592,7 @@ function HeldByScriptsSection({
           <div style={jobMetaStyle}>
             {w.running ? "Running" : "Idle"} &middot; {w.refCount} thing
             {w.refCount === 1 ? "" : "s"} asked for it &middot; last check{" "}
-            {w.lastPollAt ? new Date(w.lastPollAt).toLocaleTimeString() : "never"}{" "}
+            {w.lastPollAt ? formatDate(new Date(w.lastPollAt), "time") : "never"}{" "}
             ({w.lastPollCalls} call{w.lastPollCalls === 1 ? "" : "s"})
           </div>
           <div style={jobMetaStyle}>
@@ -721,7 +722,7 @@ function AddInTrailRow({ entry }: { entry: ExtensionAuditEntry }): React.ReactEl
       <div style={unitHeaderRowStyle}>
         <span style={unitNameStyle}>{entry.name || entry.id || entry.bundleFileName}</span>
         <span style={{ fontSize: 9.5, color: "#AAA", whiteSpace: "nowrap" }}>
-          {when && !Number.isNaN(when.getTime()) ? when.toLocaleString() : entry.at}
+          {when && !Number.isNaN(when.getTime()) ? formatDateTime(when) : entry.at}
         </span>
       </div>
       <div style={residenceStyle}>{entry.detail}</div>

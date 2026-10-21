@@ -1962,12 +1962,12 @@ fn a_data_cell_carries_its_value_field_index_and_a_label_does_not() {
     let def = two_value_definition((0, 5));
     let view = safe_calculate_pivot(&def, &mut cache);
 
-    let response = super::utils::view_to_response(&view, &def, &mut cache);
+    let response = super::utils::view_to_response(&view, &def, &mut cache, &engine::LocaleSettings::invariant());
     assert!(!response.is_windowed, "fixture: a small pivot");
     assert_cells_name_their_value_field(&data_row_cells(&response.rows), "view_to_response");
 
     // The scroll-triggered window converts through the same function.
-    let window = super::utils::extract_cell_window(&view, 0, view.rows.len());
+    let window = super::utils::extract_cell_window(&view, 0, view.rows.len(), &engine::LocaleSettings::invariant());
     assert_cells_name_their_value_field(&data_row_cells(&window), "extract_cell_window");
 }
 
@@ -2002,7 +2002,7 @@ fn the_view_lists_its_value_field_names_in_definition_order() {
     let mut cache = cache_of(&grid, (3, 1));
     let def = units_definition(3);
     let view = safe_calculate_pivot(&def, &mut cache);
-    let small = super::utils::view_to_response(&view, &def, &mut cache);
+    let small = super::utils::view_to_response(&view, &def, &mut cache, &engine::LocaleSettings::invariant());
     assert!(!small.is_windowed, "fixture: the small half is not windowed");
     assert_eq!(serde_json::to_value(&small).unwrap()["valueFieldNames"], expected, "the ordinary literal");
 
@@ -2012,7 +2012,7 @@ fn the_view_lists_its_value_field_names_in_definition_order() {
     let mut cache = cache_of(&grid, (600, 1));
     let def = units_definition(600);
     let view = safe_calculate_pivot(&def, &mut cache);
-    let big = super::utils::view_to_response(&view, &def, &mut cache);
+    let big = super::utils::view_to_response(&view, &def, &mut cache, &engine::LocaleSettings::invariant());
     assert!(big.is_windowed, "fixture: 600 row items must take the windowed branch");
     assert_eq!(serde_json::to_value(&big).unwrap()["valueFieldNames"], expected, "the windowed literal");
 
@@ -2022,7 +2022,7 @@ fn the_view_lists_its_value_field_names_in_definition_order() {
     let grid = many_regions(&fx_small, 3);
     let mut cache = cache_of(&grid, (3, 1));
     let view = safe_calculate_pivot(&bare, &mut cache);
-    let json = serde_json::to_value(super::utils::view_to_response(&view, &bare, &mut cache)).unwrap();
+    let json = serde_json::to_value(super::utils::view_to_response(&view, &bare, &mut cache, &engine::LocaleSettings::invariant())).unwrap();
     assert!(json.get("valueFieldNames").is_none(), "a pivot without value fields sends no key: {json}");
 }
 

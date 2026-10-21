@@ -781,6 +781,68 @@ pub struct QueryRequest {
     /// per-measure removal semantics as [`scoped_filters`](Self::scoped_filters).
     /// See [`ScopedInFilter`].
     pub scoped_in_filters: Vec<ScopedInFilter>,
+    /// Level-tagged multi-column TUPLE slicers (OR over tuples of AND over
+    /// columns), ANDed with every other filter.
+    ///
+    /// The exact shape of a Ctrl+click selection across two fields: keeping
+    /// `(A, x)` and `(B, y)` must NOT keep `(A, y)` or `(B, x)`, which two
+    /// per-column IN-lists would. A measure that clears SOME of the columns
+    /// evaluates under the tuple set PROJECTED onto the columns it does not
+    /// clear; clearing all of them removes the filter for that measure. The
+    /// exact predicate is always applied locally (never at fetch time), so a
+    /// request carrying one takes the local-aggregation path. Empty (default)
+    /// adds no tuple filter. See [`ScopedTupleFilter`].
+    pub scoped_tuple_filters: Vec<ScopedTupleFilter>,
+}
+
+/// One column of a [`ScopedTupleFilter`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TupleColumn {
+    /// The owning table. `None` resolves by column-name ownership, and the
+    /// owner must then be UNIQUE: an ambiguous column fails closed.
+    pub table: Option<String>,
+    /// The column name.
+    pub column: String,
+}
+
+impl TupleColumn {
+    /// A table-qualified tuple column.
+    pub fn new(table: impl Into<String>, column: impl Into<String>) -> Self {
+        Self {
+            table: Some(table.into()),
+            column: column.into(),
+        }
+    }
+}
+
+/// A multi-column tuple slicer (see [`QueryRequest::scoped_tuple_filters`]).
+///
+/// OR over tuples of AND over columns: a row is kept when its
+/// `(c1, .., ck)` equals some tuple. Each value may be
+/// [`BLANK_MEMBER_LABEL`] (any ASCII case), naming that column's blank
+/// member exactly as a [`ScopedInFilter`] does (NULL rows, and on a text
+/// column the empty string). An EMPTY `tuples` list matches nothing.
+///
+/// # Per-measure semantics
+///
+/// A measure whose `CLEAR`/`RESET` range covers `level` for SOME of the
+/// columns evaluates under the tuple set projected onto the columns it does
+/// not clear (deduplicated) -- the DAX semantics of a multi-column filter
+/// table under REMOVEFILTERS on part of it. Clearing every column removes
+/// the filter for that measure. A compound measure whose sub-expressions
+/// carry their own contexts (e.g. `DIVIDE(SUM(x), SUM(x, RESET()))`) is
+/// refused under a tuple filter with the typed contested-clear refusal (an
+/// `InvalidQuery` whose text says the measure "clears" the selection).
+///
+/// The result's row domain always honours the UNPROJECTED tuple set.
+#[derive(Debug, Clone)]
+pub struct ScopedTupleFilter {
+    /// The filtered columns, in tuple order. Must be non-empty and distinct.
+    pub columns: Vec<TupleColumn>,
+    /// The kept tuples; each has exactly `columns.len()` values.
+    pub tuples: Vec<Vec<String>>,
+    /// Filter level: 1 = ordinary slicer, 2..=9 = pinned.
+    pub level: u8,
 }
 
 /// A query-level scalar filter with explicit table attribution and a filter

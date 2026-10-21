@@ -10,12 +10,12 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import type { CellData, DimensionData, FormattingResult } from "../core/types";
 import type { PivotOverwriteUndoResponse } from "./pivotTypes";
-import type { TraceBoundObject } from "./types";
+import type { MemberRef, TraceBoundObject } from "./types";
 // The macro recorder observes the IPC bridge, and the sort family invokes Tauri
 // from HERE rather than from core/lib/tauri-api.ts. Reporting to the same single
 // hook is what keeps a recording complete: an omitted sort produces a macro that
 // runs cleanly and leaves the data in the wrong order.
-import { recordGridEvent, announceStyleEntries } from "../core/lib/tauri-api";
+import { recordGridEvent, announceStyleEntries, cellTargetArg, type CellTargetOptions } from "../core/lib/tauri-api";
 // Refresh announcements are emitted from the WRAPPERS in this file, never from
 // their call sites, so every route (ribbon, dialog, context menu, outline bar,
 // script broker) announces the change. See the block comment on OUTLINE_CHANGED
@@ -572,8 +572,11 @@ export async function clearRangeWithOptions<TResult>(
   startCol: number,
   endRow: number,
   endCol: number,
-  applyTo: ClearApplyTo = "all"
+  applyTo: ClearApplyTo = "all",
+  opts?: CellTargetOptions,
 ): Promise<TResult> {
+  // `opts.target` (P3): clear an OBJECT's cells (a floating grid's); it rides
+  // inside the params struct. Fails closed until the backend accepts it.
   return invoke<TResult>("clear_range_with_options", {
     params: {
       startRow,
@@ -581,6 +584,7 @@ export async function clearRangeWithOptions<TResult>(
       endRow,
       endCol,
       applyTo,
+      ...cellTargetArg("clear_range_with_options", opts),
     },
   });
 }
@@ -658,11 +662,14 @@ export async function sortRange<TResult>(
      * `updatedCells` is empty and the active canvas needs no repaint.
      */
     sheetIndex?: number;
-  }
+  },
+  opts?: CellTargetOptions,
 ): Promise<TResult> {
   const matchCase = options?.matchCase ?? false;
   const hasHeaders = options?.hasHeaders ?? false;
   const orientation = options?.orientation ?? "rows";
+  // `opts.target` (P3): sort an OBJECT's cells; inside the params struct.
+  const placed = cellTargetArg("sort_range", opts, options?.sheetIndex);
 
   const result = await invoke<TResult>("sort_range", {
     params: {
@@ -675,13 +682,15 @@ export async function sortRange<TResult>(
       hasHeaders,
       orientation,
       sheetIndex: options?.sheetIndex ?? null,
+      ...placed,
     },
   });
 
   // Record only a sort that actually happened. `sort_range` reports a refused
   // sort (protected range, bad criteria) as `success: false` INSTEAD of
   // rejecting, so recording unconditionally would put a no-op into the macro.
-  if (didSucceed(result)) {
+  // An object's cells are never recorded (P3).
+  if (didSucceed(result) && !placed.target) {
     recordGridEvent({
       kind: "sort",
       startRow,
@@ -2343,9 +2352,14 @@ export interface UpdateCFParams {
  * @returns Result with the created rule
  */
 export async function addConditionalFormat(
-  params: AddCFParams
+  params: AddCFParams,
+  opts?: CellTargetOptions,
 ): Promise<CFResult> {
-  return invoke<CFResult>("add_conditional_format", { params });
+  // `opts.target` (P3): the rule lives on the OBJECT's backing sheet, its
+  // ranges in the object's coordinates; inside the params struct.
+  return invoke<CFResult>("add_conditional_format", {
+    params: { ...params, ...cellTargetArg("add_conditional_format", opts) },
+  });
 }
 
 /**
@@ -2354,9 +2368,12 @@ export async function addConditionalFormat(
  * @returns Result with the updated rule
  */
 export async function updateConditionalFormat(
-  params: UpdateCFParams
+  params: UpdateCFParams,
+  opts?: CellTargetOptions,
 ): Promise<CFResult> {
-  return invoke<CFResult>("update_conditional_format", { params });
+  return invoke<CFResult>("update_conditional_format", {
+    params: { ...params, ...cellTargetArg("update_conditional_format", opts) },
+  });
 }
 
 /**
@@ -2365,9 +2382,13 @@ export async function updateConditionalFormat(
  * @returns Result
  */
 export async function deleteConditionalFormat(
-  ruleId: number
+  ruleId: number,
+  opts?: CellTargetOptions,
 ): Promise<CFResult> {
-  return invoke<CFResult>("delete_conditional_format", { ruleId });
+  return invoke<CFResult>("delete_conditional_format", {
+    ruleId,
+    ...cellTargetArg("delete_conditional_format", opts),
+  });
 }
 
 /**
@@ -2376,9 +2397,13 @@ export async function deleteConditionalFormat(
  * @returns Result
  */
 export async function reorderConditionalFormats(
-  ruleIds: number[]
+  ruleIds: number[],
+  opts?: CellTargetOptions,
 ): Promise<CFResult> {
-  return invoke<CFResult>("reorder_conditional_formats", { ruleIds });
+  return invoke<CFResult>("reorder_conditional_formats", {
+    ruleIds,
+    ...cellTargetArg("reorder_conditional_formats", opts),
+  });
 }
 
 /**
@@ -2401,10 +2426,14 @@ export async function getConditionalFormat(
  * @returns Array of rules sorted by priority
  */
 export async function getAllConditionalFormats(
-  sheetIndex?: number
+  sheetIndex?: number,
+  opts?: CellTargetOptions,
 ): Promise<ConditionalFormatDefinition[]> {
+  // `opts.target` (P3): the OBJECT's rules (its backing sheet's), never the
+  // active sheet's.
   return invoke<ConditionalFormatDefinition[]>("get_all_conditional_formats", {
     sheetIndex: sheetIndex ?? null,
+    ...cellTargetArg("get_all_conditional_formats", opts, sheetIndex),
   });
 }
 
@@ -2476,7 +2505,8 @@ export async function clearConditionalFormatsInRange(
   startCol: number,
   endRow: number,
   endCol: number,
-  sheetIndex?: number
+  sheetIndex?: number,
+  opts?: CellTargetOptions,
 ): Promise<number> {
   return invoke<number>("clear_conditional_formats_in_range", {
     startRow,
@@ -2484,6 +2514,7 @@ export async function clearConditionalFormatsInRange(
     endRow,
     endCol,
     sheetIndex: sheetIndex ?? null,
+    ...cellTargetArg("clear_conditional_formats_in_range", opts, sheetIndex),
   });
 }
 
@@ -3588,10 +3619,20 @@ export interface BiFilter {
   level?: number;
 }
 
+/**
+ * The TYPE of a query result column (mirrors Rust `bi::member::BiColumnKind`,
+ * camelCase): the grid writer decides from the source's declared type, never
+ * from guessing at the text. "unknown" = no type known (today's behaviour).
+ */
+export type BiColumnKind = "number" | "date" | "dateTime" | "boolean" | "text" | "unknown";
+
 export interface BiQueryResult {
   columns: string[];
   rows: (string | null)[][];
   rowCount: number;
+  /** One kind per column, parallel to `columns` (Rust `#[serde(default)]`:
+   *  empty from an older or hand-built result, read as "unknown"). */
+  columnKinds: BiColumnKind[];
 }
 
 export interface BiInsertRequest {
@@ -6104,14 +6145,16 @@ export async function biGetModelInfo(
   return invoke<BiModelInfo | null>("bi_get_model_info", { connectionId });
 }
 
-/** Distinct values of a model column (a dimension's members), e.g. all Countries.
- *  Used by the CUBE formula builder to pick a specific member value. */
+/** Distinct members of a model column (a dimension's members), e.g. all
+ *  Countries, the blank member (key "", label "(Blank)") last. Show `label`
+ *  (app locale); insert, select and filter by `key` (invariant). Used by the
+ *  CUBE formula builder to pick a specific member. */
 export async function biGetColumnValues(
   connectionId: string,
   table: string,
   column: string,
-): Promise<string[]> {
-  return invoke<string[]>("bi_get_column_values", { connectionId, table, column });
+): Promise<MemberRef[]> {
+  return invoke<MemberRef[]>("bi_get_column_values", { connectionId, table, column });
 }
 
 /** A workbook-local calculated measure (name + engine measure expression). */
@@ -6828,6 +6871,7 @@ export async function applyNamedStyleRange(
   startCol: number,
   endRow: number,
   endCol: number,
+  opts?: CellTargetOptions,
 ): Promise<FormattingResult> {
   const result = await invoke<FormattingResult>("apply_named_style_range", {
     name,
@@ -6835,6 +6879,7 @@ export async function applyNamedStyleRange(
     startCol,
     endRow,
     endCol,
+    ...cellTargetArg("apply_named_style_range", opts),
   });
   announceStyleEntries(result);
   return result;

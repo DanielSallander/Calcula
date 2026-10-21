@@ -1,12 +1,183 @@
 //! FILENAME: app/src-tauri/src/pivot/utils.rs
+use crate::api_types::MemberRef;
 use crate::commands::styles::parse_number_format;
 use crate::pivot::types::*;
-use engine::format_number;
+use engine::{format_number, LocaleSettings, MemberSource};
 use pivot_engine::{
     AggregationType, CacheValue, DateGroupLevel, FieldGrouping, FilterCondition, ManualGroup,
     PivotCache, PivotDefinition, PivotField, PivotFilter, PivotLayout, PivotView, ReportLayout,
-    ShowValuesAs, SortOrder, SubtotalLocation, ValueField, ValuesPosition, VALUE_ID_EMPTY,
+    ShowValuesAs, SortOrder, SubtotalLocation, ValueField, ValueId, ValuesPosition, VALUE_ID_EMPTY,
 };
+
+// ============================================================================
+// MEMBERS (P2: THE member shape, app locale everywhere)
+// ============================================================================
+
+/// The app locale a pivot or slicer command writes its display text in:
+/// `state.locale`, a LEAF lock -- taken, cloned and dropped here, so call it
+/// at the top of a command before any other guard and pass the clone down.
+pub(crate) fn display_locale_of(state: &crate::AppState) -> LocaleSettings {
+    state
+        .locale
+        .lock()
+        .map(|l| l.clone())
+        .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+}
+
+/// THE app-crate member KEY of `value_id` in field `field_index` (base or
+/// virtual) of `cache`: `FieldCache::member_key`, the invariant canonical
+/// text every selection, filter, page filter and cross-filter tuple matches
+/// on. For a BI cache it is the spelling `bi_get_column_values` returns as
+/// key (`arrow_value_to_string`); the blank member is "" (ruling Q8).
+/// `PivotCellData.member.key` agrees with it byte for byte (P4 relies on it).
+pub(crate) fn member_key_of(cache: &PivotCache, field_index: usize, value_id: ValueId) -> Option<String> {
+    cache.get_field(field_index).map(|f| f.member_key(value_id))
+}
+
+/// Fill `resp.group_members` (P4): for every `(field_index, value_id)` in
+/// the RETURNED cells' `group_path`s whose field is one of `field_keys`
+/// (`(cache field index, "Table.Column")`), the member key
+/// [`member_key_of`] gives it -- deduped, sorted by value id, one entry per
+/// field in field-index order, and only for fields that occur. A windowed
+/// response covers its window only, never the rows it did not send.
+pub(crate) fn fill_group_members(resp: &mut PivotViewResponse, field_keys: &[(usize, String)], cache: &PivotCache) {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut seen: BTreeMap<usize, BTreeSet<u32>> = BTreeMap::new();
+    for cell in resp.rows.iter().flat_map(|r| r.cells.iter()) {
+        for (field_index, value_id) in &cell.group_path {
+            if field_keys.iter().any(|(fi, _)| fi == field_index) {
+                seen.entry(*field_index).or_default().insert(*value_id);
+            }
+        }
+    }
+    resp.group_members = seen
+        .into_iter()
+        .filter_map(|(field_index, ids)| {
+            let field_key = field_keys.iter().find(|(fi, _)| *fi == field_index)?.1.clone();
+            let members: Vec<(u32, String)> = ids
+                .into_iter()
+                .filter_map(|vid| member_key_of(cache, field_index, vid).map(|key| (vid, key)))
+                .collect();
+            (!members.is_empty()).then_some(PivotGroupMembers { field_index, field_key, members })
+        })
+        .collect();
+}
+
+/// The `(cache field index, "Table.Column")` of every placed ROW, COLUMN and
+/// FILTER field of `definition` that `is_model_column` accepts by name,
+/// deduped by index -- the `field_keys` [`fill_group_members`] takes. A
+/// design-query view and a BI pivot both name each placed model column
+/// "Table.Column"; the predicate keeps out what is not one (a BI pivot's
+/// calculation-group dimension, its synthetic "Total" row).
+pub(crate) fn placed_field_keys(
+    definition: &PivotDefinition,
+    is_model_column: impl Fn(&str) -> bool,
+) -> Vec<(usize, String)> {
+    let mut out: Vec<(usize, String)> = Vec::new();
+    let placed = definition
+        .row_fields
+        .iter()
+        .chain(definition.column_fields.iter())
+        .chain(definition.filter_fields.iter().map(|f| &f.field));
+    for field in placed {
+        if is_model_column(&field.name) && !out.iter().any(|(i, _)| *i == field.source_index) {
+            out.push((field.source_index, field.name.clone()));
+        }
+    }
+    out
+}
+
+/// [`placed_field_keys`] for a BI pivot: a field counts when its name is
+/// "Table.Column" of a column the pivot's model snapshot lists.
+pub(crate) fn bi_placed_field_keys(definition: &PivotDefinition, meta: &BiPivotMetadata) -> Vec<(usize, String)> {
+    placed_field_keys(definition, |name| {
+        meta.model_tables.iter().any(|t| {
+            name.strip_prefix(t.name.as_str())
+                .and_then(|rest| rest.strip_prefix('.'))
+                .is_some_and(|column| t.columns.iter().any(|c| c.name == column))
+        })
+    })
+}
+
+/// The member `{ key, label }` of `value_id` in field `field_index`, its
+/// label written for `locale` from the locale-free `FieldCache::member_source`.
+pub(crate) fn member_ref(
+    cache: &PivotCache,
+    field_index: usize,
+    value_id: ValueId,
+    locale: &LocaleSettings,
+) -> Option<MemberRef> {
+    let field = cache.get_field(field_index)?;
+    let key = field.member_key(value_id);
+    Some(MemberRef::from_source(key, &field.member_source(value_id), locale))
+}
+
+/// Whether base field `idx` of `cache` has a BLANK member: NULL records, or
+/// an empty-string item -- ONE member under ruling Q8.
+pub(crate) fn has_blank_member(cache: &PivotCache, idx: usize) -> bool {
+    if idx >= cache.fields.len() {
+        return false;
+    }
+    let field = &cache.fields[idx];
+    cache.has_blank_values(idx)
+        || (0..field.unique_count() as ValueId)
+            .any(|id| matches!(field.get_value(id), Some(CacheValue::Text(s)) if s.is_empty()))
+}
+
+/// The members a pivot's OWN list offers for base field `field_index` (its
+/// header and filter-cell dropdowns): every interned value in the cache's
+/// sorted order, keyed by `FieldCache::member_key` and labelled for
+/// `locale`, then the BLANK member LAST (key "", label "(Blank)") when the
+/// column has one -- NULL records or an empty-string item, which are ONE
+/// member (ruling Q8) and so are never listed twice.
+pub(crate) fn field_members(cache: &mut PivotCache, field_index: usize, locale: &LocaleSettings) -> Vec<MemberRef> {
+    let has_blank = has_blank_member(cache, field_index);
+    let Some(field_cache) = cache.fields.get_mut(field_index) else { return Vec::new() };
+    let sorted_ids = field_cache.sorted_ids().to_vec();
+    let mut members: Vec<MemberRef> = sorted_ids
+        .iter()
+        .filter(|&&id| id != VALUE_ID_EMPTY)
+        .filter(|&&id| !matches!(field_cache.get_value(id), Some(CacheValue::Text(s)) if s.is_empty()))
+        .map(|&id| MemberRef::from_source(field_cache.member_key(id), &field_cache.member_source(id), locale))
+        .collect();
+    if has_blank {
+        members.push(MemberRef::blank());
+    }
+    members
+}
+
+/// Whether `hidden` (a field's hidden items, in any spelling a writer used)
+/// hides the member `key`: by its exact key, and the blank member by either
+/// of its spellings ("" or "(blank)" in any case).
+pub(crate) fn hidden_names_member(hidden: &[String], key: &str) -> bool {
+    hidden.iter().any(|h| {
+        h == key || (pivot_engine::is_blank_member_key(key) && pivot_engine::is_blank_member_key(h))
+    })
+}
+
+/// The member a header (or filter-item) view cell shows, or `None` when the
+/// engine attached no source (data, total and value cells, and any header
+/// whose text is not one member's own).
+///
+/// The KEY is the cell's value-as-text, which IS `member_key_of` of its last
+/// `group_path` entry -- both come from `FieldCache::member_key`, and the
+/// engine attaches a source only where the shown text is that member's own
+/// header text -- EXCEPT for the blank member, whose header text reads
+/// "(blank)" while its key is "" (ruling Q8). The source says which.
+pub(crate) fn view_cell_member(cell: &pivot_engine::PivotViewCell, locale: &LocaleSettings) -> Option<MemberRef> {
+    let source = cell.member_source.as_ref()?;
+    let key = match source {
+        MemberSource::Blank => pivot_engine::BLANK_MEMBER_KEY.to_string(),
+        _ => match &cell.value {
+            pivot_engine::PivotCellValue::Text(s) => s.clone(),
+            pivot_engine::PivotCellValue::Number(n) => format!("{}", n),
+            pivot_engine::PivotCellValue::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+            pivot_engine::PivotCellValue::Error(e) => format!("#{}", e),
+            pivot_engine::PivotCellValue::Empty => String::new(),
+        },
+    };
+    Some(MemberRef::from_source(key, source, locale))
+}
 
 // ============================================================================
 // PARSING & STRING UTILS
@@ -532,10 +703,15 @@ const WINDOW_THRESHOLD: usize = 500;
 /// Number of rows in the initial cell window for large pivots.
 const INITIAL_WINDOW_SIZE: usize = 200;
 
+///
+/// `locale` is the app locale the DISPLAY text is written in (formatted
+/// values, member labels, width samples); it is a parameter, never a global,
+/// so the caller clones `state.locale` at its top and tests pass their own.
 pub(crate) fn view_to_response(
     view: &PivotView,
     definition: &PivotDefinition,
     cache: &mut PivotCache,
+    locale: &LocaleSettings,
 ) -> PivotViewResponse {
     // Filter to only visible rows (fast-path toggle keeps hidden rows in the view
     // for re-expansion, but the frontend should only receive visible rows).
@@ -553,7 +729,7 @@ pub(crate) fn view_to_response(
 
     // Helper: convert engine cells to response cells
     let convert_cells = |cells: &[pivot_engine::PivotViewCell]| -> Vec<PivotCellData> {
-        cells.iter().map(pivot_cell_to_data).collect()
+        cells.iter().map(|c| pivot_cell_to_data(c, locale)).collect()
     };
 
     // Only build full PivotRowData (with cells) for the window; rest get empty cells.
@@ -584,10 +760,14 @@ pub(crate) fn view_to_response(
     for row_cells in &view.cells {
         for (j, cell) in row_cells.iter().enumerate() {
             if j >= num_cols { break; }
-            let display = if let Some(ref fmt) = cell.number_format {
+            // A header measures the member LABEL it shows; a number with a
+            // code measures its app-locale formatting.
+            let display = if let Some(member) = view_cell_member(cell, locale) {
+                member.label
+            } else if let Some(ref fmt) = cell.number_format {
                 if !fmt.is_empty() {
                     if let pivot_engine::PivotCellValue::Number(n) = &cell.value {
-                        format_number(*n, &parse_number_format(fmt), &engine::LocaleSettings::invariant())
+                        format_number(*n, &parse_number_format(fmt), locale)
                     } else {
                         cell.formatted_value.clone()
                     }
@@ -638,48 +818,25 @@ pub(crate) fn view_to_response(
             let field_index = filter.field.source_index;
             let field_name = filter.field.name.clone();
 
-            // Get unique values from cache -- and the BLANK item last, when
-            // the column has blank records (wave B, A2: Excel lists it, and
-            // without it the filter cell could not show or hide blank rows).
-            let has_blank = field_index < cache.fields.len() && cache.has_blank_values(field_index);
-            let mut unique_values: Vec<String> = if let Some(field_cache) = cache.fields.get_mut(field_index) {
-                // Clone sorted_ids to end the mutable borrow before calling get_value
-                let sorted_ids = field_cache.sorted_ids().to_vec();
-                sorted_ids
-                    .iter()
-                    .filter_map(|&id| {
-                        if id == VALUE_ID_EMPTY {
-                            return None;
-                        }
-                        field_cache.get_value(id).map(cache_value_to_string)
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            if has_blank {
-                unique_values.push(pivot_engine::BLANK_ITEM_LABEL.to_string());
-            }
+            // The field's members from the cache -- and the BLANK member last
+            // when the column has one (wave B, A2: Excel lists it, and without
+            // it the filter cell could not show or hide blank rows). Key "",
+            // label "(Blank)": NULL and "" are ONE member (ruling Q8).
+            let members = field_members(cache, field_index, locale);
 
-            // Get selected values (all values minus hidden items; the blank
-            // item is hidden by any spelling of its label)
+            // Selected KEYS (every member minus the hidden ones; the blank
+            // member is hidden by either of its spellings).
             let hidden_items = &filter.field.hidden_items;
-            let selected_values: Vec<String> = unique_values
-                .iter()
-                .filter(|v| {
-                    !hidden_items.iter().any(|h| {
-                        h == *v || (pivot_engine::is_blank_item_label(h) && pivot_engine::is_blank_item_label(v))
-                    })
-                })
-                .cloned()
-                .collect();
+            let kept: Vec<&MemberRef> =
+                members.iter().filter(|m| !hidden_names_member(hidden_items, &m.key)).collect();
+            let selected_values: Vec<String> = kept.iter().map(|m| m.key.clone()).collect();
 
-            // Calculate display value for the filter cell
+            // The filter cell's text: a single kept member shows its LABEL.
             let display_value = if hidden_items.is_empty() {
                 "(All)".to_string()
-            } else if selected_values.len() == 1 {
-                selected_values[0].clone()
-            } else if selected_values.is_empty() {
+            } else if kept.len() == 1 {
+                kept[0].label.clone()
+            } else if kept.is_empty() {
                 "(None)".to_string()
             } else {
                 "(Multiple Items)".to_string()
@@ -689,7 +846,7 @@ pub(crate) fn view_to_response(
                 field_index,
                 field_name,
                 selected_values,
-                unique_values,
+                members,
                 display_value,
                 view_row: idx,
             }
@@ -755,6 +912,7 @@ pub(crate) fn view_to_response(
             // exactly as `overwritten_cell_count` is.
             notices: Vec::new(),
             value_field_names,
+            group_members: Vec::new(),
         }
     } else {
         // Small pivot: send everything (no windowing)
@@ -779,6 +937,7 @@ pub(crate) fn view_to_response(
             overwrite_token: None,
             notices: Vec::new(),
             value_field_names,
+            group_members: Vec::new(),
         }
     }
 }
@@ -788,7 +947,11 @@ pub(crate) fn view_to_response(
 /// the scroll-triggered window (`extract_cell_window`) -- goes through this
 /// one function; they were two hand-copied closures, and a field added to one
 /// would have reached the frontend on small pivots only, or past row 200 only.
-pub(crate) fn pivot_cell_to_data(cell: &pivot_engine::PivotViewCell) -> PivotCellData {
+///
+/// `locale` writes the DISPLAY text: `formatted_value` and the member label.
+/// `member` is set exactly where the engine attached a locale-free
+/// `member_source` (headers and filter items), never on data cells.
+pub(crate) fn pivot_cell_to_data(cell: &pivot_engine::PivotViewCell, locale: &LocaleSettings) -> PivotCellData {
     PivotCellData {
         cell_type: cell.cell_type,
         value: match &cell.value {
@@ -800,7 +963,7 @@ pub(crate) fn pivot_cell_to_data(cell: &pivot_engine::PivotViewCell) -> PivotCel
         },
         formatted_value: match (&cell.value, &cell.number_format) {
             (pivot_engine::PivotCellValue::Number(n), Some(fmt)) if !fmt.is_empty() => {
-                format_number(*n, &parse_number_format(fmt), &engine::LocaleSettings::invariant())
+                format_number(*n, &parse_number_format(fmt), locale)
             }
             _ => String::new(),
         },
@@ -830,21 +993,24 @@ pub(crate) fn pivot_cell_to_data(cell: &pivot_engine::PivotViewCell) -> PivotCel
             _ => Vec::new(),
         },
         value_field_index: cell.value_field_index,
+        member: view_cell_member(cell, locale),
     }
 }
 
 /// Extract a cell window from a stored PivotView for scroll-triggered fetching.
+/// `locale`: as [`view_to_response`] (the stored view is locale-free).
 pub(crate) fn extract_cell_window(
     view: &PivotView,
     start_row: usize,
     row_count: usize,
+    locale: &LocaleSettings,
 ) -> Vec<PivotRowData> {
     let end_row = (start_row + row_count).min(view.rows.len());
     view.cells[start_row..end_row]
         .iter()
         .zip(view.rows[start_row..end_row].iter())
         .map(|(cells, descriptor)| {
-            let cell_data: Vec<PivotCellData> = cells.iter().map(pivot_cell_to_data).collect();
+            let cell_data: Vec<PivotCellData> = cells.iter().map(|c| pivot_cell_to_data(c, locale)).collect();
 
             PivotRowData {
                 view_row: descriptor.view_row,

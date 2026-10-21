@@ -22,7 +22,7 @@ import {
 } from "../../lib/undoTransactionOwnership";
 import { cellEvents } from "../../lib/cellEvents";
 import { checkRangeGuards } from "../../lib/editGuards";
-import { refuseIfSelectionOwned } from "../../lib/selectionOwner";
+import { refuseIfSelectionOwned, setGridCellEditorOpener } from "../../lib/selectionOwner";
 import {
   beginEditorOpen,
   isEditorOpening,
@@ -111,6 +111,16 @@ export function useSpreadsheetEditing({
     isOnDifferentSheet, // FIX: For handling Enter/Escape when on different sheet during formula mode
     navigateReferenceWithArrow, // For arrow key cell reference navigation in formula mode
   } = useEditing();
+
+  // Core's editor, as the cell-target seam opens it for the GRID target
+  // (@api/cellTarget editTargetCell: Insert Function's "=", AutoSum's guess).
+  useEffect(() => {
+    setGridCellEditorOpener((text) => {
+      void startEditing(text);
+      return true;
+    });
+    return () => setGridCellEditorOpener(null);
+  }, [startEditing]);
 
   const showStatus = useCallback((message: string, duration: number = 3000) => {
     setStatusMessage(message);

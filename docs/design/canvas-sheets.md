@@ -899,6 +899,10 @@ on its OWN sheet or canvas, including pivots added later; deleting any slicer re
 one Ctrl+Z restores both; model slicers reach pivots and pivot charts now, design-query charts next.
 **Design-query charts: built 2026-10-08** -- a model slicer filters every design-query chart (Cards, KPIs,
 gauges and other visuals) on its own sheet or canvas through `@api/pageFilters`, inside the engine (§13).
+**Subject to interactions since 2026-10-17** (canvas round 2 P4, §16.4): on a canvas a model slicer filters each
+visual of its page SUBJECT TO Edit interactions -- a slicer -> visual pair set to None leaves that visual unfiltered
+(for a BI pivot Rust re-folds it without the slicer, in the same undo step), and `@api/pageFilters` is now
+`@api/reportFilters`. A slicer is also a TARGET: another visual's selection dims (or hides) its items without data.
 
 - **The source.** `SlicerSourceType::BiConnection` with the connection's id in `data_source_id`.
   Insert Slicers lists every loaded model first ("Sales (Model)"), its columns as fields, and says
@@ -1110,7 +1114,7 @@ direction and goal, gauge min/max/target). Painters: `app/extensions/Charts/rend
 A design query may be **measure-only** (`VALUES: [Revenue]`, no ROWS or COLUMNS): the backend returns one
 GrandTotal row (blank when the engine has no value -- never 0) and the chart reads it as one category. A
 **model slicer filters every design-query chart on its own sheet or canvas**: the Slicer publishes each
-page's kept items per model column through `@api/pageFilters` (silent when a re-publish changes nothing),
+page's kept items per model column through `@api/pageFilters` (since 2026-10-17 `@api/reportFilters`, §16.4) (silent when a re-publish changes nothing),
 and Charts merges them into the request as `pageFilterFields` and re-queries only the charts on the pages
 that changed. The backend runs page filters -- and a chart's own FILTERS -- INSIDE the engine with no
 GROUP BY, so an AVERAGE or a distinct count under a multi-item slicer is the model's exact answer; a pinned
@@ -1206,7 +1210,7 @@ embeds the spec as a JSON object, §15.7.) Both can be BOUND to a formula (`/bac
 | The tab's six groups, order, fold order, ids, icons | `canvasTabPanel.test.tsx`, `canvas{Visuals,Elements,Page,View}Section.test.tsx`, `canvasTabIcons.test.ts`, `canvasArrangeSection.test.tsx` |
 | Visual presets and the dialog preset / narrowing / validation | `canvasVisuals.test.ts`, `insertOnCanvas.test.ts`, `createChartDialogPreset.test.tsx`, `createChartDialogTypeSwitch.test.tsx` |
 | The four marks, display text, blanks, totals, formats | `rendering/visuals/__tests__/*`, `visualsReviewFixes.test.ts`, `chartDisplayValues.test.ts` |
-| Measure-only queries, page filters inside the engine, the share fallback, Float64 spelling | `app/src-tauri/src/pivot/design_query_measure_only_tests.rs`; `pageFilters.test.ts`, `modelSlicerFiltersDesignQueryCharts.test.ts`, `slicerPageFilters*.test.ts` |
+| Measure-only queries, page filters inside the engine, the share fallback, Float64 spelling | `app/src-tauri/src/pivot/design_query_measure_only_tests.rs`; `reportFilters.resolve.test.ts` (was `pageFilters.test.ts`), `modelSlicerFiltersDesignQueryCharts.test.ts`, `slicerPageFilters*.test.ts` |
 | Button actions: create, perform, paint, pane, refusal to scripts, pull survival, undo | `buttonAction{Create,Perform,Paint}.test.ts`, `buttonActionSection.test.tsx`, `buttonActionRefusal.test.ts`, `held_button_code_tests.rs`; `pageNavigator.test.ts`, `sheetHistory.test.ts`, `slicerClearService.test.ts` |
 | Lock Objects at every backend door; the UI notice; wallpaper; presets | `commands/canvas_objects_lock_tests.rs`, `objectsLock.test.ts`, `objectsLockWiring.test.ts`, `canvasSheet.test.ts`, `canvasSheetConstantsDrift.test.ts`, `canvasSheetScriptRows.test.ts` |
 | LIVE: P1 tab at 1280 and 1920, P2 presets, P3 Card from a cell, P4 KPI and Gauge with undo/redo pixels, P5 a measure-only Card refiltered by a model slicer and Clear All Slicers, P6 Shapes, P7 Page Navigator and Back, P8 Tooltip / wallpaper / Lock Objects, P9 Page View and Themes, P10 LPAD/RPAD | `app/e2e/journeys/canvas-powerbi.spec.ts`, 10/10 on 2026-10-08 (three live sabotages turned P5, P2 and P1 red). P7 was rewritten on 2026-10-15 for the live control (one `pageNavigator` control and no `button`, "Insert Page Navigator", no stored `action`, the box = `pageNavigatorNaturalSize(2)` clamped to the page, an item press switches pages, Back returns); **the whole file passed 10/10 live on 2026-10-15** |
@@ -1360,6 +1364,9 @@ themselves are §15.
   control" entry that joins the transaction; BUG-0487); a pivot's style through `update_pivot_properties`
   ("PivotTable Style"); unchanged values send nothing (BUG-0477 is still open at the pivot door). Previews
   (a colour picker drag, a slider) are transient: no write, no undo, no dirty.
+- **One pick, one commit; a solid colour wins.** A colour row commits once per pick, on the native
+  `change`, and a solid background colour clears a gradient and switches the background on; the plot area
+  is transparent by default, so Background recolours the whole visual (§16, round 2).
 - **Lock Objects vs format.** Lock Objects freezes POSITION: the geometry rows are disabled with its
   sentence, while every format field -- padding and a floating grid's title toggle and header strips
   included -- still commits (§2.aj owner question 1 is now enforced by `commitObjectFormat` and the Rust
@@ -1508,7 +1515,7 @@ hooked into one command, miss paste, fill, sort and undo; this cannot. A raw bac
 nothing leaves bindings stale until the next announcement -- an announcement defect in that command, to be
 fixed there. `AppEvents.GRID_REFRESH` (a repaint request) is deliberately NOT a trigger, and families
 repaint with `requestOverlayRedraw()`, so a volatile binding cannot loop. The seam mirrors
-`@api/pageFilters` to Rust (`SetPageFilters`, always the full snapshot, also sent before every `Set`) and
+`@api/pageFilters` (since 2026-10-17 `@api/reportFilters`, keyed by sheet id with per-object overrides, §16.4) to Rust (`SetPageFilters`, always the full snapshot, also sent before every `Set`) and
 sends `RefreshMeasures` on open, new, model change and model refresh.
 
 ### 15.5 Undo, dirty, structure, deletes
@@ -1628,3 +1635,342 @@ restricted-tier clamp is enforced in TypeScript only. Each has a row in open-ite
 | Scripts: validator rows, the handle doors, typings | `scriptHost/__tests__/setStateAspectRows.test.ts`, `scriptObjectHandleDoor.test.ts`, `mediaHandles.test.ts`; `ScriptableObjects/__tests__/objectContextsTypings.test.ts` |
 | AI tools, the summary, the Bound Properties view | `mcp/bindings_tests.rs`; `AIChat/__tests__/chatToolSurface.test.ts`, `crossLayerConstantDrift.test.ts`; `BuiltIn/BoundProperties/__tests__/boundPropertiesDialog.test.tsx` |
 | LIVE | `app/e2e/journeys/object-bindings.spec.ts` (WP-D S12, on the owner's AdventureWorks model) -- **13/13 live 2026-10-15**; B3's dirty/undo assertions proved to have teeth by the `SetPageFilters` sabotage its header names (failed on "SetPageFilters (Europe) dirtied the document", reverted, 13/13). The ported journeys passed the same day: `fixall-calp` 39/39, `tests/scriptable-shapes` 40/40, `chart-interaction` 15/15, `canvas-page-navigator` 12/12, `canvas-powerbi` 10/10 (open-items §2.ak, `#### WP-D bindings`) |
+
+## 16. Round 2 (2026-10-16)
+
+The owner's canvas test of 2026-10-16, built as four packages (open-items §2.al). Each package adds one
+`### 16.N` below.
+
+### 16.1 Background means the whole visual
+
+Owner finding G1 ("chart background colour does nothing"), package P1.
+
+- **The plot area is transparent by default**, as in Power BI. `DEFAULT_CHART_THEME.plotBackground` is `""`;
+  every plot fill goes through ONE helper pair in `Charts/rendering/chartPainterUtils.ts` (`hasPlotFill` /
+  `fillPlotShape`: a rect or a row path, solid or gradient), multi-row card rows included, so the container's
+  Background shows under the plot. `plotFill.test.ts` is the census: no other `.plotBackground` read under
+  `Charts/rendering/`. A plot colour the author sets still paints; "Automatic" in the Plot area card means none.
+- **A solid colour commit wins.** Committing one background colour (`solidBackgroundPatch`,
+  `@api/visualContainer`) clears a stored or resolved gradient and switches `background.show` on when the
+  stored or family-default show would hide it (a floating grid's background is off by default). The Format
+  tab's Effects card, the Chart elements card's "Chart area fill" and chart style presets use it, and
+  `solidBackgroundIsNoop` keeps an unchanged pick from recording a step. The Rust container-literal door
+  (`object_bindings/container_literal.rs`) applies the same rule to script, MCP and binding-literal writes. Not
+  yet routed: a page navigator's flat `containerBackgroundColor` key and a formula-bound colour (BUG-0510).
+- **Presets.** A preset replaces the previous preset's look (BUG-0489: every preset-owned theme key is sent, the
+  unset ones as an explicit `undefined`) and is a solid background commit. The colorful (`colorful-1` ..
+  `colorful-8`) and light outline (`outline-1` .. `outline-3`) presets set no plot fill; the monochrome, dark,
+  `outline-4` and gradient presets keep a deliberately tinted plot that differs from their background.
+- **One pick = one undo step.** Every native colour input that previews goes through
+  `_shared/components/colorPick/useNativeColorPick`: the base is snapshotted when the pick STARTS (a preview
+  rewrites the very value the swatch shows), each `input` previews, the native `change` commits ONCE against
+  that base, and blur ends the pick. A host with a draft (the chart Data tab's series swatch) diffs the commit
+  against its STORED value, never the draft. Before this, the Format tab never committed a pick (BUG-0503), the
+  series swatch wrote nothing (BUG-0504, with BUG-0502 behind it) and the Chart elements card wrote per drag step
+  (BUG-0505).
+
+Proofs: `_shared/components/__tests__/useNativeColorPick.test.tsx` [A]-[J],
+`BuiltIn/ObjectPane/__tests__/colorBox.test.tsx`, `Charts/components/__tests__/elementCardOneStep.test.tsx`,
+`Charts/components/pane/__tests__/ChartRangeDataTab.test.tsx`, `Charts/rendering/__tests__/plotFill.test.ts`,
+`Charts/lib/__tests__/chartStylePresets.test.ts`, `app/src/api/__tests__/visualContainer.test.ts`,
+`object_bindings/container_literal_tests.rs`; live: `app/e2e/journeys/canvas-round2-quick.spec.ts`, **13/13
+on 2026-10-17** against the owner's AdventureWorks model, sabotages X1-X10 each failing their step (open-items
+§2.al). The real picker is NOT the OS ChooseColor: WebView2 opens Chromium's own colour popup, which Q7 drives
+by keyboard -- one pick there sent 8 `input` events and 1 `change`, and stayed ONE undo step through the hook
+(the inputs that still commit on `input` are BUG-0536).
+
+### 16.2 Floating grids take every Home command (G3)
+
+Owner finding G3 ("the Home tab does nothing on a floating grid's cells"), package P3; ledger BUG-0516 (links
+BUG-0185, BUG-0493). Until P3 every Home door refused on a floating grid's cell with "... is not available for a
+floating range's cells yet" -- BUG-0185's safety net, because Core's selection stays on a sheet cell HIDDEN under
+the grid and a door that wrote "the selection" wrote that hidden cell.
+
+#### One question per door
+
+- A door asks ONE question, `resolveCellTarget(action, capability)` (`@api/cellTarget`, implemented in
+  `src/core/lib/selectionOwner.ts`). It answers the grid (`{ kind: "grid", selection }`), an OBJECT's cells
+  (`{ kind: "object", ref, selection, bounds, label, ownerId }`), or null after the owner's one refusal toast.
+  `cellTargetFor(capability, action)` is the silent form a dialog's OK uses to re-ask.
+- The capability says what KIND of act it is: `read`, `format`, `numberFormat`, `content`, `clear`, `sort`,
+  `structure`, `shiftCells`, `lineSize`, `merge`, `conditionalFormat`, `table`, `filter`. An owner admits a list
+  (`SelectionOwner.actsOn`); the floating grid's is spelled out in `FloatingRange/lib/frKeyRouting.ts`
+  (`FR_ACTS_ON`): everything but `shiftCells`, `table` and `filter`. A capability is admitted by decision, never
+  derived.
+- The target is EXPLICIT. The door passes `{ target: targetRefOf(t) }` to the wrapper it already calls; for the
+  grid that is `undefined`, so one call serves both. No wrapper reads an ambient selection, so a script or MCP
+  call never acts on a floating grid by accident.
+- The wrappers FAIL CLOSED: `placementArgs` throws for a `target` on a command that is not in `TARGET_COMMANDS`
+  (`app/src/api/cellTargetCommands.ts`). A Rust params struct ignores an unknown key, so without that list a
+  door would act on the ACTIVE sheet at the grid's local coordinates and report success (the BUG-0185 class).
+- `app/src/api/__tests__/cellTargetDoorCensus.test.ts` reads the tree: every refuse-only door is listed with its
+  reason, every target-aware door passes its target to every wrapper, and `TARGET_COMMANDS` agrees with the Rust
+  signatures in both directions.
+
+#### Rust: `CellTargetRef` and the resolver
+
+- The wire shape is `{"kind":"floatingRange","id":"<uuid>"}` (`api_types::CellTargetRef`). The frontend never
+  sends a backing sheet index. `cell_target.rs` resolves the id ONCE (`resolve_cell_target`: backing index, host
+  index, extent, name) and re-checks it under the held guards (`ensure_target_still_at`), so a stale index cannot
+  address the wrong sheet.
+- A target with an explicit sheet is refused ("Pass a floating grid target or a sheet, not both."). A cell past
+  the grid's write extent is refused by name ("Cell A5 is outside floating grid 'Float1'. Nothing was changed.").
+- PROTECTION IS THE HOST'S. The backing sheet is never protected, so every gate asks the host sheet's protection
+  over the BACKING cells' lock flags (`target_protection_view`, `gate_target_cells`, `gate_host_action`). The
+  in-cell edit door is gated the same way (`update_floating_range_cell_inner`, BUG-0512). Line height and
+  hide/unhide follow the host's Format Rows / Format Columns option (ruling Q5); Lock Objects on a canvas still
+  refuses a change to the object's window, sizes or hidden set.
+- Style commands report the merges of the sheet they wrote (`report_merges`), never the active sheet's mirror.
+
+#### What the renderer paints
+
+- `get_cell_target_cells` is the styled read: every stored cell with its display in the app locale and its style
+  index, the backing merges, the conditional-format results evaluated on the BACKING grid, and the backing
+  sheet's rules. The grid paints each cell with `paintStyledCellBox` (`@api/cellPaint`; fills first, then edge
+  borders, then CF glyphs through `@api/conditionalFormatPaint`), the same helpers the sheet uses, so the two
+  painters cannot drift. Style interceptors of the host sheet are never run on a grid's cells.
+- Merges: a click on any part selects the whole merge with its top-left cell active; interior gridlines are not
+  drawn. Hidden lines are 0 px wide, show a double-line hint in the grid's headers and are never hit.
+
+#### Table-like structure
+
+- Insert / Delete Sheet Rows and Columns act on the grid as on a table: the backing content shifts, the window
+  grows or shrinks with the lines that were inside it (never below one line, never past 1000 rows / 256 columns),
+  and size overrides and hidden lines move with their lines. One owned undo step; a failure after the first
+  write rolls back to its savepoint (`edit_lines_on_target`).
+- Row Height / Column Width / AutoFit and Hide / Unhide write the OBJECT's maps (`rowHeights`, `colWidths`,
+  `hiddenRows`, `hiddenCols`), never the backing sheet's. Hidden lines persist on the `floating_ranges.json` row
+  and stamp `.cala` format version 11 (`FLOATING_GRID_HIDDEN_LINES_MIN_FORMAT_VERSION`) only when a set is
+  non-empty. SUBTOTAL does not see them (open-items §2.al P3 (b)).
+- Merge behaves exactly as on a sheet (ruling Q4): the same keep-first-value gesture and prompt; Rust moves the
+  first value into the top-left cell and re-points the backing sheet's readers of the moved cell.
+
+#### What is refused
+
+- Format as Table and Filter: "... is not available inside a floating grid: a floating grid is already a
+  table-like object. Nothing was changed." These are permanent.
+- Insert / Delete Cells with a shift: "Insert Cells is not available inside a floating grid yet. Nothing was
+  changed." (ruling Q3; the whole-row and whole-column forms work).
+- Style-only writes INTO a grid (Format Painter from a sheet, Paste Formatting, Paste No Borders) refuse with one
+  sentence until BUG-0513 is fixed; painting FROM a grid onto a sheet works.
+- Non-Home doors (Data Validation, comments, hyperlinks, bookmarks, Group, Remove Duplicates, Print Area, cell
+  types, Define Name, ...) keep refusing with "<action> is not available inside a floating grid yet. Nothing was
+  changed.".
+- A door that needs cells while only the grid OBJECT is selected says "Select cells inside the floating grid
+  first."
+
+#### Where the proofs are
+
+- Rust: `cell_target_tests.rs` (resolver, styled read, host gates, lock order), `commands/format_home_tests.rs`
+  (style commands with a target), `commands/cell_target_content_tests.rs` (content, clear, sort, fill, batch,
+  merge, search, Go To Special, CF), `commands/structure_target_tests.rs` (structure, line sizes, rollback);
+  `core/calcula-format/src/zip_io.rs` (`a_hidden_line_stamp_reaches_the_written_manifest`).
+- TypeScript: `cellTargetDoorCensus.test.ts`, `cellTargetWrappers.test.ts`, `selectionOwner.test.ts`,
+  `styledCellBox.test.ts`, `conditionalFormatPaint.test.ts`, the door tests of each migrated extension
+  (`homeTabCellTarget.test.tsx`, `formatCellsTarget.test.ts`, `gridGesturesTarget.test.ts`,
+  `mergeGesturesTarget.test.ts`, `clipboardCellTarget.test.tsx`, `pasteSpecialCellTarget.test.ts`,
+  `formatPainterCellTarget.test.ts`, `sortCellTarget.test.ts`, `cfCellTarget.test.tsx`, ...) and the floating
+  grid's own (`frCellTarget.test.ts`, `frRendererStyled.test.ts`, `frHomeDoorsWiring.test.ts`).
+- Live: `app/e2e/journeys/floating-grid-home.spec.ts` (FG1-FG14, owner's AdventureWorks model for FG13), **14/14
+  on 2026-10-17**, sabotages SB1-SB9 each failing their step; the updated `fixall-edit.spec.ts` doors, 50/50 (2
+  destructive close tests skipped by design). The proof found two product defects on the way, both fixed:
+  typing a palette's own colour + Enter applied nothing (BUG-0537), and Home > Fill greyed Down from Core's
+  hidden A1 instead of the grid's selection (BUG-0538). Details in open-items §2.al.
+
+### 16.3 App locale on canvas (G0)
+
+Owner rule G0 ("the app locale everywhere"), package P2; the whole contract, its census and what is left open are
+in open-items §2.al `#### P2 app locale (G0)`.
+
+- **Everything on a canvas page formats through the app locale** (File > Options > General > Locale, persisted by
+  the backend in `%LOCALAPPDATA%\Calcula\app-settings.json`): Cards, Multi-row cards, KPIs and Gauges
+  (`Charts/rendering/visuals/visualValues.ts`, `formatVisualNumber` -> `@api/locale formatNumber`), chart axes,
+  data labels and tooltips, canvas pivots (their `formattedValue` and member labels are rendered by Rust with
+  the command's locale), slicer and timeline items. A source text written by the engine (a cell's display, a
+  measure formatted with its `#,##0`) is READ in the app locale (`readShownNumber`), never guessed. BUG-0447 (an
+  sv-SE Card writing "1.2K kr" beside "1 234,50 kr") is closed by this.
+- **A switch repaints without a reload.** `locale:changed` reaches every window; Charts invalidates its rasters
+  and refreshes, pivots and slicers re-read, and nothing recalculates (stored values do not change).
+- **Member key vs label.** Every pivot, BI, model-slicer and design-query member crosses the boundary as
+  `MemberRef { key, label }` (`app/src/api/types.ts`, Rust `api_types::MemberRef`): the KEY is invariant canonical
+  ("2013-07-01", "3578.2700000000", "" for the blank) and is what a slicer selection, a page filter, a
+  cross-filter tuple and GETPIVOTDATA match on; the LABEL is what the page shows ("01.07.2013", "3578,27",
+  "(Blank)"). Identity always comes from `pivotCellItemKey` / `MemberRef.key`, display from
+  `pivotCellDisplayText` / `MemberRef.label`.
+- **Page filters carry keys.** `@api/reportFilters` `includedKeys` (the `@api/pageFilters` `includedItems` of P2's time) are member KEYS, never labels, so a model slicer
+  on a date column keeps filtering the page's Cards after a locale switch. Table-source slicers are the exception:
+  their key is the display text, as AutoFilter's (BUG-0523, open).
+- **A slicer item renderer** (script or in-process) sees `item.text` = the label and `item.key` = the key; it
+  paints `text` and selects by `key` (`docs/design/script-sandbox-architecture.md` section 6.2).
+
+Proofs: `visualValues.locale.test.ts`, `chartDataReader.typed.test.ts`, `pivotMembers.test.ts`,
+`memberWireCensus.test.ts`, `slicerPageFilters.test.ts`, Rust `member_shape_tests.rs`; live:
+`app/e2e/journeys/app-locale.spec.ts` (J4 tile visuals, J5 canvas pivots, J6 / J6b / J7 model slicers and page
+filters, J11 the live switch), **15/15 on 2026-10-17** against the owner's AdventureWorks, its header sabotages each
+failing their step (J9's and J11's on the right target: the object pane's own number box, and the in-window
+announcement -- open-items §2.al). GETPIVOTDATA on a model pivot names the member KEY, Decimal ones with their scale
+("2.2900000000"), and still reads a formula written with the shorter spelling (BUG-0539).
+
+The round-1 canvas journeys pass again under sv-SE (2026-10-17, proof group 3): object-pane-format 26/26,
+canvas-pick-cells 15/15, canvas-page-navigator 12/12, fixall-canvas 36/36, canvas 11/11, fixall-pivot 59/59,
+chart-interaction 15/15, fixall-calp 39/39, moving-objects 23/23, selected-object-keys 9/9. Pivot auto-fit
+now measures CHARACTERS (BUG-0541). It counted bytes, so an sv-SE grouped number (U+00A0) fitted wide and pushed
+a canvas pivot box's last column out of reach. The harness updates for the round-2 contracts (app-locale text,
+P3's floating-grid Copy, Q8's single blank member) are listed in open-items §2.al.
+
+The last proof group (2026-10-17, group 4) found the older suites unchanged by round 2 on the same binary, all on
+their first run: functional charts 3/3, pivot 8/8, scriptable-shapes 40/40, scriptable-objects 26/26 (one
+long-standing fixme), animation 9/9; invariant state-consistency 2/2; journeys owner-followups 4/4,
+fixall-lifecycle 23/23, live-parity-proofs 10/10, reload-integrity 7/7, zz-persisted-residue 2/2.
+
+### 16.4 Filters, cross-filter and Edit interactions
+
+Owner findings G2-B ("a ribbon filter moves the PivotTable but not the chart beside it") and G4 ("clicking a bar
+should filter the other visuals, as in Power BI, and I want Edit interactions"), package P4; what is left open and
+the owner questions are in open-items §2.al `#### P4`.
+
+**One resolver.** Every model visual on a canvas asks ONE question of `@api/reportFilters`
+(`app/src/api/reportFilters/`, which replaced `@api/pageFilters`): `resolveFiltersFor(pageSheetId, {ref,
+canHighlight}, connectionId, options?)`, answering `{ filters, tupleFilters, highlights, sources }`. Its rules, in
+order, live in `resolve.ts` and nowhere else:
+
+1. **Published filters** (model slicers, ribbon filters) are kept when the connection matches and the scope reaches
+   the target: `page` / `pages` by sheet id, `all` always, `visuals` when the target is listed. A filter that has a
+   canvas object behind it (a model slicer's `sourceRef`) is then put through the page's interactions: `none` drops
+   it, anything else keeps it as a filter (a slicer never highlights). A filter never reaches its own source object.
+   `include: "visualSelectionsOnly"` skips this rule: pivot boxes and slicers take published filters through their
+   own backend route.
+2. **Visual selections** on the same page and connection: the target's OWN selection is dropped; the pair's mode
+   decides the rest (`none` drops, `highlight` on a target that cannot highlight becomes `filter`). A RECTANGULAR
+   selection (the tuple set is the cross product of its fields' keys; one field always is) becomes one per-column
+   IN filter per field; any other becomes ONE tuple (OR-of-AND) filter. Each lands in `filters` / `tupleFilters` or
+   in `highlights`.
+3. **Defaults (Power BI's):** an explicit pair wins; otherwise a slicer source filters; otherwise a visual source
+   uses the page's `defaultMode ?? "highlight"`, forced to `filter` when the target cannot highlight. A default is
+   never `none`.
+4. **Stable order** (publisher, source, field), so a query built from the answer is the same text every time and
+   the engine's `query_cache` stays warm. **Change events** fire only when something resolvable moved, per
+   (sheet id or `*`, connection) plus the named targets.
+
+Everything is keyed by SHEET ID and member KEY (P2's `MemberRef.key`, blank = `""`), never by index or label. The
+one persisted exception is a ribbon filter's `connected_sheets` (indices, remapped by Rust on every sheet move or
+delete); its publisher converts it to sheet ids at publish time (DC-4).
+
+**Who is a source, who is a target** (`@api/modelVisuals`, one provider per family; `@api/chartMarks`
+`chartMarkCrossFilter(mark)` for the marks):
+
+| Visual | Source | Target | Can highlight | How it is painted |
+|---|---|---|---|---|
+| Design-query bar / horizontal bar | yes (canvas, no transform) | yes | yes | the whole bar faded (alpha 0.4), then the highlighted portion |
+| Design-query pie / donut | yes | yes | yes | the slice faded, the highlighted share as an inner arc |
+| Design-query scatter / bubble | yes | yes | yes | non-matching points dimmed (alpha 0.25) |
+| Design-query line / area | yes | yes | no (filter or none) | filtered |
+| Card, Multi-row card, KPI, Gauge, other marks | no | yes | no | filtered (a mark that declares nothing fails closed to filter-only) |
+| BI PivotTable box on a canvas | yes (cells and headers) | yes | no | the paint-only filtered view (below) |
+| Model slicer | yes (through its published filter) | yes | no | items without data dimmed or hidden, per the slicer's setting |
+| `[Measure]` binding | -- | follows its object | -- | the object's own override |
+| Range chart, range pivot, table slicer | no | no | -- | a disabled None reading "Reads cells, not the model" |
+
+A PivotChart follows its PivotTable, not the model. Timeline slicers are not interaction sources (they publish no
+model filter).
+
+**The click grammar** (outside Design Mode, on a canvas; `Charts/handlers/crossFilterClick.ts` header,
+`Pivot/lib/pivotCrossFilterClick.ts` the same grammar for a pivot cell). A press acts on RELEASE over the same datum
+or cell; a drag never cross-filters.
+
+| Gesture | Effect |
+|---|---|
+| Click a datum or legend entry | REPLACES every selection on the page with this source's one tuple (selections on other pages are kept) |
+| Click the sole selected datum | clears this source |
+| Ctrl+click | toggles the tuple within this source and keeps every other source (AND) |
+| Click the plot background / margin | clears this source -- armed only while the chart HAS a selection; otherwise the background is frame and the chart moves |
+| Click the empty page | clears the page's selections (not with Shift or Ctrl, not in Edit interactions) |
+| Escape | ends Edit interactions; else deselects; else clears the page's selections |
+| A datum with no member path (a grand total, a composed or transformed chart, a scroll-fetched pivot window) | nothing, logged once |
+
+A datum's identity is its category's member path plus its series' path (`ParsedChartData.categoryMembers` /
+`seriesMembers`, built by `Charts/lib/chartMemberPaths.ts` from the response's `groupMembers`); on a pie the slice IS
+its category. The press first selects the chart at OBJECT level and keeps the insight cue on that datum (DC-8): the
+series / point ladder levels of these charts are reached in Design Mode only. A chart with a `select:"point"` param
+keeps its own click entirely.
+
+**The paint-only pivot view.** A canvas BI pivot under another visual's selection PAINTS a filtered view and
+changes nothing else: its cells, its hidden grid and every `GETPIVOTDATA` / `=Canvas1!B5` reading it never move.
+The view comes from `run_bi_pivot_filtered_view` (`pivot/headless.rs` `bi_pivot_filtered_view`), which rebuilds the
+pivot's request on a TRANSIENT definition with the pivot's own slicer filters and pins, adds the other visuals'
+selections, and is never handed the document or the undo stack (it cannot dirty or record). While filtered the box
+shows the badge "Filtered by <sources>"; every gesture that would act on the real pivot through a displayed cell
+(+/-, filter buttons, header filters, double-click drill, the field filter menu) is refused with "Filtered by
+<source> -- clear the selection to change this PivotTable here"; the context menu offers Copy (the shown text) and
+"Clear visual selection". A shape the design query cannot reproduce (hierarchies, a calculation group, LOOKUP
+columns, a windowed grid) is refused with a sentence in the badge ("Not filtered by <source>: <reason>") and the
+pivot keeps its own grid -- never an approximation. Which consumers read the displayed view and which the real
+one is the census in `Pivot/lib/__tests__/pivotFilteredViewConsumers.test.ts`.
+
+**Ribbon filters on every visual.** A ribbon filter publishes ONCE, with a scope, and design-query charts, Cards,
+KPIs, Gauges and `[Measure]` bindings consume it beside the pivots' proven backend route
+(`ControlsPane/lib/filterReportPublisher.ts`). The connection modes read "Selected visuals" (pivots in the
+persisted `connected_pivots`, the other visuals in `connected_visuals`, shown as one checklist), "Selected pages"
+and "All pages" ("Filters every PivotTable, chart, card, KPI and gauge built on this model, on every page,
+including ones added later."). An advanced (condition) filter is applied as the member keys it selects, so it
+reaches charts too.
+
+**Lifetime.** Selections are view state: no undo step, no dirty flag, never saved. They survive page switches in
+the session; they are cleared on File > New / Open, when their source is deleted (once the backend accepted the
+delete; a refused delete keeps them), and when their members vanish. Clear All Slicers does NOT clear them.
+
+**Edit interactions.** Canvas > Arrange > Edit interactions (the hero beside Lock; enabled with exactly one
+selected visual that can be a source, on a canvas that is not subscribed) puts a Filter / Highlight / None strip on every other visual of the page
+(`CanvasSheet/lib/interactionOverlay.tsx`, `components/InteractionIcons.tsx`). Selecting another source while the
+mode is on makes it the source. A target that cannot highlight shows no Highlight; a visual that cannot follow
+shows a disabled None with its reason. A change is ONE undo step ("Change visual interaction") through
+`set_canvas_layout`; the UI writes only non-default pairs. The mode ends on Escape, the toggle, a sheet switch,
+File New / Open, or deleting the source.
+
+**Storage.** `CanvasLayout.interactions { defaultMode?, pairs: [{source, target, mode}] }`
+(`core/persistence/src/lib.rs` `CanvasInteractions`; sanitized on load, refused when duplicated on edit; kinds
+chart / pivot / slicer). A pair naming a deleted object is inert, comes back alive on undo of the delete, and is
+dropped at SAVE (`persistence::prune_dead_visual_refs_for_save`, also for a ribbon filter's `connected_visuals`) --
+never pruned eagerly (DC-2). Manifest feature ids `canvas_interactions` and `ribbon_filter_visual_targets`; no
+format-version link (but see DC-1). A model slicer -> BI pivot pair moving to or from None is applied by RUST
+inside `set_canvas_layout`'s own step (now async; `sheets::refold_after_interaction_change`): the pivot is
+re-folded, a dropped connection is refused before any write, and a later failure rolls back the layout and every
+pivot already re-folded (DC-9). Scripts set the pairs through `api.setCanvasLayout({interactions})` (replaced
+whole) and read or set selections through `api.getCrossFilters` / `api.setCrossFilter` / `api.clearCrossFilters`;
+MCP reads them in `get_sheet_summary` and writes them through `set_object_property` on `canvasPage`
+`/interactions` (a literal, never a binding).
+
+**How it reaches the engine.** Rectangular selections travel as IN filters; a non-rectangular Ctrl selection as
+the engine's tuple filter (`model-engine-lib` `ScopedTupleFilter`, with per-measure CLEAR semantics; a compound
+measure under a tuple is refused loudly, never answered unfiltered). The Rust binding mirror is keyed by sheet id
+and carries per-object overrides, so a Card under a `none` pair and its neighbour under the selection read
+different numbers from one pass. A model slicer's items are dimmed by `get_slicer_items`' optional
+`visualConstraints`.
+
+**The decisions on record (spec DC-1..DC-9).** DC-1 interactions are a feature id, not a version link (owner
+question: slicer -> pivot None is a lie case for an older reader); DC-2 dangling pairs are inert and dropped at
+save; DC-3 pivots stay in `connected_pivots`, other visuals in `connected_visuals`; DC-4 sheet ids at runtime, the
+persisted index list kept; DC-5 `interactions` is settable from scripts (`zOrder` / `locked` stay read-only); DC-6
+MCP through the literal path, no new tool; DC-7 P2's `MemberRef` and `member_key_of` are the one key spelling; DC-8
+a datum click outside Design Mode selects the chart, keeps the cue and cross-filters; DC-9 Rust applies the
+slicer -> pivot None on every door.
+
+**Where the proofs are.** Engine: `model-engine-lib/crates/engine/src/tuple_filter_tests.rs`. Format:
+`core/calcula-format/src/zip_io.rs` (`canvas_interactions_*`, `ribbon_filter_visual_targets_*`),
+`core/calcula-format/src/features/ribbon_filter_tests.rs`, `core/persistence/src/lib.rs` (`retain_live_*`). App crate:
+`pivot/design_query_tuple_tests.rs`, `pivot/filtered_view_tests.rs`, `object_bindings/measures_tests.rs`,
+`object_bindings/page_overrides_tests.rs`, `slicer/canvas_interactions_refold_tests.rs`,
+`commands/canvas_sheet_tests.rs`. TypeScript: `app/src/api/__tests__/reportFilters.resolve.test.ts`,
+`reportFilters.lifecycle.test.ts`, `modelVisuals.test.ts`, `objectBindings.bridge.test.ts`; Charts
+`crossHighlightPaint.test.ts` (plus its pre-change snapshot), `chartMarkCrossFilterDeclarations.test.ts`,
+`designQueryCrossFilter.test.ts`, `chartMemberPaths.test.ts`, `chartZoneAtCrossFilter.test.ts`,
+`crossFilterClick.test.ts`, `chartCrossFilterRelease.test.ts`; Pivot `pivotCrossFilterView.test.ts`,
+`pivotCrossFilterClick.test.ts`, `pivotFilteredViewConsumers.test.ts`; ControlsPane `filterReportPublisher.test.ts`;
+CanvasSheet `editInteractions.test.ts`, `crossFilterClears.test.ts`; scripts `crossFilterScriptRows.test.ts`. Live:
+`app/e2e/journeys/canvas-crossfilter.spec.ts`, **11/11 on 2026-10-17** against the owner's AdventureWorks, sabotages
+SB1-SB10 each failing a step (SB1, SB4 and SB8 only after the journey gained the checks that can see them: a source
+is never HIGHLIGHTED by itself, the box must not PAINT the real Grand Total under a selection, and the reopen runs
+over a workbook that holds a selection -- open-items §2.al). On the owner's model the share K2 is a GVAR measure the
+engine answers under a tuple filter, so the refusal of a CLEARing measure is proved by `design_query_tuple_tests.rs`
+alone. A reopened model pivot box shows "Grand Total 0" until its first refresh (an empty cache by design; filed as
+an owner call in §2.al).

@@ -23,6 +23,28 @@ import { normaliseBlock } from "@api/selectionBlocks";
 export type FillDirection = "down" | "right" | "up" | "left";
 
 /**
+ * What the Fill menu's greying reads: the selection the fill ACTS on and the
+ * extent it can go to. A selection owner (a floating grid's cells) answers
+ * with its OWN selection and its own window (`bounds`); Core's selection is
+ * then hidden and says nothing about the act. "refused": the owner refuses
+ * the fill -- the rows stay enabled so the command can say why, once.
+ */
+export function fillSourceView(
+  target:
+    | { kind: "grid"; selection: Selection | null }
+    | { kind: "object"; selection: Selection; bounds: { rows: number; cols: number } }
+    | { refusal: string },
+  gridSelection: Selection | null | undefined,
+  config: { totalRows: number; totalCols: number },
+): { selection: Selection | null | undefined; totalRows: number; totalCols: number } | "refused" {
+  if ("refusal" in target) return "refused";
+  if (target.kind === "object") {
+    return { selection: target.selection, totalRows: target.bounds.rows, totalCols: target.bounds.cols };
+  }
+  return { selection: gridSelection, totalRows: config.totalRows, totalCols: config.totalCols };
+}
+
+/**
  * Whether Fill <direction> has something to copy over the selection's MAIN
  * range (the one range Core's fill acts on).
  *

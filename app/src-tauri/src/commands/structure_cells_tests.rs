@@ -739,6 +739,7 @@ fn conditional_formats_and_validations_are_cut_and_undone() {
         &fx.state,
         &fx.file,
         AddCFParams {
+            target: None,
             rule: ConditionalFormatRule::CellValue(CellValueRule {
                 operator: CellValueOperator::GreaterThan,
                 value1: "2".to_string(),

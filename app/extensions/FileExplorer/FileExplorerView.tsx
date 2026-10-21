@@ -4,6 +4,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import type { ActivityViewProps } from "@api/uiTypes";
+import { formatNumber } from "@api/locale";
 import {
   getSheets,
   getAllNamedRanges,
@@ -308,8 +309,8 @@ function isPreviewable(ext: string): boolean {
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1048576).toFixed(1)} MB`;
+  if (bytes < 1048576) return `${formatNumber(bytes / 1024, { decimals: 1 })} KB`;
+  return `${formatNumber(bytes / 1048576, { decimals: 1 })} MB`;
 }
 
 // ============================================================================

@@ -72,10 +72,11 @@
 //          own: it would be empty for every element -- the exact dead-member
 //          defect CI-7 removed from the hit taxonomy.
 
-import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useReducer, useState } from "react";
 import { css } from "@emotion/css";
 import { AppEvents, emitAppEvent, onAppEvent } from "@api/events";
 import { DialogSection } from "@api/dialogLayout";
+import { NumberInput } from "@api/layout";
 import {
   getChartSelection,
   onChartSelectionChanged,
@@ -123,7 +124,7 @@ import {
   type FormatCardProps,
 } from "@api/objectFormat";
 import { chartRegionOf } from "../lib/chartObjectPane";
-import { chartIdOfFormatRegion } from "../lib/chartObjectFormat";
+import { chartIdOfFormatRegion, resolveChartContainer } from "../lib/chartObjectFormat";
 import { getCachedChartData, invalidateChartCache } from "../rendering/chartRenderer";
 import {
   markOffersPerPointFormatting,
@@ -150,6 +151,8 @@ import { getErrorBarOptions, withErrorBarOptions } from "../rendering/errorBarPa
 import { getCurrentChartId, getSubSelection, setSubSelection } from "../handlers/selectionHandler";
 import { ChartEvents } from "../lib/chartEvents";
 import { resolveChartTheme } from "../rendering/chartTheme";
+import { solidBackgroundPatch } from "@api/visualContainer";
+import { useNativeColorPick } from "../../_shared/components/colorPick";
 
 // ============================================================================
 // Publishing the selection into @api/chartSelection
@@ -1176,16 +1179,22 @@ function ColorField({
    */
   onPreview?: (hex: string) => void;
 }): React.ReactElement {
+  // The OS picker: every `input` step only PREVIEWS (when the field
+  // previews at all), and its native `change` COMMITS once -- one undo step
+  // per pick, never one per drag step (round 2, G1). The shared hook compares
+  // the pick against the colour stored when the pick started, because the
+  // preview rewrites `chart.spec` -- and so `value` -- while it drags.
+  const picker = useNativeColorPick({
+    value: value ?? "",
+    fallback,
+    onStep: onPreview,
+    onCommit: onChange,
+    onEnd: onPreview !== undefined ? onEndPreview : undefined,
+  });
   return (
     <>
       <Row label={label}>
-        <input
-          type="color"
-          aria-label={label}
-          className={s.color}
-          value={value ?? fallback}
-          onChange={(e) => onChange(e.target.value)}
-        />
+        <input {...picker} aria-label={label} className={s.color} />
         <span style={{ flex: 1, color: "var(--text-secondary, #888)", fontSize: 11 }}>
           {value ?? "Automatic"}
         </span>
@@ -1303,9 +1312,10 @@ function CheckField({
 /**
  * A numeric field whose EMPTY string means "auto" rather than zero.
  *
- * Local state is required: a controlled input fed straight from the spec cannot
- * hold "-" or "1." while the reader is still typing, and `parseFloat("")` is
- * NaN, which would commit a bound of `null` on every keystroke of a number.
+ * The @api/layout NumberInput keeps the draft ("-" or "1," while the reader is
+ * still typing) and reads it in the APP locale (P2): "1,5" under de-DE is 1.5,
+ * and the foreign "1.5" there commits nothing rather than a misread bound.
+ * Blank commits null (auto).
  */
 function NumberField({
   label,
@@ -1318,32 +1328,14 @@ function NumberField({
   placeholder?: string;
   onCommit: (next: number | null) => void;
 }): React.ReactElement {
-  const [draft, setDraft] = useState(value == null ? "" : String(value));
-  const lastExternal = useRef(value);
-  if (lastExternal.current !== value) {
-    lastExternal.current = value;
-    const incoming = value == null ? "" : String(value);
-    if (incoming !== draft && parseFloat(draft) !== value) setDraft(incoming);
-  }
-
   return (
     <Row label={label}>
-      <input
-        type="text"
+      <NumberInput
         aria-label={label}
         className={s.input}
-        value={draft}
+        value={value ?? null}
         placeholder={placeholder ?? "Auto"}
-        onChange={(e) => {
-          const next = e.target.value;
-          setDraft(next);
-          if (next.trim() === "") {
-            onCommit(null);
-            return;
-          }
-          const parsed = parseFloat(next);
-          if (!Number.isNaN(parsed)) onCommit(parsed);
-        }}
+        onChange={onCommit}
       />
     </Row>
   );
@@ -2025,13 +2017,16 @@ function LegendSections({
 
 function PlotAreaSections({ chartId }: { chartId: string }): React.ReactElement {
   const chart = getChartById(chartId);
-  const theme = resolveChartTheme(chart?.spec.config);
+  // The plot area paints NOTHING by default (Power BI): the visual container's
+  // background shows through it, so that is the colour the swatch shows while
+  // the plot has no fill of its own.
+  const theme = resolveChartTheme(chart?.spec.config, chart ? resolveChartContainer(chartId, chart.spec) : null);
   return (
     <DialogSection title="Plot area fill">
       <ColorField
         label="Background"
-        value={chart?.spec.config?.theme?.plotBackground}
-        fallback={theme.plotBackground}
+        value={chart?.spec.config?.theme?.plotBackground || undefined}
+        fallback={theme.plotBackground || theme.background}
         onChange={(hex) => commitThemePatch(chartId, { plotBackground: hex })}
         onClear={() => commitThemePatch(chartId, { plotBackground: undefined })}
         onPreview={(hex) => previewThemePatch(chartId, { plotBackground: hex })}
@@ -2048,7 +2043,10 @@ function ChartAreaSections({
   tab: ChartFormatTabId;
 }): React.ReactElement {
   const chart = getChartById(chartId);
-  const theme = resolveChartTheme(chart?.spec.config);
+  // Resolved WITH the container, so the swatch's fallback is the colour the
+  // chart area actually paints (it used to resolve without one and always
+  // showed #ffffff).
+  const theme = resolveChartTheme(chart?.spec.config, chart ? resolveChartContainer(chartId, chart.spec) : null);
 
   if (tab === "text") {
     return (
@@ -2071,7 +2069,11 @@ function ChartAreaSections({
 
   // THE CHART AREA'S BACKGROUND IS THE VISUAL CONTAINER'S (D-FORMAT): the same
   // fact the Format tab's Effects card edits, written through the same seam --
-  // one spelling, one undo label, whichever control the reader used.
+  // one spelling, one undo label, whichever control the reader used. A pick is
+  // a SOLID background commit (@api solidBackgroundPatch): it clears a stored
+  // gradient and switches the background on, as the Format tab does. The patch
+  // is diffed against the STORED spec -- the card's preview has already put
+  // the picked colour into `chart.spec` by the time the pick commits.
   const region = chartRegionOf(chartId);
   const stored = chart?.spec.container?.background?.color;
   return (
@@ -2081,7 +2083,13 @@ function ChartAreaSections({
         value={stored === "" ? undefined : stored}
         fallback={theme.background}
         onChange={(hex) => {
-          if (region) void commitObjectFormat([{ region, patch: { background: { color: hex } } }]);
+          if (!region) return;
+          const storedSpec = getPreviewBaseSpec(chartId) ?? chart?.spec;
+          const patch = solidBackgroundPatch(hex, {
+            stored: storedSpec?.container,
+            resolved: storedSpec ? resolveChartContainer(chartId, storedSpec) : undefined,
+          });
+          void commitObjectFormat([{ region, patch }]);
         }}
         onClear={() => {
           if (region) void commitObjectFormat([{ region, patch: { background: { color: null } } }]);

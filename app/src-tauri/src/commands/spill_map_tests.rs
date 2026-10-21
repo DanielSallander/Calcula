@@ -1074,10 +1074,14 @@ fn every_command_that_cannot_carry_an_array_refuses_one() {
 
     for (source, command) in [
         (DATA_RS, "sort_range"),
-        (DATA_RS, "sort_range_off_sheet"),
+        // P3 S4: the off-sheet body is the `_at` twin (the public name is a
+        // wrapper); fill and merge on a floating grid ask too.
+        (DATA_RS, "sort_range_off_sheet_at"),
         (DATA_RS, "fill_range"),
+        (DATA_RS, "fill_range_on_target"),
         (MERGE_RS, "merge_cells_core"),
         (MERGE_RS, "merge_cells_off_sheet"),
+        (MERGE_RS, "merge_cells_on_target"),
     ] {
         let body = body_of(source, command);
         assert!(
@@ -1299,7 +1303,8 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         // and adjust_number_format_decimals through write_range_style_plan.
         ("commands/styles.rs", "write_style_delta", "style_index only — no formula is removed, so no range is orphaned"),
         ("commands/styles.rs", "set_cell_style", "style_index only"),
-        ("commands/styles.rs", "set_cell_rich_text", "rich-text runs only"),
+        ("commands/styles.rs", "set_cell_rich_text_core", "rich-text runs only (the body of set_cell_rich_text; P3 split it out so tests drive it)"),
+        ("cell_target.rs", "set_backing_style", "style_index only -- no formula is removed (update_cells_batch_on_target refuses spilled cells first)"),
         ("commands/styles.rs", "write_range_style_plan", "style_index and row/column style tiers only"),
         ("protection.rs", "set_cell_protection", "lock/hidden flags only"),
         ("named_styles_cmd.rs", "apply_named_style_impl", "style_index only"),
@@ -1460,7 +1465,7 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
     for (file, func) in [
         ("commands/data.rs", "clear_range"),
         ("commands/data.rs", "clear_range_with_options"),
-        ("commands/data.rs", "clear_range_with_options_off_sheet"),
+        ("commands/data.rs", "clear_range_with_options_off_sheet_at"),
         ("commands/data.rs", "clear_range_on_sheets"),
         ("commands/data.rs", "clear_cell"),
         ("commands/data.rs", "sort_range"),
@@ -1662,7 +1667,7 @@ fn every_release_policy_call_site_actually_releases_the_spill() {
     for expected in [
         "clear_range",
         "clear_range_with_options",
-        "clear_range_with_options_off_sheet",
+        "clear_range_with_options_off_sheet_at",
         "clear_range_on_sheets",
     ] {
         assert!(

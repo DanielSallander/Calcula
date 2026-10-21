@@ -679,8 +679,8 @@ test.describe("Object property bindings (D-BIND), live", () => {
       expect(overlaps, `precondition: the slicer still covers the Card (${JSON.stringify(moved)} vs ${JSON.stringify(card)})`).toBe(false);
     }
     await eventually(
-      () => callModule<Array<{ value: string }> | undefined>(page, MOD.SLICER_STORE, "getCachedItems", [slicerId]),
-      (it) => (it ?? []).some((x) => x.value === EUROPE),
+      () => callModule<Array<{ key: string }> | undefined>(page, MOD.SLICER_STORE, "getCachedItems", [slicerId]),
+      (it) => (it ?? []).some((x) => x.key === EUROPE),
       `the model slicer does not list ${EUROPE}`,
       30_000,
     );
@@ -770,8 +770,9 @@ test.describe("Object property bindings (D-BIND), live", () => {
     await invoke(page, "save_file", { path: FILE_CLEAN });
     await eventually(() => isDirty(page), (d) => d === false, "precondition: the document is not clean after Save");
     const depth = (await undoInfo(page)).undoDepth;
-    const europeSnapshot = await callModule<Array<{ sheetIndex: number; connectionId: string; filters: unknown[] }>>(page, BRIDGE, "pageFiltersSnapshot");
-    expect(europeSnapshot.some((p) => p.sheetIndex === reportIndex), `precondition: the live page-filter snapshot holds the canvas: ${JSON.stringify(europeSnapshot)}`).toBe(true);
+    const reportSheetId = ((await sheetsResult(page)).sheets[reportIndex] as SheetRow).sheetId;
+    const europeSnapshot = await callModule<Array<{ sheetId: string; connectionId: string; filters: unknown[] }>>(page, BRIDGE, "pageFiltersSnapshot");
+    expect(europeSnapshot.some((p) => p.sheetId === reportSheetId), `precondition: the live page-filter snapshot holds the canvas (by sheet id): ${JSON.stringify(europeSnapshot)}`).toBe(true);
     const titleNow = async () => (await backendBinding(page, cardRef(), "/spec/title"))?.resolved?.display ?? "";
     const stillClean = async (op: string) => {
       expect(await isDirty(page), `${op} dirtied the document`).toBe(false);

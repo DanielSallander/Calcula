@@ -1121,6 +1121,72 @@ function DesignMode({ size }: RibbonIconProps): React.ReactElement {
 }
 
 // ============================================================================
+// Edit interactions (P4, 2026-10-17): Power BI's Format > Edit interactions
+// and the three buttons it puts on every other visual of the page.
+// ============================================================================
+
+/** Edit interactions (Arrange hero): one visual reaching another. A STRONG
+ *  source visual top-left (2.4..10.8, rx 1.6), a SOFT target visual
+ *  bottom-right (13.2..21.6), and the ACCENT elbow arrow from the source's
+ *  right to the target's top: a 2.4 run on the pixel grid (y 6, then x 18)
+ *  ending in a head whose tip stops 1.2 short of the target. The arrow's
+ *  round cap starts 2.4 clear of the source. No transform. */
+function EditInteractions({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <rect x="2.4" y="2.4" width="8.4" height="8.4" rx="1.6" fill={STRONG} />
+      <rect x="13.2" y="13.2" width="8.4" height="8.4" rx="1.6" fill={SOFT} />
+      <path d="M14.4 6H18V9.6" {...line(ACCENT, PIXEL_STROKE)} />
+      <path d="M14.4 9.6H21.6L18 12Z" fill={ACCENT} />
+    </IconFrame>
+  );
+}
+
+/** Interaction: Filter -- the target shows ONLY what the source selects. A
+ *  SOFT funnel head (2.4..21.6 at the top, narrowing to 9.6..14.4 at y 10.8)
+ *  and, 1.2 below it, the two ACCENT columns that pass through. Unlike Filter
+ *  (a whole funnel with an accent stem) the subject is the columns that are
+ *  left. */
+function InteractionFilter({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <path d="M3.6 2.4H20.4A1.2 1.2 0 0 1 21.3 4.4L14.4 10.8H9.6L2.7 4.4A1.2 1.2 0 0 1 3.6 2.4Z" fill={SOFT} />
+      <rect x="6" y="14.4" width="4.8" height="7.2" rx="1.4" fill={ACCENT} />
+      <rect x="13.2" y="12" width="4.8" height="9.6" rx="1.4" fill={ACCENT} />
+    </IconFrame>
+  );
+}
+
+/** Interaction: Highlight -- the target shows everything, the selected part
+ *  emphasised: three columns whose upper part stays SOFT and whose lower part
+ *  is ACCENT, 1.2 apart, exactly how a highlighted bar is painted (the faded
+ *  whole, then the highlighted portion). */
+function InteractionHighlight({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <rect x="2.4" y="4.8" width="4.8" height="6" rx="1.4" fill={SOFT} />
+      <rect x="2.4" y="12" width="4.8" height="9.6" rx="1.4" fill={ACCENT} />
+      <rect x="9.6" y="2.4" width="4.8" height="10.8" rx="1.4" fill={SOFT} />
+      <rect x="9.6" y="14.4" width="4.8" height="7.2" rx="1.4" fill={ACCENT} />
+      <rect x="16.8" y="7.2" width="4.8" height="8.4" rx="1.4" fill={SOFT} />
+      <rect x="16.8" y="16.8" width="4.8" height="4.8" rx="1.4" fill={ACCENT} />
+    </IconFrame>
+  );
+}
+
+/** Interaction: None -- the source does not affect the target: Power BI's
+ *  circle with a slash, one STRONG channel (a 2.6 ring of radius 8.4 and the
+ *  slash across it). No accent: nothing is selected through. */
+function InteractionNone({ size }: RibbonIconProps): React.ReactElement {
+  return (
+    <IconFrame size={size}>
+      <circle cx="12" cy="12" r="8.4" {...line(STRONG, 2.6)} />
+      <path d="M6.06 17.94L17.94 6.06" {...line(STRONG, 2.6)} />
+    </IconFrame>
+  );
+}
+
+// ============================================================================
 // Group export
 // ============================================================================
 
@@ -1194,6 +1260,11 @@ export const GENERIC_ICONS = {
   ShowGrid,
   LockObjects,
   DesignMode,
+  // ---- Edit interactions (P4, 2026-10-17) ----------------------------------
+  EditInteractions,
+  InteractionFilter,
+  InteractionHighlight,
+  InteractionNone,
 } as const;
 /* eslint-enable @typescript-eslint/naming-convention */
 

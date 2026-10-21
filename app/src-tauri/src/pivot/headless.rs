@@ -31,7 +31,7 @@ use crate::pivot::types::{
     BiPivotModelInfo, BiValueFieldRef, CalculatedFieldDef, LayoutConfig,
     PivotViewResponse, ValueColumnRefDef,
 };
-use crate::pivot::utils::{apply_layout_config, view_to_response};
+use crate::pivot::utils::{apply_layout_config, fill_group_members, view_to_response};
 
 /// Return the BI model (tables / columns / measures / hierarchies / calc groups)
 /// for a connection, in the same `BiPivotModelInfo` shape a pivot exposes. Used
@@ -100,7 +100,7 @@ pub struct DesignQueryFieldRef {
     pub included_items: Option<Vec<String>>,
     /// The FILTER LEVEL an engine-routed filter applies at: 1 (absent) is an
     /// ordinary slicer, which a bare `CLEAR`/`RESET` removes; 2..=9 is a
-    /// slicer PINNED above that range (`@api/pageFilters` carries it as
+    /// slicer PINNED above that range (`@api/reportFilters` carries it as
     /// `filterLevel`). Clamped to the engine's range. Only a filter that runs
     /// inside the engine query reads it -- a host-masked filter has no level.
     #[serde(default)]
@@ -123,6 +123,33 @@ impl DesignQueryFieldRef {
     }
 }
 
+/// One column of a [`DesignQueryTupleFilter`]: a model column named by its
+/// table. Mirrored by the `fields` entries of `DesignQueryTupleFilter` in
+/// `app/extensions/_shared/dsl/pivotLayout/designQuery.ts`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesignQueryColumn {
+    pub table: String,
+    pub column: String,
+}
+
+/// An OR-of-AND filter (P4: a NON-rectangular cross-filter selection made on
+/// another visual): keep a row whose `fields` equal, column by column, one of
+/// the `tuples`. `tuples[i][j]` is the member KEY of `fields[j]` -- "" is the
+/// blank member (ruling Q8). An EMPTY `tuples` keeps nothing. It always runs
+/// INSIDE the engine query (`bi_engine::ScopedTupleFilter`), at `level`
+/// (absent = 1, an ordinary slicer). Mirrored by `DesignQueryTupleFilter` in
+/// `app/extensions/_shared/dsl/pivotLayout/designQuery.ts`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesignQueryTupleFilter {
+    pub fields: Vec<DesignQueryColumn>,
+    #[serde(default)]
+    pub tuples: Vec<Vec<String>>,
+    #[serde(default)]
+    pub level: Option<u8>,
+}
+
 /// A compiled design-query spec. Mirrors the field-assignment subset of
 /// `UpdateBiPivotFieldsRequest` but carries a `connectionId` (there is no pivot).
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -138,13 +165,19 @@ pub struct DesignQueryRequest {
     pub value_fields: Vec<BiValueFieldRef>,
     #[serde(default)]
     pub filter_fields: Vec<DesignQueryFieldRef>,
-    /// The canvas PAGE's model filters (`@api/pageFilters`, merged by the
+    /// The canvas PAGE's model filters (`@api/reportFilters`, merged by the
     /// chart reader), kept apart from the query's own FILTERS: they always run
     /// INSIDE the engine query -- never a GROUP BY column, never a report's
     /// filter area -- so a non-additive measure under a slicer that keeps
     /// several items is the model's exact answer on every path.
     #[serde(default)]
     pub page_filter_fields: Vec<DesignQueryFieldRef>,
+    /// The tuple (OR-of-AND) filters of a non-rectangular cross-filter
+    /// selection (P4). Like `page_filter_fields` they run INSIDE the engine
+    /// query; unlike them they have no host-mask fallback, so an engine
+    /// refusal under one is an error, never an unfiltered answer.
+    #[serde(default)]
+    pub tuple_filters: Vec<DesignQueryTupleFilter>,
     #[serde(default)]
     pub calculated_fields: Option<Vec<CalculatedFieldDef>>,
     #[serde(default)]
@@ -162,7 +195,7 @@ pub struct DesignQueryRequest {
 /// AVERAGE bar read avg(East) + avg(West), a DISTINCTCOUNT double-counted, and
 /// a high-cardinality slicer column (Customer) multiplied the result just to
 /// roll it back up. Once page slicers reached grouped charts
-/// (`@api/pageFilters`), every click on a canvas produced such numbers.
+/// (`@api/reportFilters`), every click on a canvas produced such numbers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FiltersRoute {
     /// A CHART (`run_design_query`): the filters run inside the engine query
@@ -178,11 +211,157 @@ pub(crate) enum FiltersRoute {
 /// Execute a design query headlessly and return the resulting pivot view.
 #[tauri::command]
 pub async fn run_design_query(
+    state: State<'_, crate::AppState>,
     bi_state: State<'_, BiState>,
     request: DesignQueryRequest,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text and member labels (leaf lock:
+    // taken, cloned and dropped before anything else).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     let (def, mut cache, view) = compute_design_query_view(&bi_state, &request).await?;
-    Ok(view_to_response(&view, &def, &mut cache))
+    let mut response = view_to_response(&view, &def, &mut cache, &display_locale);
+    fill_group_members(&mut response, &design_query_field_keys(&def), &cache);
+    Ok(response)
+}
+
+/// The `field_keys` of a design-query view: every placed field, which
+/// [`apply_design_query_zones`] named "Table.Column" on its own cache column
+/// (a design query places no calculation group and no synthetic field).
+pub(crate) fn design_query_field_keys(def: &pivot_engine::PivotDefinition) -> Vec<(usize, String)> {
+    crate::pivot::utils::placed_field_keys(def, |_| true)
+}
+
+/// What `run_bi_pivot_filtered_view` is asked (P4): a BI pivot, and the
+/// selection made on OTHER visuals of its page that the pivot must show --
+/// engine-routed field filters and tuple (OR-of-AND) filters.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BiPivotFilteredViewRequest {
+    pub pivot_id: pivot_engine::PivotId,
+    #[serde(default)]
+    pub page_filter_fields: Vec<DesignQueryFieldRef>,
+    #[serde(default)]
+    pub tuple_filters: Vec<DesignQueryTupleFilter>,
+}
+
+/// The refusal of a pivot whose grid needs more rows than one response sends.
+pub(crate) const FILTERED_VIEW_WINDOWED_REFUSAL: &str =
+    "This PivotTable uses more rows than one screen holds, which a visual's selection cannot filter yet.";
+
+/// A PAINT-ONLY view of a BI pivot under a selection made on another visual
+/// (P4 cross-filter): the pivot's own query -- rebuilt from its stored
+/// definition exactly as a refresh rebuilds it, with its slicer filters and
+/// its pinned (level 2-9) engine filters -- plus the selection, run as a
+/// headless design query. It WRITES NOTHING: no pivot store, no cells, no
+/// undo step, no dirty flag. The response names the REAL pivot and its
+/// version for staleness pairing only; its `group_path`s index a TRANSIENT
+/// cache, so the frontend keeps it out of the pivot view store and never
+/// hands one to a command that acts on the real pivot.
+#[tauri::command]
+pub async fn run_bi_pivot_filtered_view(
+    state: State<'_, crate::AppState>,
+    bi_state: State<'_, BiState>,
+    pivot_state: State<'_, crate::pivot::types::PivotState>,
+    request: BiPivotFilteredViewRequest,
+) -> Result<PivotViewResponse, String> {
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
+    bi_pivot_filtered_view(&bi_state, &pivot_state, &request, &display_locale).await
+}
+
+/// The body of [`run_bi_pivot_filtered_view`], over plain references.
+pub(crate) async fn bi_pivot_filtered_view(
+    bi_state: &BiState,
+    pivot_state: &crate::pivot::types::PivotState,
+    request: &BiPivotFilteredViewRequest,
+    display_locale: &engine::LocaleSettings,
+) -> Result<PivotViewResponse, String> {
+    let pivot_id = request.pivot_id;
+    // Lock order as `refresh_bi_pivot_unrecorded`: pivot_tables, then
+    // bi_metadata -- both READ, cloned, released before any engine work.
+    let (real_def, bi_request, connection_id) = {
+        let pivot_tables = pivot_state.pivot_tables.read().map_err(|e| e.to_string())?;
+        let (definition, cache) =
+            pivot_tables.get(&pivot_id).ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+        let bi_meta = pivot_state.bi_metadata.read().map_err(|e| e.to_string())?;
+        let meta = bi_meta.get(&pivot_id).ok_or_else(|| format!("Pivot {} is not a BI-backed pivot", pivot_id))?;
+        let bi_request = crate::pivot::commands::bi_request_from_definition(pivot_id, definition, cache, meta);
+        (definition.clone(), bi_request, meta.connection_id)
+    };
+
+    let mut query =
+        crate::pivot::commands::design_query_from_bi_pivot(&bi_request, connection_id, &real_def.engine_filters)?;
+    query.page_filter_fields.extend(request.page_filter_fields.iter().cloned());
+    query.tuple_filters = request.tuple_filters.clone();
+
+    let (mut def, mut cache, mut view) = compute_design_query_view_for_report(bi_state, &query).await?;
+    // The real pivot's value formats. A format the pivot ADOPTED from the
+    // model is left out of the rebuilt request (only a user override rides
+    // it), and nothing on the design-query path re-adopts it -- so without
+    // this a cross-filter repainted every value cell in General.
+    let formats_changed = carry_value_formats(&mut def, &real_def);
+    if !(def.row_fields.is_empty() && def.column_fields.is_empty()) {
+        // The real pivot's LOOK: its layout and each field's display settings
+        // (sort, subtotals, collapsed members, grouping), by field name. The
+        // rebuilt request carries none of them ("keep current layout").
+        carry_display_settings(&mut def, &real_def);
+        view = safe_calculate_pivot(&def, &mut cache);
+    } else if formats_changed {
+        view = safe_calculate_pivot(&def, &mut cache);
+    }
+    let mut response = view_to_response(&view, &def, &mut cache, display_locale);
+    if response.is_windowed {
+        return Err(FILTERED_VIEW_WINDOWED_REFUSAL.to_string());
+    }
+    fill_group_members(&mut response, &design_query_field_keys(&def), &cache);
+    response.pivot_id = pivot_id;
+    response.version = real_def.version;
+    Ok(response)
+}
+
+/// Copy each value field's EFFECTIVE number format (a user override, or one
+/// adopted from the model) from `real` onto the transient `def`, matched by
+/// measure name and calculation item. Returns whether anything changed.
+fn carry_value_formats(def: &mut pivot_engine::PivotDefinition, real: &pivot_engine::PivotDefinition) -> bool {
+    let mut changed = false;
+    for vf in def.value_fields.iter_mut() {
+        let Some(old) = real.value_fields.iter().find(|o| o.name == vf.name && o.calc_item == vf.calc_item) else {
+            continue;
+        };
+        if vf.number_format != old.number_format || vf.number_format_from_model != old.number_format_from_model {
+            vf.number_format = old.number_format.clone();
+            vf.number_format_from_model = old.number_format_from_model;
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Copy `real`'s layout and its fields' display settings onto the transient
+/// definition `def` of the same pivot, matched by field name. Each field
+/// keeps its own cache column and hidden items (those are the query's).
+fn carry_display_settings(def: &mut pivot_engine::PivotDefinition, real: &pivot_engine::PivotDefinition) {
+    def.layout = real.layout.clone();
+    let real_fields: Vec<&pivot_engine::PivotField> = real
+        .row_fields
+        .iter()
+        .chain(real.column_fields.iter())
+        .chain(real.filter_fields.iter().map(|f| &f.field))
+        .collect();
+    let transient = def
+        .row_fields
+        .iter_mut()
+        .chain(def.column_fields.iter_mut())
+        .chain(def.filter_fields.iter_mut().map(|f| &mut f.field));
+    for field in transient {
+        let Some(old) = real_fields.iter().find(|o| o.name == field.name) else { continue };
+        field.sort_order = old.sort_order;
+        field.show_subtotals = old.show_subtotals;
+        field.collapsed = old.collapsed;
+        field.collapsed_items = old.collapsed_items.clone();
+        field.show_all_items = old.show_all_items;
+        field.grouping = old.grouping.clone();
+        field.number_format = old.number_format.clone();
+    }
 }
 
 /// Compile + run a design query for a CHART and compute its pivot view --
@@ -290,6 +469,7 @@ async fn compute_design_query_view_routed(
     if every_field().any(|f| f.is_lookup) {
         return Err("LOOKUP columns are not supported in design queries yet.".to_string());
     }
+    validate_tuple_filters(request)?;
 
     // A MEASURE-ONLY query (no ROWS, no COLUMNS) is a Card / Gauge / KPI read
     // straight from the model, as Power BI's are (CONTRACT-CANVAS 4.8): ONE
@@ -304,6 +484,13 @@ async fn compute_design_query_view_routed(
         .collect();
 
     match compute_once(bi_state, request, &engine_fields, group_own_filters).await {
+        // A tuple filter has no host-mask spelling: the mask route can only
+        // hide whole items of one column, and dropping the tuple would answer
+        // UNFILTERED while the reader believes the selection applies. The
+        // visual shows this as its error state instead (BUG-0444 class).
+        Err(QueryFailure::ContestedClear(refusal)) if !request.tuple_filters.is_empty() => {
+            Err(tuple_refusal_message(&refusal))
+        }
         Err(QueryFailure::ContestedClear(refusal)) if !engine_fields.is_empty() => {
             // The HOST-MASK ROUTE: every filter becomes a GROUP BY column the
             // pivot then masks, the engine evaluates with no request filter,
@@ -318,6 +505,44 @@ async fn compute_design_query_view_routed(
         }
         other => other.map_err(QueryFailure::message),
     }
+}
+
+/// The error a visual shows when the engine refuses to evaluate it under a
+/// selection made on ANOTHER visual that only a tuple filter can say.
+pub(crate) fn tuple_refusal_message(refusal: &str) -> String {
+    format!("This visual cannot apply the selection from another visual here: {}", refusal)
+}
+
+/// The tuple filters' own refusals, before any engine work: a column on a
+/// calculation group (a pseudo table, not a model column) or on a LOOKUP
+/// placement (resolved after aggregation, so it cannot narrow the rows).
+/// Malformed tuples (wrong length, no columns, a column named twice) are the
+/// engine's to refuse -- it owns the one rule for them.
+fn validate_tuple_filters(request: &DesignQueryRequest) -> Result<(), String> {
+    let lookup = |c: &DesignQueryColumn| {
+        request
+            .row_fields
+            .iter()
+            .chain(request.column_fields.iter())
+            .chain(request.filter_fields.iter())
+            .chain(request.page_filter_fields.iter())
+            .any(|f| f.is_lookup && f.table == c.table && f.column == c.column)
+    };
+    for column in request.tuple_filters.iter().flat_map(|t| t.fields.iter()) {
+        if column.table == crate::pivot::types::CALC_GROUP_TABLE {
+            return Err(format!(
+                "A selection cannot filter by the calculation group '{}'. Select a model column instead.",
+                column.column
+            ));
+        }
+        if lookup(column) {
+            return Err(format!(
+                "A selection cannot filter by the LOOKUP column {}.{}.",
+                column.table, column.column
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// `request` with every engine-routed filter folded into the query's own
@@ -411,6 +636,11 @@ async fn compute_once(
             referenced_tables.push(f.table.clone());
         }
     }
+    for c in request.tuple_filters.iter().flat_map(|t| t.fields.iter()) {
+        if !referenced_tables.contains(&c.table) {
+            referenced_tables.push(c.table.clone());
+        }
+    }
     // Add each measure's home table (usually the fact table) so it is warmed too.
     {
         let engine = engine_arc.lock().await;
@@ -461,11 +691,13 @@ async fn compute_once(
         .map(|f| bi_engine::ColumnRef::new(&f.table, &f.column))
         .collect();
     let scoped_in_filters = engine_filters(bi_state, &engine_arc, connection_id, engine_fields).await?;
+    let scoped_tuple_filters = engine_tuple_filters(&engine_arc, &request.tuple_filters).await;
     let query_request = bi_engine::QueryRequest {
         measures: query_measures.clone(),
         group_by: query_group_by,
         filters: vec![],
         scoped_in_filters,
+        scoped_tuple_filters,
         ..Default::default()
     };
 
@@ -611,11 +843,15 @@ fn blank_measures_without_data(
 /// Items match EXACTLY, the pivot path's rule (`apply_design_query_zones`).
 fn measure_only_kept_items(field: &DesignQueryFieldRef, all_values: Option<&[String]>) -> Option<Vec<String>> {
     let hidden = field.hidden();
+    // The blank member is ONE member under either spelling (its key "" or the
+    // header text "(blank)", ruling Q8): hiding one spelling hides it.
+    let is_hidden = |v: &String| {
+        hidden.contains(v)
+            || (pivot_engine::is_blank_member_key(v) && hidden.iter().any(|h| pivot_engine::is_blank_member_key(h)))
+    };
     match (&field.included_items, all_values) {
-        (Some(included), _) => Some(included.iter().filter(|i| !hidden.contains(i)).cloned().collect()),
-        (None, Some(all)) if !hidden.is_empty() => {
-            Some(all.iter().filter(|v| !hidden.contains(v)).cloned().collect())
-        }
+        (Some(included), _) => Some(included.iter().filter(|i| !is_hidden(i)).cloned().collect()),
+        (None, Some(all)) if !hidden.is_empty() => Some(all.iter().filter(|v| !is_hidden(v)).cloned().collect()),
         _ => None,
     }
 }
@@ -630,15 +866,18 @@ fn measure_only_kept_items(field: &DesignQueryFieldRef, all_values: Option<&[Str
 /// ordinary slicer click on a float column answered BLANK, with no error,
 /// while a bar chart on the same page (host labels) kept working. A float item
 /// is therefore re-spelled through `f64`'s round-trip form. The blank member
-/// and anything that is not a number stay as written.
+/// -- its key "" or the legacy "(blank)" -- is spelled the way the engine's
+/// IN-list reads it (`bi::member::engine_in_value`, ruling Q8), and anything
+/// that is not a number stays as written.
 fn engine_spelling(data_type: Option<&bi_engine::DataType>, item: &str) -> String {
+    if pivot_engine::is_blank_member_key(item) {
+        return crate::bi::member::engine_in_value(item);
+    }
     match data_type {
-        Some(bi_engine::DataType::Float64) if !pivot_engine::is_blank_item_label(item) => {
-            match item.trim().parse::<f64>() {
-                Ok(v) if v.is_finite() => format!("{:?}", v),
-                _ => item.to_string(),
-            }
-        }
+        Some(bi_engine::DataType::Float64) => match item.trim().parse::<f64>() {
+            Ok(v) if v.is_finite() => format!("{:?}", v),
+            _ => item.to_string(),
+        },
         _ => item.to_string(),
     }
 }
@@ -692,6 +931,59 @@ async fn engine_filters(
     Ok(out)
 }
 
+/// A design query's tuple filters as the engine's level-tagged
+/// `ScopedTupleFilter`s. Each key is re-spelled for its column's type exactly
+/// as an IN-list item is ([`engine_spelling`]): a float key "2024" becomes
+/// "2024.0", and the blank member's key "" becomes `BLANK_MEMBER_LABEL` --
+/// a raw "" would match only empty-string rows, never NULL. Level: the
+/// filter's own, clamped to the engine's range, else `LEVEL_SLICER`. The
+/// tuples keep their order (the engine's query cache keys on it).
+async fn engine_tuple_filters(
+    engine_arc: &std::sync::Arc<tokio::sync::Mutex<bi_engine::Engine>>,
+    filters: &[DesignQueryTupleFilter],
+) -> Vec<bi_engine::ScopedTupleFilter> {
+    if filters.is_empty() {
+        return Vec::new();
+    }
+    let engine = engine_arc.lock().await;
+    let data_type_of = |c: &DesignQueryColumn| {
+        engine
+            .model()
+            .table(&c.table)
+            .ok()
+            .and_then(|t| t.column(&c.column).ok())
+            .map(|col| col.data_type().clone())
+    };
+    filters
+        .iter()
+        .map(|filter| {
+            let types: Vec<Option<bi_engine::DataType>> = filter.fields.iter().map(data_type_of).collect();
+            bi_engine::ScopedTupleFilter {
+                columns: filter
+                    .fields
+                    .iter()
+                    .map(|c| bi_engine::TupleColumn::new(c.table.clone(), c.column.clone()))
+                    .collect(),
+                tuples: filter
+                    .tuples
+                    .iter()
+                    .map(|tuple| {
+                        tuple
+                            .iter()
+                            .enumerate()
+                            .map(|(j, key)| engine_spelling(types.get(j).and_then(|t| t.as_ref()), key))
+                            .collect()
+                    })
+                    .collect(),
+                level: filter
+                    .level
+                    .map(|l| l.clamp(bi_engine::LEVEL_SLICER, bi_engine::LEVEL_MAX))
+                    .unwrap_or(bi_engine::LEVEL_SLICER),
+            }
+        })
+        .collect()
+}
+
 /// The query's ROWS, COLUMNS and -- when `place_filters` (they were grouped)
 /// -- FILTERS as the transient definition's fields, each on its cache column
 /// (`field_to_cache_idx`), each with every item filter the query says:
@@ -721,8 +1013,15 @@ pub(crate) fn apply_design_query_zones(
         let mut field = pivot_engine::PivotField::new(idx, format!("{}.{}", f.table, f.column));
         field.hidden_items = f.hidden().to_vec();
         if let Some(ref included) = f.included_items {
-            for (_value_id, label) in cache.get_unique_values_for_filter(idx) {
-                if !included.contains(&label) && !field.hidden_items.contains(&label) {
+            // An inclusion names a member by its KEY (what every member list,
+            // slicer, page filter and cross-filter tuple hands out) -- which
+            // for a decimal is "5.50" where the display spelling below is
+            // "5.5" -- so compare on both, or the selected member is hidden.
+            let field_cache = cache.fields.get(idx);
+            for (value_id, label) in cache.get_unique_values_for_filter(idx) {
+                let key = field_cache.map(|fc| fc.member_key(value_id));
+                let is_included = included.contains(&label) || key.as_ref().is_some_and(|k| included.contains(k));
+                if !is_included && !field.hidden_items.contains(&label) {
                     field.hidden_items.push(label);
                 }
             }
@@ -730,7 +1029,7 @@ pub(crate) fn apply_design_query_zones(
             // interned, so the item list above never shows one, and
             // `Region = ("East")` kept every row whose Region was blank (a
             // NULL member) in each total.
-            let names_blank = included.iter().any(|l| pivot_engine::is_blank_item_label(l));
+            let names_blank = included.iter().any(|l| pivot_engine::is_blank_member_key(l));
             if !names_blank && cache.has_blank_values(idx) {
                 field.hidden_items.push(pivot_engine::BLANK_ITEM_LABEL.to_string());
             }
@@ -758,6 +1057,16 @@ pub(crate) fn apply_design_query_zones(
 #[cfg(test)]
 #[path = "design_query_measure_only_tests.rs"]
 mod design_query_measure_only_tests;
+
+/// P4 S4b: tuple filters through design queries, and `group_members`.
+#[cfg(test)]
+#[path = "design_query_tuple_tests.rs"]
+mod design_query_tuple_tests;
+
+/// P4 S4b: the paint-only BI pivot view (`run_bi_pivot_filtered_view`).
+#[cfg(test)]
+#[path = "filtered_view_tests.rs"]
+mod filtered_view_tests;
 
 #[cfg(test)]
 mod design_query_filter_tests {
@@ -804,6 +1113,7 @@ mod design_query_filter_tests {
             value_fields: Vec::new(),
             filter_fields: filters,
             page_filter_fields: Vec::new(),
+            tuple_filters: Vec::new(),
             calculated_fields: None,
             value_column_order: None,
             layout: None,
@@ -838,6 +1148,51 @@ mod design_query_filter_tests {
             "an inclusion filter ran unfiltered"
         );
         assert_eq!(def.row_fields[0].source_index, 1, "fixture: Year is the result's second column");
+    }
+
+    /// A Decimal(_, 2) column: every member list, slicer, page filter and
+    /// cross-filter names a member by its KEY "5.50", where the cache's
+    /// display spelling is "5.5". The inclusion `Price = ("5.50")` must keep
+    /// 5.50 and hide the rest -- it used to hide exactly the member named.
+    #[test]
+    fn an_inclusion_of_a_decimal_member_key_keeps_that_member() {
+        let mut grid = engine::grid::Grid::new();
+        let rows: [[&str; 2]; 5] = [["Price", "Revenue"], ["5.5", "10"], ["10", "20"], ["5.5", "30"], ["7.25", "40"]];
+        for (r, row) in rows.iter().enumerate() {
+            for (c, v) in row.iter().enumerate() {
+                let cell = match v.parse::<f64>() {
+                    Ok(n) if r > 0 => engine::Cell::new_number(n),
+                    _ => engine::Cell::new_text(v.to_string()),
+                };
+                grid.set_cell(r as u32, c as u32, cell);
+            }
+        }
+        let mut cache = crate::pivot::operations::build_cache_from_grid(&grid, (0, 0), (4, 1), true).expect("the cache").0;
+        cache.fields[0].member_kind = pivot_engine::MemberKind::Decimal { scale: 2 };
+        assert!(
+            cache.get_unique_values_for_filter(0).iter().any(|(id, label)| label == "5.5" && cache.fields[0].member_key(*id) == "5.50"),
+            "fixture: the display spelling and the key differ"
+        );
+        let mut price = fref("Sales", "Price");
+        price.included_items = Some(vec!["5.50".to_string()]);
+        let columns = HashMap::from([(("Sales".to_string(), "Price".to_string()), 0)]);
+        let mut def = pivot_engine::PivotDefinition::new(identity::EntityId::ZERO, (0, 0), (0, 0));
+
+        apply_design_query_zones(&mut def, &request(Vec::new(), vec![price]), &columns, &cache, true);
+
+        assert_eq!(
+            sorted(def.filter_fields[0].field.hidden_items.clone()),
+            vec!["10".to_string(), "7.25".to_string()],
+            "the inclusion hid the member it named"
+        );
+        def.value_fields
+            .push(pivot_engine::ValueField::new(1, "Revenue".to_string(), pivot_engine::AggregationType::Sum));
+        let view = safe_calculate_pivot(&def, &mut cache);
+        let total = view.cells.iter().flatten().find_map(|c| match (c.cell_type, &c.value) {
+            (pivot_engine::PivotCellType::GrandTotal, pivot_engine::PivotCellValue::Number(n)) => Some(*n),
+            _ => None,
+        });
+        assert_eq!(total, Some(40.0), "Price = 5.50 totals 10 + 30");
     }
 
     /// `ROWS: Geo.Region NOT IN ("West")` hides West on the ROW field.

@@ -17,12 +17,14 @@ export interface CsvExportOptions {
 
 /**
  * Create default CSV export options.
- * If a locale decimal separator is provided, the default delimiter is adjusted:
- * locales using ',' as decimal get ';' as CSV delimiter.
+ * The default delimiter is the app locale's LIST separator (pass
+ * `listSeparator()` from `@api/locale`): "," in en-US, ";" in de-DE and
+ * sv-SE -- the same character Excel's "CSV" uses in that region, and the one
+ * a decimal-comma locale needs so "1,5" stays one field. No separator = ",".
  */
-export function createDefaultExportOptions(localeDecimalSeparator?: string): CsvExportOptions {
+export function createDefaultExportOptions(listSeparator?: string): CsvExportOptions {
   return {
-    delimiter: localeDecimalSeparator === "," ? ";" : ",",
+    delimiter: listSeparator ? listSeparator : ",",
     textQualifier: '"',
     lineEnding: "\r\n",
   };

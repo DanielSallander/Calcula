@@ -1,6 +1,16 @@
 //! FILENAME: app/extensions/BuiltIn/FormatPainter/formatPainterLogic.ts
 // PURPOSE: Core logic for the Format Painter tool: capture source styles, apply to target.
 // CONTEXT: Called by the extension entry point. Uses the public API only (no deep core imports).
+//
+// ON A FLOATING GRID'S CELLS (P3, owner finding G3): the SOURCE may be a
+// floating grid's selected cells -- read through its styled read
+// (`getCellTargetCells`), never Core's hidden cell under it -- and the painter
+// then paints onto sheet cells as usual. Painting INTO a floating grid's cells
+// is refused with one sentence and the painter stays armed: a stroke assigns
+// the source's style INDEX to each destination cell, and no style-index write
+// takes a target yet (the backend's set_cell_style acts on the active sheet;
+// BUG-0513). A move of the floating grid's own
+// selection (`onCellTargetChanged`) is a stroke attempt like a sheet click.
 
 import type { Selection } from "@api/types";
 import {
@@ -37,7 +47,18 @@ import {
 } from "./formatPainterState";
 import { alertAsync } from "@api/dialogs";
 import { ownUndoTransaction, type OwnedUndoTransaction, type UndoTransactionCloses } from "@api/undoTicket";
-import { refuseIfSelectionOwned } from "@api/selectionOwner";
+import {
+  cellTargetFor,
+  getCellTargetCells,
+  onCellTargetChanged,
+  resolveCellTarget,
+  targetRefOf,
+  type CellTargetRef,
+} from "@api/cellTarget";
+
+/** The sentence a stroke into a floating grid's cells is refused with. */
+export const PAINT_INTO_FLOATING_GRID_REFUSAL =
+  "Format Painter cannot paint into a floating grid's cells yet. Click a sheet cell to paint there. Nothing was changed.";
 
 /** A stroke's closes, read when the close runs (see ownUndoTransaction). */
 const UNDO_CLOSES: UndoTransactionCloses = {
@@ -60,7 +81,8 @@ const PAINTBRUSH_CURSOR_SVG = `url("data:image/svg+xml,%3Csvg xmlns='http://www.
  * Returns a Map of "relRow,relCol" -> styleIndex.
  */
 export async function captureSourceFormat(
-  selection: Selection
+  selection: Selection,
+  target?: CellTargetRef,
 ): Promise<{ styles: Map<string, number>; width: number; height: number }> {
   const minRow = Math.min(selection.startRow, selection.endRow);
   const maxRow = Math.max(selection.startRow, selection.endRow);
@@ -70,6 +92,19 @@ export async function captureSourceFormat(
   const width = maxCol - minCol + 1;
   const height = maxRow - minRow + 1;
   const styles = new Map<string, number>();
+
+  if (target) {
+    // A floating grid's cells: ONE styled read of the rectangle. A cell the
+    // read does not return stores nothing, so it carries the default style.
+    const read = await getCellTargetCells(target, { startRow: minRow, startCol: minCol, endRow: maxRow, endCol: maxCol });
+    const byCell = new Map(read.cells.map((cell) => [`${cell.row},${cell.col}`, cell.styleIndex] as const));
+    for (let r = minRow; r <= maxRow; r++) {
+      for (let c = minCol; c <= maxCol; c++) {
+        styles.set(`${r - minRow},${c - minCol}`, byCell.get(`${r},${c}`) ?? 0);
+      }
+    }
+    return { styles, width, height };
+  }
 
   for (let r = minRow; r <= maxRow; r++) {
     for (let c = minCol; c <= maxCol; c++) {
@@ -98,11 +133,16 @@ export async function captureSourceFormat(
 export async function applyFormatToTarget(target: Selection): Promise<void> {
   if (!isFormatPainterActive()) return;
 
-  // The target is Core's selection. If something else holds the selection
-  // (BUG-0185: a floating grid's selected cell, Core's selection HIDDEN under
-  // it) the paint would land on a cell the user cannot see: refused, once, and
-  // the painter stays armed for a real target.
-  if (refuseIfSelectionOwned("Format Painter")) return;
+  // Where the stroke lands. Core's selection on the sheet; an owner that does
+  // not admit formatting refuses once (BUG-0185: Core's selection is HIDDEN
+  // under it); a floating grid's cells have no style-index write (see the
+  // header) -- refused, once. Either way the painter stays armed.
+  const place = resolveCellTarget("Format Painter", "format");
+  if (place === null) return;
+  if (place.kind === "object") {
+    void alertAsync(PAINT_INTO_FLOATING_GRID_REFUSAL);
+    return;
+  }
 
   const sourceStyles = getSourceStyles();
   const { width: srcW, height: srcH } = getSourceDimensions();
@@ -222,16 +262,19 @@ export async function activateFormatPainter(
     return;
   }
 
+  // The SOURCE: Core's selection, or a floating grid's selected cells (P3),
+  // read through its target. An owner that admits no read refuses, once
+  // (BUG-0185: Core's selection is hidden under it). Every door (Ctrl+Shift+C,
+  // the ribbon, the Edit menu, Format Painter Lock) comes through here, and
+  // turning the painter OFF (above) is never refused.
+  const sourcePlace = resolveCellTarget("Format Painter", "read");
+  if (sourcePlace === null) return;
+  const sourceTarget = targetRefOf(sourcePlace);
+  if (sourcePlace.kind === "object") currentSelection = sourcePlace.selection;
   if (!currentSelection) {
     console.warn("[FormatPainter] No selection to capture format from.");
     return;
   }
-
-  // The SOURCE is Core's selection -- a cell hidden under a floating grid
-  // while that grid's cell is selected (BUG-0185). Every door (Ctrl+Shift+C,
-  // the ribbon, the Edit menu, Format Painter Lock) comes through here, and
-  // turning the painter OFF (above) is never refused.
-  if (refuseIfSelectionOwned("Format Painter")) return;
 
   console.log(
     `[FormatPainter] Activating (${persistent ? "persistent" : "single-use"})`,
@@ -244,7 +287,7 @@ export async function activateFormatPainter(
   beginFormatPainterStart(persistent);
   let capture: Awaited<ReturnType<typeof captureSourceFormat>>;
   try {
-    capture = await captureSourceFormat(currentSelection);
+    capture = await captureSourceFormat(currentSelection, sourceTarget);
   } catch (err) {
     finishFormatPainterStart();
     throw err;
@@ -259,8 +302,10 @@ export async function activateFormatPainter(
   // 2. Update state
   setFormatPainterActive(true, start.persistent, currentSelection, styles, width, height);
 
-  // 3. Show marching ants around source
-  dispatchGridAction(setClipboard("copy", { ...currentSelection }));
+  // 3. Show marching ants around source -- a SHEET source only: Core's ants
+  //    are drawn on the active sheet, where a floating grid's coordinates
+  //    would outline the host's cells under the grid.
+  if (!sourceTarget) dispatchGridAction(setClipboard("copy", { ...currentSelection }));
 
   // 4. Change cursor to paintbrush
   setCursorPaintbrush();
@@ -285,7 +330,10 @@ export async function activateFormatPainter(
   // restates the SOURCE range is not a target: painting a range onto itself
   // changes nothing, and re-renders can re-announce an unchanged selection.
   const source = { ...currentSelection };
+  // A floating grid's source range is not a SHEET range: no Core selection
+  // restates it.
   const isSourceRange = (s: Selection): boolean =>
+    !sourceTarget &&
     s.startRow === source.startRow &&
     s.startCol === source.startCol &&
     s.endRow === source.endRow &&
@@ -313,6 +361,26 @@ export async function activateFormatPainter(
   };
   window.addEventListener("mouseup", handleMouseUp);
   addCleanup(() => window.removeEventListener("mouseup", handleMouseUp));
+
+  // A floating grid's OWN selection moved (P3): a stroke attempt on its cells,
+  // like a click on a sheet cell. Core's selection does not move there, so the
+  // listener above never hears it.
+  const unsubTarget = onCellTargetChanged(() => {
+    if (!isFormatPainterActive()) return;
+    const moved = cellTargetFor("format", "Format Painter");
+    if ("refusal" in moved || moved.kind !== "object") return;
+    // A notification that restates the floating-grid SOURCE is not a stroke.
+    const restatesSource =
+      sourceTarget !== undefined &&
+      moved.ref.id === sourceTarget.id &&
+      moved.selection.startRow === source.startRow &&
+      moved.selection.startCol === source.startCol &&
+      moved.selection.endRow === source.endRow &&
+      moved.selection.endCol === source.endCol;
+    if (restatesSource) return;
+    void applyFormatToTarget(moved.selection);
+  });
+  addCleanup(unsubTarget);
 
   // 6. Register edit guard to block editing while painter is active
   const unsubEditGuard = registerEditGuard(async () => {

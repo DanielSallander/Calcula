@@ -6,7 +6,7 @@
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { CoreCommands } from "@api/commands";
 import { DialogExtensions } from "@api/ui";
-import { refuseIfSelectionOwned } from "@api/selectionOwner";
+import { resolveCellTarget } from "@api/cellTarget";
 import { FormatCellsDialog } from "./FormatCellsDialog";
 
 // ============================================================================
@@ -60,13 +60,16 @@ function activate(context: ExtensionContext): void {
   // Register the FORMAT_CELLS command. Every door to the dialog (Ctrl+1, the
   // Format menu, the ribbon's Format Cells button AND its "More Number
   // Formats..." / "More Fill Options..." rows, the grid's context menu) comes
-  // through here, and the dialog formats Core's selection -- so while something
-  // else owns the selection (BUG-0185) it does not open at all. The two "More"
+  // through here. It asks WHICH cells (P3): Core's selection, or a floating
+  // grid's own cells when its owner admits "format" -- the dialog then seeds
+  // from and writes to those (FormatCellsDialog.tsx, lib/formatCellsWrites.ts).
+  // While an owner that does not admit it holds the selection (BUG-0185) it
+  // does not open at all. The two "More"
   // rows opened the dialog directly, past this check, until the review of
   // BUG-0185; they now pass `{ tab }`, which opens it on that tab, and
   // optionally `{ category }` for the Number tab's category list.
   context.commands.register(CoreCommands.FORMAT_CELLS, (args?: unknown) => {
-    if (refuseIfSelectionOwned("Format Cells")) return;
+    if (resolveCellTarget("Format Cells", "format") === null) return;
     const view = requestedView(args);
     if (view === null) DialogExtensions.openDialog("format-cells");
     else DialogExtensions.openDialog("format-cells", view);

@@ -27,6 +27,19 @@ import {
 import { BindableField } from "../../_shared/components/bindings";
 import { getBinding, isBindablePath, type ObjectBindingRef } from "@api/objectBindings";
 import { controlPropertyPointer } from "../lib/controlBindings";
+import { NumberInput } from "@api/layout";
+
+/**
+ * A number property's STORED literal (invariant wire text, "0.5") as a number,
+ * or null when it is blank or not a number. Never user text: what the user
+ * types goes through NumberInput, which reads the app locale and hands back a
+ * number that is stored as `String(n)` again.
+ */
+function storedNumber(literal: string): number | null {
+  if (literal.trim() === "") return null;
+  const n = Number(literal);
+  return Number.isFinite(n) ? n : null;
+}
 
 // ============================================================================
 // Styles (theme-aware via CSS variables)
@@ -329,7 +342,7 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
         if (definition.min !== undefined && definition.max !== undefined) {
           return (
             <SliderInput
-              value={parseFloat(localValue) || 0}
+              value={storedNumber(localValue) ?? 0}
               min={definition.min}
               max={definition.max}
               step={definition.step ?? 1}
@@ -343,14 +356,14 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
           );
         }
         return (
-          <input
-            type="number"
+          // Typed and shown in the APP locale; the literal stays invariant.
+          <NumberInput
             style={{
               ...inputStyle,
               ...(inputFocused ? inputFocusStyle : {}),
             }}
-            value={localValue}
-            onChange={handleInputChange}
+            value={storedNumber(localValue)}
+            onChange={(n) => setLocalValue(n === null ? "" : String(n))}
             onBlur={handleInputBlur}
             onFocus={() => setInputFocused(true)}
             onKeyDown={handleKeyDown}

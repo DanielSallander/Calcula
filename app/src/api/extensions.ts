@@ -151,7 +151,12 @@ export interface GridContextMenuItem {
  * src/api/__tests__/gridCommandDrift.test.ts.
  */
 export type { GridCommand, CommandGuard } from "../core/lib/gridCommands";
+// The resolved cell target a grid command handler receives (P3).
+export type { GridCommandContext } from "../core/lib/gridCommands";
+// GRID_COMMAND_CAPABILITY (P3): the kind of cell act each grid command is, as
+// resolveCellTarget asks it (@api/cellTarget).
 export { GRID_COMMANDS } from "../core/lib/gridCommands";
+export { GRID_COMMAND_CAPABILITY } from "../core/lib/gridCommands";
 
 // ============================================================================
 // Sheet Context Types

@@ -251,6 +251,8 @@ pub(crate) fn create_floating_range_inner(
             show_column_headers: true,
             show_row_headers: true,
             container: None,
+            hidden_rows: Vec::new(),
+            hidden_cols: Vec::new(),
         };
         state
             .floating_ranges
@@ -305,7 +307,7 @@ pub fn update_floating_range(
     id: identity::EntityId,
     patch: FloatingRangePatch,
 ) -> Result<FloatingRangeInfo, String> {
-    update_floating_range_inner(&state, &file_state, id, patch)
+    update_floating_range_inner(&state, &file_state, id, patch, PatchGate::ObjectEdit)
 }
 
 /// Validate one whole override map. `None` (absent field) always passes — that
@@ -333,6 +335,54 @@ fn validate_size_map(
     Ok(())
 }
 
+/// Validate one whole hidden-line set (`FloatingRangePatch::hidden_rows` /
+/// `hidden_cols`): every index below `max_index_exclusive`, strictly
+/// ascending (so sorted AND deduplicated). `None` (absent field) passes.
+/// Refused as a whole, like the size maps: the stored set is the invariant
+/// `patched()` and the frontend's frame arithmetic rely on, and a caller that
+/// sent a bad one must hear about it rather than see it silently repaired.
+/// (The LOAD path repairs instead -- `saved_floating_range_to_row` -- because a
+/// file has no caller to tell.)
+pub(crate) fn validate_line_set(
+    set: Option<&Vec<u32>>,
+    field: &str,
+    max_index_exclusive: u32,
+) -> Result<(), String> {
+    let Some(set) = set else { return Ok(()) };
+    for (i, index) in set.iter().enumerate() {
+        if *index >= max_index_exclusive {
+            return Err(format!(
+                "{field} index {index} is out of range (0..{max_index_exclusive})"
+            ));
+        }
+        if i > 0 && set[i - 1] >= *index {
+            return Err(format!(
+                "{field} must be sorted ascending without duplicates (got {} then {index})",
+                set[i - 1]
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// WHICH permission governs a patch (P3 2.4).
+///
+/// * `ObjectEdit` -- every authoring act on the object (move, resize, the edge
+///   drag, chrome, container, the Object pane): the host's "Edit objects"
+///   option, today's behaviour.
+/// * `LineFormat` -- a row height / column width or a hidden set chosen from
+///   Home > Format on the floating grid's CELLS. In Excel's taxonomy that is a
+///   CELL-format act, governed by the host's "Format rows" / "Format columns"
+///   option (`host_option`), never by "Edit objects"; `what` names the act in
+///   the refusal ("hide floating grid rows", ...). Lock Objects still refuses a
+///   geometry change in BOTH modes: it is the page author's lock, not
+///   protection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PatchGate {
+    ObjectEdit,
+    LineFormat { host_option: &'static str, what: &'static str },
+}
+
 /// Refuse a geometry/window patch on a floating range whose HOST is a
 /// SUBSCRIBED CANVAS: a canvas pulled from a Collaboration application is the
 /// publisher's layout and is read-only until detached
@@ -355,7 +405,7 @@ fn validate_size_map(
 /// (`sheet_ids`, `sheet_names`, `subscriptions`), each released before it
 /// returns. Called holding nothing -- in particular NOT the row store, whose
 /// order against `subscriptions` no code path establishes.
-fn ensure_host_layout_editable(state: &AppState, row: &FloatingRange) -> Result<(), String> {
+pub(crate) fn ensure_host_layout_editable(state: &AppState, row: &FloatingRange) -> Result<(), String> {
     let host_index = sheet_index_of(state, row.host_sheet_id)
         .ok_or_else(|| "Floating range host sheet is missing".to_string())?;
     ensure_sheet_layout_editable(state, host_index)
@@ -395,17 +445,23 @@ fn ensure_sheet_layout_editable(state: &AppState, host_index: usize) -> Result<(
 /// with Design Mode off moved a range on a protected sheet whose charts refused
 /// the same drag. "editObjects" is an object-scope action
 /// (`CANVAS_OBJECT_SCOPE_ACTIONS`), so a canvas host is refused only when it is
-/// protected without that option. The CELLS keep their own per-cell gate
-/// (`update_cell_on_sheets_inner`), which is the backing sheet's, not this one.
+/// protected without that option. The CELLS are gated by the HOST too (P3,
+/// DECISIONS2: a protected host sheet protects its floating grids' cells):
+/// every door to them -- the in-cell editor, the Delete fallback, the script
+/// `floatingRangeSetCells` loop, and every Home command with a `target` --
+/// asks `cell_target::gate_target_cells`, which answers from the host's
+/// protection (its flag and options, never its allow-edit ranges, which name
+/// host coordinates) over the BACKING cells' lock flags. The backing sheet's
+/// own protection is never set.
 ///
 /// LOCK ORDER: `check_sheet_action` takes `sheet_kinds`/`sheet_protection` read
 /// guards and releases them; called holding nothing, before any effect.
-fn ensure_host_objects_editable(state: &AppState, host_index: usize, what: &str) -> Result<(), String> {
+pub(crate) fn ensure_host_objects_editable(state: &AppState, host_index: usize, what: &str) -> Result<(), String> {
     crate::protection::check_sheet_action(state, host_index, "editObjects", what)
 }
 
 /// The host sheet's CURRENT index for a row (the SheetId is the authority).
-fn host_index_of(state: &AppState, row: &FloatingRange) -> Result<usize, String> {
+pub(crate) fn host_index_of(state: &AppState, row: &FloatingRange) -> Result<usize, String> {
     sheet_index_of(state, row.host_sheet_id)
         .ok_or_else(|| "Floating range host sheet is missing".to_string())
 }
@@ -424,12 +480,15 @@ fn patchable_fields_differ(a: &FloatingRange, b: &FloatingRange) -> bool {
         || a.col_widths != b.col_widths
         || a.row_heights != b.row_heights
         || a.container != b.container
+        || a.hidden_rows != b.hidden_rows
+        || a.hidden_cols != b.hidden_cols
 }
 
 /// Whether two rows differ in POSITION or SIZE -- what a page's Lock Objects
 /// forbids (`CanvasLayout::objects_locked`): the origin, the window's row and
-/// column counts, and the cell sizes that make up the frame. The chrome flags
-/// are deliberately absent: hiding a title strip is formatting.
+/// column counts, the cell sizes that make up the frame, and the hidden line
+/// sets (a hidden row shrinks the frame exactly as a smaller window does). The
+/// chrome flags are deliberately absent: hiding a title strip is formatting.
 fn geometry_differs(a: &FloatingRange, b: &FloatingRange) -> bool {
     a.x != b.x
         || a.y != b.y
@@ -437,6 +496,57 @@ fn geometry_differs(a: &FloatingRange, b: &FloatingRange) -> bool {
         || a.col_count != b.col_count
         || a.col_widths != b.col_widths
         || a.row_heights != b.row_heights
+        || a.hidden_rows != b.hidden_rows
+        || a.hidden_cols != b.hidden_cols
+}
+
+/// The undo description of a LINE patch, or `None` for every other patch:
+///
+/// * only the hidden sets differ -> "Hide floating grid rows" / "Unhide
+///   floating grid rows" (rows first when both changed), or the columns
+///   equivalents. Hide when the new set is a superset of the old one.
+/// * under `PatchGate::LineFormat`, only the size maps differ -> "Row height"
+///   (only the heights changed) / "Column width" (only the widths). The
+///   edge-handle drag (`ObjectEdit`) keeps "Resize floating range cells".
+fn line_patch_description(
+    previous: &FloatingRange,
+    updated: &FloatingRange,
+    gate: PatchGate,
+) -> Option<&'static str> {
+    let mut only_hidden = previous.clone();
+    only_hidden.hidden_rows = updated.hidden_rows.clone();
+    only_hidden.hidden_cols = updated.hidden_cols.clone();
+    if !patchable_fields_differ(&only_hidden, updated) {
+        let hides = |old: &[u32], new: &[u32]| old.iter().all(|i| new.contains(i));
+        return Some(if previous.hidden_rows != updated.hidden_rows {
+            if hides(&previous.hidden_rows, &updated.hidden_rows) {
+                "Hide floating grid rows"
+            } else {
+                "Unhide floating grid rows"
+            }
+        } else if hides(&previous.hidden_cols, &updated.hidden_cols) {
+            "Hide floating grid columns"
+        } else {
+            "Unhide floating grid columns"
+        });
+    }
+    if !matches!(gate, PatchGate::LineFormat { .. }) {
+        return None;
+    }
+    let mut only_sizes = previous.clone();
+    only_sizes.row_heights = updated.row_heights.clone();
+    only_sizes.col_widths = updated.col_widths.clone();
+    if patchable_fields_differ(&only_sizes, updated) {
+        return None;
+    }
+    match (
+        previous.row_heights != updated.row_heights,
+        previous.col_widths != updated.col_widths,
+    ) {
+        (true, false) => Some("Row height"),
+        (false, true) => Some("Column width"),
+        _ => None,
+    }
 }
 
 /// Apply `patch` to a copy of `row` (absent fields are left alone).
@@ -474,6 +584,12 @@ fn patched(row: &FloatingRange, patch: &FloatingRangePatch) -> FloatingRange {
         // container is no container (no key on save).
         next.container = container.clone().filter(|c| !c.is_empty());
     }
+    if let Some(rows) = &patch.hidden_rows {
+        next.hidden_rows = rows.clone();
+    }
+    if let Some(cols) = &patch.hidden_cols {
+        next.hidden_cols = cols.clone();
+    }
     next
 }
 
@@ -482,6 +598,7 @@ pub(crate) fn update_floating_range_inner(
     file_state: &FileState,
     id: identity::EntityId,
     patch: FloatingRangePatch,
+    gate: PatchGate,
 ) -> Result<FloatingRangeInfo, String> {
     if let Some(x) = patch.x {
         if !x.is_finite() || x < 0.0 {
@@ -525,6 +642,8 @@ pub(crate) fn update_floating_range_inner(
         MIN_FLOATING_RANGE_ROW_H,
         MAX_FLOATING_RANGE_ROW_H,
     )?;
+    validate_line_set(patch.hidden_rows.as_ref(), "hiddenRows", MAX_FLOATING_RANGE_ROWS)?;
+    validate_line_set(patch.hidden_cols.as_ref(), "hiddenCols", MAX_FLOATING_RANGE_COLS)?;
     // The visual container (D-FORMAT) is validated like every other field:
     // before anything is decided, naming the bad leaf.
     if let Some(Some(container)) = &patch.container {
@@ -537,14 +656,31 @@ pub(crate) fn update_floating_range_inner(
     // clean as it was. (The lookup used to sit AFTER `DocumentEffect::mutates`,
     // so a stale id dirtied the document it then refused to change.) Then the
     // host's sheet protection: every patchable field -- position, window,
-    // cell sizes, chrome -- is an object edit.
+    // cell sizes, chrome -- is an object edit, EXCEPT a line format chosen on
+    // the cells (`PatchGate::LineFormat`), which the host's Format Rows /
+    // Format Columns option governs, answered through the host-protection view
+    // keyed by the backing sheet (`cell_target::gate_host_action`), so a canvas
+    // host -- which has no rows of its own -- is never asked about rows.
     let row = find_row(state, id)?;
     ensure_host_layout_editable(state, &row)?;
-    ensure_host_objects_editable(
-        state,
-        host_index_of(state, &row)?,
-        "move or resize a floating range",
-    )?;
+    match gate {
+        PatchGate::ObjectEdit => ensure_host_objects_editable(
+            state,
+            host_index_of(state, &row)?,
+            "move or resize a floating range",
+        )?,
+        PatchGate::LineFormat { host_option, what } => {
+            let backing_index = sheet_index_of(state, row.backing_sheet_id)
+                .ok_or_else(|| "Floating range backing sheet is missing".to_string())?;
+            crate::cell_target::gate_host_action(
+                state,
+                host_index_of(state, &row)?,
+                backing_index,
+                host_option,
+                what,
+            )?
+        }
+    }
     // LOCK OBJECTS on the host page: a patch that MOVES the range or RESIZES
     // its window (position, row/column count, cell sizes) is refused before
     // the effect. Its chrome (title, headers) is formatting and goes through.
@@ -593,7 +729,12 @@ pub(crate) fn update_floating_range_inner(
     let sizes_changed =
         previous.col_widths != updated.col_widths || previous.row_heights != updated.row_heights;
     if patchable_fields_differ(&previous, &updated) {
-        let description = if previous.row_count != updated.row_count
+        let description = if let Some(name) = line_patch_description(&previous, &updated, gate) {
+            // Home > Format on the cells (P3): named for the act, checked
+            // BEFORE the chain below -- a hidden-set-only patch would
+            // otherwise fall through to "Move floating range".
+            name
+        } else if previous.row_count != updated.row_count
             || previous.col_count != updated.col_count
         {
             "Resize floating range"
@@ -748,9 +889,12 @@ pub(crate) fn update_floating_range_cell_inner(
     value: String,
     invariant: Option<bool>,
 ) -> Result<Vec<usize>, String> {
-    let range = find_row(state, id)?;
-    let backing_index = sheet_index_of(state, range.backing_sheet_id)
-        .ok_or_else(|| "Floating range backing sheet is missing".to_string())?;
+    // ONE resolver (P3 2.2): id -> backing/host indices and the write extent.
+    let target = crate::cell_target::resolve_cell_target(
+        state,
+        &crate::api_types::CellTargetRef::FloatingRange { id },
+    )?;
+    let backing_index = target.backing_index;
     // The write door is the CONTENT EXTENT: the window, grown to the cells the
     // backing sheet already holds. The reader scrolls over exactly this extent
     // (a shrink hides cells, it never deletes them, and a formula can spill
@@ -758,13 +902,23 @@ pub(crate) fn update_floating_range_cell_inner(
     // can edit. A cell beyond both the window and every stored cell is still
     // refused -- the extent bounds the write door, not the address space
     // formulas read.
-    let (extent_rows, extent_cols) = floating_range_write_extent(state, &range, backing_index);
-    if row >= extent_rows || col >= extent_cols {
+    if row >= target.extent_rows || col >= target.extent_cols {
         return Err(format!(
             "Cell ({row},{col}) is outside the floating range's {}x{} window and beyond its content",
-            range.row_count, range.col_count
+            target.row.row_count, target.row.col_count
         ));
     }
+    // HOST PROTECTION, holding nothing and before any effect (P3 2.2): a
+    // protected host protects its floating grids' cells. The call below gates
+    // only the BACKING sheet's protection, which is never set, so without this
+    // a locked cell on a protected host was typed into freely.
+    crate::cell_target::gate_target_cells(
+        state,
+        &target,
+        (row, col, row, col),
+        crate::cell_target::EDIT_CELLS,
+        "edit a floating grid's cells",
+    )?;
     crate::commands::data::update_cell_on_sheets_inner(
         state,
         file_state,
@@ -967,26 +1121,38 @@ pub(crate) fn delete_floating_range_inner(
     Ok(())
 }
 
-/// GAP B: register every object-backed sheet's cross-sheet dependency edges.
+/// GAP B: register the cross-sheet dependency edges of every sheet that is
+/// NOT the active one -- the object-backed sheets AND the user sheets.
 ///
 /// The active-sheet-only edge rebuild (`rebuild_all_dependencies_from_grid`)
-/// registers cross-sheet edges lazily, when a sheet becomes ACTIVE — and a
-/// backing sheet never does. A loaded document's floating-range formulas would
-/// therefore come back present, values intact, and permanently DEAD (§2z's
-/// defect class: restored collection, missing index). Called from the load
-/// path after `rebuild_all_dependencies`, and from `.calp` materialization —
-/// the ONE shared installer rule.
+/// registers cross-sheet edges lazily, when a sheet becomes ACTIVE. A backing
+/// sheet never does, so a loaded document's floating-range formulas came back
+/// present, values intact, and permanently DEAD (§2z's defect class: restored
+/// collection, missing index). A USER sheet the user has not visited since
+/// the load is the same defect until its first visit (BUG-0540, found live
+/// 2026-10-17): `Sheet1!B1 = Sheet2!A1*10` in a file saved with Sheet2 active
+/// kept its old value through every edit of Sheet2!A1 after the reopen, and a
+/// GETPIVOTDATA on Sheet1 ignored every re-fold of a canvas pivot -- the
+/// off-sheet cascade finds its dependents through the cross-sheet map only.
+/// Called from the load path after `rebuild_all_dependencies`, and from
+/// `.calp` materialization -- the ONE shared installer rule. The name is kept
+/// from its first, object-sheet-only form (the `.calp` wiring census pins it).
+///
+/// The ACTIVE sheet is skipped: `rebuild_all_dependencies` has just installed
+/// its edges from the live mirror (`state.grid`), which `grids[active]` can lag.
+/// Re-registering a sheet is idempotent (`update_cross_sheet_dependencies`
+/// replaces a formula cell's whole set).
 ///
 /// Callers must hold NO AppState locks.
 pub(crate) fn register_object_sheet_edges(state: &AppState) {
+    let active = *state.active_sheet.read().unwrap();
     let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.read().unwrap();
-    let visibility = state.sheet_visibility.read().unwrap();
     let mut dependents = state.cross_sheet_dependents.lock().unwrap();
     let mut dependencies = state.cross_sheet_dependencies.lock().unwrap();
 
     for idx in 0..grids.len() {
-        if crate::sheets::is_user_sheet(&visibility, idx) {
+        if idx == active {
             continue;
         }
         let grid = &grids[idx];

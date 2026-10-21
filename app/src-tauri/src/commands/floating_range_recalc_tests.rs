@@ -33,6 +33,7 @@ fn grow(wb: &Workbook, id: identity::EntityId, rows: u32, cols: u32) {
             col_count: Some(cols),
             ..Default::default()
         },
+        crate::floating_range::PatchGate::ObjectEdit,
     )
     .expect("grow window");
 }

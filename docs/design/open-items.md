@@ -2900,7 +2900,7 @@ fold. New pieces underneath:
   `datumKinds`, `seriesTotals`).
 - **Measure-only design queries** (`VALUES: [Revenue]` with no ROWS/COLUMNS) return one total
   (`app/src-tauri/src/pivot/headless.rs`), and **model slicers filter design-query charts on their own page**
-  through the new seam `@api/pageFilters` (`app/src/api/pageFilters.ts:130`, publisher
+  through the new seam `@api/pageFilters` (replaced 2026-10-17 by `@api/reportFilters`, `app/src/api/reportFilters/`, §2.al P4; publisher
   `app/extensions/Slicer/lib/slicerPageFilters.ts`). Page filters travel as `pageFilterFields` and run INSIDE
   the engine on both paths, as does a chart's own FILTERS (`FiltersRoute`, `headless.rs:167`), so averages
   and distinct counts are exact; a RESET/CLEAR share measure falls back to the host mask; grid REPORTS keep
@@ -2965,7 +2965,7 @@ pre-existing).
 | **AI visuals**: Q&A, Key influencers, Decomposition tree, Smart narrative | |
 | **Metrics, Paginated report, R / Python visuals, Power Apps / Power Automate** | |
 | **Ribbon chart, Text slicer** | no such mark / no search-box slicer |
-| **Persistent Group / Ungroup, Selection pane, Edit interactions, smart guides** | a multi-selection drag is transient (`groupDrag.ts`); every design-query chart on a page follows its model slicers (no per-visual opt-out) |
+| **Persistent Group / Ungroup, Selection pane, smart guides** | a multi-selection drag is transient (`groupDrag.ts`). (Edit interactions was on this row until 2026-10-17: it is BUILT -- canvas round 2 P4, §2.al, `canvas-sheets.md` §16.4 -- with a per-visual Filter / Highlight / None.) |
 | **Duplicate Page** and the New Page menu (lane decision D2) | the backend refuses to copy a canvas (`copy_sheet`; `canvas-sheets.md` §10), so New Page is a plain hero |
 | Power BI's other buttons (Bookmark, Information, Help, Q&A, Apply all slicers, Web URL) and page Vertical alignment, background IMAGE and transparency | not in the contract |
 
@@ -3261,7 +3261,7 @@ defaults, while no field-list editor was mounted); filed at S15 from the spec's 
 steps: BUG-0483 (a shape's `strokeWidth "0"` painted 1 px), BUG-0484 (the Shell broadcast `pivot:refresh`
 on every pane's update), BUG-0485 (the `"properties"` context key was never added), BUG-0486 (the pivot
 style was session-only), BUG-0487 (control formatting was not undoable). OPEN: BUG-0477, BUG-0480, BUG-0481,
-BUG-0488, BUG-0489 (rows below).
+BUG-0488 (rows below). BUG-0489 was fixed in canvas round 2 (§2.al, P1).
 
 **Proved (unit tier, 2026-10-16, WP-C S15 census sweep):** the whole vitest suite 1987 files / 127,613 tests
 green, among them every census the change trips -- `overlayZoneCensus` (new block: every floating family
@@ -3388,11 +3388,511 @@ not `functional`, which ignores it) after the harness fix below, on the failing 
 | **BUG-0488 (open, low): `set_pivot_number_format` dirties the document on a refused out-of-range index and records no undo step.** WP-C's Data format card does not use it (it rides the fields update); the Pivot service's `setNumberFormat` still does. | `app/src-tauri/src/pivot/commands.rs:5433`; `app/extensions/Pivot/lib/pivot-api.ts:1639` |
 | **BUG-0480 (open, medium): the pivot DSL serializer writes an aliased model measure under its ALIAS** (`[Revenue] AS "Sales"` becomes `[Sales] AS "Sales"`), which hits the pivot editor's Design text after a visual edit. The chart's Fields wells are protected: they are editable only when the DSL round-trips losslessly. | `app/extensions/_shared/dsl/pivotLayout/serializer.ts:61` |
 | **BUG-0481 (open, medium, pre-existing): Edit Chart re-detects the series on open** and REPLACES the stored series selection and category, so unchecked series come back checked and Update Chart writes them. The pane's Data tab never auto-detects on mount and does not have this defect. | `app/extensions/Charts/components/CreateChartDialog.tsx:380`; `app/extensions/Charts/components/data/useRangeSource.ts` |
-| **BUG-0489 (open, low, pre-existing): picking a chart style after another keeps the first style's colours** where the second is silent (`buildPresetUpdates` sends a theme through the store's deep merge). | `app/extensions/Charts/lib/chartStylePresets.ts:488`; `app/extensions/Charts/lib/chartStore.ts:149` |
+| ~~**BUG-0489 (low, pre-existing): picking a chart style after another keeps the first style's colours**~~ **FIXED 2026-10-16 (canvas round 2, P1, §2.al):** the preset's theme patch now carries every preset-owned key, the unset ones as an explicit `undefined`, so the deep merge clears them. | `app/extensions/Charts/lib/chartStylePresets.ts` (`presetThemePatch`, `PRESET_THEME_KEYS`); `app/extensions/Charts/lib/__tests__/chartStylePresets.test.ts` |
 | **A canvas pivot box's editor and a worksheet pivot editor share the drop-zone keys** (`rows` / `columns` / `values` / `filters`) when both are mounted: unmounting one no longer deletes the other's registration (WP-C S9b), but the later one wins drops. A per-instance `dropKey` would separate them. | `app/extensions/_shared/components/useDragDrop.ts:327` |
 | **A pivot with no stored view this session keeps its old hidden-grid colours after a style change** until its next render (a data-model pivot reopened from a file before its first refresh); the box paints the new style at once. Its undo and redo do the same (BUG-0496: they no longer re-render, which cleared such a pivot). | `app/src-tauri/src/pivot/operations.rs:858` (`restyle_pivot_in_grid`) |
 | **Data format on the other design-query marks is not built** (BUG-0499 narrowed the card to Card / Multi-row card / KPI / Gauge). A column, bar, line or pie chart's data labels, value-axis ticks and tooltips format the raw number (`formatTickValue`, the label's own d3 pattern); following `spec.fieldFormats` needs the reader's Rust-formatted `displayValues` in the labels and tooltips and an Excel-code formatter for ticks (none exists in TypeScript; Rust formats). | `app/extensions/Charts/rendering/dataLabelPainter.ts:315`; `app/extensions/Charts/lib/chartObjectFormat.ts:220` |
 | **The older control undo steps still snapshot the WHOLE control store** ("Add control", "Move control", "Change button code"), so their Ctrl+Z also reverts a later Properties-pane row write that recorded no undo step of its own (a row write is not an undo step, WP-B). "Format control" and "Set property" record per property since BUG-0498. | `app/src-tauri/src/controls.rs:1045`, `:1690`; `app/src-tauri/src/undo_commands.rs:5148` |
+
+### 2.al Canvas round 2 (2026-10-16)
+
+The owner's canvas test of 2026-10-16 became four packages, landing in the order P1 -> P3 -> P2 -> P4: P1 the
+chart background and ribbon filter values (G1, G2-A); P3 the Home tab's commands in floating-grid cells (G3);
+P2 the app locale everywhere and the `{key,label}` member shape (G0); P4 one filter resolver, ribbon filters
+reaching every visual, visual cross-filter and Edit interactions (G2-B, G4). Each package appends its own
+`####` block below.
+
+#### P1 -- chart background and ribbon filter values (G1, G2-A)
+
+**What shipped.**
+- **One pick = one commit.** A shared native colour-pick hook,
+  `app/extensions/_shared/components/colorPick/useNativeColorPick.ts`, snapshots the base when a pick STARTS,
+  previews each `input` step, commits ONCE on the native `change`, and ends the preview on blur. Three surfaces
+  use it: the Format tab's `ColorBox` (every colour row of every family), the chart Data tab's series swatch, and
+  the Chart elements card's swatches. Before it, the Format tab never committed a pick (BUG-0503), the series
+  swatch diffed its commit against its own draft and wrote nothing (BUG-0504, with BUG-0502 behind it), and the
+  elements card wrote once per drag step (BUG-0505).
+- **The plot area is transparent by default** (Power BI). `DEFAULT_CHART_THEME.plotBackground` is `""`, and
+  every plot fill goes through `hasPlotFill` / `fillPlotShape` in `Charts/rendering/chartPainterUtils.ts`,
+  multi-row card rows included (BUG-0506). The colorful and light outline presets dropped their plot tint; the mono,
+  dark, outline-4 and gradient presets keep theirs.
+- **A solid colour commit wins.** `solidBackgroundPatch` / `solidBackgroundIsNoop` (`@api/visualContainer`, API
+  1.5.0) clear a stored or resolved gradient and switch a hidden background on. The Format tab's `rowPatch`, the
+  Chart elements card's "Chart area fill" and chart style presets use them. Per ruling Q9, the Rust
+  container-literal door (`object_bindings/container_literal.rs`) applies the same rule to script, MCP and
+  binding-literal writes (BUG-0509).
+- **BUG-0489 fixed:** a preset sends every preset-owned theme key, the unset ones as an explicit `undefined`.
+- **Ribbon filter values.** `refreshFilterItems` splits a field key with `splitBiFieldKey` over the
+  connection's table names, so `BI.dim_date.year` asks for table `BI.dim_date`. A load failure shows an alert
+  naming the whole key, with a Retry, never "No matching values", and a failed load is not marked loaded
+  (BUG-0507). `getBiModelInfo` is typed nullable, as Rust returns it (BUG-0508).
+- **"Cross-filter" became "dependent filters"** for the ribbon filter's filter-to-filter and filter-to-slicer
+  narrowing, in code, wire (`dependentFilters` / `dependentSlicers`, `BiValueConstraint`, the `constraints`
+  argument of `bi_get_column_available_values`) and UI. The word "cross-filter" is reserved for P4's visual
+  interactions; `crossFilterWordReserved.test.ts` pins that, and `ribbonFilterWireDrift.test.ts` pins the TS
+  interfaces against the Rust structs. Dependent lists in an older `.cala` are dropped on load (no backward
+  compatibility; a visible loss, never a lie). No format version, no command, no AppState field.
+
+**Evidence.** Unit and Rust tests landed with each step: `useNativeColorPick.test.tsx` [A]-[J],
+`colorBox.test.tsx`, `elementCardOneStep.test.tsx`, `ChartRangeDataTab.test.tsx`, `plotFill.test.ts` (with the
+census that forbids any other `.plotBackground` read under `Charts/rendering/`), `chartStylePresets.test.ts`
+(the BUG-0489 repro drives the real chart store), `visualContainer.test.ts`, `formatValues.test.ts`,
+`container_literal_tests.rs`, `ribbonFilterItemsError.test.tsx`, the ControlsPane store tests,
+`crossFilterWordReserved.test.ts` and `ribbonFilterWireDrift.test.ts`.
+
+**Live (2026-10-17, proof phase).** `app/e2e/journeys/canvas-round2-quick.spec.ts`: **13/13** against the owner's
+AdventureWorks model (Postgres), re-proved 13/13 after every sabotage was restored and again on the final clean
+binary. Sabotages X1-X10 (spec P1 section 5), each confirmed to change the file and run against the live app:
+
+| # | Failed (as required) | Stayed green |
+|---|---|---|
+| X1 ColorBox old controlled body | Q1 (spec still null) | Q3, F1-F4 |
+| X2 plot default `#fafafa` | Q1's plotMode (`[248,248,248]`) | -- (same test) |
+| X3 Chart elements card commits on `input` | Q3 ("an input ... wrote the spec") | Q1 |
+| X4 no `gradient: null` | Q4 ("left the stored gradient") | Q1 |
+| X5 first-dot split | F1 | Q0-Q6 |
+| X6 error swallowed | F3 (neither values nor error) | F1 |
+| X7 sibling first-dot split | F2 (every country has data) | F1 |
+| X8 hook compares at `change` time | Q3 (nothing persists) | Q1 -- so ColorBox's preview does NOT rewrite its own prop |
+| X9 series commit diffs the draft | Q8 | Q1 |
+| X10 `table === ""` | F3 (`BI.dim_dat.year` not refused) | F1 |
+
+Four HARNESS defects fixed on the way (no product change, no owner assertion weakened): `chart.setGradientFill`
+and `chart.applyStyle` are EXTENSION commands, but the journey ran them through `CommandRegistry`, which only
+warns "No handler registered" -- a new `runExtensionCommand` fails on an unknown id instead; Q6 read the row as
+soon as it was white, which mono-blue's own save already was (now waits for mono-blue's axis colour, then for
+colorful-1's gridline colour); Q8's swatch id is the series' SOURCE column (`-1`), never `-0`.
+**Q7 is proved live, and the native picker is not ChooseColor:** WebView2 opens Chromium's in-page colour popup
+for `<input type="color">`, which no Win32 dialog search finds (the `setcolor` driver said NOCOLORDIALOG). The
+popup takes the page's keyboard, so Q7 now drives it for real (Tab x3, R/G/B, Enter): **8 `input` + 1 `change`
+per pick**, persisted `#641ec8` as ONE "Format Object" step, one Ctrl+Z restores. Filed BUG-0536 per the row
+below.
+
+**What is left open.**
+
+| Item | Where |
+|---|---|
+| **Ribbon filters still reach only pivots.** Charts, cards and the Connections wording are P4's (G2-B). | `app/extensions/ControlsPane/components/FilterDropdown.tsx` (Connections sub-panel) |
+| **Filter values are the invariant strings** `bi_get_column_values` returns; localised member labels are P2's `{key,label}`. | `app/extensions/ControlsPane/lib/filterPaneStore.ts` (`refreshFilterItems`) |
+| **BUG-0536 (open, medium): colour inputs that commit on `input` write once per picker step.** Measured 2026-10-17 (Q7): one pick in WebView2's picker sends 8 `input` events before its `change`. The layout kit's custom-colour input and the page navigator's colour rows commit on React `onChange` (= every `input`); the per-step writes are inferred from that wiring, not yet driven live. | `app/src/api/layout/primitives/Color.tsx` (the `${testId}-custom` input); `app/extensions/Controls/PropertiesPane/PageNavigatorButtonsSection.tsx:394` |
+| **The other native colour inputs are not migrated to the hook** (none has the restore defect: each is a draft or commits on `input`): the chart dialog's Design tab, the insight overlay style, a control's Properties row, the navigator buttons, the layout kit's colour primitive. Conditional on Q7. | `app/extensions/Charts/components/tabs/DesignTab.tsx:360`; `app/extensions/Insights/components/OverlayStyleSection.tsx:123`; `app/extensions/Controls/PropertiesPane/PropertyRow.tsx:302` |
+| **BUG-0510 (open, low): two background-colour doors still skip the solid-commit rule.** A page navigator's flat `containerBackgroundColor` key goes through the control arm, not the container-literal door, and its background is off by default; a FORMULA-bound colour is an overlay at resolve time and still sits under a stored gradient. (Script, MCP and binding LITERAL writes are fixed: BUG-0509.) | `app/src-tauri/src/controls.rs` (`set_control_property_core`); `app/extensions/Controls/PageNavigator/navigatorModel.ts:228` |
+| **Format-tab preview over a gradient.** While dragging a colour over a stored gradient, the preview patch carries only the colour, so the gradient shows until the commit clears it. | `app/extensions/BuiltIn/ObjectPane/components/formatContext.tsx` (`previewField`) |
+| **The ribbon filter card's short name is a last-dot split**, wrong for a dotted COLUMN name (cosmetic). | `app/extensions/ControlsPane/components/RibbonFilterCard.tsx:161` |
+
+#### P3 -- floating grids take every Home command (G3)
+
+**G3 CLOSED** as BUG-0516 (links BUG-0185, BUG-0493): with a floating grid's cell selected, the Home tab acts on
+that grid's cells instead of refusing. Design: `docs/design/canvas-sheets.md` §16.2.
+
+**Mechanism.**
+- A door asks `resolveCellTarget(action, capability)` (`@api/cellTarget`); the floating grid admits ten
+  capabilities (`FR_ACTS_ON`, `FloatingRange/lib/frKeyRouting.ts`) and answers with its own cells.
+- The door passes the explicit `target: CellTargetRef` to the wrapper it already called; wrappers throw for a
+  command not in `TARGET_COMMANDS` (`app/src/api/cellTargetCommands.ts`, 31 entries), so nothing can fall
+  through to Core's hidden cell.
+- Rust resolves the id once (`cell_target.rs`) and gates every write by the HOST's protection over the backing
+  cells, the in-cell editor included (BUG-0512).
+- The grid paints from one styled read (`get_cell_target_cells`, the ONE new command; 832 by the line-wise
+  parse) with the sheet's own paint helpers (`@api/cellPaint`, `@api/conditionalFormatPaint`); its hidden lines
+  persist at `.cala` v11 (`FLOATING_GRID_HIDDEN_LINES_MIN_FORMAT_VERSION`).
+
+**Permanent refusals:** Format as Table and Filter ("... is not available inside a floating grid: a floating grid
+is already a table-like object. Nothing was changed.").
+
+**Evidence.** Rust: `cell_target_tests.rs`, `format_home_tests.rs`, `cell_target_content_tests.rs`,
+`structure_target_tests.rs`, `zip_io.rs` (the v11 stamp). TypeScript: `cellTargetDoorCensus.test.ts`,
+`cellTargetWrappers.test.ts` and the door tests of each migrated extension (list in canvas-sheets §16.2).
+
+**Live (2026-10-17, proof phase).** `app/e2e/journeys/floating-grid-home.spec.ts` **14/14** (FG13 on the owner's
+AdventureWorks model), re-proved 14/14 on the final clean binary; `fixall-edit.spec.ts` **50/50** (the 2
+destructive E8b/E8c close tests skip by design); `floating-range.spec.ts` 9/9; `home-excel.spec.ts` 13/13;
+`core-edit-keys.spec.ts` 4/4. Sabotages SB1-SB9 from the spec header, each run against a binary rebuilt with it
+(Rust ones: app stopped by PID, rebuilt, binary time checked) and then restored:
+
+| # | Failed (as required) |
+|---|---|
+| SB1 style route also writes the active sheet | FG1 -- only after the journey gained a Sheet1!B1 witness: the leak lands at the grid's COORDINATES (Sheet1!B1), never on Core's A1, so the A1 witness alone passed it |
+| SB2 the styled painter skips the fill | FG2 ("B2's interior is not yellow") -- the solid-colour branch alone changed nothing: a Fill Color pick paints through `style.fill` |
+| SB3 `FR_ACTS_ON` without `numberFormat` | FG1 |
+| SB4 ribbon reads Core's cell | FG3 |
+| SB5 no window patch | FG7 (window stays 5 rows) |
+| SB6 protection view of the BACKING sheet | FG12 (Bold on a protected host said nothing) |
+| SB7 no v11 stamp | FG14 |
+| SB8 `resolveCellTarget` always the grid | FG1, FG2 |
+| SB9 no host gate on in-cell typing | FG12 ("typing landed") |
+
+Defects the proof found. **Product, fixed with a unit test each (sabotage-checked):** BUG-0537 -- typing the
+palette's own colour into a colour popover's hex box + Enter applied nothing (Fill Color's value is the
+REMEMBERED yellow; `Color.tsx` commitHex, `colorPalette.test.tsx`); BUG-0538 -- Home > Fill greyed Down/Right
+from Core's hidden A1 while a floating grid held the selection (`FillMenuButton.tsx` via
+`editingRules.fillSourceView`, `fillMenuButton.test.tsx`). **Harness, fixed:** the shared `setFrCell` seed now
+writes invariantly (since P2 a sv-SE app stored "1234.567" as TEXT); `frSelect` presses Shift+arrows to the edge
+instead of a fixed count (Shift+Down skips a hidden row, as in Excel); FG1 accepts the format's display name
+"Number (2 decimals)"; FG8 pastes on Sheet1!F12 (F5 lies under Float1's title bar at this display); FG13
+AutoFits Float2's column before comparing paint ("21 143 338,0" rightly paints `#######` in 64 px); FG6 waits
+for the Row Height dialog before typing; fixall-edit D4's grid doors click a CELL (the previous door's Escape
+leaves the whole object selected, which a sort rightly refuses).
+
+**What is left open.**
+
+| Item | Where |
+|---|---|
+| **(a) The macro recorder does not record targeted gestures.** A wrapper called with a target skips `recordGridEvent`, so a recorded macro replays nothing for a floating-grid edit (better than replaying it on the active sheet). | `app/src/core/lib/tauri-api.ts` (the targeted wrappers) |
+| **(b) SUBTOTAL 1xx / AGGREGATE ignore object-hidden lines.** Hide on a floating grid writes the OBJECT's `hiddenRows` / `hiddenCols` (as decided); the engine reads row visibility from the SHEET's user-hidden sets, so `=SUBTOTAL(109, Float1!B1:B4)` still counts a hidden row. Owner call: store the hidden lines in the backing sheet's user-hidden sets instead (already persisted at v4, already feeding SUBTOTAL, no version bump). | `app/src-tauri/src/commands/dimensions.rs` (`set_rows_hidden_inner`); `app/src-tauri/src/cell_target.rs` (`set_lines_hidden_on_target`) |
+| **(c) Non-Home doors still refuse** on a floating grid's cells ("<action> is not available inside a floating grid yet. Nothing was changed."): Data Validation, comments / notes, hyperlinks, bookmarks, Group, Remove Duplicates, Subtotals, Text to Columns, Print Area, cell types, Define Name, F11 chart, Ctrl+; / Ctrl+Shift+: and the rest of `NO_TARGET`. | `app/src/api/__tests__/cellTargetDoorCensus.test.ts` (`NO_TARGET`, each with its reason) |
+| **(d) Scripts and MCP have no `target` surface.** The target is explicit and never ambient, so a script's cell and format calls act on sheets only; a floating grid is reached through `api.floatingRange*` as before. | `app/src/api/cellTargetCommands.ts` |
+| **(e) Insert / Delete Cells with a shift is refused on a floating grid** ("Insert Cells is not available inside a floating grid yet."; ruling Q3). `insert_cells` / `delete_cells` run the active-sheet `shift_cells_impl`, which shifts ~30 per-sheet stores with the active mirror held; an off-sheet twin is a programme of its own. The whole-row / whole-column forms work. | `app/src-tauri/src/commands/structure_cells.rs` (`shift_cells_impl`) |
+| ~~**(f) Merge differs between a sheet and a floating grid.**~~ **Closed by ruling Q4:** Merge on a floating grid is the sheet's gesture -- the same keep-first-value prompt and value rule; Rust moves the first value into the top-left cell and re-points the backing sheet's readers of the moved cell. Readers on OTHER sheets are not re-pointed, exactly as on a sheet. | `app/src-tauri/src/merge_commands.rs` (`merge_cells_on_target`) |
+| **BUG-0513 (open, medium): style-only writes INTO a floating grid are refused.** Format Painter from a sheet onto a grid, Paste Formatting and Paste (No Borders) refuse with one sentence: no backend command that assigns a style INDEX takes a target (`set_cell_style` is active-sheet only). Painting FROM a grid onto a sheet works. | `app/extensions/BuiltIn/FormatPainter/formatPainterLogic.ts`; `app/extensions/BuiltIn/PasteSpecial/pasteRefusals.ts` |
+| **BUG-0514 (open, low): Custom Sort's Cell Icon order list is empty on a floating grid** (`get_range_icons` is active-sheet only). | `app/extensions/Sorting/lib/sortHelpers.ts` |
+| **BUG-0511 (open, low): data bars ignore border colour, negative colours, axis, direction and showValue; icon sets ignore showIconOnly** -- on sheets and floating grids alike (one shared painter). | `app/extensions/ConditionalFormatting/rendering/dataBarRenderer.ts`; `iconSetRenderer.ts` |
+| **Clear Comments / Clear Hyperlinks / Remove Hyperlinks do nothing on a floating grid** (no door can put a comment or a link there; their stores clear the active sheet only). | `app/src/core/lib/clearGestures/clearGestures.ts` |
+| **AutoSum's single-cell guess in a floating grid opens the grid's editor without the caret inside the brackets** and without highlighting the references (`editTargetCell` seeds text only). | `app/extensions/AutoSum/lib/autoSumCommand.ts` |
+| **Find's scope is fixed when the search runs.** Moving between the grid and the sheet afterwards does not re-scope a modeless Find; Replace then refuses ("The selection moved since the search. Search again."). | `app/extensions/BuiltIn/FindReplaceDialog/FindReplaceDialog.tsx` |
+| **The typed read (`getCellTargetCellsTyped`, through `get_floating_range_cells`) does not apply host formula-hiding**, the same exposure the grid's renderer already had (not new). | `app/src/api/cellTarget.ts` |
+| **The floating grid's cell editor sizes itself to the master cell, not the whole merge**; selection snapping knows only the merges inside the last fetched rectangle. | `app/extensions/FloatingRange/editor/frEditor.ts`; `app/extensions/FloatingRange/rendering/frRenderer.ts` (`frExpandToMerges`) |
+| **Cut-paste between sheets or grids does not qualify a moved formula's references with its source sheet** (pre-existing on sheets too). | `app/src/core/hooks/useClipboard.ts` |
+| **BUG-0515's casing restamp covers sheet names only**: named-range and table casing in the off-sheet structural rewrite are not restamped (that would need their locks while the grid locks are held); the same-sheet `store_rewritten_formula` path was not audited for casing. | `app/src-tauri/src/commands/structure.rs` (`shift_cross_sheet_formulas_for_off_sheet_edit`) |
+| ~~**The styled read's display locale is `state.locale`**, read once holding nothing; P2 switches it to `app_locale::display_locale()`.~~ **Closed by P2 (2026-10-17): `state.locale` IS the permanent form** -- a command that holds an `AppState` reads `state.locale`, never the process mirror (under `cfg(test)` the mirror is a thread-local that `install` does not set). P2's Rust census pins the read (`MUST_READ_STATE_LOCALE` in `display_locale_census_tests.rs`). | `app/src-tauri/src/cell_target.rs` (`get_cell_target_cells_inner`) |
+| **The live journey's FG6 asserts the HOST sheet's row heights unchanged**, not the backing sheet's: `get_all_row_heights` reads the active sheet only, and no command reads another sheet's heights. The object's own map and the frame are asserted directly. | `app/e2e/journeys/floating-grid-home.spec.ts` |
+
+#### P2 app locale (G0)
+
+**G0 CLOSED in code** (owner rule: every display and every input parse uses the APP locale -- never a fixed en-US,
+never the OS or browser locale, never a locale that differs from its neighbour). Ledger: BUG-0447 fixed;
+BUG-0517, BUG-0518, BUG-0519, BUG-0520, BUG-0521 found and fixed on the way; BUG-0522 (DC3) and BUG-0523 (DC2)
+filed open. Design on canvas: `docs/design/canvas-sheets.md` §16.3.
+
+**The authority (Rust, `app/src-tauri/src/app_locale.rs`).**
+- The user's choice lives in an APP settings file, `%LOCALAPPDATA%\Calcula\app-settings.json`
+  (`{"localeOverride": "de-DE" | null}`, under `profile_dir::resolve()`), loaded inside `create_app_state`, so
+  MCP, scripts and every headless path agree from the first instruction. It is never a `Persisted<T>` and never
+  dirties a document (`app_locale_tests.rs` scans the production code for `DocumentEffect::` / `FileState` /
+  `mark_saved`). The localStorage key `calcula.locale` is retired.
+- Startup: a valid override from the file, else the OS regional format. An unknown or invalid value is ignored
+  with a `log_warn` (it never reaches `from_locale_id`'s silent en-US fallback).
+- `set_locale` (main window only, `Result<LocaleSettingsData, String>`): **every explicit id persists; only
+  "System default" (`"system"`) clears**, written as `{"localeOverride": null}` (read-modify-write, temp file +
+  rename). It emits `locale:changed` (`LOCALE_CHANGED_EVENT`, pinned against the TS constant by
+  `crossLayerConstantDrift.test.ts`) with the full `LocaleSettingsData` (now with `overrideId`, month / day names
+  and `quarterLabels`). `get_locale_settings` fills `overrideId`.
+- The evaluator's process mirror (`eval_budget::set_formula_locale`) is gone; `apply` reads
+  `app_locale::display_locale_opt()`. A command that holds an `AppState` reads `state.locale`. In tests the
+  evaluator is invariant unless a test wraps it in `with_test_display_locale` -- it used to follow the machine's
+  OS region.
+- **No recalculation on a locale switch.** Stored values do not change; every display is re-rendered (the shell
+  dispatches `grid:refresh` once per switch; pivots, slicers, charts, the status bar and the ribbon filter re-read
+  on `LOCALE_CHANGED`). Text a FORMULA produced (TEXT, DOLLAR, FIXED) follows on the next recalculation (F9), as
+  in Excel; the Settings page says so under the Locale dropdown.
+
+**The frontend (`@api/locale`, core `src/core/lib/locale/`).** Every window entry (main, chart spec editor,
+object script, model editor, package inspector) awaits `initAppLocale()` before its first render (it never
+rejects: a failed read keeps the invariant locale and logs once) and follows `locale:changed`. The helpers are
+SYNC: `getAppLocale()`, `decimalSeparator()`, `listSeparator()`, `formatNumber`, `formatNumberWithCode`,
+`formatDate`, `formatDateTime`, `monthName`, `dayName`, `quarterLabel`, `parseNumber`, `parseDate`;
+`getLocaleSettings()` stays ASYNC (so `getLocaleSettings().decimalSeparator` is a Promise's property -- always
+undefined). Number format CODES stay en-US syntax in UI and on the wire (ruling Q10). Typed numbers go through
+`NumberField` / `NumberInput` (`@api/layout`), app-locale text spinbuttons; a value read back from the wire (a
+range position, an option value, a stored literal) is read as a number, never through `parseNumber`.
+
+**The member contract (`MemberRef { key, label }`).**
+- `key` = invariant canonical text; `label` = the app-locale display. Selections, filters, page filters,
+  cross-filter tuples and GETPIVOTDATA match on the KEY only; nothing parses a label. Pivot header cells carry
+  `PivotCellData.member` (headers and filter items only); pivot filter rows carry `members` (was
+  `uniqueValues`); `SlicerItem` is `{ key, label, selected, hasData }`; `bi_get_column_values` returns
+  `MemberRef[]`; `bi_get_column_available_values` returns the key set. TS: `@api/pivotMembers`
+  (`pivotCellItemKey` for identity, `pivotCellDisplayText` for display).
+- THE key spelling is `pivot_engine::FieldCache::member_key`, wrapped by `pivot::utils::member_key_of`;
+  `PivotCellData.member.key`, `member_key_of` and the `bi_get_column_values` keys are equal byte for byte
+  (`member_shape_tests.rs`), including Decimal and ISO-date columns and the blank. Labels are computed at
+  RESPONSE time from a locale-free `MemberSource` (`engine::member_label`), so a re-fetch after a switch is enough.
+- **The blank member (ruling Q8):** KEY `""`, LABEL `"(Blank)"` (`engine::BLANK_MEMBER_LABEL`, English and
+  capitalised in every locale). The pivot's HEADER TEXT, GETPIVOTDATA items and host-written hidden lists still
+  read `"(blank)"`, and Rust still accepts `"(blank)"` in any case as a key. The pivot's OWN item lists now fold
+  NULL and the empty string into ONE blank member, as a model list does (`BlankListing::Separate` is deleted).
+- A BI Decimal member is keyed with its scale (`"5.50"`, BUG-0518), so a BI pivot's Decimal header text now
+  reads `"5.50"` where it read `"5.5"`.
+
+**The census (what keeps it true).** TypeScript: the locale lint entries spread into `dialogGuardConfigs` and
+both colour blocks of `app/eslint.boundaries.js` (`LOCALE_RESTRICTED_SYNTAX` / `LOCALE_RESTRICTED_PROPERTIES`:
+`toLocaleString`, `toLocaleDateString`, `toLocaleTimeString`, `Intl`), proved by `localeGlobalsBan.test.ts`;
+the ratchet `localeCensus.test.ts` over `toFixed` / `parseFloat` / `Number(raw)` / regex re-parse with
+`fixtures/localeCensusAllowlist.json` (74 files, every one with a reason; a stale count fails too);
+`memberWireCensus.test.ts` (no `.uniqueValues`, no `pivotCellLabel`, no `invoke<string[]>("bi_get_column_values"`).
+Rust: `display_locale_census_tests.rs` (19 classified allowlist entries; `MUST_READ_STATE_LOCALE` pins eight
+display sites to `state.locale`). One shared corpus, `core/engine/tests/fixtures/locale_text_corpus.json` (184
+rows over en-US, en-GB, sv-SE, de-DE, de-CH, fr-FR, plus the six locales in wire shape), is read by BOTH
+`locale_corpus_tests.rs` and `localeText.corpus.test.ts`, so the TS formatter cannot drift from Rust's. E2E:
+`e2e/localeBaseline.ts` records the profile's override read-only; `zz-persisted-residue` asserts it is unchanged.
+
+**Decisions recorded in the spec (DC1-DC5).**
+- **DC1 BI result cells are typed by the Arrow schema, not guessed from text.** `BiQueryResult.columnKinds`
+  (`number | date | dateTime | boolean | text | unknown`) travels with the result; both grid writers go through
+  `bi::member::ResultCellWriter` / `typed_cell`. Behaviour changes: a Utf8 column holding `"00123"` now lands as
+  TEXT (it used to become the number 123); Date32 / Timestamp columns land as date serials. The machine text is
+  parsed invariantly (it is not user input).
+- **DC2 table-source slicers stay keyed by display text** (key = label), because their selection is applied by
+  AutoFilter's display-text matching (Excel's semantics). A stored selection on a numeric or date column stops
+  matching after a locale switch, exactly as in Excel: **BUG-0523** (open).
+- **DC3 DAX `FORMAT()` is not in the app locale** (nor .NET-correct in any locale): it compiles to SQL `TO_CHAR`
+  and is pushed down to Postgres. A fix is a feature (a .NET-format interpreter, a DataFusion UDF, pushdown
+  exclusion): **BUG-0522** (open). model-engine-lib code is unchanged by P2, so no host-integration-changelog
+  entry.
+
+**Prose and booleans stay English.** Insights narration prose is English except sv-SE (its numbers now follow the
+app locale for EVERY locale: `AnalyzeOptions::for_settings`); `TRUE` / `FALSE`, `(Blank)`, "Goal:", "R² =" and
+the KPI distance text stay English apart from their digits.
+
+**Other behaviour changes that shipped.** Built-in "months" / "weekdays" custom sort lists also accept the app
+locale's names (`to_lowercase` match, so "März" sorts). Object-binding computed displays and unformatted measures
+show General in the app locale. The List/Dict preview is localised (0.1+0.2 shows "0,3" in de-DE, not
+"0.30000000000000004"). Evaluate Formula step VALUES use the locale's decimal separator; the formula TEXT stays
+invariant (DC5). The CSV export's default delimiter is the app list separator (";" in de-DE and sv-SE). The status
+bar, the recalc counter, print `&D` / `&T`, every chrome timestamp and the size / duration texts use the app
+locale. Sparklines plot NUMBER cells only (a text "5" is a gap, as in Excel). The fill handle reads and writes in
+the app locale (BUG-0521); a unit text like "10 kg" no longer extrapolates (it used to fill "30", dropping the
+unit). Fill Series accepts only the app locale's decimal mark ("0,5" is refused under en-US).
+
+**Evidence.** Rust: `member_label_tests.rs`, `locale_text_function_tests.rs`, `locale_corpus_tests.rs`, the
+pivot-engine `member_source_tests`, `app_locale_tests.rs`, `member_shape_tests.rs`, `bi/member_tests.rs`,
+`formula_eval_plan_locale_tests.rs`, `commands/collection_preview_tests.rs`, `display_locale_census_tests.rs`.
+TypeScript: `localeText.corpus.test.ts`, `localeText.test.ts`, `appLocale.test.ts`, `pivotMembers.test.ts`,
+`memberWireCensus.test.ts`, `localeCensus.test.ts`, `localeGlobalsBan.test.ts`, `visualValues.locale.test.ts`,
+`chartDataReader.typed.test.ts`, `fields.locale.test.tsx`, `filterDropdownConditions.test.tsx`,
+`pivotFilterOverlayMembers.test.tsx`, `fillEngine.locale.test.ts`, `statusBarAggregation.locale.test.tsx`,
+`sparklineTypedRead.test.ts`, `progressLocale.test.ts`, `writebackEditing.test.ts`.
+
+**Live (2026-10-17, proof phase, group 2).** `app/e2e/journeys/app-locale.spec.ts` **15/15** (J0-J12 with J0b and
+J9a/J9b; de-DE, then a live switch to sv-SE; the owner's AdventureWorks on Postgres), on a binary built after the
+last Rust change and again on the final one; the owner's profile was left on "system" (no `localeOverride`) after
+every run. Sabotages, each confirmed to change the file and run against the live app:
+
+| # | Sabotage | Failed (as required) |
+|---|---|---|
+| J1 | `set_locale_core` skips `write_settings` (Rust) | J1 ("the settings file ... does not hold the choice") |
+| J2 | `main.tsx` renders before `initAppLocale()` | J2 (first frame `en-US`) |
+| J3 | DATEVALUE reads `parse_date_string` only (core engine, rebuilt) | J3 (`#VALUE!`) |
+| J4 | `groupDigits` back to hard-coded "," | J4 (the Cards wrote no "." grouping) |
+| J5 | `get_pivot_view` formats with `LocaleSettings::invariant()` (Rust) | J5 (`14,561,052`), run as J0/J1/J0b/J5 because J8's range pivot reads the same command first |
+| J6 | the slicer click writes the item's LABEL | J6 (the pivot never refiltered) |
+| J6b | the slicer page filter publishes the de-DE date label | J7+J6b (the Card never refiltered) |
+| J9 | `parseNumberFieldText` -> `Number(raw)` (`fields.tsx`) | **nothing** -- J9b's border width is the object pane's own `NumberBox` (`ObjectPane/components/fields/NumberField.tsx`, `parseNumber`); sabotaging THAT turned J9b red. `fields.tsx` is proved by `fields.locale.test.tsx` only |
+| J11 | `set_locale` skips `app.emit(LOCALE_CHANGED_EVENT)` (Rust) | **nothing, by design**: the window that calls `setLocale` installs the REPLY itself (`applyFromBackend`, `app/src/api/locale.ts`), the event serves OTHER windows, and the journey has one. Skipping the in-window announcement (`emitAppEvent(AppEvents.LOCALE_CHANGED)`) turned J11 red |
+
+Harness fixes (no owner assertion weakened): J9a located Goal Seek's status dialog by the input form's title (it is
+"Goal Seek Status"); J4/J11 found "<d>,<ddd>" in the listprice slicer's de-DE label "112,565" (a correct three-place
+decimal, now excluded by name) and took the year pivot's Grand Total for the Card's text (the Card's own text, with
+its decimals, is now required); J5's year was typed as 2013, but the owner's model is re-dated 2023..2026 (read from
+the view now). **One product defect, fixed: BUG-0539** -- below. G0 is proved live.
+
+**What is left open.**
+
+| Item | Where |
+|---|---|
+| **DC4 -- no locale-adaptive short-date marker.** A typed date and a BI date FREEZE the current locale's short-date pattern into their style (`typed_entry::parse_date_time_input` returns `NumberFormat::Date { format: locale.date_format }`; `typed_cell` follows it): written under de-DE they keep `DD.MM.YYYY` after a switch to sv-SE. Excel has a built-in format 14 that renders per region. Building one (stored as one code, rendered per app locale, round-tripped to xlsx as format 14) touches typed entry, the renderer and xlsx export; `a_bi_date_freezes_the_write_time_pattern_like_typed_date_entry` pins the precedent so both sites change together. | `core/engine/src/typed_entry.rs`; `app/src-tauri/src/bi/member.rs` (`typed_cell`) |
+| **DC5 -- Evaluate Formula shows the formula TEXT in the invariant spelling.** Only each step's evaluated value is localised (`value_to_display_localized`). Localising the text (`engine::formula_locale::localize_formula`) would shift the underline spans `build_display` returns, so it needs span remapping. | `app/src-tauri/src/evaluate_formula.rs` (`build_display`); `app/src-tauri/src/formula_eval_plan.rs` |
+| **Quarter prefixes for the owner to review.** `CalendarNames.quarter_prefix`: en "Q", sv "Kv", fr / es / it / pt "T"; nb / da / nl / fi / de / pl / ru / ja / zh / ko default to "Q". Only en and sv are pinned by tests. Pivot date groups and timelines name quarters with them. | `core/engine/src/locale.rs` (`quarter_prefix`) |
+| **The blank label is "(Blank)" (capitalised, Power BI) while pivot header TEXT still reads "(blank)"** (ruling Q8 changed only key and label). If the owner wants one spelling on screen, the header text is the place. | `core/pivot-engine/src/engine.rs` (`get_value_label`, `BLANK_ITEM_LABEL`) |
+| **The data-validation list dropdown shows numeric list items invariantly** (allowlisted in the Rust census as a comparison site). | `app/src-tauri/src/data_validation.rs` (`resolve_list_source`) |
+| **A script or MCP writeback is still read leniently** (`parse_value` replaces ',' with '.'); the TS doors read strictly in the app locale (BUG-0520). | `app/src-tauri/src/bi/writeback.rs` (`parse_value`) |
+| **Integer-only native number inputs remain** in the Model Editor (REST source form, measures / tables grid priority, CUBE Rank), classed `wire` (no separator is valid in an integer box). A lint against `<input type="number">` would catch new sites; not added. | `app/extensions/ModelEditor/` |
+| **The progress cell type reads display text** (strictly in the app locale), because `CellTypeRenderContext` carries no typed value. | `app/extensions/CellTypes/types/progress.ts` |
+| **`formatNumberIn(Infinity)` returns "inf"** in the core formatter; the S7 callers guard it, other callers on a non-finite value would print it. | `app/src/core/lib/locale/localeText.ts` |
+| **Tests that read `state.locale` without pinning it depend on the machine**: `create_app_state` starts on the OS locale, so a display assertion can pass on a Swedish machine and fail elsewhere. | `app/src-tauri/src/lib.rs` (`create_app_state`) |
+| ~~**BUG-0539 (medium): GETPIVOTDATA on a model Decimal member named and matched the f64 label ("2.29"), not the member KEY ("2.2900000000", BUG-0518)**~~ **FIXED 2026-10-17** (found live, app-locale J5): the pick writes the key; the lookup accepts the key AND the older label, so a formula written before keeps its value. | `app/src-tauri/src/pivot/operations.rs` (`group_path_item_key`); `member_shape_tests.rs` (`getpivotdata_on_a_decimal_member_writes_the_key_and_reads_key_and_label`, each half undone alone fails it) |
+| **A formula written through a cell door in the wrong locale's separators is stored as TEXT, silently.** `CellRange.setValue` reads like typing (app locale since P2): `=GETPIVOTDATA("x",Report!A1)` under sv-SE reads the "," as a decimal comma and lands as the text `=GETPIVOTDATA("x".Report!A1)`, with no error. Excel refuses such an entry ("There's a problem with this formula"). Found by canvas-crossfilter's seed (fixed there to use the locale's list separator); not filed -- an owner call whether the API door should refuse instead. | `app/src/api/range.ts` (`setValue`) |
+
+#### P4 -- one filter resolver, ribbon filters on every visual, cross-filter and Edit interactions (G2-B, G4)
+
+Built 2026-10-16/17 in fifteen steps (S1-S14); the design is `docs/design/canvas-sheets.md` §16.4. Command count
+833 after it (`pivot::headless::run_bi_pivot_filtered_view`; CLAUDE.md and `backend-facade.md` re-run together). No
+`.cala` format-version change: two manifest feature ids, `canvas_interactions` and `ribbon_filter_visual_targets`
+(`core/calcula-format/src/manifest.rs`).
+
+**What shipped.**
+- **One resolver.** `@api/reportFilters` (`app/src/api/reportFilters/`, `resolve.ts` holds the rules) replaced
+  `@api/pageFilters`: published filters with a scope (page / pages / all / visuals), visual selections, and the
+  page's interactions, resolved per TARGET (`resolveFiltersFor`). `@api/modelVisuals` lists every model visual with
+  its source / target / highlight role; `@api/chartMarks` `chartMarkCrossFilter(mark)` answers per mark and fails
+  closed. Everything is keyed by sheet id and member KEY.
+- **Engine tuple filter.** `model-engine-lib` `ScopedTupleFilter` (OR-of-AND, `QueryRequest.scoped_tuple_filters`)
+  with per-measure CLEAR projection and ONE blank rule (`blank_member_split`); changelog entry in
+  `model-engine-lib/docs/host-integration-changelog.md`. Two older defects in the shared contested path were fixed
+  on the way (BUG-0525 empty contested IN-list, BUG-0526 every measure clearing a contested dimension filter).
+- **Ribbon filters reach every model visual (G2-B).** `ControlsPane/lib/filterReportPublisher.ts` publishes each
+  ribbon filter once with its scope; design-query charts, Cards, KPIs, Gauges and `[Measure]` bindings consume it,
+  pivots keep their backend route. The modes read "Selected visuals" / "Selected pages" / "All pages"; the non-pivot
+  targets persist in `RibbonFilter.connected_visuals` (Rust `ribbon_filter/types.rs`, core `SavedRibbonFilter`).
+  An advanced (condition) filter is applied as the member keys it selects, so it reaches charts too.
+- **Cross-filter and cross-highlight (G4, canvas only).** Charts: member paths (`Charts/lib/chartMemberPaths.ts`,
+  from the responses' `groupMembers`), the highlight query and paint (`Charts/rendering/crossHighlight.ts`, bar /
+  pie / scatter / bubble painters), the click grammar (`Charts/handlers/crossFilterClick.ts`,
+  `lib/crossFilterPress.ts`, `lib/chartZoneAt.ts`). Pivot boxes: cells and headers as sources
+  (`Pivot/lib/pivotCrossFilterClick.ts`) and the PAINT-ONLY filtered view with its badge
+  (`Pivot/lib/pivotCrossFilterView.ts`, Rust `pivot/headless.rs` `bi_pivot_filtered_view`). BUG-0527 (a dotted
+  field on a table the model lacks failed the whole design query) was found and fixed in S5.
+- **Edit interactions.** Canvas > Arrange > Edit interactions (`CanvasSheet/lib/editInteractions.ts`,
+  `lib/interactionOverlay.tsx`, `components/InteractionIcons.tsx`, four new icons) writes
+  `CanvasLayout.interactions` (core `persistence::CanvasInteractions`) through `set_canvas_layout` as ONE undo step
+  ("Change visual interaction"). `set_canvas_layout` is async and re-folds a BI pivot whose model-slicer pair moves
+  to or from None inside that step (`sheets::refold_after_interaction_change`, DC-9); a slicer -> slicer None is
+  applied in the slicers' has-data (`slicer/commands.rs`, optional `visualConstraints` on `get_slicer_items`).
+- **Bindings.** The Rust binding mirror is keyed by sheet id and carries tuple filters and per-object overrides
+  (`object_bindings/measures.rs` `PageFilterSet` / `ObjectFilterOverride`, `eval.rs` `effective_filters`; TS
+  `app/src/api/objectBindings/bridge.ts`), so a `[Measure]` follows its object's interaction.
+- **Save, scripts and MCP.** Dangling pairs and connected visuals are dropped at save
+  (`persistence::prune_dead_visual_refs_for_save`, `.cala` and `.calp`). Scripts: `api.setCanvasLayout({interactions})`
+  (DC-5) and `api.getCrossFilters` / `api.setCrossFilter` / `api.clearCrossFilters`; a `crossFilter.*` setState
+  aspect is refused by name (`app/src/api/scriptHost/validators.ts`). A slicer is refused as a `setCrossFilter` source (BUG-0528): it filters through its own items, so a script-held "selection" on it would filter the page while the slicer shows nothing ticked. MCP: an interactions line in
+  `get_sheet_summary`'s Canvases section and `set_object_property` on `canvasPage` `/interactions` (a literal, never
+  a binding; `object_bindings/literal.rs` sends it through the async door).
+
+**Owner questions.**
+
+| Question | Where |
+|---|---|
+| **DC-1: should a model slicer -> BI pivot None pair raise the format version?** It is stored as a manifest feature id, as decided. But the pair changes the pivot's STORED cells (the page fold writes the slicer's level-1 selection as `hidden_items` into the persisted definition), so an older reader that drops the pair re-folds the slicer on refresh and the pivot plus every GETPIVOTDATA reading it come back filtered under an unchanged title -- the lie case CLAUDE.md reserves version links for. The fix is one conditional stamp, `VISUAL_INTERACTIONS_MIN_FORMAT_VERSION` = 12 (P3 owns 11), written only when some pair has a model-slicer source, a pivot target and mode `none`. | `core/calcula-format/src/manifest.rs` (`CANVAS_INTERACTIONS_FEATURE` rustdoc); `app/src-tauri/src/pivot/commands.rs` (`page_model_slicers`) |
+| **Level-1 semantics differ between a pivot and a chart under a CLEARing measure.** A level-1 ribbon or slicer filter is a HOST MASK on a pivot (the engine computes the unfiltered aggregate, the host hides rows) and an ENGINE filter on a chart, so a measure that clears the column (a share, `ALL`) answers differently on the two. P4 asserts pivot/chart agreement only for additive measures. Pre-existing (filter.md section 5). | `app/src-tauri/src/pivot/commands.rs` (`hidden_for_selection`); `app/extensions/Charts/lib/designQueryChartDataReader.ts` |
+
+**Choices made while building, on record.**
+- **The interaction door's all-or-nothing** uses the in-tree owned-transaction precedent
+  (`begin_owned_transaction` + `roll_back_open_changes_after`, P3's `cell_target::edit_lines_on_target`), not the
+  savepoint commands the spec named: it needs no ticket, joins an open step (a granted run's included) and takes
+  back only its own changes. A dropped connection is refused BEFORE any write; a later failure rolls back the
+  layout and every pivot already re-folded (`sheets::FAIL_REFOLD_AT_FOR_TEST`). `app/src-tauri/src/sheets.rs`
+- **What a None pair clears on a pivot**: the slicer's pin always; the column's level-1 hidden items unless an
+  APPLYING page slicer or an external filter (a pivot slicer, a ribbon filter on that pivot) holds the same column.
+  The cosmetic fast path of `update_bi_pivot_fields_unrecorded` is refused while a None slicer still owns something
+  on the pivot (`fold_clears_something`). A header filter on a column a page model slicer folds is reset on every
+  rebuild under BOTH modes (already true for `filter`). `app/src-tauri/src/pivot/commands.rs`
+- **Check triggers of the binding mirror.** Besides report-filter changes, MUTATION_REFRESH, SHEET_ADDED,
+  SHEET_DELETED, STRUCTURAL_UNDO and the page list re-compare the wire once per frame and send only on a
+  difference, so a visual added under a live selection still gets its override. An object added WITHOUT any of
+  those events reaches Rust only on the next report-filter change. `app/src/api/objectBindings/bridge.ts`
+- **A press that slides off the datum still leaves the chart selected** (Core selects at press, before the
+  release decides; the cross-filter itself needs the release over the same datum). `app/extensions/Charts/index.ts`
+- **`CONNECTED_VISUAL_KINDS` accepts pivot and slicer refs in Rust**, but the UI offers charts only: pivots stay in
+  `connected_pivots` (DC-3) and slicers narrow through dependent filters. Harmless. `app/src-tauri/src/ribbon_filter/types.rs`
+
+**Live (2026-10-17, proof phase, group 2).** `app/e2e/journeys/canvas-crossfilter.spec.ts` **11/11** (J1-J10 with
+J3b under sv-SE) on the owner's AdventureWorks, re-proved 11/11 after every sabotage was restored and on the final
+binary (built 17:30 from restored source). Sabotages, each confirmed to change the file:
+
+| # | Sabotage | Failed (as required) |
+|---|---|---|
+| SB1 | `resolve.ts` keeps the target's own selection | J3 "C1 is highlighted by its own selection" -- a check ADDED: the first run stayed green, because a bar's own selection would be a HIGHLIGHT (its values stay whole) |
+| SB2 | `interactions.ts` ignores explicit pairs | J6 (the picked mode is not pressed: the strip reads the same rule) |
+| SB3 | every selection becomes rectangular field filters | J5 (K = the rectangular product, 29.0M vs 18.2M) |
+| SB4 | the box paints the REAL view only | J3 "PV's box painted the REAL Grand Total" -- a check ADDED: the first two runs stayed green, because the journey read the STORED filtered view, and K paints the same Europe total in the same format |
+| SB5 | `page_model_slicers` ignores a `none` pair (Rust) | J7 (PV's real total stays folded) |
+| SB6 | "Selected visuals" publishes scope `all` | J2 (K stays filtered) |
+| SB7 | `crossFilterPressAt` drops the Design Mode guard | J9 (the ladder never reaches the series) |
+| SB8 | the selection is not cleared on `AFTER_OPEN` | J8 "a reopened workbook holds a visual selection" -- after the journey stopped running File > New before the reopen (AFTER_NEW cleared it and hid AFTER_OPEN) |
+| SB9 | `refold_after_interaction_change` re-folds nothing (Rust) | J7 -- the strip route uses the same door, so it fails before J10's MCP route |
+| SB10 | the click builds its tuple from the sv-SE label | J3b ("the selection holds the LABEL") |
+
+Harness fixes (no owner assertion weakened): the GETPIVOTDATA seed was written with "," under sv-SE (stored as
+text; see the P2 row) and named the data field "Revenue" where a model pivot's field is "[Revenue]"; `cardText` read
+a design-query Card's text from `displayValues`, which only a CELL card has (it now finds the painted text the app
+locale's parser reads as the card's value); the pie oracle dropped the blank member and indexed by key where the
+axis carries labels ("(Blank)"); Edit interactions' toggle sits in the folded Arrange flyout at this width, which
+stays open over the strips (closed by its group button, the mode proved to survive); J10's oracle left out S's year,
+which K follows once the pairs are cleared; a model pivot reopens with an EMPTY cache until its first refresh
+(BUG-0162 design), so J8 refreshes PV after the last reopen. **J5's refusal sub-step is not exercised on the
+owner's model**: its "% Revenue of Total" is `GVAR total = [Revenue] RETURN [Revenue] / total`, which the engine
+evaluates under the tuple filter (nothing to contest), so J5 now requires K2 to show that answer and leaves the
+refusal to `design_query_tuple_tests.rs`. **One product defect, fixed: BUG-0540** (high) -- a sheet nobody visited
+after File > Open did not follow its cross-sheet precedents; found here as a GETPIVOTDATA that ignored an MCP re-fold.
+Regression the same day on the final binary: `object-bindings` 13/13, `canvas-powerbi` 10/10 (after P3/P5 stopped
+typing en-US digits: a tile writes "$1,2K" and "8,4M" in the owner's sv-SE, as P2 requires).
+
+| Item | Where |
+|---|---|
+| ~~**BUG-0540 (high): after File > Open, a formula on a sheet that was not active at load followed none of its cross-sheet precedents until the sheet was visited**~~ **FIXED 2026-10-17**: the load rebuilt cross-sheet edges for the active sheet only, and the one shared installer covered floating-range backing sheets alone. It now registers every NON-active sheet (load, `.calp` pull/refresh/reset already call it). Proved live by a two-sheet probe (B1 stayed 20 after A1 = 3; 30 after the fix) and canvas-crossfilter J10. | `app/src-tauri/src/floating_range.rs` (`register_object_sheet_edges`); `commands/cross_sheet_recalc_tests.rs` (`after_a_load_an_unvisited_sheet_follows_the_active_sheet`, red with user sheets skipped again) |
+| **A reopened model pivot box paints "Grand Total 0" until its first refresh.** By design its cache is empty on load (`SavedBiPivotMetadata`, BUG-0162), but on a canvas the box renders the VIEW, not the saved cells, so a reopened report page shows zeros until Refresh. Owner call: refresh on open, or paint the saved output. | `app/src-tauri/src/pivot/types.rs` (`SavedBiPivotMetadata.output_extent`); `app/extensions/Pivot/lib/pivotVisualOverlay.ts` |
+
+**Filed residuals (not built, by decision or by size).**
+
+| Item | Where |
+|---|---|
+| **Range charts and range pivots are not cross-filter participants** (no source, no target): their strip is a disabled None reading "Reads cells, not the model". | `app/extensions/Charts/lib/chartModelVisuals.ts`; `app/extensions/Pivot/lib/pivotModelVisuals.ts` (`RANGE_PIVOT_REASON`) |
+| **Timeline slicers are not interaction sources**: they publish no model filter. | `app/extensions/TimelineSlicer/` |
+| **Cross-filter is canvas only**, by decision; a `select:"point"` chart keeps its authored click and does not join. | `app/extensions/Charts/lib/chartZoneAt.ts` (`crossFilterPressAt`) |
+| **A slicer TARGET under several tuple filters is exact only up to 64 combinations** (`SLICER_TUPLE_HAS_DATA_CAP`); above it has-data is computed under the plain constraints alone (a superset: an item may stay lit that the exact answer would dim), logged. | `app/src-tauri/src/slicer/commands.rs` |
+| **"Explain this chart" does not state the visual selection** that filters or highlights the chart. | `app/extensions/Insights/lib/chartExplain.ts` |
+| **The filtered pivot view keeps the REAL pivot's hidden-grid column widths and row heights**, so a filtered view with fewer or narrower members paints in the real geometry. | `app/extensions/Pivot/lib/pivotVisualOverlay.ts` |
+| **A PivotTable SOURCE does not prune its selection when its members vanish** (a refresh that drops a selected member keeps the tuple, so the page's other visuals filter to nothing until the selection is cleared); a chart source prunes after every read (`pruneCrossFilter` in `designQueryChartDataReader.ts`). The spec asked it of charts only. | `app/extensions/Pivot/lib/pivotCrossFilterView.ts` |
+| **Filtered pivot views exist only for the ACTIVE canvas**; leaving the page drops them and they are read again on return (the selections themselves survive). | `app/extensions/Pivot/lib/pivotCrossFilterView.ts` |
+| **The script door does not check a selection's fields against the source's grouping fields** (`ModelVisualInfo` carries no member path). A wrong field set is inert: TS (BUG-0527) and Rust (`tuple_filter_fields`) skip a whole tuple filter whose field is not in the model. | `app/src/api/scriptHost/host.ts` (`api.setCrossFilter`) |
+| **Engine: the per-measure projection widening is proved by a planner unit test only**; the in-memory connector does not project, so `tuple_filter_tests.rs` test 11 pins the end-to-end answer, not the widening. | `model-engine-lib/crates/engine-query/src/planner/pushdown/mod.rs` |
+| ~~**Not yet proved live**~~ **PROVED LIVE 2026-10-17**: the journey runs 11/11 (below), and the app with the 833 commands started and served every run without a stack overflow. | `app/src-tauri/build.rs` |
+
+**What is left open.**
+
+| Item | Where |
+|---|---|
+| **A pivot's scroll window carries no member keys.** `group_members` covers the cells a response SENDS: the full view of a BI pivot or design-query view, and the first window of a windowed one. A scroll-fetched window (`extract_cell_window`) carries none in v1, so a press on a cell whose valueId has no key does nothing and logs once (the S6/S7 gesture table). | `app/src-tauri/src/pivot/utils.rs` (`extract_cell_window`, `fill_group_members`) |
+| **The paint-only filtered view refuses what a design query cannot reproduce yet**: row/column hierarchies, a placed calculation group, LOOKUP columns (`design_query_from_bi_pivot`), and a pivot whose grid is windowed (more than 500 visible rows). Each refusal is a sentence the pivot's badge shows; the pivot keeps its own unfiltered grid. | `app/src-tauri/src/pivot/commands.rs` (`design_query_from_bi_pivot`); `app/src-tauri/src/pivot/headless.rs` (`FILTERED_VIEW_WINDOWED_REFUSAL`) |
+| **A values-only BI pivot's filtered view is one grand-total row**, without the synthetic "Total" row label the real pivot shows (the rebuilt request drops that field, so the design query is measure-only). The number is right; the shape differs by that label. | `app/src-tauri/src/pivot/headless.rs` (`bi_pivot_filtered_view`) |
+| **A compound measure (a share, `DIVIDE(SUM(x), SUM(x, RESET()))`) under a NON-rectangular selection is an error on the visual**, never an unfiltered number: the engine refuses it under a tuple filter and the host-mask fallback cannot express a tuple. A rectangular selection is unaffected (it travels as IN-lists, and the host mask answers it). | `app/src-tauri/src/pivot/headless.rs` (`tuple_refusal_message`); `model-engine-lib` tuple projection (S1) |
+
+#### Round-2 review findings (2026-10-17) -- all FIXED
+
+Seven defects from the round's review (owner, integrity and security lenses; each confirmed by two votes). Each fix has a
+test that was proved to fail with the fix sabotaged.
+
+| Defect | Fix and test |
+|---|---|
+| ~~**BUG-0529 (medium): a cross-filtered BI pivot box lost its model number formats**~~ **FIXED:** the filtered view's rebuilt request leaves an ADOPTED model format out, and nothing on the design-query path re-adopts it, so every value cell painted in General. The filtered view now carries each value field's effective format from the real definition (by measure name + calculation item). | `app/src-tauri/src/pivot/headless.rs` (`carry_value_formats`); `filtered_view_tests.rs` (`the_filtered_view_paints_the_model_format_the_real_pivot_adopted`) |
+| ~~**BUG-0530 (medium): a cross-filter selection outlived a source removed by undo, a script/MCP/AI or a reload**~~ **FIXED:** new seam `pruneMissingCrossFilterSources(kind, liveIds, pageSheetId?)`; Charts prunes after every store reload, and the Pivot region sync prunes the page's pivot selections whose box is no longer announced. The DC-2a claim ("a pair naming a vanished object is inert by construction") now holds. | `app/src/api/reportFilters/selections.ts`; `app/extensions/Charts/lib/chartCrossFilterPrune.ts` (called from `reloadCharts`); `app/extensions/Pivot/lib/pivotCrossFilterView.ts` (`syncPivotCrossFilterBoxes`); tests `reportFilters.pruneMissing.test.ts`, `chartCrossFilterPrune.test.ts`, `pivotCrossFilterView.test.ts` |
+| ~~**BUG-0531 (medium): timeline period labels kept the old locale after a locale switch**~~ **FIXED:** TimelineSlicer re-reads every timeline on `LOCALE_CHANGED`. | `app/extensions/TimelineSlicer/index.ts`; `__tests__/timelineLocaleRefresh.test.ts` |
+| ~~**BUG-0532 (medium): a cross-filtered pivot box kept its filtered view in the old locale**~~ **FIXED:** the filtered view's signature carries the app locale id, and every box re-reads on `LOCALE_CHANGED`. | `app/extensions/Pivot/lib/pivotCrossFilterView.ts` (`refreshPivotCrossFilter`); `pivotCrossFilterView.test.ts` (two locale cases) |
+| ~~**BUG-0533 (high): Paste Special Add / Subtract / Multiply / Divide parsed DISPLAY text with `Number()` and wrote an en-US result as user input**~~ **FIXED** on both routes (sheet and floating grid): the operands are read TYPED before anything is written (the source where it was copied from, rows through `sourceRows`; the destination on the paste's place), and the result is written with `invariant: true`. The lint now bans `Number` / `parseFloat` / `parseInt` of a `.display`. | `app/extensions/BuiltIn/PasteSpecial/pasteSpecialExecute.ts` (`readSourceOperands`, `pasteWithOperation`, `pasteCellsOnTarget`); `__tests__/pasteSpecialOperationTyped.test.ts`; `app/eslint.boundaries.js` (`LOCALE_RESTRICTED_SYNTAX`), `localeGlobalsBan.test.ts` |
+| ~~**BUG-0534 (medium): the host-mask route hid the SELECTED members of a Decimal column**~~ **FIXED:** `apply_design_query_zones` keeps a member when the inclusion names its display spelling or its member key ("5.5" / "5.50"). | `app/src-tauri/src/pivot/headless.rs` (`apply_design_query_zones`; test `an_inclusion_of_a_decimal_member_key_keeps_that_member`) |
+| ~~**BUG-0535 (low, predates round 2): `chart.setStyleProperty` / `slicer.setStyleProperty` had no `vSetState` row**~~ **FIXED:** `checkStylePropertyAspect` -- an identifier name (max 64), a string value (max 256), no `data:` URI or `url(...)` -- for both aspects and both setState doors. | `app/src/api/scriptHost/validators.ts`; `setStateAspectRows.test.ts` |
+
+#### Regression on the round-1 canvas journeys (2026-10-17, proof phase, group 3)
+
+On the owner's sv-SE app locale and AdventureWorks, final binary built 18:02 (with the BUG-0541 fix):
+`object-pane-format` **26/26**, `canvas-pick-cells` **15/15**, `canvas-page-navigator` **12/12**, `fixall-canvas`
+**36/36** (35 in the full run, X12 + Y11 re-run alone after its harness fix), `canvas` **11/11**, `fixall-pivot`
+**59/59** (57 in the full run, the two X2 tests re-run with the third X2 after their update), `chart-interaction`
+**15/15**, `fixall-calp` **39/39**, `moving-objects` **23/23**, `selected-object-keys` **9/9**.
+
+- **One product defect, fixed: BUG-0541** (medium). Pivot auto-fit sized columns by the UTF-8 BYTE length of the
+  shown text. Since P2 a pivot's numbers are in the app locale, and sv-SE groups with U+00A0 (two bytes), so every
+  value column fitted about 12 px too wide; on the 640 px AdventureWorks box the fourth year column fell wholly
+  past the right edge (canvas-pick-cells J1/J3/J8/J9 could not reach it). Any non-ASCII member label over-widened
+  the same way.
+- **Harness updates for the round-2 contracts (no owner assertion dropped):**
+  - object-pane-format J6 and J11 expected en-US text ("1,234.50", ".0"). A tile and a pivot cell now write the
+    app locale, so the expected shape is built from `get_locale_settings`.
+  - canvas-pick-cells J7 compared the formula bar with JS `String(raw)`. The bar shows General in the app locale,
+    so it is read back with the locale's decimal mark and must carry no grouping.
+  - fixall-canvas X12 expected Edit > Copy on a floating-grid cell to be REFUSED. P3 (owner G3) makes it the
+    grid's own cell copy, so the check is now "no refusal toast and no object copied".
+  - fixall-pivot X2/A2 and X2 (pivot slicer) expected the header dropdown to list `=""` apart from `(blank)`, and
+    a column with only `=""` to offer no blank. Ruling Q8 folds both into ONE blank member (key `""`, label
+    `(Blank)`). The tests now uncheck/re-check that one member and assert both kinds of row go and come back.
+
+| Item | Where |
+|---|---|
+| ~~**BUG-0541 (medium): pivot auto-fit counted UTF-8 bytes, so sv-SE grouping (U+00A0) and non-ASCII labels fitted too wide and pushed a canvas pivot box's last columns out of reach**~~ **FIXED 2026-10-17**: `auto_fit_text_len` counts characters. Proved live by canvas-pick-cells 15/15. | `app/src-tauri/src/pivot/operations.rs` (`auto_fit_text_len`, `auto_fit_pivot_columns`); `auto_fit_len_tests` (two of three fail with `display.len()` back) |
+| **Owner call: Excel keeps a `=""` item apart from `(blank)` in a pivot's own lists; Calcula folds them since ruling Q8.** A column holding only `=""` cells now offers a blank member, and unchecking it hides those rows. | `core/pivot-engine` (`is_blank_member_key`); `app/e2e/journeys/fixall-pivot.spec.ts` (X2/A2, X2 pivot slicer) |
+| **Observation: General shows 10 fixed decimals, not Excel's 15 significant digits.** A canvas pivot cell's formula bar reads "3816543,3276160001", where Excel shows 3816543,327616. TS `formatGeneral` mirrors Rust `format_general` (`{:.10}`), so every General cell does the same. Not filed: it predates round 2. | `app/src/core/lib/locale/localeText.ts` (`formatGeneral`); `core/engine/src/number_format.rs` (`format_general`) |
+
+#### Regression on the functional, invariant and lifecycle suites (2026-10-17, proof phase, group 4 -- last)
+
+Same binary as group 3 (built 18:02; no Rust or TypeScript product source is newer than it, and it carries the
+review fixes BUG-0529..0535 and BUG-0541), owner's sv-SE app locale, all first runs, nothing changed:
+functional `tests/charts` **3/3**, `tests/pivot` **8/8**, `tests/scriptable-shapes` **40/40**,
+`tests/scriptable-objects` **26/26** (1 skipped: the long-standing `test.fixme` "Object Scripts dialog opens from
+Developer menu" -- that editor is a separate OS window CDP cannot see), `tests/animation` **9/9**; invariant
+`tests/state-consistency` **2/2** (both walks `[OK]`; the undo-oracle skips are its documented structure-change and
+floating-range cases); journeys `owner-followups` **4/4**, `fixall-lifecycle` **23/23**, `live-parity-proofs`
+**10/10**, `reload-integrity` **7/7**, `zz-persisted-residue` **2/2** (run last: no journey left the application
+reconfigured or the profile's locale override changed). No product defect, no harness change, nothing filed.
 
 ## 3. How to keep this file honest
 

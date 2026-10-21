@@ -13,6 +13,8 @@ export type {
   BindingEditSource,
   ChangedCellRef,
   PageFilterWire,
+  TupleFilterWire,
+  ObjectFilterOverrideWire,
   PageFilterPageWire,
   BindingFormulaAnalysis,
   BindingModelMeasures,

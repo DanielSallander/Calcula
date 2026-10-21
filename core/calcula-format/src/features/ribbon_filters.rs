@@ -6,7 +6,7 @@
 
 use identity::EntityId;
 use persistence::{
-    SavedRibbonFilter, SavedRibbonFilterDisplayMode, SavedConnectionMode,
+    CanvasObjectRef, SavedRibbonFilter, SavedRibbonFilterDisplayMode, SavedConnectionMode,
     SavedAdvancedFilter,
 };
 use serde::{Deserialize, Serialize};
@@ -33,6 +33,11 @@ pub struct RibbonFilterDef {
     pub connected_pivots: Vec<EntityId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connected_sheets: Vec<usize>,
+    /// For manual mode ("Selected visuals"): the non-pivot model visuals
+    /// (design-query charts, cards, KPIs, gauges) the filter targets. Feature
+    /// id `ribbon_filter_visual_targets`; omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connected_visuals: Vec<CanvasObjectRef>,
     #[serde(default = "default_display_mode")]
     pub display_mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -42,9 +47,9 @@ pub struct RibbonFilterDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advanced_filter: Option<SavedAdvancedFilter>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cross_filter_targets: Vec<EntityId>,
+    pub dependent_filters: Vec<EntityId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cross_filter_slicer_targets: Vec<EntityId>,
+    pub dependent_slicers: Vec<EntityId>,
     #[serde(default)]
     pub hide_no_data: bool,
     #[serde(default = "default_true")]
@@ -107,6 +112,7 @@ impl From<&SavedRibbonFilter> for RibbonFilterDef {
             },
             connected_pivots: f.connected_pivots.clone(),
             connected_sheets: f.connected_sheets.clone(),
+            connected_visuals: f.connected_visuals.clone(),
             display_mode: match f.display_mode {
                 SavedRibbonFilterDisplayMode::Checklist => "checklist".to_string(),
                 SavedRibbonFilterDisplayMode::Buttons => "buttons".to_string(),
@@ -114,8 +120,8 @@ impl From<&SavedRibbonFilter> for RibbonFilterDef {
             },
             selected_items: f.selected_items.clone(),
             advanced_filter: f.advanced_filter.clone(),
-            cross_filter_targets: f.cross_filter_targets.clone(),
-            cross_filter_slicer_targets: f.cross_filter_slicer_targets.clone(),
+            dependent_filters: f.dependent_filters.clone(),
+            dependent_slicers: f.dependent_slicers.clone(),
             hide_no_data: f.hide_no_data,
             indicate_no_data: f.indicate_no_data,
             sort_no_data_last: f.sort_no_data_last,
@@ -146,14 +152,15 @@ impl From<&RibbonFilterDef> for SavedRibbonFilter {
             },
             connected_pivots: f.connected_pivots.clone(),
             connected_sheets: f.connected_sheets.clone(),
+            connected_visuals: f.connected_visuals.clone(),
             display_mode: match f.display_mode.as_str() {
                 "buttons" => SavedRibbonFilterDisplayMode::Buttons,
                 "dropdown" => SavedRibbonFilterDisplayMode::Dropdown,
                 _ => SavedRibbonFilterDisplayMode::Checklist,
             },
             selected_items: f.selected_items.clone(),
-            cross_filter_targets: f.cross_filter_targets.clone(),
-            cross_filter_slicer_targets: f.cross_filter_slicer_targets.clone(),
+            dependent_filters: f.dependent_filters.clone(),
+            dependent_slicers: f.dependent_slicers.clone(),
             hide_no_data: f.hide_no_data,
             indicate_no_data: f.indicate_no_data,
             sort_no_data_last: f.sort_no_data_last,

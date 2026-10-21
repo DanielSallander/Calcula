@@ -3,6 +3,7 @@
 // CONTEXT: Polar grid with connected point polygons per series.
 //          Each category maps to an axis radiating from center.
 
+import { formatNumber } from "@api/locale";
 import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, RadarMarkOptions } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
@@ -277,9 +278,10 @@ export function computeRadarPointMarkers(
 // Helpers
 // ============================================================================
 
+/** A ring label in the APP locale: "1.5M", "2.0K", "0.3". */
 function formatSimple(value: number): string {
-  if (Math.abs(value) >= 1_000_000) return (value / 1_000_000).toFixed(1) + "M";
-  if (Math.abs(value) >= 1_000) return (value / 1_000).toFixed(1) + "K";
-  if (Number.isInteger(value)) return value.toString();
-  return value.toFixed(1);
+  if (Math.abs(value) >= 1_000_000) return formatNumber(value / 1_000_000, { decimals: 1 }) + "M";
+  if (Math.abs(value) >= 1_000) return formatNumber(value / 1_000, { decimals: 1 }) + "K";
+  if (Number.isInteger(value)) return formatNumber(value);
+  return formatNumber(value, { decimals: 1 });
 }

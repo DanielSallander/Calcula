@@ -42,6 +42,7 @@ import {
 } from "./lib/controlsPaneStore";
 import { ControlsPaneEvents } from "./lib/controlsPaneEvents";
 import { registerFilterBadge } from "./lib/filterBadge";
+import { installRibbonFilterReportPublisher } from "./lib/filterReportPublisher";
 import { filterPaneBackend } from "./lib/filterPaneBackend";
 import {
   ensureCustomControlWiring,
@@ -54,6 +55,8 @@ import {
 } from "./components/CustomControlHost";
 
 let unregisterBadge: (() => void) | null = null;
+/** Withdraws the ribbon filters from @api/reportFilters (and stops the seam). */
+let stopReportPublisher: (() => void) | null = null;
 let releaseUndoRefusal: (() => void) | null = null;
 let removeWindowListeners: (() => void) | null = null;
 /** Unsubscribers for the @api event-bus listeners (the document lifecycle). */
@@ -250,6 +253,13 @@ function activate(context: ExtensionContext): void {
   // Track applied filters and show count badge on the Controls tab
   unregisterBadge = registerFilterBadge();
 
+  // Every ribbon filter with a selection reaches the model visuals of its
+  // scope (charts, cards, KPIs, gauges, [Measure] bindings) through
+  // @api/reportFilters; its pivots keep the backend route (the bridge).
+  // Installed before the first cache load, so that load's FILTERS_REFRESHED
+  // publishes.
+  stopReportPublisher = installRibbonFilterReportPublisher();
+
   // A keyboard Ctrl+Z / Ctrl+Y while a ribbon filter change lands is refused
   // with a sentence (the backend refuses it silently): @api/objectGeometry.
   releaseUndoRefusal = refuseUndoWhileAGestureLands(isRibbonFilterChangeLanding);
@@ -268,6 +278,8 @@ function deactivate(): void {
   console.log("[ControlsPane Extension] Deactivating...");
   unregisterBadge?.();
   unregisterBadge = null;
+  stopReportPublisher?.();
+  stopReportPublisher = null;
   releaseUndoRefusal?.();
   releaseUndoRefusal = null;
   removeWindowListeners?.();

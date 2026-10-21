@@ -30,6 +30,12 @@
 //          The band is painted by one grid layer at "over-selection", above
 //          every object.
 //
+//          A plain CLICK on the empty page (released without passing the
+//          threshold, no Shift/Ctrl) also CLEARS the page's cross-filter
+//          selections (@api/reportFilters `clearCrossFilters`), as clicking
+//          the empty canvas does in Power BI -- except while Edit interactions
+//          is on, where the click only deselects (P4 S10).
+//
 //          The mousemove/mouseup listeners are SESSION-SCOPED: bound by the
 //          background press, removed at its mouseup (or when the next press
 //          finds a session whose mouseup never arrived) -- see the census in
@@ -44,6 +50,9 @@ import {
   setObjectSelectionSet,
 } from "@api/objectSelection";
 import type { GridLayerContext } from "@api";
+import { clearCrossFilters } from "@api/reportFilters";
+import { getCanvasSheetSnapshot } from "./canvasSheetStore";
+import { isEditInteractionsActive } from "./editInteractions";
 
 /** The event Core dispatches when a canvas press lands on no object. */
 export const BACKGROUND_POINTER_DOWN_EVENT = "floatingObject:backgroundPointerDown";
@@ -172,12 +181,23 @@ export function endMarquee(apply: boolean): void {
   if (!s) return;
   s.detach();
   session = null;
+  if (apply && !s.active && !s.additive) clearPageCrossFilters();
   if (!apply || !s.active) return;
   requestOverlayRedraw();
   const hits = regionsTouchingBand(selectableFloatingRegions(), bandRect(s.start, s.current));
   if (hits.length === 0) return;
   const members = s.additive ? [...getSelectedObjectRegions(), ...hits] : hits;
   setObjectSelectionSet(members, hits[hits.length - 1]);
+}
+
+/**
+ * A plain click on the empty page: clear the active page's cross-filter
+ * selections, unless Edit interactions is on. Exported for tests.
+ */
+export function clearPageCrossFilters(): void {
+  if (isEditInteractionsActive()) return;
+  const sheetId = getCanvasSheetSnapshot().active?.sheetId;
+  if (sheetId) clearCrossFilters(sheetId);
 }
 
 /**

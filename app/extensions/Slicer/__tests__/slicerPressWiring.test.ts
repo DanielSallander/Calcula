@@ -64,7 +64,7 @@ vi.mock("../lib/slicerStore", async (importOriginal) => ({
   getAllSlicers: () => [slicerRow("s1", B1), slicerRow("s2", B2)],
   getCachedItems: (id: string) =>
     id === "s1" || id === "s2"
-      ? ["North", "South", "West"].map((value) => ({ value, selected: true, hasData: true }))
+      ? ["North", "South", "West"].map((value) => ({ key: value, label: value, selected: true, hasData: true }))
       : undefined,
   clickSlicerItem: h.clickItem,
   clickSlicerItemRun: h.clickRun,

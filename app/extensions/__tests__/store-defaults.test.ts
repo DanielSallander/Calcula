@@ -169,6 +169,7 @@ describe("Sort store initial state", () => {
     expect(state).toMatchInlineSnapshot(`
       {
         "caseSensitive": false,
+        "cellTarget": null,
         "columnHeaders": [],
         "hasHeaders": true,
         "levels": [],

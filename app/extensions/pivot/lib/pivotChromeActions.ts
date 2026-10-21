@@ -16,7 +16,8 @@ import { emitAppEvent } from "@api/events";
 import { requestOverlayRedraw } from "@api/gridOverlays";
 import { PivotEvents } from "../../_shared/lib/pivotEvents";
 import type { PivotViewResponse, PivotRowData, PivotCellData } from "./pivot-api";
-import { getPivotAtCell, togglePivotGroup, cancelPivotOperation, getCellDisplayValue } from "./pivot-api";
+import { getPivotAtCell, togglePivotGroup, cancelPivotOperation } from "./pivot-api";
+import { pivotCellItemKey } from "@api/pivotMembers";
 import {
   getCachedPivotView,
   getCellWindowCache,
@@ -45,17 +46,6 @@ export function getPivotViewCell(pivotId: string, viewRow: number, viewCol: numb
   const view = getCachedPivotView(pivotId);
   if (!view) return null;
   return getPivotViewRow(pivotId, view, viewRow)?.cells[viewCol] ?? null;
-}
-
-/**
- * The item name a pivot cell stands for: its formatted text, or -- when the
- * backend sent none (a text header whose label IS its value, an unformatted
- * numeric header such as the year 2013) -- its value as text. Every menu item
- * and toggle that names an item by its label reads this, so a numeric header
- * is never named "" (BUG-0454).
- */
-export function pivotCellLabel(cell: PivotCellData): string {
-  return cell.formattedValue || getCellDisplayValue(cell.value);
 }
 
 /**
@@ -117,7 +107,7 @@ export async function setPivotItemExpandedAt(
     pivotId,
     isRow,
     fieldIndex: headerZonePosition(header),
-    value: pivotCellLabel(header),
+    value: pivotCellItemKey(header),
     groupPath: header.groupPath,
   });
   window.dispatchEvent(new CustomEvent("pivot:refresh"));
@@ -137,7 +127,9 @@ export async function togglePivotHeaderAt(
   const cell = getPivotViewCell(pivotId, viewRow, viewCol);
   if (!cell) return false;
 
-  const itemLabel = pivotCellLabel(cell);
+  // The item's KEY (identity), never its localised label (BUG-0454: an
+  // unformatted numeric header is "2013", never "").
+  const itemLabel = pivotCellItemKey(cell);
   // In compact layout, all row headers share col 0 but have different indent levels.
   // Use indentLevel to determine the correct field index.
   // For columns, indentLevel carries the column field depth directly.

@@ -10,6 +10,7 @@ import { resolvePointColor, resolvePointOpacity, resolveSeriesEncoding, seriesPa
 import type { ResolvedDatumStyle } from "../lib/dataPointOverrides";
 import { resolveDatumStyle } from "../lib/dataPointOverrides";
 import { applyFillStyle } from "./gradientFill";
+import { datumEmphasis, paintFadedThenHighlighted } from "./crossHighlight";
 import { createLinearScale, createBandScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
@@ -270,26 +271,29 @@ function drawBars(
 
       if (clippedHeight <= 0) continue;
 
-      if (style.opacity != null) ctx.globalAlpha = style.opacity;
-
       // Fill: per-point gradient override > mark-level gradient > solid color.
-      applyFillStyle(ctx, style.fill, style.gradientFill ?? undefined, barX, clippedY, barWidth, clippedHeight);
+      const fillBar = (x: number, y: number, w: number, h: number): void => {
+        applyFillStyle(ctx, style.fill, style.gradientFill ?? undefined, x, y, w, h);
+        if (theme.barBorderRadius > 0 && h > theme.barBorderRadius * 2) {
+          drawRoundedRect(ctx, x, y, w, h, theme.barBorderRadius);
+          ctx.fill();
+        } else {
+          ctx.fillRect(x, y, w, h);
+        }
+      };
 
-      if (theme.barBorderRadius > 0 && clippedHeight > theme.barBorderRadius * 2) {
-        drawRoundedRect(
-          ctx,
-          barX,
-          clippedY,
-          barWidth,
-          clippedHeight,
-          theme.barBorderRadius,
-        );
-        ctx.fill();
+      // Cross-filter (P4): a highlighted datum is its faded whole plus the
+      // highlighted portion; an unselected datum of a source is faded.
+      const emphasis = datumEmphasis(data, si, ci);
+      if (emphasis.kind === "plain") {
+        if (style.opacity != null) ctx.globalAlpha = style.opacity;
+        fillBar(barX, clippedY, barWidth, clippedHeight);
+        strokeDatumBorderRect(ctx, style, barX, clippedY, barWidth, clippedHeight, theme.barBorderRadius);
+        if (style.opacity != null) ctx.globalAlpha = 1;
       } else {
-        ctx.fillRect(barX, clippedY, barWidth, clippedHeight);
+        paintFadedThenHighlighted(ctx, { x: barX, y: clippedY, w: barWidth, h: clippedHeight }, emphasis, style.opacity, value >= 0 ? "bottom" : "top", fillBar);
+        strokeDatumBorderRect(ctx, style, barX, clippedY, barWidth, clippedHeight, theme.barBorderRadius);
       }
-      strokeDatumBorderRect(ctx, style, barX, clippedY, barWidth, clippedHeight, theme.barBorderRadius);
-      if (style.opacity != null) ctx.globalAlpha = 1;
     }
   }
 }
@@ -371,17 +375,28 @@ function drawStackedBars(
 
       if (clippedHeight <= 0) continue;
 
-      if (style.opacity != null) ctx.globalAlpha = style.opacity;
-      applyFillStyle(ctx, style.fill, style.gradientFill ?? undefined, barX, clippedY, barWidth, clippedHeight);
+      const fillBar = (x: number, y: number, w: number, h: number): void => {
+        applyFillStyle(ctx, style.fill, style.gradientFill ?? undefined, x, y, w, h);
+        if (theme.barBorderRadius > 0 && h > theme.barBorderRadius * 2) {
+          drawRoundedRect(ctx, x, y, w, h, theme.barBorderRadius);
+          ctx.fill();
+        } else {
+          ctx.fillRect(x, y, w, h);
+        }
+      };
 
-      if (theme.barBorderRadius > 0 && clippedHeight > theme.barBorderRadius * 2) {
-        drawRoundedRect(ctx, barX, clippedY, barWidth, clippedHeight, theme.barBorderRadius);
-        ctx.fill();
+      // Cross-filter (P4): the segment's highlighted portion grows from the
+      // segment's own lower end (its upper end for a negative segment).
+      const emphasis = datumEmphasis(data, si, ci);
+      if (emphasis.kind === "plain") {
+        if (style.opacity != null) ctx.globalAlpha = style.opacity;
+        fillBar(barX, clippedY, barWidth, clippedHeight);
+        strokeDatumBorderRect(ctx, style, barX, clippedY, barWidth, clippedHeight, theme.barBorderRadius);
+        if (style.opacity != null) ctx.globalAlpha = 1;
       } else {
-        ctx.fillRect(barX, clippedY, barWidth, clippedHeight);
+        paintFadedThenHighlighted(ctx, { x: barX, y: clippedY, w: barWidth, h: clippedHeight }, emphasis, style.opacity, value >= 0 ? "bottom" : "top", fillBar);
+        strokeDatumBorderRect(ctx, style, barX, clippedY, barWidth, clippedHeight, theme.barBorderRadius);
       }
-      strokeDatumBorderRect(ctx, style, barX, clippedY, barWidth, clippedHeight, theme.barBorderRadius);
-      if (style.opacity != null) ctx.globalAlpha = 1;
     }
   }
 }

@@ -45,6 +45,20 @@ export const CANVAS_OBJECT_KINDS = [
 /** One of {@link CANVAS_OBJECT_KINDS}. */
 export type CanvasObjectKind = (typeof CANVAS_OBJECT_KINDS)[number];
 
+/**
+ * The object kinds an interaction pair (`CanvasLayout.interactions`, Edit
+ * interactions) may name as its source or target: the visuals that read a
+ * model. Mirrors Rust `CANVAS_INTERACTION_KINDS` (core/persistence), pinned by
+ * canvasSheetConstantsDrift.test.ts.
+ */
+export const CANVAS_INTERACTION_KINDS = ["chart", "pivot", "slicer"] as const;
+
+/**
+ * The most refs one canvas layout list may hold (`zOrder`, `locked`, the
+ * interaction pairs). Mirrors Rust `CANVAS_MAX_OBJECT_REFS` (core/persistence).
+ */
+export const CANVAS_MAX_OBJECT_REFS = 4096;
+
 /** Build a ref; the kind is checked against the one list at compile time. */
 export function canvasObjectRef(kind: CanvasObjectKind, id: string): CanvasObjectRef {
   return { kind, id };

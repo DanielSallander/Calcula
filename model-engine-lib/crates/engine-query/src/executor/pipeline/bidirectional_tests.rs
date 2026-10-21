@@ -198,6 +198,7 @@ async fn run_pipeline(
         TotalsMode::None,
         None,
         &[],
+        &[],
         &model,
         &registry,
         Some(&cache),

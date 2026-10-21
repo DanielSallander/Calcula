@@ -439,6 +439,7 @@ fn clear_params(apply_to: ClearApplyTo) -> ClearRangeParams {
         end_col: 1,
         apply_to,
         sheet_index: Some(1),
+        target: None,
     }
 }
 
@@ -572,6 +573,7 @@ fn sort_params() -> SortRangeParams {
         has_headers: false,
         orientation: SortOrientation::Rows,
         sheet_index: Some(1),
+        target: None,
     }
 }
 
@@ -629,6 +631,74 @@ fn off_sheet_sort_is_blocked_by_target_protection() {
     .expect_err("protected target (allowSort=false) must refuse");
     assert!(err.to_lowercase().contains("protect"), "{err}");
     assert_eq!(value_at(&state, 1, 0, 0), Some(CellValue::Number(3.0)), "order unchanged");
+}
+
+/// P2 S5: a built-in custom list ("months") orders the APP locale's month
+/// names too -- "mars, januari, februari" sorts into calendar order under
+/// sv-SE -- and the English names are still recognised beside them.
+#[test]
+fn a_months_custom_sort_reads_the_app_locales_month_names() {
+    let text = |s: &str| Cell {
+        value: CellValue::Text(s.to_string()),
+        ast: None,
+        style_index: 0,
+        rich_text: None,
+    };
+    let state = two_sheet_state(|g| {
+        g.set_cell(0, 0, text("mars"));
+        g.set_cell(1, 0, text("Januari"));
+        g.set_cell(2, 0, text("February"));
+        g.set_cell(3, 0, text("december"));
+    });
+    *state.locale.lock().unwrap() = engine::LocaleSettings::from_locale_id("sv-SE");
+    let a = aux();
+    let mut params = sort_params();
+    params.end_row = 3;
+    params.fields[0].custom_order = Some("months".to_string());
+
+    let result = crate::commands::data::sort_range_off_sheet(
+        &state, &a.file, &a.files, &a.pivots, &a.pane, &a.filters, 1, params,
+    )
+    .expect("sort succeeds");
+    assert!(result.success, "{:?}", result.error);
+    let order: Vec<Option<CellValue>> = (0..4).map(|r| value_at(&state, 1, r, 0)).collect();
+    assert_eq!(
+        order,
+        vec![
+            Some(CellValue::Text("Januari".to_string())),
+            Some(CellValue::Text("February".to_string())),
+            Some(CellValue::Text("mars".to_string())),
+            Some(CellValue::Text("december".to_string())),
+        ],
+        "Swedish and English month names share one calendar order"
+    );
+}
+
+/// The positive control for the test above: under the invariant locale the
+/// Swedish spellings are NOT in the list, so they sort after every English
+/// name (usize::MAX), proving the order above came from the locale.
+#[test]
+fn a_months_custom_sort_without_the_locale_leaves_foreign_names_last() {
+    let text = |s: &str| Cell {
+        value: CellValue::Text(s.to_string()),
+        ast: None,
+        style_index: 0,
+        rich_text: None,
+    };
+    let state = two_sheet_state(|g| {
+        g.set_cell(0, 0, text("mars"));
+        g.set_cell(1, 0, text("February"));
+        g.set_cell(2, 0, text("January"));
+    });
+    *state.locale.lock().unwrap() = engine::LocaleSettings::invariant();
+    let a = aux();
+    let mut params = sort_params();
+    params.fields[0].custom_order = Some("months".to_string());
+    crate::commands::data::sort_range_off_sheet(&state, &a.file, &a.files, &a.pivots, &a.pane, &a.filters, 1, params)
+        .expect("sort succeeds");
+    assert_eq!(value_at(&state, 1, 0, 0), Some(CellValue::Text("January".to_string())));
+    assert_eq!(value_at(&state, 1, 1, 0), Some(CellValue::Text("February".to_string())));
+    assert_eq!(value_at(&state, 1, 2, 0), Some(CellValue::Text("mars".to_string())));
 }
 
 // ---------------------------------------------------------------------------

@@ -80,6 +80,13 @@ export function AddFilterDialog({
         // the try below already handles a connection without one.
         try {
           const modelInfo = await getBiModelInfo(conn.id);
+          if (modelInfo === null) {
+            // A connection with no model loaded has no fields to offer.
+            console.warn(
+              `[AddFilterDialog] Connection "${conn.name}" has no model loaded; skipping it.`,
+            );
+            continue;
+          }
           const allFields: string[] = [];
           const tableNames: string[] = [];
           const fieldTypes = new Map<string, FieldDataType>();
@@ -195,7 +202,13 @@ export function AddFilterDialog({
   // stripped when the heading above already says it. The title attribute keeps
   // the whole key readable on hover either way.
   const renderField = (field: string, display: string) => (
-    <label key={field} style={styles.fieldItem} title={field}>
+    <label
+      key={field}
+      style={styles.fieldItem}
+      title={field}
+      data-testid="controls-pane-add-filter-field"
+      data-field={field}
+    >
       <input
         type="checkbox"
         checked={checkedFields.has(field)}
@@ -249,6 +262,7 @@ export function AddFilterDialog({
               ) : (
                 <select
                   style={styles.select}
+                  data-testid="controls-pane-add-filter-connection"
                   value={selectedSourceIndex}
                   onChange={(e) => {
                     setSelectedSourceIndex(Number(e.target.value));
@@ -338,6 +352,7 @@ export function AddFilterDialog({
             style={FOOTER_BUTTON_STYLE}
             disabled={checkedFields.size === 0 || isLoading}
             onClick={handleCreate}
+            data-testid="controls-pane-add-filter-create"
           >
             {isLoading ? "Creating..." : `Add ${checkedFields.size || ""} Filter${checkedFields.size !== 1 ? "s" : ""}`}
           </Button>

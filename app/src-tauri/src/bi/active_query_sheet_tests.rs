@@ -133,6 +133,7 @@ fn one_row_result() -> BiQueryResult {
         columns: vec!["Region".to_string(), "Revenue".to_string()],
         rows: vec![vec![Some("East".to_string()), Some("10".to_string())]],
         row_count: 1,
+        column_kinds: vec![],
     }
 }
 

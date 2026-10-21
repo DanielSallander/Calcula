@@ -6,12 +6,31 @@
 import React, { useEffect, useMemo, useState } from "react";
 import type { DialogProps } from "@api/uiTypes";
 import { getActiveSheet } from "@api/lib";
+import { formatNumber, parseNumber } from "@api/locale";
 import { listAnimatableCharts, listChartParams, type ChartParamBinding } from "@api/chartParams";
 import { parseA1, toA1 } from "../lib/a1";
 import { getAnimation, upsertAnimation, newAnimationId } from "../lib/animationStore";
 import { playbackEngine } from "../lib/animationEngine";
 import { listScenarios, type ScenarioData } from "../lib/animationBackend";
 import type { AnimationSpec, ChartParamSequence, DriverKind } from "../types";
+
+/** A number box's text: the APP locale ("0,5" under de-DE), so it reads back. */
+function numberText(n: number): string {
+  return formatNumber(n);
+}
+
+/** A prefill value (a number, or text a caller already wrote) as box text. */
+function prefillText(v: unknown, fallback: string): string {
+  if (typeof v === "number") return numberText(v);
+  return v != null ? String(v) : fallback;
+}
+
+/** What a number box holds, read STRICTLY in the app locale; NaN when it is
+ *  no number there (the foreign "0.5" under de-DE), so every existing
+ *  "must be a number" check refuses it rather than misreading it. */
+function typedNumber(text: string): number {
+  return parseNumber(text) ?? Number.NaN;
+}
 
 /** Dialog id shared by the registration (index.ts) and the openers (panel). */
 export const ANIMATION_DIALOG_ID = "animation.editor";
@@ -142,9 +161,9 @@ export function AnimationDialog({ isOpen, onClose, data }: DialogProps): React.R
       setDriverType("clockCell");
       setName(existing.name);
       setCellRef(toA1(existing.clockCell.row, existing.clockCell.col));
-      setFromStr(String(existing.clockCell.from));
-      setToStr(String(existing.clockCell.to));
-      setStepStr(String(existing.clockCell.step));
+      setFromStr(numberText(existing.clockCell.from));
+      setToStr(numberText(existing.clockCell.to));
+      setStepStr(numberText(existing.clockCell.step));
     } else if (existing?.driver === "chartParam" && existing.chartParam) {
       setDriverType("chartParam");
       setName(existing.name);
@@ -154,25 +173,25 @@ export function AnimationDialog({ isOpen, onClose, data }: DialogProps): React.R
       setDriverType("scenario");
       setName(existing.name);
       setSelectedScenarios(existing.scenario.keyframes);
-      setFramesPerSegStr(String(existing.scenario.framesPerSegment));
+      setFramesPerSegStr(numberText(existing.scenario.framesPerSegment));
       setInterpolate(existing.scenario.interpolate);
     } else if (existing?.driver === "monteCarlo" && existing.monteCarlo) {
       setDriverType("monteCarlo");
       setName(existing.name);
       setOutcomeCell(toA1(existing.monteCarlo.outcomeRow, existing.monteCarlo.outcomeCol));
-      setTrialsStr(String(existing.monteCarlo.trials));
-      setBinsStr(String(existing.monteCarlo.bins ?? 20));
+      setTrialsStr(numberText(existing.monteCarlo.trials));
+      setBinsStr(numberText(existing.monteCarlo.bins ?? 20));
     } else {
       const p = (data?.prefill ?? {}) as Record<string, unknown>;
       setDriverType("clockCell");
       setName(typeof p.name === "string" ? p.name : "");
       setCellRef(typeof p.cellRef === "string" ? p.cellRef : "B1");
-      setFromStr(p.from != null ? String(p.from) : "0");
-      setToStr(p.to != null ? String(p.to) : "100");
-      setStepStr(p.step != null ? String(p.step) : "1");
+      setFromStr(prefillText(p.from, "0"));
+      setToStr(prefillText(p.to, "100"));
+      setStepStr(prefillText(p.step, "1"));
     }
     if (existing) {
-      setFpsStr(String(existing.playback.fps));
+      setFpsStr(numberText(existing.playback.fps));
       setLoop(existing.playback.loop);
     } else {
       setFpsStr("12");
@@ -216,7 +235,7 @@ export function AnimationDialog({ isOpen, onClose, data }: DialogProps): React.R
       setError("Name is required");
       return;
     }
-    const fps = Number(fpsStr);
+    const fps = typedNumber(fpsStr);
     if (!Number.isFinite(fps)) {
       setError("fps must be a number");
       return;
@@ -230,9 +249,9 @@ export function AnimationDialog({ isOpen, onClose, data }: DialogProps): React.R
     if (driverType === "clockCell") {
       const parsed = parseA1(cellRef);
       if (!parsed) return setError("Driver cell must be like B1");
-      const from = Number(fromStr);
-      const to = Number(toStr);
-      const step = Number(stepStr);
+      const from = typedNumber(fromStr);
+      const to = typedNumber(toStr);
+      const step = typedNumber(stepStr);
       if (![from, to, step].every(Number.isFinite) || step === 0) {
         return setError("From / To / Step must be numbers and Step ≠ 0");
       }
@@ -247,13 +266,13 @@ export function AnimationDialog({ isOpen, onClose, data }: DialogProps): React.R
     } else if (driverType === "scenario") {
       const keyframes = scenarios.map((s) => s.name).filter((n) => selectedScenarios.includes(n));
       if (keyframes.length < 1) return setError("Pick at least one scenario");
-      const framesPerSegment = Math.max(1, Math.round(Number(framesPerSegStr)) || 1);
+      const framesPerSegment = Math.max(1, Math.round(typedNumber(framesPerSegStr)) || 1);
       spec = { id, name: trimmed, sheetIndex, driver: "scenario", playback, scenario: { sheetIndex, keyframes, framesPerSegment, interpolate } };
     } else {
       const parsed = parseA1(outcomeCell);
       if (!parsed) return setError("Outcome cell must be like B1");
-      const trials = Math.max(1, Math.round(Number(trialsStr)) || 1);
-      const bins = Math.max(1, Math.round(Number(binsStr)) || 20);
+      const trials = Math.max(1, Math.round(typedNumber(trialsStr)) || 1);
+      const bins = Math.max(1, Math.round(typedNumber(binsStr)) || 20);
       spec = { id, name: trimmed, sheetIndex, driver: "monteCarlo", playback, monteCarlo: { sheetIndex, outcomeRow: parsed.row, outcomeCol: parsed.col, trials, bins } };
     }
 
@@ -410,7 +429,7 @@ export function AnimationDialog({ isOpen, onClose, data }: DialogProps): React.R
           <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
             <div>
               <div style={labelStyle}>fps</div>
-              <input style={{ ...field, width: 70 }} type="number" min={1} max={120} value={fpsStr} onChange={(e) => setFpsStr(e.target.value)} />
+              <input style={{ ...field, width: 70 }} type="text" inputMode="numeric" value={fpsStr} onChange={(e) => setFpsStr(e.target.value)} />
             </div>
             <label style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 14 }}>
               <input type="checkbox" checked={loop} onChange={(e) => setLoop(e.target.checked)} />

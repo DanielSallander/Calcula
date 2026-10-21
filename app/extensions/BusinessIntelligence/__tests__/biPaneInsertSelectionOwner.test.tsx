@@ -44,7 +44,7 @@ vi.mock("../../_shared/lib/bi-api", async (importOriginal) => ({
   connect: vi.fn(async () => undefined),
   getActiveRole: vi.fn(async () => null),
   bindTable: vi.fn(async () => undefined),
-  query: vi.fn(async () => ({ columns: ["Revenue"], rows: [["10"]], rowCount: 1 })),
+  query: vi.fn(async () => ({ columns: ["Revenue"], rows: [["10"]], rowCount: 1, columnKinds: [] })),
   insertResult: vi.fn(async (req: { connectionId: string; sheetIndex: number; startRow: number; startCol: number }) => {
     h.inserted.push(req);
     return { startRow: req.startRow, startCol: req.startCol, endRow: req.startRow + 1, endCol: req.startCol };

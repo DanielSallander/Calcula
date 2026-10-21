@@ -28,6 +28,7 @@ import {
 import { requestOverlayRedraw } from "@api/gridOverlays";
 import { surfacePivotNotices } from "@api/pivotNotices";
 import { emitAppEvent, AppEvents } from "@api";
+import { formatNumber } from "@api/locale";
 import { confirmAsync } from "@api/dialogs";
 import { pivotOverwriteQuestion, takeBackPivotOverwrite } from "@api/pivotOverwrite";
 import type { BiHierarchyMeta } from "@api/backend";
@@ -162,6 +163,7 @@ import {
   showReportFilterPages as apiShowReportFilterPages,
 } from "@api/backend";
 import { pivotBackend } from "./pivotBackend";
+import { notePivotDeleted } from "./pivotCrossFilterView";
 
 // ============================================================================
 // API Functions
@@ -295,6 +297,9 @@ export async function getPivotCellWindow(
  */
 export async function deletePivotTable(pivotId: PivotId): Promise<void> {
   await apiDeletePivotTable(pivotId);
+  // P4 S7: a deleted pivot's cross-filter selection goes (Power BI), and so
+  // does its box's filtered view -- only once the backend accepted the delete.
+  notePivotDeleted(String(pivotId));
   // §3bn: the delete cascaded into the slicers and timeline slicers bound to
   // this pivot and pruned it from every ribbon filter that targeted it. Those
   // extensions cache their own objects and paint their own overlays, so a
@@ -426,11 +431,14 @@ export function getCellNumericValue(value: PivotCellValue): number {
 }
 
 /**
- * Extracts the display string from a PivotCellValue.
+ * Extracts the DISPLAY string from a PivotCellValue: a number in General with
+ * the app locale's separators ("1234,5" under de-DE). Display only -- an
+ * identity (a filter item, a toggle name) reads `pivotCellItemKey` (@api).
  */
 export function getCellDisplayValue(value: PivotCellValue): string {
   if (value === null || value === undefined) return "";
-  if (typeof value === "number") return value.toString();
+  // A non-finite number has no General text; it keeps its JS spelling.
+  if (typeof value === "number") return Number.isFinite(value) ? formatNumber(value) : String(value);
   if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
   return value; // string (including "#ERROR" prefixed errors)
 }
@@ -1260,7 +1268,8 @@ async function buildCompileContext(
     const promises = info.fieldConfiguration.filterFields.map(async (f) => {
       try {
         const resp = await getPivotFieldUniqueValues(info.pivotId, f.sourceIndex);
-        filterUniqueValues!.set(f.name, resp.uniqueValues);
+        // The layout DSL speaks member KEYS (invariant), never labels.
+        filterUniqueValues!.set(f.name, resp.members.map((m) => m.key));
       } catch {
         // Non-critical — serialization will use NOT IN fallback
       }
@@ -1328,7 +1337,8 @@ export async function getPivotDsl(pivotId: PivotId): Promise<string> {
     const promises = filters.map(async (f) => {
       try {
         const resp = await getPivotFieldUniqueValues(pivotId, f.sourceIndex);
-        filterUniqueValues!.set(f.name, resp.uniqueValues);
+        // The layout DSL speaks member KEYS (invariant), never labels.
+        filterUniqueValues!.set(f.name, resp.members.map((m) => m.key));
       } catch { /* non-critical */ }
     });
     await Promise.all(promises);

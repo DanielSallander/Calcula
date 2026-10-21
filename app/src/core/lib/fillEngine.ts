@@ -17,6 +17,39 @@ import {
   type FormulaShiftInput,
 } from "./tauri-api";
 import { FillListRegistry, type FillListMatch } from "./fillLists";
+import { getActiveLocale, parseNumberIn, formatNumberIn } from "./locale";
+
+/** Significant digits a double round-trips exactly. */
+const FILL_ROUND_TRIP_DIGITS = 15;
+
+/**
+ * The number a fill source cell holds, read from its DISPLAY text strictly in
+ * the app locale (P2 S11), or null when the text is not a number there.
+ *
+ * It was `parseFloat`, which reads only the invariant spelling and stops at
+ * the first character it does not know: under de-DE the cells 1,5 and 2,5
+ * read as 1 and 2 and filled 3, 4, 5; "1.234" read as 1.234 instead of 1234;
+ * and "10 kg" read as 10, so a unit column filled "30" with its unit gone.
+ */
+export function fillNumberOf(text: string): number | null {
+  if (text.trim() === "") return null;
+  return parseNumberIn(getActiveLocale(), text);
+}
+
+/**
+ * The cell INPUT a fill writes for a generated number. The batch write parses
+ * its input in the app locale exactly as if the user had typed it, so the
+ * number must be spelled in that locale ("3,5" under de-DE, where "3.5" is a
+ * mis-grouped text). No grouping, and fifteen significant digits so binary
+ * float noise (0.1 + 0.2) never lands in a cell.
+ */
+export function fillNumberText(n: number): string {
+  if (!Number.isFinite(n)) return String(n);
+  const abs = Math.abs(n);
+  const intDigits = abs >= 1 ? Math.floor(Math.log10(abs)) + 1 : 0;
+  const maxDecimals = Math.max(0, Math.min(FILL_ROUND_TRIP_DIGITS, FILL_ROUND_TRIP_DIGITS - intDigits));
+  return formatNumberIn(getActiveLocale(), n, { minDecimals: 0, maxDecimals, grouping: false });
+}
 
 /**
  * Fill direction enumeration.
@@ -263,7 +296,7 @@ export function detectPattern(values: string[]): PatternResult {
     }
 
     // Single number - copy by default
-    if (!isNaN(parseFloat(val)) && val.trim() !== "") {
+    if (fillNumberOf(val) !== null) {
       return { type: "copy", baseValues: values, step: 0 };
     }
 
@@ -272,8 +305,9 @@ export function detectPattern(values: string[]): PatternResult {
   }
 
   // Multiple values - try to detect series
-  const numbers = values.map((v) => parseFloat(v));
-  const allNumbers = numbers.every((n) => !isNaN(n));
+  const parsed = values.map((v) => fillNumberOf(v));
+  const allNumbers = parsed.every((n) => n !== null);
+  const numbers = parsed.map((n) => n ?? NaN);
 
   if (allNumbers && values.length >= 2) {
     // Check for arithmetic sequence
@@ -330,15 +364,15 @@ export function generateFillValue(
       return sourceValues[index % sourceValues.length];
 
     case "increment": {
-      const baseNum = parseFloat(sourceValues[0]);
-      return String(baseNum + index + 1);
+      const baseNum = fillNumberOf(sourceValues[0]) ?? NaN;
+      return fillNumberText(baseNum + index + 1);
     }
 
     case "series": {
-      const lastNum = parseFloat(sourceValues[sourceValues.length - 1]);
+      const lastNum = fillNumberOf(sourceValues[sourceValues.length - 1]) ?? NaN;
       const offset = index - sourceValues.length + 1;
       if (offset > 0) {
-        return String(lastNum + pattern.step * offset);
+        return fillNumberText(lastNum + pattern.step * offset);
       }
       return sourceValues[index];
     }

@@ -8,8 +8,14 @@
 //   rendering pipeline as the "base style". This interceptor runs AFTER base
 //   styles are resolved, so any properties returned here will override values
 //   set by Computed Properties (backgroundColor, textColor, bold, italic, etc.).
+//
+// ONE FOLD. Which result wins for each property (first match, colour scale
+// before a rule fill) is decided by `conditionalResultsToOverride` in
+// `@api/conditionalFormatPaint`, which a floating grid uses for ITS cells too.
+// A second copy here would drift from it on the first property added.
 
 import type { IStyleOverride, CellCoords } from "@api/styleInterceptors";
+import { conditionalResultsToOverride } from "@api/conditionalFormatPaint";
 import { getEvaluationForCell } from "./cfStore";
 
 /**
@@ -22,68 +28,5 @@ export function conditionalFormattingInterceptor(
   _baseStyle: { styleIndex: number },
   coords: CellCoords
 ): IStyleOverride | null {
-  const results = getEvaluationForCell(coords.row, coords.col);
-  if (!results || results.length === 0) {
-    return null;
-  }
-
-  const override: IStyleOverride = {};
-  let hasOverride = false;
-
-  for (const cf of results) {
-    // Color scale background takes priority
-    if (cf.colorScaleColor && !override.backgroundColor) {
-      override.backgroundColor = cf.colorScaleColor;
-      hasOverride = true;
-    }
-
-    // Apply format overrides (first match wins for each property)
-    const fmt = cf.format;
-    if (fmt.backgroundColor && !override.backgroundColor) {
-      override.backgroundColor = fmt.backgroundColor;
-      hasOverride = true;
-    }
-    if (fmt.textColor && !override.textColor) {
-      override.textColor = fmt.textColor;
-      hasOverride = true;
-    }
-    if (fmt.bold !== undefined && override.bold === undefined) {
-      override.bold = fmt.bold;
-      hasOverride = true;
-    }
-    if (fmt.italic !== undefined && override.italic === undefined) {
-      override.italic = fmt.italic;
-      hasOverride = true;
-    }
-    if (fmt.underline !== undefined && override.underline === undefined) {
-      override.underline = fmt.underline;
-      hasOverride = true;
-    }
-    if (fmt.strikethrough !== undefined && override.strikethrough === undefined) {
-      override.strikethrough = fmt.strikethrough;
-      hasOverride = true;
-    }
-    if (fmt.borderTopColor && !override.borderTopColor) {
-      override.borderTopColor = fmt.borderTopColor;
-      override.borderTopStyle = fmt.borderTopStyle || "solid";
-      hasOverride = true;
-    }
-    if (fmt.borderBottomColor && !override.borderBottomColor) {
-      override.borderBottomColor = fmt.borderBottomColor;
-      override.borderBottomStyle = fmt.borderBottomStyle || "solid";
-      hasOverride = true;
-    }
-    if (fmt.borderLeftColor && !override.borderLeftColor) {
-      override.borderLeftColor = fmt.borderLeftColor;
-      override.borderLeftStyle = fmt.borderLeftStyle || "solid";
-      hasOverride = true;
-    }
-    if (fmt.borderRightColor && !override.borderRightColor) {
-      override.borderRightColor = fmt.borderRightColor;
-      override.borderRightStyle = fmt.borderRightStyle || "solid";
-      hasOverride = true;
-    }
-  }
-
-  return hasOverride ? override : null;
+  return conditionalResultsToOverride(getEvaluationForCell(coords.row, coords.col));
 }

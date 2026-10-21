@@ -6,6 +6,7 @@
 import type { TestSuite } from "../types";
 import { expectCellValue, assertTrue, assertEqual } from "../assertions";
 import { setActiveSheetApi } from "@api";
+import { parseNumber } from "@api/locale";
 
 /**
  * Mock data structure (from mockData.csv.ts):
@@ -76,7 +77,8 @@ export const mockDataSuite: TestSuite = {
         for (let row = 1; row <= 5; row++) {
           const cell = await ctx.getCell(row, 4);
           assertTrue(cell !== null, `Cell at row ${row}, col 4 should exist`);
-          const num = Number(cell!.display);
+          // The display is the app locale's ("1234,5" under sv-SE): read it in that locale.
+          const num = parseNumber(cell!.display) ?? NaN;
           assertTrue(!isNaN(num), `Sales value at row ${row} should be numeric, got "${cell!.display}"`);
           assertTrue(num > 0, `Sales value at row ${row} should be positive`);
         }

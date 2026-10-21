@@ -15,7 +15,7 @@ exports[`DEFAULT_CHART_THEME > matches snapshot 1`] = `
   "labelFontSize": 10,
   "legendFontSize": 10,
   "legendTextColor": "#555555",
-  "plotBackground": "#fafafa",
+  "plotBackground": "",
   "titleColor": "#333333",
   "titleFontSize": 14,
 }
@@ -103,7 +103,7 @@ exports[`mergeTheme > with partial overrides merges correctly 1`] = `
   "labelFontSize": 10,
   "legendFontSize": 10,
   "legendTextColor": "#555555",
-  "plotBackground": "#fafafa",
+  "plotBackground": "",
   "titleColor": "#333333",
   "titleFontSize": 14,
 }
@@ -124,7 +124,7 @@ exports[`mergeTheme > with undefined overrides returns base unchanged 1`] = `
   "labelFontSize": 10,
   "legendFontSize": 10,
   "legendTextColor": "#555555",
-  "plotBackground": "#fafafa",
+  "plotBackground": "",
   "titleColor": "#333333",
   "titleFontSize": 14,
 }
@@ -145,7 +145,7 @@ exports[`resolveChartTheme > with empty theme override returns default theme 1`]
   "labelFontSize": 10,
   "legendFontSize": 10,
   "legendTextColor": "#555555",
-  "plotBackground": "#fafafa",
+  "plotBackground": "",
   "titleColor": "#333333",
   "titleFontSize": 14,
 }
@@ -187,7 +187,7 @@ exports[`resolveChartTheme > with no config returns default theme 1`] = `
   "labelFontSize": 10,
   "legendFontSize": 10,
   "legendTextColor": "#555555",
-  "plotBackground": "#fafafa",
+  "plotBackground": "",
   "titleColor": "#333333",
   "titleFontSize": 14,
 }

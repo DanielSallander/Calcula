@@ -29,7 +29,7 @@ use tauri::State;
 /// Returns the formula display string with "=" prefix for the frontend.
 /// `Cell::formula_string()` renders the AST without the leading "=";
 /// this helper adds it so the formula bar shows "=A1+B1" not "A1+B1".
-fn formula_display(cell: &engine::Cell, locale: &engine::LocaleSettings) -> Option<String> {
+pub(crate) fn formula_display(cell: &engine::Cell, locale: &engine::LocaleSettings) -> Option<String> {
     cell.formula_string()
         .map(|f| format!("={}", engine::localize_formula(&f, locale)))
 }
@@ -901,7 +901,7 @@ fn check_region_range_protection(
 /// Reject a batch write when ANY of its target cells lies inside a protected
 /// object-output region. One region-list lock for the whole batch; skips the
 /// scan entirely when the active sheet has no regions.
-fn check_region_cells_protection<'a>(
+pub(crate) fn check_region_cells_protection<'a>(
     state: &AppState,
     sheet_index: usize,
     mut cells: impl Iterator<Item = (u32, u32)> + 'a,
@@ -1311,18 +1311,57 @@ pub fn get_watch_cells(
 }
 
 /// Get the structured contents of a List or Dict cell for preview.
+///
+/// The preview is DISPLAY text, so its numbers (scalars and number keys) read
+/// in the app locale (P2 S5). The clipboard twin, `get_collection_texts`,
+/// stays JSON: machine text, invariant on purpose.
 #[tauri::command]
 pub fn get_cell_collection(
     state: State<AppState>,
     row: u32,
     col: u32,
 ) -> crate::api_types::CollectionPreviewResult {
+    // The app locale first (leaf lock: take, clone, drop), before the grid.
+    let locale = state.locale.lock().map(|g| g.clone()).unwrap_or_else(|e| e.into_inner().clone());
+    let grid = state.grid.read().unwrap();
+    collection_preview(grid.get_cell(row, col).map(|cell| &cell.value), &locale)
+}
+
+/// The preview of one cell's value: a List or a Dict, else "none".
+pub(crate) fn collection_preview(
+    value: Option<&engine::cell::CellValue>,
+    locale: &engine::LocaleSettings,
+) -> crate::api_types::CollectionPreviewResult {
     use crate::api_types::{CollectionEntry, CollectionItem, CollectionPreviewResult};
     use engine::cell::{CellValue, DictKey};
 
-    let grid = state.grid.read().unwrap();
+    fn number_display(n: f64, locale: &engine::LocaleSettings) -> String {
+        crate::format_cell_value_display(&CellValue::Number(n), locale)
+    }
 
-    fn cell_value_to_item(val: &CellValue, depth: usize) -> CollectionItem {
+    fn key_display(k: &DictKey, locale: &engine::LocaleSettings) -> String {
+        match k {
+            DictKey::Text(s) => format!("\"{}\"", s),
+            DictKey::Number(n) => number_display(*n, locale),
+            DictKey::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+        }
+    }
+
+    fn entries_of(
+        entries: &[(DictKey, CellValue)],
+        depth: usize,
+        locale: &engine::LocaleSettings,
+    ) -> Vec<CollectionEntry> {
+        entries
+            .iter()
+            .map(|(k, v)| CollectionEntry {
+                key: key_display(k, locale),
+                value: cell_value_to_item(v, depth, locale),
+            })
+            .collect()
+    }
+
+    fn cell_value_to_item(val: &CellValue, depth: usize, locale: &engine::LocaleSettings) -> CollectionItem {
         if depth > 32 {
             return CollectionItem::Scalar {
                 display: "...".to_string(),
@@ -1331,42 +1370,17 @@ pub fn get_cell_collection(
         match val {
             CellValue::List(items) => CollectionItem::List {
                 count: items.len(),
-                items: items.iter().map(|i| cell_value_to_item(i, depth + 1)).collect(),
+                items: items.iter().map(|i| cell_value_to_item(i, depth + 1, locale)).collect(),
             },
             CellValue::Dict(entries) => CollectionItem::Dict {
                 count: entries.len(),
-                entries: entries
-                    .iter()
-                    .map(|(k, v)| {
-                        let key = match k {
-                            DictKey::Text(s) => format!("\"{}\"", s),
-                            DictKey::Number(n) => {
-                                if n.fract() == 0.0 && n.abs() < 1e15 {
-                                    format!("{:.0}", n)
-                                } else {
-                                    format!("{}", n)
-                                }
-                            }
-                            DictKey::Boolean(b) => {
-                                if *b { "TRUE" } else { "FALSE" }.to_string()
-                            }
-                        };
-                        CollectionEntry {
-                            key,
-                            value: cell_value_to_item(v, depth + 1),
-                        }
-                    })
-                    .collect(),
+                entries: entries_of(entries, depth + 1, locale),
             },
             CellValue::Empty => CollectionItem::Scalar {
                 display: String::new(),
             },
             CellValue::Number(n) => CollectionItem::Scalar {
-                display: if n.fract() == 0.0 && n.abs() < 1e15 {
-                    format!("{:.0}", n)
-                } else {
-                    format!("{}", n)
-                },
+                display: number_display(*n, locale),
             },
             CellValue::Text(s) => CollectionItem::Scalar {
                 display: format!("\"{}\"", s),
@@ -1380,49 +1394,22 @@ pub fn get_cell_collection(
         }
     }
 
-    match grid.get_cell(row, col) {
-        Some(cell) => match &cell.value {
-            CellValue::List(items) => CollectionPreviewResult {
-                cell_type: "list".to_string(),
-                root: Some(CollectionItem::List {
-                    count: items.len(),
-                    items: items.iter().map(|i| cell_value_to_item(i, 0)).collect(),
-                }),
-            },
-            CellValue::Dict(entries) => CollectionPreviewResult {
-                cell_type: "dict".to_string(),
-                root: Some(CollectionItem::Dict {
-                    count: entries.len(),
-                    entries: entries
-                        .iter()
-                        .map(|(k, v)| {
-                            let key = match k {
-                                DictKey::Text(s) => format!("\"{}\"", s),
-                                DictKey::Number(n) => {
-                                    if n.fract() == 0.0 && n.abs() < 1e15 {
-                                        format!("{:.0}", n)
-                                    } else {
-                                        format!("{}", n)
-                                    }
-                                }
-                                DictKey::Boolean(b) => {
-                                    if *b { "TRUE" } else { "FALSE" }.to_string()
-                                }
-                            };
-                            CollectionEntry {
-                                key,
-                                value: cell_value_to_item(v, 0),
-                            }
-                        })
-                        .collect(),
-                }),
-            },
-            _ => CollectionPreviewResult {
-                cell_type: "none".to_string(),
-                root: None,
-            },
+    match value {
+        Some(CellValue::List(items)) => CollectionPreviewResult {
+            cell_type: "list".to_string(),
+            root: Some(CollectionItem::List {
+                count: items.len(),
+                items: items.iter().map(|i| cell_value_to_item(i, 0, locale)).collect(),
+            }),
         },
-        None => CollectionPreviewResult {
+        Some(CellValue::Dict(entries)) => CollectionPreviewResult {
+            cell_type: "dict".to_string(),
+            root: Some(CollectionItem::Dict {
+                count: entries.len(),
+                entries: entries_of(entries, 0, locale),
+            }),
+        },
+        _ => CollectionPreviewResult {
             cell_type: "none".to_string(),
             root: None,
         },
@@ -3066,7 +3053,26 @@ pub fn update_cells_batch(
     updates: Vec<crate::api_types::CellUpdateInput>,
     udf_results: Option<std::collections::HashMap<String, crate::scripting::udf::UdfValue>>,
     udf_volatile_cells: Option<Vec<crate::scripting::udf::UdfCellRef>>,
+    target: Option<crate::api_types::CellTargetRef>,
 ) -> Result<Vec<CellData>, String> {
+    // P3: an OBJECT's cells (a paste, AutoSum or Fill Series into a floating
+    // grid). A route of its own, BEFORE the active-sheet body: that body's
+    // protection check, control-anchor probe and core are all keyed on the
+    // active sheet. The target route carries literal values and formulas
+    // only, so no UDF results ride along.
+    if let Some(target) = target.as_ref() {
+        return crate::cell_target::update_cells_batch_on_target(
+            &state,
+            &file_state,
+            &user_files_state,
+            &pivot_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            target,
+            updates,
+            "Paste",
+        );
+    }
     // Protected-region guard (paste / fill / multi-edit): reject the WHOLE
     // batch before any mutation when a target cell sits inside a pivot/report
     // output region — the single-cell edit path (update_cell_impl) already
@@ -4328,6 +4334,34 @@ pub(crate) fn clear_range_with_options_off_sheet(
     target: usize,
     params: ClearRangeParams,
 ) -> Result<ClearRangeResult, String> {
+    clear_range_with_options_off_sheet_at(
+        state,
+        file_state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        target,
+        params,
+        None,
+    )
+}
+
+/// [`clear_range_with_options_off_sheet`] that, for an OBJECT's cells (P3),
+/// re-checks under the held `grids` guard that `target` is still the
+/// object's backing sheet (`cell_target::ensure_target_still_at`).
+#[allow(clippy::too_many_arguments)]
+fn clear_range_with_options_off_sheet_at(
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    target: usize,
+    params: ClearRangeParams,
+    expect: Option<&crate::cell_target::ResolvedCellTarget>,
+) -> Result<ClearRangeResult, String> {
     let min_row = params.start_row.min(params.end_row);
     let max_row = params.start_row.max(params.end_row);
     let min_col = params.start_col.min(params.end_col);
@@ -4371,6 +4405,9 @@ pub(crate) fn clear_range_with_options_off_sheet(
         let grids = state.grids.lock_pending().unwrap();
         if target >= grids.len() {
             return Err(format!("Sheet index {} out of range", target));
+        }
+        if let Some(t) = expect {
+            crate::cell_target::ensure_target_still_at(state, t)?;
         }
         let effect = crate::document_effect::DocumentEffect::mutates(file_state);
         let mut grids = grids.authorize(&effect);
@@ -4511,6 +4548,73 @@ pub(crate) fn clear_range_with_options_off_sheet(
     })
 }
 
+/// Clear-with-options on an OBJECT's cells (P3, owner finding G3: the Clear
+/// menu and Delete on a floating grid). Every gate runs holding nothing and
+/// before any effect: target-with-sheet refusal, the write extent, and the
+/// HOST's protection over the backing cells' lock flags. Then the off-sheet
+/// twin clears the BACKING sheet as ONE sheet-tagged undo step (an N-cell
+/// Delete is one Ctrl+Z) and recalculates dependents anywhere -- a host
+/// formula reading the grid included.
+///
+/// Clear Hyperlinks / Remove Hyperlinks: a floating grid's cells cannot hold a
+/// link (Insert Hyperlink refuses them), so with no link in the range there
+/// is nothing to clear and the answer is an honest 0; should one ever exist,
+/// the gesture is refused rather than half-done (the hyperlink store's clear
+/// is active-sheet-only).
+pub(crate) fn clear_range_on_target(
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    params: ClearRangeParams,
+) -> Result<ClearRangeResult, String> {
+    crate::cell_target::refuse_target_with_sheet(&params.target, params.sheet_index.is_some())?;
+    let Some(target_ref) = params.target.clone() else {
+        return Err("clear_range_on_target needs a target".to_string());
+    };
+    let t = crate::cell_target::resolve_cell_target(state, &target_ref)?;
+    let (r0, c0) = (params.start_row.min(params.end_row), params.start_col.min(params.end_col));
+    let (r1, c1) = (params.start_row.max(params.end_row), params.start_col.max(params.end_col));
+    crate::cell_target::ensure_in_extent(&t, r0, c0, r1, c1)?;
+    if matches!(params.apply_to, ClearApplyTo::Hyperlinks | ClearApplyTo::RemoveHyperlinks) {
+        let linked = state
+            .hyperlinks
+            .read()
+            .map_err(|e| e.to_string())?
+            .get(&t.backing_index)
+            .map(|links| links.keys().any(|&(r, c)| r >= r0 && r <= r1 && c >= c0 && c <= c1))
+            .unwrap_or(false);
+        if linked {
+            return Err(
+                "Clear Hyperlinks is not available inside a floating grid yet. Nothing was changed."
+                    .to_string(),
+            );
+        }
+        return Ok(ClearRangeResult { count: 0, updated_cells: Vec::new() });
+    }
+    crate::cell_target::gate_target_cells(
+        state,
+        &t,
+        (r0, c0, r1, c1),
+        crate::cell_target::EDIT_CELLS,
+        "clear these cells",
+    )?;
+    let backing = t.backing_index;
+    clear_range_with_options_off_sheet_at(
+        state,
+        file_state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        backing,
+        ClearRangeParams { sheet_index: None, target: None, ..params },
+        Some(&t),
+    )
+}
+
 /// `applyTo` "hyperlinks" and "removeHyperlinks" on the ACTIVE sheet, Excel's
 /// two hyperlink clears (measured live, core-grid lane, 2026-10-04):
 ///
@@ -4647,6 +4751,18 @@ pub fn clear_range_with_options(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     params: ClearRangeParams,
 ) -> Result<ClearRangeResult, String> {
+    // P3: an OBJECT's cells (a floating grid) -- its backing sheet only.
+    if params.target.is_some() {
+        return clear_range_on_target(
+            &state,
+            &file_state,
+            &user_files_state,
+            &pivot_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            params,
+        );
+    }
     let active_sheet = *state.active_sheet.read().unwrap();
 
     // Wave 3: an explicit non-active target takes the off-sheet path.
@@ -4747,6 +4863,7 @@ pub fn clear_range_with_options(
         end_col,
         apply_to,
         sheet_index: _,
+        target: _,
     } = params;
 
     // Normalize coordinates
@@ -5098,6 +5215,73 @@ pub(crate) fn sort_range_off_sheet(
     target: usize,
     params: SortRangeParams,
 ) -> Result<SortRangeResult, String> {
+    sort_range_off_sheet_at(
+        state,
+        file_state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        target,
+        params,
+        None,
+    )
+}
+
+/// Sort on an OBJECT's cells (P3: Sort A-Z / Z-A / Custom Sort on a floating
+/// grid). Holding nothing and before any effect: target-with-sheet refusal,
+/// the write extent, and the HOST's protection (the Sort option plus the
+/// backing cells' lock flags). Then the off-sheet twin permutes the BACKING
+/// sheet, its rules snapshot (icon sorts) taken from the backing sheet, as one
+/// sheet-tagged undo step, and recalculates dependents anywhere. Excel's sort
+/// moves values and never rewrites references from OTHER cells, so a host
+/// formula reading the grid keeps its text and reads the value that arrived.
+pub(crate) fn sort_range_on_target(
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    params: SortRangeParams,
+) -> Result<SortRangeResult, String> {
+    crate::cell_target::refuse_target_with_sheet(&params.target, params.sheet_index.is_some())?;
+    let Some(target_ref) = params.target.clone() else {
+        return Err("sort_range_on_target needs a target".to_string());
+    };
+    let t = crate::cell_target::resolve_cell_target(state, &target_ref)?;
+    let (r0, c0) = (params.start_row.min(params.end_row), params.start_col.min(params.end_col));
+    let (r1, c1) = (params.start_row.max(params.end_row), params.start_col.max(params.end_col));
+    crate::cell_target::ensure_in_extent(&t, r0, c0, r1, c1)?;
+    crate::cell_target::gate_target_cells(state, &t, (r0, c0, r1, c1), "sort", "sort")?;
+    let backing = t.backing_index;
+    sort_range_off_sheet_at(
+        state,
+        file_state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        backing,
+        SortRangeParams { sheet_index: None, target: None, ..params },
+        Some(&t),
+    )
+}
+
+/// [`sort_range_off_sheet`] with the P3 TOCTOU re-check under the held
+/// `grids` guard (see `clear_range_with_options_off_sheet_at`).
+#[allow(clippy::too_many_arguments)]
+fn sort_range_off_sheet_at(
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    target: usize,
+    params: SortRangeParams,
+    expect: Option<&crate::cell_target::ResolvedCellTarget>,
+) -> Result<SortRangeResult, String> {
     {
         let rules = crate::conditional_formatting::rules_snapshot(state, target);
         validate_sort_fields(&params.fields, &rules)?;
@@ -5134,6 +5318,7 @@ pub(crate) fn sort_range_off_sheet(
         has_headers,
         orientation,
         sheet_index: _,
+        target: _,
     } = params;
 
     if fields.is_empty() {
@@ -5179,6 +5364,12 @@ pub(crate) fn sort_range_off_sheet(
     // an icon sort needs both them and the rules while the grid guard is held.
     let sheet_names_for_icons = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
     let cf_rules_for_sort = crate::conditional_formatting::rules_snapshot(state, target);
+    // The app locale (leaf lock: take, clone, drop) resolves the built-in
+    // custom lists' local month/day names, once for the whole sort.
+    let custom_orders = {
+        let locale = state.locale.lock().map_err(|e| e.to_string())?.clone();
+        resolve_custom_orders(&fields, &locale)
+    };
 
     let sorted_count = {
         // Bounds check under a read-only view; the effect is built only once it
@@ -5187,6 +5378,9 @@ pub(crate) fn sort_range_off_sheet(
         let grids = state.grids.lock_pending().unwrap();
         if target >= grids.len() {
             return Err(format!("Sheet index {} out of range", target));
+        }
+        if let Some(t) = expect {
+            crate::cell_target::ensure_target_still_at(state, t)?;
         }
         let effect = crate::document_effect::DocumentEffect::mutates(file_state);
         let mut grids = grids.authorize(&effect);
@@ -5281,7 +5475,7 @@ pub(crate) fn sort_range_off_sheet(
 
                 rows.sort_by(|a, b| {
                     compare_rows_by_fields(
-                        &a.1, &b.1, a.0, b.0, &icon_sets, &fields, min_col, match_case, &styles,
+                        &a.1, &b.1, a.0, b.0, &icon_sets, &custom_orders, &fields, min_col, match_case, &styles,
                     )
                 });
 
@@ -5349,7 +5543,7 @@ pub(crate) fn sort_range_off_sheet(
 
                 cols.sort_by(|a, b| {
                     compare_cols_by_fields(
-                        &a.1, &b.1, a.0, b.0, &icon_sets_cols, &fields, min_row, match_case,
+                        &a.1, &b.1, a.0, b.0, &icon_sets_cols, &custom_orders, &fields, min_row, match_case,
                         &styles,
                     )
                 });
@@ -5571,6 +5765,18 @@ pub fn sort_range(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     params: SortRangeParams,
 ) -> Result<SortRangeResult, String> {
+    // P3: an OBJECT's cells (a floating grid) -- its backing sheet only.
+    if params.target.is_some() {
+        return sort_range_on_target(
+            &state,
+            &file_state,
+            &user_files_state,
+            &pivot_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            params,
+        );
+    }
     // The rule snapshot is taken and released here, BEFORE any long-lived guard.
     // Sorting holds the grid guards for its whole two-phase pass and undo restore
     // writes the CF store, so a CF guard held across either is a deadlock waiting
@@ -5678,7 +5884,10 @@ pub fn sort_range(
         has_headers,
         orientation,
         sheet_index: _,
+        target: _,
     } = params;
+    // Built-in custom lists also match the app locale's month/day names.
+    let custom_orders = resolve_custom_orders(&fields, &locale);
 
     // Validate sort fields
     if fields.is_empty() {
@@ -5782,7 +5991,7 @@ pub fn sort_range(
             // Sort the rows using the sort fields
             rows.sort_by(|a, b| {
                 compare_rows_by_fields(
-                    &a.1, &b.1, a.0, b.0, &icon_sets, &fields, min_col, match_case, &styles,
+                    &a.1, &b.1, a.0, b.0, &icon_sets, &custom_orders, &fields, min_col, match_case, &styles,
                 )
             });
 
@@ -5957,7 +6166,7 @@ pub fn sort_range(
 
             cols.sort_by(|a, b| {
                 compare_cols_by_fields(
-                    &a.1, &b.1, a.0, b.0, &icon_sets, &fields, min_row, match_case, &styles,
+                    &a.1, &b.1, a.0, b.0, &icon_sets, &custom_orders, &fields, min_row, match_case, &styles,
                 )
             });
 
@@ -6132,6 +6341,7 @@ fn compare_rows_by_fields(
     orig_a: u32,
     orig_b: u32,
     icon_sets: &IconMatchSets,
+    custom_orders: &CustomOrders,
     fields: &[SortField],
     _min_col: u32,
     match_case: bool,
@@ -6153,7 +6363,8 @@ fn compare_rows_by_fields(
         let cell_a = &row_a[col_idx];
         let cell_b = &row_b[col_idx];
 
-        let ordering = compare_cells(cell_a, cell_b, field, match_case, styles);
+        let custom_order = custom_orders.get(level).and_then(Option::as_ref);
+        let ordering = compare_cells(cell_a, cell_b, field, custom_order, match_case, styles);
 
         if ordering != std::cmp::Ordering::Equal {
             return if field.ascending {
@@ -6205,6 +6416,7 @@ fn compare_cols_by_fields(
     orig_a: u32,
     orig_b: u32,
     icon_sets: &IconMatchSets,
+    custom_orders: &CustomOrders,
     fields: &[SortField],
     _min_row: u32,
     match_case: bool,
@@ -6226,7 +6438,8 @@ fn compare_cols_by_fields(
         let cell_a = &col_a[row_idx];
         let cell_b = &col_b[row_idx];
 
-        let ordering = compare_cells(cell_a, cell_b, field, match_case, styles);
+        let custom_order = custom_orders.get(level).and_then(Option::as_ref);
+        let ordering = compare_cells(cell_a, cell_b, field, custom_order, match_case, styles);
 
         if ordering != std::cmp::Ordering::Equal {
             return if field.ascending {
@@ -6244,35 +6457,35 @@ fn compare_cells(
     cell_a: &Option<engine::Cell>,
     cell_b: &Option<engine::Cell>,
     field: &SortField,
+    // `field.custom_order` resolved ONCE per sort (`resolve_custom_orders`);
+    // None when the level has no custom list or the list is empty.
+    custom_order: Option<&CustomOrder>,
     match_case: bool,
     styles: &StyleRegistry,
 ) -> std::cmp::Ordering {
     match field.sort_on {
         SortOn::Value => {
             // Check for custom sort order
-            if let Some(ref custom_order) = field.custom_order {
-                let list = resolve_custom_order(custom_order);
-                if !list.is_empty() {
-                    let text_a = cell_a.as_ref().and_then(|c| match &c.value {
-                        engine::CellValue::Text(s) => Some(s.as_str()),
-                        _ => None,
-                    });
-                    let text_b = cell_b.as_ref().and_then(|c| match &c.value {
-                        engine::CellValue::Text(s) => Some(s.as_str()),
-                        _ => None,
-                    });
+            if let Some(list) = custom_order {
+                let text_a = cell_a.as_ref().and_then(|c| match &c.value {
+                    engine::CellValue::Text(s) => Some(s.as_str()),
+                    _ => None,
+                });
+                let text_b = cell_b.as_ref().and_then(|c| match &c.value {
+                    engine::CellValue::Text(s) => Some(s.as_str()),
+                    _ => None,
+                });
 
-                    return match (text_a, text_b) {
-                        (None, None) => std::cmp::Ordering::Equal,
-                        (None, Some(_)) => std::cmp::Ordering::Greater,
-                        (Some(_), None) => std::cmp::Ordering::Less,
-                        (Some(a), Some(b)) => {
-                            let key_a = custom_sort_key(a, &list);
-                            let key_b = custom_sort_key(b, &list);
-                            key_a.cmp(&key_b)
-                        }
-                    };
-                }
+                return match (text_a, text_b) {
+                    (None, None) => std::cmp::Ordering::Equal,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (Some(a), Some(b)) => {
+                        let key_a = custom_sort_key(a, list);
+                        let key_b = custom_sort_key(b, list);
+                        key_a.cmp(&key_b)
+                    }
+                };
             }
 
             // Compare by cell value
@@ -6372,24 +6585,77 @@ const WEEKDAYS_SHORT: &[&str] = &["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat
 const MONTHS: &[&str] = &["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 const MONTHS_SHORT: &[&str] = &["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-/// Resolve a custom_order string into a list of values.
+/// One custom sort list, resolved for a sort: position `i` holds every
+/// spelling (lower-cased) that sorts at `i`.
+pub(crate) struct CustomOrder {
+    positions: Vec<Vec<String>>,
+}
+
+/// One entry per sort level, parallel to `fields`.
+type CustomOrders = Vec<Option<CustomOrder>>;
+
+/// Resolve every level's `custom_order` ONCE per sort, in the app locale.
+/// An empty list is None, so that level compares by value as before.
+fn resolve_custom_orders(fields: &[SortField], locale: &engine::LocaleSettings) -> CustomOrders {
+    fields
+        .iter()
+        .map(|f| {
+            f.custom_order
+                .as_deref()
+                .map(|order| resolve_custom_order(order, locale))
+                .filter(|order| !order.positions.is_empty())
+        })
+        .collect()
+}
+
+/// Resolve a custom_order string into its positions.
 /// Built-in names: "weekdays", "weekdaysShort", "months", "monthsShort".
 /// Otherwise treated as a comma-separated list of custom values.
-fn resolve_custom_order(custom_order: &str) -> Vec<String> {
-    match custom_order {
-        "weekdays" => WEEKDAYS.iter().map(|s| s.to_string()).collect(),
-        "weekdaysShort" => WEEKDAYS_SHORT.iter().map(|s| s.to_string()).collect(),
-        "months" => MONTHS.iter().map(|s| s.to_string()).collect(),
-        "monthsShort" => MONTHS_SHORT.iter().map(|s| s.to_string()).collect(),
-        _ => custom_order.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
-    }
+///
+/// A built-in list keeps the ENGLISH names and adds the app locale's own
+/// calendar names (`locale.calendar()`) at the same position, so "mars"
+/// sorts as March under sv-SE while "March" is still recognised (P2 S5).
+/// Both are matched case-insensitively.
+fn resolve_custom_order(custom_order: &str, locale: &engine::LocaleSettings) -> CustomOrder {
+    let calendar = locale.calendar();
+    let built_in = |english: &[&str], local: &[&str]| -> Vec<Vec<String>> {
+        english
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let mut spellings = vec![name.to_lowercase()];
+                if let Some(own) = local.get(i) {
+                    let own = own.to_lowercase();
+                    if !spellings.contains(&own) {
+                        spellings.push(own);
+                    }
+                }
+                spellings
+            })
+            .collect()
+    };
+    let positions = match custom_order {
+        "weekdays" => built_in(WEEKDAYS, &calendar.days_full),
+        "weekdaysShort" => built_in(WEEKDAYS_SHORT, &calendar.days_short),
+        "months" => built_in(MONTHS, &calendar.months_full),
+        "monthsShort" => built_in(MONTHS_SHORT, &calendar.months_short),
+        _ => custom_order
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| vec![s.to_lowercase()])
+            .collect(),
+    };
+    CustomOrder { positions }
 }
 
 /// Get the sort position of a value in a custom list (case-insensitive).
 /// Values not found in the list sort after all list values (usize::MAX).
-fn custom_sort_key(value: &str, list: &[String]) -> usize {
-    list.iter()
-        .position(|item| item.eq_ignore_ascii_case(value))
+fn custom_sort_key(value: &str, list: &CustomOrder) -> usize {
+    let value = value.to_lowercase();
+    list.positions
+        .iter()
+        .position(|spellings| spellings.iter().any(|s| *s == value))
         .unwrap_or(usize::MAX)
 }
 
@@ -7944,6 +8210,162 @@ pub fn clear_range_on_sheets(
     Ok(())
 }
 
+/// Fill on an OBJECT's cells (P3): the same tiling and the same relative shift
+/// as `fill_range` (a formula's references move by the distance from the
+/// source cell it came from; everything else is copied verbatim, value and
+/// style), written to the object's BACKING sheet only.
+///
+/// Every gate runs holding nothing, before any effect: both rectangles inside
+/// the write extent, the HOST's protection over the destination's lock flags,
+/// the writeback claim and the array guard on the backing sheet. The write is
+/// ONE sheet-tagged undo step (`script_grid_cells`); each written formula's
+/// cross-sheet edges are registered (a filled `=Sheet1!A1` keeps following
+/// Sheet1), and dependents anywhere recalculate in a second lock phase.
+/// Returns no cells: the object repaints from `get_cell_target_cells`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fill_range_on_target(
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    target: &crate::api_types::CellTargetRef,
+    source: (u32, u32, u32, u32),
+    dest: (u32, u32, u32, u32),
+) -> Result<Vec<CellData>, String> {
+    let norm = |r: (u32, u32, u32, u32)| (r.0.min(r.2), r.1.min(r.3), r.0.max(r.2), r.1.max(r.3));
+    let (sr0, sc0, sr1, sc1) = norm(source);
+    let (tr0, tc0, tr1, tc1) = norm(dest);
+    let t = crate::cell_target::resolve_cell_target(state, target)?;
+    crate::cell_target::ensure_in_extent(&t, sr0, sc0, sr1, sc1)?;
+    crate::cell_target::ensure_in_extent(&t, tr0, tc0, tr1, tc1)?;
+    crate::cell_target::gate_target_cells(
+        state,
+        &t,
+        (tr0, tc0, tr1, tc1),
+        crate::cell_target::EDIT_CELLS,
+        "fill these cells",
+    )?;
+    let backing = t.backing_index;
+    crate::calp_commands::ensure_range_unclaimed_on_sheets(
+        state, "fill into this range", &[backing], tr0, tc0, tr1, tc1,
+    )?;
+    check_no_array_within(state, backing, tr0, tc0, tr1, tc1)?;
+
+    // Read before the grid guard and released: `grids` comes first in the
+    // canonical order, so nothing is nested here.
+    let sheet_names: Vec<String> = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+    let (src_rows, src_cols) = (sr1 - sr0 + 1, sc1 - sc0 + 1);
+
+    let mut edges: Vec<(u32, u32, rustc_hash::FxHashSet<(String, u32, u32)>)> = Vec::new();
+    {
+        let grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
+        if backing >= grids.len() {
+            return Err("Floating range backing sheet is missing".to_string());
+        }
+        crate::cell_target::ensure_target_still_at(state, &t)?;
+
+        // The plan, against the backing grid as it stands: every destination
+        // cell's previous and new state.
+        let grid = &grids[backing];
+        let mut source_cells: std::collections::HashMap<(u32, u32), engine::Cell> =
+            std::collections::HashMap::new();
+        for r in sr0..=sr1 {
+            for c in sc0..=sc1 {
+                if let Some(cell) = grid.get_cell(r, c) {
+                    source_cells.insert((r - sr0, c - sc0), cell.clone());
+                }
+            }
+        }
+        let mut plan: Vec<(u32, u32, Option<engine::Cell>, Option<engine::Cell>)> = Vec::new();
+        for tr in tr0..=tr1 {
+            for tc in tc0..=tc1 {
+                let (rel_r, rel_c) = ((tr - tr0) % src_rows, (tc - tc0) % src_cols);
+                let previous = grid.get_cell(tr, tc).cloned();
+                let next = source_cells.get(&(rel_r, rel_c)).map(|src| {
+                    let mut cell = src.clone();
+                    cell.rich_text = None;
+                    if let Some(formula) = crate::commands::structure::formula_to_rewrite(src) {
+                        let row_delta = tr as i32 - (sr0 + rel_r) as i32;
+                        let col_delta = tc as i32 - (sc0 + rel_c) as i32;
+                        let shifted =
+                            crate::commands::structure::shift_formula_internal(&formula, row_delta, col_delta);
+                        if !crate::commands::structure::store_rewritten_formula(&mut cell, &shifted, "fill", tr, tc) {
+                            // The fill's own rule (see `fill_range`): an
+                            // unreadable shift is a VISIBLE #VALUE!, never the
+                            // source's tree pointing at the wrong cells.
+                            cell.ast = None;
+                            cell.value = engine::CellValue::Error(engine::CellError::Value);
+                        }
+                    }
+                    cell
+                });
+                if previous.is_none() && next.is_none() {
+                    continue;
+                }
+                plan.push((tr, tc, previous, next));
+            }
+        }
+        if plan.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Every gate has passed and the fill changes cells: committed here,
+        // in the same critical section as the plan.
+        let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+        let mut grids = grids.authorize(&effect);
+        let grid = &mut grids[backing];
+        let mut previous_cells: Vec<(u32, u32, Option<engine::Cell>)> = Vec::with_capacity(plan.len());
+        for (row, col, previous, next) in plan {
+            previous_cells.push((row, col, previous));
+            match next {
+                Some(cell) => grid.set_cell(row, col, cell),
+                None => grid.clear_cell(row, col),
+            }
+        }
+        // Each destination's cross-sheet edges, from what it now holds (an
+        // emptied or literal cell registers the empty set, which drops any
+        // edge its previous formula had).
+        for &(row, col, _) in &previous_cells {
+            let refs = grid
+                .get_cell(row, col)
+                .and_then(|cell| cell.ast.as_deref())
+                .map(|ast| {
+                    let ast = crate::convert_expr(ast);
+                    crate::normalize_cross_sheet_refs(
+                        &crate::extract_all_references(&ast, grid).cross_sheet_cells,
+                        &sheet_names,
+                    )
+                })
+                .unwrap_or_default();
+            edges.push((row, col, refs));
+        }
+        let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
+        let owned = undo_stack.begin_owned_transaction(format!("Fill {} cells", previous_cells.len()));
+        undo_stack.record_custom_restore(
+            "script_grid_cells".to_string(),
+            crate::undo_commands::script_grid_cells_snapshot_bytes(backing, previous_cells),
+            "Fill",
+        );
+        undo_stack.commit_owned(owned);
+    }
+
+    // PHASE B, holding nothing from phase A.
+    for (row, col, refs) in edges {
+        register_off_sheet_cell_edges(state, backing, row, col, refs);
+    }
+    recalc_after_off_sheet_write(
+        state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        &[backing],
+    );
+    Ok(Vec::new())
+}
+
 /// Fill a target range by copying/tiling source cells.
 /// Formulas have their relative references shifted by the delta between source and target.
 /// Non-formula cells are cloned verbatim (value + style).
@@ -7964,7 +8386,24 @@ pub fn fill_range(
     target_start_col: u32,
     target_end_row: u32,
     target_end_col: u32,
+    target: Option<crate::api_types::CellTargetRef>,
 ) -> Result<Vec<CellData>, String> {
+    // P3: an OBJECT's cells (Fill Down/Right/Up/Left on a floating grid). Both
+    // rectangles are in the object's coordinates; `target_*` stays the FILL
+    // destination, as before.
+    if let Some(target) = target.as_ref() {
+        return fill_range_on_target(
+            &state,
+            &file_state,
+            &user_files_state,
+            &pivot_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            target,
+            (source_start_row, source_start_col, source_end_row, source_end_col),
+            (target_start_row, target_start_col, target_end_row, target_end_col),
+        );
+    }
     // PERF-03: one lookup-index cache for the whole pass (lookup_cache.rs).
     let _lookup_pass = engine::begin_lookup_pass();
     // SUBTOTAL/AGGREGATE row-visibility snapshot: built ONCE for this
@@ -9017,6 +9456,28 @@ mod floating_range_lifecycle_tests;
 #[cfg(test)]
 #[path = "floating_range_recalc_tests.rs"]
 mod floating_range_recalc_tests;
+
+/// P3 S2 -- cell targets: the resolver, the extent, HOST protection on every
+/// door to a floating grid's cells, the styled read, and hidden lines on the
+/// object row. A child of this module for the shared `Workbook` harness; the
+/// file lives beside `cell_target.rs`.
+#[cfg(test)]
+#[path = "../cell_target_tests.rs"]
+mod cell_target_tests;
+
+/// P3 S4 -- content, clear, sort, fill, the batch write, merge, search, Go To
+/// Special and conditional formatting on a CELL TARGET (a floating grid's
+/// cells). A child of this module for the shared `Workbook` harness.
+#[cfg(test)]
+#[path = "cell_target_content_tests.rs"]
+mod cell_target_content_tests;
+
+/// P3 S5 -- whole rows/columns with table semantics, and line sizes and
+/// hidden lines on a floating grid's own maps (a CELL TARGET's lines). A
+/// child of this module for the shared `Workbook` harness.
+#[cfg(test)]
+#[path = "structure_target_tests.rs"]
+mod structure_target_tests;
 
 /// Canvas sheets (M1): the kind authority and the write-refusal doors. A CHILD
 /// module of `data` for the same reason as above: it drives `update_cell_impl`.

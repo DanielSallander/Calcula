@@ -95,6 +95,9 @@ vi.mock("../lib/filterPaneStore", () => ({
   updateFilterAsync: async () => null,
   getAllFilters: () => [],
   createFilterAsync: async () => undefined,
+  getFilterItemsError: () => null,
+  getFilterNarrowingError: () => null,
+  getFilterLoadAttempts: () => 0,
 }));
 vi.mock("../lib/filterPaneApi", () => ({
   getBiConnections: async () => mocks.connections,
@@ -142,8 +145,8 @@ function filterFixture(overrides: Partial<RibbonFilter> = {}): RibbonFilter {
     connectedSheets: [],
     displayMode: "dropdown" as RibbonFilter["displayMode"],
     selectedItems: null,
-    crossFilterTargets: [],
-    crossFilterSlicerTargets: [],
+    dependentFilters: [],
+    dependentSlicers: [],
     advancedFilter: null,
     hideNoData: false,
     indicateNoData: true,
@@ -159,7 +162,8 @@ function filterFixture(overrides: Partial<RibbonFilter> = {}): RibbonFilter {
 }
 
 const ITEMS: SlicerItem[] = Array.from({ length: 12 }, (_, i) => ({
-  value: `City ${i + 1}`,
+  key: `City ${i + 1}`,
+  label: `City ${i + 1}`,
   selected: false,
   hasData: i % 4 !== 3,
 }));
@@ -308,7 +312,7 @@ beforeEach(() => {
   mocks.deleteControlAsync.mockReset().mockResolvedValue(undefined);
   mocks.updateFilterSelectionAsync.mockReset();
   mocks.deleteFilterAsync.mockReset().mockResolvedValue(undefined);
-  mocks.refreshFilterItems.mockReset().mockResolvedValue(undefined);
+  mocks.refreshFilterItems.mockReset().mockResolvedValue({ ok: true, narrowingError: null });
   mocks.emitAppEvent.mockReset();
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -463,7 +467,7 @@ describe("RibbonFilterCard", () => {
     const ok = Array.from(pop.querySelectorAll("button")).find((b) => b.textContent === "OK");
     expect(ok).toBeTruthy();
 
-    for (const view of ["Connections", "Cross-filter", "Settings"]) {
+    for (const view of ["Connections", "Dependent filters", "Settings"]) {
       const btn = Array.from(flyouts()[0].querySelectorAll("button")).find(
         (b) => b.textContent === view,
       );
@@ -796,7 +800,8 @@ describe("PropertiesPane adapters", () => {
       layout,
     );
     const range = container.querySelector<HTMLInputElement>('input[type="range"]')!;
-    const box = container.querySelector<HTMLInputElement>('input[type="number"]')!;
+    // The NumberField is an app-locale TEXT box with the spinbutton role (P2 S9).
+    const box = container.querySelector<HTMLInputElement>('input[role="spinbutton"]')!;
     expect(box.value).toBe("50");
 
     // A drag step previews AND commits, as the bare range did.

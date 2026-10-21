@@ -35,9 +35,12 @@
 //          commits what landed. It used to step the main range only, while
 //          Borders and Clear covered every block.
 //
-//          The door behaves as the Home tab's `applyFormat` does: it refuses,
-//          with one toast and no write, while something else owns the
-//          selection; a backend refusal reaches the user through alertAsync;
+//          The door behaves as the Home tab's `applyFormat` does: it asks
+//          WHICH cells (`resolveCellTarget(action, "numberFormat")`, P3) --
+//          Core's selection, or a floating grid's own cells, written through
+//          `{ target }` -- and refuses, with one toast and no write, while an
+//          owner that does not admit the act holds the selection; a backend
+//          refusal reaches the user through alertAsync;
 //          a write is announced through the ONE announcement
 //          (`@api/announceFormatting`: cell events, then `styles:refresh` and
 //          `grid:refresh`, which also make the ribbon re-read the active cell).
@@ -51,7 +54,7 @@ import {
   commitUndoTransaction,
 } from "@api/lib";
 import { alertAsync } from "@api/dialogs";
-import { refuseIfSelectionOwned } from "@api/selectionOwner";
+import { resolveCellTarget, targetRefOf } from "@api/cellTarget";
 import { activeCellOf } from "@api/activeCell";
 import { selectionBlocks, type SelectionBlock } from "@api/selectionBlocks";
 import { announceFormattingResult } from "@api/announceFormatting";
@@ -115,8 +118,12 @@ export async function stepNumberFormatDecimals(
   action: string,
   fallback?: Selection | null,
 ): Promise<boolean> {
-  if (refuseIfSelectionOwned(action)) return false;
-  const selection = getGridStateSnapshot()?.selection ?? fallback ?? null;
+  const t = resolveCellTarget(action, "numberFormat");
+  if (t === null) return false;
+  // A floating grid's own selection (its local == backing coordinates), else
+  // Core's.
+  const target = targetRefOf(t);
+  const selection = t.kind === "object" ? t.selection : (getGridStateSnapshot()?.selection ?? fallback ?? null);
   if (!selection) return false;
   const { rows, cols } = activeCellFirst(selection);
   const others = selectionBlocks(selection).slice(1);
@@ -134,7 +141,7 @@ export async function stepNumberFormatDecimals(
   const results: FormattingResult[] = [];
   let answered = false;
   try {
-    const main = await adjustNumberFormatDecimals(rows, cols, delta);
+    const main = await adjustNumberFormatDecimals(rows, cols, delta, { target });
     answered = true;
     results.push(main);
     // Every returned style carries the SAME format -- the active cell's,
@@ -144,7 +151,7 @@ export async function stepNumberFormatDecimals(
     if (numberFormat !== undefined) {
       for (const block of others) {
         const lists = rowsColsOf(block);
-        results.push(await applyFormatting(lists.rows, lists.cols, { numberFormat }));
+        results.push(await applyFormatting(lists.rows, lists.cols, { numberFormat }, { target }));
       }
     }
     await tx?.commit();
@@ -157,6 +164,6 @@ export async function stepNumberFormatDecimals(
       console.error("[HomeTab] Decimals: closing the undo step failed:", closeErr),
     );
   }
-  if (results.some(wroteSomething)) announceFormattingResult(results);
+  if (results.some(wroteSomething)) announceFormattingResult(results, { target });
   return answered;
 }

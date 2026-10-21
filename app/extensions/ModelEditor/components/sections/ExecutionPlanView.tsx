@@ -8,8 +8,14 @@
 import React, { useMemo, useState } from "react";
 import { saveTextToFile } from "@api";
 import type { ExecutionPlanDto, PlanNodeDto } from "@api";
+import { formatNumber } from "@api/locale";
 import { styles } from "../editorShared";
 import { ME } from "../theme";
+
+/** A duration in the APP locale, one decimal ("12,5" under de-DE). */
+function ms1(ms: number): string {
+  return formatNumber(ms, { decimals: 1 });
+}
 
 // Color/badge per plan operation (aligned with Calcula Studio's palette).
 // Keys are the engine's PascalCase PlanOperation names, verbatim.
@@ -67,7 +73,7 @@ export function ExecutionPlanView({ plan }: { plan: ExecutionPlanDto }): React.R
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
         <span style={styles.label}>Execution plan</span>
         <span style={{ ...styles.muted, fontSize: 12 }}>
-          — {plan.summary} ({plan.totalMs.toFixed(1)} ms)
+          — {plan.summary} ({ms1(plan.totalMs)} ms)
         </span>
         <span style={{ flex: 1 }} />
         <button style={tabStyle("visual")} onClick={() => setMode("visual")}>
@@ -139,7 +145,7 @@ function PlanTreeNode({ node, depth }: { node: PlanNodeDto; depth: number }): Re
         </span>
         <span style={{ fontWeight: 600 }}>{node.label}</span>
         <span style={styles.muted}>
-          [{node.operation}] · {node.durationMs.toFixed(1)} ms
+          [{node.operation}] · {ms1(node.durationMs)} ms
         </span>
       </div>
       {node.properties.length > 0 && (
@@ -275,7 +281,7 @@ function PlanGraph({ plan }: { plan: ExecutionPlanDto }): React.ReactElement {
                   {cfg.badge}
                 </text>
                 <text x={50} y={19} fontSize={10} fill={ME.text3}>
-                  {n.node.durationMs.toFixed(1)} ms
+                  {ms1(n.node.durationMs)} ms
                 </text>
                 <text x={10} y={38} fontSize={11} fontWeight={600} fill={ME.text}>
                   {n.node.label.length > 26 ? `${n.node.label.slice(0, 25)}…` : n.node.label}
@@ -303,7 +309,7 @@ function PlanGraph({ plan }: { plan: ExecutionPlanDto }): React.ReactElement {
           <div style={{ fontWeight: 600, marginBottom: 2 }}>
             {selected.node.label}{" "}
             <span style={styles.muted}>
-              [{selected.node.operation}] · {selected.node.durationMs.toFixed(1)} ms
+              [{selected.node.operation}] · {ms1(selected.node.durationMs)} ms
             </span>
           </div>
           {selected.node.properties.length === 0 ? (

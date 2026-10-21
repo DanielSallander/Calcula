@@ -45,6 +45,12 @@ export interface FloatingRangeInfo {
   colWidths: Record<number, number>;
   /** Per-row height overrides (px); absent rows use the default. */
   rowHeights: Record<number, number>;
+  /** The object's OWN hidden rows / columns (Home > Format > Hide & Unhide on
+   *  a floating grid, P3): local indices, ascending, deduplicated. Hidden lines
+   *  have size 0 in the frame; the backing sheet's own hidden sets are not
+   *  involved. Absent from an older backend = none hidden. */
+  hiddenRows?: number[];
+  hiddenCols?: number[];
   /** Frame chrome. The title bar carries the name AND is the move grab zone;
    *  the other two are the object's own A1 column letters / row numbers. The
    *  frame size DERIVES from these, so hiding one SHRINKS the object. */
@@ -83,6 +89,11 @@ export interface FloatingRangePatch {
    *  absent leaves alone — an empty object CLEARS every override. */
   colWidths?: Record<number, number>;
   rowHeights?: Record<number, number>;
+  /** WHOLE-SET replacement of the object's hidden rows / columns (ascending,
+   *  deduplicated, each below the window maximum). Present replaces, absent
+   *  leaves alone -- an empty array unhides every line. */
+  hiddenRows?: number[];
+  hiddenCols?: number[];
   /** The visual container: absent = keep, null = clear, a value = set
    *  (formatting: a locked page lets it through, like the chrome flags). */
   container?: VisualContainerFormat | null;

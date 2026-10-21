@@ -3164,6 +3164,8 @@ mod tests {
             show_column_headers: false,
             show_row_headers: true,
             container: None,
+            hidden_rows: Vec::new(),
+            hidden_cols: Vec::new(),
         }
     }
 

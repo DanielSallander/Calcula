@@ -2,9 +2,11 @@
 // PURPOSE: Registry for custom slicer item renderers from scriptable objects.
 // CONTEXT: Allows user scripts to override how individual slicer items are drawn.
 
-/** Custom item renderer function signature. */
+/** Custom item renderer function signature. `item.text` is the DISPLAY label
+ *  (app locale); `item.key` is the invariant member key -- what
+ *  `slicer.setSelectedItems` speaks. */
 export type SlicerItemRendererFn = (
-  item: { text: string; selected: boolean; hasData: boolean; index: number },
+  item: { text: string; key: string; selected: boolean; hasData: boolean; index: number },
   ctx: CanvasRenderingContext2D,
   bounds: { x: number; y: number; width: number; height: number },
 ) => void;

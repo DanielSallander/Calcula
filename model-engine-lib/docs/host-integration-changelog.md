@@ -67,6 +67,35 @@ All new model fields are additive (serde `default` + `skip_serializing_if`), so 
 
 ---
 
+## Tuple (multi-column) slicers: `QueryRequest::scoped_tuple_filters` (no `MODEL_FORMAT_VERSION` change)
+
+A Ctrl+click selection across two fields -- (A, x) and (B, y) -- could only be sent as two per-column IN-lists, which also keep (A, y) and (B, x). Calcula's Power BI-style cross-filter (round 2, P4) needs the exact set.
+
+- **New request field** (*additive*, `Default` keeps it empty): `QueryRequest::scoped_tuple_filters: Vec<ScopedTupleFilter>`.
+  - `ScopedTupleFilter { columns: Vec<TupleColumn>, tuples: Vec<Vec<String>>, level: u8 }` and `TupleColumn { table: Option<String>, column: String }` (`TupleColumn::new(table, column)`). Both are re-exported by `bi_engine` (and `engine_query`).
+  - Semantics: OR over `tuples` of AND over `columns`, ANDed with every other filter. A row is kept when its `(c1, .., ck)` equals some tuple. An EMPTY `tuples` list matches nothing.
+  - The BLANK member: a value equal to `BLANK_MEMBER_LABEL` (`(blank)`, any ASCII case) names that column's blank member exactly as in a `ScopedInFilter`: the NULL rows, plus the empty string on a text column.
+- **Per-measure CLEAR semantics (projection).** A measure whose `CLEAR`/`RESET` range covers `level` for SOME of the columns evaluates under the tuple set PROJECTED onto the columns it does not clear (deduplicated). This is DAX's REMOVEFILTERS on part of a multi-column filter table. Clearing every column removes the filter for that measure. The result's row domain (which groups are rows) always honours the UNPROJECTED tuples.
+- **Strategy routing.** A request with any tuple filter takes `LocalAggregation`. The exact predicate is applied per measure in the local SQL and is never a fetch-time WHERE. Each column that NO requested measure clears also pre-narrows its owner table's fetch with an IN-list of its distinct tuple values; this is sound because the product of those INs is a superset of the tuple set. The tuple columns are added to the fetch projection.
+- **Fail-closed refusals** (`QueryError::InvalidQuery`):
+  - a column whose owner is ambiguous ("a tuple filter column '<c>' is in more than one table ...; name its table"), an unknown table/column, a level outside `1..=9`, no columns, a column named twice, or a tuple whose length differs from `columns`;
+  - ROLLUP totals;
+  - a tuple column reached through anything but the fact or a safe direct join;
+  - any path that cannot thread a per-measure filter: COMPOUND measures with their own sub-expression contexts (e.g. `DIVIDE(SUM(x), SUM(x, RESET()))`), window/TI, QUERY-in-VAR, multi-fact, and the pre-aggregate and split-override paths. Their refusal text contains " clears ", the same discriminator as the contested-clear refusal, so a host that falls back on that text keeps working. The fallback must not answer a tuple selection with an unfiltered number.
+- **Query cache key.** The cache key covers the tuple filters: the count, then each column's table attribution and name, the tuples IN ORDER, and the level. Two selections never share a cached answer.
+- **Object-level security.** Every tuple column is checked like a scoped-IN column. A table-qualified column is matched exactly, and a bare name is matched conservatively. A denied column refuses the query with `EngineError::ObjectLevelSecurityDenied`.
+- **EXPLAIN.**
+  - The pushdown node lists `tuple_filters`: columns, level, tuple count, which measures clear which columns, and which columns pre-narrow.
+  - It also lists `in_filters_pushed`: every IN-list on a source fetch, as `table.column IN (n value(s))`.
+  - The executed LocalAggregation node carries one `tuple_filter` property per filter.
+- **Two fixes in the shared contested-filter path** (these change only queries that used to error):
+  - BUG-0525: an EMPTY contested IN-list failed with a DataFusion `Internal("predicate did not evaluate to an array")`. It now keeps no row for the honouring measures.
+  - BUG-0526: a GROUPED query whose every measure cleared a contested DIMENSION filter failed with `FieldNotFound` on that dimension. The row-domain probe's table now always joins.
+- **Calcula action:** S4b maps `DesignQueryRequest.tuple_filters` into `ScopedTupleFilter`. Blank keys (`""`, ruling Q8) must be sent as `BLANK_MEMBER_LABEL`, as for scoped IN-lists. The host-mask fallback cannot express a tuple, so it must surface the refusal instead of masking.
+- **Tests:**
+  - `crates/engine/src/tuple_filter_tests.rs` (cached and connector-fetched): exactness vs the rectangle, projection measure-only and grouped, clear-all, blank on text and int columns, empty set, the cache key and the live cache, OLS, ambiguity and malformed refusals, EXPLAIN pre-narrowing, compound refusal, the end-to-end answer on an off-axis column, BUG-0525 and BUG-0526.
+  - `engine-query` `a_tuple_filter_plans_local_with_widened_projection_and_pre_narrowing` (the widened projection and the per-column narrowing on a pushdown-capable source).
+
 ## A fetch-only source is aggregated locally: `ConnectorCapabilities::aggregate_pushdown` (no `MODEL_FORMAT_VERSION` change)
 
 The planner chose `QueryPlan::PushedAggregation` for any single-table simple-aggregate query on a DirectQuery table, whatever its connector, and handed that connector a `FetchRequest` with `group_by` + `aggregates` set. The CSV, Parquet, in-memory and REST connectors only FETCH: they ignored both and returned the table's raw rows, which the executor then read POSITIONALLY as the aggregated result. A DirectQuery CSV table grouped by `Region` answered one row per source row, and grouped by `Year` it answered with the `Region` column. Calcula found it on 2026-09-29: a model slicer on `Sales.Year` over a DirectQuery CSV source listed East / North / South / West (e2e fixall-pivot W4). Connectors do not advertise what they cannot answer, so an in-memory, auto-tiered or cache-served table was never affected. Only a connector-fetched DirectQuery table was.

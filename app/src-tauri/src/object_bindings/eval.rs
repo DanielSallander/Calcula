@@ -33,7 +33,7 @@ use std::sync::Arc;
 use engine::{CellValue, EvalContext, Evaluator, Expression, Grid, LocaleSettings, MultiSheetContext};
 use serde_json::Value;
 
-use crate::api_types::{ObjectBindingRef, ObjectBindingsChangedPayload, PageFilterWire, ResolvedBinding};
+use crate::api_types::{ObjectBindingRef, ObjectBindingsChangedPayload, ResolvedBinding};
 use crate::control_values::ControlValuesMap;
 use crate::pane_control::PaneControlState;
 use crate::ribbon_filter::RibbonFilterState;
@@ -130,14 +130,22 @@ pub struct BindingRuntime {
     pub volatile_dependents: HashSet<BindingKey>,
     /// The last value of every binding, diffed by `reevaluate` before it announces.
     pub resolved: HashMap<BindingKey, ResolvedBinding>,
-    /// The page-filter mirror: (page, connection id) -> its filters. The
-    /// frontend (`@api/pageFilters`) stays the authority; this is a copy.
-    pub page_filters: HashMap<(identity::SheetId, String), Vec<PageFilterWire>>,
+    /// The page-filter mirror: (page, connection id) -> its filter set (the
+    /// per-column filters and the tuple filters of other visuals' selections).
+    /// The frontend (`@api/reportFilters`) stays the authority; this is a copy.
+    pub page_filters: HashMap<(identity::SheetId, String), super::measures::PageFilterSet>,
+    /// Per-OBJECT overrides of the page set (P4: an interaction other than the
+    /// page default): object -> connection id -> the set that object reads
+    /// instead of its page's, with the page it was mirrored under.
+    pub object_filters: HashMap<ObjectBindingRef, HashMap<String, super::measures::ObjectFilterOverride>>,
+    /// Sheet ids a page-filter snapshot named that no build knew, already said
+    /// in the log (so a stale page is logged once, not on every snapshot).
+    pub warned_unknown_sheets: HashSet<identity::SheetId>,
     /// Measure values fetched by the measure pass, keyed by (page, connection
-    /// id, UPPERCASE measure, filter signature of the page's filters when
-    /// fetched). A pass reads ONLY the entry of the page's CURRENT signature,
-    /// so a filter change shows `pending` until the new value arrives, never
-    /// the old filter's number.
+    /// id, UPPERCASE measure, signature of the filter set they were fetched
+    /// under). A pass reads ONLY the entry of the object's CURRENT signature
+    /// (its override, else its page's), so a filter change shows `pending`
+    /// until the new value arrives, never the old filter's number.
     pub measure_cache: HashMap<super::measures::MeasureKey, MeasureOutcome>,
     /// How the measure pass last resolved each binding MODEL KEY: the
     /// connection id it names, or `None` = no connection with a loaded model
@@ -191,23 +199,54 @@ impl BindingRuntime {
         self.built = true;
     }
 
-    /// The fetched value of measure `name` of model `model` on `page`, under
-    /// the page's CURRENT filters -- `None` when it has not been fetched for
-    /// them (pending). A model key the pass resolved to no connection answers
+    /// The filter set `object` on `page` reads from `connection`: its own
+    /// override when it has one, else the page's set, else none at all.
+    pub fn effective_filters(
+        &self,
+        page: identity::SheetId,
+        object: &ObjectBindingRef,
+        connection: &str,
+    ) -> &super::measures::PageFilterSet {
+        if let Some(own) = self.object_filters.get(object).and_then(|by_connection| by_connection.get(connection)) {
+            return &own.set;
+        }
+        self.page_filters.get(&(page, connection.to_string())).unwrap_or(&super::measures::NO_FILTERS)
+    }
+
+    /// Every signature some object on `page` currently reads `connection`
+    /// under: the page's own set, and each override mirrored under that page.
+    pub fn current_signatures(&self, page: identity::SheetId, connection: &str) -> HashSet<u64> {
+        let mut out: HashSet<u64> = HashSet::new();
+        out.insert(super::measures::filter_signature(
+            self.page_filters.get(&(page, connection.to_string())).unwrap_or(&super::measures::NO_FILTERS),
+        ));
+        for by_connection in self.object_filters.values() {
+            if let Some(own) = by_connection.get(connection).filter(|o| o.page == page) {
+                out.insert(super::measures::filter_signature(&own.set));
+            }
+        }
+        out
+    }
+
+    /// The fetched value of measure `name` of model `model` for `object` on
+    /// `page`, under the object's CURRENT filters (its override, else the
+    /// page's) -- `None` when it has not been fetched for them (pending). A
+    /// model key the pass resolved to no connection answers
     /// [`MeasureOutcome::NotConnected`] for every measure.
-    pub fn measure_outcome(&self, page: identity::SheetId, model: &str, name: &str) -> Option<MeasureOutcome> {
+    pub fn measure_outcome(
+        &self,
+        page: identity::SheetId,
+        object: &ObjectBindingRef,
+        model: &str,
+        name: &str,
+    ) -> Option<MeasureOutcome> {
         match self.measure_models.get(model)? {
             None => Some(MeasureOutcome::NotConnected(format!(
                 "The model '{model}' that [{name}] is read from is not connected to this workbook. \
                  Connect it (Model > Connections) and the value follows."
             ))),
             Some(connection) => {
-                let filters = self
-                    .page_filters
-                    .get(&(page, connection.clone()))
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]);
-                let signature = super::measures::filter_signature(filters);
+                let signature = super::measures::filter_signature(self.effective_filters(page, object, connection));
                 self.measure_cache
                     .get(&(page, connection.clone(), name.to_uppercase(), signature))
                     .cloned()
@@ -638,18 +677,20 @@ pub struct PassInput {
 
 /// The measure values a pass substitutes for one binding's `[Measure]` refs,
 /// read from the runtime's `measure_cache` (filled by `measures.rs`) under the
-/// page's CURRENT filter signature. A measure with no entry is left out: the
-/// ref evaluates as pending -- never a stale number presented as current.
+/// CURRENT filter signature of the binding's object (its override, else its
+/// page's). A measure with no entry is left out: the ref evaluates as pending
+/// -- never a stale number presented as current.
 fn cached_measures(
     runtime: &BindingRuntime,
     page: identity::SheetId,
+    object: &ObjectBindingRef,
     model: Option<&str>,
     measures: &[String],
 ) -> HashMap<String, MeasureOutcome> {
     let mut out = HashMap::new();
     for name in measures {
         let outcome = match model {
-            Some(model) => runtime.measure_outcome(page, model, name),
+            Some(model) => runtime.measure_outcome(page, object, model, name),
             // Every row Set stores names its model; a row without one (edited
             // by hand) cannot be read from any model.
             None => Some(MeasureOutcome::Failed(format!(
@@ -760,7 +801,7 @@ fn select_for_pass(
         let measures = if p.measure_refs.is_empty() {
             HashMap::new()
         } else {
-            cached_measures(&runtime, loc.sheet_id, p.model.as_deref(), &p.measure_refs)
+            cached_measures(&runtime, loc.sheet_id, &key.object, p.model.as_deref(), &p.measure_refs)
         };
         let (cube, cube_pending, cube_refusal) = if p.cube_calls.is_empty() {
             (None, false, None)
@@ -1113,12 +1154,12 @@ pub fn evaluate_one(pass: &PassContext<'_>, input: &PassInput) -> ResolvedBindin
     let display = match (&input.single_cell, &input.single_measure) {
         (Some((sheet, row, col)), _) => pass
             .cell_display(*sheet, *row, *col)
-            .unwrap_or_else(|| crate::format_cell_value_simple(&value)),
+            .unwrap_or_else(|| crate::format_cell_value_display(&value, pass.locale)),
         (None, Some(measure)) => match input.measures.get(&measure.to_uppercase()) {
             Some(MeasureOutcome::Number(_, formatted)) => formatted.clone(),
-            _ => crate::format_cell_value_simple(&value),
+            _ => crate::format_cell_value_display(&value, pass.locale),
         },
-        _ => crate::format_cell_value_simple(&value),
+        _ => crate::format_cell_value_display(&value, pass.locale),
     };
     let coerced = coerce(input.value_type, &value, &display, pass.media);
     // A container colour paints only as hex (`visual_format::is_safe_color`):

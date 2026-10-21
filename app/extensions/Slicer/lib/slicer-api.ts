@@ -3,6 +3,7 @@
 
 import { slicerBackend } from "./slicerBackend";
 import type { PivotFilterGesture } from "@api/pivotTypes";
+import type { SlicerVisualConstraints } from "@api/types";
 import type {
   Slicer,
   SlicerItem,
@@ -85,8 +86,21 @@ export async function getSlicer(slicerId: string): Promise<Slicer> {
   return slicerBackend.invoke<Slicer>("get_slicer", { slicerId });
 }
 
-export async function getSlicerItems(slicerId: string): Promise<SlicerItem[]> {
-  return slicerBackend.invoke<SlicerItem[]>("get_slicer_items", { slicerId });
+/**
+ * A slicer's items. `visualConstraints` (P4, a MODEL slicer only): the other
+ * visuals' cross-filter selections that reach it on its canvas page, as
+ * @api/reportFilters resolved them (slicerVisualConstraints.ts); they narrow
+ * its has-data shading, never its selection. Absent = none reach it, and the
+ * argument is left off the wire.
+ */
+export async function getSlicerItems(
+  slicerId: string,
+  visualConstraints?: SlicerVisualConstraints,
+): Promise<SlicerItem[]> {
+  return slicerBackend.invoke<SlicerItem[]>(
+    "get_slicer_items",
+    visualConstraints ? { slicerId, visualConstraints } : { slicerId },
+  );
 }
 
 export async function clearSlicerFilter(slicerId: string): Promise<void> {

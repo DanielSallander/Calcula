@@ -78,7 +78,7 @@ function load(over: Record<string, unknown> = {}, count = 3): void {
   const names = ["North", "South", "West", "East", "Mid", "Coast", "Hill", "Vale", "Port", "Lake", "Moor", "Dale"];
   h.items.set(
     "s1",
-    names.slice(0, count).map((value) => ({ value, selected: true, hasData: true })),
+    names.slice(0, count).map((value) => ({ key: value, label: value, selected: true, hasData: true })),
   );
 }
 

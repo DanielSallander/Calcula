@@ -30,6 +30,7 @@ fn dirty(fs: &FileState) -> bool {
 
 fn cf_params() -> AddCFParams {
     AddCFParams {
+        target: None,
         rule: ConditionalFormatRule::CellValue(CellValueRule {
             operator: CellValueOperator::GreaterThan,
             value1: "10".to_string(),

@@ -453,10 +453,15 @@ pub fn get_timeline_slicers_for_sheet(
 /// Returns periods with has_data and is_selected flags.
 #[tauri::command]
 pub fn get_timeline_data(
+    state: State<'_, crate::AppState>,
     pivot_state: State<'_, PivotState>,
     timeline_state: State<TimelineSlicerState>,
     timeline_id: identity::EntityId,
 ) -> Result<TimelineDataResponse, String> {
+    // The app locale for the period LABELS (leaf lock: taken, cloned and
+    // dropped before any other guard). `start_date` / `end_date` stay the
+    // invariant ISO keys.
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     let timelines = timeline_state
         .timelines
         .read()
@@ -488,7 +493,7 @@ pub fn get_timeline_data(
 
     let dates_set: HashSet<DateTuple> = dates.into_iter().collect();
 
-    let periods = generate_periods(level, &min_date, &max_date, &dates_set, &sel_start, &sel_end);
+    let periods = generate_periods(level, &min_date, &max_date, &dates_set, &sel_start, &sel_end, &display_locale);
     let total_periods = periods.len();
 
     Ok(TimelineDataResponse {
@@ -786,22 +791,31 @@ fn get_pivot_date_value_strings_in_range(
 }
 
 /// Generate timeline periods between min_date and max_date at the given level.
-fn generate_periods(
+/// `locale` writes the LABELS (quarter and month names from its calendar);
+/// `start_date` / `end_date` are the invariant keys whatever it is.
+pub(crate) fn generate_periods(
     level: TimelineLevel,
     min_date: &DateTuple,
     max_date: &DateTuple,
     dates_with_data: &HashSet<DateTuple>,
     sel_start: &Option<String>,
     sel_end: &Option<String>,
+    locale: &engine::LocaleSettings,
 ) -> Vec<TimelinePeriod> {
     let sel_start_date = sel_start.as_ref().and_then(|s| parse_iso_date(s));
     let sel_end_date = sel_end.as_ref().and_then(|s| parse_iso_date(s));
 
     match level {
         TimelineLevel::Years => generate_year_periods(min_date, max_date, dates_with_data, &sel_start_date, &sel_end_date),
-        TimelineLevel::Quarters => generate_quarter_periods(min_date, max_date, dates_with_data, &sel_start_date, &sel_end_date),
-        TimelineLevel::Months => generate_month_periods(min_date, max_date, dates_with_data, &sel_start_date, &sel_end_date),
-        TimelineLevel::Days => generate_day_periods(min_date, max_date, dates_with_data, &sel_start_date, &sel_end_date),
+        TimelineLevel::Quarters => {
+            generate_quarter_periods(min_date, max_date, dates_with_data, &sel_start_date, &sel_end_date, locale)
+        }
+        TimelineLevel::Months => {
+            generate_month_periods(min_date, max_date, dates_with_data, &sel_start_date, &sel_end_date, locale)
+        }
+        TimelineLevel::Days => {
+            generate_day_periods(min_date, max_date, dates_with_data, &sel_start_date, &sel_end_date, locale)
+        }
     }
 }
 
@@ -844,6 +858,7 @@ fn generate_quarter_periods(
     dates_with_data: &HashSet<DateTuple>,
     sel_start: &Option<DateTuple>,
     sel_end: &Option<DateTuple>,
+    locale: &engine::LocaleSettings,
 ) -> Vec<TimelinePeriod> {
     let mut periods = Vec::new();
     let start_q = quarter_of(min_date.1);
@@ -869,7 +884,7 @@ fn generate_quarter_periods(
             };
 
             periods.push(TimelinePeriod {
-                label: format!("Q{}", q),
+                label: locale.calendar().quarter_label(q),
                 group_label: format!("{}", year),
                 start_date: format!("{:04}-{:02}-01", year, first_month),
                 end_date: format!("{:04}-{:02}-{:02}", year, last_month, days_in_month(year, last_month)),
@@ -888,12 +903,9 @@ fn generate_month_periods(
     dates_with_data: &HashSet<DateTuple>,
     sel_start: &Option<DateTuple>,
     sel_end: &Option<DateTuple>,
+    locale: &engine::LocaleSettings,
 ) -> Vec<TimelinePeriod> {
-    static MONTH_NAMES: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-
+    let calendar = locale.calendar();
     let mut periods = Vec::new();
 
     for year in min_date.0..=max_date.0 {
@@ -915,7 +927,7 @@ fn generate_month_periods(
             };
 
             periods.push(TimelinePeriod {
-                label: MONTH_NAMES[(month - 1) as usize].to_string(),
+                label: calendar.month_short(month).to_string(),
                 group_label: format!("{}", year),
                 start_date: format!("{:04}-{:02}-01", year, month),
                 end_date: format!("{:04}-{:02}-{:02}", year, month, last_day),
@@ -934,12 +946,9 @@ fn generate_day_periods(
     dates_with_data: &HashSet<DateTuple>,
     sel_start: &Option<DateTuple>,
     sel_end: &Option<DateTuple>,
+    locale: &engine::LocaleSettings,
 ) -> Vec<TimelinePeriod> {
-    static MONTH_NAMES: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-
+    let calendar = locale.calendar();
     let mut periods = Vec::new();
     let mut current = *min_date;
 
@@ -955,7 +964,7 @@ fn generate_day_periods(
 
         periods.push(TimelinePeriod {
             label: format!("{}", d),
-            group_label: format!("{} {}", MONTH_NAMES[(m - 1) as usize], y),
+            group_label: format!("{} {}", calendar.month_short(m), y),
             start_date: date_str.clone(),
             end_date: date_str,
             has_data,

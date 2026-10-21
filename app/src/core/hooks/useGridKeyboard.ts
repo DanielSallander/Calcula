@@ -29,7 +29,12 @@ import { handleCellTypeKeyDown } from "../../api/cellTypes";
 import { getGridRegions } from "../../api/gridOverlays";
 import { isKeyClaimed } from "../lib/pointerClaims";
 import { isExternalEditLive } from "../lib/formulaEditTarget";
-import { refuseIfSelectionOwned } from "../lib/selectionOwner";
+import {
+  refuseIfSelectionOwned,
+  resolveCellTarget,
+  type CellTarget,
+  type CellTargetCapability,
+} from "../lib/selectionOwner";
 
 /**
  * Options for the useGridKeyboard hook.
@@ -47,14 +52,23 @@ interface UseGridKeyboardOptions {
   onClearClipboard?: () => void;
   /** Whether clipboard has content (for ESC handling) */
   hasClipboardContent?: boolean;
-  /** Callback for delete/clear contents operation */
-  onDelete?: () => Promise<void>;
+  /**
+   * Callback for delete/clear contents operation. `target`: WHICH cells
+   * (P3) -- Core's selection (`kind: "grid"`) or a selection owner's own
+   * cells (`kind: "object"`, a floating grid's) -- resolved here for
+   * "clear".
+   */
+  onDelete?: (target?: CellTarget) => Promise<void>;
   /** Callback for selecting an entire column (Ctrl+Space) */
   onSelectColumn?: (col: number) => void;
   /** Callback for selecting an entire row (Shift+Space) */
   onSelectRow?: (row: number) => void;
-  /** Callback for executing a named command (formatting, fill, etc.) */
-  onCommand?: (command: string) => Promise<void>;
+  /**
+   * Callback for executing a named command (formatting, fill, etc.).
+   * `target`: for a command that may act on an owner's cells
+   * (SELECTION_WRITE_CAPABILITY), WHICH cells it acts on, resolved here.
+   */
+  onCommand?: (command: string, target?: CellTarget) => Promise<void>;
 }
 
 /**
@@ -143,6 +157,38 @@ const SELECTION_WRITE_COMMANDS: Readonly<Record<string, string>> = {
   "insert.chart": "Insert Chart",
   "checkbox.toggle": "Toggle Checkbox",
 };
+
+/**
+ * The commands above that may act on a selection OWNER's cells (P3, owner
+ * finding G3: a floating grid's cells take every Home command), with the
+ * capability each asks for. The keyboard asks `resolveCellTarget(action,
+ * capability)` and hands the answer to `onCommand(command, target)`: Core's
+ * selection, or the owner's cells when it admits the act -- an owner that does
+ * not refuses, once, as before. A command NOT listed here keeps refusing
+ * outright while an owner holds the selection (`refuseIfSelectionOwned`):
+ * Ctrl+; / Ctrl+Shift+: and Space write through Core's own cell paths, and F11
+ * builds a chart (an Insert-tab act), none of which has a target route.
+ * Ctrl+Alt+V reaches the Paste Special door, which asks its own question.
+ */
+const SELECTION_WRITE_CAPABILITY: Readonly<Partial<Record<string, CellTargetCapability>>> = {
+  "format.toggleBold": "format",
+  "format.toggleItalic": "format",
+  "format.toggleUnderline": "format",
+  "format.toggleStrikethrough": "format",
+  "format.numberGeneral": "numberFormat",
+  "format.numberCurrency": "numberFormat",
+  "format.numberPercentage": "numberFormat",
+  "format.numberScientific": "numberFormat",
+  "format.numberDate": "numberFormat",
+  "format.numberTime": "numberFormat",
+  "format.numberNumber": "numberFormat",
+  "clipboard.pasteSpecial": "content",
+};
+
+/** The capability `command` asks for, or undefined (it refuses outright). */
+function capabilityOf(command: string): CellTargetCapability | undefined {
+  return SELECTION_WRITE_CAPABILITY[command];
+}
 
 /**
  * Clamp a value between min and max bounds.
@@ -363,7 +409,10 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
 
   // Every write this keyboard makes to Core's selection goes through these two
   // wrappers, so a selection owner is asked at ONE place whatever the key (see
-  // SELECTION_WRITE_COMMANDS). The branches below still consume the key: a
+  // SELECTION_WRITE_COMMANDS). A command with a capability
+  // (SELECTION_WRITE_CAPABILITY) asks WHICH cells and hands the answer on --
+  // Core's selection, or the owner's own cells (P3); the rest refuse while an
+  // owner holds the selection. The branches below still consume the key: a
   // refused write is an answer, not a key for someone else.
   //
   // A key's command is fire-and-forget at every call site below, so this
@@ -376,9 +425,19 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
       rawOnCommand &&
       (async (command: string): Promise<void> => {
         const action = SELECTION_WRITE_COMMANDS[command];
-        if (action !== undefined && refuseIfSelectionOwned(action)) return;
+        let target: CellTarget | undefined;
+        if (action !== undefined) {
+          const capability = capabilityOf(command);
+          if (capability === undefined) {
+            if (refuseIfSelectionOwned(action)) return;
+          } else {
+            const resolved = resolveCellTarget(action, capability);
+            if (resolved === null) return;
+            target = resolved;
+          }
+        }
         try {
-          await rawOnCommand(command);
+          await (target === undefined ? rawOnCommand(command) : rawOnCommand(command, target));
         } catch (error) {
           console.error(`[useGridKeyboard] ${command} failed:`, error);
         }
@@ -389,8 +448,9 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
     () =>
       rawOnDelete &&
       (async (): Promise<void> => {
-        if (refuseIfSelectionOwned("Clear Contents")) return;
-        await rawOnDelete();
+        const target = resolveCellTarget("Clear Contents", "clear");
+        if (target === null) return;
+        await rawOnDelete(target);
       }),
     [rawOnDelete]
   );

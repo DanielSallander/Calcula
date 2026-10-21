@@ -26,6 +26,7 @@ import { formulaA1ToR1C1 } from "../r1c1";
 import { drawCorner, drawColumnHeaders, drawRowHeaders } from "./rendering/headers";
 import { drawGridLines } from "./rendering/grid";
 import { hasStyleInterceptors } from "../../../api/styleInterceptors";
+import { formatDateIn, getActiveLocale } from "../locale";
 import {
   drawCellText,
   drawDeferredCellDecorations,
@@ -1463,10 +1464,15 @@ function drawPageLayoutOverlay(
 /**
  * Parse Excel-style header/footer format codes: &L, &C, &R for left/center/right.
  * Also replaces &P (page number), &N (total pages), &D (date), &T (time), &F (filename).
+ * &D and &T are today's date and time in the APP locale (its short date and
+ * time patterns), never the WebView's own locale.
  */
-function parseHeaderFooter(format: string): { left: string; center: string; right: string } {
+export function parseHeaderFooter(format: string, now: Date = new Date()): { left: string; center: string; right: string } {
   const result = { left: "", center: "", right: "" };
   if (!format) return result;
+  const locale = getActiveLocale();
+  const dateText = formatDateIn(locale, now, "short");
+  const timeText = formatDateIn(locale, now, "time");
 
   // Split by &L, &C, &R sections
   const sections = format.split(/&([LCR])/i);
@@ -1482,8 +1488,8 @@ function parseHeaderFooter(format: string): { left: string; center: string; righ
     const text = section
       .replace(/&P/gi, "1")
       .replace(/&N/gi, "1")
-      .replace(/&D/gi, new Date().toLocaleDateString())
-      .replace(/&T/gi, new Date().toLocaleTimeString())
+      .replace(/&D/gi, () => dateText)
+      .replace(/&T/gi, () => timeText)
       .replace(/&F/gi, "Workbook");
 
     result[currentSection] += text;

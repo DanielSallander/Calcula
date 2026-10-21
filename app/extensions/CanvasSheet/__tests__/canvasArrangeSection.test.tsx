@@ -30,6 +30,7 @@ const h = vi.hoisted(() => ({
   align: vi.fn(async (_e: string) => 0),
   distribute: vi.fn(async (_a: string) => 0),
   primary: null as unknown,
+  refs: {} as Record<string, { kind: string; id: string }>,
 }));
 
 vi.mock("../lib/canvasSheetStore", () => ({
@@ -41,6 +42,7 @@ vi.mock("@api/objectSelection", async (importOriginal) => ({
   getSelectedObjectRegions: () => h.selected,
   getPrimaryObjectRegion: () => h.primary,
   onObjectSelectionChanged: () => () => {},
+  objectRefOf: (r: { id: string }) => h.refs[r.id] ?? null,
 }));
 vi.mock("../lib/zOrderStore", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/zOrderStore")>()),
@@ -63,6 +65,8 @@ import { drawsIcon } from "./tabHarness";
 import type { GridRegion } from "@api/gridOverlays";
 import { registerObjectGeometryProvider, resetObjectGeometryProviders } from "@api/objectGeometry";
 import { registerSizeAndPositionOpener, resetObjectPosition } from "@api/objectPosition";
+import { registerModelVisualProvider, type ModelVisualInfo } from "@api/modelVisuals";
+import { exitEditInteractions, getEditInteractionsState } from "../lib/editInteractions";
 
 const PRIMARY: GridRegion = {
   id: "chart-b",
@@ -247,5 +251,67 @@ describe("the Arrange section", () => {
     h.snapshot = { active: null, activeSubscribed: false };
     render();
     expect(container.querySelector('[data-testid="canvas-arrange-align"]')).toBeNull();
+  });
+});
+
+describe("Edit interactions (P4 S10)", () => {
+  const visual = (id: string, source: boolean): ModelVisualInfo => ({
+    ref: { kind: "chart", id },
+    name: id,
+    sheetIndex: 2,
+    sheetId: "cv-2",
+    connectionId: "c1",
+    role: { source, target: true, canHighlight: source, reason: source ? null : "This visual does not filter others" },
+    label: "Column chart",
+  });
+  let offVisuals: () => void = () => {};
+
+  beforeEach(() => {
+    h.refs = { a: { kind: "chart", id: "a" }, b: { kind: "chart", id: "b" }, card: { kind: "chart", id: "card" } };
+    offVisuals = registerModelVisualProvider({ kind: "chart", list: () => [visual("a", true), visual("b", true), visual("card", false)] });
+  });
+  afterEach(() => {
+    exitEditInteractions();
+    offVisuals();
+  });
+
+  it("is the toggle after Lock, drawing EditInteractions", () => {
+    h.selected = [{ id: "a" }];
+    render();
+    const ids = Array.from(container.querySelectorAll("[data-testid]")).map((el) => el.getAttribute("data-testid"));
+    expect(ids.indexOf("canvas-edit-interactions")).toBe(ids.indexOf("canvas-arrange-lock") + 1);
+    expect(drawsIcon(byTestId("canvas-edit-interactions", container), "EditInteractions")).toBe(true);
+  });
+
+  it("is enabled with exactly one source-capable visual selected, and toggles the mode", () => {
+    h.selected = [{ id: "a" }];
+    render();
+    const button = byTestId("canvas-edit-interactions", container);
+    expect(button.disabled).toBe(false);
+    expect(button.getAttribute("aria-pressed")).not.toBe("true");
+    click(button);
+    expect(getEditInteractionsState()).toEqual({ active: true, source: { kind: "chart", id: "a" } });
+    expect(byTestId("canvas-edit-interactions", container).getAttribute("aria-pressed")).toBe("true");
+    click(byTestId("canvas-edit-interactions", container));
+    expect(getEditInteractionsState().active).toBe(false);
+  });
+
+  it("is disabled with two selected, with nothing selected, and with a visual that is not a source", () => {
+    h.selected = [{ id: "a" }, { id: "b" }];
+    render();
+    expect(byTestId("canvas-edit-interactions", container).disabled).toBe(true);
+    h.selected = [];
+    render();
+    expect(byTestId("canvas-edit-interactions", container).disabled).toBe(true);
+    h.selected = [{ id: "card" }];
+    render();
+    expect(byTestId("canvas-edit-interactions", container).disabled).toBe(true);
+  });
+
+  it("is disabled on a SUBSCRIBED canvas", () => {
+    h.selected = [{ id: "a" }];
+    h.snapshot = { ...h.snapshot, activeSubscribed: true };
+    render();
+    expect(byTestId("canvas-edit-interactions", container).disabled).toBe(true);
   });
 });

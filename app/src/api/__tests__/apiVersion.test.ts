@@ -27,6 +27,10 @@
 //          pick preview), the copy primitive and inner clipboard door
 //          (copyCellRange, innerClipboardCommand), @api/statusBarRange,
 //          hasDomTextSelection and GridContextMenuItem.disabledReason.
+//
+//          1.5.0 is canvas round 2 (2026-10-16), one entry for the round's
+//          packages. P1 added the solid background commit
+//          (solidBackgroundPatch, solidBackgroundIsNoop, SolidBackgroundBase).
 
 import { describe, it, expect } from "vitest";
 import * as fs from "fs";
@@ -50,8 +54,8 @@ const entry = (v: string) => CHANGELOG?.find((e) => e.version === v);
 const names = (v: string): Set<string> => new Set(entry(v)?.added.map((e) => e.name) ?? []);
 
 describe("API_VERSION", () => {
-  it("is 1.4.0 (the canvas owner findings programme added to @api)", () => {
-    expect(version.API_VERSION).toBe("1.4.0");
+  it("is 1.5.0 (canvas round 2 added to @api)", () => {
+    expect(version.API_VERSION).toBe("1.5.0");
   });
 
   it("carries a changelog whose newest entry IS the current version", () => {
@@ -195,6 +199,169 @@ describe("the 1.4.0 changelog names what WP-A (picks and pivot cells) added", ()
     const changed = (entry("1.4.0")?.changed ?? []).join("\n");
     for (const word of ["isFormulaReferencePickActive", "INERT", "clipboardDoorCommand", "innerClipboardCommand", "disabledReason"]) {
       expect(changed, `1.4.0's "changed" says nothing about ${word}`).toContain(word);
+    }
+  });
+});
+
+describe("the 1.5.0 changelog names what round 2's P1 (solid background commit) added", () => {
+  const REQUIRED = ["solidBackgroundPatch", "solidBackgroundIsNoop", "SolidBackgroundBase"];
+
+  it("lists every P1 addition", () => {
+    const listed = names("1.5.0");
+    expect(entry("1.5.0"), "API_CHANGELOG has no 1.5.0 entry").toBeDefined();
+    for (const n of REQUIRED) expect(listed.has(n), `1.5.0's changelog does not list ${n}`).toBe(true);
+  });
+});
+
+describe("the 1.5.0 changelog names what round 2's P3 (cell targets) added", () => {
+  const REQUIRED = [
+    "resolveCellTarget",
+    "cellTargetFor",
+    "targetRefOf",
+    "getCellTargetCells",
+    "readTargetCell",
+    "onCellTargetChanged",
+    "notifyCellTargetChanged",
+    "selectTargetCells",
+    "editTargetCell",
+    "CellTargetRef",
+    "CellTargetCapability",
+    "OwnedCellTarget",
+    "CellTargetOptions",
+    "SelectionOwner.cellTarget",
+    "SelectionOwner.actsOn",
+    "SelectionOwner.selectCells",
+    "SelectionOwner.editActiveCell",
+    "paintStyledCellBox",
+    "registerConditionalFormatPainter",
+    "paintConditionalFormat",
+  ];
+
+  it("lists every P3 addition", () => {
+    const listed = names("1.5.0");
+    for (const n of REQUIRED) expect(listed.has(n), `1.5.0's changelog does not list ${n}`).toBe(true);
+  });
+
+  it("says the cell wrappers CHANGED: they take an explicit `{ target }`", () => {
+    const changed = new Set(entry("1.5.0")?.changed ?? []);
+    for (const n of ["applyFormatting", "updateCellsBatch", "clearRangeWithOptions", "SelectionOwner.refusal"]) {
+      expect(changed.has(n), `1.5.0's changelog does not say ${n} changed`).toBe(true);
+    }
+  });
+});
+
+describe("the 1.5.0 changelog names what round 2's P2 (the app locale) added", () => {
+  const REQUIRED = [
+    "initAppLocale",
+    "getAppLocale",
+    "decimalSeparator",
+    "listSeparator",
+    "formatNumber",
+    "formatNumberWithCode",
+    "formatDate",
+    "formatDateTime",
+    "monthName",
+    "dayName",
+    "quarterLabel",
+    "parseNumber",
+    "parseDate",
+    "LOCALE_CHANGED_EVENT",
+    "DateStyle",
+    "FormatNumberOptions",
+    "LocaleSettings.overrideId",
+  ];
+
+  it("lists every P2 addition", () => {
+    const listed = names("1.5.0");
+    for (const n of REQUIRED) expect(listed.has(n), `1.5.0's changelog does not list ${n}`).toBe(true);
+  });
+
+  it("says getCachedLocale was removed and the locale doors changed meaning", () => {
+    const changed = new Set(entry("1.5.0")?.changed ?? []);
+    for (const n of ["getCachedLocale", "getLocaleSettings", "setLocale", "LocaleSettings"]) {
+      expect(changed.has(n), `1.5.0's changelog does not say ${n} changed`).toBe(true);
+    }
+  });
+});
+
+describe("the 1.5.0 changelog names P2 S7's member shape", () => {
+  const REQUIRED = [
+    "pivotCellItemKey",
+    "pivotCellDisplayText",
+    "memberKeyNumber",
+    "memberKeyDate",
+    "memberKeys",
+    "memberLabelOf",
+    "MemberRef",
+    "PivotCellData.member",
+    "FilterRowData.members",
+    "BiColumnKind",
+    "BiQueryResult.columnKinds",
+    "SlicerItemRenderer.item.key",
+  ];
+
+  it("lists every member-shape addition", () => {
+    const listed = names("1.5.0");
+    for (const n of REQUIRED) expect(listed.has(n), `1.5.0's changelog does not list ${n}`).toBe(true);
+  });
+
+  it("says the member wire CHANGED: biGetColumnValues, the pivot filter lists, slicer items, page filters", () => {
+    const changed = new Set(entry("1.5.0")?.changed ?? []);
+    for (const n of [
+      "biGetColumnValues",
+      "FilterRowData",
+      "FieldUniqueValuesResponse",
+      "ISlicerStoreService.getCachedItems",
+      "getSlicerItemBitmap",
+      "PageFilterInput.includedItems",
+    ]) {
+      expect(changed.has(n), `1.5.0's changelog does not say ${n} changed`).toBe(true);
+    }
+  });
+});
+
+describe("the 1.5.0 changelog names what round 2's P4 (report filters) added", () => {
+  const REQUIRED = [
+    "publishReportFilters",
+    "getReportFilters",
+    "setCrossFilter",
+    "addToCrossFilter",
+    "clearCrossFilter",
+    "clearCrossFilters",
+    "getCrossFilters",
+    "pruneCrossFilter",
+    "pruneMissingCrossFilterSources",
+    "isCrossFilterSource",
+    "publishPageInteractions",
+    "interactionFor",
+    "resolvePageBase",
+    "resolveFiltersFor",
+    "isRectangular",
+    "onReportFiltersChange",
+    "startReportFilters",
+    "VisualRef",
+    "MemberPath",
+    "ReportFilterInput",
+    "CrossFilterSelection",
+    "ResolvedFilters",
+    "registerModelVisualProvider",
+    "listModelVisuals",
+    "modelVisualOf",
+    "chartMarkCrossFilter",
+    "ChartMarkMeta.crossFilter",
+    "CANVAS_INTERACTION_KINDS",
+    "CANVAS_MAX_OBJECT_REFS",
+  ];
+
+  it("lists every P4 addition", () => {
+    const listed = names("1.5.0");
+    for (const n of REQUIRED) expect(listed.has(n), `1.5.0's changelog does not list ${n}`).toBe(true);
+  });
+
+  it("says @api/pageFilters was removed, with each of its names", () => {
+    const changed = new Set(entry("1.5.0")?.changed ?? []);
+    for (const n of ["@api/pageFilters", "publishPageFilters", "getPageFilters", "listPageFilterPages", "onPageFiltersChange"]) {
+      expect(changed.has(n), `1.5.0's changelog does not say ${n} changed`).toBe(true);
     }
   });
 });

@@ -24,7 +24,7 @@ pub mod types;
 
 use serde::Serialize;
 
-use engine::Grid;
+use engine::{Grid, LocaleSettings};
 
 use crate::narrate::Locale;
 use crate::relations::AlignedColumn;
@@ -34,26 +34,41 @@ use crate::types::{
     ColumnRole, Dataset, FactKind, HeaderMode, Insight, InsightBundle, RangeRef, SourceRef, Subject,
 };
 
-pub use crate::narrate::narrator_for;
+pub use crate::narrate::{narrator_for, narrator_for_settings};
 pub use crate::types::{
     AppliedAttr, AttrSource, Column, Datum, Direction, OutlierMethod, OutlierPoint,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// How a bundle is written: `locale` decides the PROSE (English for every
+/// locale, by decision -- see `narrate::narrator_for`), `numbers` decides the
+/// DIGITS (the app locale's separators, for every locale -- P2 A15). They are
+/// separate on purpose: a de-DE reader gets English sentences with "1.234,50",
+/// which the old `Locale`-only options collapsed to en-US numbers.
+///
+/// No `PartialEq`: `LocaleSettings` derives none, and nothing compares
+/// options.
+#[derive(Debug, Clone)]
 pub struct AnalyzeOptions {
     pub locale: Locale,
+    pub numbers: LocaleSettings,
 }
 
 impl Default for AnalyzeOptions {
     fn default() -> Self {
-        AnalyzeOptions { locale: Locale::En }
+        AnalyzeOptions {
+            locale: Locale::En,
+            numbers: LocaleSettings::invariant(),
+        }
     }
 }
 
 impl AnalyzeOptions {
-    pub fn for_locale_id(id: &str) -> Self {
+    /// The options for the app locale `settings`: its numbers, and the prose
+    /// language its id maps to.
+    pub fn for_settings(settings: &LocaleSettings) -> Self {
         AnalyzeOptions {
-            locale: Locale::from_locale_id(id),
+            locale: Locale::from_locale_id(&settings.locale_id),
+            numbers: settings.clone(),
         }
     }
 }
@@ -94,7 +109,7 @@ pub fn analyze_with_policy(
     options: &AnalyzeOptions,
     policy: &mut dyn FnMut(&mut Insight) -> bool,
 ) -> InsightBundle {
-    let narrator = narrate::narrator_for(options.locale);
+    let narrator = narrate::narrator_for_settings(&options.numbers);
     let mut notes: Vec<String> = Vec::new();
     let facts = collect_facts(dataset, &mut notes);
 
@@ -658,7 +673,7 @@ mod tests {
     fn a_swedish_bundle_renders_a_comma_decimal() {
         let values: Vec<f64> = (0..20).map(|i| 100.0 + 2.5 * i as f64).collect();
         let ds = dataset(vec![column("Intakt", 0, numbers(&values))]);
-        let sv = analyze(&ds, &AnalyzeOptions::for_locale_id("sv-SE"));
+        let sv = analyze(&ds, &AnalyzeOptions::for_settings(&engine::LocaleSettings::from_locale_id("sv-SE")));
         let en = analyze(&ds, &AnalyzeOptions::default());
 
         assert_eq!(sv.locale_id, "sv-SE");
@@ -673,6 +688,27 @@ mod tests {
         assert_ne!(sv.markdown, en.markdown);
         assert_eq!(
             sv.insights.iter().map(|i| i.id.clone()).collect::<Vec<_>>(),
+            en.insights.iter().map(|i| i.id.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    /// P2 A15: options built for the app locale's SETTINGS narrate that
+    /// locale's numbers for every locale (de-DE read en-US digits before),
+    /// while the prose -- and so the bundle's locale id -- stays English.
+    #[test]
+    fn a_german_bundle_renders_german_numbers_in_english_prose() {
+        let values: Vec<f64> = (0..20).map(|i| 1000.0 + 2.5 * i as f64).collect();
+        let ds = dataset(vec![column("Revenue", 0, numbers(&values))]);
+        let de_settings = engine::LocaleSettings::from_locale_id("de-DE");
+        let de = analyze(&ds, &AnalyzeOptions::for_settings(&de_settings));
+        let en = analyze(&ds, &AnalyzeOptions::default());
+
+        assert_eq!(de.locale_id, "en-US", "the prose locale is not English");
+        assert!(de.markdown.contains("1.0"), "no German grouping in:\n{}", de.markdown);
+        assert!(!de.markdown.contains("1,0"), "an en-US grouping in:\n{}", de.markdown);
+        assert_ne!(de.markdown, en.markdown);
+        assert_eq!(
+            de.insights.iter().map(|i| i.id.clone()).collect::<Vec<_>>(),
             en.insights.iter().map(|i| i.id.clone()).collect::<Vec<_>>()
         );
     }

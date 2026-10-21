@@ -59,8 +59,8 @@ export type {
   ActionRowProps,
 } from "./primitives/containers";
 
-export { Field, FieldGrid, NumberField, NUMBER_FIELD_WIDTH } from "./primitives/fields";
-export type { FieldProps, FieldGridProps, NumberFieldProps } from "./primitives/fields";
+export { Field, FieldGrid, NumberField, NumberInput, NUMBER_FIELD_WIDTH } from "./primitives/fields";
+export type { FieldProps, FieldGridProps, NumberFieldProps, NumberInputProps } from "./primitives/fields";
 
 export { ItemList, Tall, Gallery } from "./primitives/blocks";
 export type { ItemListProps, TallProps, GalleryProps } from "./primitives/blocks";

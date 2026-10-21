@@ -5,6 +5,7 @@
 import type { PrintData, PageSetup } from "@api/lib";
 import { indexToCol, colToIndex } from "@api/lib";
 import { alertAsync } from "@api/dialogs";
+import { formatDate } from "@api/locale";
 
 // ============================================================================
 // Paper sizes in CSS (mm)
@@ -119,13 +120,19 @@ function parseHeaderFooterSections(text: string): HeaderFooterSections {
   return { left: left.trim(), center: center.trim(), right: right.trim() };
 }
 
-function replaceDynamicFields(text: string, sheetName: string): string {
+/**
+ * Replace header/footer field codes. &D / &T are the date and time of `now` in
+ * the APP locale's short-date and time patterns.
+ */
+export function replaceDynamicFields(text: string, sheetName: string, now: Date = new Date()): string {
   if (!text) return "";
+  const dateText = formatDate(now, "short");
+  const timeText = formatDate(now, "time");
   return text
     .replace(/&P/g, "1") // Page number placeholder (browser handles pagination)
     .replace(/&N/g, "1") // Total pages placeholder
-    .replace(/&D/g, new Date().toLocaleDateString())
-    .replace(/&T/g, new Date().toLocaleTimeString())
+    .replace(/&D/g, () => dateText)
+    .replace(/&T/g, () => timeText)
     .replace(/&F/g, sheetName)
     .replace(/&A/g, sheetName);
 }

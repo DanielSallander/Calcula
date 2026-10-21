@@ -15,6 +15,7 @@
 
 import React, { useCallback } from "react";
 import { NumberField, Slider } from "@api/layout";
+import { parseNumber } from "@api/locale";
 
 // ============================================================================
 // Props
@@ -69,13 +70,14 @@ export const SliderInput: React.FC<SliderInputProps> = ({
     [onChange, onCommit, clamp],
   );
 
-  /** Commit what the box holds (clamped); anything that is not a number is
-   *  dropped and the box shows the current value again on blur. */
+  /** Commit what the box holds (clamped); anything that is not a number in
+   *  the APP locale ("1,5" under de-DE; the foreign "1.5" is not) is dropped
+   *  and the box shows the current value again on blur. */
   const commitBox = useCallback(
     (raw: string) => {
       if (raw.trim() === "") return;
-      const v = Number(raw);
-      if (!Number.isFinite(v)) return;
+      const v = parseNumber(raw);
+      if (v === null) return;
       onCommit(clamp(v));
     },
     [onCommit, clamp],

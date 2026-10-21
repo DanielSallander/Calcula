@@ -753,7 +753,13 @@ function renderPaletteBody(o: PaletteBodyOptions, s: PaletteState): React.ReactE
     const hex = normalizeHex(draft);
     if (hex === null) return;
     setHexDraft(null);
-    if (!sameColor(hex, value)) onChange(hex);
+    // Enter is a PICK, like a swatch click (which always applies): a split
+    // button's `value` is the REMEMBERED colour, not the cell's, so the
+    // equality skip made typing Excel's default yellow into Fill Color's hex
+    // box and pressing Enter apply nothing at all (found live 2026-10-17,
+    // floating-grid-home FG2). Only a blur that typed back the shown colour
+    // is a no-op.
+    if (andClose || !sameColor(hex, value)) onChange(hex);
     if (andClose) done();
   };
 

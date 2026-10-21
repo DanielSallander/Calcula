@@ -2,11 +2,31 @@
 // PURPOSE: Handles pivot:openFilterMenu events to show the filter dropdown.
 // CONTEXT: When a user clicks a filter dropdown cell in a pivot table,
 // this handler fetches the unique values and shows the filter overlay.
+//          A request from a canvas pivot BOX's cell while the box shows a
+//          filtered view (P4 S7, pivotCrossFilterView.ts) is REFUSED: the
+//          box's cells and field indices are the transient view's. From the
+//          field list, a PivotChart (which names its pivot) or the ribbon the
+//          menu opens on the real pivot as before.
 
 import { pivot } from "@api/pivot";
+import { getGridRegions } from "@api/gridOverlays";
 import { OverlayExtensions, emitAppEvent } from "@api";
+import type { MemberRef } from "@api/pivotMembers";
 import { PIVOT_FILTER_OVERLAY_ID } from "../manifest";
 import { getCachedPivotView } from "../lib/pivotViewStore";
+import { refuseWhileFiltered } from "../lib/pivotCrossFilterView";
+import { PIVOT_VISUAL_REGION_TYPE, pivotIdOfVisual } from "../lib/pivotVisualRegions";
+
+/** The pivot whose canvas box holds hidden-grid cell (row, col), or null. */
+function boxPivotAt(row: number, col: number): string | null {
+  for (const r of getGridRegions()) {
+    if (r.type !== PIVOT_VISUAL_REGION_TYPE) continue;
+    if (row < r.startRow || row > r.endRow || col < r.startCol || col > r.endCol) continue;
+    const id = pivotIdOfVisual(r);
+    if (id) return id;
+  }
+  return null;
+}
 import { PivotEvents } from "../../_shared/lib/pivotEvents";
 
 /**
@@ -40,6 +60,10 @@ export async function handleOpenFilterMenu(detail: {
     // Use provided pivotId (e.g. from PivotChart) or find pivot at cell
     let resolvedPivotId = detail.pivotId;
     if (resolvedPivotId == null) {
+      // Opened from a cell of a FILTERED box: refused (and said) before
+      // anything is asked of the backend.
+      const boxPivotId = boxPivotAt(row, col);
+      if (boxPivotId !== null && refuseWhileFiltered(boxPivotId)) return;
       const pivotInfo = await pivot.getAtCell(row, col);
       if (!pivotInfo) {
         console.warn("[Pivot Extension] No pivot found at filter cell");
@@ -50,12 +74,12 @@ export async function handleOpenFilterMenu(detail: {
 
     console.log("[Pivot Extension] Found pivot:", resolvedPivotId);
 
-    // Get unique values for this field
-    let allValues: string[] = [];
+    // The field's members: the overlay SHOWS labels and selects KEYS.
+    let members: MemberRef[] = [];
     try {
       const valuesResponse = await pivot.getFieldUniqueValues(resolvedPivotId, fieldIndex);
       console.log("[Pivot Extension] Got unique values:", valuesResponse);
-      allValues = valuesResponse?.uniqueValues ?? [];
+      members = valuesResponse?.members ?? [];
     } catch (valuesError) {
       console.error("[Pivot Extension] Failed to get unique values:", valuesError);
       // Continue with empty array - user will see "No matching values"
@@ -66,7 +90,7 @@ export async function handleOpenFilterMenu(detail: {
     const filterRowMeta = cachedView?.filterRows?.find(
       (fr) => fr.fieldIndex === fieldIndex
     );
-    const selectedValues = filterRowMeta?.selectedValues ?? [...allValues];
+    const selectedValues = filterRowMeta?.selectedValues ?? members.map((m) => m.key);
 
     // Store current filter state for the apply callback
     currentFilterState = {
@@ -80,7 +104,7 @@ export async function handleOpenFilterMenu(detail: {
       data: {
         fieldName,
         fieldIndex,
-        uniqueValues: allValues,
+        members,
         selectedValues,
         onApply: handleApplyFilter,
       },

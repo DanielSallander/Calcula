@@ -434,13 +434,17 @@ describe("theme merging", () => {
   });
 
   const themeFields: Array<keyof typeof DEFAULT_CHART_THEME> = [
-    "background", "plotBackground", "gridLineColor", "axisColor",
+    "background", "gridLineColor", "axisColor",
     "axisLabelColor", "axisTitleColor", "titleColor", "legendTextColor", "fontFamily",
   ];
 
   it.each(themeFields)("DEFAULT_CHART_THEME.%s is a non-empty string", (field) => {
     expect(typeof DEFAULT_CHART_THEME[field]).toBe("string");
     expect((DEFAULT_CHART_THEME[field] as string).length).toBeGreaterThan(0);
+  });
+
+  it("DEFAULT_CHART_THEME.plotBackground is the empty string (no plot fill, Power BI)", () => {
+    expect(DEFAULT_CHART_THEME.plotBackground).toBe("");
   });
 
   const numericFields: Array<keyof typeof DEFAULT_CHART_THEME> = [

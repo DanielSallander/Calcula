@@ -19,9 +19,10 @@ use crate::features::scheduled_jobs::{
 use crate::features::script_authoring::{SCRIPT_AUTHORING_FEATURE, SCRIPT_AUTHORING_FILE};
 use crate::manifest::{
     stamp_feature_format_version, Manifest, CALA_BASE_FORMAT_VERSION, PINNED_FILTER_MIN_FORMAT_VERSION,
-    CANVAS_OBJECTS_LOCKED_FEATURE, CANVAS_SHEET_MIN_FORMAT_VERSION, CANVAS_WALLPAPER_FEATURE,
-    CHART_SPEC_OBJECT_MIN_FORMAT_VERSION, OBJECT_BINDINGS_FEATURE,
-    OBJECT_BINDINGS_MIN_FORMAT_VERSION, PAGE_NAVIGATOR_FEATURE, PIVOT_STYLE_FEATURE, VISUAL_CONTAINER_FEATURE,
+    CANVAS_INTERACTIONS_FEATURE, CANVAS_OBJECTS_LOCKED_FEATURE, CANVAS_SHEET_MIN_FORMAT_VERSION,
+    CANVAS_WALLPAPER_FEATURE, RIBBON_FILTER_VISUAL_TARGETS_FEATURE,
+    CHART_SPEC_OBJECT_MIN_FORMAT_VERSION, FLOATING_GRID_HIDDEN_LINES_MIN_FORMAT_VERSION,
+    OBJECT_BINDINGS_FEATURE, OBJECT_BINDINGS_MIN_FORMAT_VERSION, PAGE_NAVIGATOR_FEATURE, PIVOT_STYLE_FEATURE, VISUAL_CONTAINER_FEATURE,
     PENDING_RECALC_MIN_FORMAT_VERSION, SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION,
     SHEET_VIEW_MIN_FORMAT_VERSION,
     SPILL_EXTENT_MIN_FORMAT_VERSION,
@@ -109,7 +110,9 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     if !workbook.charts.is_empty() {
         manifest.features.push("charts".to_string());
     }
-    // Feature id only, no version link — see the floating_ranges.json write.
+    // Feature id only — see the floating_ranges.json write. (The rows' hidden
+    // line sets alone take a version link, stamped in the block before the
+    // manifest is written.)
     if !workbook.floating_ranges.is_empty() {
         manifest.features.push("floating_ranges".to_string());
     }
@@ -307,6 +310,17 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     if layouts().any(|l| l.objects_locked) {
         manifest.features.push(CANVAS_OBJECTS_LOCKED_FEATURE.to_string());
     }
+    // VISUAL INTERACTIONS (P4) and a ribbon filter's "Selected visuals" list:
+    // feature ids and, as decided, NO version link (see
+    // CANVAS_INTERACTIONS_FEATURE for the recorded owner question). Each is
+    // declared only when present; both ride records that are read
+    // unconditionally (the sheet's metadata.json, the filter's own json).
+    if layouts().any(|l| !l.interactions.is_default()) {
+        manifest.features.push(CANVAS_INTERACTIONS_FEATURE.to_string());
+    }
+    if workbook.ribbon_filters.iter().any(|f| !f.connected_visuals.is_empty()) {
+        manifest.features.push(RIBBON_FILTER_VISUAL_TARGETS_FEATURE.to_string());
+    }
     // A PAGE NAVIGATOR control (D-NAV): a feature id and DELIBERATELY NO
     // version link -- an older reader paints the unknown control type as a
     // grey button that does nothing, a visible loss, never a lie (see
@@ -354,6 +368,22 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     // feature id: the shape change is not an optional feature.
     if !workbook.charts.is_empty() {
         stamp_feature_format_version(&mut manifest, CHART_SPEC_OBJECT_MIN_FORMAT_VERSION);
+    }
+    // Hidden lines on a floating grid (P3): a version link. An older reader
+    // drops `hiddenRows`/`hiddenCols` and shows the rows the author HID -- the
+    // lie class (see FLOATING_GRID_HIDDEN_LINES_MIN_FORMAT_VERSION). Stamped
+    // only when some floating range carries a non-empty set. It MUST stay in
+    // this block, before manifest.json is written below: the
+    // floating_ranges.json write further down runs after the manifest has been
+    // flushed into the ZIP, so a stamp placed there would change a manifest
+    // nobody reads and the file would go out as the older version
+    // (pinned by `a_hidden_line_stamp_reaches_the_written_manifest`).
+    if workbook
+        .floating_ranges
+        .iter()
+        .any(|f| !f.hidden_rows.is_empty() || !f.hidden_cols.is_empty())
+    {
+        stamp_feature_format_version(&mut manifest, FLOATING_GRID_HIDDEN_LINES_MIN_FORMAT_VERSION);
     }
     manifest.features.push("theme".to_string());
 
@@ -605,9 +635,11 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     }
 
     // Floating range object rows. A manifest FEATURE ID with NO format-version
-    // link (the media precedent): an older reader drops the rows and the
-    // backing sheets load as non-visible sheets with intact values — visible
-    // LOSS, not misinterpretation. The read below is unconditional
+    // link of its own (the media precedent): an older reader drops the rows and
+    // the backing sheets load as non-visible sheets with intact values — visible
+    // LOSS, not misinterpretation. The one exception, the rows' hidden line
+    // sets, is stamped BEFORE manifest.json is written (never here: the
+    // manifest is already in the ZIP by now). The read below is unconditional
     // (named_ranges/sparklines precedent) so bytes written by a build that
     // forgot the id are still recovered.
     if !workbook.floating_ranges.is_empty() {
@@ -1969,10 +2001,11 @@ mod tests {
             connection_mode: Default::default(),
             connected_pivots: Vec::new(),
             connected_sheets: Vec::new(),
+            connected_visuals: Vec::new(),
             display_mode: Default::default(),
             selected_items: None,
-            cross_filter_targets: Vec::new(),
-            cross_filter_slicer_targets: Vec::new(),
+            dependent_filters: Vec::new(),
+            dependent_slicers: Vec::new(),
             advanced_filter: Some(persistence::SavedAdvancedFilter {
                 condition1: persistence::SavedAdvancedFilterCondition {
                     operator: "greaterThan".to_string(),
@@ -2473,6 +2506,165 @@ mod tests {
         assert_eq!(loaded.sheets[0].kind, persistence::SheetKind::Canvas(layout));
     }
 
+    /// A canvas whose interactions hold one default and two pairs (P4).
+    fn canvas_with_interactions() -> persistence::CanvasLayout {
+        let r = |kind: &str, id: &str| persistence::CanvasObjectRef { kind: kind.to_string(), id: id.to_string() };
+        persistence::CanvasLayout {
+            interactions: persistence::CanvasInteractions {
+                default_mode: Some(persistence::VisualInteractionMode::Highlight),
+                pairs: vec![
+                    persistence::CanvasInteraction {
+                        source: r("slicer", "s-1"),
+                        target: r("pivot", "p-1"),
+                        mode: persistence::VisualInteractionMode::None,
+                    },
+                    persistence::CanvasInteraction {
+                        source: r("chart", "7"),
+                        target: r("chart", "8"),
+                        mode: persistence::VisualInteractionMode::Filter,
+                    },
+                ],
+            },
+            ..persistence::CanvasLayout::default()
+        }
+    }
+
+    /// P4: a canvas's VISUAL INTERACTIONS round-trip the real archive and
+    /// declare the manifest FEATURE ID `canvas_interactions`, but take NO link
+    /// in the format-version chain (as decided; the slicer -> pivot `none`
+    /// owner question is recorded on CANVAS_INTERACTIONS_FEATURE). So a canvas
+    /// carrying them stamps exactly what a plain canvas stamps, and a plain
+    /// canvas declares no id.
+    #[test]
+    fn canvas_interactions_declares_a_feature_id_but_never_raises_the_version() {
+        let mut plain = make_test_workbook();
+        plain.sheets[0].kind = persistence::SheetKind::new_canvas();
+        let plain_manifest = manifest_of(&write_calcula_bytes(&plain).unwrap());
+        assert!(!plain_manifest.features.iter().any(|f| f == CANVAS_INTERACTIONS_FEATURE), "{:?}", plain_manifest.features);
+
+        let mut workbook = make_test_workbook();
+        let layout = canvas_with_interactions();
+        workbook.sheets[0].kind = persistence::SheetKind::Canvas(layout.clone());
+        let bytes = write_calcula_bytes(&workbook).unwrap();
+        let loaded = read_calcula_bytes(&bytes).unwrap();
+        assert_eq!(loaded.sheets[0].kind, persistence::SheetKind::Canvas(layout), "the interactions survive the archive");
+
+        let manifest = manifest_of(&bytes);
+        assert!(manifest.features.iter().any(|f| f == CANVAS_INTERACTIONS_FEATURE), "{:?}", manifest.features);
+        assert_eq!(
+            manifest.format_version, plain_manifest.format_version,
+            "interactions must not raise the version above what the same canvas without them stamps"
+        );
+
+        // A default alone is enough to declare it; nothing at all declares nothing.
+        let mut default_only = make_test_workbook();
+        default_only.sheets[0].kind = persistence::SheetKind::Canvas(persistence::CanvasLayout {
+            interactions: persistence::CanvasInteractions {
+                default_mode: Some(persistence::VisualInteractionMode::Filter),
+                pairs: Vec::new(),
+            },
+            ..persistence::CanvasLayout::default()
+        });
+        let m = manifest_of(&write_calcula_bytes(&default_only).unwrap());
+        assert!(m.features.iter().any(|f| f == CANVAS_INTERACTIONS_FEATURE), "{:?}", m.features);
+    }
+
+    /// The READ is unconditional: interactions ride the sheet's own metadata
+    /// (`kind`), so a manifest that forgot the id still loads them.
+    #[test]
+    fn canvas_interactions_load_even_without_their_feature_id() {
+        let mut workbook = make_test_workbook();
+        let layout = canvas_with_interactions();
+        workbook.sheets[0].kind = persistence::SheetKind::Canvas(layout.clone());
+        let bytes = write_calcula_bytes(&workbook).unwrap();
+        let stripped = rewrite_archive(&bytes, |name, content| {
+            (name == "manifest.json").then(|| {
+                let mut m: Manifest = serde_json::from_slice(content).unwrap();
+                assert!(m.features.iter().any(|f| f == CANVAS_INTERACTIONS_FEATURE), "precondition: the id was written");
+                m.features.retain(|f| f != CANVAS_INTERACTIONS_FEATURE);
+                serde_json::to_vec_pretty(&m).unwrap()
+            })
+        });
+        assert!(!manifest_of(&stripped).features.iter().any(|f| f == CANVAS_INTERACTIONS_FEATURE));
+        let loaded = read_calcula_bytes(&stripped).unwrap();
+        assert_eq!(loaded.sheets[0].kind, persistence::SheetKind::Canvas(layout));
+    }
+
+    /// A ribbon filter with the given "Selected visuals" list (P4 DC-3).
+    fn ribbon_filter_with_visuals(visuals: Vec<persistence::CanvasObjectRef>) -> persistence::SavedRibbonFilter {
+        persistence::SavedRibbonFilter {
+            id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            name: "Region".to_string(),
+            connection_id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            data_source_id: None,
+            field_name: "Geo.Region".to_string(),
+            field_data_type: "text".to_string(),
+            connection_mode: persistence::SavedConnectionMode::Manual,
+            connected_pivots: vec![identity::EntityId::from_bytes(identity::generate_uuid_v7())],
+            connected_sheets: Vec::new(),
+            connected_visuals: visuals,
+            display_mode: Default::default(),
+            selected_items: Some(vec!["North".to_string()]),
+            dependent_filters: Vec::new(),
+            dependent_slicers: Vec::new(),
+            advanced_filter: None,
+            hide_no_data: false,
+            indicate_no_data: true,
+            sort_no_data_last: true,
+            show_select_all: false,
+            single_select: false,
+            order: 0,
+            button_columns: 2,
+            button_rows: 0,
+            filter_level: 1,
+        }
+    }
+
+    /// P4: a ribbon filter's "Selected visuals" (`connectedVisuals`) round-trips
+    /// the real archive through calcula-format's own `RibbonFilterDef` and
+    /// declares the feature id `ribbon_filter_visual_targets` -- only when the
+    /// list is non-empty -- with NO version link.
+    #[test]
+    fn ribbon_filter_visual_targets_declares_a_feature_id_but_never_raises_the_version() {
+        let mut without = make_test_workbook();
+        without.ribbon_filters.push(ribbon_filter_with_visuals(Vec::new()));
+        let without_bytes = write_calcula_bytes(&without).unwrap();
+        let without_manifest = manifest_of(&without_bytes);
+        assert!(!without_manifest.features.iter().any(|f| f == RIBBON_FILTER_VISUAL_TARGETS_FEATURE));
+        let filter_json = entry_text(&without_bytes, &format!("ribbon_filters/filter_{}.json", without.ribbon_filters[0].id))
+            .expect("the filter record is written");
+        assert!(!filter_json.contains("connectedVisuals"), "an empty list stays off the wire: {filter_json}");
+
+        let visuals = vec![
+            persistence::CanvasObjectRef { kind: "chart".to_string(), id: "12".to_string() },
+            persistence::CanvasObjectRef { kind: "chart".to_string(), id: "13".to_string() },
+        ];
+        let mut with = make_test_workbook();
+        with.ribbon_filters.push(ribbon_filter_with_visuals(visuals.clone()));
+        let bytes = write_calcula_bytes(&with).unwrap();
+        let manifest = manifest_of(&bytes);
+        assert!(manifest.features.iter().any(|f| f == RIBBON_FILTER_VISUAL_TARGETS_FEATURE), "{:?}", manifest.features);
+        assert_eq!(manifest.format_version, without_manifest.format_version, "the list must not raise the version");
+        let filter_json = entry_text(&bytes, &format!("ribbon_filters/filter_{}.json", with.ribbon_filters[0].id)).unwrap();
+        assert!(filter_json.contains("\"connectedVisuals\""), "camelCase key on disk: {filter_json}");
+
+        let loaded = read_calcula_bytes(&bytes).unwrap();
+        assert_eq!(loaded.ribbon_filters.len(), 1);
+        assert_eq!(loaded.ribbon_filters[0].connected_visuals, visuals, "the visuals survive save and load");
+        assert_eq!(loaded.ribbon_filters[0].connected_pivots, with.ribbon_filters[0].connected_pivots, "pivots stay in their own list");
+
+        // Read unconditionally with the record: a manifest that forgot the id
+        // still gets the list back.
+        let stripped = rewrite_archive(&bytes, |name, content| {
+            (name == "manifest.json").then(|| {
+                let mut m: Manifest = serde_json::from_slice(content).unwrap();
+                m.features.retain(|f| f != RIBBON_FILTER_VISUAL_TARGETS_FEATURE);
+                serde_json::to_vec_pretty(&m).unwrap()
+            })
+        });
+        assert_eq!(read_calcula_bytes(&stripped).unwrap().ribbon_filters[0].connected_visuals, visuals);
+    }
+
     /// One sheet's controls payload holding a single control of `control_type`.
     fn controls_with(sheet: SheetId, control_type: &str) -> persistence::SavedSheetControls {
         persistence::SavedSheetControls {
@@ -2597,8 +2789,30 @@ mod tests {
     fn the_bindings_link_is_above_every_earlier_link() {
         assert!(CANVAS_SHEET_MIN_FORMAT_VERSION > PINNED_FILTER_MIN_FORMAT_VERSION);
         assert!(CANVAS_SHEET_MIN_FORMAT_VERSION < OBJECT_BINDINGS_MIN_FORMAT_VERSION);
-        assert_eq!(OBJECT_BINDINGS_MIN_FORMAT_VERSION, CALA_MAX_SUPPORTED_FORMAT_VERSION);
-        assert_eq!(CHART_SPEC_OBJECT_MIN_FORMAT_VERSION, CALA_MAX_SUPPORTED_FORMAT_VERSION);
+        assert!(OBJECT_BINDINGS_MIN_FORMAT_VERSION < FLOATING_GRID_HIDDEN_LINES_MIN_FORMAT_VERSION);
+        assert!(CHART_SPEC_OBJECT_MIN_FORMAT_VERSION < FLOATING_GRID_HIDDEN_LINES_MIN_FORMAT_VERSION);
+        assert_eq!(OBJECT_BINDINGS_MIN_FORMAT_VERSION, CHART_SPEC_OBJECT_MIN_FORMAT_VERSION);
+    }
+
+    /// The floating-grid hidden-lines link (v11) sits ABOVE every earlier link
+    /// and is the current ceiling, so a v10 build (bindings) refuses a workbook
+    /// whose floating grid hides rows instead of showing them.
+    #[test]
+    fn the_hidden_lines_link_is_above_every_earlier_link() {
+        for earlier in [
+            PENDING_RECALC_MIN_FORMAT_VERSION,
+            USER_HIDDEN_MIN_FORMAT_VERSION,
+            SHEET_VIEW_MIN_FORMAT_VERSION,
+            SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION,
+            SPILL_EXTENT_MIN_FORMAT_VERSION,
+            PINNED_FILTER_MIN_FORMAT_VERSION,
+            CANVAS_SHEET_MIN_FORMAT_VERSION,
+            OBJECT_BINDINGS_MIN_FORMAT_VERSION,
+            CHART_SPEC_OBJECT_MIN_FORMAT_VERSION,
+        ] {
+            assert!(earlier < FLOATING_GRID_HIDDEN_LINES_MIN_FORMAT_VERSION, "{earlier}");
+        }
+        assert_eq!(FLOATING_GRID_HIDDEN_LINES_MIN_FORMAT_VERSION, CALA_MAX_SUPPORTED_FORMAT_VERSION);
     }
 
     /// A split ALONE stamps it too: the split is as unrecoverable as the zoom.
@@ -3664,26 +3878,31 @@ mod tests {
         assert!(err.starts_with("charts.json in this file could not be read"), "{err}");
     }
 
-    /// v11 -- one above this build -- is refused through the reader gate,
-    /// while a v10 file (a binding) opens.
+    /// v12 -- one above this build -- is refused through the reader gate,
+    /// while a v10 file (a binding) and a v11 file (a floating grid that hides
+    /// a row) open.
     #[test]
-    fn a_v11_file_is_refused() {
-        assert_eq!(CALA_MAX_SUPPORTED_FORMAT_VERSION + 1, 11);
+    fn a_v12_file_is_refused() {
+        assert_eq!(CALA_MAX_SUPPORTED_FORMAT_VERSION + 1, 12);
         let workbook = make_test_workbook();
         let bytes = write_calcula_bytes(&workbook).unwrap();
-        let v11 = rewrite_archive(&bytes, |name, content| {
+        let v12 = rewrite_archive(&bytes, |name, content| {
             (name == "manifest.json").then(|| {
                 let mut m: Manifest = serde_json::from_slice(content).unwrap();
-                m.format_version = 11;
+                m.format_version = 12;
                 serde_json::to_vec_pretty(&m).unwrap()
             })
         });
-        let err = read_calcula_bytes(&v11).unwrap_err();
+        let err = read_calcula_bytes(&v12).unwrap_err();
         assert!(err.to_string().contains("Unsupported format version"), "got: {err}");
 
         let mut with_binding = make_test_workbook();
         with_binding.object_bindings = vec![binding("chart", "c", "/spec/title", "=A1")];
         assert!(read_calcula_bytes(&write_calcula_bytes(&with_binding).unwrap()).is_ok());
+
+        let bytes = write_calcula_bytes(&with_hidden_lines(vec![1], Vec::new())).unwrap();
+        assert_eq!(manifest_of(&bytes).format_version, 11);
+        assert!(read_calcula_bytes(&bytes).is_ok());
     }
 
     // ---- WP-C: the visual container + the persisted pivot style ----
@@ -3773,7 +3992,83 @@ mod tests {
             show_column_headers: true,
             show_row_headers: true,
             container: None,
+            hidden_rows: Vec::new(),
+            hidden_cols: Vec::new(),
         }
+    }
+
+    // ---- P3: hidden lines on a floating grid (format v11) ----
+
+    /// One workbook holding one floating grid with the given hidden sets.
+    fn with_hidden_lines(rows: Vec<u32>, cols: Vec<u32>) -> Workbook {
+        let mut wb = make_test_workbook();
+        let sheet = wb.sheets[0].id;
+        let mut grid = a_floating_range(sheet, sheet);
+        grid.hidden_rows = rows;
+        grid.hidden_cols = cols;
+        wb.floating_ranges = vec![grid];
+        wb
+    }
+
+    /// CLAUDE.md "Stamp conditionally": a floating grid that hides nothing
+    /// keeps the version below 11; hiding one row (or one column) ALONE
+    /// stamps exactly 11.
+    #[test]
+    fn floating_grid_hidden_lines_stamp_v11_only_when_present() {
+        let plain = write_calcula_bytes(&with_hidden_lines(Vec::new(), Vec::new())).unwrap();
+        let plain_version = manifest_of(&plain).format_version;
+        assert!(
+            plain_version < FLOATING_GRID_HIDDEN_LINES_MIN_FORMAT_VERSION,
+            "a floating grid that hides nothing must not stamp v11, got {plain_version}"
+        );
+        assert!(
+            !entry_text(&plain, "floating_ranges.json").unwrap().contains("hidden"),
+            "empty sets write no key"
+        );
+
+        let rows = write_calcula_bytes(&with_hidden_lines(vec![2], Vec::new())).unwrap();
+        assert_eq!(manifest_of(&rows).format_version, FLOATING_GRID_HIDDEN_LINES_MIN_FORMAT_VERSION);
+        assert_eq!(manifest_of(&rows).format_version, 11);
+
+        let cols = write_calcula_bytes(&with_hidden_lines(Vec::new(), vec![0])).unwrap();
+        assert_eq!(manifest_of(&cols).format_version, 11);
+    }
+
+    /// The stamp must reach the manifest that is IN THE ZIP. Reads the raw
+    /// `manifest.json` entry back out of the written bytes (not an in-memory
+    /// `Manifest`), which is what fails when the stamp drifts beside the
+    /// `floating_ranges.json` write -- that runs after the manifest has
+    /// already been flushed into the archive.
+    #[test]
+    fn a_hidden_line_stamp_reaches_the_written_manifest() {
+        let bytes = write_calcula_bytes(&with_hidden_lines(vec![0, 4], vec![1])).unwrap();
+        let raw = entry_text(&bytes, "manifest.json").expect("manifest.json in the archive");
+        let manifest: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(manifest["formatVersion"], serde_json::json!(11), "manifest.json: {raw}");
+    }
+
+    /// The sets survive the archive, ASCENDING and deduplicated whatever order
+    /// the writer held them in (the `col_widths` byte-determinism rule).
+    #[test]
+    fn floating_grid_hidden_lines_round_trip_ascending() {
+        let wb = with_hidden_lines(vec![5, 1, 3, 1], vec![2, 0]);
+        let bytes = write_calcula_bytes(&wb).unwrap();
+        let json = entry_text(&bytes, "floating_ranges.json").unwrap();
+        let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(rows[0]["hiddenRows"], serde_json::json!([1, 3, 5]));
+        assert_eq!(rows[0]["hiddenCols"], serde_json::json!([0, 2]));
+
+        let loaded = read_calcula_bytes(&bytes).unwrap();
+        assert_eq!(loaded.floating_ranges.len(), 1);
+        assert_eq!(loaded.floating_ranges[0].hidden_rows, vec![1, 3, 5]);
+        assert_eq!(loaded.floating_ranges[0].hidden_cols, vec![0, 2]);
+
+        // The same sets in another order produce the same bytes for the row.
+        let again = write_calcula_bytes(&with_hidden_lines(vec![3, 5, 1], vec![0, 2])).unwrap();
+        let again_rows: serde_json::Value =
+            serde_json::from_str(&entry_text(&again, "floating_ranges.json").unwrap()).unwrap();
+        assert_eq!(again_rows[0]["hiddenRows"], rows[0]["hiddenRows"]);
+        assert_eq!(again_rows[0]["hiddenCols"], rows[0]["hiddenCols"]);
     }
 
     fn a_pivot(frame_container: Option<serde_json::Value>, style: Option<serde_json::Value>) -> persistence::SavedPivotDefinition {

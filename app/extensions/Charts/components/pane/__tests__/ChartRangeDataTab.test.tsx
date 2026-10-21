@@ -3,7 +3,10 @@
 //          as ONE `updateChartSpec` in ONE undo step "Edit chart data", with
 //          the store's debounced `update_chart` landed INSIDE the transaction
 //          (review R1-4 / R2-7) -- and writes nothing when the range is
-//          unchanged, refused, or the page is read-only.
+//          unchanged, refused, or the page is read-only. A series colour PICK
+//          is one write too, diffed against the STORED colours, never the
+//          draft the tab shows while the picker drags (round 2, review R1-2:
+//          the draft made every pick diff to "no change", so nothing persisted).
 // CONTEXT: The real tab, the real range rules (useRangeSource), the real chart
 //          store and the real undo transaction; the backend (the chart channel
 //          and the undo begin/commit) is doubled into ONE ordered log. Series
@@ -296,5 +299,66 @@ describe("the other controls", () => {
     type("Sheet1!A1:C5");
     await blur();
     expect(log).toEqual([]);
+  });
+});
+
+describe("a series colour picked in the pane persists (one write, diffed against the STORED colours)", () => {
+  function swatch(): HTMLInputElement {
+    const el = host.querySelector('[data-testid="chart-data-range-series-color-1"]') as HTMLInputElement | null;
+    expect(el).not.toBeNull();
+    return el!;
+  }
+
+  async function step(hex: string): Promise<void> {
+    const el = swatch();
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      setter.call(el, hex);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+
+  async function pick(): Promise<void> {
+    const el = swatch();
+    await act(async () => {
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await settle();
+  }
+
+  /** A stored change from elsewhere (an undo, another pane): the swatch shows it only when no draft is left over. */
+  async function storedChangesTo(hex: string): Promise<void> {
+    const chart = getChartById("c1")!;
+    await act(async () => {
+      chart.spec = { ...chart.spec, seriesColors: { Revenue: hex } };
+      window.dispatchEvent(new Event("chart:updated"));
+    });
+    await settle();
+  }
+
+  it("input then change writes the picked colour once, and the draft is dropped", async () => {
+    await load(baseSpec({ sheetIndex: 0, sheetId: "id-0", startRow: 0, startCol: 0, endRow: 9, endCol: 1 }));
+    await mount();
+    await step("#ff0000");
+    expect(writes()).toHaveLength(0);
+    await pick();
+    expect(writes()).toHaveLength(1);
+    expect(getChartById("c1")!.spec.seriesColors?.Revenue).toBe("#ff0000");
+    // The draft is gone: a later stored change shows through.
+    await storedChangesTo("#0000ff");
+    expect(swatch().value).toBe("#0000ff");
+  });
+
+  it("picking the stored colour back writes nothing and drops the draft", async () => {
+    await load({ ...baseSpec({ sheetIndex: 0, sheetId: "id-0", startRow: 0, startCol: 0, endRow: 9, endCol: 1 }), seriesColors: { Revenue: "#00ff00" } } as ChartSpec);
+    await mount();
+    expect(swatch().value).toBe("#00ff00");
+    await step("#ff0000");
+    await step("#00ff00");
+    await pick();
+    expect(writes()).toHaveLength(0);
+    expect(getChartById("c1")!.spec.seriesColors?.Revenue).toBe("#00ff00");
+    await storedChangesTo("#0000ff");
+    expect(swatch().value).toBe("#0000ff");
   });
 });

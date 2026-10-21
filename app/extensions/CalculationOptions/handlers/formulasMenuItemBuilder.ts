@@ -35,6 +35,7 @@ import {
   setCalculateBeforeSave,
 } from "@api/lib";
 import { promptAsync, alertAsync } from "@api/dialogs";
+import { formatNumber, parseNumber } from "@api/locale";
 
 // ============================================================================
 // State
@@ -183,11 +184,12 @@ export function registerCalculationMenuItems(): () => void {
 
       const maxChangeInput = await promptAsync("Maximum Change:", {
         title: "Iteration Settings",
-        defaultValue: String(iterationMaxChange),
+        // Shown and read in the APP locale (P2 S11): "0,001" under de-DE.
+        defaultValue: formatNumber(iterationMaxChange),
       });
       if (maxChangeInput === null) return; // User cancelled
-      const maxChg = parseFloat(maxChangeInput);
-      if (isNaN(maxChg) || maxChg <= 0) {
+      const maxChg = parseNumber(maxChangeInput);
+      if (maxChg === null || maxChg <= 0) {
         await alertAsync("Maximum Change must be a positive number.", { kind: "error" });
         return;
       }

@@ -19,6 +19,7 @@ import React, { useState, useCallback, useEffect, useRef, useMemo } from "react"
 import { Dropdown, useSurfaceLayout } from "@api/layout";
 import type { DropdownOption } from "@api/layout";
 import { setChartParamValue } from "@api/chartParams";
+import { parseNumber } from "@api/locale";
 import type { ControlValue } from "@api/controlValues";
 import type { PaneControl } from "../lib/controlsPaneTypes";
 import { commitValue } from "../lib/controlsPaneStore";
@@ -125,12 +126,11 @@ export function DropdownControl({ control }: Props): React.ReactElement {
       const committed: ControlValue = { kind: "text", value };
       void commitValue(control.id, committed);
       if (chartTarget) {
-        const n = Number(value);
-        setChartParamValue(
-          chartTarget.chartId,
-          chartTarget.param,
-          value.trim() !== "" && !Number.isNaN(n) ? n : value,
-        );
+        // An item is display text (a source cell's shown value, or a typed
+        // static item), so a numeric item is read in the APP locale: "1,5"
+        // under de-DE drives the param with 1.5.
+        const n = parseNumber(value);
+        setChartParamValue(chartTarget.chartId, chartTarget.param, n !== null ? n : value);
       }
     },
     [control.id, chartTarget],

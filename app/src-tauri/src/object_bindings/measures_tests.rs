@@ -200,6 +200,7 @@ impl Fx {
             pivots: &self.pivots,
             pane: &self.pane,
             ribbon: &self.ribbon,
+            user_files: Box::leak(Box::new(crate::persistence::UserFilesState::default())),
         }
     }
 
@@ -261,7 +262,7 @@ impl Fx {
         let pages = match items {
             None => json!([]),
             Some(items) => json!([{
-                "sheetIndex": REPORT, "connectionId": self.conn.to_string(),
+                "sheetId": self.ids[REPORT].to_string(), "connectionId": self.conn.to_string(),
                 "filters": [{ "field": "Sales.region", "includedItems": items, "filterLevel": 1 }]
             }]),
         };
@@ -297,6 +298,7 @@ impl Fx {
                     }]
                 })
                 .unwrap_or_default(),
+            tuple_filters: Vec::new(),
             calculated_fields: None,
             value_column_order: None,
             layout: None,
@@ -398,16 +400,60 @@ fn the_signature_ignores_the_order_of_filters_and_items() {
         included_items: items.iter().map(|s| s.to_string()).collect(),
         filter_level: level,
     };
+    let sig = |filters: &[PageFilterWire]| measures::filter_signature(&measures::PageFilterSet::new(filters.to_vec(), Vec::new()));
     let a = [f("Sales.region", &["East", "West"], 1), f("Sales.year", &["Y1"], 1)];
     let b = [f("Sales.year", &["Y1"], 1), f("Sales.region", &["West", "East"], 1)];
-    assert_eq!(measures::filter_signature(&a), measures::filter_signature(&b));
-    assert_ne!(measures::filter_signature(&a), measures::filter_signature(&a[..1]), "a filter less is another page state");
+    assert_eq!(sig(&a), sig(&b));
+    assert_ne!(sig(&a), sig(&a[..1]), "a filter less is another page state");
     assert_ne!(
-        measures::filter_signature(&[f("Sales.region", &["East"], 1)]),
-        measures::filter_signature(&[f("Sales.region", &["East"], 2)]),
+        sig(&[f("Sales.region", &["East"], 1)]),
+        sig(&[f("Sales.region", &["East"], 2)]),
         "a pinned filter is another state"
     );
-    assert_ne!(measures::filter_signature(&[]), measures::filter_signature(&[f("Sales.region", &[], 1)]), "keeps-nothing is a filter");
+    assert_ne!(sig(&[]), sig(&[f("Sales.region", &[], 1)]), "keeps-nothing is a filter");
+}
+
+/// P4: the signature HASHES TUPLES too -- order of tuples is not meaning, but
+/// which tuples, which fields and an empty tuple list are.
+#[test]
+fn the_signature_hashes_tuple_filters_and_ignores_their_order() {
+    use crate::api_types::TupleFilterWire;
+    let t = |fields: &[&str], tuples: &[&[&str]]| TupleFilterWire {
+        fields: fields.iter().map(|s| s.to_string()).collect(),
+        tuples: tuples.iter().map(|row| row.iter().map(|s| s.to_string()).collect()).collect(),
+    };
+    let sig = |tuples: Vec<TupleFilterWire>| measures::filter_signature(&measures::PageFilterSet::new(Vec::new(), tuples));
+    let fields = ["Sales.region", "Sales.year"];
+    let one = sig(vec![t(&fields, &[&["East", "Y1"], &["North", "Y2"]])]);
+    assert_eq!(one, sig(vec![t(&fields, &[&["North", "Y2"], &["East", "Y1"]])]), "tuple order is not meaning");
+    assert_ne!(one, sig(vec![t(&fields, &[&["East", "Y2"], &["North", "Y1"]])]), "the same members, other pairs");
+    assert_ne!(one, sig(vec![t(&fields, &[&["East", "Y1"]])]), "a tuple less");
+    assert_ne!(sig(Vec::new()), sig(vec![t(&fields, &[])]), "an empty tuple list keeps nothing: a filter");
+    assert_ne!(one, measures::filter_signature(&measures::PageFilterSet::default()), "a selection is a page state");
+}
+
+#[test]
+fn tuple_filter_fields_split_against_the_models_tables_and_skip_an_unknown_tuple_whole() {
+    use crate::api_types::TupleFilterWire;
+    let tables = vec!["Sales".to_string(), "BI.dim_territory".to_string()];
+    let tuples = vec![
+        TupleFilterWire {
+            fields: vec!["Sales.region".into(), "BI.dim_territory.Region".into()],
+            tuples: vec![vec!["East".into(), "".into()]],
+        },
+        // One column the model does not have: the WHOLE tuple filter is
+        // skipped -- dropping the column would widen the selection.
+        TupleFilterWire { fields: vec!["Sales.region".into(), "Nowhere.x".into()], tuples: vec![vec!["East".into(), "a".into()]] },
+    ];
+    let out = measures::tuple_filter_fields(&tuples, &tables);
+    assert_eq!(out.len(), 1, "{out:?}");
+    let columns: Vec<(String, String)> = out[0].fields.iter().map(|c| (c.table.clone(), c.column.clone())).collect();
+    assert_eq!(
+        columns,
+        vec![("Sales".to_string(), "region".to_string()), ("BI.dim_territory".to_string(), "Region".to_string())]
+    );
+    assert_eq!(out[0].tuples, vec![vec!["East".to_string(), String::new()]], "keys go in as KEYS: the blank key stays \"\"");
+    assert_eq!(out[0].level, None);
 }
 
 #[test]
@@ -598,3 +644,226 @@ async fn a_measure_pass_never_dirties_the_document_or_records_undo() {
     assert_eq!(fx.state.object_bindings.read().unwrap().generation, generation, "the persisted store is never written");
 }
 
+
+/// P2 S5: a measure with NO format string shows General in the APP locale
+/// ("1234,5" under de-DE), as a formatted one already did. It used to fall
+/// back to the invariant `format_cell_value_simple`, so the same Card read
+/// "1.234,50" with a format and "1234.5" without one.
+#[test]
+fn an_unformatted_measure_reads_in_the_app_locale() {
+    let de = engine::LocaleSettings::from_locale_id("de-DE");
+    assert_eq!(measures::format_measure(1234.5, None, &de), "1234,5");
+    assert_eq!(measures::format_measure(1234.5, Some("  "), &de), "1234,5", "a blank code is no code");
+    assert_eq!(measures::format_measure(1234.5, None, &engine::LocaleSettings::invariant()), "1234.5");
+    assert_eq!(measures::format_measure(1234.5, Some("#,##0.00"), &de), "1.234,50");
+}
+
+// ---------------------------------------------------------------------------
+// P4 S4c: per-object overrides and tuple filters
+// ---------------------------------------------------------------------------
+
+impl Fx {
+    /// The snapshot of Report: `Sales.region IN page_items` for every object,
+    /// and each `(object, items)` in `overrides` reading `Sales.region IN items`
+    /// instead (`None` = the object reads NO filter -- a `none` pair).
+    fn snapshot(&self, page_items: &[&str], overrides: &[(&ObjectBindingRef, Option<&[&str]>)]) -> Value {
+        let region = |items: &[&str]| json!([{ "field": "Sales.region", "includedItems": items, "filterLevel": 1 }]);
+        let objects: Vec<Value> = overrides
+            .iter()
+            .map(|(object, items)| {
+                json!({ "object": object, "filters": items.map(region).unwrap_or_else(|| json!([])), "tupleFilters": [] })
+            })
+            .collect();
+        json!({ "op": "setPageFilters", "pages": [{
+            "sheetId": self.ids[REPORT].to_string(), "connectionId": self.conn.to_string(),
+            "filters": region(page_items), "tupleFilters": [], "objects": objects
+        }] })
+    }
+
+    /// Two Cards on Report, each with `=[Revenue]` bound (the first is the
+    /// "sibling", the second the object that gets an override).
+    async fn two_cards(&self) -> (BindingKey, BindingKey) {
+        let a = self.card(REPORT, self.conn);
+        let b = self.card(REPORT, self.conn);
+        binding_of(self.send(set_goal(&a, "=[Revenue]")).await.unwrap());
+        binding_of(self.send(set_goal(&b, "=[Revenue]")).await.unwrap());
+        let key = |o: &ObjectBindingRef| BindingKey { object: o.clone(), path: "/spec/markOptions/goal".to_string() };
+        (key(&a), key(&b))
+    }
+}
+
+/// SABOTAGE: make `BindingRuntime::effective_filters` ignore `object_filters`
+/// -- the overridden Card then reads the page's 4,000 and this fails.
+#[tokio::test]
+async fn an_object_override_gives_that_objects_measure_its_own_value_while_a_sibling_reads_the_page() {
+    let fx = Fx::new().await;
+    let (sibling, own) = fx.two_cards().await;
+
+    // The page is filtered to East; the second Card's pair is `none`: it reads
+    // no filter at all.
+    fx.send(fx.snapshot(&["East"], &[(&own.object, None)])).await.unwrap();
+    let s = fx.resolved(&sibling);
+    let o = fx.resolved(&own);
+    assert_eq!((s.value.clone(), s.pending), (json!(fx.oracle(Some(&["East"])).await), false), "sibling: {s:?}");
+    assert_eq!((o.value.clone(), o.pending), (json!(fx.oracle(None).await), false), "override: {o:?}");
+    assert_eq!((s.value, o.value), (json!(4_000.0), json!(10_000.0)), "fixture: East 4,000, all 10,000");
+
+    // An override can FILTER differently too, not only clear.
+    fx.send(fx.snapshot(&["East"], &[(&own.object, Some(&["West"]))])).await.unwrap();
+    assert_eq!(fx.resolved(&sibling).value, json!(4_000.0));
+    assert_eq!(fx.resolved(&own).value, json!(2_000.0), "West");
+}
+
+#[tokio::test]
+async fn an_override_removed_falls_back_to_the_page_set() {
+    let fx = Fx::new().await;
+    let (sibling, own) = fx.two_cards().await;
+    fx.send(fx.snapshot(&["East"], &[(&own.object, None)])).await.unwrap();
+    assert_eq!(fx.resolved(&own).value, json!(10_000.0), "precondition: the override applies");
+
+    // The next snapshot carries no override: the Card reads its page again.
+    fx.send(fx.snapshot(&["East"], &[])).await.unwrap();
+    let o = fx.resolved(&own);
+    assert_eq!((o.value.clone(), o.pending), (json!(4_000.0), false), "{o:?}");
+    assert_eq!(fx.resolved(&sibling).value, json!(4_000.0));
+    assert!(fx.state.object_binding_runtime.lock().unwrap().object_filters.is_empty(), "the snapshot REPLACES the overrides");
+}
+
+#[tokio::test]
+async fn a_tuple_filter_reaches_the_measure_query() {
+    let fx = Fx::new().await;
+    let card = fx.card(REPORT, fx.conn);
+    binding_of(fx.send(set_goal(&card, "=[Revenue]")).await.unwrap());
+    let key = BindingKey { object: card.clone(), path: "/spec/markOptions/goal".to_string() };
+
+    // (East, Y1) OR (North, Y2): 1000 + 4000. The rectangle region IN (East,
+    // North) x year IN (Y1, Y2) would read 8,000 -- a tuple is not two IN-lists.
+    let tuples = |rows: Value| {
+        json!({ "op": "setPageFilters", "pages": [{
+            "sheetId": fx.ids[REPORT].to_string(), "connectionId": fx.conn.to_string(), "filters": [],
+            "tupleFilters": [{ "fields": ["Sales.region", "Sales.year"], "tuples": rows }], "objects": []
+        }] })
+    };
+    fx.send(tuples(json!([["East", "Y1"], ["North", "Y2"]]))).await.unwrap();
+    let r = fx.resolved(&key);
+    assert_eq!((r.value.clone(), r.pending, r.error.clone()), (json!(5_000.0), false, None), "{r:?}");
+
+    // An empty tuple list keeps nothing: a blank total, not the unfiltered 10,000.
+    fx.send(tuples(json!([]))).await.unwrap();
+    let r = fx.resolved(&key);
+    assert_ne!(r.value, json!(10_000.0), "an empty selection must not read as no selection: {r:?}");
+    assert!(!r.pending, "{r:?}");
+
+    // A tuple filter inside an object's override reaches that object's query.
+    fx.send(json!({ "op": "setPageFilters", "pages": [{
+        "sheetId": fx.ids[REPORT].to_string(), "connectionId": fx.conn.to_string(), "filters": [], "tupleFilters": [],
+        "objects": [{ "object": card, "filters": [],
+            "tupleFilters": [{ "fields": ["Sales.region", "Sales.year"], "tuples": [["West", "Y1"]] }] }]
+    }] }))
+    .await
+    .unwrap();
+    assert_eq!(fx.resolved(&key).value, json!(2_000.0), "(West, Y1) through the override");
+}
+
+/// The `eval.rs` rule "a filter change shows pending, never the old number",
+/// PER OBJECT: the mirror moves without the measure pass (the unit-tier op).
+#[tokio::test]
+async fn a_filter_change_shows_pending_per_object_never_the_old_number() {
+    let fx = Fx::new().await;
+    let (sibling, own) = fx.two_cards().await;
+    fx.send(fx.snapshot(&["East"], &[])).await.unwrap();
+    assert_eq!(fx.resolved(&own).value, json!(4_000.0));
+
+    // Only the second Card's filters move (an override appears): it is PENDING,
+    // and its sibling -- whose filters did not move -- keeps its value.
+    let pages = serde_json::from_value(fx.snapshot(&["East"], &[(&own.object, Some(&["West"]))])["pages"].clone()).unwrap();
+    assert_eq!(set_page_filters_core(&fx.cx(), pages), vec![fx.ids[REPORT]], "an override that appeared changes its page");
+    let o = fx.resolved(&own);
+    assert!(o.pending && o.value.is_null(), "East's 4,000 shown under West: {o:?}");
+    let s = fx.resolved(&sibling);
+    assert_eq!((s.value.clone(), s.pending), (json!(4_000.0), false), "the sibling's filters did not move: {s:?}");
+
+    // The same snapshot again changes nothing.
+    let pages = serde_json::from_value(fx.snapshot(&["East"], &[(&own.object, Some(&["West"]))])["pages"].clone()).unwrap();
+    assert!(set_page_filters_core(&fx.cx(), pages).is_empty(), "the same snapshot changes no page");
+
+    // The pass fills the override's value.
+    fx.send(json!({ "op": "refreshMeasures", "sheetIndex": REPORT })).await.unwrap();
+    assert_eq!(fx.resolved(&own).value, json!(2_000.0));
+    assert_eq!(fx.resolved(&sibling).value, json!(4_000.0));
+
+    // The PAGE moves while the override holds: the sibling is pending, the
+    // override's object is not.
+    let pages = serde_json::from_value(fx.snapshot(&["North"], &[(&own.object, Some(&["West"]))])["pages"].clone()).unwrap();
+    set_page_filters_core(&fx.cx(), pages);
+    assert!(fx.resolved(&sibling).pending, "{:?}", fx.resolved(&sibling));
+    assert_eq!(fx.resolved(&own).value, json!(2_000.0), "the override did not move");
+
+    // The override goes away: the object is pending under the page's set...
+    let pages = serde_json::from_value(fx.snapshot(&["North"], &[])["pages"].clone()).unwrap();
+    assert_eq!(set_page_filters_core(&fx.cx(), pages), vec![fx.ids[REPORT]], "an override that went away changes its page");
+    assert!(fx.resolved(&own).pending, "{:?}", fx.resolved(&own));
+    // ...until the pass brings North's number for both.
+    fx.send(json!({ "op": "refreshMeasures", "sheetIndex": REPORT })).await.unwrap();
+    assert_eq!((fx.resolved(&own).value, fx.resolved(&sibling).value), (json!(4_000.0), json!(4_000.0)), "North");
+}
+
+/// One install keeps every signature CURRENT for some object on the page: a
+/// pass for the page must not evict the overridden object's value (or the
+/// page's) just because they read different sets.
+#[tokio::test]
+async fn one_pass_keeps_the_values_of_every_current_signature_on_the_page() {
+    let fx = Fx::new().await;
+    let (sibling, own) = fx.two_cards().await;
+    fx.send(fx.snapshot(&["East"], &[(&own.object, Some(&["West"]))])).await.unwrap();
+    fx.send(json!({ "op": "refreshMeasures", "sheetIndex": REPORT })).await.unwrap();
+    fx.send(json!({ "op": "resolveAll" })).await.unwrap();
+    assert_eq!((fx.resolved(&sibling).value, fx.resolved(&own).value), (json!(4_000.0), json!(2_000.0)));
+    let runtime = fx.state.object_binding_runtime.lock().unwrap();
+    let signatures: std::collections::HashSet<u64> = runtime.measure_cache.keys().map(|(_, _, _, s)| *s).collect();
+    assert_eq!(signatures.len(), 2, "East (the page) and West (the override), nothing else: {signatures:?}");
+}
+
+/// `SetPageFilters` with overrides and tuples is still deliberately clean:
+/// the mirror is a runtime copy (B3 precedent).
+#[tokio::test]
+async fn set_page_filters_with_overrides_and_tuples_never_dirties_the_document() {
+    let fx = Fx::new().await;
+    let (_sibling, own) = fx.two_cards().await;
+    let depth = fx.state.undo_stack.lock().unwrap().undo_depth();
+    // Set wrote the persisted store (dirty); a save clears it, so what
+    // follows is measured from a clean document.
+    crate::document_effect::mark_saved(&fx.file);
+    assert!(!fx.file.is_dirty(), "precondition");
+    fx.send(fx.snapshot(&["East"], &[(&own.object, None)])).await.unwrap();
+    fx.send(json!({ "op": "setPageFilters", "pages": [{
+        "sheetId": fx.ids[REPORT].to_string(), "connectionId": fx.conn.to_string(), "filters": [],
+        "tupleFilters": [{ "fields": ["Sales.region", "Sales.year"], "tuples": [["East", "Y1"]] }], "objects": []
+    }] }))
+    .await
+    .unwrap();
+    assert!(!fx.file.is_dirty(), "the page-filter mirror is transient");
+    assert_eq!(fx.state.undo_stack.lock().unwrap().undo_depth(), depth, "and never enters undo");
+}
+
+/// A snapshot naming a sheet id this workbook does not have is inert: no page
+/// is evaluated under it, and it is not an error.
+#[tokio::test]
+async fn a_snapshot_for_an_unknown_sheet_id_reaches_no_binding() {
+    let fx = Fx::new().await;
+    let card = fx.card(REPORT, fx.conn);
+    binding_of(fx.send(set_goal(&card, "=[Revenue]")).await.unwrap());
+    let key = BindingKey { object: card.clone(), path: "/spec/markOptions/goal".to_string() };
+    let stranger = identity::SheetId::from_bytes(new_id());
+    fx.send(json!({ "op": "setPageFilters", "pages": [{
+        "sheetId": stranger.to_string(), "connectionId": fx.conn.to_string(),
+        "filters": [{ "field": "Sales.region", "includedItems": ["East"], "filterLevel": 1 }]
+    }] }))
+    .await
+    .unwrap();
+    assert_eq!(fx.resolved(&key).value, json!(10_000.0), "Report's Card is not filtered by another sheet's filters");
+    assert!(
+        fx.state.object_binding_runtime.lock().unwrap().warned_unknown_sheets.contains(&stranger),
+        "the stranger is said in the log once"
+    );
+}

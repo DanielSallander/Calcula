@@ -17,6 +17,12 @@
 //          count is 0. (Which rules the backend removes -- whole rules inside
 //          the range only, or Excel's cut of every overlapping rule -- is the
 //          backend's business; a 0 is a 0 either way.)
+//
+//          P3 (owner finding G3): every write takes an optional cell TARGET --
+//          a floating grid's cells. The rule then lives on the object's
+//          backing sheet, its ranges in the object's coordinates; the sheet's
+//          rules cache is not the object's, so the object is re-read through
+//          grid:refresh instead.
 
 import {
   addConditionalFormat,
@@ -24,6 +30,7 @@ import {
   showToast,
 } from "@api";
 import type { AddCFParams, ConditionalFormatRange } from "@api";
+import type { CellTargetRef } from "@api/cellTarget";
 import { invalidateAndRefresh } from "./cfStore";
 
 /** The words of a thrown value: an Error's message, a string as-is. */
@@ -35,7 +42,12 @@ export function reasonOf(err: unknown): string {
 
 /** Re-read the rules after a write; a failed re-read is logged, never thrown
  *  (the write itself has already happened). */
-async function refreshAfterWrite(): Promise<void> {
+export async function refreshAfterWrite(target?: CellTargetRef): Promise<void> {
+  if (target) {
+    // An object's rules: it re-reads its cells (and their CF) on grid:refresh.
+    window.dispatchEvent(new CustomEvent("grid:refresh"));
+    return;
+  }
   try {
     await invalidateAndRefresh();
   } catch (err) {
@@ -50,22 +62,22 @@ async function refreshAfterWrite(): Promise<void> {
  * decides how to show the reason (a toast from a menu, an inline alert in a
  * dialog that stays open).
  */
-export async function tryAddRule(params: AddCFParams): Promise<string | null> {
+export async function tryAddRule(params: AddCFParams, target?: CellTargetRef): Promise<string | null> {
   try {
-    const result = await addConditionalFormat(params);
+    const result = await addConditionalFormat(params, { target });
     if (result && result.success === false) {
       return result.error || "the backend refused the rule";
     }
   } catch (err) {
     return reasonOf(err);
   }
-  await refreshAfterWrite();
+  await refreshAfterWrite(target);
   return null;
 }
 
 /** Add a rule from a menu or a gallery: a refusal is one error toast. */
-export async function addRuleReporting(params: AddCFParams): Promise<boolean> {
-  const refused = await tryAddRule(params);
+export async function addRuleReporting(params: AddCFParams, target?: CellTargetRef): Promise<boolean> {
+  const refused = await tryAddRule(params, target);
   if (refused !== null) {
     showToast(`Conditional Formatting: the rule was not added -- ${refused}`, { variant: "error" });
     return false;
@@ -78,14 +90,24 @@ export async function addRuleReporting(params: AddCFParams): Promise<boolean> {
  * removed, or null after a refusal (already reported as one error toast).
  * Never rejects.
  */
-export async function clearRulesReporting(range: ConditionalFormatRange): Promise<number | null> {
+export async function clearRulesReporting(
+  range: ConditionalFormatRange,
+  target?: CellTargetRef,
+): Promise<number | null> {
   let removed: unknown;
   try {
-    removed = await clearConditionalFormatsInRange(range.startRow, range.startCol, range.endRow, range.endCol);
+    removed = await clearConditionalFormatsInRange(
+      range.startRow,
+      range.startCol,
+      range.endRow,
+      range.endCol,
+      undefined,
+      { target },
+    );
   } catch (err) {
     showToast(`Clear Rules: the rules were not cleared -- ${reasonOf(err)}`, { variant: "error" });
     return null;
   }
-  await refreshAfterWrite();
+  await refreshAfterWrite(target);
   return typeof removed === "number" ? removed : null;
 }

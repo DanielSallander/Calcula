@@ -61,7 +61,11 @@ pub const CALA_BASE_FORMAT_VERSION: u32 = 1;
 /// v10 adds OBJECT PROPERTY BINDINGS — `bindings.json`
 /// (`OBJECT_BINDINGS_MIN_FORMAT_VERSION`) — and the chart spec EMBEDDED as a
 /// JSON object in `charts.json` (`CHART_SPEC_OBJECT_MIN_FORMAT_VERSION`).
-pub const CALA_MAX_SUPPORTED_FORMAT_VERSION: u32 = 10;
+///
+/// v11 adds HIDDEN LINES ON A FLOATING GRID -- `hiddenRows` / `hiddenCols` on
+/// the rows of `floating_ranges.json`
+/// (`FLOATING_GRID_HIDDEN_LINES_MIN_FORMAT_VERSION`).
+pub const CALA_MAX_SUPPORTED_FORMAT_VERSION: u32 = 11;
 
 /// Minimum `.cala` format version a reader must be to handle
 /// `pending_recalc.json` — the record of which cells a cancelled
@@ -213,6 +217,24 @@ pub const OBJECT_BINDINGS_FEATURE: &str = "object_bindings";
 /// optional feature.
 pub const CHART_SPEC_OBJECT_MIN_FORMAT_VERSION: u32 = 10;
 
+/// Minimum `.cala` format version a reader must be to handle the HIDDEN LINES
+/// of a floating grid -- `hiddenRows` / `hiddenCols` on a row of
+/// `floating_ranges.json` (Home > Format > Hide & Unhide on the grid's cells).
+///
+/// THE TEST THIS PASSES: would an older reader MISHANDLE the document? Yes, in
+/// the lie class CLAUDE.md names: "rows hidden to keep working data out of a
+/// distributed report coming back VISIBLE". An older reader ignores the two
+/// unknown fields (`SavedFloatingRange` has no `deny_unknown_fields`), shows
+/// every window row and column the author hid, raises no error anywhere, and
+/// drops the sets for good on its next save. Refusing the open is the honest
+/// failure. The same reasoning gave the sheet-level hides their own link
+/// (`USER_HIDDEN_MIN_FORMAT_VERSION`).
+///
+/// Stamped ONLY when some floating range carries a non-empty set, so a
+/// workbook whose floating grids hide nothing keeps the lowest version that
+/// can express it.
+pub const FLOATING_GRID_HIDDEN_LINES_MIN_FORMAT_VERSION: u32 = 11;
+
 /// Manifest FEATURE ID declared when some canvas carries a WALLPAPER (the
 /// colour of the area outside its page, `CanvasLayout::wallpaper`).
 ///
@@ -239,6 +261,37 @@ pub const CANVAS_WALLPAPER_FEATURE: &str = "canvas_wallpaper";
 /// convenience the user notices at the first drag -- never a document that
 /// silently says something it did not. Same unconditional read.
 pub const CANVAS_OBJECTS_LOCKED_FEATURE: &str = "canvas_objects_locked";
+
+/// Manifest FEATURE ID declared when some canvas carries VISUAL INTERACTIONS
+/// (`CanvasLayout::interactions`, Power BI's Format > Edit interactions): a
+/// page-wide default mode or at least one explicit source -> target pair.
+///
+/// No format-version link, AS DECIDED (round 2, P4). An older reader ignores
+/// the unknown field and every visual on the page cross-filters every other by
+/// the defaults -- view behaviour, visible at the first click. RECORDED OWNER
+/// QUESTION (P4 DC-1, open-items): one pair kind is not purely view state. A
+/// model slicer -> BI pivot pair set to `none` decides whether the page fold
+/// writes the slicer's selection into that pivot's PERSISTED `hidden_items`,
+/// so an older reader that drops the pair re-folds the slicer on the pivot's
+/// next refresh and the pivot (and every GETPIVOTDATA reading it) comes back
+/// filtered under an unchanged title. If the owner wants that closed, the fix
+/// is one conditional stamp at the next free version, written only when some
+/// pair has a model-slicer source, a pivot target and mode `none`. The READ is
+/// unconditional: interactions ride each sheet's own metadata.json.
+pub const CANVAS_INTERACTIONS_FEATURE: &str = "canvas_interactions";
+
+/// Manifest FEATURE ID declared when some ribbon filter targets non-pivot
+/// model visuals in "Selected visuals" mode (`connectedVisuals` on its
+/// `ribbon_filters/filter_{id}.json`).
+///
+/// No format-version link: an older reader drops the list, so the filter stops
+/// reaching those charts/cards/KPIs/gauges, which then paint unfiltered. Those
+/// visuals are queried live and store no filtered result, so no cell, pivot
+/// definition or GETPIVOTDATA answer changes; the pivots the filter targets
+/// keep `connectedPivots` and stay filtered (P4 DC-3 keeps them in that list
+/// for exactly this reason). Read unconditionally with the rest of the filter
+/// record.
+pub const RIBBON_FILTER_VISUAL_TARGETS_FEATURE: &str = "ribbon_filter_visual_targets";
 
 // PAGE_NAVIGATOR_CONTROL_TYPE itself lives in crate::page_navigator; zip_io reads it there.
 

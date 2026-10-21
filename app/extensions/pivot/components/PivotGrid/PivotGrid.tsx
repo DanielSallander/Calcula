@@ -14,6 +14,7 @@ import type {
 } from '../../rendering/pivot';
 import { usePivotGridInteraction } from './usePivotGridInteraction';
 import { FilterDropdown } from '../FilterDropdown';
+import { memberKeys, memberLabelOf } from '@api/pivotMembers';
 
 // =============================================================================
 // TYPES
@@ -475,7 +476,8 @@ export const PivotGrid: React.FC<PivotGridProps> = ({
         <FilterDropdown
           fieldName={activeFilterDropdown.filterRow.fieldName}
           fieldIndex={activeFilterDropdown.fieldIndex}
-          uniqueValues={activeFilterDropdown.filterRow.uniqueValues}
+          uniqueValues={memberKeys(activeFilterDropdown.filterRow.members)}
+          labelOf={memberLabelOf(activeFilterDropdown.filterRow.members)}
           selectedValues={activeFilterDropdown.filterRow.selectedValues}
           anchorRect={activeFilterDropdown.anchorRect}
           onApply={handleApplyFilter}

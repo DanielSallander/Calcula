@@ -41,9 +41,16 @@
  * dead app.
  *
  * It runs last because the file name sorts last. Do not rename it.
+ *
+ * THE APP LOCALE IS A SECOND, NON-STORAGE RESIDUE (P2 S11). The override lives
+ * in the backend's %LOCALAPPDATA%\Calcula\app-settings.json, not localStorage,
+ * and it outlives the run in the OWNER'S PROFILE, not just the next project.
+ * global-setup recorded the boot value read-only (e2e/localeBaseline.ts); the
+ * second test asserts the live override still equals it.
  */
 import { test, expect } from "../fixtures";
 import { APP_STORAGE_PREFIXES, GOLDEN_AFFECTING_KEYS } from "../volatilePersistedState";
+import { LOCALE_BASELINE_FILE, readLocaleBaseline } from "../localeBaseline";
 
 test.describe("Persisted-state residue guard (runs last)", () => {
   test("no journey spec left the application reconfigured", async ({ appPage }) => {
@@ -81,5 +88,32 @@ test.describe("Persisted-state residue guard (runs last)", () => {
         "backstop for the case where the app dies before any `finally` can run.\n" +
         `Full app-namespace storage at end of run: ${JSON.stringify(storage, null, 2)}`,
     ).toEqual([]);
+  });
+
+  test("no journey spec left the app-locale override changed in the profile", async ({ appPage }) => {
+    const baseline = readLocaleBaseline();
+    expect(
+      baseline,
+      `global-setup recorded no locale baseline at ${LOCALE_BASELINE_FILE} -- the guard cannot ` +
+        "answer, which is a failure, not a pass.",
+    ).not.toBeNull();
+
+    const live = await appPage.evaluate(async () => {
+      const t = (
+        window as unknown as {
+          __TAURI__: { core: { invoke: (cmd: string, args: unknown) => Promise<unknown> } };
+        }
+      ).__TAURI__;
+      return (await t.core.invoke("get_locale_settings", {})) as { localeId: string; overrideId?: string | null };
+    });
+
+    expect(
+      live.overrideId ?? null,
+      `A journey spec left the app-locale override at ${JSON.stringify(live.overrideId ?? null)} ` +
+        `(the app is on ${live.localeId}); the run began with ${JSON.stringify(baseline!.localeOverride)} ` +
+        `(${baseline!.source}). Every explicit set_locale PERSISTS to the owner's profile, so the next ` +
+        "launch starts there. Restore in the spec that switched it, in a `finally`: " +
+        "set_locale({ localeId: boot.overrideId ?? \"system\" }).",
+    ).toBe(baseline!.localeOverride);
   });
 });

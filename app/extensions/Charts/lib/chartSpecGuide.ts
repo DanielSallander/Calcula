@@ -848,7 +848,7 @@ The chart's OUTER background is its visual container's (\`container.background.c
 
 | Property | Default | Description |
 |----------|---------|-------------|
-| plotBackground | #fafafa | Plot area background |
+| plotBackground | none | Plot area background; none = transparent, the visual's background shows |
 | gridLineColor | #e8e8e8 | Grid line color |
 | gridLineWidth | 1 | Grid line width (px) |
 | axisColor | #999999 | Axis line color |

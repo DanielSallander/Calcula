@@ -13,6 +13,7 @@ import { buildSourceSignature } from '../lib/namedConfigs';
 import { pivot, savePivotLayout } from '@api/pivot';
 import { openTaskPane, getBiConnectionService, showToast } from '@api';
 import { onAppEvent } from '@api/events';
+import { getAppLocale, onLocaleChanged, formatDateTime } from '@api/locale';
 import type { SavePivotLayoutRequest } from '@api/pivot';
 import type { DesignStrategySummary } from '@api/designQueryAssist';
 import { TableFieldList } from '../../_shared/components/TableFieldList';
@@ -361,15 +362,10 @@ export function PivotEditor({
     return set;
   }, [fieldListModel?.calculationGroups]);
 
-  // The active UI locale for culture (translation) resolution. Read once —
-  // there is no app-wide locale service yet; null shows raw names.
-  const uiLocale = useMemo<string | null>(() => {
-    try {
-      return window.localStorage.getItem('calcula.locale');
-    } catch {
-      return null;
-    }
-  }, []);
+  // The APP locale (P2) for culture (translation) resolution, followed live:
+  // a switch in Settings re-resolves the field list's captions.
+  const [uiLocale, setUiLocale] = useState<string | null>(() => getAppLocale().localeId);
+  useEffect(() => onLocaleChanged((next) => setUiLocale(next.localeId)), []);
   const handlePerspectiveChange = useCallback(
     (name: string | null) => {
       setSelectedPerspective(name);
@@ -771,7 +767,11 @@ export function PivotEditor({
   // and column fields and their items (a range pivot's items come from its
   // source; a data-model pivot offers the fields without items).
   const readBaseFieldItems = useCallback(
-    async (sourceIndex: number) => (await getPivotFieldUniqueValues(pivotId, sourceIndex)).uniqueValues ?? [],
+    // MEMBERS: a base item is stored and resolved by its KEY (Rust
+    // `resolve_base_item_id`), so a de-DE label is never written into it;
+    // the dialog SHOWS the label (the app locale).
+    async (sourceIndex: number) =>
+      (await getPivotFieldUniqueValues(pivotId, sourceIndex)).members ?? [],
     [pivotId],
   );
   const baseFieldChoices = useBaseFieldChoices(
@@ -985,9 +985,9 @@ export function PivotEditor({
       {isBiPivot && biModel?.dataAsOf && (
         <div
           style={{ padding: '4px 8px', fontSize: '11px', color: '#57606a' }}
-          title={`Data last fetched from the database on ${new Date(biModel.dataAsOf).toLocaleString()}. Refresh to update.`}
+          title={`Data last fetched from the database on ${formatDateTime(biModel.dataAsOf) || biModel.dataAsOf}. Refresh to update.`}
         >
-          Data as of {new Date(biModel.dataAsOf).toLocaleString()}
+          Data as of {formatDateTime(biModel.dataAsOf) || biModel.dataAsOf}
         </div>
       )}
 

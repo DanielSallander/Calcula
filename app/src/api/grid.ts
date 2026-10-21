@@ -116,6 +116,7 @@ import {
   setSplitWindow as backendSetSplitWindow,
   getSplitWindow as backendGetSplitWindow,
   goToSpecial as backendGoToSpecial,
+  type CellTargetOptions,
   getUsedRange,
   applyBorderPreset,
   fillRange as backendFillRange,
@@ -279,8 +280,19 @@ export async function borderAround(
  */
 export async function goToSpecial(
   criteria: GoToSpecialCriteria,
-  searchRange?: { startRow: number; startCol: number; endRow: number; endCol: number }
+  searchRange?: { startRow: number; startCol: number; endRow: number; endCol: number },
+  opts?: CellTargetOptions,
 ): Promise<GoToSpecialResult> {
+  // An OBJECT's cells (P3, `opts.target`): every criterion -- "lastCell"
+  // included -- is answered by the backend over the object's backing sheet,
+  // clipped to its extent; the active sheet's used range would be the wrong
+  // sheet's corner.
+  if (opts?.target) {
+    const range = searchRange
+      ? ([searchRange.startRow, searchRange.startCol, searchRange.endRow, searchRange.endCol] as [number, number, number, number])
+      : null;
+    return await backendGoToSpecial(criteria, range, opts);
+  }
   if (criteria === "lastCell") {
     // An empty sheet answers {0,0,0,0,empty:true}, so this selects A1 the way
     // Excel does without a case of its own.

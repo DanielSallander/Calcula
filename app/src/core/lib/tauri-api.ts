@@ -27,8 +27,12 @@ import type {
   CellShiftResult,
   InsertCellsShift,
   DeleteCellsShift,
+  CellTargetRef,
 } from "../types";
 import { isSheetGroupingActive, getSelectedSheetIndices } from "../state/sheetGrouping";
+// The Rust commands that accept a cell target (P3): a target on any other
+// command is refused HERE, before invoke (see placementArgs).
+import { TARGET_COMMANDS } from "../../api/cellTargetCommands";
 import { AppEvents, emitAppEvent } from "./events";
 // STRUCTURAL_UNDO lives only in the @api event table (Core's own table has no
 // entry for it); the cell-shift wrappers below announce through it.
@@ -540,9 +544,22 @@ export interface CellUpdateInput {
  * @returns Array of all updated cells (including dependents)
  */
 export async function updateCellsBatch(
-  updates: CellUpdateInput[]
+  updates: CellUpdateInput[],
+  opts?: CellTargetOptions,
 ): Promise<CellData[]> {
   const t0 = performance.now();
+  const placed = cellTargetArg("update_cells_batch", opts);
+  if (placed.target) {
+    // An OBJECT's cells (P3): written on its backing sheet by the backend's
+    // target route, which carries literal values and formulas only (no UDF
+    // pre-resolution keyed on active-sheet cells) and is never recorded as a
+    // grid gesture (its coordinates are the object's, not the sheet's).
+    const targeted = await invoke<CellData[]>("update_cells_batch", { updates, ...placed });
+    console.log(
+      `[PERF][bridge] updateCellsBatch(${updates.length}, target) => ${targeted.length} cells | ipc=${(performance.now() - t0).toFixed(1)}ms`,
+    );
+    return targeted;
+  }
   const udf = await resolveUdfsFor(
     updates.map((u) => ({ row: u.row, col: u.col, value: u.value, invariant: u.invariant })),
   );
@@ -605,8 +622,11 @@ export async function clearRangeWithOptions(
   endRow: number,
   endCol: number,
   applyTo: ClearApplyTo = "all",
-  sheetIndex?: number
+  sheetIndex?: number,
+  opts?: CellTargetOptions,
 ): Promise<unknown> {
+  // `target` rides INSIDE the params struct, beside `sheetIndex` (TARGET_IN_PARAMS).
+  const placed = cellTargetArg("clear_range_with_options", opts, sheetIndex);
   const result = await invoke("clear_range_with_options", {
     params: {
       startRow,
@@ -615,9 +635,10 @@ export async function clearRangeWithOptions(
       endCol,
       applyTo,
       sheetIndex: sheetIndex ?? null,
+      ...placed,
     },
   });
-  recordGridEvent({ kind: "clearRange", startRow, startCol, endRow, endCol, applyTo });
+  if (!placed.target) recordGridEvent({ kind: "clearRange", startRow, startCol, endRow, endCol, applyTo });
   return result;
 }
 
@@ -961,10 +982,15 @@ function mergeLineRuns(runs: readonly LineRun[]): Array<[number, number]> {
  * wrapper reports (a recorded macro replays `setRowHeight` per row); the
  * events are built only while a recorder is listening.
  */
-export async function setRowHeights(runs: readonly LineRun[], height: number): Promise<void> {
+export async function setRowHeights(
+  runs: readonly LineRun[],
+  height: number,
+  opts?: CellTargetOptions,
+): Promise<void> {
   const merged = mergeLineRuns(runs);
-  await invoke<void>("set_row_heights", { rows: merged, height });
-  if (isGridRecorderActive()) {
+  const placed = cellTargetArg("set_row_heights", opts);
+  await invoke<void>("set_row_heights", { rows: merged, height, ...placed });
+  if (!placed.target && isGridRecorderActive()) {
     for (const [first, last] of merged) {
       for (let row = first; row <= last; row++) recordGridEvent({ kind: "rowHeight", row, height });
     }
@@ -975,10 +1001,15 @@ export async function setRowHeights(runs: readonly LineRun[], height: number): P
  * Excel's Column Width... over every column of `runs`, ONE call and ONE undo
  * step (Rust `set_column_widths`). See {@link setRowHeights}.
  */
-export async function setColumnWidths(runs: readonly LineRun[], width: number): Promise<void> {
+export async function setColumnWidths(
+  runs: readonly LineRun[],
+  width: number,
+  opts?: CellTargetOptions,
+): Promise<void> {
   const merged = mergeLineRuns(runs);
-  await invoke<void>("set_column_widths", { cols: merged, width });
-  if (isGridRecorderActive()) {
+  const placed = cellTargetArg("set_column_widths", opts);
+  await invoke<void>("set_column_widths", { cols: merged, width, ...placed });
+  if (!placed.target && isGridRecorderActive()) {
     for (const [first, last] of merged) {
       for (let col = first; col <= last; col++) recordGridEvent({ kind: "columnWidth", col, width });
     }
@@ -998,13 +1029,15 @@ export async function setColumnWidths(runs: readonly LineRun[], width: number): 
  * does not resurrect a filter-hidden row. Range-taking so a 500-row "Hide" is
  * one IPC call and one undo step; it is undoable and marks the document dirty.
  */
-export async function setRowsHidden(rows: number[], hidden: boolean): Promise<number[]> {
-  return invoke<number[]>("set_rows_hidden", { rows, hidden });
+export async function setRowsHidden(rows: number[], hidden: boolean, opts?: CellTargetOptions): Promise<number[]> {
+  // With a target (P3) the OBJECT's own hidden set changes, never the sheet's;
+  // the result is then the object's resulting set.
+  return invoke<number[]>("set_rows_hidden", { rows, hidden, ...cellTargetArg("set_rows_hidden", opts) });
 }
 
 /** Hide or unhide COLUMNS on the active sheet (see {@link setRowsHidden}). */
-export async function setColsHidden(cols: number[], hidden: boolean): Promise<number[]> {
-  return invoke<number[]>("set_cols_hidden", { cols, hidden });
+export async function setColsHidden(cols: number[], hidden: boolean, opts?: CellTargetOptions): Promise<number[]> {
+  return invoke<number[]>("set_cols_hidden", { cols, hidden, ...cellTargetArg("set_cols_hidden", opts) });
 }
 
 /** Rows the user hid by hand on the active sheet, ascending. */
@@ -1101,9 +1134,10 @@ export async function setCellStyle(
 export async function setCellRichText(
   row: number,
   col: number,
-  runs: RichTextRun[] | null
+  runs: RichTextRun[] | null,
+  opts?: CellTargetOptions,
 ): Promise<CellData | null> {
-  return invoke<CellData | null>("set_cell_rich_text", { row, col, runs });
+  return invoke<CellData | null>("set_cell_rich_text", { row, col, runs, ...cellTargetArg("set_cell_rich_text", opts) });
 }
 
 /**
@@ -1164,11 +1198,68 @@ function groupArgs(): { sheetIndices?: number[] } {
   return isSheetGroupingActive() ? { sheetIndices: getSelectedSheetIndices() } : {};
 }
 
+/**
+ * The one option a cell wrapper takes to act on an OBJECT's cells instead of
+ * the active sheet's (P3, owner finding G3): `target` names the object (a
+ * floating grid); the backend resolves its hidden backing sheet in ONE place.
+ *
+ * EXPLICIT, never ambient: no wrapper reads the selection owner. A script that
+ * calls `applyFormatting` while a floating-grid cell is selected still formats
+ * the active sheet; only a door that resolved a target
+ * (`resolveCellTarget`, @api/cellTarget) passes one.
+ */
+export interface CellTargetOptions {
+  target?: CellTargetRef;
+}
+
+/** The sentence when a caller names a target AND a sheet (mirrors Rust's refusal). */
+export const TARGET_WITH_SHEET_REFUSAL = "Pass a floating grid target or a sheet, not both.";
+
+/**
+ * `{ target }` for `command` when `opts` names one, else `{}`.
+ *
+ * FAILS CLOSED. Tauri drops an argument a command does not declare, so a
+ * target sent to a command that has not learned it would be IGNORED and the
+ * command would act on the ACTIVE sheet at the object's local coordinates,
+ * reporting success (BUG-0185 again). A target on a command missing from
+ * `TARGET_COMMANDS` (api/cellTargetCommands.ts) therefore THROWS here,
+ * before any invoke. `sheet`: the caller's explicit sheet selector, which a
+ * target excludes.
+ */
+export function cellTargetArg(
+  command: string,
+  opts?: CellTargetOptions,
+  sheet?: number | readonly number[] | null,
+): { target?: CellTargetRef } {
+  const target = opts?.target;
+  if (target === undefined || target === null) return {};
+  if (!TARGET_COMMANDS.includes(command)) {
+    throw new Error(`${command} does not accept a floating grid target yet.`);
+  }
+  if (sheet !== undefined && sheet !== null) throw new Error(TARGET_WITH_SHEET_REFUSAL);
+  return { target };
+}
+
+/**
+ * Where a formatting command lands: `{ target }` for an object's cells (a
+ * target ALWAYS drops the ambient sheet group -- an object's cells are not
+ * grouped), else the group (`groupArgs`). Fails closed like `cellTargetArg`.
+ */
+export function placementArgs(
+  command: string,
+  opts?: CellTargetOptions,
+): { target?: CellTargetRef; sheetIndices?: number[] } {
+  const placed = cellTargetArg(command, opts);
+  return placed.target ? placed : groupArgs();
+}
+
 export async function applyFormatting(
   rows: number[],
   cols: number[],
-  formatting: FormattingOptions
+  formatting: FormattingOptions,
+  opts?: CellTargetOptions,
 ): Promise<FormattingResult> {
+  const placement = placementArgs("apply_formatting", opts);
   console.log(
     "[tauri-api] applyFormatting:",
     `${rows.length} rows x ${cols.length} cols`,
@@ -1208,7 +1299,7 @@ export async function applyFormatting(
       locked: formatting.locked,
       formulaHidden: formatting.formulaHidden,
     },
-    ...groupArgs(),
+    ...placement,
   });
   console.log(
     "[tauri-api] applyFormatting result:",
@@ -1218,7 +1309,8 @@ export async function applyFormatting(
     result.styles.length
   );
   announceStyleEntries(result);
-  recordGridEvent({ kind: "formatting", rows, cols, formatting });
+  // An object's cells are not a gesture on the sheet: never recorded (P3).
+  if (!placement.target) recordGridEvent({ kind: "formatting", rows, cols, formatting });
   // Grouped sheets were formatted by the SAME command (`groupArgs`).
   return result;
 }
@@ -1255,8 +1347,10 @@ export async function applyBorderPreset(
   preset: string,
   style: string,
   color: string,
-  width: number
+  width: number,
+  opts?: CellTargetOptions,
 ): Promise<FormattingResult> {
+  const placement = placementArgs("apply_border_preset", opts);
   const result = await invoke<FormattingResult>("apply_border_preset", {
     startRow,
     startCol,
@@ -1266,19 +1360,21 @@ export async function applyBorderPreset(
     style,
     color,
     width,
-    ...groupArgs(),
+    ...placement,
   });
-  recordGridEvent({
-    kind: "borderPreset",
-    startRow,
-    startCol,
-    endRow,
-    endCol,
-    preset,
-    style,
-    color,
-    width,
-  });
+  if (!placement.target) {
+    recordGridEvent({
+      kind: "borderPreset",
+      startRow,
+      startCol,
+      endRow,
+      endCol,
+      preset,
+      style,
+      color,
+      width,
+    });
+  }
   announceStyleEntries(result);
   return result;
 }
@@ -1339,13 +1435,15 @@ export async function applyBorderPresetToSheets(
 export async function adjustNumberFormatDecimals(
   rows: number[],
   cols: number[],
-  delta: 1 | -1
+  delta: 1 | -1,
+  opts?: CellTargetOptions,
 ): Promise<FormattingResult> {
+  const placement = placementArgs("adjust_number_format_decimals", opts);
   const result = await invoke<FormattingResult>("adjust_number_format_decimals", {
     rows,
     cols,
     delta,
-    ...groupArgs(),
+    ...placement,
   });
   announceStyleEntries(result);
 
@@ -1355,7 +1453,7 @@ export async function adjustNumberFormatDecimals(
   // Rust by every_display_name_the_serializer_emits_round_trips), so it is what
   // a recorded macro replays. Empty styles: Excel changed nothing.
   const numberFormat = result.styles[0]?.style.numberFormat;
-  if (numberFormat !== undefined) {
+  if (numberFormat !== undefined && !placement.target) {
     recordGridEvent({ kind: "formatting", rows, cols, formatting: { numberFormat } });
   }
   return result;
@@ -1689,6 +1787,18 @@ export interface CanvasLayout {
   zOrder?: CanvasObjectRef[];
   /** Objects locked against move/resize (absent when empty). */
   locked?: CanvasObjectRef[];
+  /**
+   * Edit interactions (P4): how one visual's selection reaches another on this
+   * page. `defaultMode` is what a visual source gives a target with no pair
+   * (absent = Power BI's default: highlight where the target can, else
+   * filter); `pairs` say it pair by pair. Absent on the wire at its default
+   * (no pairs, no default mode). Rust `CanvasInteractions`; source and target
+   * kinds follow `CANVAS_INTERACTION_KINDS` (@api/canvasSheet).
+   */
+  interactions?: {
+    defaultMode?: "filter" | "highlight";
+    pairs?: Array<{ source: CanvasObjectRef; target: CanvasObjectRef; mode: "filter" | "highlight" | "none" }>;
+  };
 }
 
 /** Partial update for a canvas layout (Rust `CanvasLayoutPatch`). */
@@ -1983,8 +2093,21 @@ async function isOffSheetTarget(sheetIndex: number | undefined): Promise<boolean
  *   A non-active target updates backend state only (empty result, no
  *   canvas events) — the sheet re-materializes from its grid on switch.
  */
-export async function insertRows(row: number, count: number, sheetIndex?: number): Promise<CellData[]> {
+export async function insertRows(
+  row: number,
+  count: number,
+  sheetIndex?: number,
+  opts?: CellTargetOptions,
+): Promise<CellData[]> {
   console.log(`[tauri-api] insertRows(${row}, ${count})`);
+  const placed = cellTargetArg("insert_rows", opts, sheetIndex);
+  if (placed.target) {
+    // An OBJECT's lines (P3, table semantics): the backend shifts the object's
+    // backing sheet and grows or shrinks its window as ONE undo step. No
+    // active-sheet structural event (the active sheet did not change) and no
+    // recording.
+    return invoke<CellData[]>("insert_rows", { row, count, ...placed });
+  }
   if (await isOffSheetTarget(sheetIndex)) {
     return invoke<CellData[]>("insert_rows", { row, count, sheetIndex });
   }
@@ -2001,8 +2124,21 @@ export async function insertRows(row: number, count: number, sheetIndex?: number
  * @param count - Number of columns to insert
  * @param sheetIndex - Target sheet (0-based); omit for the active sheet (see insertRows).
  */
-export async function insertColumns(col: number, count: number, sheetIndex?: number): Promise<CellData[]> {
+export async function insertColumns(
+  col: number,
+  count: number,
+  sheetIndex?: number,
+  opts?: CellTargetOptions,
+): Promise<CellData[]> {
   console.log(`[tauri-api] insertColumns(${col}, ${count})`);
+  const placed = cellTargetArg("insert_columns", opts, sheetIndex);
+  if (placed.target) {
+    // An OBJECT's lines (P3, table semantics): the backend shifts the object's
+    // backing sheet and grows or shrinks its window as ONE undo step. No
+    // active-sheet structural event (the active sheet did not change) and no
+    // recording.
+    return invoke<CellData[]>("insert_columns", { col, count, ...placed });
+  }
   if (await isOffSheetTarget(sheetIndex)) {
     return invoke<CellData[]>("insert_columns", { col, count, sheetIndex });
   }
@@ -2019,8 +2155,21 @@ export async function insertColumns(col: number, count: number, sheetIndex?: num
  * @param count - Number of rows to delete
  * @param sheetIndex - Target sheet (0-based); omit for the active sheet (see insertRows).
  */
-export async function deleteRows(row: number, count: number, sheetIndex?: number): Promise<CellData[]> {
+export async function deleteRows(
+  row: number,
+  count: number,
+  sheetIndex?: number,
+  opts?: CellTargetOptions,
+): Promise<CellData[]> {
   console.log(`[tauri-api] deleteRows(${row}, ${count})`);
+  const placed = cellTargetArg("delete_rows", opts, sheetIndex);
+  if (placed.target) {
+    // An OBJECT's lines (P3, table semantics): the backend shifts the object's
+    // backing sheet and grows or shrinks its window as ONE undo step. No
+    // active-sheet structural event (the active sheet did not change) and no
+    // recording.
+    return invoke<CellData[]>("delete_rows", { row, count, ...placed });
+  }
   if (await isOffSheetTarget(sheetIndex)) {
     const result = await invoke<CellData[]>("delete_rows", { row, count, sheetIndex });
     announceStructuralDeleteCascade();
@@ -2058,8 +2207,21 @@ function announceStructuralDeleteCascade(): void {
  * @param count - Number of columns to delete
  * @param sheetIndex - Target sheet (0-based); omit for the active sheet (see insertRows).
  */
-export async function deleteColumns(col: number, count: number, sheetIndex?: number): Promise<CellData[]> {
+export async function deleteColumns(
+  col: number,
+  count: number,
+  sheetIndex?: number,
+  opts?: CellTargetOptions,
+): Promise<CellData[]> {
   console.log(`[tauri-api] deleteColumns(${col}, ${count})`);
+  const placed = cellTargetArg("delete_columns", opts, sheetIndex);
+  if (placed.target) {
+    // An OBJECT's lines (P3, table semantics): the backend shifts the object's
+    // backing sheet and grows or shrinks its window as ONE undo step. No
+    // active-sheet structural event (the active sheet did not change) and no
+    // recording.
+    return invoke<CellData[]>("delete_columns", { col, count, ...placed });
+  }
   if (await isOffSheetTarget(sheetIndex)) {
     const result = await invoke<CellData[]>("delete_columns", { col, count, sheetIndex });
     announceStructuralDeleteCascade();
@@ -2458,7 +2620,8 @@ export interface FindOptions {
  */
 export async function findAll(
   query: string,
-  options: FindOptions = {}
+  options: FindOptions = {},
+  opts?: CellTargetOptions,
 ): Promise<FindResult> {
   const {
     caseSensitive = false,
@@ -2473,6 +2636,7 @@ export async function findAll(
     matchEntireCell,
     searchFormulas,
     sheetIndex: sheetIndex ?? null,
+    ...cellTargetArg("find_all", opts, sheetIndex),
   });
 }
 
@@ -2481,7 +2645,8 @@ export async function findAll(
  */
 export async function countMatches(
   query: string,
-  options: FindOptions = {}
+  options: FindOptions = {},
+  opts?: CellTargetOptions,
 ): Promise<number> {
   const {
     caseSensitive = false,
@@ -2496,6 +2661,7 @@ export async function countMatches(
     matchEntireCell,
     searchFormulas,
     sheetIndex: sheetIndex ?? null,
+    ...cellTargetArg("count_matches", opts, sheetIndex),
   });
 }
 
@@ -2509,9 +2675,11 @@ export async function countMatches(
 export async function replaceAll(
   search: string,
   replacement: string,
-  options: { caseSensitive?: boolean; matchEntireCell?: boolean; sheetIndex?: number } = {}
+  options: { caseSensitive?: boolean; matchEntireCell?: boolean; sheetIndex?: number } = {},
+  opts?: CellTargetOptions,
 ): Promise<ReplaceResult> {
   const { caseSensitive = false, matchEntireCell = false, sheetIndex } = options;
+  const placed = cellTargetArg("replace_all", opts, sheetIndex);
 
   console.log(
     `[tauri-api] replaceAll("${search}" -> "${replacement}", caseSensitive=${caseSensitive})`
@@ -2523,19 +2691,22 @@ export async function replaceAll(
     caseSensitive,
     matchEntireCell,
     sheetIndex: sheetIndex ?? null,
+    ...placed,
   });
 
   console.log(
     `[tauri-api] replaceAll completed: ${result.replacementCount} replacements`
   );
 
-  recordGridEvent({
-    kind: "replaceAll",
-    search,
-    replacement,
-    caseSensitive,
-    matchEntireCell,
-  });
+  if (!placed.target) {
+    recordGridEvent({
+      kind: "replaceAll",
+      search,
+      replacement,
+      caseSensitive,
+      matchEntireCell,
+    });
+  }
   return result;
 }
 
@@ -2552,7 +2723,8 @@ export async function replaceSingle(
   search: string,
   replacement: string,
   caseSensitive: boolean = false,
-  sheetIndex?: number
+  sheetIndex?: number,
+  opts?: CellTargetOptions,
 ): Promise<CellData | null> {
   return invoke<CellData | null>("replace_single", {
     row,
@@ -2561,6 +2733,7 @@ export async function replaceSingle(
     replacement,
     caseSensitive,
     sheetIndex: sheetIndex ?? null,
+    ...cellTargetArg("replace_single", opts, sheetIndex),
   });
 }
 
@@ -2690,9 +2863,14 @@ export interface GoToSpecialResult {
 
 export async function goToSpecial(
   criteria: string,
-  searchRange: [number, number, number, number] | null
+  searchRange: [number, number, number, number] | null,
+  opts?: CellTargetOptions,
 ): Promise<GoToSpecialResult> {
-  return await invoke<GoToSpecialResult>("go_to_special", { criteria, searchRange });
+  return await invoke<GoToSpecialResult>("go_to_special", {
+    criteria,
+    searchRange,
+    ...cellTargetArg("go_to_special", opts),
+  });
 }
 
 // ============================================================================
@@ -2743,7 +2921,9 @@ export async function mergeCells(
   endCol: number,
   sheetIndex?: number,
   options?: MergeOptions,
+  opts?: CellTargetOptions,
 ): Promise<MergeResult> {
+  const placed = cellTargetArg("merge_cells", opts, sheetIndex);
   const result = await invoke<MergeResult>("merge_cells", {
     startRow,
     startCol,
@@ -2751,8 +2931,9 @@ export async function mergeCells(
     endCol,
     sheetIndex: sheetIndex ?? null,
     options: options ?? null,
+    ...placed,
   });
-  if (!options?.probe) recordMergeResult(result);
+  if (!options?.probe && !placed.target) recordMergeResult(result);
   return result;
 }
 
@@ -2770,15 +2951,18 @@ export async function unmergeCells(
   col: number,
   sheetIndex?: number,
   end?: { endRow: number; endCol: number },
+  opts?: CellTargetOptions,
 ): Promise<MergeResult> {
+  const placed = cellTargetArg("unmerge_cells", opts, sheetIndex);
   const result = await invoke<MergeResult>("unmerge_cells", {
     row,
     col,
     sheetIndex: sheetIndex ?? null,
     endRow: end?.endRow ?? null,
     endCol: end?.endCol ?? null,
+    ...placed,
   });
-  if (result?.success) {
+  if (result?.success && !placed.target) {
     for (const r of result.removedRegions ?? []) {
       recordGridEvent({ kind: "unmergeCells", row: r.startRow, col: r.startCol });
     }
@@ -2882,8 +3066,12 @@ export async function fillRange(
   targetStartCol: number,
   targetEndRow: number,
   targetEndCol: number,
+  opts?: CellTargetOptions,
 ): Promise<CellData[]> {
   const t0 = performance.now();
+  // `target` (P3) names the OBJECT whose cells both ranges are in; the
+  // `target*` coordinates are the fill's destination, as before.
+  const placed = cellTargetArg("fill_range", opts);
   const result = await invoke<CellData[]>("fill_range", {
     sourceStartRow,
     sourceStartCol,
@@ -2893,12 +3081,14 @@ export async function fillRange(
     targetStartCol,
     targetEndRow,
     targetEndCol,
+    ...placed,
   });
   const dt = performance.now() - t0;
   console.log(
     `[PERF][bridge] fillRange src=(${sourceStartRow},${sourceStartCol})-(${sourceEndRow},${sourceEndCol}) ` +
     `tgt=(${targetStartRow},${targetStartCol})-(${targetEndRow},${targetEndCol}) => ${result.length} cells | ipc=${dt.toFixed(1)}ms`
   );
+  if (placed.target) return result;
   recordGridEvent({
     kind: "fillRange",
     sourceStartRow,

@@ -332,7 +332,8 @@ describe("Animation — transport", () => {
   it("fps is a NumberField that sets the engine's rate", () => {
     render(<TransportSection placement="sidebar" />, panelLayout(300));
     const fps = q<HTMLInputElement>('[data-testid="anim-fps"]');
-    expect(fps.type).toBe("number");
+    // An app-locale text box with the spinbutton role since P2 S9.
+    expect(fps.getAttribute("role")).toBe("spinbutton");
     act(() => {
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
       setter.call(fps, "24");

@@ -13,9 +13,16 @@
 //          would lose its "$". The rule here: text is shown as text; a number is
 //          shown as the source showed it unless a display unit has to scale it,
 //          and then the source's currency prefix/suffix travels with the unit.
+//
+//          APP LOCALE (P2 S8, BUG-0447). Every digit this module writes is in the
+//          app locale ("1,2K" and "1.234,50" in de-DE), and a source text is
+//          read as a number only when its digits parse in the app locale -- the
+//          locale Rust rendered it in. A hard-coded "," grouping and "." point
+//          used to write en-US digits on every Card in every locale.
 
 import type { ParsedChartData, VisualAggregate, VisualDisplayUnits } from "../../types";
-import { parseDisplayNumber } from "../../lib/chartFieldTypes";
+import { formatNumber } from "@api/locale";
+import { readShownNumber, splitShownNumber } from "../../lib/chartFieldTypes";
 
 /** What an empty field shows. Power BI's own word for "no value". */
 export const BLANK_TEXT = "(Blank)";
@@ -104,7 +111,7 @@ export function isTextDatum(data: ParsedChartData, si: number, ci: number): bool
   if (kind === "number" || kind === "blank") return false;
   const t = datumText(data, si, ci);
   if (kind === "text") return t !== null;
-  return t !== null && Number.isNaN(parseDisplayNumber(t));
+  return t !== null && readShownNumber(t) === null;
 }
 
 /**
@@ -185,7 +192,7 @@ export function aggregateSeries(
 
 /** Write a {@link VisualValue}: text as text, blank as (Blank), numbers through the units. */
 export function formatVisualValue(v: VisualValue, opts: VisualFormatOptions): string {
-  if (v.text !== null && (v.isText === true || Number.isNaN(parseDisplayNumber(v.text)))) return v.text;
+  if (v.text !== null && (v.isText === true || readShownNumber(v.text) === null)) return v.text;
   if (v.value === null || !Number.isFinite(v.value)) return BLANK_TEXT;
   return formatVisualNumber(v.value, { ...opts, sourceText: v.text, formatSource: v.formatSource ?? null });
 }
@@ -230,15 +237,18 @@ export function formatVisualNumber(
 ): string {
   const units = opts.displayUnits ?? "auto";
   const source = opts.sourceText ?? null;
-  const sourceIsNumber = source !== null && !Number.isNaN(parseDisplayNumber(source));
+  const sourceIsNumber = source !== null && readShownNumber(source) !== null;
   const exemplar = sourceIsNumber ? source : (opts.formatSource ?? null);
-  const exemplarIsNumber = exemplar !== null && !Number.isNaN(parseDisplayNumber(exemplar));
-  const percent = exemplarIsNumber && exemplar!.trim().endsWith("%");
+  // The exemplar taken apart: its currency / unit text and whether it is a
+  // percent. Null when it is not a number in the app locale (then nothing is
+  // copied from it).
+  const shape = exemplar !== null ? shapeOf(exemplar) : null;
+  const percent = shape !== null && shape.percent;
 
   if (percent) {
     if (sourceIsNumber && opts.decimals === undefined) return source!;
     const pct = value * 100;
-    const d = opts.decimals ?? (Number.isInteger(Number(pct.toFixed(9))) ? 0 : 2);
+    const d = opts.decimals ?? (Math.abs(pct - Math.round(pct)) < 1e-9 ? 0 : 2);
     return (pct < 0 ? "-" : "") + groupDigits(Math.abs(pct), d, opts.decimals === undefined) + "%";
   }
 
@@ -253,41 +263,54 @@ export function formatVisualNumber(
     if (sourceIsNumber && opts.decimals === undefined) return source!;
     const d = opts.decimals ?? (Number.isInteger(value) ? 0 : 2);
     const body = groupDigits(Math.abs(value), d, opts.decimals === undefined);
-    return wrapAffixes((value < 0 ? "-" : "") + body, exemplar, exemplarIsNumber);
+    return wrapAffixes((value < 0 ? "-" : "") + body, shape);
   }
 
   const scaled = value / step.factor;
   const auto = opts.decimals === undefined;
   const d = opts.decimals ?? (Math.abs(scaled) >= 10 ? 0 : 1);
   const body = groupDigits(Math.abs(scaled), d, auto) + step.suffix;
-  return wrapAffixes((scaled < 0 ? "-" : "") + body, exemplar, exemplarIsNumber);
+  return wrapAffixes((scaled < 0 ? "-" : "") + body, shape);
 }
 
-/** Grouped digits with a "." decimal point; `trim` drops trailing zeros. */
+/**
+ * Grouped digits in the APP locale (its group separator and decimal
+ * separator); `trim` drops trailing zeros. Rounds half away from zero, as
+ * Excel's own number formats do.
+ */
 function groupDigits(abs: number, decimals: number, trim: boolean): string {
-  let fixed = abs.toFixed(Math.max(0, Math.min(20, Math.floor(decimals))));
-  if (trim && fixed.includes(".")) fixed = fixed.replace(/\.?0+$/, "");
-  const [int, frac] = fixed.split(".");
-  const grouped = int.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  return frac !== undefined ? `${grouped}.${frac}` : grouped;
+  const d = Math.max(0, Math.min(20, Math.floor(decimals)));
+  return formatNumber(abs, trim ? { maxDecimals: d, trimZeros: true, grouping: true } : { decimals: d, grouping: true });
+}
+
+/** The affixes and percent-ness of a number text, or null when it is not one. */
+interface NumberShape {
+  prefix: string;
+  suffix: string;
+  percent: boolean;
+}
+
+/**
+ * Take an exemplar text apart. Its digits must parse in the APP locale
+ * (`readShownNumber`'s rule); its currency prefix and suffix are what travels
+ * with a scaled number. A sign or parenthesis in the source is the number's,
+ * not an affix.
+ */
+function shapeOf(text: string): NumberShape | null {
+  const parts = splitShownNumber(text);
+  if (parts !== null) return { prefix: parts.prefix, suffix: parts.suffix, percent: parts.percent };
+  // The locale's own plain spelling (e.g. the locale currency symbol written
+  // with a space) that only `parseNumber` reads: a number with no affixes.
+  return readShownNumber(text) !== null ? { prefix: "", suffix: "", percent: text.trim().endsWith("%") } : null;
 }
 
 /**
  * Put the source's currency prefix/suffix around `core` (which carries its own
- * sign). "$11,732.00" gives prefix "$"; "25 000 kr" gives suffix " kr". A sign
- * or parenthesis in the source is the number's, not an affix.
+ * sign). "$11,732.00" gives prefix "$"; "25 000 kr" gives suffix " kr".
  */
-function wrapAffixes(core: string, source: string | null, use: boolean): string {
-  if (!use || source === null) return core;
-  const s = source.trim();
-  const first = s.search(/\d/);
-  if (first < 0) return core;
-  let last = first;
-  for (let i = s.length - 1; i >= 0; i--) {
-    if (/\d/.test(s[i])) { last = i; break; }
-  }
-  const prefix = s.slice(0, first).replace(/[-(\s]+$/, "").replace(/^[-(]+/, "");
-  const suffix = s.slice(last + 1).replace(/^[)]+/, "").replace(/\)$/, "");
+function wrapAffixes(core: string, shape: NumberShape | null): string {
+  if (shape === null) return core;
+  const { prefix, suffix } = shape;
   if (suffix.includes("%")) return core;
   const negative = core.startsWith("-");
   const unsigned = negative ? core.slice(1) : core;

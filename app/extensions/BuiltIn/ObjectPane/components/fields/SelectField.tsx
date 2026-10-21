@@ -60,7 +60,9 @@ export function SelectField({ fieldId, label, options, disabled }: SelectFieldPr
       <SelectBox
         value={raw === undefined || raw === null ? "" : String(raw)}
         options={asText}
-        onCommit={(v) => void ctx.commitField(fieldId, numeric ? Number(v) : v)}
+        // A numeric option's <option value> is only a lookup handle: commit the
+        // option's OWN number, never a re-parse of the handle text.
+        onCommit={(v) => void ctx.commitField(fieldId, numeric ? (options.find(([o]) => String(o) === v)?.[0] ?? v) : v)}
         disabled={ctx.readOnly || disabled}
         ariaLabel={label}
         testId={`format-${fieldId}`}

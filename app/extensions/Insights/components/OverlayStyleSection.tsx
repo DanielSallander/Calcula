@@ -23,6 +23,7 @@ import {
   type OverlayStyle,
 } from "@api/insightStyle";
 import { documentOverlayStyle, saveOverlayStyle } from "../lib/overlay";
+import { NumberInput } from "@api/layout";
 
 const POLARITY_LABEL: Record<ChartCuePolarity, string> = {
   good: "Good",
@@ -146,18 +147,18 @@ export function OverlayStyleSection(): React.ReactElement {
           ))}
           <div style={rowStyle}>
             <span style={labelStyle}>Line width</span>
-            <input
-              type="number"
+            {/* Typed and shown in the APP locale ("1,5" under de-DE); a native
+                number input typed in the browser's locale instead (P2 S11). */}
+            <NumberInput
               min={0.5}
               max={8}
               step={0.5}
               aria-label="Line width"
-              data-testid="insights-overlay-style-linewidth"
+              testId="insights-overlay-style-linewidth"
               value={draft.lineWidth}
               style={{ width: 56 }}
-              onChange={(e) => {
-                const v = Number(e.target.value);
-                if (Number.isFinite(v)) {
+              onChange={(v) => {
+                if (v !== null && Number.isFinite(v)) {
                   setDraft((d) => ({ ...d, lineWidth: v }));
                   setDirty(true);
                 }

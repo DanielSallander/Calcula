@@ -20,7 +20,8 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { css } from "@emotion/css";
 import type { ActivityViewProps } from "@api/uiTypes";
 import {
-  getLocaleSettings,
+  getAppLocale,
+  onLocaleChanged,
   setLocale,
   getSupportedLocales,
   type LocaleSettings,
@@ -216,10 +217,12 @@ function describeList(sep: string): string {
 export function SettingsView(_props: ActivityViewProps): React.ReactElement {
   const [activeTab, setActiveTab] = useState<SettingsTab>("general");
   const [settings, setSettings] = useState<CalcuaSettings>(getSettings);
-  const [locale, setLocaleState] = useState<LocaleSettings | null>(null);
+  const [locale, setLocaleState] = useState<LocaleSettings>(() => getAppLocale());
   const [supportedLocales, setSupportedLocales] = useState<SupportedLocaleEntry[]>([]);
+  // The user's explicit choice is the BACKEND's (persisted in the app settings
+  // file, P2); null means the app follows the OS ("System default").
   const [localeOverride, setLocaleOverride] = useState<string>(
-    localStorage.getItem("calcula.locale") || "system"
+    () => getAppLocale().overrideId ?? "system"
   );
   const tabBarRef = useRef<HTMLDivElement>(null);
 
@@ -248,10 +251,14 @@ export function SettingsView(_props: ActivityViewProps): React.ReactElement {
     selected?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
   }, [activeTab]);
 
-  // Load locale settings
+  // The supported list, and every later locale switch (from this page, another
+  // window or a script) re-read from the one app locale.
   useEffect(() => {
-    getLocaleSettings().then(setLocaleState);
     getSupportedLocales().then(setSupportedLocales);
+    return onLocaleChanged((next) => {
+      setLocaleState(next);
+      setLocaleOverride(next.overrideId ?? "system");
+    });
   }, []);
 
   const updateFileClickAction = useCallback((mode: FileOpenMode) => {
@@ -262,7 +269,16 @@ export function SettingsView(_props: ActivityViewProps): React.ReactElement {
 
   const handleLocaleChange = useCallback((value: string) => {
     setLocaleOverride(value);
-    setLocale(value).then(setLocaleState);
+    void setLocale(value)
+      .then((next) => {
+        setLocaleState(next);
+        // The reply names the persisted override; "system" clears it.
+        setLocaleOverride(next.overrideId ?? (value === "system" ? "system" : value));
+      })
+      .catch((err) => {
+        console.error("[settings] could not change the locale:", err);
+        setLocaleOverride(getAppLocale().overrideId ?? "system");
+      });
   }, []);
 
   const localeOptions: DropdownOption<string>[] = [
@@ -315,6 +331,9 @@ export function SettingsView(_props: ActivityViewProps): React.ReactElement {
               />
               <p className={s.settingHint}>
                 Controls decimal separators, formula argument separators, date formats, and currency display.
+              </p>
+              <p className={s.settingHint} data-testid="settings-locale-recalc-note">
+                Formulas that produce text (TEXT, DOLLAR, FIXED) update on the next recalculation (F9).
               </p>
             </div>
 

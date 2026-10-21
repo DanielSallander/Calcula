@@ -100,6 +100,11 @@ vi.mock("../lib/filterPaneStore", () => ({
   refreshCache: () => undefined,
   clearCache: () => undefined,
   isRibbonFilterChangeLanding: () => false,
+  // The report-filter publisher (filterReportPublisher.ts) reads the cache.
+  getAllFilters: () => [],
+  getFilterItemsError: () => null,
+  getFilterNarrowingError: () => null,
+  getFilterLoadAttempts: () => 0,
 }));
 vi.mock("../lib/controlsPaneStore", () => ({
   // The entry point's imports...

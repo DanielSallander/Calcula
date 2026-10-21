@@ -19,7 +19,7 @@ vi.mock("@api/ui", () => ({
 }));
 
 vi.mock("@api/locale", () => ({
-  getCachedLocale: () => ({ decimalSeparator: "." }),
+  getAppLocale: () => ({ decimalSeparator: "." }),
 }));
 
 vi.mock("@api", async () => {

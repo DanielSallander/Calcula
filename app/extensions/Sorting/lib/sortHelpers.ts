@@ -10,7 +10,23 @@ import {
   getRangeIcons,
 } from "@api/lib";
 import type { IconSetType } from "@api/lib";
-import type { Selection } from "@api/types";
+import type { CellData, Selection } from "@api/types";
+import { getCellTargetCells, type CellTargetRef } from "@api/cellTarget";
+
+/**
+ * Display cells of a rectangle: the active sheet's, or an OBJECT's own (a
+ * floating grid's, P3) through the styled read.
+ */
+async function readCells(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  target?: CellTargetRef | null,
+): Promise<CellData[]> {
+  if (target) return (await getCellTargetCells(target, { startRow, startCol, endRow, endCol })).cells;
+  return getViewportCells(startRow, startCol, endRow, endCol);
+}
 
 // ============================================================================
 // Range Detection
@@ -59,12 +75,12 @@ export async function getColumnDisplayNames(
   startCol: number,
   endCol: number,
   hasHeaders: boolean,
+  target?: CellTargetRef | null,
 ): Promise<string[]> {
-  const colCount = endCol - startCol + 1;
   const headers: string[] = [];
 
   if (hasHeaders) {
-    const cells = await getViewportCells(startRow, startCol, startRow, endCol);
+    const cells = await readCells(startRow, startCol, startRow, endCol, target);
     const cellMap = new Map(cells.map((c) => [c.col, c.display]));
 
     for (let col = startCol; col <= endCol; col++) {
@@ -94,11 +110,12 @@ export async function getRowDisplayNames(
   endRow: number,
   startCol: number,
   hasHeaders: boolean,
+  target?: CellTargetRef | null,
 ): Promise<string[]> {
   const names: string[] = [];
 
   if (hasHeaders) {
-    const cells = await getViewportCells(startRow, startCol, endRow, startCol);
+    const cells = await readCells(startRow, startCol, endRow, startCol, target);
     const cellMap = new Map(cells.map((c) => [c.row, c.display]));
 
     for (let row = startRow; row <= endRow; row++) {
@@ -131,8 +148,9 @@ export async function getUniqueColorsInColumn(
   endRow: number,
   col: number,
   type: "cellColor" | "fontColor",
+  target?: CellTargetRef | null,
 ): Promise<string[]> {
-  const cells = await getViewportCells(startRow, col, endRow, col);
+  const cells = await readCells(startRow, col, endRow, col, target);
   const colorSet = new Set<string>();
 
   for (const cell of cells) {
@@ -240,7 +258,14 @@ export async function getUniqueIconsInColumn(
   startRow: number,
   endRow: number,
   absoluteCol: number,
+  target?: CellTargetRef | null,
 ): Promise<IconChoice[]> {
+  // An OBJECT's cells (P3): the one evaluator that answers "which icon does a
+  // cell SHOW" (`get_range_icons`) reads the active sheet only, and
+  // re-deriving it from the rule list is BUG-0107's mistake. So no icon is
+  // offered there: the dropdown says none was found, rather than offering an
+  // icon the host's cells show (BUG-0514).
+  if (target) return [];
   return getRangeIcons(startRow, absoluteCol, endRow, absoluteCol);
 }
 

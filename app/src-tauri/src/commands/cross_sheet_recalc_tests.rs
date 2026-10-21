@@ -1410,3 +1410,35 @@ fn deleting_a_sheet_keeps_a_dependent_that_is_not_the_new_active_sheet_live() {
         "Sheet4, now index 2, must still follow Sheet1!B1"
     );
 }
+
+// ---------------------------------------------------------------------------
+// BUG-0540: after a load, a sheet nobody has visited yet follows the active one
+// ---------------------------------------------------------------------------
+
+/// The load rebuilds cross-sheet edges for the ACTIVE sheet only, and every
+/// other sheet used to get its edges on its first visit. Until then a formula
+/// there that reads the active sheet was present, valued and DEAD: found live
+/// (2026-10-17) with `Sheet1!B1 = Sheet2!A1*10` in a file saved on Sheet2, and
+/// with a GETPIVOTDATA that ignored every re-fold of a canvas pivot. The load
+/// path's shared installer now registers every non-active sheet's edges.
+#[test]
+fn after_a_load_an_unvisited_sheet_follows_the_active_sheet() {
+    let wb = Workbook::new(2);
+    wb.switch_to(1);
+    wb.set(0, 1, "=Sheet1!A1*10");
+    wb.switch_to(0);
+    wb.set(0, 0, "1");
+    assert_eq!(wb.number(1, 0, 1), 10.0, "precondition: in session Sheet2!B1 follows Sheet1!A1");
+
+    // A fresh load: the maps are emptied, then rebuilt for the ACTIVE sheet
+    // (Sheet1, which holds no formula) -- exactly open_file's order.
+    wb.state.cross_sheet_dependents.lock().unwrap().clear();
+    wb.state.cross_sheet_dependencies.lock().unwrap().clear();
+    crate::undo_commands::rebuild_all_dependencies(&wb.state);
+    wb.set(0, 0, "2");
+    assert_eq!(wb.number(1, 0, 1), 10.0, "precondition: with the active-only rebuild Sheet2!B1 is DEAD");
+
+    crate::floating_range::register_object_sheet_edges(&wb.state);
+    wb.set(0, 0, "3");
+    assert_eq!(wb.number(1, 0, 1), 30.0, "the load installer must register the unvisited sheet's edges (BUG-0540)");
+}

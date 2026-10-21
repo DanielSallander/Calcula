@@ -6,6 +6,7 @@
 //          Inner ring = top level, outer rings = sub-categories.
 //          If categories have no separator, behaves like a single-ring donut.
 
+import { formatNumber } from "@api/locale";
 import type { ChartSpec, ParsedChartData, ChartLayout, BarRect, SunburstMarkOptions } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
@@ -297,7 +298,7 @@ export function paintSunburstChart(
             labelText = formatTickValue(node.value);
             break;
           case "percent":
-            labelText = `${percent.toFixed(1)}%`;
+            labelText = `${formatNumber(percent, { decimals: 1 })}%`;
             break;
           case "both":
             labelText = `${node.name}: ${formatTickValue(node.value)}`;

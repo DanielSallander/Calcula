@@ -213,7 +213,7 @@ function snapshotOf(slicerId: string): SlicerSnapshot | null {
 }
 
 function valueAt(s: SlicerSnapshot, slot: number): SlicerFocusValue {
-  return slot < s.offset ? SLICER_SELECT_ALL_FOCUS : s.items[slot - s.offset].value;
+  return slot < s.offset ? SLICER_SELECT_ALL_FOCUS : s.items[slot - s.offset].key;
 }
 
 /**
@@ -235,7 +235,7 @@ export function slicerSlotSentence(
   const item = items[slot - offset];
   if (!item) return position;
   const noData = !item.hasData && slicer.indicateNoData ? ", no data" : "";
-  return `${item.value}, ${position}, ${item.selected ? "selected" : "not selected"}${noData}`;
+  return `${item.label}, ${position}, ${item.selected ? "selected" : "not selected"}${noData}`;
 }
 
 // ============================================================================
@@ -335,7 +335,7 @@ function keyOnStaleFocus(e: KeyboardEvent, name: string | null): void {
 function keyInside(e: KeyboardEvent, focus: SlicerKeyFocus): void {
   if (isBareModifier(e)) return;
   const s = snapshotOf(focus.slicerId);
-  const at = s ? resolveSlicerFocusSlot(focus, s.items.map((i) => i.value), s.offset > 0) : null;
+  const at = s ? resolveSlicerFocusSlot(focus, s.items.map((i) => i.key), s.offset > 0) : null;
   if (s === null || at === null) {
     // Nothing left to focus (the slicer lost every item, or is gone).
     keyOnStaleFocus(e, s?.slicer.name ?? null);
@@ -413,7 +413,7 @@ function showSlot(s: SlicerSnapshot, slot: number): void {
  * last one: `selectionAfterItemRun`). Just `to` when the anchor is gone.
  */
 function runBetween(items: readonly SlicerItem[], anchor: string, to: string): string[] {
-  const values = items.map((i) => i.value);
+  const values = items.map((i) => i.key);
   const a = values.indexOf(anchor);
   const b = values.indexOf(to);
   if (a < 0 || b < 0) return [to];
@@ -453,7 +453,7 @@ function announceFocused(slicerId: string): void {
   if (focus === null || focus.slicerId !== slicerId) return;
   const s = snapshotOf(slicerId);
   if (s === null) return;
-  const at = resolveSlicerFocusSlot(focus, s.items.map((i) => i.value), s.offset > 0);
+  const at = resolveSlicerFocusSlot(focus, s.items.map((i) => i.key), s.offset > 0);
   if (at === null) return;
   announce(slicerSlotSentence(s.slicer, s.items, at.slot));
 }
@@ -471,10 +471,10 @@ function announceRun(slicerId: string, run: readonly string[]): void {
   const s = snapshotOf(slicerId);
   if (s === null) return;
   const inRun = new Set(run);
-  const shown = s.items.filter((i) => inRun.has(i.value));
+  const shown = s.items.filter((i) => inRun.has(i.key));
   if (shown.length === 0) return;
   const selected = shown.filter((i) => i.selected).length;
-  announce(`${shown[0].value} to ${shown[shown.length - 1].value}, ${selected} of ${shown.length} selected`);
+  announce(`${shown[0].label} to ${shown[shown.length - 1].label}, ${selected} of ${shown.length} selected`);
 }
 
 /** Alt+C: clear the filter (queued like every user click), and say so once it is clear. */
@@ -500,7 +500,7 @@ function endIfStale(): void {
   const focus = getSlicerKeyFocus();
   if (focus === null) return;
   const s = snapshotOf(focus.slicerId);
-  if (s !== null && resolveSlicerFocusSlot(focus, s.items.map((i) => i.value), s.offset > 0) !== null) return;
+  if (s !== null && resolveSlicerFocusSlot(focus, s.items.map((i) => i.key), s.offset > 0) !== null) return;
   leaveSlicerKeyFocus();
   // A slicer that is gone was deleted: its own route ended the focus first,
   // and there is no name to say.

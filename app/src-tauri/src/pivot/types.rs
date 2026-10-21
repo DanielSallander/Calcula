@@ -1126,6 +1126,30 @@ pub struct PivotViewResponse {
     /// value fields.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub value_field_names: Vec<String>,
+    /// The member KEY of every grouping valueId present in THIS response's
+    /// cells, per grouping field (P4): what a data cell's `group_path`
+    /// (valueIds only) means as member keys, so a click on a datum can be
+    /// turned into a selection without a second round trip. Filled only by
+    /// [`crate::pivot::utils::fill_group_members`], at the producers that know
+    /// each field's model column (BI pivots and design-query views); absent
+    /// everywhere else, and never covering rows outside the returned window.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_members: Vec<PivotGroupMembers>,
+}
+
+/// The member keys of one grouping field's valueIds (P4). Mirrored by
+/// `PivotGroupMembers` in `app/src/api/pivotTypes.ts`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotGroupMembers {
+    /// The cache field index, as a `group_path` entry names it.
+    pub field_index: usize,
+    /// The model column, "Table.Column".
+    pub field_key: String,
+    /// `(value_id, key)`, sorted by value id. Every key is
+    /// `pivot::utils::member_key_of`, the ONE spelling a header's
+    /// `member.key` also comes from; the blank member's key is "" (Q8).
+    pub members: Vec<(u32, String)>,
 }
 
 /// What a declined "overwrite existing data?" took back
@@ -1150,8 +1174,11 @@ pub struct PivotOverwriteUndoResponse {
 pub struct FilterRowData {
     pub field_index: usize,
     pub field_name: String,
+    /// The KEYS of the members the filter keeps (`members[i].key`).
     pub selected_values: Vec<String>,
-    pub unique_values: Vec<String>,
+    /// Every member the filter lists, the blank member LAST (key "", label
+    /// "(Blank)", ruling Q8). Match on `key`; show `label`.
+    pub members: Vec<crate::api_types::MemberRef>,
     pub display_value: String,
     pub view_row: usize,
 }
@@ -1228,6 +1255,13 @@ pub struct PivotCellData {
     /// total cell shows. Absent on labels and headers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_field_index: Option<usize>,
+    /// THE member a header (or filter-item) cell shows: `key` is the
+    /// invariant canonical text (`pivot::utils::member_key_of` of the cell's
+    /// last `group_path` entry) that selections and cross-filters match on;
+    /// `label` is the app-locale display. Absent on data, total and value
+    /// cells, and on any header whose text is not one member's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member: Option<crate::api_types::MemberRef>,
 }
 
 fn is_false(v: &bool) -> bool { !v }
@@ -1598,7 +1632,9 @@ pub struct PivotRegionData {
 pub struct FieldUniqueValuesResponse {
     pub field_index: usize,
     pub field_name: String,
-    pub unique_values: Vec<String>,
+    /// The field's members in the cache's sorted order, the blank member LAST
+    /// (key "", label "(Blank)", ruling Q8). A selection names KEYS.
+    pub members: Vec<crate::api_types::MemberRef>,
 }
 
 /// Result from resolving a pivot cell into GETPIVOTDATA formula arguments.

@@ -60,14 +60,44 @@ vi.mock("@api/ui", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@api/ui")>()),
   showDialog: (id: string, data?: Record<string, unknown>) => h.shown.push({ id, data }),
 }));
-vi.mock("@api/selectionOwner", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@api/selectionOwner")>()),
-  refuseIfSelectionOwned: () => h.owned,
-}));
-
 import extension, { INSERT_CELLS_DIALOG_ID, DELETE_CELLS_DIALOG_ID, resetRememberedChoices } from "../index";
 import { MULTIPLE_SELECTIONS, shapeShift, readShiftArg } from "../lib/cellShift";
 import { CommandRegistry, CoreCommands } from "@api/commands";
+import { registerSelectionOwner, type CellTargetCapability, type SelectionOwner } from "@api/selectionOwner";
+import { registerToastSink, type ToastPayload } from "@api/notifications";
+
+// The selection OWNER is real (@api/selectionOwner): a test owner that holds
+// the selection while `h.owned` is true and admits nothing, and -- for the
+// floating-grid cases (P3) -- a double shaped like the floating grid's owner,
+// which admits every capability but "table", "filter" and "shiftCells".
+const toasts: ToastPayload[] = [];
+registerToastSink((t) => toasts.push(t));
+registerSelectionOwner({ id: "test-owner", label: "the test object's cells", ownsSelection: () => h.owned });
+
+const FR_ADMITS: readonly CellTargetCapability[] = [
+  "read", "format", "numberFormat", "content", "clear", "sort", "structure", "lineSize", "merge", "conditionalFormat",
+];
+const SHIFT_SENTENCE = (action: string) => `${action} is not available inside a floating grid yet. Nothing was changed.`;
+let frSelection: Record<string, unknown> | null = null;
+const frOwner: SelectionOwner = {
+  id: "test-floating-grid",
+  label: "a floating grid's cells",
+  ownsSelection: () => frSelection !== null,
+  actsOn: FR_ADMITS,
+  cellTarget: () =>
+    frSelection === null
+      ? null
+      : {
+          ref: { kind: "floatingRange", id: "fr-1" },
+          selection: frSelection as never,
+          bounds: { rows: 10, cols: 4 },
+          label: "Float1",
+          wholeObject: false,
+        },
+  refusal: (action: string, capability?: CellTargetCapability) =>
+    capability === "shiftCells" ? SHIFT_SENTENCE(action) : `${action} is not available inside a floating grid yet. Nothing was changed.`,
+};
+registerSelectionOwner(frOwner);
 
 const LINE_COMMANDS = [
   CoreCommands.INSERT_ROW,
@@ -113,6 +143,8 @@ beforeEach(() => {
   h.refreshed = 0;
   h.executed = [];
   h.config = null;
+  frSelection = null;
+  toasts.length = 0;
   resetRememberedChoices();
 });
 
@@ -186,6 +218,8 @@ describe("core.grid.insert / core.grid.delete (the split buttons' main halves)",
     await CommandRegistry.execute(CoreCommands.DELETE_CELLS, { shift: "up" });
     expect(h.calls).toEqual([]);
     expect(h.shown).toEqual([]);
+    expect(h.executed).toEqual([]);
+    expect(toasts.length, "each refused door says it once").toBe(2);
   });
 
   it("a backend refusal reaches the user and nothing is refreshed", async () => {
@@ -328,5 +362,56 @@ describe("a range that spans every column (row) is entire rows (columns), whatev
     await CommandRegistry.execute(CoreCommands.INSERT);
     expect(h.executed).toEqual([]);
     expect(h.calls.map((c) => c.args[4])).toEqual(["down"]);
+  });
+});
+
+// P3 (owner finding G3): a floating grid's cells. Entire rows / columns are
+// the GRID's own lines (capability "structure"), run through the row / column
+// grid commands, whose door hands the target on. A cell SHIFT asks
+// "shiftCells", which no floating grid admits this round: refused with the
+// grid's sentence, and no wrapper is called.
+describe("on a floating grid's cells", () => {
+  it("Insert Cells (shift down) refuses with the floating grid's sentence and calls no wrapper", async () => {
+    frSelection = cells(1, 1, 1, 1);
+    await CommandRegistry.execute(CoreCommands.INSERT_CELLS, { shift: "down" });
+    await CommandRegistry.execute(CoreCommands.DELETE_CELLS, { shift: "left" });
+    expect(h.calls, "a cell shift reached the active-sheet backend").toEqual([]);
+    expect(h.executed).toEqual([]);
+    expect(toasts.map((t) => t.message)).toEqual([SHIFT_SENTENCE("Insert Cells"), SHIFT_SENTENCE("Delete Cells")]);
+  });
+
+  it("the main half's cell shift refuses the same way; Core's selection is never read", async () => {
+    frSelection = cells(2, 1, 2, 2);
+    h.selection = cells(2, 1, 2, 2);
+    await CommandRegistry.execute(CoreCommands.INSERT);
+    expect(h.calls).toEqual([]);
+    expect(toasts.map((t) => t.message)).toEqual([SHIFT_SENTENCE("Insert Cells")]);
+  });
+
+  it("\"Entire row\" / \"Entire column\" run the row / column grid commands (whose door hands the target on)", async () => {
+    frSelection = cells(1, 1, 1, 1);
+    await CommandRegistry.execute(CoreCommands.INSERT_CELLS, { shift: "entireRow" });
+    await CommandRegistry.execute(CoreCommands.DELETE_CELLS, { shift: "entireColumn" });
+    expect(h.executed.map((e) => e.id)).toEqual([CoreCommands.INSERT_ROW, CoreCommands.DELETE_COLUMN]);
+    expect(h.calls).toEqual([]);
+    expect(toasts).toEqual([]);
+  });
+
+  it("a selection spanning every column of the GRID is its entire rows (measured against its extent, not the sheet)", async () => {
+    frSelection = cells(3, 0, 4, 3);
+    await CommandRegistry.execute(CoreCommands.INSERT);
+    await CommandRegistry.execute(CoreCommands.INSERT_CELLS);
+    expect(h.executed.map((e) => e.id)).toEqual([CoreCommands.INSERT_ROW, CoreCommands.INSERT_ROW]);
+    expect(h.shown, "the dialog opened over whole lines").toEqual([]);
+    expect(h.calls).toEqual([]);
+  });
+
+  it("no argument opens the dialog over the GRID's selection; choosing a shift then refuses", async () => {
+    frSelection = cells(1, 1, 2, 1);
+    await CommandRegistry.execute(CoreCommands.INSERT_CELLS);
+    expect(h.shown).toHaveLength(1);
+    (h.shown[0].data?.onChoose as (c: string) => void)("right");
+    await vi.waitFor(() => expect(toasts.map((t) => t.message)).toEqual([SHIFT_SENTENCE("Insert Cells")]));
+    expect(h.calls).toEqual([]);
   });
 });

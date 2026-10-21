@@ -1,6 +1,9 @@
 //! FILENAME: app/extensions/ConditionalFormatting/components/RulesManagerDialog.tsx
 // PURPOSE: Conditional Formatting Rules Manager dialog.
 // CONTEXT: Lists all CF rules for the current sheet, allows reorder, delete, edit, toggle.
+//          P3: opened with a floating grid's `target` (data.target), it lists
+//          and edits THAT object's rules (its backing sheet's), and says so
+//          ("This floating grid (Float1)").
 
 import React, { useState, useEffect, useCallback } from "react";
 import type { DialogProps } from "@api";
@@ -8,10 +11,38 @@ import {
   deleteConditionalFormat,
   reorderConditionalFormats,
   updateConditionalFormat,
+  getAllConditionalFormats,
   restoreFocusToGrid,
 } from "@api";
 import type { ConditionalFormatDefinition } from "@api";
+import type { CellTargetRef } from "@api/cellTarget";
 import { getRules, invalidateAndRefresh } from "../lib/cfStore";
+import { refreshAfterWrite } from "../lib/ruleWrites";
+
+/**
+ * The rules of the dialog's scope: an object's (its backing sheet's, read with
+ * its target), or the active sheet's from the rules cache.
+ */
+async function readRules(target: CellTargetRef | undefined): Promise<ConditionalFormatDefinition[]> {
+  if (target) return [...(await getAllConditionalFormats(undefined, { target }))];
+  return [...getRules()];
+}
+
+/** After a write: re-read the scope's rules (and repaint where they live). */
+async function rulesAfterWrite(target: CellTargetRef | undefined): Promise<ConditionalFormatDefinition[]> {
+  if (target) {
+    await refreshAfterWrite(target);
+  } else {
+    await invalidateAndRefresh();
+  }
+  return readRules(target);
+}
+
+const scopeStyle: React.CSSProperties = {
+  fontSize: 12,
+  color: "#555",
+  margin: 0,
+};
 
 // ============================================================================
 // Styles
@@ -177,17 +208,31 @@ function describeRanges(rule: ConditionalFormatDefinition): string {
 export const RulesManagerDialog: React.FC<DialogProps> = ({
   isOpen,
   onClose,
+  data,
 }) => {
   const [rules, setRules] = useState<ConditionalFormatDefinition[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  // The scope (P3): a floating grid's rules, or the active sheet's.
+  const target = data?.target as CellTargetRef | undefined;
+  const scopeLabel = (data?.scopeLabel as string | undefined) ?? (target ? "This floating grid" : "This sheet");
 
   // Load rules when dialog opens
   useEffect(() => {
-    if (isOpen) {
-      setRules([...getRules()]);
-      setSelectedId(null);
-    }
-  }, [isOpen]);
+    if (!isOpen) return;
+    let live = true;
+    setSelectedId(null);
+    readRules(target)
+      .then((next) => {
+        if (live) setRules(next);
+      })
+      .catch((err) => {
+        console.error("[ConditionalFormatting] reading the rules failed:", err);
+        if (live) setRules([]);
+      });
+    return () => {
+      live = false;
+    };
+  }, [isOpen, target]);
 
   const handleClose = useCallback(() => {
     onClose();
@@ -196,11 +241,10 @@ export const RulesManagerDialog: React.FC<DialogProps> = ({
 
   const handleDelete = useCallback(async () => {
     if (selectedId == null) return;
-    await deleteConditionalFormat(selectedId);
-    await invalidateAndRefresh();
-    setRules([...getRules()]);
+    await deleteConditionalFormat(selectedId, { target });
+    setRules(await rulesAfterWrite(target));
     setSelectedId(null);
-  }, [selectedId]);
+  }, [selectedId, target]);
 
   const handleMoveUp = useCallback(async () => {
     if (selectedId == null) return;
@@ -210,10 +254,9 @@ export const RulesManagerDialog: React.FC<DialogProps> = ({
     const newOrder = [...rules];
     [newOrder[idx - 1], newOrder[idx]] = [newOrder[idx], newOrder[idx - 1]];
     const ids = newOrder.map((r) => r.id);
-    await reorderConditionalFormats(ids);
-    await invalidateAndRefresh();
-    setRules([...getRules()]);
-  }, [selectedId, rules]);
+    await reorderConditionalFormats(ids, { target });
+    setRules(await rulesAfterWrite(target));
+  }, [selectedId, rules, target]);
 
   const handleMoveDown = useCallback(async () => {
     if (selectedId == null) return;
@@ -223,24 +266,25 @@ export const RulesManagerDialog: React.FC<DialogProps> = ({
     const newOrder = [...rules];
     [newOrder[idx], newOrder[idx + 1]] = [newOrder[idx + 1], newOrder[idx]];
     const ids = newOrder.map((r) => r.id);
-    await reorderConditionalFormats(ids);
-    await invalidateAndRefresh();
-    setRules([...getRules()]);
-  }, [selectedId, rules]);
+    await reorderConditionalFormats(ids, { target });
+    setRules(await rulesAfterWrite(target));
+  }, [selectedId, rules, target]);
 
   const handleToggleStopIfTrue = useCallback(
     async (ruleId: number) => {
       const rule = rules.find((r) => r.id === ruleId);
       if (!rule) return;
 
-      await updateConditionalFormat({
-        ruleId,
-        stopIfTrue: !rule.stopIfTrue,
-      });
-      await invalidateAndRefresh();
-      setRules([...getRules()]);
+      await updateConditionalFormat(
+        {
+          ruleId,
+          stopIfTrue: !rule.stopIfTrue,
+        },
+        { target },
+      );
+      setRules(await rulesAfterWrite(target));
     },
-    [rules]
+    [rules, target]
   );
 
   const handleToggleEnabled = useCallback(
@@ -248,14 +292,16 @@ export const RulesManagerDialog: React.FC<DialogProps> = ({
       const rule = rules.find((r) => r.id === ruleId);
       if (!rule) return;
 
-      await updateConditionalFormat({
-        ruleId,
-        enabled: !rule.enabled,
-      });
-      await invalidateAndRefresh();
-      setRules([...getRules()]);
+      await updateConditionalFormat(
+        {
+          ruleId,
+          enabled: !rule.enabled,
+        },
+        { target },
+      );
+      setRules(await rulesAfterWrite(target));
     },
-    [rules]
+    [rules, target]
   );
 
   if (!isOpen) return null;
@@ -272,6 +318,9 @@ export const RulesManagerDialog: React.FC<DialogProps> = ({
         onMouseDown={(e) => e.stopPropagation()}
       >
         <h3 style={titleStyle}>Conditional Formatting Rules Manager</h3>
+        <p style={scopeStyle} data-cf-rules-scope>
+          Showing formatting rules for: {scopeLabel}
+        </p>
 
         {/* Toolbar */}
         <div style={toolbarStyle}>
@@ -312,7 +361,7 @@ export const RulesManagerDialog: React.FC<DialogProps> = ({
                 fontSize: 13,
               }}
             >
-              No conditional formatting rules on this sheet.
+              {target ? "No conditional formatting rules in this floating grid." : "No conditional formatting rules on this sheet."}
             </div>
           )}
           {rules.map((rule) => (

@@ -65,8 +65,15 @@ export interface Slicer {
   container?: VisualContainerFormat;
 }
 
+/** One member of the list with its state (mirrors Rust `slicer::types::SlicerItem`). */
 export interface SlicerItem {
-  value: string;
+  /** The member KEY (invariant canonical text): what the selection stores and
+   *  what selection, has-data and filters match on. The blank member's key is
+   *  "" (ruling Q8). */
+  key: string;
+  /** The app-locale display text ("(Blank)" for the blank member). Shown,
+   *  searched, never matched on. */
+  label: string;
   selected: boolean;
   hasData: boolean;
 }

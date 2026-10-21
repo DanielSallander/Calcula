@@ -502,7 +502,7 @@ export function renderSlicer(ctx: OverlayRenderContext): void {
     : undefined;
   const shownSet = shownSelection ? new Set(shownSelection) : null;
   const isShownSelected = (item: SlicerItem): boolean =>
-    shownSelection === undefined ? item.selected : shownSelection === null || shownSet!.has(item.value);
+    shownSelection === undefined ? item.selected : shownSelection === null || shownSet!.has(item.key);
   const allShownSelected = shownSelection === undefined ? slicer.selectedItems === null : shownSelection === null;
 
   // Core painted the container's shadow, background and border around this
@@ -609,7 +609,7 @@ export function renderSlicer(ctx: OverlayRenderContext): void {
           if (hasSlicerItemBitmapRenderer(String(slicer.id))) {
             const bmp = getSlicerItemBitmap(
               String(slicer.id),
-              { text: item.value, selected, hasData: item.hasData },
+              { text: item.label, key: item.key, selected, hasData: item.hasData },
               cellW,
               cellH - 2,
               window.devicePixelRatio || 1,
@@ -628,7 +628,7 @@ export function renderSlicer(ctx: OverlayRenderContext): void {
             // bitmap covers the item
           } else if (customRenderer) {
             customRenderer(
-              { text: item.value, selected, hasData: item.hasData, index: vi - selectAllOffset },
+              { text: item.label, key: item.key, selected, hasData: item.hasData, index: vi - selectAllOffset },
               c,
               { x: ix, y: iy + 1, width: cellW, height: cellH - 2 },
             );
@@ -654,7 +654,7 @@ export function renderSlicer(ctx: OverlayRenderContext): void {
                   : effColors.itemFg;
             }
 
-            c.fillText(item.value, ix + 8, iy + cellH / 2, cellW - 16);
+            c.fillText(item.label, ix + 8, iy + cellH / 2, cellW - 16);
           }
         }
       }
@@ -667,7 +667,7 @@ export function renderSlicer(ctx: OverlayRenderContext): void {
       if (keyFocus !== null && keyFocus.slicerId === slicerId) {
         const at = resolveSlicerFocusSlot(
           keyFocus,
-          items.map((i) => i.value),
+          items.map((i) => i.key),
           selectAllOffset > 0,
         );
         if (at !== null) {
@@ -989,7 +989,7 @@ export function getSlicerHitDetail(
     if (vi < frame.layout.selectAllOffset) return { type: "selectAll" };
     const itemIndex = vi - frame.layout.selectAllOffset;
     if (itemIndex < items.length) {
-      return { type: "item", itemIndex, itemValue: items[itemIndex].value };
+      return { type: "item", itemIndex, itemValue: items[itemIndex].key };
     }
   }
 

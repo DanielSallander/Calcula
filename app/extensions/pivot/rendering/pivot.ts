@@ -5,7 +5,7 @@ import type {
   PivotCellData,
   PivotRowData,
 } from '../lib/pivot-api';
-import { getCellDisplayValue } from '../lib/pivot-api';
+import { pivotCellDisplayText } from '@api/pivotMembers';
 import type { PivotInteractiveBounds } from '@api/pivotTypes';
 import { FALLBACK_PIVOT_STYLE_THEME } from '../styles/excelPivotStyles';
 
@@ -479,7 +479,7 @@ export function drawPivotCell(
   // Paint themed text for cells whose text is rendered by the grid renderer.
   // The overlay redraws the text so it matches the theme colors.
   if (cell.cellType !== 'FilterDropdown' && cell.cellType !== 'Blank') {
-    let displayText = cell.formattedValue || getCellDisplayValue(cell.value) || '';
+    let displayText = pivotCellDisplayText(cell) || '';
 
     // Strip bracket notation from BI measure names (e.g. "[TotalSales]" → "TotalSales")
     if (displayText.startsWith('[') && displayText.endsWith(']')) {
@@ -531,7 +531,7 @@ export function drawPivotCell(
   // FilterDropdown — draw text + arrow button on top of themed background
   if (cell.cellType === 'FilterDropdown') {
 
-    const displayText = cell.formattedValue || getCellDisplayValue(cell.value) || '(All)';
+    const displayText = pivotCellDisplayText(cell) || '(All)';
     const buttonResult = drawFilterDropdownButton(
       ctx,
       x,
@@ -842,7 +842,7 @@ export function renderPivotView(
         (fr) => fr.fieldIndex === cell.filterFieldIndex
       );
       cellHasActiveFilterDropdown = filterRowMeta
-        ? filterRowMeta.selectedValues.length < filterRowMeta.uniqueValues.length
+        ? filterRowMeta.selectedValues.length < filterRowMeta.members.length
         : false;
     }
 
@@ -1054,7 +1054,7 @@ export function measurePivotCellRequiredWidth(
   }
 
   const btnSize = Math.max(0, rowHeight - ARROW_BUTTON_MARGIN * 2);
-  const rawText = cell.formattedValue || getCellDisplayValue(cell.value) || '';
+  const rawText = pivotCellDisplayText(cell) || '';
 
   if (cell.cellType === 'FilterDropdown') {
     // drawFilterDropdownButton: raw text at weight 400 (no bracket

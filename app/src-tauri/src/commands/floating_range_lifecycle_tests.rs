@@ -126,6 +126,7 @@ fn update_patches_geometry_and_window_and_records_an_undo_entry() {
             col_count: Some(3),
             ..Default::default()
         },
+        crate::floating_range::PatchGate::ObjectEdit,
     )
     .expect("update");
 
@@ -145,6 +146,7 @@ fn update_patches_geometry_and_window_and_records_an_undo_entry() {
         &wb.file,
         info.range.id,
         FloatingRangePatch { x: Some(240.0), ..Default::default() },
+        crate::floating_range::PatchGate::ObjectEdit,
     )
     .expect("no-op update");
     assert_eq!(
@@ -171,7 +173,7 @@ fn update_refuses_out_of_bounds_windows() {
         FloatingRangePatch { x: Some(f64::NAN), ..Default::default() },
         FloatingRangePatch { x: Some(-1.0), ..Default::default() },
     ] {
-        crate::floating_range::update_floating_range_inner(&wb.state, &wb.file, info.range.id, patch)
+        crate::floating_range::update_floating_range_inner(&wb.state, &wb.file, info.range.id, patch, crate::floating_range::PatchGate::ObjectEdit)
             .expect_err("bounds must refuse");
     }
 }
@@ -339,6 +341,7 @@ fn floating_ranges_survive_a_collect_restore_round_trip() {
             row_heights: Some(std::collections::HashMap::from([(2u32, 44.0)])),
             ..Default::default()
         },
+        crate::floating_range::PatchGate::ObjectEdit,
     )
     .expect("shape it");
 
@@ -401,6 +404,7 @@ fn update_replaces_size_maps_wholesale_and_refuses_out_of_bounds_sizes() {
             &wb.file,
             id,
             FloatingRangePatch { col_widths: Some(map), ..Default::default() },
+            crate::floating_range::PatchGate::ObjectEdit,
         )
     };
 
@@ -418,6 +422,7 @@ fn update_replaces_size_maps_wholesale_and_refuses_out_of_bounds_sizes() {
         &wb.file,
         id,
         FloatingRangePatch { x: Some(11.0), ..Default::default() },
+        crate::floating_range::PatchGate::ObjectEdit,
     )
     .expect("geometry-only patch");
     assert_eq!(c.range.col_widths.get(&0), Some(&50.0));
@@ -635,6 +640,7 @@ fn a_range_on_a_subscribed_canvas_refuses_geometry_and_leaves_the_document_clean
             &wb.file,
             info.range.id,
             patch,
+            crate::floating_range::PatchGate::ObjectEdit,
         )
         .expect_err("a pulled canvas is the publisher's layout: read-only until detached");
         assert!(
@@ -667,6 +673,7 @@ fn a_range_on_a_subscribed_worksheet_still_moves() {
         &wb.file,
         info.range.id,
         FloatingRangePatch { x: Some(300.0), ..Default::default() },
+        crate::floating_range::PatchGate::ObjectEdit,
     )
     .expect("a range on a subscribed WORKSHEET moves");
     assert_eq!(moved.range.x, 300.0);
@@ -683,6 +690,7 @@ fn a_range_on_an_unsubscribed_canvas_moves_and_dirties_once() {
         &wb.file,
         info.range.id,
         FloatingRangePatch { x: Some(160.0), y: Some(96.0), ..Default::default() },
+        crate::floating_range::PatchGate::ObjectEdit,
     )
     .expect("an editable canvas's range moves");
     assert_eq!(row_x(&wb, info.range.id), 160.0);
@@ -700,6 +708,7 @@ fn an_unknown_id_is_refused_without_dirtying_the_document() {
         &wb.file,
         identity::EntityId::from_bytes(identity::generate_uuid_v7()),
         FloatingRangePatch { x: Some(10.0), ..Default::default() },
+        crate::floating_range::PatchGate::ObjectEdit,
     )
     .expect_err("no such range");
     assert!(
@@ -719,6 +728,7 @@ fn a_patch_that_changes_nothing_does_not_dirty_the_document() {
         &wb.file,
         info.range.id,
         FloatingRangePatch { x: Some(100.0), y: Some(50.0), ..Default::default() },
+        crate::floating_range::PatchGate::ObjectEdit,
     )
     .expect("a no-op patch is not an error");
     assert!(
@@ -773,6 +783,7 @@ fn a_protected_host_refuses_every_geometry_patch_and_leaves_the_document_clean()
             &wb.file,
             info.range.id,
             patch,
+            crate::floating_range::PatchGate::ObjectEdit,
         )
         .expect_err("a protected host without 'Edit objects' refuses the object edit");
         assert!(
@@ -816,6 +827,7 @@ fn a_protected_host_that_allows_edit_objects_still_moves_its_range() {
         &wb.file,
         info.range.id,
         FloatingRangePatch { x: Some(240.0), ..Default::default() },
+        crate::floating_range::PatchGate::ObjectEdit,
     )
     .expect("'Edit objects' allowed: the object moves");
     assert_eq!(row_x(&wb, info.range.id), 240.0);

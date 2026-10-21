@@ -6,6 +6,7 @@
 //          color (CSS color, default Calcula green), showLabel (boolean).
 
 import type { CellTypeDefinition, CellTypeRenderContext } from "@api/cellTypes";
+import { parseNumber } from "@api/locale";
 
 export const PROGRESS_TYPE_ID = "calcula.progress";
 
@@ -13,26 +14,22 @@ const DEFAULT_COLOR = "#217346";
 const TRACK_COLOR = "rgba(128, 128, 128, 0.18)";
 
 /**
- * Parse the cell's display string as a number. Display strings are
- * locale-formatted, so a decimal comma and a trailing percent sign are
- * tolerated (best-effort v1 parsing of an already-formatted value).
+ * The number a progress bar shows for a cell. The render context carries only
+ * the cell's DISPLAY text, which the engine wrote in the app locale, so it is
+ * read back STRICTLY in that locale through `parseNumber` (its grouping, its
+ * decimal separator, a percent sign, its currency symbol): de-DE "1.234,5"
+ * is 1234.5, sv-SE "42 %" is 0.42. A foreign spelling is not a number. An
+ * empty cell is 0. Null = not a number (the cell is shown as plain text).
  */
-function parseDisplayNumber(display: string): number | null {
-  const trimmed = display.trim();
-  if (trimmed === "") return null;
-  const isPercent = trimmed.endsWith("%");
-  const cleaned = (isPercent ? trimmed.slice(0, -1) : trimmed)
-    .replace(/\s/g, "")
-    .replace(",", ".");
-  const num = Number(cleaned);
-  if (Number.isNaN(num)) return null;
-  return isPercent ? num / 100 : num;
+export function progressValueOf(display: string): number | null {
+  if (display.trim() === "") return 0;
+  return parseNumber(display);
 }
 
 function renderProgress(context: CellTypeRenderContext): boolean {
   const { ctx, cellLeft, cellTop, cellRight, cellBottom, value, params } = context;
 
-  const parsed = value === "" ? 0 : parseDisplayNumber(value);
+  const parsed = progressValueOf(value);
   if (parsed === null) {
     return false; // Non-numeric value: show it as plain text.
   }

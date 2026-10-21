@@ -17,6 +17,7 @@ import type {
   DataLabelPosition,
 } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
+import { formatNumber } from "@api/locale";
 import { formatTickValue, recordDataLabelRects } from "./chartPainterUtils";
 
 // ============================================================================
@@ -322,12 +323,12 @@ function formatLabelText(
         break;
       case "percent":
         if (percent != null) {
-          parts.push(`${percent.toFixed(1)}%`);
+          parts.push(`${formatNumber(percent, { decimals: 1 })}%`);
         } else {
           // Calculate percent from total of all series values
           const total = data.series.reduce((sum, s) => sum + s.values.reduce((a, b) => a + b, 0), 0);
           const pct = total > 0 ? (value / total) * 100 : 0;
-          parts.push(`${pct.toFixed(1)}%`);
+          parts.push(`${formatNumber(pct, { decimals: 1 })}%`);
         }
         break;
     }
@@ -340,7 +341,7 @@ function formatWithPattern(value: number, pattern: string): string {
   // Simple format patterns: "$,.2f", ",.0f", ".1%", etc.
   if (pattern.endsWith("%")) {
     const decimals = parseInt(pattern.match(/\.(\d+)/)?.[1] ?? "1", 10);
-    return (value * 100).toFixed(decimals) + "%";
+    return formatNumber(value * 100, { decimals }) + "%";
   }
 
   const hasComma = pattern.includes(",");
@@ -348,14 +349,8 @@ function formatWithPattern(value: number, pattern: string): string {
   const decimals = decimalsMatch ? parseInt(decimalsMatch[1], 10) : 0;
   const prefix = pattern.startsWith("$") ? "$" : "";
 
-  let formatted = value.toFixed(decimals);
-  if (hasComma) {
-    const [intPart, decPart] = formatted.split(".");
-    const withCommas = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-    formatted = decPart ? `${withCommas}.${decPart}` : withCommas;
-  }
-
-  return prefix + formatted;
+  // The app locale's digits, grouping and decimal separator.
+  return prefix + formatNumber(value, { decimals, grouping: hasComma });
 }
 
 /**

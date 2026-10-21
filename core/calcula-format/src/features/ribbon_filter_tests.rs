@@ -23,10 +23,11 @@ mod tests {
             connection_mode: SavedConnectionMode::BySheet,
             connected_pivots: vec![mint_id(), mint_id()],
             connected_sheets: vec![0, 2],
+            connected_visuals: vec![],
             display_mode: SavedRibbonFilterDisplayMode::Checklist,
             selected_items: Some(vec!["New York".to_string(), "London".to_string()]),
-            cross_filter_targets: vec![],
-            cross_filter_slicer_targets: vec![],
+            dependent_filters: vec![],
+            dependent_slicers: vec![],
             advanced_filter: None,
             hide_no_data: false,
             indicate_no_data: true,
@@ -51,10 +52,11 @@ mod tests {
             connection_mode: SavedConnectionMode::Manual,
             connected_pivots: vec![],
             connected_sheets: vec![],
+            connected_visuals: vec![],
             display_mode: SavedRibbonFilterDisplayMode::Checklist,
             selected_items: None,
-            cross_filter_targets: vec![],
-            cross_filter_slicer_targets: vec![],
+            dependent_filters: vec![],
+            dependent_slicers: vec![],
             advanced_filter: None,
             hide_no_data: false,
             indicate_no_data: true,
@@ -83,7 +85,7 @@ mod tests {
         assert_eq!(def.connected_pivots, saved.connected_pivots);
         assert_eq!(def.display_mode, "checklist");
         assert_eq!(def.selected_items.as_ref().unwrap().len(), 2);
-        assert!(def.cross_filter_targets.is_empty());
+        assert!(def.dependent_filters.is_empty());
         assert_eq!(def.order, 5);
         assert_eq!(def.button_columns, 3);
         assert_eq!(def.button_rows, 4);
@@ -176,5 +178,82 @@ mod tests {
         assert!(!json.contains("\"connectedSheets\""));
         // Null selectedItems should be skipped
         assert!(!json.contains("\"selectedItems\""));
+    }
+
+    /// P1 round 2: the ribbon filter's filter-to-filter and filter-to-slicer
+    /// narrowing lists are called `dependentFilters` / `dependentSlicers` on the
+    /// wire ("cross-filter" is reserved for visual cross-filtering). The `.cala`
+    /// key is the serde camelCase of the field, so this pins the saved shape.
+    #[test]
+    fn dependent_lists_round_trip_under_their_new_keys() {
+        let mut saved = make_test_saved_filter();
+        let (f1, f2, s1) = (mint_id(), mint_id(), mint_id());
+        saved.dependent_filters = vec![f1, f2];
+        saved.dependent_slicers = vec![s1];
+        let def = RibbonFilterDef::from(&saved);
+
+        let json = serde_json::to_string(&def).unwrap();
+        assert!(json.contains("\"dependentFilters\""), "new key missing: {json}");
+        assert!(json.contains("\"dependentSlicers\""), "new key missing: {json}");
+        assert!(!json.contains("crossFilterTargets"), "old key still written: {json}");
+        assert!(!json.contains("crossFilterSlicerTargets"), "old key still written: {json}");
+
+        let back: RibbonFilterDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.dependent_filters, vec![f1, f2]);
+        assert_eq!(back.dependent_slicers, vec![s1]);
+        let saved_back = SavedRibbonFilter::from(&back);
+        assert_eq!(saved_back.dependent_filters, saved.dependent_filters);
+        assert_eq!(saved_back.dependent_slicers, saved.dependent_slicers);
+        // The whole def survives unchanged: re-serializing gives the same JSON.
+        assert_eq!(serde_json::to_string(&back).unwrap(), json);
+    }
+
+    /// No alias exists for the retired keys (CLAUDE.md: no backward
+    /// compatibility; per-field serde renames are forbidden). A document that
+    /// still carries `crossFilterTargets` loads with NO dependent filters --
+    /// values are simply not narrowed, which is a visible loss, never a lie.
+    #[test]
+    fn retired_cross_filter_keys_are_not_read() {
+        let def = RibbonFilterDef::from(&make_minimal_saved_filter());
+        let mut value = serde_json::to_value(&def).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        assert!(!obj.contains_key("dependentFilters"));
+        assert!(!obj.contains_key("dependentSlicers"));
+        let stale = serde_json::to_value(mint_id()).unwrap();
+        obj.insert("crossFilterTargets".to_string(), serde_json::Value::Array(vec![stale.clone()]));
+        obj.insert("crossFilterSlicerTargets".to_string(), serde_json::Value::Array(vec![stale]));
+
+        let read: RibbonFilterDef = serde_json::from_value(value).unwrap();
+        assert!(read.dependent_filters.is_empty(), "a retired key was read as an alias");
+        assert!(read.dependent_slicers.is_empty(), "a retired key was read as an alias");
+    }
+
+    /// P4 (review A1): `connected_visuals` ("Selected visuals", the NON-pivot
+    /// model visuals) survives SavedRibbonFilter -> RibbonFilterDef -> JSON ->
+    /// RibbonFilterDef -> SavedRibbonFilter, under the camelCase key, and an
+    /// empty list is absent from the JSON. Without the field on the def and in
+    /// BOTH From impls, every save and load would drop it silently.
+    #[test]
+    fn connected_visuals_survive_the_def_mirror_and_json() {
+        let mut saved = make_test_saved_filter();
+        saved.connection_mode = SavedConnectionMode::Manual;
+        saved.connected_visuals = vec![
+            CanvasObjectRef { kind: "chart".to_string(), id: "12".to_string() },
+            CanvasObjectRef { kind: "chart".to_string(), id: "0:3".to_string() },
+        ];
+        let def = RibbonFilterDef::from(&saved);
+        assert_eq!(def.connected_visuals, saved.connected_visuals, "Saved -> Def dropped the visuals");
+
+        let json = serde_json::to_string(&def).unwrap();
+        assert!(json.contains("\"connectedVisuals\""), "camelCase key missing: {json}");
+        let def_back: RibbonFilterDef = serde_json::from_str(&json).unwrap();
+        let saved_back = SavedRibbonFilter::from(&def_back);
+        assert_eq!(saved_back.connected_visuals, saved.connected_visuals, "Def -> Saved dropped the visuals");
+        assert_eq!(saved_back.connected_pivots, saved.connected_pivots, "pivots stay in their own list");
+
+        let empty = serde_json::to_string(&RibbonFilterDef::from(&make_minimal_saved_filter())).unwrap();
+        assert!(!empty.contains("connectedVisuals"), "an empty list must stay off the wire: {empty}");
+        let read: RibbonFilterDef = serde_json::from_str(&empty).unwrap();
+        assert!(read.connected_visuals.is_empty(), "an absent key reads as an empty list");
     }
 }

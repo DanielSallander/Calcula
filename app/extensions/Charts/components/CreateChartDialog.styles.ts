@@ -2,7 +2,8 @@
 // PURPOSE: Styled-components for the Create Chart dialog.
 // CONTEXT: Follows same pattern as FormatCellsDialog.styles.ts.
 
-import styled from "styled-components";
+import styled, { css } from "styled-components";
+import { NumberInput } from "@api/layout";
 
 const v = (name: string) => `var(${name})`;
 
@@ -196,7 +197,7 @@ export const GridSpan = styled.div`
   min-width: 0;
 `;
 
-export const Input = styled.input`
+const inputLook = css`
   width: 100%;
   padding: 6px 10px;
   font-size: 12px;
@@ -211,6 +212,16 @@ export const Input = styled.input`
   &:focus {
     border-color: ${v("--accent-primary")};
   }
+`;
+
+export const Input = styled.input`
+  ${inputLook}
+`;
+
+/** A number box with the Input's look, typed and shown in the APP locale
+ *  (the @api/layout NumberInput: draft, strict parse, arrow step). */
+export const NumberBox = styled(NumberInput)`
+  ${inputLook}
 `;
 
 export const Select = styled.select`

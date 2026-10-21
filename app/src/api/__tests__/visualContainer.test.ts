@@ -30,6 +30,8 @@ import {
   lineHeightFor,
   readContainerField,
   resolveVisualContainer,
+  solidBackgroundIsNoop,
+  solidBackgroundPatch,
   validateVisualContainer,
   validateVisualContainerPatch,
   type ContainerFieldId,
@@ -270,6 +272,92 @@ describe("patches", () => {
     expect(isEmptyVisualContainer({ border: {} })).toBe(true);
     expect(isEmptyVisualContainer({ border: { show: false } })).toBe(false);
     expect(isEmptyVisualContainer({ lockAspect: false })).toBe(false);
+  });
+});
+
+// ============================================================================
+// A solid background commit (round 2, G1)
+// ============================================================================
+
+describe("solidBackgroundPatch / solidBackgroundIsNoop", () => {
+  const gradient = { type: "linear" as const, stops: [{ offset: 0, color: "#000000" }, { offset: 1, color: "#ffffff" }] };
+  const base = (stored: VisualContainerFormat | undefined, defaults: ResolvedVisualContainer = BASE_CONTAINER_DEFAULTS) => ({
+    stored,
+    resolved: resolveVisualContainer(stored, defaults),
+  });
+  const hiddenDefaults: ResolvedVisualContainer = {
+    ...BASE_CONTAINER_DEFAULTS,
+    background: { ...BASE_CONTAINER_DEFAULTS.background, show: false },
+  };
+  const gradientDefaults: ResolvedVisualContainer = {
+    ...BASE_CONTAINER_DEFAULTS,
+    background: { ...BASE_CONTAINER_DEFAULTS.background, gradient },
+  };
+
+  it("with no base the patch is unconditional (the preset form)", () => {
+    expect(solidBackgroundPatch("#123456")).toEqual({ background: { color: "#123456", show: true, gradient: null } });
+  });
+
+  it("null = back to the family default, and never touches show or the gradient", () => {
+    expect(solidBackgroundPatch(null)).toEqual({ background: { color: null } });
+    expect(solidBackgroundPatch(null, base({ background: { show: false, gradient } }))).toEqual({
+      background: { color: null },
+    });
+  });
+
+  it("a plain container gets the colour alone", () => {
+    expect(solidBackgroundPatch("#123456", base({}))).toEqual({ background: { color: "#123456" } });
+    expect(solidBackgroundPatch("#123456", { stored: undefined, resolved: undefined })).toEqual({
+      background: { color: "#123456" },
+    });
+  });
+
+  it("a stored OR resolved gradient is cleared", () => {
+    expect(solidBackgroundPatch("#123456", base({ background: { gradient } }))).toEqual({
+      background: { color: "#123456", gradient: null },
+    });
+    expect(solidBackgroundPatch("#123456", base({}, gradientDefaults))).toEqual({
+      background: { color: "#123456", gradient: null },
+    });
+  });
+
+  it("a stored show:false or a resolved show:false is switched on", () => {
+    expect(solidBackgroundPatch("#123456", base({ background: { show: false } }))).toEqual({
+      background: { color: "#123456", show: true },
+    });
+    expect(solidBackgroundPatch("#123456", base({}, hiddenDefaults))).toEqual({
+      background: { color: "#123456", show: true },
+    });
+    // A stored show:true over a hidden-by-default family resolves true: nothing to switch.
+    expect(solidBackgroundPatch("#123456", base({ background: { show: true } }, hiddenDefaults))).toEqual({
+      background: { color: "#123456" },
+    });
+  });
+
+  it("every patch it builds passes the patch validator and applies to the solid colour", () => {
+    const cases = [
+      solidBackgroundPatch("#123456"),
+      solidBackgroundPatch(null),
+      solidBackgroundPatch("#123456", base({ background: { show: false, gradient, color: "#000" } })),
+    ];
+    for (const p of cases) expect(validateVisualContainerPatch(p)).toBeNull();
+    const applied = applyVisualContainerPatch({ background: { show: false, gradient, color: "#000" } }, cases[2]);
+    expect(applied).toEqual({ background: { show: true, color: "#123456" } });
+  });
+
+  it("the no-op test: same shown colour, shown, no gradient", () => {
+    expect(solidBackgroundIsNoop("#123456", base({ background: { color: "#123456" } }))).toBe(true);
+    expect(solidBackgroundIsNoop("#ABCDEF", base({ background: { color: "#abcdef" } }))).toBe(true);
+    expect(solidBackgroundIsNoop(BASE_CONTAINER_DEFAULTS.background.color, base({}))).toBe(true);
+    // The stored literal is what shows when there is one (a binding's resolved value is not the literal).
+    expect(
+      solidBackgroundIsNoop("#123456", { stored: { background: { color: "#123456" } }, resolved: BASE_CONTAINER_DEFAULTS }),
+    ).toBe(true);
+    expect(solidBackgroundIsNoop("#654321", base({ background: { color: "#123456" } }))).toBe(false);
+    expect(solidBackgroundIsNoop("#123456", base({ background: { color: "#123456", gradient } }))).toBe(false);
+    expect(solidBackgroundIsNoop("#123456", base({ background: { color: "#123456", show: false } }))).toBe(false);
+    expect(solidBackgroundIsNoop(BASE_CONTAINER_DEFAULTS.background.color, base({}, hiddenDefaults))).toBe(false);
+    expect(solidBackgroundIsNoop(BASE_CONTAINER_DEFAULTS.background.color, base({}, gradientDefaults))).toBe(false);
   });
 });
 

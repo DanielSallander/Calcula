@@ -4,6 +4,7 @@
 
 pub mod types;
 pub mod commands;
+pub mod member;
 pub mod cube;
 pub mod macro_capture;
 pub mod measures;
@@ -20,6 +21,9 @@ mod active_query_sheet_tests;
 
 #[cfg(test)]
 mod blank_member_tests;
+
+#[cfg(test)]
+mod member_tests;
 
 pub use commands::*;
 pub use types::{BiState, ConnectionId};

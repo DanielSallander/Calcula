@@ -201,6 +201,35 @@ describe("fromInfo normalization", () => {
     expect(roundTripped.backingSheetIndex).toBe(info.backingSheetIndex);
     expect(roundTripped.name).toBe(info.name);
   });
+  // P3 spec review finding 4: the entry is rebuilt FIELD BY FIELD, so a field
+  // added only to the @api type never reaches the renderer. The hidden sets
+  // must be mapped (normalized) and copied by both directions.
+  it("maps the hidden line sets: integers, sorted, de-duplicated, [] when absent", () => {
+    const e = fromInfo(makeInfo({ hiddenRows: [3, 1, 1], hiddenCols: [2] }));
+    expect(e.hiddenRows).toEqual([1, 3]);
+    expect(e.hiddenCols).toEqual([2]);
+    const junk = fromInfo(makeInfo({ hiddenRows: [-1, 1.5, 4] as number[], hiddenCols: undefined }));
+    expect(junk.hiddenRows).toEqual([4]);
+    expect(junk.hiddenCols).toEqual([]);
+  });
+
+  it("the store entry and toInfo carry the hidden sets (copies, not the same arrays)", () => {
+    const stored = upsertFromInfo(makeInfo({ hiddenRows: [3, 1, 1] }));
+    expect(getFloatingRangeById(stored.id)?.hiddenRows).toEqual([1, 3]);
+    const wire = toInfo(stored);
+    expect(wire.hiddenRows).toEqual([1, 3]);
+    expect(wire.hiddenCols).toEqual([]);
+    expect(wire.hiddenRows).not.toBe(stored.hiddenRows);
+  });
+
+  it("a hidden row SHRINKS the published frame by its height", () => {
+    setFrActiveSheetIndex(0);
+    upsertFromInfo(makeInfo({ id: "a", rowCount: 3 }));
+    upsertFromInfo(makeInfo({ id: "b", rowCount: 3, hiddenRows: [1] }));
+    syncFloatingRangeRegions();
+    const height = (id: string) => getGridRegions().find((r) => r.id === "fr-" + id)!.floating!.height;
+    expect(height("a") - height("b")).toBe(FR_DEFAULT_ROW_H);
+  });
 });
 
 // ============================================================================

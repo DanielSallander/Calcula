@@ -12,6 +12,7 @@
 //          without a grid, a dialog or a backend.
 
 import type { SetSelectionPayload } from "@api/grid";
+import { formatNumber } from "@api/locale";
 
 /** One matched cell, as the backend reports it. */
 export interface MatchedCell {
@@ -122,9 +123,9 @@ export function selectionForMatches(cells: readonly MatchedCell[]): SetSelection
   if (areas.length === 0) return null;
   if (areas.length > MAX_MATCH_AREAS) {
     throw new Error(
-      `Go To Special found ${cells.length.toLocaleString("en-US")} cells in ` +
-        `${areas.length.toLocaleString("en-US")} separate areas, more than can be selected at once ` +
-        `(${MAX_MATCH_AREAS.toLocaleString("en-US")}). Select a smaller range first and try again.`,
+      `Go To Special found ${formatNumber(cells.length, { grouping: true, decimals: 0 })} cells in ` +
+        `${formatNumber(areas.length, { grouping: true, decimals: 0 })} separate areas, more than can be selected at once ` +
+        `(${formatNumber(MAX_MATCH_AREAS, { grouping: true, decimals: 0 })}). Select a smaller range first and try again.`,
     );
   }
   const [first, ...rest] = areas;

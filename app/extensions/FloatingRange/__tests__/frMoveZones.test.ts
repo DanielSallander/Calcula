@@ -135,7 +135,8 @@ import {
   FR_TITLE_H,
   FR_COL_HDR_H,
 } from "../lib/frDimensions";
-import { hitTestFloatingRange } from "../rendering/frRenderer";
+import { hitTestFloatingRange, recordFrCellRead } from "../rendering/frRenderer";
+import { styledRead } from "./helpers/frStyledRead";
 import { recordFrUsedExtent, resetFrExtents } from "../lib/frExtent";
 import { registerLayoutSurfaceProvider, type LayoutSurface } from "@api/layoutSurface";
 import { registerGridOverlay, getOverlayRegistration } from "@api/gridOverlays";
@@ -537,6 +538,30 @@ describe("edge-handle cell scaling", () => {
     mouse("mouseup", drag.canvasX + 30, drag.canvasY);
     await flush();
     expect(updateFloatingRange).toHaveBeenCalledTimes(1);
+  });
+
+  // P3: a row the OBJECT hides is 0 px and is not scaled: it keeps its stored
+  // height (so unhiding shows it at the size it had), and a drag never
+  // re-shows it or gives it a size it did not have.
+  it("a BOTTOM-edge drag over a grid with row 2 hidden leaves rowHeights[2] unchanged (and gives row 3 none)", async () => {
+    load({ hiddenRows: [2, 3], rowHeights: { 2: 33 } } as Partial<FloatingRangeInfo>);
+    const entry = getFloatingRangeById(FR_ID)!;
+    const h0 = frameHeight(entry);
+    const ctx = ctxAt(frameWidth(entry) / 2, h0, SELECTED);
+    expect(pressInCoreOrder(ctx)).toBe("content");
+    mouse("mousemove", ctx.canvasX, ctx.canvasY + 40);
+    const live = getFloatingRangeById(FR_ID)!;
+    expect(frameHeight(live)).toBeGreaterThan(h0 + 20);
+    expect(live.rowHeights[2], "the hidden row was scaled").toBe(33);
+    expect(live.rowHeights[3], "a hidden row with no size was given one").toBeUndefined();
+    expect(live.rowHeights[0]).toBeGreaterThan(FR_DEFAULT_ROW_H);
+    expect(live.hiddenRows).toEqual([2, 3]);
+    mouse("mouseup", ctx.canvasX, ctx.canvasY + 40);
+    await flush();
+    // The ONE write carries the hidden row's stored size unchanged.
+    const patch = updateFloatingRange.mock.calls.at(-1)?.[1] as { rowHeights: Record<number, number> };
+    expect(patch.rowHeights[2]).toBe(33);
+    expect(patch.rowHeights[3]).toBeUndefined();
   });
 
   it("a ball press moves no cell selection (the ball is not the cell under it)", () => {
@@ -971,5 +996,31 @@ describe("the container's padding band: frame around, the title bar and the cell
     expect(q.cols).toBe(4);
     expect(q.rows).toBe(4);
     expect(q.width).toBeCloseTo(frameWidth(entry) + FR_DEFAULT_COL_W, 6);
+  });
+});
+
+// ============================================================================
+// P3: a press on a MERGED cell selects the merge; a hidden row is never hit
+// ============================================================================
+
+describe("merged and hidden cells under a press (P3)", () => {
+  it("a press on the RIGHT half of a merged A1:B1 selects A1:B1, with A1 active", () => {
+    recordFrCellRead(FR_ID, { startRow: 0, startCol: 0, endRow: 3, endCol: 2 }, styledRead(
+      { startRow: 0, startCol: 0, endRow: 3, endCol: 2 },
+      () => null,
+      {},
+      { merges: [{ startRow: 0, startCol: 0, endRow: 0, endCol: 1 }] },
+    ));
+    const c = cellCentre(0, 1);
+    expect(clickInCoreOrder(ctxAt(c.dx, c.dy, FREE))).toBe("content");
+    expect(getLocalSelection()).toMatchObject({ anchorRow: 0, anchorCol: 0, endRow: 0, endCol: 1 });
+  });
+
+  it("a press where a hidden row was lands on the row now shown there", () => {
+    load({ hiddenRows: [1] } as Partial<FloatingRangeInfo>);
+    // Row 1 is 0 px: the centre of the SECOND painted row is row 2.
+    const c = cellCentre(1, 0);
+    expect(clickInCoreOrder(ctxAt(c.dx, c.dy, FREE))).toBe("content");
+    expect(getLocalSelection()).toMatchObject({ anchorRow: 2, endRow: 2 });
   });
 });

@@ -71,6 +71,7 @@ fn binding_cx(handle: &AppHandle) -> BindingCx<'_> {
         pivots: handle.state::<crate::pivot::types::PivotState>().inner(),
         pane: handle.state::<crate::pane_control::PaneControlState>().inner(),
         ribbon: handle.state::<crate::ribbon_filter::RibbonFilterState>().inner(),
+        user_files: handle.state::<crate::persistence::UserFilesState>().inner(),
     }
 }
 
@@ -387,10 +388,53 @@ pub(crate) fn set_object_property_core(
     let shown = truncate_value(&value.to_string());
     let source = BindingEditSource::Ai { tool: SET_OBJECT_PROPERTY_TOOL.to_string() };
     let handled = object_bindings::set_literal_core(cx, &object, path, value, &source)?;
+    Ok(property_write_reply(cx, &object, path, &shown, handled))
+}
+
+/// [`set_object_property_core`] with the BI state: a canvas page's
+/// `/interactions` goes through the async binding door (P4 S4d), which also
+/// re-folds the PivotTables the change reaches in the same undo step (DC-9);
+/// every other path is the synchronous core. ERASED for the reason
+/// [`set_object_binding_core`] is: the re-fold nests the BI pivot rebuild.
+pub(crate) fn set_object_property_async_core<'a>(
+    cx: &'a BindingCx<'a>,
+    bi: &'a crate::bi::types::BiState,
+    kind: &'a str,
+    id: &'a str,
+    path: &'a str,
+    value: Value,
+) -> Pin<Box<dyn Future<Output = Result<PropertyWrite, String>> + Send + 'a>> {
+    Box::pin(async move {
+        let object = object_ref(kind, id)?;
+        if object.kind != ObjectBindingKind::CanvasPage || path != catalog::CANVAS_INTERACTIONS_PATH {
+            return set_object_property_core(cx, kind, id, path, value);
+        }
+        let shown = truncate_value(&value.to_string());
+        let source = BindingEditSource::Ai { tool: SET_OBJECT_PROPERTY_TOOL.to_string() };
+        let request = ObjectBindingsRequest::SetLiteral {
+            object: object.clone(),
+            path: path.to_string(),
+            value,
+            source: Some(source),
+        };
+        let handled = dispatch(cx, bi, request).await?;
+        Ok(property_write_reply(cx, &object, path, &shown, handled))
+    })
+}
+
+/// The reply and the announcements of one literal write.
+fn property_write_reply(
+    cx: &BindingCx<'_>,
+    object: &ObjectBindingRef,
+    path: &str,
+    shown: &str,
+    handled: object_bindings::Handled,
+) -> PropertyWrite {
     let domains = match handled.response {
         ObjectBindingsResponse::LiteralSet { domains } => domains,
         _ => Vec::new(),
     };
+    let object = object.clone();
     let what = describe(cx, &object);
     let mut reply = if domains.is_empty() {
         format!("{path} of {what} is already {shown}; nothing changed.")
@@ -404,7 +448,7 @@ pub(crate) fn set_object_property_core(
             bound.formula
         ));
     }
-    Ok(PropertyWrite { reply, domains, layout: handled.layout })
+    PropertyWrite { reply, domains, layout: handled.layout }
 }
 
 /// A boxed, `Send` future whose concrete type is ERASED.
@@ -531,18 +575,22 @@ pub fn list_object_properties(
 
 /// `set_object_property`: write a literal through the family's own core, then
 /// announce the domains it reports (`mutation:refresh`) and, for a canvas
-/// page, the canvas-layout change.
-pub fn set_object_property(
+/// page, the canvas-layout change. ASYNC since P4 S4d: a page's
+/// `/interactions` re-folds the PivotTables the change reaches.
+pub async fn set_object_property(
     handle: &AppHandle,
     kind: &str,
     id: &str,
     path: &str,
     value: Value,
 ) -> Result<String, String> {
-    let script_state = handle.state::<crate::scripting::types::ScriptState>();
-    super::objects::gate(&script_state, "set_object_property")?;
+    {
+        let script_state = handle.state::<crate::scripting::types::ScriptState>();
+        super::objects::gate(&script_state, "set_object_property")?;
+    }
     let cx = binding_cx(handle);
-    let written = set_object_property_core(&cx, kind, id, path, value)?;
+    let bi = handle.state::<crate::bi::types::BiState>().inner();
+    let written = set_object_property_async_core(&cx, bi, kind, id, path, value).await?;
     use tauri::Emitter;
     if !written.domains.is_empty() {
         let _ = handle.emit(

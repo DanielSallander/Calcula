@@ -19,10 +19,13 @@ export interface ISlicerStoreService {
   listSlicers(): Array<{ id: string; name: string; sheetIndex: number; fieldName: string; sourceType: string }>;
   getSelectedItems(slicerId: string): string[];
   setSelectedItems(slicerId: string, items: string[] | null): Promise<void>;
-  getCachedItems(slicerId: string): Array<{ text: string; hasData: boolean }> | undefined;
-  /** Register a custom item renderer for a slicer. Returns cleanup function. */
+  /** The slicer's items: `text` is the display label (app locale), `key` the
+   *  invariant member key that `setSelectedItems` speaks. */
+  getCachedItems(slicerId: string): Array<{ text: string; key: string; hasData: boolean }> | undefined;
+  /** Register a custom item renderer for a slicer. Returns cleanup function.
+   *  `item.text` is the display label; `item.key` the member key. */
   setItemRenderer(slicerId: string, renderer: ((
-    item: { text: string; selected: boolean; hasData: boolean; index: number },
+    item: { text: string; key: string; selected: boolean; hasData: boolean; index: number },
     ctx: CanvasRenderingContext2D,
     bounds: { x: number; y: number; width: number; height: number },
   ) => void) | null): () => void;

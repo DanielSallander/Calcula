@@ -13,6 +13,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { formatNumber } from "@api/locale";
 
 // --- The backend door, mocked wholesale ------------------------------------
 const cancelCalculation = vi.fn(async () => true);
@@ -48,16 +49,13 @@ let container: HTMLDivElement;
 let root: Root;
 
 /**
- * Group a number the way the COMPONENT does.
- *
- * Deliberately not a hardcoded "1,000": the component uses
- * `toLocaleString()`, so on a Swedish machine (this repo's own environment)
- * the separator is a non-breaking space, and asserting the US form would fail
- * on the developer's laptop while passing in CI. Same class of bug as the
- * formula-separator locale trap already documented for the E2E suite.
+ * Group a number the way the COMPONENT does: in the APP locale (P2 S10), which
+ * a unit test leaves at the invariant locale -- so the expectation no longer
+ * depends on the machine's region, as it did while the component used
+ * `toLocaleString()`.
  */
 function grouped(n: number): string {
-  return n.toLocaleString();
+  return formatNumber(n, { grouping: true, decimals: 0 });
 }
 
 function mount(): void {

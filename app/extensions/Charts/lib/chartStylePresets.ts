@@ -6,6 +6,7 @@
 
 import type { ChartRenderTheme } from "../rendering/chartTheme";
 import type { AxisSpec, ChartContainerFormat } from "../types";
+import { solidBackgroundPatch, type VisualContainerPatch } from "@api/visualContainer";
 
 // ============================================================================
 // Preset Type
@@ -52,6 +53,11 @@ export function getPresetColors(preset: ChartStylePreset): string[] {
 // ============================================================================
 // Colorful Styles (multi-hue palettes, light backgrounds)
 // ============================================================================
+//
+// The colorful and the light outline styles set NO plot fill: the plot area is
+// transparent (Power BI), so the visual's background -- the container colour,
+// the Format pane's Background row -- recolours the whole visual. Mono, dark,
+// "Gray Background" and gradient styles keep a deliberately tinted plot.
 
 const colorfulStyles: ChartStylePreset[] = [
   {
@@ -60,7 +66,7 @@ const colorfulStyles: ChartStylePreset[] = [
     category: "colorful",
     palette: "default",
     background: "#ffffff",
-    theme: { plotBackground: "#fafafa", gridLineColor: "#e8e8e8" },
+    theme: { gridLineColor: "#e8e8e8" },
     gridLines: true,
     barBorderRadius: 2,
   },
@@ -70,7 +76,7 @@ const colorfulStyles: ChartStylePreset[] = [
     category: "colorful",
     palette: "vivid",
     background: "#ffffff",
-    theme: { plotBackground: "#fafafa", gridLineColor: "#e8e8e8" },
+    theme: { gridLineColor: "#e8e8e8" },
     gridLines: true,
     barBorderRadius: 2,
   },
@@ -80,7 +86,7 @@ const colorfulStyles: ChartStylePreset[] = [
     category: "colorful",
     palette: "pastel",
     background: "#ffffff",
-    theme: { plotBackground: "#fafafa", gridLineColor: "#e0e0e0" },
+    theme: { gridLineColor: "#e0e0e0" },
     gridLines: true,
     barBorderRadius: 3,
   },
@@ -90,7 +96,7 @@ const colorfulStyles: ChartStylePreset[] = [
     category: "colorful",
     palette: "ocean",
     background: "#ffffff",
-    theme: { plotBackground: "#f8f9fa", gridLineColor: "#e0e0e0" },
+    theme: { gridLineColor: "#e0e0e0" },
     gridLines: true,
     barBorderRadius: 0,
   },
@@ -100,7 +106,7 @@ const colorfulStyles: ChartStylePreset[] = [
     category: "colorful",
     palette: "default",
     background: "#ffffff",
-    theme: { plotBackground: "#ffffff", gridLineColor: "#f0f0f0", gridLineWidth: 1 },
+    theme: { gridLineColor: "#f0f0f0", gridLineWidth: 1 },
     gridLines: true,
     barBorderRadius: 0,
   },
@@ -110,7 +116,7 @@ const colorfulStyles: ChartStylePreset[] = [
     category: "colorful",
     palette: "default",
     background: "#ffffff",
-    theme: { plotBackground: "#ffffff", gridLineWidth: 0 },
+    theme: { gridLineWidth: 0 },
     gridLines: false,
     barBorderRadius: 4,
   },
@@ -120,7 +126,7 @@ const colorfulStyles: ChartStylePreset[] = [
     category: "colorful",
     palette: "vivid",
     background: "#fffdf7",
-    theme: { plotBackground: "#fffdf7", gridLineColor: "#efe8d8" },
+    theme: { gridLineColor: "#efe8d8" },
     gridLines: true,
     barBorderRadius: 3,
   },
@@ -130,7 +136,7 @@ const colorfulStyles: ChartStylePreset[] = [
     category: "colorful",
     palette: "pastel",
     background: "#f7faff",
-    theme: { plotBackground: "#f7faff", gridLineColor: "#dde6f0" },
+    theme: { gridLineColor: "#dde6f0" },
     gridLines: true,
     barBorderRadius: 3,
   },
@@ -282,7 +288,6 @@ const outlineStyles: ChartStylePreset[] = [
     palette: "default",
     background: "#ffffff",
     theme: {
-      plotBackground: "#ffffff",
       gridLineWidth: 0, axisColor: "#ccc",
     },
     gridLines: false,
@@ -295,7 +300,6 @@ const outlineStyles: ChartStylePreset[] = [
     palette: "pastel",
     background: "#ffffff",
     theme: {
-      plotBackground: "#ffffff",
       gridLineColor: "#f0f0f0", gridLineWidth: 1,
       axisColor: "#ddd",
     },
@@ -309,7 +313,6 @@ const outlineStyles: ChartStylePreset[] = [
     palette: "vivid",
     background: "#ffffff",
     theme: {
-      plotBackground: "#fafafa",
       gridLineColor: "#ccc", gridLineWidth: 2,
       axisColor: "#999",
     },
@@ -455,21 +458,81 @@ export function getPresetsByCategory(): Record<string, ChartStylePreset[]> {
 }
 
 /**
- * Apply a chart style preset to a ChartSpec.
- * Returns the partial spec updates to pass to updateChartSpec().
+ * Every theme key a preset can set (the union over CHART_STYLE_PRESETS, plus the
+ * plot fill pair and the bar radius every preset writes). A preset patch sends
+ * ALL of them -- the keys the new preset leaves at the default as an explicit
+ * `undefined` -- because `config.theme` is deep-merged (chartStore
+ * `deepMergeSpec`): without the reset, the previous preset's keys survive
+ * (BUG-0489: mono-blue then colorful-1 kept the blue axis and title). The
+ * test pins that every preset's keys are listed here.
  */
-export function applyPreset(preset: ChartStylePreset): Record<string, unknown> {
+export const PRESET_THEME_KEYS: ReadonlyArray<keyof ChartRenderTheme> = [
+  "plotBackground",
+  "plotBackgroundGradient",
+  "gridLineColor",
+  "gridLineWidth",
+  "axisColor",
+  "axisLabelColor",
+  "axisTitleColor",
+  "titleColor",
+  "legendTextColor",
+  "barBorderRadius",
+];
+
+/**
+ * The `config.theme` patch a preset writes: every PRESET_THEME_KEYS key, the
+ * ones the preset does not set as `undefined` (deepMergeSpec assigns it, so
+ * the key falls back to the default; JSON drops it on save).
+ */
+export function presetThemePatch(preset: ChartStylePreset): Partial<ChartRenderTheme> {
+  const set: Record<string, unknown> = { ...preset.theme, barBorderRadius: preset.barBorderRadius };
+  const patch: Record<string, unknown> = {};
+  for (const key of PRESET_THEME_KEYS) patch[key] = set[key];
+  // A key a preset sets that the list forgot still travels (never silently dropped).
+  for (const [key, value] of Object.entries(set)) if (!(key in patch)) patch[key] = value;
+  return patch as Partial<ChartRenderTheme>;
+}
+
+/** The palette / theme / container updates of a preset (the part that needs no current spec). */
+function presetBaseUpdates(preset: ChartStylePreset): Record<string, unknown> {
   return {
     palette: preset.palette,
-    config: { theme: preset.theme },
+    config: { theme: presetThemePatch(preset) },
+    // The background is the container's (merged: padding, border ... stay).
     container: presetContainerPatch(preset),
-    yAxis: undefined, // Handled separately below
   };
 }
 
-/** The container patch a preset writes: its background colour (a merge: the rest of the container stays). */
+/**
+ * Apply a chart style preset to a ChartSpec.
+ * Returns the partial spec updates to pass to updateChartSpec(). The same
+ * builder as buildPresetUpdates, without the gridline change (which needs the
+ * current Y axis), so the two cannot drift.
+ */
+export function applyPreset(preset: ChartStylePreset): Record<string, unknown> {
+  return presetBaseUpdates(preset);
+}
+
+/**
+ * A container patch in the form `deepMergeSpec` (chartStore) understands: there
+ * `undefined` CLEARS a key and `null` would be STORED as a value, so the
+ * solid-background rule's one `gradient: null` leaf travels as `undefined`.
+ */
+function forDeepMerge(patch: VisualContainerPatch): ChartContainerFormat {
+  const background: Record<string, unknown> = { ...(patch.background ?? {}) };
+  if (background.gradient === null) background.gradient = undefined;
+  return { ...patch, background } as ChartContainerFormat;
+}
+
+/**
+ * The container patch a preset writes: a SOLID background in the preset's
+ * colour (a merge: padding, border, title ... stay). Applying a preset is a
+ * solid background commit (round 2, G1): it clears a stored gradient and
+ * switches the background on, by the one rule in @api `solidBackgroundPatch`
+ * (unconditional form -- a preset always paints its colour).
+ */
 export function presetContainerPatch(preset: ChartStylePreset): ChartContainerFormat {
-  return { background: { color: preset.background } };
+  return forDeepMerge(solidBackgroundPatch(preset.background));
 }
 
 /** Whether `spec` already shows this preset's background (the gallery's "current" ring). */
@@ -489,17 +552,8 @@ export function buildPresetUpdates(
   preset: ChartStylePreset,
   currentSpec: { yAxis: AxisSpec; markOptions?: unknown },
 ): Record<string, unknown> {
-  const updates: Record<string, unknown> = {
-    palette: preset.palette,
-    config: { theme: preset.theme },
-    // The background is the container's (merged: padding, border ... stay).
-    container: presetContainerPatch(preset),
+  return {
+    ...presetBaseUpdates(preset),
     yAxis: { ...currentSpec.yAxis, gridLines: preset.gridLines },
   };
-
-  // Apply bar border radius via theme override (already in theme)
-  const themeWithRadius = { ...preset.theme, barBorderRadius: preset.barBorderRadius };
-  updates.config = { theme: themeWithRadius };
-
-  return updates;
 }

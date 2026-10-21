@@ -6,9 +6,13 @@
 //          cell at 45 degrees (the Home tab's Angle Counterclockwise) opened
 //          showing nothing it could select, and stacked text could not be set
 //          here at all. The Indent goes to Excel's 250 (it was capped at 15).
+//          The Degrees and Indent boxes are the @api/layout NumberInput: typed
+//          and shown in the APP locale, ArrowUp/ArrowDown step, and the draft
+//          ("-" on the way to "-45") survives the store's echo (P2 S9).
 
-import React, { useEffect, useRef, useState } from "react";
+import React from "react";
 import styled from "styled-components";
+import { NumberInput as LayoutNumberInput } from "@api/layout";
 import { useFormatCellsStore } from "../hooks/useFormatCellsState";
 import {
   MAX_INDENT,
@@ -35,40 +39,6 @@ const V_ALIGN_OPTIONS = [
 /** The one-click angles, top to bottom as on Excel's orientation dial. */
 const ANGLE_PRESETS = [90, 45, 0, -45, -90] as const;
 
-/**
- * A number field's TEXT, kept in step with the store value it edits. A value
- * that arrives from outside (the dialog's style load lands after mount) is
- * shown; a value this field itself just wrote is not echoed back, so typing
- * "-" or "4" on the way to "-45" is not overwritten mid-keystroke.
- */
-function useNumberText(value: number): {
-  text: string;
-  setText: (t: string) => void;
-  wrote: (v: number) => void;
-} {
-  const [text, setText] = useState(String(value));
-  const written = useRef<number | null>(null);
-  useEffect(() => {
-    if (written.current !== value) setText(String(value));
-    written.current = null;
-  }, [value]);
-  return {
-    text,
-    setText,
-    wrote: (n: number) => {
-      written.current = n;
-    },
-  };
-}
-
-/** A typed number, or null while the field holds something that is not one yet. */
-function typedNumber(raw: string): number | null {
-  const t = raw.trim();
-  if (t === "" || t === "-" || t === "+") return null;
-  const n = Number(t);
-  return Number.isFinite(n) ? n : null;
-}
-
 export function AlignmentTab(): React.ReactElement {
   const {
     textAlign,
@@ -86,8 +56,6 @@ export function AlignmentTab(): React.ReactElement {
   } = useFormatCellsStore();
 
   const orientation = orientationOf(textRotation);
-  const degreesText = useNumberText(orientation.degrees);
-  const indentText = useNumberText(indent);
 
   /**
    * Set the indent the way Excel does: an indent on a General or a Center cell
@@ -157,22 +125,17 @@ export function AlignmentTab(): React.ReactElement {
               </IndentButton>
               <NumberInput
                 id="fc-indent"
-                type="number"
                 min={0}
                 max={MAX_INDENT}
                 step={1}
-                value={indentText.text}
-                onChange={(e) => {
-                  indentText.setText(e.target.value);
-                  const n = typedNumber(e.target.value);
+                value={indent}
+                onChange={(n) => {
+                  // Blank or half-typed: nothing to set yet. Excel's range is
+                  // 0..250; a typed value past it is held at the limit
+                  // (changeIndent clamps) rather than silently ignored.
                   if (n === null) return;
-                  // Excel's range is 0..250; a typed value past it is held at
-                  // the limit rather than silently ignored.
-                  const next = clampIndent(n);
-                  indentText.wrote(next);
-                  changeIndent(next);
+                  changeIndent(n);
                 }}
-                onBlur={() => indentText.setText(String(indent))}
                 aria-label="Indent level"
                 data-testid="fc-indent"
               />
@@ -254,22 +217,17 @@ export function AlignmentTab(): React.ReactElement {
           <FieldLabel htmlFor="fc-orientation-degrees">Degrees:</FieldLabel>
           <NumberInput
             id="fc-orientation-degrees"
-            type="number"
             min={-90}
             max={90}
             step={1}
-            value={degreesText.text}
-            onChange={(e) => {
-              degreesText.setText(e.target.value);
-              const n = typedNumber(e.target.value);
+            value={orientation.degrees}
+            onChange={(n) => {
               if (n === null) return;
               // Excel's range is -90..90. Typing an angle leaves stacked text,
               // as choosing a point on Excel's dial does.
               const clamped = Math.max(-90, Math.min(90, Math.round(n)));
-              degreesText.wrote(clamped);
               setTextRotation(textRotationForDegrees(clamped));
             }}
-            onBlur={() => degreesText.setText(String(orientation.degrees))}
             aria-label="Degrees"
             data-testid="fc-orientation-degrees"
           />
@@ -403,7 +361,7 @@ const IndentButton = styled.button<{ disabled?: boolean }>`
   }
 `;
 
-const NumberInput = styled.input`
+const NumberInput = styled(LayoutNumberInput)`
   width: 64px;
   padding: 5px 8px;
   font-size: 13px;

@@ -20,7 +20,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vites
 
 const h = vi.hoisted(() => ({
   slicers: new Map<string, Record<string, unknown>>(),
-  items: new Map<string, Array<{ value: string; selected: boolean; hasData: boolean }>>(),
+  items: new Map<string, Array<{ key: string; label: string; selected: boolean; hasData: boolean }>>(),
   clickItem: vi.fn(async (..._args: unknown[]) => undefined),
   clickRun: vi.fn(async (..._args: unknown[]) => undefined),
   clickClear: vi.fn(async (..._args: unknown[]) => undefined),
@@ -166,7 +166,7 @@ beforeEach(() => {
   h.slicers.set("s2", slicerRow("s2", 320));
   h.items.clear();
   for (const id of ["s1", "s2"]) {
-    h.items.set(id, ["North", "South", "West"].map((value) => ({ value, selected: true, hasData: true })));
+    h.items.set(id, ["North", "South", "West"].map((value) => ({ key: value, label: value, selected: true, hasData: true })));
   }
   setGridRegions([region("s1", 64), region("s2", 320)]);
   h.surface = { editable: true, locked: false };

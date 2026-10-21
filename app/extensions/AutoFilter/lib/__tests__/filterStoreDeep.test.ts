@@ -480,6 +480,7 @@ describe("color filter operations", () => {
       0, 0, 10, 3,
       [{ key: 2, ascending: true, sortOn: "fontColor", color: "#00ff00" }],
       { hasHeaders: true },
+      { target: undefined },
     );
   });
 

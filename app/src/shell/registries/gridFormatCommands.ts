@@ -34,16 +34,28 @@
 //          itself -- which is what makes Excel's "select all, Unhide Rows"
 //          idiom work.
 //
-//          SELECTION OWNERS. Every command here except Default Width writes to
-//          Core's selection, so each asks `refuseIfSelectionOwned` FIRST (one
-//          toast while a floating grid's cell holds the selection, BUG-0185
-//          class). Default Width is a sheet setting, not a selection door.
+//          SELECTION OWNERS. Every command here except Default Width acts on a
+//          SELECTION, so each asks `resolveCellTarget(action, "lineSize")`
+//          FIRST: Core's selection on the active sheet, or -- while a floating
+//          grid's cell holds the selection (P3, owner finding G3) -- the GRID's
+//          own lines. A floating grid's sizes and hidden lines are the OBJECT's
+//          (its `rowHeights` / `colWidths` / `hiddenRows` / `hiddenCols`), so
+//          the same wrappers are called with `{ target }` and Unhide reads the
+//          object's hidden set, never the sheet's. An owner that does not admit
+//          the act refuses once, as before (BUG-0185 class). Default Width is a
+//          sheet setting, not a selection door.
 
 import { CommandRegistry, CoreCommands } from "@api/commands";
 import { showToast } from "@api/notifications";
 import { DialogExtensions } from "@api/ui";
 import { alertAsync } from "@api/dialogs";
-import { refuseIfSelectionOwned } from "@api/selectionOwner";
+import {
+  announceCellTargetObjectChanged,
+  getCellTargetLines,
+  resolveCellTarget,
+  targetRefOf,
+  type CellTargetRef,
+} from "@api/cellTarget";
 import {
   getGridStateSnapshot,
   hideRows,
@@ -62,9 +74,12 @@ import {
   setDefaultColumnWidth,
   getUserHiddenRows,
   getUserHiddenCols,
+  setRowsHidden,
+  setColsHidden,
 } from "../../core/lib/tauri-api";
 import { columnToLetter, type Selection } from "../../core/types";
 import { DIMENSION_INPUT_DIALOG_ID, type DimensionInputData } from "../dialogs/DimensionInputDialog";
+import { formatNumber } from "@api/locale";
 
 // ============================================================================
 // The selection span
@@ -143,14 +158,28 @@ function selectionSpan(axis: LineAxis): LineInterval[] | null {
   return selectionLineIntervals(selection, axis);
 }
 
+/**
+ * Ask the door's question for `action`: the span the command acts on and the
+ * OBJECT it acts on (a floating grid's ref; undefined for Core's selection),
+ * or null when refused (announced once) or nothing is selected.
+ */
+function resolveSpan(action: string, axis: LineAxis): { runs: LineInterval[]; target?: CellTargetRef } | null {
+  const t = resolveCellTarget(action, "lineSize");
+  if (t === null) return null;
+  const target = targetRefOf(t);
+  const runs = target ? selectionLineIntervals(t.selection!, axis) : selectionSpan(axis);
+  if (!runs || runs.length === 0) return null;
+  return { runs, target };
+}
+
 /** Refuse a span beyond the limit; true when refused. */
 function refuseOversizedSpan(action: string, axis: LineAxis, runs: readonly LineInterval[]): boolean {
   const count = lineCount(runs);
   if (count <= MAX_LINES_PER_FORMAT_COMMAND) return false;
   const what = axis === "rows" ? "rows" : "columns";
   refuse(
-    `${action} can change at most ${MAX_LINES_PER_FORMAT_COMMAND.toLocaleString("en-US")} ${what} at once; ` +
-      `this selection spans ${count.toLocaleString("en-US")}. Select fewer ${what}.`,
+    `${action} can change at most ${formatNumber(MAX_LINES_PER_FORMAT_COMMAND, { grouping: true, decimals: 0 })} ${what} at once; ` +
+      `this selection spans ${formatNumber(count, { grouping: true, decimals: 0 })}. Select fewer ${what}.`,
   );
   return true;
 }
@@ -165,19 +194,32 @@ function refuseOversizedSpan(action: string, axis: LineAxis, runs: readonly Line
  * protected sheet) is shown and changes nothing -- the backend gates before it
  * writes.
  */
-async function applyLineSizes(axis: LineAxis, runs: readonly LineInterval[], px: number): Promise<void> {
+async function applyLineSizes(
+  axis: LineAxis,
+  runs: readonly LineInterval[],
+  px: number,
+  target?: CellTargetRef,
+): Promise<void> {
   if (runs.length === 0) return;
   const label = axis === "rows" ? "Row Height" : "Column Width";
   let landed = false;
   try {
-    if (axis === "rows") await setRowHeights(runs, px);
-    else await setColumnWidths(runs, px);
+    // `target`: a floating grid's own line sizes (the backend writes the
+    // OBJECT's map, gated by the host's Format Rows / Format Columns).
+    if (axis === "rows") await setRowHeights(runs, px, { target });
+    else await setColumnWidths(runs, px, { target });
     landed = true;
   } catch (err) {
     console.error(`[gridFormatCommands] ${label} failed:`, err);
     void alertAsync(err instanceof Error ? err.message : String(err));
   }
 
+  if (target) {
+    // The OBJECT changed, not the sheet: its row is re-read; the sheet's
+    // sizes (and the pinned controls listening for them) did not move.
+    if (landed) announceCellTargetObjectChanged(target);
+    return;
+  }
   refreshGridDimensions();
   refreshGridData();
   if (landed) {
@@ -209,29 +251,50 @@ function openDimensionDialog(data: DimensionInputData): void {
   DialogExtensions.openDialog(DIMENSION_INPUT_DIALOG_ID, data as unknown as Record<string, unknown>);
 }
 
-/** Open Row Height on `runs`, seeded with the first row's current height. */
-async function openRowHeightDialogOnRuns(runs: readonly LineInterval[], label: string): Promise<void> {
-  if (runs.length === 0) return;
+/**
+ * The current size of line `index`: the object's own (a floating grid's map,
+ * `target`) or the sheet's, else the default.
+ */
+async function currentLineSize(axis: LineAxis, index: number, target?: CellTargetRef): Promise<number> {
   const defaults = await getDefaultDimensions();
-  const currentPx = (await getRowHeight(runs[0][0])) ?? defaults.defaultRowHeight;
+  const fallback = axis === "rows" ? defaults.defaultRowHeight : defaults.defaultColumnWidth;
+  if (target) {
+    const lines = await getCellTargetLines(target);
+    const own = axis === "rows" ? lines?.rowHeights[index] : lines?.colWidths[index];
+    return typeof own === "number" && own > 0 ? own : fallback;
+  }
+  return (axis === "rows" ? await getRowHeight(index) : await getColumnWidth(index)) ?? fallback;
+}
+
+/** Open Row Height on `runs`, seeded with the first row's current height. */
+async function openRowHeightDialogOnRuns(
+  runs: readonly LineInterval[],
+  label: string,
+  target?: CellTargetRef,
+): Promise<void> {
+  if (runs.length === 0) return;
+  const currentPx = await currentLineSize("rows", runs[0][0], target);
   openDimensionDialog({
     mode: "rowHeight",
     currentPx,
     rangeLabel: label,
-    onResult: (px) => applyLineSizes("rows", runs, px),
+    onResult: (px) => applyLineSizes("rows", runs, px, target),
   });
 }
 
 /** Open Column Width on `runs`, seeded with the first column's current width. */
-async function openColumnWidthDialogOnRuns(runs: readonly LineInterval[], label: string): Promise<void> {
+async function openColumnWidthDialogOnRuns(
+  runs: readonly LineInterval[],
+  label: string,
+  target?: CellTargetRef,
+): Promise<void> {
   if (runs.length === 0) return;
-  const defaults = await getDefaultDimensions();
-  const currentPx = (await getColumnWidth(runs[0][0])) ?? defaults.defaultColumnWidth;
+  const currentPx = await currentLineSize("columns", runs[0][0], target);
   openDimensionDialog({
     mode: "columnWidth",
     currentPx,
     rangeLabel: label,
-    onResult: (px) => applyLineSizes("columns", runs, px),
+    onResult: (px) => applyLineSizes("columns", runs, px, target),
   });
 }
 
@@ -256,15 +319,15 @@ export function lineRangeLabel(axis: LineAxis, start: number, end: number): stri
 
 async function sizeCommand(axis: LineAxis): Promise<void> {
   const action = axis === "rows" ? "Row Height" : "Column Width";
-  if (refuseIfSelectionOwned(action)) return;
-  const runs = selectionSpan(axis);
-  if (!runs || runs.length === 0) return;
+  const span = resolveSpan(action, axis);
+  if (!span) return;
+  const { runs, target } = span;
   // Rows only: a column span can never pass the bound (a sheet has 16,384
   // columns), and the batch sets any number of them in one call.
   if (axis === "rows" && refuseOversizedSpan(action, axis, runs)) return;
   const label = rangeLabel(axis, runs);
-  if (axis === "rows") await openRowHeightDialogOnRuns(runs, label);
-  else await openColumnWidthDialogOnRuns(runs, label);
+  if (axis === "rows") await openRowHeightDialogOnRuns(runs, label, target);
+  else await openColumnWidthDialogOnRuns(runs, label, target);
 }
 
 /**
@@ -313,14 +376,42 @@ async function defaultWidthCommand(): Promise<void> {
  */
 async function hideCommand(axis: LineAxis): Promise<void> {
   const action = axis === "rows" ? "Hide Rows" : "Hide Columns";
-  if (refuseIfSelectionOwned(action)) return;
-  const runs = selectionSpan(axis);
-  if (!runs || runs.length === 0) return;
+  const span = resolveSpan(action, axis);
+  if (!span) return;
+  const { runs, target } = span;
   if (refuseOversizedSpan(action, axis, runs)) return;
   const lines = expand(runs);
+  if (target) {
+    await setObjectLinesHidden(action, axis, lines, true, target);
+    return;
+  }
   if (axis === "rows") await hideRows(lines, true);
   else await hideColumns(lines, true);
   refreshGridData();
+}
+
+/**
+ * Hide or unhide a floating grid's OWN lines (`target`): the object's hidden
+ * set changes in one undo step (gated by the host's Format Rows / Format
+ * Columns; Lock Objects refuses it). Never `hideRows` / `hideColumns`, which
+ * move the ACTIVE sheet's lines and Core's mirror of them. A refusal is shown.
+ */
+async function setObjectLinesHidden(
+  action: string,
+  axis: LineAxis,
+  lines: number[],
+  hidden: boolean,
+  target: CellTargetRef,
+): Promise<void> {
+  try {
+    if (axis === "rows") await setRowsHidden(lines, hidden, { target });
+    else await setColsHidden(lines, hidden, { target });
+  } catch (err) {
+    console.error(`[gridFormatCommands] ${action} failed:`, err);
+    void alertAsync(err instanceof Error ? err.message : String(err));
+    return;
+  }
+  announceCellTargetObjectChanged(target);
 }
 
 /**
@@ -332,12 +423,18 @@ async function hideCommand(axis: LineAxis): Promise<void> {
  */
 async function unhideCommand(axis: LineAxis): Promise<void> {
   const action = axis === "rows" ? "Unhide Rows" : "Unhide Columns";
-  if (refuseIfSelectionOwned(action)) return;
-  const runs = selectionSpan(axis);
-  if (!runs || runs.length === 0) return;
+  const span = resolveSpan(action, axis);
+  if (!span) return;
+  const { runs, target } = span;
   let userHidden: number[];
   try {
-    userHidden = axis === "rows" ? await getUserHiddenRows() : await getUserHiddenCols();
+    if (target) {
+      // A floating grid's OWN hidden lines (its row store), never the sheet's.
+      const lines = await getCellTargetLines(target);
+      userHidden = axis === "rows" ? (lines?.hiddenRows ?? []) : (lines?.hiddenCols ?? []);
+    } else {
+      userHidden = axis === "rows" ? await getUserHiddenRows() : await getUserHiddenCols();
+    }
   } catch (err) {
     console.error(`[gridFormatCommands] ${action}: could not read the hidden ${axis}:`, err);
     void alertAsync(err instanceof Error ? err.message : String(err));
@@ -345,6 +442,10 @@ async function unhideCommand(axis: LineAxis): Promise<void> {
   }
   const inSpan = userHidden.filter((i) => runs.some(([lo, hi]) => i >= lo && i <= hi));
   if (inSpan.length === 0) return;
+  if (target) {
+    await setObjectLinesHidden(action, axis, inSpan, false, target);
+    return;
+  }
   if (axis === "rows") await hideRows(inSpan, false);
   else await hideColumns(inSpan, false);
   refreshGridData();

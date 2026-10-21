@@ -21,11 +21,15 @@ import {
   type BuiltinModelProgressEvent,
   type BuiltinStatus,
 } from "./aiTypes";
+import { formatNumber } from "@api/locale";
 
-/** Bytes as "1.04 GB" or "412 MB" — what a person compares against free disk space. */
+/**
+ * Bytes as "1.04 GB" or "412 MB" — what a person compares against free disk space —
+ * with the app locale's separators (de-DE "1,04 GB").
+ */
 export function formatSize(bytes: number): string {
-  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-  if (bytes >= 1024 * 1024) return `${Math.round(bytes / (1024 * 1024)).toLocaleString("en-US")} MB`;
+  if (bytes >= 1024 * 1024 * 1024) return `${formatNumber(bytes / (1024 * 1024 * 1024), { decimals: 2 })} GB`;
+  if (bytes >= 1024 * 1024) return `${formatNumber(Math.round(bytes / (1024 * 1024)), { grouping: true, decimals: 0 })} MB`;
   return `${Math.round(bytes / 1024)} KB`;
 }
 

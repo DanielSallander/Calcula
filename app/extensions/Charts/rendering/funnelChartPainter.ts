@@ -3,6 +3,7 @@
 // CONTEXT: Progressively narrowing horizontal sections. Uses first series' values.
 //          Width of each section is proportional to its value.
 
+import { formatNumber } from "@api/locale";
 import type { ChartSpec, ParsedChartData, ChartLayout, BarRect, FunnelMarkOptions } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
@@ -138,9 +139,9 @@ export function paintFunnelChart(
       if (labelFormat === "value") {
         labelText = `${category}: ${formatTickValue(value)}`;
       } else if (labelFormat === "percent") {
-        labelText = `${category}: ${percent.toFixed(1)}%`;
+        labelText = `${category}: ${formatNumber(percent, { decimals: 1 })}%`;
       } else {
-        labelText = `${category}: ${formatTickValue(value)} (${percent.toFixed(1)}%)`;
+        labelText = `${category}: ${formatTickValue(value)} (${formatNumber(percent, { decimals: 1 })}%)`;
       }
 
       // Use white text on dark backgrounds, dark on light

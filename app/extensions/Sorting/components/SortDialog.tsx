@@ -1,6 +1,8 @@
 //! FILENAME: app/extensions/Sorting/components/SortDialog.tsx
 // PURPOSE: Main Sort dialog component with multi-level sort configuration.
 // CONTEXT: Opens via Data > Custom Sort menu. Allows hierarchical sort criteria.
+//          P3: opened on a floating grid's cells, the command hands it the
+//          OBJECT's target; every read and the sort go through it.
 
 import React, { useEffect, useCallback, useState } from "react";
 import type { DialogProps } from "@api/uiTypes";
@@ -9,6 +11,7 @@ import { useGridState } from "@api";
 import { sortRange } from "@api/lib";
 import type { SortField } from "@api/lib";
 import type { SortRangeResult } from "@api";
+import type { CellTargetRef } from "@api/cellTarget";
 import { useSortStore } from "../hooks/useSortState";
 import {
   detectSortRange,
@@ -32,12 +35,20 @@ import * as S from "./SortDialog.styles";
 interface SortDialogData {
   range?: { startRow: number; startCol: number; endRow: number; endCol: number };
   hasHeaders?: boolean;
+  /** The OBJECT whose cells are sorted (a floating grid's, P3). */
+  target?: CellTargetRef;
 }
 
-function decidedByCommand(data: Record<string, unknown> | undefined): Required<SortDialogData> | null {
+interface DecidedSort {
+  range: { startRow: number; startCol: number; endRow: number; endCol: number };
+  hasHeaders: boolean;
+  target: CellTargetRef | null;
+}
+
+function decidedByCommand(data: Record<string, unknown> | undefined): DecidedSort | null {
   const d = data as SortDialogData | undefined;
   if (!d?.range || typeof d.hasHeaders !== "boolean") return null;
-  return { range: d.range, hasHeaders: d.hasHeaders };
+  return { range: d.range, hasHeaders: d.hasHeaders, target: d.target ?? null };
 }
 
 export function SortDialog(props: DialogProps): React.ReactElement | null {
@@ -62,6 +73,7 @@ export function SortDialog(props: DialogProps): React.ReactElement | null {
     rangeEndCol,
     columnHeaders,
     selectedLevelId,
+    cellTarget,
     addLevel,
     deleteLevel,
     copyLevel,
@@ -103,11 +115,13 @@ export function SortDialog(props: DialogProps): React.ReactElement | null {
         // the old default (more than one row).
         const defaultHasHeaders = decided ? decided.hasHeaders : range.endRow > range.startRow;
 
+        const target = decided?.target ?? null;
         const headers = await getColumnDisplayNames(
           range.startRow,
           range.startCol,
           range.endCol,
           defaultHasHeaders,
+          target,
         );
 
         initialize(
@@ -117,6 +131,7 @@ export function SortDialog(props: DialogProps): React.ReactElement | null {
           range.endCol,
           headers,
           defaultHasHeaders,
+          target,
         );
 
         setError(null);
@@ -144,6 +159,7 @@ export function SortDialog(props: DialogProps): React.ReactElement | null {
             rangeEndRow,
             rangeStartCol,
             hasHeaders,
+            cellTarget,
           );
           setColumnHeaders(names);
         } else {
@@ -152,6 +168,7 @@ export function SortDialog(props: DialogProps): React.ReactElement | null {
             rangeStartCol,
             rangeEndCol,
             hasHeaders,
+            cellTarget,
           );
           setColumnHeaders(names);
         }
@@ -161,7 +178,7 @@ export function SortDialog(props: DialogProps): React.ReactElement | null {
     }
 
     refreshHeaders();
-  }, [hasHeaders, orientation, isLoading, rangeStartRow, rangeStartCol, rangeEndRow, rangeEndCol, setColumnHeaders]);
+  }, [hasHeaders, orientation, isLoading, rangeStartRow, rangeStartCol, rangeEndRow, rangeEndCol, setColumnHeaders, cellTarget]);
 
   // ---- Keyboard handling ----
   useEffect(() => {
@@ -214,6 +231,7 @@ export function SortDialog(props: DialogProps): React.ReactElement | null {
           hasHeaders,
           orientation,
         },
+        { target: cellTarget ?? undefined },
       );
 
       if (!result.success) {
@@ -228,7 +246,7 @@ export function SortDialog(props: DialogProps): React.ReactElement | null {
     } catch (err) {
       setError(`Sort failed: ${err}`);
     }
-  }, [levels, rangeStartRow, rangeStartCol, rangeEndRow, rangeEndCol, caseSensitive, hasHeaders, orientation, onClose]);
+  }, [levels, rangeStartRow, rangeStartCol, rangeEndRow, rangeEndCol, caseSensitive, hasHeaders, orientation, onClose, cellTarget]);
 
   // ---- Toolbar handlers ----
   const handleAddLevel = useCallback(() => {

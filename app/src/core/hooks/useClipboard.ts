@@ -29,6 +29,7 @@ import {
   getComment,
   getDataValidation,
   relocateCellReferences,
+  clearRangeWithOptions,
 } from "../lib/tauri-api";
 import type { CellUpdateInput, FormulaShiftInput } from "../lib/tauri-api";
 import {
@@ -38,7 +39,18 @@ import {
 } from "../lib/undoTransactionOwnership";
 import { cellEvents } from "../lib/cellEvents";
 import { setClipboard, clearClipboard, setSelection } from "../state/gridActions";
-import type { Selection, CellData, ClipboardMode, Comment, DataValidation, ValidationRange } from "../types";
+import type {
+  Selection,
+  CellData,
+  CellTargetRef,
+  ClipboardMode,
+  Comment,
+  DataValidation,
+  ValidationRange,
+} from "../types";
+import type { GridCommandContext } from "../lib/gridCommands";
+import type { CellTarget } from "../lib/selectionOwner";
+import { getCellTargetCells, selectTargetCells } from "../../api/cellTarget";
 import { checkRangeGuards } from "../lib/editGuards";
 import {
   captureClipboardCells,
@@ -92,6 +104,15 @@ export interface ClipboardData {
    */
   sourceSheetIndex: number;
   sourceSheetName: string;
+  /**
+   * The OBJECT the cells were copied from (a floating grid's, P3), or absent
+   * for a sheet. With it, `sourceSelection` / `sourceRows` are the object's
+   * own (backing) coordinates, `sourceSheetName` is the object's name ("Float1",
+   * which a formula spells as a sheet: Paste Link writes `=Float1!$A$1`), and
+   * `sourceSheetIndex` is -1 -- never a sheet, so nothing that compares it with
+   * the active sheet takes the object's coordinates for the sheet's.
+   */
+  sourceTarget?: CellTargetRef;
   /** Plain text representation for system clipboard */
   text: string;
   /** Map of "row,col" (relative) to JSON text for collection cells (List/Dict) */
@@ -106,12 +127,15 @@ export interface ClipboardData {
  * Return type for the useClipboard hook.
  */
 export interface UseClipboardReturn {
-  /** Cut selected cells to clipboard */
-  cut: () => Promise<void>;
-  /** Copy selected cells to clipboard */
-  copy: () => Promise<void>;
-  /** Paste clipboard contents to current selection */
-  paste: () => Promise<void>;
+  /**
+   * Cut selected cells to clipboard. The grid-command door hands `ctx.target`
+   * (an object's cells, P3); without one, Core's selection.
+   */
+  cut: (args?: unknown, ctx?: GridCommandContext) => Promise<void>;
+  /** Copy selected cells to clipboard (see `cut` for `ctx`). */
+  copy: (args?: unknown, ctx?: GridCommandContext) => Promise<void>;
+  /** Paste clipboard contents to current selection (see `cut` for `ctx`). */
+  paste: (args?: unknown, ctx?: GridCommandContext) => Promise<void>;
   /** Check if clipboard has content */
   hasClipboardData: () => boolean;
   /** Get current clipboard mode */
@@ -405,6 +429,15 @@ export interface CellRangeCopyRequest {
   batchRead?: boolean;
   /** Cap on cells read; defaults to MAX_CLIPBOARD_CELLS (5,000,000). The pivot copy passes 200,000. */
   maxCells?: number;
+  /**
+   * Copy an OBJECT's cells instead of the active sheet's (a floating grid's,
+   * P3): the coordinates are the object's own, read through its styled read
+   * (`getCellTargetCells`), and the clipboard records the object as its
+   * source (`ClipboardData.sourceTarget`, named `label`). Comments and
+   * validations are not read: their stores are the active sheet's, and an
+   * object's (row, col) would read the host's.
+   */
+  target?: { ref: CellTargetRef; label: string };
 }
 
 /** What {@link copyCellRange} did. A refusal never touches the clipboard that was there. */
@@ -521,6 +554,35 @@ async function fetchValidationsBatched(
 }
 
 /**
+ * An object's cells over a rectangle (its own coordinates), keyed "row,col",
+ * through its styled read (banded by `getCellTargetCells`). A cell the read
+ * does not return is EMPTY.
+ */
+async function prefetchTargetCells(
+  ref: CellTargetRef,
+  minRow: number,
+  maxRow: number,
+  minCol: number,
+  maxCol: number,
+): Promise<Map<string, CellData>> {
+  const read = await getCellTargetCells(ref, { startRow: minRow, startCol: minCol, endRow: maxRow, endCol: maxCol });
+  const map = new Map<string, CellData>();
+  for (const cell of read.cells) map.set(`${cell.row},${cell.col}`, cell);
+  return map;
+}
+
+/** Whether two cell targets name the same object. */
+function sameTarget(a: CellTargetRef | undefined, b: CellTargetRef | undefined): boolean {
+  return a !== undefined && b !== undefined && a.kind === b.kind && a.id === b.id;
+}
+
+/** The OBJECT target a grid command was handed, or null for Core's selection. */
+function objectTargetOf(ctx?: GridCommandContext): Extract<CellTarget, { kind: "object" }> | null {
+  const t = ctx?.target;
+  return t && t.kind === "object" ? t : null;
+}
+
+/**
  * Copy a range of the ACTIVE sheet to the internal + system clipboard. Never
  * touches Core's selection or the marching ants (the hook's `copy` dispatches
  * setClipboard itself after calling this).
@@ -531,8 +593,10 @@ async function fetchValidationsBatched(
  */
 export async function copyCellRange(range: CellRangeCopyRequest): Promise<CellRangeCopyResult> {
   const snapshot = getGridStateSnapshot();
-  const sourceSheetIndex = snapshot?.sheetContext?.activeSheetIndex ?? 0;
-  const sourceSheetName = snapshot?.sheetContext?.activeSheetName ?? "";
+  const target = range.target;
+  // An object source is never a sheet: -1 (see ClipboardData.sourceTarget).
+  const sourceSheetIndex = target ? -1 : snapshot?.sheetContext?.activeSheetIndex ?? 0;
+  const sourceSheetName = target ? target.label : snapshot?.sheetContext?.activeSheetName ?? "";
 
   const minRow = Math.min(range.startRow, range.endRow);
   const maxRow = Math.max(range.startRow, range.endRow);
@@ -543,7 +607,17 @@ export async function copyCellRange(range: CellRangeCopyRequest): Promise<CellRa
 
   try {
     let readCell: (row: number, col: number) => Promise<CellData | null>;
-    if (range.batchRead) {
+    if (target) {
+      // An object's cells: ONE styled read of the rectangle (banded), after the
+      // same cap, so an oversized range costs no read at all.
+      const rows = copyableSourceRows(minRow, maxRow, range.skipRows, false);
+      if (rows.length * width > maxCells) {
+        console.warn(`[Clipboard] Range too large for clipboard (${rows.length * width} cells). Skipping.`);
+        return { copied: false, reason: "tooLarge" };
+      }
+      const prefetched = await prefetchTargetCells(target.ref, minRow, maxRow, minCol, maxCol);
+      readCell = async (r, c) => prefetched.get(`${r},${c}`) ?? null;
+    } else if (range.batchRead) {
       // The cap first -- the SAME count captureClipboardCells uses (copyable
       // rows x width) -- so an oversized range costs no read at all.
       const rows = copyableSourceRows(minRow, maxRow, range.skipRows, false);
@@ -589,16 +663,22 @@ export async function copyCellRange(range: CellRangeCopyRequest): Promise<CellRa
       return { copied: false, reason: "empty" };
     }
 
-    // Detect collection cells and fetch their JSON representations
-    const collectionTexts = await fetchCollectionTexts(cells, sourceRows, minCol);
-
-    // Fetch comments and validations for paste special support
-    const comments = range.batchRead
-      ? await fetchCommentsBatched(cells, sourceRows, minCol)
-      : await fetchComments(cells, sourceRows, minCol);
-    const validations = range.batchRead
-      ? await fetchValidationsBatched(cells, sourceRows, minCol)
-      : await fetchValidations(cells, sourceRows, minCol);
+    // Detect collection cells and fetch their JSON representations; fetch
+    // comments and validations for paste special support. Not for an object:
+    // each of these reads the ACTIVE sheet's store by (row, col).
+    const collectionTexts = target
+      ? new Map<string, string>()
+      : await fetchCollectionTexts(cells, sourceRows, minCol);
+    const comments = target
+      ? new Map<string, Comment>()
+      : range.batchRead
+        ? await fetchCommentsBatched(cells, sourceRows, minCol)
+        : await fetchComments(cells, sourceRows, minCol);
+    const validations = target
+      ? new Map<string, DataValidation>()
+      : range.batchRead
+        ? await fetchValidationsBatched(cells, sourceRows, minCol)
+        : await fetchValidations(cells, sourceRows, minCol);
 
     const text = cellsToText(cells, collectionTexts);
 
@@ -616,6 +696,7 @@ export async function copyCellRange(range: CellRangeCopyRequest): Promise<CellRa
       isCut: false,
       sourceSheetIndex,
       sourceSheetName,
+      ...(target ? { sourceTarget: target.ref } : {}),
       text,
       collectionTexts: collectionTexts.size > 0 ? collectionTexts : undefined,
       comments: comments.size > 0 ? comments : undefined,
@@ -639,6 +720,8 @@ export async function copyCellRange(range: CellRangeCopyRequest): Promise<CellRa
 export function useClipboard(): UseClipboardReturn {
   const { state, dispatch } = useGridContext();
   const { selection, config, clipboard, sheetContext, dimensions } = state;
+  // Core's own selection, under the name the paste uses beside an object's.
+  const coreSelection = selection;
 
   // The FILTER source only. Hand hides and outline collapses are copied by
   // Excel, so the effective union (dimensions.hiddenRows) must not be used here.
@@ -694,7 +777,24 @@ export function useClipboard(): UseClipboardReturn {
    * cell selection); what is Core's selection's own stays here: the marching
    * ants and forgetting a pending cut.
    */
-  const copy = useCallback(async () => {
+  const copy = useCallback(async (_args?: unknown, ctx?: GridCommandContext) => {
+    const owned = objectTargetOf(ctx);
+    if (owned) {
+      // An OBJECT's cells (a floating grid's, P3): copied from the object, in
+      // its own coordinates. No marching ants: Core's ants are drawn on the
+      // ACTIVE sheet, where the object's coordinates would name the host's cells.
+      const sel = owned.selection;
+      const result = await copyCellRange({
+        startRow: sel.startRow,
+        startCol: sel.startCol,
+        endRow: sel.endRow,
+        endCol: sel.endCol,
+        target: { ref: owned.ref, label: owned.label },
+      });
+      if (!result.copied) return;
+      cutSourceRef.current = null;
+      return;
+    }
     if (!selection) {
       console.log("[Clipboard] No selection to copy");
       return;
@@ -723,9 +823,59 @@ export function useClipboard(): UseClipboardReturn {
   }, [selection, filterHiddenRows, dispatch, sheetContext.activeSheetIndex]);
 
   /**
+   * Cut an OBJECT's cells (a floating grid's, P3): the whole rectangle of its
+   * selection, read through its styled read, recorded with the object as the
+   * source. The source is cleared through the same target when it is pasted
+   * (see paste). No marching ants (they belong to the active sheet's cells).
+   */
+  const cutTarget = useCallback(async (owned: Extract<CellTarget, { kind: "object" }>) => {
+    const sel = owned.selection;
+    const minRow = Math.min(sel.startRow, sel.endRow);
+    const maxRow = Math.max(sel.startRow, sel.endRow);
+    const minCol = Math.min(sel.startCol, sel.endCol);
+    const maxCol = Math.max(sel.startCol, sel.endCol);
+    try {
+      const prefetched = await prefetchTargetCells(owned.ref, minRow, maxRow, minCol, maxCol);
+      const capture = await captureClipboardCells<CellData>({
+        minRow,
+        maxRow,
+        minCol,
+        maxCol,
+        includeFilterHidden: true,
+        readCell: async (r, c) => prefetched.get(`${r},${c}`) ?? null,
+      });
+      if (capture.tooLarge || capture.cells.length === 0) {
+        console.warn("[Clipboard] Nothing to cut in this selection");
+        return;
+      }
+      const { cells, sourceRows } = capture;
+      const text = cellsToText(cells, new Map());
+      internalClipboard = {
+        sourceSelection: { ...sel },
+        cells,
+        sourceRows,
+        isCut: true,
+        sourceSheetIndex: -1,
+        sourceSheetName: owned.label,
+        sourceTarget: owned.ref,
+        text,
+      };
+      cutSourceRef.current = { ...sel };
+      await writeToSystemClipboard(text, cellsToHtml(cells));
+    } catch (error) {
+      console.error("[Clipboard] Cut failed:", error);
+    }
+  }, []);
+
+  /**
    * Cut selected cells to clipboard.
    */
-  const cut = useCallback(async () => {
+  const cut = useCallback(async (_args?: unknown, ctx?: GridCommandContext) => {
+    const owned = objectTargetOf(ctx);
+    if (owned) {
+      await cutTarget(owned);
+      return;
+    }
     if (!selection) {
       console.log("[Clipboard] No selection to cut");
       return;
@@ -781,12 +931,21 @@ export function useClipboard(): UseClipboardReturn {
     } catch (error) {
       console.error("[Clipboard] Cut failed:", error);
     }
-  }, [selection, getCellRange, dispatch, sheetContext.activeSheetIndex, sheetContext.activeSheetName]);
+  }, [selection, getCellRange, cutTarget, dispatch, sheetContext.activeSheetIndex, sheetContext.activeSheetName]);
 
   /**
-   * Paste clipboard contents to current selection.
+   * Paste clipboard contents to current selection -- or, handed an OBJECT
+   * target by the grid-command door (a floating grid's cells, P3), to the
+   * object's selection: written with `updateCellsBatch(.., { target })`, with
+   * Excel's relative shift on the object's own (backing) coordinates.
    */
-  const paste = useCallback(async () => {
+  const paste = useCallback(async (_args?: unknown, ctx?: GridCommandContext) => {
+    const owned = objectTargetOf(ctx);
+    const selection = owned ? owned.selection : coreSelection;
+    const destRef = owned?.ref;
+    // The destination's size: the object's write extent, or the sheet's.
+    const totalRows = owned ? owned.bounds.rows : config.totalRows;
+    const totalCols = owned ? owned.bounds.cols : config.totalCols;
     if (!selection) {
       console.log("[Clipboard] No selection for paste target");
       return;
@@ -840,14 +999,18 @@ export function useClipboard(): UseClipboardReturn {
     const targetCol = Math.min(selection.startCol, selection.endCol);
 
     // Calculate actual paste bounds (clamped to grid bounds)
-    const actualPasteHeight = Math.min(pasteHeight, config.totalRows - targetRow);
-    const actualPasteWidth = Math.min(pasteWidth, config.totalCols - targetCol);
+    const actualPasteHeight = Math.min(pasteHeight, totalRows - targetRow);
+    const actualPasteWidth = Math.min(pasteWidth, totalCols - targetCol);
 
-    // Check if paste target overlaps a protected range (e.g., pivot table)
-    const rangeGuard = checkRangeGuards(
-      targetRow, targetCol,
-      targetRow + actualPasteHeight - 1, targetCol + actualPasteWidth - 1
-    );
+    // Check if paste target overlaps a protected range (e.g., pivot table).
+    // The guards describe the ACTIVE sheet's regions; an object's cells are
+    // gated by the backend on the object's own (backing) cells.
+    const rangeGuard = destRef
+      ? null
+      : checkRangeGuards(
+          targetRow, targetCol,
+          targetRow + actualPasteHeight - 1, targetCol + actualPasteWidth - 1
+        );
     if (rangeGuard?.blocked) {
       if (rangeGuard.message) void alertAsync(rangeGuard.message);
       return;
@@ -924,7 +1087,7 @@ export function useClipboard(): UseClipboardReturn {
           const destCol = targetCol + c;
 
           // Check bounds
-          if (destRow >= config.totalRows || destCol >= config.totalCols) {
+          if (destRow >= totalRows || destCol >= totalCols) {
             continue;
           }
 
@@ -944,7 +1107,8 @@ export function useClipboard(): UseClipboardReturn {
 
       // Single batch IPC call for all cells
       try {
-        await updateCellsBatch(batchUpdates);
+        if (destRef) await updateCellsBatch(batchUpdates, { target: destRef });
+        else await updateCellsBatch(batchUpdates);
       } catch (err) {
         // Close the transaction opened above — a rejected paste (e.g. into a
         // protected pivot/report region) must not leave it dangling, or the
@@ -968,21 +1132,61 @@ export function useClipboard(): UseClipboardReturn {
         const srcMaxRow = Math.max(src.startRow, src.endRow);
         const srcMinCol = Math.min(src.startCol, src.endCol);
         const srcMaxCol = Math.max(src.startCol, src.endCol);
+        const srcRef = internalClipboard?.sourceTarget;
 
-        for (let r = srcMinRow; r <= srcMaxRow; r++) {
-          for (let c = srcMinCol; c <= srcMaxCol; c++) {
-            // Don't clear if it overlaps with paste destination
-            const overlaps =
-              r >= targetRow &&
-              r < targetRow + pasteHeight &&
-              c >= targetCol &&
-              c < targetCol + pasteWidth;
+        if (srcRef || destRef) {
+          // An OBJECT on either side (P3). Source and destination overlap only
+          // when they are the SAME place -- the same object -- never by raw
+          // coordinates: Float1!B2 and the host's B2 are different cells, and
+          // reading them as one skipped the source clear and silently turned
+          // the cut into a copy.
+          const samePlace = sameTarget(srcRef, destRef);
+          const overlaps = (r: number, c: number) =>
+            samePlace &&
+            r >= targetRow &&
+            r < targetRow + pasteHeight &&
+            c >= targetCol &&
+            c < targetCol + pasteWidth;
+          if (srcRef && !samePlace) {
+            // A different place cannot overlap: ONE clear over the whole source
+            // rectangle, through the source's own target, inside this step.
+            try {
+              await clearRangeWithOptions(srcMinRow, srcMinCol, srcMaxRow, srcMaxCol, "all", undefined, {
+                target: srcRef,
+              });
+            } catch (err) {
+              console.error("[Clipboard] Failed to clear the cut source:", err);
+              void alertAsync(typeof err === "string" ? err : (err as Error)?.message || String(err));
+            }
+          } else {
+            for (let r = srcMinRow; r <= srcMaxRow; r++) {
+              for (let c = srcMinCol; c <= srcMaxCol; c++) {
+                if (overlaps(r, c)) continue;
+                try {
+                  if (srcRef) await clearRangeWithOptions(r, c, r, c, "all", undefined, { target: srcRef });
+                  else await clearCell(r, c);
+                } catch (err) {
+                  console.error(`[Clipboard] Failed to clear cut source (${r}, ${c}):`, err);
+                }
+              }
+            }
+          }
+        } else {
+          for (let r = srcMinRow; r <= srcMaxRow; r++) {
+            for (let c = srcMinCol; c <= srcMaxCol; c++) {
+              // Don't clear if it overlaps with paste destination
+              const overlaps =
+                r >= targetRow &&
+                r < targetRow + pasteHeight &&
+                c >= targetCol &&
+                c < targetCol + pasteWidth;
 
-            if (!overlaps) {
-              try {
-                await clearCell(r, c);
-              } catch (err) {
-                console.error(`[Clipboard] Failed to clear cut source (${r}, ${c}):`, err);
+              if (!overlaps) {
+                try {
+                  await clearCell(r, c);
+                } catch (err) {
+                  console.error(`[Clipboard] Failed to clear cut source (${r}, ${c}):`, err);
+                }
               }
             }
           }
@@ -1014,13 +1218,24 @@ export function useClipboard(): UseClipboardReturn {
       // Update selection to cover the pasted range
       const pastedEndRow = targetRow + actualPasteHeight - 1;
       const pastedEndCol = targetCol + actualPasteWidth - 1;
-      
-      dispatch(setSelection({
-        startRow: targetRow,
-        startCol: targetCol,
-        endRow: pastedEndRow,
-        endCol: pastedEndCol,
-      }));
+
+      if (owned) {
+        // The OBJECT's own selection (Core's is hidden under the object).
+        selectTargetCells(owned, {
+          startRow: targetRow,
+          startCol: targetCol,
+          endRow: pastedEndRow,
+          endCol: pastedEndCol,
+          type: "cells",
+        });
+      } else {
+        dispatch(setSelection({
+          startRow: targetRow,
+          startCol: targetCol,
+          endRow: pastedEndRow,
+          endCol: pastedEndCol,
+        }));
+      }
       
       console.log("[Clipboard] Selection moved to pasted range:", {
         startRow: targetRow,
@@ -1034,7 +1249,7 @@ export function useClipboard(): UseClipboardReturn {
       // after a join -- a script's batch is its holder's to close).
       await tx?.cancel().catch(() => {});
     }
-  }, [selection, config.totalRows, config.totalCols, dispatch]);
+  }, [coreSelection, config.totalRows, config.totalCols, dispatch]);
 
   /**
    * Check if there's clipboard data available.

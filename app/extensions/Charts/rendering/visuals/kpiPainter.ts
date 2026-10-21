@@ -25,6 +25,7 @@
 //          otherwise — the area/marker rule `markerReachesDatum` uses), and an
 //          override on the LATEST period also colours the indicator.
 
+import { formatNumber } from "@api/locale";
 import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, KpiMarkOptions, KpiDirection } from "../../types";
 import type { ChartRenderTheme } from "../chartTheme";
 import { resolveDatumStyle } from "../../lib/dataPointOverrides";
@@ -103,11 +104,11 @@ function trendPoints(data: ParsedChartData, layout: ChartLayout): Array<{ x: num
   }));
 }
 
-/** "+10%" / "-25%": distance to goal as a share of the goal, two decimals at most. */
+/** "+10%" / "-25%": distance to goal as a share of the goal, two decimals at most, in the app locale. */
 function distanceText(value: number, goal: number): string {
   if (goal === 0) return "";
   const pct = ((value - goal) / Math.abs(goal)) * 100;
-  const body = Math.abs(pct).toFixed(2).replace(/\.?0+$/, "");
+  const body = formatNumber(Math.abs(pct), { maxDecimals: 2, trimZeros: true });
   return `${pct >= 0 ? "+" : "-"}${body}%`;
 }
 

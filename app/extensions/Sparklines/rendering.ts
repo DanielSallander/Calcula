@@ -62,16 +62,41 @@ function ensureData(
 }
 
 /**
+ * The most cells one `getRangeCellsTyped` call may cover (the backend's
+ * `MAX_TYPED_RANGE_CELLS`); a larger data range is read in row bands.
+ */
+const TYPED_READ_CAP = 100_000;
+
+/**
+ * The number a sparkline plots for one typed cell: the engine's own value for
+ * a number cell (a date is its serial), NaN for anything else -- an empty
+ * cell, text, a boolean or an error -- which the renderer treats per the
+ * group's emptyCellHandling (Excel's sparklines skip text the same way).
+ *
+ * The DISPLAY text is never re-parsed: in sv-SE "1 234,50 kr" stripped to
+ * digits and dots read 123450, and an ISO date "2024-01-15" read 2024.
+ */
+export function sparklineCellNumber(cell: { value: unknown; type?: string } | null | undefined): number {
+  if (!cell) return NaN;
+  if (cell.type === "number" && typeof cell.value === "number" && Number.isFinite(cell.value)) return cell.value;
+  return NaN;
+}
+
+/**
  * Fetch all data for a sparkline group.
  * Returns an array of number arrays: one per sparkline (location cell).
  * NaN values are preserved (not replaced with 0) so that the renderer
  * can apply the group's emptyCellHandling setting.
+ *
+ * The data range is read TYPED, one call per band (on the active sheet, like
+ * the sparkline itself), and each cell's number comes from its value, never
+ * from the text it shows.
  */
-async function fetchGroupData(
+export async function fetchGroupData(
   group: SparklineGroup,
   orientation: DataOrientation,
 ): Promise<number[][]> {
-  const { getCell } = await import("../../src/api/lib");
+  const { getRangeCellsTyped } = await import("@api/lib");
 
   const dr = group.dataRange;
   const dataRows = dr.endRow - dr.startRow + 1;
@@ -81,16 +106,24 @@ async function fetchGroupData(
   const locCols = group.location.endCol - group.location.startCol + 1;
   const count = Math.max(locRows, locCols);
 
-  // Read all cells in the data range into a 2D grid (preserve NaN for empty cells)
-  const rawGrid: number[][] = [];
-  for (let r = 0; r < dataRows; r++) {
-    const row: number[] = [];
-    for (let c = 0; c < dataCols; c++) {
-      const cell = await getCell(dr.startRow + r, dr.startCol + c);
-      const num = cell ? parseFloat(cell.display.replace(/[^0-9.\-]/g, "")) : NaN;
-      row.push(num); // Keep NaN — renderer handles it via emptyCellHandling
+  // A dense grid of NaN (the typed read is sparse: an absent cell is empty).
+  // Keep NaN — the renderer handles it via emptyCellHandling.
+  const rawGrid: number[][] = Array.from({ length: Math.max(0, dataRows) }, () =>
+    Array<number>(Math.max(0, dataCols)).fill(NaN),
+  );
+  if (dataRows > 0 && dataCols > 0) {
+    const rowsPerBand = Math.max(1, Math.floor(TYPED_READ_CAP / dataCols));
+    for (let r0 = dr.startRow; r0 <= dr.endRow; r0 += rowsPerBand) {
+      const r1 = Math.min(dr.endRow, r0 + rowsPerBand - 1);
+      const cells = await getRangeCellsTyped(r0, dr.startCol, r1, dr.endCol);
+      for (const cell of cells) {
+        const r = cell.row - dr.startRow;
+        const c = cell.col - dr.startCol;
+        if (r >= 0 && r < dataRows && c >= 0 && c < dataCols) {
+          rawGrid[r][c] = sparklineCellNumber(cell);
+        }
+      }
     }
-    rawGrid.push(row);
   }
 
   // Slice the data according to orientation

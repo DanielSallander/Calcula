@@ -124,6 +124,11 @@ export const UNPREVIEWABLE: ReadonlyMap<string, string> = new Map([
   // both be fabrications, the same reason setPrintArea is listed above.
   ["api.getCanvasLayout", "a preview holds ONE worksheet's grid and no canvas sheet or page model"],
   ["api.setCanvasLayout", "a preview holds ONE worksheet's grid and no canvas sheet or page model"],
+  // A cross-filter selection lives on a canvas PAGE and names its visuals; a
+  // preview has neither, and inventing "no selections" would be a fabrication.
+  ["api.getCrossFilters", "a preview holds ONE worksheet's grid and no canvas page or visuals"],
+  ["api.setCrossFilter", "a preview holds ONE worksheet's grid and no canvas page or visuals"],
+  ["api.clearCrossFilters", "a preview holds ONE worksheet's grid and no canvas page or visuals"],
 ]);
 
 /**

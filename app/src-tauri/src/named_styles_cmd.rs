@@ -3,7 +3,7 @@
 // CONTEXT: Named styles map a user-facing name ("Heading 1", "Good", etc.) to a
 // style_index in the StyleRegistry. Built-in styles are seeded on app start.
 
-use crate::api_types::{CellData, FormattingResult, NamedCellStyle, StyleData, StyleEntry};
+use crate::api_types::{CellData, CellTargetRef, FormattingResult, NamedCellStyle, StyleData, StyleEntry};
 use crate::document_effect::{CleanReason, DocumentEffect};
 use crate::persistence::FileState;
 use crate::{format_cell_value_with_color, AppState};
@@ -115,7 +115,7 @@ pub fn apply_named_style(
     rows: Vec<u32>,
     cols: Vec<u32>,
 ) -> Result<FormattingResult, String> {
-    apply_named_style_impl(&state, &file_state, &name, &rows, &cols)
+    apply_named_style_impl(&state, &file_state, &name, &rows, &cols, None)
 }
 
 /// Apply a named style to a rectangular range (inclusive bounds), under ONE
@@ -123,7 +123,12 @@ pub fn apply_named_style(
 /// surface addresses ranges as rects, not row/col lists, and expanding a big
 /// rect into two vectors on the JS side just to have Rust cross-product them
 /// back is wasted IPC. Bounds are normalized (start/end may arrive swapped).
+///
+/// `target` (P3, Home > Cell Styles on a floating grid): the rect is in the
+/// floating grid's cells -- written on its backing sheet ONLY, inside the
+/// extent, gated by the HOST's protection.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn apply_named_style_range(
     state: State<AppState>,
     file_state: State<FileState>,
@@ -132,12 +137,18 @@ pub fn apply_named_style_range(
     start_col: u32,
     end_row: u32,
     end_col: u32,
+    target: Option<CellTargetRef>,
 ) -> Result<FormattingResult, String> {
     let (r1, r2) = (start_row.min(end_row), start_row.max(end_row));
     let (c1, c2) = (start_col.min(end_col), start_col.max(end_col));
+    // A cell target's extent bounds the rect BEFORE it is expanded into lists.
+    if let Some(t) = &target {
+        let resolved = crate::cell_target::resolve_cell_target(&state, t)?;
+        crate::cell_target::ensure_in_extent(&resolved, r1, c1, r2, c2)?;
+    }
     let rows: Vec<u32> = (r1..=r2).collect();
     let cols: Vec<u32> = (c1..=c2).collect();
-    apply_named_style_impl(&state, &file_state, &name, &rows, &cols)
+    apply_named_style_impl(&state, &file_state, &name, &rows, &cols, target.as_ref())
 }
 
 /// Shared body of `apply_named_style` / `apply_named_style_range`: applies the
@@ -145,26 +156,50 @@ pub fn apply_named_style_range(
 /// a single undo transaction (the caller's, when one is already open -- see
 /// the begin below). Takes plain references so it is unit-testable
 /// with `create_app_state()` (same pattern as off_sheet_structural_edit).
+///
+/// `target` (P3): write a floating grid's backing sheet INSTEAD of the active
+/// sheet -- extent-checked, and gated by the HOST's protection (the backing
+/// cells' lock flags, the host's protected flag and Format Cells option).
 pub(crate) fn apply_named_style_impl(
     state: &AppState,
     file_state: &FileState,
     name: &str,
     rows: &[u32],
     cols: &[u32],
+    target: Option<&CellTargetRef>,
 ) -> Result<FormattingResult, String> {
+    // A cell target resolves, holding nothing, before any guard below.
+    let resolved = match target {
+        Some(target) => Some(crate::cell_target::resolve_cell_target(state, target)?),
+        None => None,
+    };
     // Sheet protection. Applying a named style rewrites the target cells'
     // style_index wholesale, so once `CellStyle.locked` is authoritative this is
     // an unlock vector too — the built-in "Normal" style carries locked:true,
     // and any user-defined style could carry locked:false.
-    {
-        let active_sheet = *state.active_sheet.read().unwrap();
-        crate::protection::check_sheet_protection_cells(
-            state,
-            active_sheet,
-            rows.iter().flat_map(|r| cols.iter().map(move |c| (*r, *c))),
-        )?;
-        // Second protection axis, same as apply_formatting.
-        crate::protection::check_sheet_action(state, active_sheet, "formatCells", "apply a named style")?;
+    match &resolved {
+        Some(t) => {
+            let bounds = (
+                rows.iter().min().copied(),
+                cols.iter().min().copied(),
+                rows.iter().max().copied(),
+                cols.iter().max().copied(),
+            );
+            if let (Some(r0), Some(c0), Some(r1), Some(c1)) = bounds {
+                crate::cell_target::ensure_in_extent(t, r0, c0, r1, c1)?;
+                crate::cell_target::gate_target_cells(state, t, (r0, c0, r1, c1), "formatCells", "apply a named style")?;
+            }
+        }
+        None => {
+            let active_sheet = *state.active_sheet.read().unwrap();
+            crate::protection::check_sheet_protection_cells(
+                state,
+                active_sheet,
+                rows.iter().flat_map(|r| cols.iter().map(move |c| (*r, *c))),
+            )?;
+            // Second protection axis, same as apply_formatting.
+            crate::protection::check_sheet_action(state, active_sheet, "formatCells", "apply a named style")?;
+        }
     }
 
     // Look up the named style
@@ -179,14 +214,39 @@ pub(crate) fn apply_named_style_impl(
     // Every gate above has passed; from here this command commits. Constructed
     // HERE and not at the top so a refusal cannot leave a spuriously dirty
     // document -- see DocumentEffect::mutates on ordering.
-    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
-    let mut grid = state.grid.write(&effect).unwrap();
-    let mut grids = state.grids.write(&effect).unwrap();
+    let grid = state.grid.lock_pending().unwrap();
+    let grids = state.grids.lock_pending().unwrap();
     let active_sheet = *state.active_sheet.read().unwrap();
+    // The sheet written: the active sheet, or the cell target's backing sheet
+    // re-checked under the held grid guards (`sheet_ids` after `grids`).
+    let sheet = match &resolved {
+        Some(t) => {
+            crate::cell_target::ensure_target_still_at(state, t)?;
+            t.backing_index
+        }
+        None => active_sheet,
+    };
+    if sheet != active_sheet && sheet >= grids.len() {
+        return Err("Floating range backing sheet is missing".to_string());
+    }
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let mut grid = grid.authorize(&effect);
+    let mut grids = grids.authorize(&effect);
     let mut styles = state.style_registry.write(&effect).unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
-    let merged_regions = state.merged_regions.read().unwrap();
+    // The written sheet's merges: the active mirror, or the backing sheet's set.
+    let merged_regions: Vec<crate::api_types::MergedRegion> = if sheet == active_sheet {
+        state.merged_regions.read().unwrap().iter().cloned().collect()
+    } else {
+        state.all_merged_regions.read().unwrap().get(sheet).map(|m| m.iter().cloned().collect()).unwrap_or_default()
+    };
     let locale = state.locale.lock().unwrap();
+    // The grid written, and the active sheet's second copy when it is the one.
+    let (grid, mut mirror): (&mut engine::Grid, Option<&mut engine::Grid>) = if sheet == active_sheet {
+        (&mut *grid, grids.get_mut(active_sheet))
+    } else {
+        (&mut grids[sheet], None)
+    };
 
     let mut updated_cells = Vec::new();
 
@@ -236,12 +296,12 @@ pub(crate) fn apply_named_style_impl(
             };
             grid.set_cell(row, col, updated_cell.clone());
 
-            if active_sheet < grids.len() {
-                grids[active_sheet].set_cell(row, col, updated_cell.clone());
+            if let Some(m) = mirror.as_deref_mut() {
+                m.set_cell(row, col, updated_cell.clone());
             }
 
-            // Record undo
-            undo_stack.record_cell_change(active_sheet, row, col, previous_cell);
+            // Record undo, against the sheet the cell is on.
+            undo_stack.record_cell_change(sheet, row, col, previous_cell);
 
             // Display resolution honours the row/column tiers (the cell was just
             // written above, so this reflects the newly applied named style).
@@ -327,7 +387,7 @@ mod rect_apply_tests {
         let rows: Vec<u32> = (1..=3).collect();
         let cols: Vec<u32> = (0..=1).collect();
         let result =
-            apply_named_style_impl(&state, &file_state, "Good", &rows, &cols).expect("apply");
+            apply_named_style_impl(&state, &file_state, "Good", &rows, &cols, None).expect("apply");
         assert_eq!(result.cells.len(), 6, "every cell of the rect is reported");
 
         let good_index = state
@@ -373,7 +433,7 @@ mod rect_apply_tests {
     fn rect_apply_of_an_unknown_style_changes_nothing() {
         let state = crate::create_app_state();
         let file_state = FileState::default();
-        let err = apply_named_style_impl(&state, &file_state, "NoSuchStyle", &[0, 1], &[0])
+        let err = apply_named_style_impl(&state, &file_state, "NoSuchStyle", &[0, 1], &[0], None)
             .expect_err("must refuse");
         assert!(err.contains("not found"), "got: {}", err);
         assert_eq!(state.undo_stack.lock().unwrap().undo_depth(), 0);
@@ -396,12 +456,12 @@ mod rect_apply_tests {
         })
         .expect("fixture: the script's begin opens the batch");
 
-        apply_named_style_impl(&state, &file_state, "Good", &[0], &[0]).expect("apply to A1");
+        apply_named_style_impl(&state, &file_state, "Good", &[0], &[0], None).expect("apply to A1");
         assert!(
             state.undo_stack.lock().unwrap().has_open_transaction(),
             "applying the style closed the script's open batch"
         );
-        apply_named_style_impl(&state, &file_state, "Bad", &[1], &[0]).expect("apply to A2");
+        apply_named_style_impl(&state, &file_state, "Bad", &[1], &[0], None).expect("apply to A2");
         assert!(
             crate::undo_commands::commit_undo_transaction_core(&state, Some(ticket)),
             "the script's own commit found its batch already closed"

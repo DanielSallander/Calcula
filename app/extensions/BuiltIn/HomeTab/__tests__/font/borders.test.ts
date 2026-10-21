@@ -47,6 +47,13 @@ vi.mock("@api/grid", () => ({ getGridStateSnapshot: () => grid.snapshot }));
 const dialogs = vi.hoisted(() => ({ alertAsync: vi.fn(async (..._a: unknown[]) => undefined) }));
 vi.mock("@api/dialogs", () => dialogs);
 
+// The cell-target seam is REAL (P3); only its backend read is doubled.
+const targetRead = vi.hoisted(() => ({ getCellTargetCells: vi.fn() }));
+vi.mock("@api/cellTarget", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@api/cellTarget")>()),
+  getCellTargetCells: (...a: unknown[]) => targetRead.getCellTargetCells(...a),
+}));
+
 import { CommandRegistry, CoreCommands } from "@api/commands";
 import { cellEvents } from "@api/cellEvents";
 import { registerSelectionOwner } from "@api/selectionOwner";
@@ -120,7 +127,8 @@ beforeEach(() => {
   borderPen.reset();
   selectBlock(B2C3);
   lib.applyBorderPreset.mockReset().mockImplementation(async (...args: unknown[]) => {
-    log.push(`preset:${JSON.stringify(args)}`);
+    // The eight preset arguments; the ninth, the options, is the target (none here).
+    log.push(`preset:${JSON.stringify(args.slice(0, 8))}`);
     return { cells: [{ row: 1, col: 1, display: "", formula: null, styleIndex: 3 }], styles: [] };
   });
   lib.applyFormatting.mockReset().mockImplementation(async (rows: number[], cols: number[], f: unknown) => {
@@ -454,5 +462,71 @@ describe("More Borders...", () => {
     execute.mockRejectedValueOnce(new Error("nope"));
     await openMoreBorders();
     expect(dialogs.alertAsync).toHaveBeenCalledWith("nope");
+  });
+});
+
+// ============================================================================
+// P3 S9: a floating grid's cells
+// ============================================================================
+
+describe("applyBorderChoice on a floating grid's cells (P3)", () => {
+  const REF = { kind: "floatingRange" as const, id: "fr-2" };
+  /** The grid's own selection D5:E6; Core's stays B2:C3 (selectBlock in beforeEach). */
+  const FR_RECT: CellRect = { startRow: 4, startCol: 3, endRow: 5, endCol: 4 };
+
+  function floatingGrid(actsOn?: readonly string[]): void {
+    releaseOwner = registerSelectionOwner({
+      id: "floatingRange",
+      label: "a floating grid's cells",
+      ownsSelection: () => true,
+      cellTarget: () => ({
+        ref: REF,
+        selection: { ...FR_RECT, activeRow: 4, activeCol: 3, type: "cells" },
+        // The write extent ends at row 5 / column 4: the bottom and right
+        // neighbour strips are outside the grid and never read.
+        bounds: { rows: 6, cols: 5 },
+        label: "Float1",
+        wholeObject: false,
+      }),
+      ...(actsOn ? { actsOn: actsOn as never } : {}),
+    });
+  }
+
+  beforeEach(() => {
+    targetRead.getCellTargetCells.mockReset().mockImplementation(async (_ref: unknown, rect: CellRect) => {
+      log.push(`targetRead:${rect.startRow},${rect.startCol},${rect.endRow},${rect.endCol}`);
+      // D4 (row 3, col 3) draws a bottom line on the grid's top edge.
+      const cells = rect.startRow <= 3 && rect.endRow >= 3 && rect.startCol <= 3 && rect.endCol >= 3
+        ? [{ row: 3, col: 3, styleIndex: 5, display: "", formula: null, valueKind: "empty" }]
+        : [];
+      return { cells, merges: [], conditional: [], styles: [], rules: [] };
+    });
+    styles.set(5, styleWith({ borderBottom: THIN_SIDE }));
+  });
+
+  it("writes the preset and the shared-edge clear to the GRID's cells with { target }, reading neighbours through it", async () => {
+    floatingGrid(["format"]);
+    await expect(applyBorderChoice("none")).resolves.toBe(true);
+    expect(toasts).toEqual([]);
+    expect(writes()).toEqual([
+      `preset:${JSON.stringify([4, 3, 5, 4, "none", "solid", "#000000", 0])}`,
+      `format:${JSON.stringify([[3], [3], { borderBottom: { style: "none", color: "#000000" } }])}`,
+    ]);
+    expect(lib.applyBorderPreset.mock.calls[0][8]).toEqual({ target: REF });
+    expect(lib.applyFormatting.mock.calls[0][3]).toEqual({ target: REF });
+    // The neighbours are the grid's own (top and left strips inside its
+    // extent); the active sheet's cells under it are never read.
+    expect(lib.getViewportCells).not.toHaveBeenCalled();
+    expect(log.filter((l) => l.startsWith("targetRead:"))).toEqual(["targetRead:3,3,3,4", "targetRead:4,2,5,2"]);
+    // One undo step, as on the sheet.
+    expect(log[0]).toBe("begin:No Border");
+  });
+
+  it("inert until S8: a floating-grid owner that admits nothing refuses, once, writing nothing", async () => {
+    floatingGrid(undefined);
+    await expect(applyBorderChoice("allBorders")).resolves.toBe(false);
+    expect(writes()).toEqual([]);
+    expect(log).toEqual([]);
+    expect(toasts.length).toBe(1);
   });
 });

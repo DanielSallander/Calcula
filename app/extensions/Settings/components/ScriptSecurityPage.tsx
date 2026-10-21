@@ -63,6 +63,7 @@ import {
 import { showDialog } from "@api/ui";
 import type { CapabilityId } from "@api";
 import { confirmAsync } from "@api/dialogs";
+import { formatDateTime } from "@api/locale";
 
 // ============================================================================
 // Helpers
@@ -111,7 +112,7 @@ const capLabel = (id: string): string => CAP_LABEL[id as CapabilityId] ?? id;
 function formatWhen(iso: string): string {
   if (!iso) return "unknown";
   const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? "unknown" : d.toLocaleString();
+  return Number.isNaN(d.getTime()) ? "unknown" : formatDateTime(d);
 }
 
 /** Show the file name prominently and the folder quietly. */

@@ -1,8 +1,14 @@
 //! FILENAME: app/extensions/ControlsPane/components/FilterDropdown.tsx
 // PURPOSE: Dropdown checklist anchored below a ribbon filter card.
 //          Includes search, select all/none, OK/Cancel, and actions.
-// CONTEXT: Report Connections only ever offer the BI pivots backed by the
-//          filter's own model connection.
+// CONTEXT: Report Connections only ever offer the visuals built on the
+//          filter's own model connection: its BI pivots (from the backend, the
+//          route that filters them) and every other model visual a family lists
+//          on @api/modelVisuals (design-query charts, cards, KPIs, gauges).
+//          "Selected visuals" writes the pivots to `connectedPivots` and the
+//          rest to `connectedVisuals`; "Selected pages" and "All pages" reach
+//          both kinds through the scope the filter publishes
+//          (lib/filterReportPublisher.ts).
 //
 //          Hosted in an @api card Popover (Calcula Clusters): the Popover owns
 //          positioning, the card chrome, and dismissal on Escape or a press
@@ -11,9 +17,17 @@
 //          its own document listeners; every colour is now a token, so the
 //          checklist follows the skin in Dark. The filtering logic is
 //          unchanged.
+//
+//          Items are MEMBERS (P2): the list SHOWS and searches each item's
+//          app-locale `label` and SELECTS by its invariant `key` (what the
+//          filter stores and every reader matches). An advanced condition
+//          compares numbers and dates on the KEY against the user's text read
+//          in the app locale, and text on the label (`evalCondition`).
 
 import React, { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { getSheets, emitAppEvent, AppEvents } from "@api";
+import { parseNumber, parseDate } from "@api/locale";
+import { memberKeyNumber, memberKeyDate } from "@api/pivotMembers";
 import {
   Button,
   Input,
@@ -25,6 +39,8 @@ import {
 } from "@api/layout";
 import { focusWhenVisible, primaryButtonClass } from "./paneChrome";
 import { runStepThenConfirmOverwrite } from "@api/pivotOverwrite";
+import { listModelVisuals, type ModelVisualInfo } from "@api/modelVisuals";
+import type { VisualRef } from "@api/reportFilters";
 import type { SlicerItem, ConnectionMode, UpdateRibbonFilterParams, AdvancedFilter, AdvancedFilterOperator, AdvancedFilterLogic, FieldDataType } from "../lib/filterPaneTypes";
 import { updateFilterAsync, updateFilterSelectionAsync, getAllFilters, getConnectionName } from "../lib/filterPaneStore";
 import {
@@ -43,7 +59,18 @@ import {
 export interface FilterDropdownProps {
   filterId: string;
   fieldName: string;
+  /** How an error sentence names the field: the WHOLE field key (e.g.
+   *  "BI.dim_date.year"), never a last-dot short name that truncates a dotted
+   *  column. */
+  fieldLabel: string;
   items: SlicerItem[];
+  /** Why the values could not be loaded, or null. Shown INSTEAD of the list,
+   *  so a failed load never reads as "No matching values". */
+  itemsError: string | null;
+  /** Why the values are shown un-narrowed by the dependent filters, or null. */
+  narrowingError: string | null;
+  /** Load the values again (the alert's Retry). */
+  onRetry: () => void;
   selectedItems: string[] | null;
   /** The filter card the popover hangs below (and never dismisses on). */
   anchorEl: HTMLElement;
@@ -53,12 +80,14 @@ export interface FilterDropdownProps {
   /** The model connection this filter is sourced from. */
   connectionId: string;
   connectionMode: ConnectionMode;
-  crossFilterTargets: string[];
-  crossFilterSlicerTargets: string[];
+  dependentFilters: string[];
+  dependentSlicers: string[];
   advancedFilter: AdvancedFilter | null;
   fieldDataType: FieldDataType;
   connectedPivots?: string[];
   connectedSheets?: number[];
+  /** Manual mode's non-pivot visuals (charts, cards, KPIs, gauges). */
+  connectedVisuals?: VisualRef[];
   hideNoData: boolean;
   indicateNoData: boolean;
   sortNoDataLast: boolean;
@@ -71,7 +100,11 @@ export interface FilterDropdownProps {
 export function FilterDropdown({
   filterId,
   fieldName,
+  fieldLabel,
   items,
+  itemsError,
+  narrowingError,
+  onRetry,
   selectedItems,
   anchorEl,
   onApply,
@@ -79,34 +112,45 @@ export function FilterDropdown({
   onDelete,
   connectionId,
   connectionMode,
-  crossFilterTargets,
+  dependentFilters,
   advancedFilter,
   fieldDataType,
   connectedPivots,
   connectedSheets,
+  connectedVisuals,
   hideNoData,
   indicateNoData,
   sortNoDataLast,
   showSelectAll,
   singleSelect,
   filterLevel,
-  crossFilterSlicerTargets,
+  dependentSlicers,
 }: FilterDropdownProps): React.ReactElement {
   const cachedFilters = getAllFilters();
   const connectionName = getConnectionName(connectionId);
   // Local selection state for OK/Cancel pattern
-  const allValues = useMemo(() => items.map((i) => i.value), [items]);
+  // Member KEYS: the selection stores keys, never labels.
+  const allValues = useMemo(() => items.map((i) => i.key), [items]);
   const [localSelected, setLocalSelected] = useState<Set<string>>(() => {
     if (selectedItems === null) return new Set(allValues);
     return new Set(selectedItems);
   });
+  // The values can arrive while the checklist is open (a Retry after a failed
+  // load, a dependent filter's refresh). Until the user has ticked anything,
+  // the local selection follows them: "(All)" must tick the values that
+  // arrived, or OK would apply an empty selection the user never chose.
+  const userEdited = useRef(false);
+  useEffect(() => {
+    if (userEdited.current) return;
+    setLocalSelected(selectedItems === null ? new Set(allValues) : new Set(selectedItems));
+  }, [allValues, selectedItems]);
   const [searchText, setSearchText] = useState("");
   const [filterMode, setFilterMode] = useState<"basic" | "advanced">(
     advancedFilter ? "advanced" : "basic",
   );
 
   // Sub-panel state
-  type PanelView = "none" | "connections" | "crossTargets" | "settings";
+  type PanelView = "none" | "connections" | "dependents" | "settings";
   const [panelView, setPanelView] = useState<PanelView>("none");
 
   // Alias for backward compat in the JSX
@@ -118,11 +162,11 @@ export function FilterDropdown({
     new Set(connectedSheets ?? []),
   );
 
-  const [localCrossTargets, setLocalCrossTargets] = useState<Set<string>>(
-    new Set(crossFilterTargets),
+  const [localDependentFilters, setLocalDependentFilters] = useState<Set<string>>(
+    new Set(dependentFilters),
   );
-  const [localCrossSlicerTargets, setLocalCrossSlicerTargets] = useState<Set<string>>(
-    new Set(crossFilterSlicerTargets),
+  const [localDependentSlicers, setLocalDependentSlicers] = useState<Set<string>>(
+    new Set(dependentSlicers),
   );
   const [availableSlicers, setAvailableSlicers] = useState<SlicerInfo[]>([]);
 
@@ -131,10 +175,15 @@ export function FilterDropdown({
   const [localConnections, setLocalConnections] = useState<Set<string>>(() => {
     return new Set(connectedPivots ?? []);
   });
+  // ...and its other model visuals (charts, cards, KPIs, gauges), by "kind:id".
+  const [availableVisuals, setAvailableVisuals] = useState<ModelVisualInfo[]>([]);
+  const [localVisuals, setLocalVisuals] = useState<Set<string>>(
+    () => new Set((connectedVisuals ?? []).map(visualKey)),
+  );
 
-  // Load slicers when cross-filter panel opens
+  // Load slicers when the dependent-filters panel opens
   useEffect(() => {
-    if (panelView !== "crossTargets") return;
+    if (panelView !== "dependents") return;
     fetchAllSlicers().then(setAvailableSlicers).catch(console.error);
   }, [panelView]);
 
@@ -147,6 +196,7 @@ export function FilterDropdown({
     getPivotsForBiConnection(connectionId)
       .then(setAvailablePivots)
       .catch(() => setAvailablePivots([]));
+    setAvailableVisuals(selectableModelVisuals(connectionId));
   }, [showConnections, connectionId]);
 
   const handleSaveConnections = useCallback(async () => {
@@ -177,11 +227,19 @@ export function FilterDropdown({
     const updates: UpdateRibbonFilterParams = {
       connectionMode: localMode,
       connectedSheets: localMode === "bySheet" ? Array.from(localSheets) : [],
-      crossFilterTargets: Array.from(localCrossTargets),
-      crossFilterSlicerTargets: Array.from(localCrossSlicerTargets),
+      dependentFilters: Array.from(localDependentFilters),
+      dependentSlicers: Array.from(localDependentSlicers),
     };
     if (localMode === "manual") {
       updates.connectedPivots = Array.from(localConnections);
+      // The ticked visuals, plus any connected ref the list cannot show (its
+      // family is not loaded): not listed is not unticked. A ref to a deleted
+      // object is dropped by the backend at save.
+      const listed = new Set(availableVisuals.map((v) => visualKey(v.ref)));
+      updates.connectedVisuals = [
+        ...availableVisuals.filter((v) => localVisuals.has(visualKey(v.ref))).map((v) => ({ ...v.ref })),
+        ...(connectedVisuals ?? []).filter((r) => !listed.has(visualKey(r))).map((r) => ({ ...r })),
+      ];
     }
 
     // ONE Save is ONE undo step -- the connections, the clears and the apply
@@ -221,7 +279,7 @@ export function FilterDropdown({
 
     emitAppEvent(AppEvents.GRID_REFRESH);
 
-    // Trigger slicer refresh so cross-filter has_data is recalculated
+    // Trigger slicer refresh so the dependents' has_data is recalculated
     window.dispatchEvent(
       new CustomEvent("ribbonFilter:selectionChanged", {
         detail: { filterId },
@@ -229,7 +287,7 @@ export function FilterDropdown({
     );
 
     setShowConnections(false);
-  }, [filterId, fieldName, connectionMode, connectedSheets, availablePivots, localMode, localSheets, localConnections, localCrossTargets, localCrossSlicerTargets, connectedPivots]);
+  }, [filterId, fieldName, connectionMode, connectedSheets, availablePivots, availableVisuals, localMode, localSheets, localConnections, localVisuals, localDependentFilters, localDependentSlicers, connectedPivots, connectedVisuals]);
 
   // Escape and a press outside the popover and the card close it: the
   // Popover below owns both, so this component binds no document listeners.
@@ -245,6 +303,7 @@ export function FilterDropdown({
   }, [showSearch]);
 
   const handleToggle = useCallback((value: string) => {
+    userEdited.current = true;
     if (singleSelect) {
       // Single-select: only one item at a time
       setLocalSelected(new Set([value]));
@@ -259,21 +318,25 @@ export function FilterDropdown({
   }, [singleSelect]);
 
   const handleSelectAll = useCallback(() => {
+    userEdited.current = true;
     setLocalSelected(new Set(allValues));
   }, [allValues]);
 
   const handleSelectNone = useCallback(() => {
+    userEdited.current = true;
     setLocalSelected(new Set());
   }, []);
 
   const handleOk = useCallback(() => {
+    // No values loaded: there is nothing to choose from, so nothing changes.
+    if (itemsError !== null) return;
     // If all selected, clear filter (null = all)
     if (localSelected.size === allValues.length) {
       onApply(null);
     } else {
       onApply(Array.from(localSelected));
     }
-  }, [localSelected, allValues, onApply]);
+  }, [itemsError, localSelected, allValues, onApply]);
 
   const filtered = useMemo(() => {
     let result = items;
@@ -284,7 +347,8 @@ export function FilterDropdown({
     // Filter by search text
     if (searchText) {
       const lower = searchText.toLowerCase();
-      result = result.filter((i) => i.value.toLowerCase().includes(lower));
+      // Search what the user SEES (the label).
+      result = result.filter((i) => i.label.toLowerCase().includes(lower));
     }
     // Sort items with no data to the bottom
     if (sortNoDataLast && !hideNoData) {
@@ -353,34 +417,70 @@ export function FilterDropdown({
                 </div>
               )}
 
-              {/* Items */}
-              <div style={styles.itemList}>
-                {filtered.map((item) => (
-                  <label
-                    key={item.value}
-                    style={{
-                      ...styles.itemRow,
-                      opacity: indicateNoData && !item.hasData ? 0.45 : 1,
-                    }}
-                  >
-                    <input
-                      type={singleSelect ? "radio" : "checkbox"}
-                      checked={localSelected.has(item.value)}
-                      onChange={() => handleToggle(item.value)}
-                      name={singleSelect ? `filter-${filterId}` : undefined}
-                      style={styles.rowInput}
-                    />
-                    <span style={styles.itemLabel}>{item.value || "(Blank)"}</span>
-                  </label>
-                ))}
-                {filtered.length === 0 && (
-                  <div style={styles.noResults}>No matching values</div>
-                )}
-              </div>
+              {/* The values are shown un-narrowed: say why, above the list. */}
+              {itemsError === null && narrowingError !== null && (
+                <div
+                  style={styles.narrowingNotice}
+                  data-testid="controls-pane-filter-narrowing-error"
+                >
+                  Values are not narrowed by dependent filters: {narrowingError}
+                </div>
+              )}
+
+              {/* Items -- or, when they could not be loaded, why not. */}
+              {itemsError !== null ? (
+                <div style={styles.itemsErrorBox}>
+                  <div role="alert" data-testid="controls-pane-filter-items-error">
+                    Could not load the values of {fieldLabel}: {itemsError}
+                  </div>
+                  <div>
+                    <Button
+                      size="sm"
+                      variant="outlined"
+                      onClick={onRetry}
+                      data-testid="controls-pane-filter-items-retry"
+                    >
+                      Retry
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div style={styles.itemList}>
+                  {filtered.map((item) => (
+                    <label
+                      key={item.key}
+                      data-testid="controls-pane-filter-item"
+                      data-value={item.key}
+                      data-has-data={String(item.hasData)}
+                      style={{
+                        ...styles.itemRow,
+                        opacity: indicateNoData && !item.hasData ? 0.45 : 1,
+                      }}
+                    >
+                      <input
+                        type={singleSelect ? "radio" : "checkbox"}
+                        checked={localSelected.has(item.key)}
+                        onChange={() => handleToggle(item.key)}
+                        name={singleSelect ? `filter-${filterId}` : undefined}
+                        style={styles.rowInput}
+                      />
+                      <span style={styles.itemLabel}>{item.label || "(Blank)"}</span>
+                    </label>
+                  ))}
+                  {filtered.length === 0 && (
+                    <div style={styles.noResults}>No matching values</div>
+                  )}
+                </div>
+              )}
 
               {/* OK / Cancel */}
               <div style={styles.footer}>
-                <Button variant="outlined" className={primaryButtonClass} onClick={handleOk}>
+                <Button
+                  variant="outlined"
+                  className={primaryButtonClass}
+                  onClick={handleOk}
+                  disabled={itemsError !== null}
+                >
                   OK
                 </Button>
                 <Button variant="outlined" onClick={onClose}>
@@ -413,8 +513,12 @@ export function FilterDropdown({
               <Button size="sm" onClick={() => setPanelView("connections")}>
                 Connections
               </Button>
-              <Button size="sm" onClick={() => setPanelView("crossTargets")}>
-                Cross-filter
+              <Button
+                size="sm"
+                data-testid="controls-pane-filter-dependents-open"
+                onClick={() => setPanelView("dependents")}
+              >
+                Dependent filters
               </Button>
               <Button size="sm" onClick={() => setPanelView("settings")}>
                 Settings
@@ -434,12 +538,12 @@ export function FilterDropdown({
               filterLevel={filterLevel}
               onClose={() => setPanelView("none")}
             />
-          ) : panelView === "crossTargets" ? (
+          ) : panelView === "dependents" ? (
             <div style={styles.connectionsPanel}>
-              <div style={styles.connectionsHeader}>Cross-filter targets</div>
+              <div style={styles.connectionsHeader}>Dependent filters</div>
               <div style={styles.modeHint}>
-                Select which filters and slicers this filter should cross-filter.
-                Target items will be dimmed when they have no matching data.
+                Choose the filters and slicers whose value lists follow this filter's selection.
+                Their values with no matching data are dimmed.
               </div>
               <div style={styles.sheetList}>
                 {/* Other ribbon filters on the SAME model connection — item
@@ -454,9 +558,9 @@ export function FilterDropdown({
                       <label key={`f-${f.id}`} style={styles.itemRow}>
                         <input
                           type="checkbox"
-                          checked={localCrossTargets.has(f.id)}
+                          checked={localDependentFilters.has(f.id)}
                           onChange={() => {
-                            setLocalCrossTargets((prev) => {
+                            setLocalDependentFilters((prev) => {
                               const next = new Set(prev);
                               if (next.has(f.id)) next.delete(f.id);
                               else next.add(f.id);
@@ -479,9 +583,9 @@ export function FilterDropdown({
                     <label key={`s-${s.id}`} style={styles.itemRow}>
                       <input
                         type="checkbox"
-                        checked={localCrossSlicerTargets.has(s.id)}
+                        checked={localDependentSlicers.has(s.id)}
                         onChange={() => {
-                          setLocalCrossSlicerTargets((prev) => {
+                          setLocalDependentSlicers((prev) => {
                             const next = new Set(prev);
                             if (next.has(s.id)) next.delete(s.id);
                             else next.add(s.id);
@@ -498,7 +602,7 @@ export function FilterDropdown({
                 {cachedFilters.filter((f) => f.id !== filterId && f.connectionId === connectionId).length === 0 &&
                   availableSlicers.length === 0 && (
                   <div style={styles.modeHint}>
-                    No other filters on this model connection or slicers to cross-filter.
+                    No other filter on this model, and no slicer, can depend on this filter.
                   </div>
                 )}
               </div>
@@ -509,8 +613,8 @@ export function FilterDropdown({
                 <Button
                   variant="outlined"
                   onClick={() => {
-                    setLocalCrossTargets(new Set(crossFilterTargets));
-                    setLocalCrossSlicerTargets(new Set(crossFilterSlicerTargets));
+                    setLocalDependentFilters(new Set(dependentFilters));
+                    setLocalDependentSlicers(new Set(dependentSlicers));
                     setPanelView("none");
                   }}
                 >
@@ -534,11 +638,7 @@ export function FilterDropdown({
                       checked={localMode === mode}
                       onChange={() => setLocalMode(mode)}
                     />
-                    {mode === "manual"
-                      ? "Manual"
-                      : mode === "bySheet"
-                        ? "By Sheet"
-                        : "Workbook"}
+                    {CONNECTION_MODE_LABELS[mode]}
                   </label>
                 ))}
               </div>
@@ -569,19 +669,20 @@ export function FilterDropdown({
 
               {localMode === "workbook" && (
                 <div style={styles.modeHint}>
-                  Automatically connects to all pivot tables using this model
-                  connection, including newly created ones.
+                  Filters every PivotTable, chart, card, KPI and gauge built on
+                  this model, on every page, including ones added later.
                 </div>
               )}
 
               {localMode === "manual" && (
                 <div style={styles.sheetList}>
-                  {availablePivots.length === 0 ? (
+                  {availablePivots.length === 0 && availableVisuals.length === 0 ? (
                     <div style={styles.modeHint}>
-                      No pivot tables use this model connection yet.
+                      No visuals use this model yet.
                     </div>
                   ) : (
-                    availablePivots.map((pv) => (
+                    <>
+                    {availablePivots.map((pv) => (
                       <label key={pv.id} style={styles.itemRow}>
                         <input
                           type="checkbox"
@@ -596,10 +697,36 @@ export function FilterDropdown({
                           }}
                           style={styles.rowInput}
                         />
-                        <span style={styles.kindTag}>[P]</span>
+                        <span style={styles.kindTag}>PivotTable</span>
                         <span>{pv.name}</span>
                       </label>
-                    ))
+                    ))}
+                    {availableVisuals.map((v) => {
+                      const key = visualKey(v.ref);
+                      return (
+                        <label key={key} style={styles.itemRow} data-visual-ref={key}>
+                          <input
+                            type="checkbox"
+                            checked={localVisuals.has(key)}
+                            onChange={() => {
+                              setLocalVisuals((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(key)) next.delete(key);
+                                else next.add(key);
+                                return next;
+                              });
+                            }}
+                            style={styles.rowInput}
+                          />
+                          <span style={styles.kindTag}>{v.label}</span>
+                          <span>{v.name}</span>
+                          {sheetNames[v.sheetIndex] !== undefined && (
+                            <span style={styles.kindTag}>&nbsp;({sheetNames[v.sheetIndex]})</span>
+                          )}
+                        </label>
+                      );
+                    })}
+                    </>
                   )}
                 </div>
               )}
@@ -614,7 +741,8 @@ export function FilterDropdown({
                     setLocalMode(connectionMode);
                     setLocalSheets(new Set(connectedSheets ?? []));
                     setLocalConnections(new Set(connectedPivots ?? []));
-                    setLocalCrossTargets(new Set(crossFilterTargets));
+                    setLocalVisuals(new Set((connectedVisuals ?? []).map(visualKey)));
+                    setLocalDependentFilters(new Set(dependentFilters));
                     setPanelView("none");
                   }}
                 >
@@ -627,6 +755,33 @@ export function FilterDropdown({
       </SurfaceLayoutProvider>
     </Popover>
   );
+}
+
+// ============================================================================
+// Report connections: modes and model visuals
+// ============================================================================
+
+/** What each connection mode is called (Power BI's words). */
+export const CONNECTION_MODE_LABELS: Readonly<Record<ConnectionMode, string>> = {
+  manual: "Selected visuals",
+  bySheet: "Selected pages",
+  workbook: "All pages",
+};
+
+/** A visual's identity as one string. */
+function visualKey(ref: VisualRef): string {
+  return `${ref.kind}:${ref.id}`;
+}
+
+/**
+ * The model visuals on `connectionId` a ribbon filter can name in
+ * "Selected visuals", besides its pivots: the ones that FOLLOW other filters
+ * (role.target). Pivots come from the backend (getPivotsForBiConnection, the
+ * route that filters them) and stay in `connectedPivots`; slicers narrow
+ * through dependent filters instead.
+ */
+function selectableModelVisuals(connectionId: string): ModelVisualInfo[] {
+  return listModelVisuals({ connectionId }).filter((v) => v.ref.kind === "chart" && v.role.target);
 }
 
 // ============================================================================
@@ -837,13 +992,51 @@ function needsValue(op: AdvancedFilterOperator): boolean {
   return op !== "isBlank" && op !== "isNotBlank";
 }
 
-/** Evaluate a single condition against a value. */
-function evalCondition(
-  value: string,
+/** A number condition: the member KEY read invariantly ("3578.27") against
+ *  the user's text read in the APP locale ("3.000,5" under de-DE). Either side
+ *  that is not a number fails the condition. */
+function compareNumbers(
+  member: SlicerItem,
+  target: string,
+  holds: (value: number, bound: number) => boolean,
+): boolean {
+  const value = memberKeyNumber(member.key);
+  const bound = parseNumber(target);
+  return value !== null && bound !== null && holds(value, bound);
+}
+
+/** A date condition: the KEY's serial (an ISO key, read invariantly) against
+ *  the user's text read as a date in the APP locale ("01.02.2024" under
+ *  de-DE). Either side that is not a date fails the condition. */
+function compareDates(
+  member: SlicerItem,
+  target: string,
+  holds: (value: number, bound: number) => boolean,
+): boolean {
+  const value = memberKeyDate(member.key);
+  const bound = parseDate(target);
+  return value !== null && bound !== null && holds(value, bound);
+}
+
+/**
+ * Evaluate one advanced-filter condition against a MEMBER:
+ * - numeric comparisons compare the invariant KEY with the target read in the
+ *   app locale; date comparisons the key's ISO date with the target read as an
+ *   app-locale date (never a string comparison of display text);
+ * - text comparisons (is, contains, starts with) read the LABEL, what the user
+ *   sees and types;
+ * - blank / empty read the KEY: the blank member's key is "" (ruling Q8),
+ *   while its label reads "(Blank)".
+ * It compared display text before (BUG-0519): "is blank" never matched the
+ * blank member and a de-DE "3.000,5" was parseFloat'ed to 3.
+ */
+export function evalCondition(
+  member: SlicerItem,
   op: AdvancedFilterOperator,
   target: string,
 ): boolean {
-  const vLower = value.toLowerCase();
+  const label = member.label;
+  const vLower = label.toLowerCase();
   const tLower = target.toLowerCase();
   switch (op) {
     case "is": return vLower === tLower;
@@ -852,18 +1045,18 @@ function evalCondition(
     case "doesNotContain": return !vLower.includes(tLower);
     case "startsWith": return vLower.startsWith(tLower);
     case "doesNotStartWith": return !vLower.startsWith(tLower);
-    case "isBlank": return value.trim() === "";
-    case "isNotBlank": return value.trim() !== "";
-    case "isEmpty": return value === "";
-    case "isNotEmpty": return value !== "";
-    case "isLessThan": return parseFloat(value) < parseFloat(target);
-    case "isLessThanOrEqualTo": return parseFloat(value) <= parseFloat(target);
-    case "isGreaterThan": return parseFloat(value) > parseFloat(target);
-    case "isGreaterThanOrEqualTo": return parseFloat(value) >= parseFloat(target);
-    case "isAfter": return value > target;
-    case "isOnOrAfter": return value >= target;
-    case "isBefore": return value < target;
-    case "isOnOrBefore": return value <= target;
+    case "isBlank": return member.key.trim() === "";
+    case "isNotBlank": return member.key.trim() !== "";
+    case "isEmpty": return member.key === "";
+    case "isNotEmpty": return member.key !== "";
+    case "isLessThan": return compareNumbers(member, target, (v, b) => v < b);
+    case "isLessThanOrEqualTo": return compareNumbers(member, target, (v, b) => v <= b);
+    case "isGreaterThan": return compareNumbers(member, target, (v, b) => v > b);
+    case "isGreaterThanOrEqualTo": return compareNumbers(member, target, (v, b) => v >= b);
+    case "isAfter": return compareDates(member, target, (v, b) => v > b);
+    case "isOnOrAfter": return compareDates(member, target, (v, b) => v >= b);
+    case "isBefore": return compareDates(member, target, (v, b) => v < b);
+    case "isOnOrBefore": return compareDates(member, target, (v, b) => v <= b);
     default: return true;
   }
 }
@@ -900,15 +1093,16 @@ function AdvancedFilterPanel({
   const [hasCond2, setHasCond2] = useState(!!currentFilter?.condition2);
 
   const handleApply = useCallback(async () => {
-    // Evaluate conditions against all item values
+    // Evaluate the conditions against every MEMBER; the selection is the
+    // matching members' KEYS.
     const matching = items
-      .map((i) => i.value)
-      .filter((v) => {
-        const c1 = evalCondition(v, op1, val1);
+      .filter((i) => {
+        const c1 = evalCondition(i, op1, val1);
         if (!hasCond2 || !val2) return c1;
-        const c2 = evalCondition(v, op2, val2);
+        const c2 = evalCondition(i, op2, val2);
         return logic === "and" ? c1 && c2 : c1 || c2;
-      });
+      })
+      .map((i) => i.key);
 
     // Save the advanced filter definition
     const af: AdvancedFilter = {
@@ -1096,6 +1290,23 @@ const styles: Record<string, React.CSSProperties> = {
     color: LT.textSecondary,
     fontStyle: "italic",
     fontSize: 12,
+  },
+  itemsErrorBox: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 6,
+    padding: "8px 4px",
+    fontSize: 12,
+    color: LT.dangerFg,
+    overflowWrap: "anywhere",
+  },
+  narrowingNotice: {
+    padding: "4px 4px",
+    fontSize: 11,
+    color: LT.warnFg,
+    background: LT.warnBg,
+    borderBottom: DIVIDER,
+    overflowWrap: "anywhere",
   },
   footer: {
     padding: "8px 2px 6px",

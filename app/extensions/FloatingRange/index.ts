@@ -26,7 +26,15 @@ import {
   type CellValuesChangedPayload,
   isKeyClaimed,
 } from "@api";
-import { getActiveSheet } from "@api/lib";
+import {
+  getActiveSheet,
+  clearRangeWithOptions,
+  beginUndoTransaction,
+  commitUndoTransaction,
+  cancelUndoTransaction,
+} from "@api/lib";
+import { resolveCellTarget, targetRefOf } from "@api/cellTarget";
+import { ownUndoTransaction } from "@api/undoTicket";
 import {
   getGridRegions,
   requestOverlayRedraw,
@@ -120,6 +128,9 @@ import {
   trackedRowIndices,
   frColWidth,
   frRowHeight,
+  frColHidden,
+  frRowHidden,
+  frNearestShown,
   type FrEdge,
 } from "./lib/frDimensions";
 import {
@@ -150,6 +161,7 @@ import {
   resetFrRenderCaches,
   setFrResizeGhost,
   frHandlesLive,
+  frMergeAt,
 } from "./rendering/frRenderer";
 import {
   openFrEditor,
@@ -461,58 +473,60 @@ export async function deleteFrObjectsConfirmed(frIds: readonly string[]): Promis
 }
 
 /**
- * Clear the CONTENT of the local selection (only cells that actually hold
- * something — the read bounds the write batch). Undoable per cell.
+ * Clear the CONTENT of the local selection: Delete / Backspace on the grid's
+ * cells, which is Clear Contents (P3).
  *
- * The selection is clamped to the CONTENT extent (M7), not the window, so a
- * cleared cell can be one only scrolling shows. The read is banded (a whole
- * column over a 1000-row extent is past the backend's one-read limit), and a
- * cell the backend REFUSES does not stop the others: each is tried, and the
- * refusals are reported once, visibly -- a Delete that silently left cells
- * behind would look like it worked.
+ * THE DOOR. It asks the cell-target question like every Clear door
+ * (`resolveCellTarget("Clear Contents", "clear")`), so the grid's own answer --
+ * its selection clamped to the CONTENT extent (M7) and grown to whole merges --
+ * is what is cleared, through ONE `clearRangeWithOptions` with the target: one
+ * undo step for the whole selection (it used to be one write, and one undo
+ * step, per cell), backing sheet only, host protection gated in the backend.
+ * A multi-area selection is one call per area inside ONE bracket. A refusal is
+ * reported once, visibly -- a Delete that silently left cells behind would look
+ * like it worked.
  */
 async function clearLocalSelectionCells(frId: string): Promise<void> {
   const entry = getFloatingRangeById(frId);
   const sel = getLocalSelection();
   if (!entry || !sel || sel.frId !== frId) return;
-  const view = getFrView(entry);
-  const rect = localSelectionRect(sel);
-  const maxRow = Math.min(rect.maxRow, view.rows - 1);
-  const maxCol = Math.min(rect.maxCol, view.cols - 1);
-  let failed = 0;
-  let firstError: unknown = null;
+  const t = resolveCellTarget("Clear Contents", "clear");
+  // Refused (and announced), or -- never -- anything but THIS grid's cells.
+  if (t === null || t.kind !== "object" || t.ref.id !== frId) return;
+  const target = targetRefOf(t);
+  const areas = [
+    { startRow: t.selection.startRow, startCol: t.selection.startCol, endRow: t.selection.endRow, endCol: t.selection.endCol },
+    ...(t.selection.additionalRanges ?? []),
+  ];
+  const tx =
+    areas.length > 1
+      ? ownUndoTransaction(await beginUndoTransaction("Clear Contents").catch(() => null), {
+          commitUndoTransaction,
+          cancelUndoTransaction,
+        })
+      : null;
+  let cleared = 0;
   try {
-    const cells = await readFrCells(frId, {
-      startRow: rect.minRow,
-      startCol: rect.minCol,
-      endRow: maxRow,
-      endCol: maxCol,
-    });
-    for (const cell of cells) {
-      if (cell.type === "empty" && !cell.formula) continue;
-      try {
-        await updateFloatingRangeCell(frId, cell.row, cell.col, "");
-      } catch (err) {
-        failed++;
-        if (firstError === null) firstError = err;
-      }
+    for (const a of areas) {
+      await clearRangeWithOptions(a.startRow, a.startCol, a.endRow, a.endCol, "contents", undefined, { target });
+      cleared++;
     }
+    await tx?.commit();
   } catch (err) {
-    failed++;
-    if (firstError === null) firstError = err;
-  }
-  if (failed > 0) {
-    console.error("[FloatingRange] Clear cells failed:", firstError);
-    const reason = firstError instanceof Error ? firstError.message : String(firstError);
-    showToast(
-      failed === 1
-        ? `A cell could not be cleared: ${reason}`
-        : `${failed} cells could not be cleared: ${reason}`,
-      { type: "error" },
+    console.error("[FloatingRange] Clear cells failed:", err);
+    // COMMIT what landed (a cancel would keep the writes with no undo record).
+    const close = cleared > 0 ? tx?.commit() : tx?.cancel();
+    await close?.catch((closeErr: unknown) =>
+      console.error("[FloatingRange] Clear cells: closing the undo step failed:", closeErr),
     );
+    showToast(`The cells could not be cleared: ${err instanceof Error ? err.message : String(err)}`, {
+      type: "error",
+    });
   }
   invalidateFrCache(frId);
   requestOverlayRedraw();
+  // The cells' re-read (and the formula bar's) for every listener.
+  window.dispatchEvent(new CustomEvent("grid:refresh"));
 }
 
 async function createFrOnActiveSheet(
@@ -1143,13 +1157,23 @@ function setupFloatingObjectEvents(): void {
     if (hit.zone === "cells") {
       anchorRow = endRow = hit.row;
       anchorCol = endCol = hit.col;
+      // A press on a MERGED cell -- any part of it -- selects the whole merge,
+      // with its top-left cell active (Excel).
+      const merge = frMergeAt(frId, hit.row, hit.col);
+      if (merge) {
+        anchorRow = merge.startRow;
+        anchorCol = merge.startCol;
+        endRow = merge.endRow;
+        endCol = merge.endCol;
+      }
     } else if (hit.zone === "rowHeader") {
       anchorRow = endRow = hit.row;
-      anchorCol = 0;
+      // The active cell is the first SHOWN column (a hidden one is never active).
+      anchorCol = frNearestShown((c) => frColHidden(entry, c), 0, view.cols, 1);
       endCol = view.cols - 1;
     } else if (hit.zone === "colHeader") {
       anchorCol = endCol = hit.col;
-      anchorRow = 0;
+      anchorRow = frNearestShown((r) => frRowHidden(entry, r), 0, view.rows, 1);
       endRow = view.rows - 1;
     }
 
@@ -1285,8 +1309,15 @@ export function handleFrKeyDown(e: KeyboardEvent): void {
     // past the window's edge is one arrow press away, and the move scrolls it
     // into view. The moving end is the one kept visible (Shift extends it).
     const view = getFrView(entry);
+    // Hidden lines are stepped over and merges are moved onto as a whole, and
+    // left from their far edge (P3, Excel's rule).
+    const lines = {
+      rowHidden: (r: number) => frRowHidden(entry, r),
+      colHidden: (c: number) => frColHidden(entry, c),
+      mergeAt: (r: number, c: number) => frMergeAt(entry.id, r, c),
+    };
     const move = (dRow: number, dCol: number, extend: boolean) => {
-      moveLocalSelection(dRow, dCol, extend, view.rows, view.cols);
+      moveLocalSelection(dRow, dCol, extend, view.rows, view.cols, lines);
       const moved = getLocalSelection();
       if (moved) ensureFrCellVisible(entry, moved.endRow, moved.endCol);
       requestOverlayRedraw();

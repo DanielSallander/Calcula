@@ -68,7 +68,10 @@ export interface ChartRenderTheme {
 
 export const DEFAULT_CHART_THEME: ChartRenderTheme = {
   background: "#ffffff",
-  plotBackground: "#fafafa",
+  // Power BI: the plot area paints nothing by default; the visual container's
+  // background is what shows. "" = no fill (the same spelling as a container
+  // colour ""); every plot fill goes through fillPlotShape (chartPainterUtils).
+  plotBackground: "",
   gridLineColor: "#e8e8e8",
   gridLineWidth: 1,
   axisColor: "#999999",
@@ -94,7 +97,17 @@ export function mergeTheme(
   overrides: Partial<ChartRenderTheme> | undefined,
 ): ChartRenderTheme {
   if (!overrides) return base;
-  return { ...base, ...overrides };
+  // An override key whose value is `undefined` means "back to the base" --
+  // never "this key is now undefined". A chart style preset resets the keys
+  // the previous preset set by writing them as explicit `undefined` through
+  // `deepMergeSpec` (BUG-0489), and the Format pane's Clear does the same;
+  // the in-memory spec carries those keys until its next JSON round trip, so a
+  // plain spread would hand painters `axisColor: undefined` until a reload.
+  const result: ChartRenderTheme = { ...base };
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value !== undefined) (result as unknown as Record<string, unknown>)[key] = value;
+  }
+  return result;
 }
 
 /**

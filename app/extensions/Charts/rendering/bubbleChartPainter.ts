@@ -8,6 +8,7 @@ import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { resolvePointColor, resolvePointOpacity, resolveSeriesEncoding, seriesPaletteIndex } from "../lib/encodingResolver";
 import { resolveDatumStyle } from "../lib/dataPointOverrides";
+import { pointIsDimmed, DIM_ALPHA } from "./crossHighlight";
 import {
   paintDatumMarker,
   recordXAxisTitleRect,
@@ -152,7 +153,9 @@ export function paintBubbleChart(
         fill: style.markerFill ?? style.fill,
         borderColor: style.markerBorderColor ?? style.borderColor ?? style.markerFill ?? style.fill,
         borderWidth: style.markerBorderWidth ?? style.borderWidth ?? 1,
-        opacity: style.opacity,
+        // Cross-filter (P4): dimmed when the highlight does not reach it, or
+        // its own source's selection does not hold it (`origIdx`, as above).
+        opacity: pointIsDimmed(data, origIdx, ci) ? (style.opacity ?? 1) * DIM_ALPHA : style.opacity,
       });
     }
   }

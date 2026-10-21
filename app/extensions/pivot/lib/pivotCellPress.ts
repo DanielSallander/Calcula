@@ -32,6 +32,13 @@
 //          `clampVisualScroll`), re-extends to the cell at the box edge and
 //          repaints. It stops at the release, when the pointer comes back, or
 //          when the scroll cannot move further.
+//
+//          A CLICK (P4 cross-filter, S7). A press the caller hands an
+//          `onClick` (a plain or Ctrl press on a canvas BI pivot box outside
+//          Design Mode, pivotVisualOverlay.ts) calls it at its primary RELEASE
+//          when the release is over the press cell and the drag never reached
+//          another cell: a drag selects cells and never cross-filters, nor
+//          does a Shift-extend (no `onClick`), Escape, a blur or a lost release.
 
 import { holdContentGestureCursor, requestOverlayRedraw } from "@api/gridOverlays";
 import { getPivotVisualRecord, type PivotVisualRecord } from "./pivotVisualHits";
@@ -69,6 +76,11 @@ export interface PivotCellPress {
   shiftKey: boolean;
   /** A window mouse event's point in logical canvas px; null before the grid mounts. */
   clientToCanvas(clientX: number, clientY: number): { x: number; y: number } | null;
+  /**
+   * Called at the primary release when the press was a CLICK on its cell (the
+   * release over the press cell, no drag to another cell), with that cell.
+   */
+  onClick?(cell: { viewRow: number; viewCol: number }): void;
 }
 
 interface Session {
@@ -81,6 +93,8 @@ interface Session {
   lastY: number;
   /** The pending animation frame of the auto-scroll loop, or null. */
   frame: number | null;
+  /** The click the press may still be: its cell and callback; null once it dragged off or has none. */
+  click: { viewRow: number; viewCol: number; run: NonNullable<PivotCellPress["onClick"]> } | null;
 }
 
 let session: Session | null = null;
@@ -144,6 +158,7 @@ export function beginPivotCellPress(press: PivotCellPress): boolean {
     lastX: press.canvasX,
     lastY: press.canvasY,
     frame: null,
+    click: press.onClick ? { viewRow: at.viewRow, viewCol: at.viewCol, run: press.onClick } : null,
   };
   setPivotCellPressHeld(true);
   window.addEventListener("mousemove", onPressMove);
@@ -199,7 +214,10 @@ function extendToPointer(s: Session): void {
   const record = getPivotVisualRecord(s.pivotId);
   if (!record) return;
   const at = cellAtClamped(record, getPivotVisualScroll(s.pivotId), s.lastX, s.lastY);
-  if (at) extendPivotCellSelection(at.viewRow, at.viewCol);
+  if (!at) return;
+  // A drag that reaches another cell selects cells; it is no click any more.
+  if (s.click && (at.viewRow !== s.click.viewRow || at.viewCol !== s.click.viewCol)) s.click = null;
+  extendPivotCellSelection(at.viewRow, at.viewCol);
 }
 
 /** Start the auto-scroll loop when the pointer is past the body edge (idempotent). */
@@ -258,8 +276,36 @@ const onPressUp = (e: MouseEvent): void => {
     if ((e.buttons & 1) === 0) endPress();
     return;
   }
+  const s = session;
+  const click = s ? clickAtRelease(s, e) : null;
   endPress();
+  if (click) {
+    try {
+      click.run({ viewRow: click.viewRow, viewCol: click.viewCol });
+    } catch (err) {
+      console.error("[pivot] a cell click handler threw:", err);
+    }
+  }
 };
+
+/**
+ * The click a primary release completes, or null: the press armed one, never
+ * dragged to another cell, and is released over its own cell (inside the box,
+ * at the box's live scroll).
+ */
+function clickAtRelease(s: Session, e: MouseEvent): Session["click"] {
+  const click = s.click;
+  if (!click) return null;
+  const record = getPivotVisualRecord(s.pivotId);
+  const point = s.clientToCanvas(e.clientX, e.clientY);
+  if (!record?.geometry || !point) return null;
+  const lx = point.x - record.box.x;
+  const ly = point.y - record.box.y;
+  if (lx < 0 || ly < 0 || lx > record.box.width || ly > record.box.height) return null;
+  const at = viewCellAtLocal(record.geometry, getPivotVisualScroll(s.pivotId), lx, ly);
+  if (!at || at.viewRow !== click.viewRow || at.viewCol !== click.viewCol) return null;
+  return click;
+}
 
 const onPressKey = (e: KeyboardEvent): void => {
   if (!session || e.key !== "Escape") return;

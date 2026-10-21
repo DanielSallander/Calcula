@@ -91,7 +91,7 @@ const mockApply = vi.fn(async (s: Slicer, options?: ApplyOptions) => {
   }
 });
 const mockReport = vi.fn((_failures: readonly SlicerFilterFailure[]) => undefined);
-type Item = { value: string; selected: boolean; hasData: boolean };
+type Item = { key: string; label: string; selected: boolean; hasData: boolean };
 const mockListFromModel = vi.fn(async (_s: Slicer): Promise<Item[] | null> => null);
 /** The click's ONE backend gesture: the selection AND its filter. */
 const mockGesture = vi.fn(async (s: Slicer, actor: string) => {
@@ -118,7 +118,7 @@ vi.mock("../slicerFilterBridge", () => ({
 let backendSlicers: Slicer[] = [];
 let itemsError: string | null = null;
 /** Items get_slicer_items answers, per slicer id. */
-let backendItems: Record<string, Array<{ value: string; selected: boolean; hasData: boolean }>> = {};
+let backendItems: Record<string, Array<{ key: string; label: string; selected: boolean; hasData: boolean }>> = {};
 /** When set, the next update_slicer_selection waits on it (a slow BI apply). */
 let selectionGate: Promise<void> | null = null;
 const apiCalls: string[] = [];
@@ -256,7 +256,7 @@ describe("a slicer click", () => {
 // User clicks run one at a time
 // ---------------------------------------------------------------------------
 
-const ITEMS = ["East", "West", "North", "South"].map((value) => ({ value, selected: true, hasData: true }));
+const ITEMS = ["East", "West", "North", "South"].map((value) => ({ key: value, label: value, selected: true, hasData: true }));
 
 describe("user clicks (the click queue)", () => {
   it("a second click made while the first is still applying starts only after the first LANDED, as a user click", async () => {
@@ -475,8 +475,8 @@ describe("switching to a canvas with model slicers", () => {
     backendSlicers = [slicer("p1", { sourceType: "pivot", cacheSourceId: "pv", selectedItems: ["East"], connectedSources: [{ sourceType: "pivot", sourceId: "pv" }] })];
     itemsError = "Field 'Geo.Region' not found in pivot cache";
     const fromModel = [
-      { value: "East", selected: true, hasData: true },
-      { value: "West", selected: false, hasData: true },
+      { key: "East", label: "East", selected: true, hasData: true },
+      { key: "West", label: "West", selected: false, hasData: true },
     ];
     mockListFromModel.mockImplementation(async () => fromModel);
 

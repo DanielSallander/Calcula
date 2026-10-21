@@ -679,14 +679,20 @@ fn every_bulk_cell_rewrite_seeds_the_shared_cascade() {
     // OFF-sheet rewrites: whole-sheet evaluation through the off-sheet helper.
     let off_sheet: &[(&str, &str)] = &[
         ("clear_range_on_sheets", DATA_RS),
-        ("clear_range_with_options_off_sheet", DATA_RS),
-        ("sort_range_off_sheet", DATA_RS),
+        // P3 S4: the off-sheet bodies moved into `_at` twins that also re-check
+        // a cell target under the held grid guard; the public names are thin
+        // wrappers now.
+        ("clear_range_with_options_off_sheet_at", DATA_RS),
+        ("sort_range_off_sheet_at", DATA_RS),
+        // P3 S4: fill and merge on a floating grid's backing sheet.
+        ("fill_range_on_target", DATA_RS),
         ("replace_all_off_sheet", SEARCH_RS),
         ("replace_single_off_sheet", SEARCH_RS),
         // Found at integration: the ACTIVE `merge_cells` was fixed and its
         // off-sheet twin was not — the same asymmetry as `sort_range`, mirrored,
         // so it was the sheet you were NOT looking at that stayed wrong.
         ("merge_cells_off_sheet", MERGE_RS),
+        ("merge_cells_on_target", MERGE_RS),
     ];
     for (name, source) in off_sheet {
         let body = body_of(source, name);
@@ -803,7 +809,8 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
         // adjust_number_format_decimals' in write_range_style_plan (2026-10-04).
         ("commands/styles.rs", "write_style_delta", "style_index only"),
         ("commands/styles.rs", "set_cell_style", "style_index only"),
-        ("commands/styles.rs", "set_cell_rich_text", "rich-text runs only"),
+        ("commands/styles.rs", "set_cell_rich_text_core", "rich-text runs only (the body of set_cell_rich_text; P3 split it out so tests drive it)"),
+        ("cell_target.rs", "set_backing_style", "style_index only, inside update_cells_batch_on_target, whose phase B recalculates the backing sheet"),
         ("commands/styles.rs", "write_range_style_plan", "style_index and row/column style tiers only"),
         ("protection.rs", "set_cell_protection", "lock/hidden flags only"),
         ("named_styles_cmd.rs", "apply_named_style_impl", "style_index only"),

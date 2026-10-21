@@ -97,6 +97,7 @@ fn the_stores_the_used_range_cannot_see_make_a_sheet_not_blank() {
         &b.state,
         &crate::persistence::FileState::default(),
         crate::conditional_formatting::AddCFParams {
+            target: None,
             rule: crate::conditional_formatting::ConditionalFormatRule::CellValue(
                 crate::conditional_formatting::CellValueRule {
                     operator: crate::conditional_formatting::CellValueOperator::GreaterThan,

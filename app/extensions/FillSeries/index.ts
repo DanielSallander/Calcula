@@ -11,7 +11,8 @@ import { ExtensionCommands } from "@api/commands";
 import { showDialog } from "@api/ui";
 import { showToast } from "@api/notifications";
 import { SeriesDialog } from "./components/SeriesDialog";
-import { seriesRefusal, selectedRange } from "./lib/runSeries";
+import { resolveCellTarget } from "@api/cellTarget";
+import { seriesPlaceFor } from "./lib/runSeries";
 import { defaultSeriesIn } from "./lib/seriesPlan";
 
 export const SERIES_DIALOG_ID = "fill-series";
@@ -21,16 +22,18 @@ const cleanupFns: (() => void)[] = [];
 /**
  * Open the Series dialog -- refused first, out loud, when the series could not
  * be written anyway (an object owns the selection, a canvas sheet, several
- * areas), so the dialog never opens over nothing it may fill.
+ * areas), so the dialog never opens over nothing it may fill. A floating
+ * grid's cells are a target the series fills (P3).
  */
 export function openSeriesDialog(): void {
-  const refusal = seriesRefusal();
-  if (refusal !== null) {
-    showToast(refusal, { variant: "info" });
+  const t = resolveCellTarget("Series", "content");
+  if (t === null) return;
+  const place = seriesPlaceFor(t);
+  if ("refusal" in place) {
+    showToast(place.refusal, { variant: "info" });
     return;
   }
-  const range = selectedRange();
-  showDialog(SERIES_DIALOG_ID, { seriesIn: range ? defaultSeriesIn(range) : "columns" });
+  showDialog(SERIES_DIALOG_ID, { seriesIn: defaultSeriesIn(place.range) });
 }
 
 function activate(context: ExtensionContext): void {

@@ -421,7 +421,7 @@ fn a_locked_page_refuses_a_floating_range_move_or_resize_but_not_its_chrome() {
         .expect("create a floating range on the active canvas");
     let id = info.range.id;
     lock(&wb, canvas, true);
-    let update = |p: FloatingRangePatch| crate::floating_range::update_floating_range_inner(&wb.state, &wb.file, id, p);
+    let update = |p: FloatingRangePatch| crate::floating_range::update_floating_range_inner(&wb.state, &wb.file, id, p, crate::floating_range::PatchGate::ObjectEdit);
 
     assert_clean_refusal(&wb, "floating range x", || update(FloatingRangePatch { x: Some(300.0), ..Default::default() }));
     assert_clean_refusal(&wb, "floating range rowCount", || update(FloatingRangePatch { row_count: Some(9), ..Default::default() }));

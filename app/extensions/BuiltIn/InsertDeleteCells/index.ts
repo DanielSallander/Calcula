@@ -17,13 +17,11 @@
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { CoreCommands } from "@api/commands";
 import { alertAsync } from "@api/dialogs";
-import { refuseIfSelectionOwned } from "@api/selectionOwner";
 import { showDialog } from "@api/ui";
 import { CellShiftDialog } from "./components/CellShiftDialog";
 import {
-  currentSelection,
-  gestureLabel,
   readShiftArg,
+  resolveShiftPlace,
   runChoice,
   runMainHalf,
   wholeLineChoice,
@@ -59,16 +57,18 @@ async function runCellsCommand(mode: CellShiftMode, args: unknown): Promise<void
     await alertAsync(parsed.message);
     return;
   }
-  if (refuseIfSelectionOwned(gestureLabel(mode))) return;
-  const selection = currentSelection();
-  if (!selection) return;
+  // The door's question (lib/cellShift): a floating grid's cells, Core's
+  // selection, or a refusal announced once.
+  const place = resolveShiftPlace(mode);
+  if (!place) return;
+  const { selection, size } = place;
   if (parsed.kind === "choice") {
-    await runChoice(mode, selection, parsed.choice);
+    await runChoice(mode, selection, parsed.choice, size);
     return;
   }
-  const line = wholeLineChoice(selection);
+  const line = wholeLineChoice(selection, size);
   if (line) {
-    await runChoice(mode, selection, line);
+    await runChoice(mode, selection, line, size);
     return;
   }
   showDialog(mode === "insert" ? INSERT_CELLS_DIALOG_ID : DELETE_CELLS_DIALOG_ID, {
@@ -78,7 +78,7 @@ async function runCellsCommand(mode: CellShiftMode, args: unknown): Promise<void
       lastChoice[mode] = choice;
       // The selection the dialog was opened over: the dialog is modal, so it
       // is still the user's selection when OK is pressed.
-      void runChoice(mode, selection, choice);
+      void runChoice(mode, selection, choice, size);
     },
   });
 }

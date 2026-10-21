@@ -73,6 +73,7 @@ import {
 import type { FormulaValue } from "../lib/chartFormula";
 import { hitTestGeometry } from "./chartHitTesting";
 import { formatTickValue, reflowChartElements } from "./chartPainterUtils";
+import { formatNumber } from "@api/locale";
 import type {
   ParsedChartData,
   ChartHitResult,
@@ -1355,7 +1356,7 @@ function formatTooltipNumber(value: number, fmt: string): string {
 
   // Percentage
   if (trimmed === "%") {
-    return (value * 100).toFixed(1) + "%";
+    return formatNumber(value * 100, { decimals: 1 }) + "%";
   }
 
   // Extract prefix, comma flag, and decimal spec
@@ -1376,16 +1377,8 @@ function formatTooltipNumber(value: number, fmt: string): string {
   const decMatch = rest.match(/\.(\d+)f?/);
   const decimals = decMatch ? parseInt(decMatch[1], 10) : 2;
 
-  let result = value.toFixed(decimals);
-
-  // Add comma grouping
-  if (useComma) {
-    const parts = result.split(".");
-    parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-    result = parts.join(".");
-  }
-
-  return prefix + result;
+  // The app locale's digits, grouping and decimal separator.
+  return prefix + formatNumber(value, { decimals, grouping: useComma });
 }
 
 // ============================================================================

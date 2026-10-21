@@ -15,7 +15,7 @@ import path from "path";
 import { selectionAfterClear, selectionAfterItemClick } from "../slicerClickSelection";
 import type { Slicer, SlicerItem } from "../slicerTypes";
 
-const ITEMS: SlicerItem[] = ["East", "West", "North"].map((value) => ({ value, selected: true, hasData: true }));
+const ITEMS: SlicerItem[] = ["East", "West", "North"].map((value) => ({ key: value, label: value, selected: true, hasData: true }));
 
 function s(
   selectedItems: string[] | null,

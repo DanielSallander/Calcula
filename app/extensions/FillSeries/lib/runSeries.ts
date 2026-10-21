@@ -6,6 +6,10 @@
 //          (components/SeriesDialog.tsx) calls `runSeries` on OK; the refusals
 //          are asked again here because the selection can change while the
 //          dialog is open.
+//          P3 (owner finding G3): the series fills the cells the door targets
+//          -- Core's selection, or a floating grid's own cells, read through
+//          @api/cellTarget and written with the target. The question is asked
+//          SILENTLY here (cellTargetFor): the dialog shows the sentence itself.
 
 import { getGridStateSnapshot, refreshGridData } from "@api/grid";
 import {
@@ -25,7 +29,13 @@ import {
   type FillLineCell,
   type PendingFill,
 } from "@api/fillPatterns";
-import { selectionRefusalFor } from "@api/selectionOwner";
+import {
+  cellTargetFor,
+  getCellTargetCells,
+  getCellTargetCellsTyped,
+  targetRefOf,
+  type CellTarget,
+} from "@api/cellTarget";
 import {
   planSeriesLine,
   cellsToStop,
@@ -33,6 +43,7 @@ import {
   type SeriesOptions,
   type SeriesWrite,
 } from "./seriesPlan";
+import { formatNumber } from "@api/locale";
 
 const UNDO_CLOSES: UndoTransactionCloses = {
   commitUndoTransaction: (...ticket) => commitUndoTransaction(...ticket),
@@ -52,27 +63,59 @@ interface Range {
   endCol: number;
 }
 
-/** Why a Series cannot run right now, or null. Shared with the command. */
-export function seriesRefusal(): string | null {
-  const owned = selectionRefusalFor("Series");
-  if (owned !== null) return owned;
-  const snapshot = getGridStateSnapshot();
-  if (snapshot?.surface === "canvas") return "Series is not available on a canvas sheet: it holds objects, not cells.";
-  const sel = snapshot?.selection;
-  if (!sel) return "Select the cells to fill first.";
-  if ((sel.additionalRanges?.length ?? 0) > 0) return "This command cannot be used on multiple selections.";
-  return null;
+/** Where a Series writes: the target the door resolved and its (normalised) range. */
+export interface SeriesPlace {
+  target: CellTarget;
+  range: Range;
 }
 
-export function selectedRange(): Range | null {
-  const sel = getGridStateSnapshot()?.selection;
-  if (!sel) return null;
+/**
+ * Where a Series over `t` would write, or why it cannot run right now.
+ * Shared with the command (which resolved `t` out loud).
+ */
+export function seriesPlaceFor(t: CellTarget): SeriesPlace | { refusal: string } {
+  let sel: (Range & { additionalRanges?: unknown[] }) | null | undefined;
+  if (t.kind === "object") {
+    // An object's cells are an ordinary (backing) sheet's, wherever the
+    // object sits -- a canvas page included.
+    sel = t.selection;
+  } else {
+    const snapshot = getGridStateSnapshot();
+    if (snapshot?.surface === "canvas") {
+      return { refusal: "Series is not available on a canvas sheet: it holds objects, not cells." };
+    }
+    sel = snapshot?.selection;
+  }
+  if (!sel) return { refusal: "Select the cells to fill first." };
+  if ((sel.additionalRanges?.length ?? 0) > 0) return { refusal: "This command cannot be used on multiple selections." };
   return {
-    startRow: Math.min(sel.startRow, sel.endRow),
-    startCol: Math.min(sel.startCol, sel.endCol),
-    endRow: Math.max(sel.startRow, sel.endRow),
-    endCol: Math.max(sel.startCol, sel.endCol),
+    target: t,
+    range: {
+      startRow: Math.min(sel.startRow, sel.endRow),
+      startCol: Math.min(sel.startCol, sel.endCol),
+      endRow: Math.max(sel.startRow, sel.endRow),
+      endCol: Math.max(sel.startCol, sel.endCol),
+    },
   };
+}
+
+/** `seriesPlaceFor` over the target asked SILENTLY (the dialog shows the sentence). */
+export function seriesPlace(): SeriesPlace | { refusal: string } {
+  const t = cellTargetFor("content", "Series");
+  return "refusal" in t ? { refusal: t.refusal } : seriesPlaceFor(t);
+}
+
+/** Typed cells of `r` on the place's cells (the object's own, or the active sheet's). */
+function readTyped(t: CellTarget, r: Range): Promise<TypedCellData[]> {
+  const ref = targetRefOf(t);
+  return ref ? getCellTargetCellsTyped(ref, r) : getRangeCellsTyped(r.startRow, r.startCol, r.endRow, r.endCol);
+}
+
+/** Display / formula / style cells of `r` on the place's cells. */
+async function readStyled(t: CellTarget, r: Range): Promise<CellData[]> {
+  const ref = targetRefOf(t);
+  if (ref) return (await getCellTargetCells(ref, r)).cells;
+  return getViewportCells(r.startRow, r.startCol, r.endRow, r.endCol);
 }
 
 function kindOf(cell: TypedCellData | undefined): SeriesLineCell["kind"] {
@@ -140,22 +183,31 @@ async function planAutoFill(
  * success, or the sentence to show (the dialog keeps itself open with it).
  */
 export async function runSeries(opts: SeriesOptions): Promise<string | null> {
-  const refusal = seriesRefusal();
-  if (refusal !== null) return refusal;
-  let range = selectedRange();
-  if (!range) return "Select the cells to fill first.";
+  const place = seriesPlace();
+  if ("refusal" in place) return place.refusal;
+  const t = place.target;
+  let range = place.range;
   const columns = opts.seriesIn === "columns";
+  // The last row / column the series may reach: the sheet's, or the object's
+  // write extent (a cell past it cannot hold a value).
+  const lastRow = t.kind === "object" ? t.bounds.rows - 1 : MAX_ROW;
+  const lastCol = t.kind === "object" ? t.bounds.cols - 1 : MAX_COL;
 
   const lone = range.startRow === range.endRow && range.startCol === range.endCol;
   if (lone && opts.type !== "autofill") {
     // A lone cell runs on to the Stop value (Excel's own behaviour); without
     // one there is nothing to fill.
     if (opts.stop === null) return "Select the cells to fill, or enter a Stop value.";
-    const [start] = await getRangeCellsTyped(range.startRow, range.startCol, range.startRow, range.startCol);
+    const [start] = await readTyped(t, {
+      startRow: range.startRow,
+      startCol: range.startCol,
+      endRow: range.startRow,
+      endCol: range.startCol,
+    });
     if (!start || start.type !== "number" || typeof start.value !== "number") {
       return "The selected cell holds no number to start the series from.";
     }
-    const room = columns ? MAX_ROW - range.startRow + 1 : MAX_COL - range.startCol + 1;
+    const room = columns ? lastRow - range.startRow + 1 : lastCol - range.startCol + 1;
     const length = cellsToStop(start.value, opts, Math.min(room, MAX_SERIES_CELLS));
     if (length <= 1) return null;
     range = columns
@@ -165,32 +217,32 @@ export async function runSeries(opts: SeriesOptions): Promise<string | null> {
 
   const count = (range.endRow - range.startRow + 1) * (range.endCol - range.startCol + 1);
   if (count > MAX_SERIES_CELLS) {
-    return `Series fills at most ${MAX_SERIES_CELLS.toLocaleString("en-US")} cells at once; select a smaller range.`;
+    return `Series fills at most ${formatNumber(MAX_SERIES_CELLS, { grouping: true, decimals: 0 })} cells at once; select a smaller range.`;
   }
 
   const lines = linesOf(range, columns);
   let updates: Array<{ row: number; col: number; value: string; styleIndex?: number; invariant?: boolean }>;
   try {
     if (opts.type === "autofill") {
-      const view = await getViewportCells(range.startRow, range.startCol, range.endRow, range.endCol);
+      const view = await readStyled(t, range);
       const byKey = new Map(view.map((c) => [`${c.row},${c.col}`, c]));
       updates = await planAutoFill(lines, byKey);
     } else {
-      const typed = await getRangeCellsTyped(range.startRow, range.startCol, range.endRow, range.endCol);
+      const typed = await readTyped(t, range);
       const typedAt = new Map(typed.map((c) => [`${c.row},${c.col}`, c]));
       // The start cells' styles (the format the series carries, D18).
       const starts = columns
-        ? await getViewportCells(range.startRow, range.startCol, range.startRow, range.endCol)
-        : await getViewportCells(range.startRow, range.startCol, range.endRow, range.startCol);
+        ? await readStyled(t, { startRow: range.startRow, startCol: range.startCol, endRow: range.startRow, endCol: range.endCol })
+        : await readStyled(t, { startRow: range.startRow, startCol: range.startCol, endRow: range.endRow, endCol: range.startCol });
       const styleAt = new Map(starts.map((c) => [`${c.row},${c.col}`, c.styleIndex ?? 0]));
       const writes: SeriesWrite[] = [];
       for (const line of lines) {
         const cells: SeriesLineCell[] = line.map((at) => {
-          const t = typedAt.get(`${at.row},${at.col}`);
+          const typedCell = typedAt.get(`${at.row},${at.col}`);
           return {
             ...at,
-            kind: kindOf(t),
-            value: t && t.type === "number" && typeof t.value === "number" ? t.value : null,
+            kind: kindOf(typedCell),
+            value: typedCell && typedCell.type === "number" && typeof typedCell.value === "number" ? typedCell.value : null,
             styleIndex: styleAt.get(`${at.row},${at.col}`) ?? 0,
           };
         });
@@ -207,7 +259,7 @@ export async function runSeries(opts: SeriesOptions): Promise<string | null> {
   // ONE undo step, closed only by the begin that opened it.
   const tx = ownUndoTransaction(await beginUndoTransaction("Series"), UNDO_CLOSES);
   try {
-    await updateCellsBatch(updates);
+    await updateCellsBatch(updates, { target: targetRefOf(t) });
   } catch (err) {
     await tx.cancel().catch(() => {});
     return messageOf(err);

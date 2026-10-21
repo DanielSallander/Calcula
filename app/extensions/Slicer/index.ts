@@ -77,6 +77,8 @@ import {
 } from "@api/objectGeometry";
 import { createSlicerGeometryProvider } from "./lib/slicerGeometry";
 import { installSlicerPageFilterPublisher } from "./lib/slicerPageFilters";
+import { registerSlicerModelVisuals } from "./lib/slicerModelVisuals";
+import { installSlicerVisualConstraintRefresh } from "./lib/slicerVisualConstraints";
 import { installSlicerClearProvider } from "./lib/slicerClearProvider";
 
 import {
@@ -168,7 +170,8 @@ function activate(context: ExtensionContext): void {
     },
     getCachedItems(slicerId: string) {
       const items = getCachedItems(slicerId);
-      return items?.map((item) => ({ text: item.value, hasData: item.hasData }));
+      // text = the display label, key = what setSelectedItems speaks.
+      return items?.map((item) => ({ text: item.label, key: item.key, hasData: item.hasData }));
     },
     setItemRenderer(slicerId, renderer) {
       return setSlicerItemRenderer(slicerId, renderer);
@@ -212,9 +215,17 @@ function activate(context: ExtensionContext): void {
   cleanupFunctions.push(registerSlicerObjectSelection());
 
   // A model slicer's filter on the PAGE's design-query charts (@api/
-  // pageFilters, owner decision 5 of 2026-10-08): the store's notifications
+  // reportFilters, owner decision 5 of 2026-10-08): the store's notifications
   // republish what each page's model slicers keep; the chart side re-queries.
   cleanupFunctions.push(installSlicerPageFilterPublisher());
+  // Cross-filtering (P4): every slicer is listed on @api/modelVisuals (a model
+  // slicer is a source and a target there; Edit interactions draws its icons
+  // from it), and a model slicer's items are re-read when another visual's
+  // selection on its page can have moved their has-data shading.
+  cleanupFunctions.push(registerSlicerModelVisuals());
+  cleanupFunctions.push(
+    installSlicerVisualConstraintRefresh({ getSlicers: getAllSlicers, refresh: refreshSlicerItems }),
+  );
   cleanupFunctions.push(installSlicerClearProvider()); // @api/slicerClearService: a Clear all slicers button
 
   // BOUND properties (@api/objectBindings, D-BIND): the slicer kind's
@@ -648,8 +659,8 @@ function activate(context: ExtensionContext): void {
 
   // The filter itself is applied by `updateSlicerSelectionAsync`, in the
   // click's ONE backend command and undo step (one Ctrl+Z restores slicer and
-  // pivots). This listener only refreshes the cross-filtered items of the
-  // siblings.
+  // pivots). This listener only refreshes the has-data shading of the
+  // siblings' items.
   const handleSelectionChanged = (e: Event) => {
     const detail = (e as CustomEvent).detail;
     const slicerId = detail?.slicerId as string;
@@ -707,7 +718,7 @@ function activate(context: ExtensionContext): void {
   });
 
   // -----------------------------------------------------------------------
-  // Cross-filter: refresh slicer items when a ribbon filter selection changes
+  // Dependent slicers: refresh slicer items when a ribbon filter selection changes
   // -----------------------------------------------------------------------
 
   const handleRibbonFilterChanged = async () => {
@@ -720,6 +731,15 @@ function activate(context: ExtensionContext): void {
   cleanupFunctions.push(() => {
     window.removeEventListener("ribbonFilter:selectionChanged", handleRibbonFilterChanged);
   });
+
+  // App locale switch (P2 S7): item LABELS are written by the backend in the
+  // app locale, so every slicer re-reads its items and repaints. The
+  // selections hold member KEYS and do not change.
+  cleanupFunctions.push(
+    context.events.on(AppEvents.LOCALE_CHANGED, () => {
+      void handleRibbonFilterChanged();
+    }),
+  );
 
   // -----------------------------------------------------------------------
   // Slicer computed property refresh (triggered when cell changes affect slicers)

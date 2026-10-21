@@ -302,6 +302,14 @@ pub fn write_literal(
     path: &str,
     value: Value,
 ) -> Result<LiteralWriteOutcome, String> {
+    // A canvas page's visual interactions are a LITERAL-only path with no
+    // catalog row (P4 DC-6), written by the ASYNC door only
+    // (`object_bindings::set_interactions_literal_async`): a change can move a
+    // model slicer -> pivot pair to or from `none`, and the pivot re-fold it
+    // needs awaits the model (DC-9). This synchronous door refuses it.
+    if object.kind == ObjectBindingKind::CanvasPage && path == catalog::CANVAS_INTERACTIONS_PATH {
+        return Err(INTERACTIONS_NEED_THE_ASYNC_DOOR.to_string());
+    }
     let row = catalog::match_path(object.kind, path)?;
     if object_json::locate(&ctx.stores(), object).is_none() {
         return Err(format!(
@@ -519,6 +527,88 @@ fn write_timeline(
     Ok(LiteralWriteOutcome::Written { domains: vec!["slicer"], layout: None })
 }
 
+/// The synchronous literal door's refusal of `/interactions` (P4 S4d).
+pub const INTERACTIONS_NEED_THE_ASYNC_DOOR: &str =
+    "Canvas interactions are written by the async door (the object_bindings command or the set_object_property \
+     tool), which also re-folds the PivotTables a change reaches; this synchronous door does not change them.";
+
+/// A canvas page's `/interactions` write, planned and checked but not yet
+/// made: the page's index, the layout patch carrying the normalized
+/// interactions, and the layout before (to tell an unchanged write apart).
+#[derive(Debug)]
+pub struct PlannedInteractionsWrite {
+    pub index: usize,
+    pub patch: crate::api_types::CanvasLayoutPatch,
+    pub before: Option<::persistence::CanvasLayout>,
+}
+
+/// Plan the `/interactions` literal write on canvas page `object`: the page
+/// must exist, the value must parse, normalize and validate, and every ref
+/// must name an object on THAT page (see [`canvas_interactions_literal`]).
+/// Every refusal is made here, before any effect. The write itself is
+/// `sheets::set_canvas_layout_refolding` (protection gate, undo step, re-fold).
+pub fn plan_interactions_write(
+    ctx: &LiteralWriteCtx<'_>,
+    object: &ObjectBindingRef,
+    value: Value,
+) -> Result<PlannedInteractionsWrite, String> {
+    let not_found = || format!("There is no {} with id '{}' in this workbook.", object.kind.label(), object.id);
+    if object.kind != ObjectBindingKind::CanvasPage || object_json::locate(&ctx.stores(), object).is_none() {
+        return Err(not_found());
+    }
+    let id = identity::SheetId::parse(&object.id).ok_or_else(not_found)?;
+    let index = {
+        let ids = ctx.state.sheet_ids.read().map_err(|e| e.to_string())?;
+        ids.iter().position(|s| *s == id)
+    }
+    .ok_or_else(not_found)?;
+    let patch = crate::api_types::CanvasLayoutPatch {
+        interactions: Some(canvas_interactions_literal(ctx, id, value)?),
+        ..Default::default()
+    };
+    let before = {
+        let kinds = ctx.state.sheet_kinds.read().map_err(|e| e.to_string())?;
+        kinds.get(index).and_then(|k| k.canvas_layout().cloned())
+    };
+    Ok(PlannedInteractionsWrite { index, patch, before })
+}
+
+/// The `/interactions` literal of the canvas page `page`: the value parsed as
+/// `CanvasInteractions` (`{defaultMode?, pairs: [{source, target, mode}]}`),
+/// normalized as an edit is (`api_types::normalize_canvas_interactions`) and
+/// validated, and every ref checked to name an interaction-capable object
+/// (chart, pivot, slicer) that IS ON THIS PAGE -- refused naming the first
+/// that is not. The protection gate and the undo step are the layout core's
+/// (`sheets::set_canvas_layout_inner`), reached by the caller.
+fn canvas_interactions_literal(
+    ctx: &LiteralWriteCtx<'_>,
+    page: identity::SheetId,
+    value: Value,
+) -> Result<::persistence::CanvasInteractions, String> {
+    let parsed: ::persistence::CanvasInteractions = serde_json::from_value(value).map_err(|e| {
+        format!(
+            "Interactions are an object {{\"defaultMode\"?, \"pairs\": [{{\"source\": {{\"kind\", \"id\"}}, \"target\": {{\"kind\", \"id\"}}, \"mode\": \"filter\"|\"highlight\"|\"none\"}}]}}: {}",
+            e
+        )
+    })?;
+    let normalized = crate::api_types::normalize_canvas_interactions(&parsed);
+    normalized.validate()?;
+    let on_page = object_json::canvas_refs_by_sheet(&object_json::object_locations(&ctx.stores()))
+        .remove(&page)
+        .unwrap_or_default();
+    for p in &normalized.pairs {
+        for r in [&p.source, &p.target] {
+            if !on_page.contains(r) {
+                return Err(format!(
+                    "Canvas interactions name {{kind: '{}', id: '{}'}}, which is not an object on this canvas page.",
+                    r.kind, r.id
+                ));
+            }
+        }
+    }
+    Ok(normalized)
+}
+
 fn write_canvas_page(
     ctx: &LiteralWriteCtx<'_>,
     object: &ObjectBindingRef,
@@ -537,6 +627,7 @@ fn write_canvas_page(
     match segments.first().map(String::as_str) {
         Some("background") => patch.background = Some(text),
         Some("wallpaper") => patch.wallpaper = Some(text),
+        Some("interactions") => return Err(INTERACTIONS_NEED_THE_ASYNC_DOOR.to_string()),
         other => {
             return Err(format!(
                 "'/{}' is not a canvas page property this door writes.",

@@ -37,6 +37,9 @@ import {
   stepNumberFormatDecimals,
 } from "../../components/alignment/numberGroupCommands";
 
+/** The options a write on Core's own selection carries: no target (P3). */
+const GRID = { target: undefined };
+
 let toasts: ToastPayload[] = [];
 let windowEvents: string[] = [];
 let releaseOwner: (() => void) | null = null;
@@ -112,7 +115,7 @@ describe("stepNumberFormatDecimals", () => {
     grid.selection = sel({ startRow: 3, startCol: 2, endRow: 4, endCol: 2 });
     await expect(stepNumberFormatDecimals(1, "Increase Decimal")).resolves.toBe(true);
     expect(lib.adjustNumberFormatDecimals).toHaveBeenCalledTimes(1);
-    expect(lib.adjustNumberFormatDecimals).toHaveBeenCalledWith([4, 3], [2], 1);
+    expect(lib.adjustNumberFormatDecimals).toHaveBeenCalledWith([4, 3], [2], 1, GRID);
     expect(events.emit).toHaveBeenCalledTimes(2);
     expect(events.emit).toHaveBeenCalledWith({ row: 4, col: 2, oldValue: undefined, newValue: "1.50", formula: null });
     expect(windowEvents).toEqual(["styles:refresh", "grid:refresh"]);
@@ -121,7 +124,7 @@ describe("stepNumberFormatDecimals", () => {
   it("Decrease Decimal sends -1", async () => {
     grid.selection = sel({ startRow: 0, startCol: 0, endRow: 0, endCol: 0 });
     await stepNumberFormatDecimals(-1, "Decrease Decimal");
-    expect(lib.adjustNumberFormatDecimals).toHaveBeenCalledWith([0], [0], -1);
+    expect(lib.adjustNumberFormatDecimals).toHaveBeenCalledWith([0], [0], -1, GRID);
   });
 
   it("when Excel would change nothing (a date, text, nothing left to remove) nothing is announced", async () => {
@@ -135,7 +138,7 @@ describe("stepNumberFormatDecimals", () => {
   it("falls back to the last known selection when a ribbon click has cleared the grid's", async () => {
     grid.selection = null;
     await stepNumberFormatDecimals(1, "Increase Decimal", sel({ startRow: 2, startCol: 5, endRow: 2, endCol: 5 }));
-    expect(lib.adjustNumberFormatDecimals).toHaveBeenCalledWith([2], [5], 1);
+    expect(lib.adjustNumberFormatDecimals).toHaveBeenCalledWith([2], [5], 1, GRID);
   });
 
   it("with no selection at all it writes nothing", async () => {
@@ -179,8 +182,8 @@ describe("stepNumberFormatDecimals over several blocks", () => {
   it("the other block takes the active cell's stepped format, all in ONE undo step, announced once", async () => {
     grid.selection = twoBlocks();
     await expect(stepNumberFormatDecimals(1, "Increase Decimal")).resolves.toBe(true);
-    expect(lib.adjustNumberFormatDecimals).toHaveBeenCalledWith([4, 3], [2], 1);
-    expect(lib.applyFormatting.mock.calls).toEqual([[[9], [9], { numberFormat: "Number (2 decimals)" }]]);
+    expect(lib.adjustNumberFormatDecimals).toHaveBeenCalledWith([4, 3], [2], 1, GRID);
+    expect(lib.applyFormatting.mock.calls).toEqual([[[9], [9], { numberFormat: "Number (2 decimals)" }, GRID]]);
     expect(lib.beginUndoTransaction.mock.calls).toEqual([["Increase Decimal"]]);
     expect(lib.commitUndoTransaction.mock.calls).toEqual([[3]]);
     expect(events.emit).toHaveBeenCalledTimes(3);

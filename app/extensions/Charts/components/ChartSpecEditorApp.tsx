@@ -6,6 +6,7 @@
 //          Includes a Reference panel with full ChartSpec documentation.
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
+import { formatNumber } from "@api/locale";
 import type { ChartSpec, ParsedChartData, TransformDiagnostic } from "../types";
 import { hasRenderableData } from "../types";
 import { paintChartWithContainer } from "../lib/paintChartWithContainer";
@@ -715,7 +716,7 @@ function AiPromptPanel({ currentSpec }: { currentSpec: string }): React.ReactEle
         flexShrink: 0,
       }}>
         <span style={{ fontSize: "11px", color: "#666" }}>
-          {wordCount.toLocaleString()} words / {charCount.toLocaleString()} chars
+          {formatNumber(wordCount, { grouping: true })} words / {formatNumber(charCount, { grouping: true })} chars
         </span>
         <button style={copyBtnStyle} onClick={handleCopy}>
           {copied ? "Copied!" : "Copy to Clipboard"}

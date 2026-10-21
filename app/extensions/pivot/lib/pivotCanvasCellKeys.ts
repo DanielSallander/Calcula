@@ -46,6 +46,12 @@
 //          out, the block reads in batches, and it is capped at 200,000 cells.
 //          Nothing here writes to the document: the selection, the scroll and
 //          the clipboard are not document state.
+//
+//          A FILTERED box (P4 S7, pivotCrossFilterView.ts) shows a transient
+//          view another visual's selection filters; its cells are NOT the
+//          hidden grid's. The arrows then walk the grid it shows, and Copy
+//          copies what it shows -- the cells' display text, tab-separated --
+//          to the system clipboard (never the hidden grid's real cells).
 
 import { CommandRegistry } from "@api/commands";
 import { registerKeybinding, isGridFocused, hasDomTextSelection } from "@api/keybindings";
@@ -66,7 +72,8 @@ import { stepPivotCell, type PivotCellStep } from "./pivotCellNavigation";
 import { ensurePivotCellVisible } from "./pivotVisualScroll";
 import { getPivotVisualRecord } from "./pivotVisualHits";
 import { isPivotBoxMenuOpen, isPivotCellPressHeld, isPivotChromePressLive } from "./pivotVisualMenuState";
-import { getCachedPivotView } from "./pivotViewStore";
+import { getDisplayedPivotView, isShowingFilteredView } from "./pivotCrossFilterView";
+import { getPivotViewRow } from "./pivotChromeActions";
 import { isViewRowVisible, viewColCount, viewRowCount } from "../rendering/pivotVisualRenderer";
 import { getCachedRegions, getSelectedVisualPivotId } from "../handlers/selectionHandler";
 import {
@@ -160,7 +167,7 @@ interface NavigationShape {
 function navigationShapeOf(pivotId: string): NavigationShape | null {
   const g = getPivotVisualRecord(pivotId)?.geometry;
   if (g) return { rowCount: g.rowCount, colCount: g.colCount, rowHeights: g.rowHeights };
-  const view = getCachedPivotView(pivotId);
+  const view = getDisplayedPivotView(pivotId);
   if (!view) return null;
   const rowCount = viewRowCount(view);
   const rowHeights = new Array<number>(rowCount);
@@ -254,6 +261,10 @@ export async function copyPivotCanvasCells(): Promise<void> {
     showToast("Copy failed: the PivotTable is not on this page.", { variant: "error" });
     return;
   }
+  if (isShowingFilteredView(sel.pivotId)) {
+    await copyShownPivotCells(sel.pivotId);
+    return;
+  }
   const view = pivotCellRect(sel);
   const grid = pivotCellGridRange(sel, region.startRow, region.startCol);
   const skipRows = new Set<number>();
@@ -291,6 +302,49 @@ export async function copyPivotCanvasCells(): Promise<void> {
       showToast("Copy failed: the PivotTable's cells could not be read or put on the clipboard.", {
         variant: "error",
       });
+  }
+}
+
+/**
+ * Copy what a FILTERED box shows (P4 S7): the selected rectangle of its
+ * displayed view, each cell's display text, tab-separated, rows the box hides
+ * left out, put on the system clipboard as text. The hidden grid holds the
+ * REAL pivot's cells, which are not what the user sees.
+ */
+export async function copyShownPivotCells(pivotId: string): Promise<void> {
+  const sel = getPivotCellSelection();
+  const shown = getDisplayedPivotView(pivotId);
+  if (!sel || sel.pivotId !== pivotId || !shown) return;
+  const rect = pivotCellRect(sel);
+  const cells = (rect.endRow - rect.startRow + 1) * (rect.endCol - rect.startCol + 1);
+  if (cells > PIVOT_CANVAS_COPY_MAX_CELLS) {
+    showToast(PIVOT_CANVAS_COPY_TOO_LARGE, { variant: "warning" });
+    return;
+  }
+  const shape = navigationShapeOf(pivotId);
+  const lines: string[] = [];
+  for (let r = rect.startRow; r <= rect.endRow; r++) {
+    if (shape && r < shape.rowHeights.length && shape.rowHeights[r] === 0) continue;
+    const row = getPivotViewRow(pivotId, shown, r);
+    const texts: string[] = [];
+    for (let c = rect.startCol; c <= rect.endCol; c++) {
+      const cell = row?.cells[c];
+      const text = cell ? (cell.formattedValue ?? (cell.value == null ? "" : String(cell.value))) : "";
+      texts.push(text.replace(/[\t\r\n]+/g, " "));
+    }
+    lines.push(texts.join("\t"));
+  }
+  if (lines.length === 0) {
+    showToast("There is nothing to copy: every selected row is hidden.", { variant: "info" });
+    return;
+  }
+  try {
+    const clipboard = typeof navigator !== "undefined" ? navigator.clipboard : undefined;
+    if (!clipboard?.writeText) throw new Error("the clipboard is not available");
+    await clipboard.writeText(lines.join("\r\n"));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    showToast(`Copy failed: ${message}`, { variant: "error" });
   }
 }
 

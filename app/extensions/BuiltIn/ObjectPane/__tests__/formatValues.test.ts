@@ -87,6 +87,57 @@ describe("the patch a row commits", () => {
   });
 });
 
+describe("a background colour is a solid background commit (round 2, G1)", () => {
+  const GRADIENT = {
+    type: "linear" as const,
+    stops: [
+      { offset: 0, color: "#ff0000" },
+      { offset: 1, color: "#0000ff" },
+    ],
+  };
+  /** A family whose background is OFF by default (the floating grid, frObjectFormat.ts). */
+  function hiddenByDefault(stored: ObjectFormatSnapshot["stored"]): ObjectFormatSnapshot {
+    const defaults = { ...BASE_CONTAINER_DEFAULTS, background: { ...BASE_CONTAINER_DEFAULTS.background, show: false } };
+    return { stored, resolved: resolveVisualContainer(stored, defaults), capabilities: CAPS, bound: new Map() };
+  }
+
+  it("a pick over a stored gradient clears the gradient", () => {
+    const s = snap({ background: { color: "#ffffff", gradient: GRADIENT } });
+    expect(rowPatch(s, "background.color", "#123456")).toEqual({ background: { color: "#123456", gradient: null } });
+  });
+
+  it("a pick on a background stored show:false switches it on", () => {
+    const s = snap({ background: { show: false } });
+    expect(rowPatch(s, "background.color", "#123456")).toEqual({ background: { color: "#123456", show: true } });
+  });
+
+  it("a pick on a family whose RESOLVED show is false (nothing stored) switches it on", () => {
+    const s = hiddenByDefault({});
+    expect(s.resolved.background.show).toBe(false);
+    expect(rowPatch(s, "background.color", "#123456")).toEqual({ background: { color: "#123456", show: true } });
+    // Even the colour that already resolves: committing it must make it SHOW.
+    expect(rowPatch(s, "background.color", "#ffffff")).toEqual({ background: { color: "#ffffff", show: true } });
+  });
+
+  it("the same colour, no gradient, show not false: no write", () => {
+    expect(rowPatch(snap({ background: { color: "#123456" } }), "background.color", "#123456")).toBeNull();
+    expect(rowPatch(snap({ background: { color: "#123456" } }), "background.color", "#123456".toUpperCase())).toBeNull();
+    expect(rowPatch(snap({}), "background.color", BASE_CONTAINER_DEFAULTS.background.color)).toBeNull();
+  });
+
+  it("re-picking the RESOLVED colour on a gradient-only container clears the gradient", () => {
+    // The chart Fill card's shape: only `background.gradient` stored, no colour.
+    const s = snap({ background: { gradient: GRADIENT } });
+    const shown = BASE_CONTAINER_DEFAULTS.background.color;
+    expect(rowPatch(s, "background.color", shown)).toEqual({ background: { color: shown, gradient: null } });
+  });
+
+  it("Default (null) still clears only the colour", () => {
+    const s = snap({ background: { color: "#123456", show: false, gradient: GRADIENT } });
+    expect(rowPatch(s, "background.color", null)).toEqual({ background: { color: null } });
+  });
+});
+
 describe("which fields a family's capabilities show", () => {
   it("follows the flags, including the per-leaf ones", () => {
     expect(fieldOffered(CAPS, "padding.left")).toBe(true);

@@ -13,7 +13,7 @@ import type { Slicer, SlicerItem } from "../slicerTypes";
 
 const backend = vi.hoisted(() => ({
   slicers: [] as Array<Record<string, unknown>>,
-  items: [] as Array<{ value: string; selected: boolean; hasData: boolean }>,
+  items: [] as Array<{ key: string; label: string; selected: boolean; hasData: boolean }>,
   /** Reading a slicer's items fails (a backend error that is not the BI fallback's). */
   failItems: false,
 }));
@@ -55,14 +55,14 @@ let seen: Array<{ ids: string[]; items: string[] | null }> = [];
 const onChanged = (): void => {
   seen.push({
     ids: store.getAllSlicers().map((s) => s.id),
-    items: store.getCachedItems("a")?.map((i: SlicerItem) => i.value) ?? null,
+    items: store.getCachedItems("a")?.map((i: SlicerItem) => i.key) ?? null,
   });
 };
 
 beforeEach(() => {
   store.resetStore();
   backend.slicers = [slicer("a")];
-  backend.items = [{ value: "North", selected: true, hasData: true }];
+  backend.items = [{ key: "North", label: "North", selected: true, hasData: true }];
   backend.failItems = false;
   seen = [];
   window.addEventListener(SlicerEvents.SLICER_DATA_CHANGED, onChanged);

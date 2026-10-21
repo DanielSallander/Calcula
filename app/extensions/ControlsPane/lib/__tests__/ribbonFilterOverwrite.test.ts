@@ -59,6 +59,11 @@ vi.mock("../filterPaneApi", () => ({
   getAllRibbonFilters: () => h.getAll(),
   getBiConnections: async () => [],
   recalcControlDependents: () => Promise.resolve([]),
+  getBiModelInfo: async () => ({
+    tables: [{ name: "Products", columns: [] }],
+    measures: [],
+    relationships: [],
+  }),
   getBiColumnValues: async () => [],
   getBiColumnAvailableValues: async () => [],
 }));
@@ -117,8 +122,8 @@ function filter(overrides: Partial<RibbonFilter> = {}): RibbonFilter {
     connectedSheets: [],
     displayMode: "checklist",
     selectedItems: null,
-    crossFilterTargets: [],
-    crossFilterSlicerTargets: [],
+    dependentFilters: [],
+    dependentSlicers: [],
     advancedFilter: null,
     hideNoData: false,
     indicateNoData: true,

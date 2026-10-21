@@ -12,7 +12,7 @@ import type { ChartSpec, ParamSpec, ChartSelectionMap, AxisSpec } from "../types
 import type { FormulaValue } from "./chartFormula";
 import { resolveParamCell, type ParamCellHost } from "./dataSourceResolver";
 import { getChartById } from "./chartStore";
-import { parseDisplayNumber } from "./chartFieldTypes";
+import { readShownNumber } from "./chartFieldTypes";
 import { getWidgetValue } from "../handlers/chartWidgetValues";
 
 /** Names reserved by the formula scope; a param may not shadow them. */
@@ -41,9 +41,9 @@ export function coerceToFormulaValue(raw: string | number | boolean | null | und
 /**
  * Coerce a cell's FORMATTED display text to a FormulaValue. Unlike a literal,
  * a cell value may be currency / percent / thousands-separated / locale-formatted
- * (e.g. "$1,000", "50%", sv-SE "3,5"), so it is parsed with the same
- * parseDisplayNumber the chart uses for data cells — keeping a cell-bound param
- * consistent with how the same cell reads as a data value. TRUE/FALSE map to
+ * (e.g. "$1,000", "50%", sv-SE "3,5"), so it is read in the APP locale (the
+ * locale the engine rendered it in) by the same readShownNumber the chart uses
+ * for a cell it has no typed value for. TRUE/FALSE map to
  * booleans; empty -> "".
  */
 export function coerceCellValue(display: string): FormulaValue {
@@ -52,8 +52,8 @@ export function coerceCellValue(display: string): FormulaValue {
   const upper = s.toUpperCase();
   if (upper === "TRUE") return true;
   if (upper === "FALSE") return false;
-  const n = parseDisplayNumber(s);
-  if (Number.isFinite(n)) return n;
+  const n = readShownNumber(s);
+  if (n !== null && Number.isFinite(n)) return n;
   return s;
 }
 

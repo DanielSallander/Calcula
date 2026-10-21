@@ -68,6 +68,9 @@ vi.mock("../lib/filterPaneStore", () => ({
   updateFilterSelectionAsync: vi.fn(),
   getAllFilters: () => mocks.filters,
   getConnectionName: () => "Sales model",
+  getFilterItemsError: () => null,
+  getFilterNarrowingError: () => null,
+  getFilterLoadAttempts: () => 0,
 }));
 vi.mock("../lib/filterPaneApi", () => ({
   getAllSlicers: async () => [],
@@ -187,7 +190,11 @@ describe("the Report Connections Save is ONE gesture", () => {
           <FilterDropdown
             filterId="f1"
             fieldName="Customers.Region"
-            items={[{ value: "East", selected: true, hasData: true }]}
+            items={[{ key: "East", label: "East", selected: true, hasData: true }]}
+            fieldLabel="Customers.Region"
+            itemsError={null}
+            narrowingError={null}
+            onRetry={() => undefined}
             selectedItems={["East"]}
             anchorEl={anchor}
             onApply={() => undefined}
@@ -195,8 +202,8 @@ describe("the Report Connections Save is ONE gesture", () => {
             onDelete={() => undefined}
             connectionId="c1"
             connectionMode="manual"
-            crossFilterTargets={[]}
-            crossFilterSlicerTargets={[]}
+            dependentFilters={[]}
+            dependentSlicers={[]}
             advancedFilter={null}
             fieldDataType="text"
             connectedPivots={["P"]}

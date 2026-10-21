@@ -5,7 +5,8 @@
 //          fresh workbooks (case names D1..D22 are the probe's).
 //          The planner is pure: a line of cells in, the cells to write out.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
+import { useAppLocale, useInvariantLocale } from "../../Charts/lib/__tests__/appLocaleTestKit";
 import {
   planSeriesLine,
   defaultSeriesIn,
@@ -134,11 +135,26 @@ describe("the dialog's defaults and input", () => {
     expect(defaultSeriesIn({ startRow: 0, startCol: 0, endRow: 9, endCol: 1 })).toBe("columns");
     expect(defaultSeriesIn({ startRow: 0, startCol: 0, endRow: 0, endCol: 0 })).toBe("columns");
   });
-  it("a number typed with either decimal mark; anything else is not a number", () => {
+  afterEach(async () => {
+    await useInvariantLocale();
+  });
+
+  it("a number typed in the app locale; anything else is not a number", () => {
+    // The invariant (en-US) locale every test starts in.
     expect(parseSeriesNumber("2")).toBe(2);
-    expect(parseSeriesNumber("0,5")).toBe(0.5);
     expect(parseSeriesNumber(" -1.25 ")).toBe(-1.25);
+    expect(parseSeriesNumber("1,000")).toBe(1000);
+    // Strict: the comma is no decimal mark here (it used to be guessed as one).
+    expect(parseSeriesNumber("0,5")).toBeNull();
     expect(parseSeriesNumber("")).toBeNull();
     expect(parseSeriesNumber("abc")).toBeNull();
+  });
+
+  it('de-DE: "1.000" is one thousand (the old guess read 1) and "0,5" is a half', async () => {
+    await useAppLocale("de-DE");
+    expect(parseSeriesNumber("1.000")).toBe(1000);
+    expect(parseSeriesNumber("0,5")).toBe(0.5);
+    expect(parseSeriesNumber("-1.234,25")).toBe(-1234.25);
+    expect(parseSeriesNumber("0.5")).toBeNull();
   });
 });

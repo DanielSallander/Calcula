@@ -16,7 +16,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 
 const h = vi.hoisted(() => ({
   slicer: null as Record<string, unknown> | null,
-  items: [] as Array<{ value: string; selected: boolean; hasData: boolean }>,
+  items: [] as Array<{ key: string; label: string; selected: boolean; hasData: boolean }>,
 }));
 
 vi.mock("../lib/slicerStore", () => ({
@@ -114,7 +114,8 @@ function load(selected: string[] | null, count = 4): void {
     stylePreset: "SlicerStyleLight1",
   };
   h.items = NAMES.slice(0, count).map((value) => ({
-    value,
+    key: value,
+    label: value,
     selected: selected === null || selected.includes(value),
     hasData: true,
   }));

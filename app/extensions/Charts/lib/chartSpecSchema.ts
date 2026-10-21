@@ -154,6 +154,11 @@ export const chartSpecJsonSchema: object = {
       type: "string",
       description: "Color palette name. Built-in palettes: 'default', 'vivid', 'pastel', 'ocean'.",
     },
+    seriesColors: {
+      type: "object",
+      description: "Series colour overrides by series NAME (series name -> colour, e.g. { \"Revenue\": \"#4472c4\" }). Wins over series[].color and the palette; name-keyed, so it survives filters and applies to pivot and design-query series.",
+      additionalProperties: { type: "string" },
+    },
     markOptions: {
       type: "object",
       description: "Mark-specific options. The available properties depend on the chart type (`mark`) — see the matching *MarkOptions definition. Narrowed per mark by the schema's allOf/if-then rules.",
@@ -975,7 +980,7 @@ export const chartSpecJsonSchema: object = {
       type: "object",
       description: "Override any property of the built-in chart render theme. All fields are optional.",
       properties: {
-        plotBackground: { type: "string", description: "Plot area background color. Default: \"#fafafa\"." },
+        plotBackground: { type: "string", description: "Plot area background color. Default: none (transparent; the visual's background shows)." },
         gridLineColor: { type: "string", description: "Grid line color. Default: \"#e8e8e8\"." },
         gridLineWidth: { type: "number", minimum: 0, description: "Grid line width (px). Default: 1." },
         axisColor: { type: "string", description: "Axis line color. Default: \"#999999\"." },
@@ -2033,7 +2038,7 @@ export function generateSpecReference(): string {
   lines.push("### ThemeOverrides");
   lines.push("| Property | Type | Default | Description |");
   lines.push("|----------|------|---------|-------------|");
-  lines.push("| plotBackground | string | \"#fafafa\" | Plot area background |");
+  lines.push("| plotBackground | string | \"\" (none) | Plot area background; none = transparent, the visual's background shows |");
   lines.push("| gridLineColor | string | \"#e8e8e8\" | Grid line color |");
   lines.push("| gridLineWidth | number | 1 | Grid line width (px) |");
   lines.push("| axisColor | string | \"#999999\" | Axis line color |");

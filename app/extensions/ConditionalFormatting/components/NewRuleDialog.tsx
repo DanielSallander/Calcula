@@ -30,6 +30,7 @@ import type {
   IconSetType,
 } from "@api";
 import { tryAddRule } from "../lib/ruleWrites";
+import type { CellTargetRef } from "@api/cellTarget";
 import { colorScaleRule, dataBarRule, iconSetRule } from "../lib/presetRules";
 import {
   PRESET_STYLES,
@@ -259,6 +260,8 @@ function initialFormatStyleOf(data: Record<string, unknown> | undefined): NewRul
 
 export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) => {
   const selection = data?.selection as ConditionalFormatRange | null;
+  // A floating grid's cells (P3): the rule is written with the object's target.
+  const target = data?.target as CellTargetRef | undefined;
 
   // Category selection: the page the door asked for (the dialog mounts per
   // opening, so the data is read once, here).
@@ -383,12 +386,15 @@ export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
     if (busy) return;
     setBusy(true);
     setRefusal(null);
-    const refused = await tryAddRule({
-      rule,
-      format,
-      ranges: [selection],
-      stopIfTrue: false,
-    });
+    const refused = await tryAddRule(
+      {
+        rule,
+        format,
+        ranges: [selection],
+        stopIfTrue: false,
+      },
+      target,
+    );
     setBusy(false);
     if (refused !== null) {
       // Stay open: the user can correct the rule and press OK again.
@@ -398,7 +404,7 @@ export const NewRuleDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
     onClose();
     restoreFocusToGrid();
   }, [
-    selectedCategory, selection, onClose, formatIndex, busy,
+    selectedCategory, selection, target, onClose, formatIndex, busy,
     formatByValuesType, colorScalePresetIndex, dataBarColorIndex, iconSetType,
     containingType, cellValueOperator, cellValue1, cellValue2, textRuleType, textValue, datePeriod,
     topBottomType, topBottomRank, averageType, dupUniqueType, formulaExpression,

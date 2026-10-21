@@ -308,3 +308,55 @@ describe("auto-scroll", () => {
     expect(getPivotVisualScroll("cp1").top).toBe(0);
   });
 });
+
+describe("the click (P4 S7 cross-filter)", () => {
+  function clickPress(canvasX: number, canvasY: number) {
+    const onClick = vi.fn();
+    beginPivotCellPress({ pivotId: "cp1", regionId: REGION_ID, canvasX, canvasY, shiftKey: false, clientToCanvas: identity, onClick });
+    return onClick;
+  }
+
+  it("a release over the press cell is a click: onClick gets that cell (after the press ended)", () => {
+    const onClick = clickPress(250, 110);
+    move(260, 115);
+    up(260, 115);
+    expect(onClick).toHaveBeenCalledTimes(1);
+    expect(onClick).toHaveBeenCalledWith({ viewRow: 1, viewCol: 1 });
+    expect(isPivotCellPressLive()).toBe(false);
+  });
+
+  it("a drag that reached another cell is no click, even when it comes back", () => {
+    const onClick = clickPress(250, 110);
+    move(250, 140);
+    move(250, 110);
+    up(250, 110);
+    expect(onClick).not.toHaveBeenCalled();
+  });
+
+  it("a release over another cell, outside the box, Escape, a blur or a lost release: no click", () => {
+    let onClick = clickPress(250, 110);
+    up(350, 110);
+    expect(onClick).not.toHaveBeenCalled();
+    onClick = clickPress(250, 110);
+    up(600, 110);
+    expect(onClick).not.toHaveBeenCalled();
+    onClick = clickPress(250, 110);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    up(250, 110);
+    expect(onClick).not.toHaveBeenCalled();
+    onClick = clickPress(250, 110);
+    window.dispatchEvent(new Event("blur"));
+    up(250, 110);
+    expect(onClick).not.toHaveBeenCalled();
+    onClick = clickPress(250, 110);
+    move(250, 110, 0);
+    up(250, 110);
+    expect(onClick).not.toHaveBeenCalled();
+  });
+
+  it("a press without onClick still selects as before", () => {
+    expect(press(250, 110)).toBe(true);
+    up(250, 110);
+    expect(getPivotCellSelection()).toEqual({ pivotId: "cp1", anchorRow: 1, anchorCol: 1, endRow: 1, endCol: 1 });
+  });
+});

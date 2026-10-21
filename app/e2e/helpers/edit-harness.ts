@@ -697,7 +697,11 @@ export async function frList(page: Page): Promise<FrInfo[]> {
 
 /** Set one floating-grid cell through @api (the product's announced route). */
 export async function setFrCell(page: Page, id: string, row: number, col: number, value: string): Promise<void> {
-  await callModule(page, FLOATING_RANGES, "updateFloatingRangeCell", [id, row, col, value]);
+  // A SEED, spelled invariantly by every caller ("1234.567", "=B1*2"): since
+  // P2 the cell write parses in the APP locale unless told otherwise, and in
+  // sv-SE "1234.567" became the TEXT "1234.567" (found live 2026-10-17,
+  // floating-grid-home FG1). A typed gesture goes through the editor instead.
+  await callModule(page, FLOATING_RANGES, "updateFloatingRangeCell", [id, row, col, value, true]);
   await page.waitForTimeout(150);
 }
 

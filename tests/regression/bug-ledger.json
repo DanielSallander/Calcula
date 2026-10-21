@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 502,
+  "nextId": 542,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -11682,7 +11682,7 @@
       "repro": {
         "description": "sv-SE workbook, cell 1234.5 formatted currency kr, Visuals > Card over it: '123K kr'. A date cell: '2K'."
       },
-      "notes": "Review visuals HIGH 2. Bars were wrong by the same factor before; a Card prints the number outright.",
+      "notes": "Review visuals HIGH 2. Bars were wrong by the same factor before; a Card prints the number outright. Round 2 P2 (2026-10-17): the remaining half is closed by P2 S8/S10 -- charts, tiles, chart params and transforms read typed values or app-locale text (S8); sparklines read typed values and the progress cell type reads strictly in the app locale (S10); typed input (map C6/C8) goes through @api/locale parseNumber (S9, BUG-0520); the S11 census sweep also closed the fill handle (BUG-0521), DimensionInputDialog, writeback Min/Max, Iteration Max Change, chart visual number boxes, the overlay line width, encodingResolver and the chrome size and duration texts. Ribbon filter conditions: BUG-0519.",
       "fix": {
         "status": "fixed",
         "date": "2026-10-08",
@@ -12682,7 +12682,7 @@
     },
     {
       "id": "BUG-0447",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-10-08",
       "source": {
         "kind": "manual",
@@ -12698,7 +12698,23 @@
       "repro": {
         "description": "sv-SE workbook, Cards over a currency cell and a percent cell (seen live in icons/canvas-powerbi-live-visuals.png)."
       },
-      "notes": "groupDigits in app/extensions/Charts/rendering/visuals/visualValues.ts:233 is not locale-aware (fix-charts open item, live-e2e)."
+      "notes": "groupDigits in app/extensions/Charts/rendering/visuals/visualValues.ts:233 is not locale-aware (fix-charts open item, live-e2e). Closed by round 2 P2 S8 (app locale everywhere, G0).",
+      "fixedAt": "2026-10-17",
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-17",
+        "description": "Round 2 P2 S8: visualValues.ts groupDigits formats through @api/locale formatNumber (the app locale's grouping and decimal separators, half away from zero), and every tile painter (Card, Multi-row card, KPI, Gauge) reads source text with readShownNumber/splitShownNumber in the app locale, so an sv-SE Card writes '1,2K kr' beside '1 234,50 kr'. Charts re-render on locale:changed (invalidateAllChartCaches + grid:refresh).",
+        "filesChanged": [
+          "app/extensions/Charts/rendering/visuals/visualValues.ts",
+          "app/extensions/Charts/lib/chartFieldTypes.ts",
+          "app/extensions/Charts/rendering/visuals/kpiPainter.ts",
+          "app/extensions/Charts/index.ts"
+        ]
+      },
+      "validatedBy": [
+        "app/extensions/Charts/rendering/visuals/__tests__/visualValues.locale.test.ts (sabotaged and confirmed in P2 S8)",
+        "app/e2e/journeys/app-locale.spec.ts J4 (live; written in P2 S12, run in the round's proof phase)"
+      ]
     },
     {
       "id": "BUG-0448",
@@ -13633,7 +13649,7 @@
     },
     {
       "id": "BUG-0489",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-10-16",
       "source": {
         "kind": "manual",
@@ -13650,7 +13666,8 @@
         "description": "Select a chart, Quick Access > Styles > Blue (monochromatic), then Quick Access > Styles > Classic (colorful-1, whose theme sets only plotBackground and gridLineColor): the axis and title stay blue. Same through the command chart.applyStyle (Charts/index.ts:1134). Unit: updateChartSpec(id, buildPresetUpdates(monoBlue, spec)); updateChartSpec(id, buildPresetUpdates(classic, spec)); spec.config.theme.axisColor === \"#4E79A7\"."
       },
       "triage": "Charts extension: a REPLACE intent (a whole preset) sent through a MERGE door.",
-      "notes": "Fix shape: have buildPresetUpdates send every preset-owned theme key, with an explicit undefined for the ones the new preset leaves at the default (replacementRangeRef's pattern in lib/chartDataCommit.ts), so the merge clears them. Pre-existing; noticed in WP-C S9a, not fixed there (outside the container change). Not seen live."
+      "notes": "Fix shape: have buildPresetUpdates send every preset-owned theme key, with an explicit undefined for the ones the new preset leaves at the default (replacementRangeRef's pattern in lib/chartDataCommit.ts), so the merge clears them. Pre-existing; noticed in WP-C S9a, not fixed there (outside the container change). Not seen live.",
+      "fix": "Round 2 P1 S4 + S3: buildPresetUpdates and applyPreset share ONE builder (presetBaseUpdates); the theme patch (presetThemePatch) carries EVERY preset-owned theme key (PRESET_THEME_KEYS), the ones the new preset leaves at the default as an explicit undefined, so the store's deep merge clears them; mergeTheme ignores undefined override keys, so painters never read `undefined` before a JSON round trip. A preset is also a solid background commit (presetContainerPatch derives from solidBackgroundPatch: show:true, gradient cleared). Unit: Charts/lib/__tests__/chartStylePresets.test.ts 'BUG-0489: applying a preset resets the theme keys it does not set' (among them 'mono-blue then colorful-1 leaves no blue axis or title (in memory, painted, and after JSON)', driving the real chart store) and rendering/__tests__/chartTheme.test.ts."
     },
     {
       "id": "BUG-0490",
@@ -13914,6 +13931,1022 @@
       "triage": "Backend: an object's own cascade not run by every path that deletes it (the binding rows have dependent_kind None, so the transitive census could not see them).",
       "fix": "cascade_deleted_sources drops the bindings of the removed pivots and of the slicers / timelines it deletes and carries their restore bytes in SourceCascade.bindings_restore; record_source_cascade_undo_into records them FIRST so one Ctrl+Z brings them back LAST. delete_pivot_table's own copy is gone (one spelling). xlsx_save_loss_report asks object_bindings::store::any_live_binding (only bindings of objects that still exist). Sabotage confirmed: removing the drop turns the test red (and the object-deps census).",
       "notes": "Found by the architecture-lens review. Not seen live."
+    },
+    {
+      "id": "BUG-0502",
+      "status": "fixed",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P1 S3 (chart series swatch) -- found while proving the Data-tab series colour commit"
+      },
+      "violation": {
+        "oracleId": "chart-spec-schema-refuses-seriesColors",
+        "severity": "medium",
+        "message": "THE CHART SPEC SCHEMA REFUSED `seriesColors`. ChartSpec declares seriesColors (types.ts) and every series-colour surface writes it, but chartSpecJsonSchema had no such property and is additionalProperties:false at the top level, so validateChartSpec answered \"spec: unknown property 'seriesColors'\". The object pane's Data tab commits through commitChartDataPatch, whose schema gate therefore refused EVERY series colour pick (shown inline as 'This chart's data settings are not valid'); scripts were refused at the broker gate and the JSON editor red-underlined a valid spec. The drift guard missed it because its key list (CHART_SPEC_KEYS) was a hand copy that lacked the key too.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Chart on a range, object pane > Data > pick a series colour (input then change): nothing is written and the range field shows \"spec: unknown property 'seriesColors'\". Unit: Charts/components/pane/__tests__/ChartRangeDataTab.test.tsx 'input then change writes the picked colour once, and the draft is dropped'."
+      },
+      "triage": "Charts lib: a schema top-level property missing; the drift test compared against a hand-kept list instead of the interface.",
+      "fix": "chartSpecSchema.ts declares seriesColors (object of strings); chartSpecSchema.test.ts adds 'the TOP-LEVEL schema keys equal the ChartSpec interface parsed from types.ts' (parses the interface, cannot drift) and lists seriesColors in CHART_SPEC_KEYS. Sabotage confirmed: renaming the schema key turns the drift test and the Data-tab commit test red.",
+      "notes": "Masked before round 2 by the draft-diff defect (the commit patch came out null, so the gate never ran). Unit-proved only."
+    },
+    {
+      "id": "BUG-0503",
+      "status": "fixed",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P1 (owner finding G1 'chart background colour does nothing'), proved by the r2 probe colorbox.probe.test.tsx before the fix"
+      },
+      "violation": {
+        "oracleId": "format-tab-colorbox-never-commits",
+        "severity": "medium",
+        "message": "THE FORMAT TAB COLOUR SWATCH NEVER COMMITTED A PICKED COLOUR. ColorBox (BuiltIn/ObjectPane/components/fields/ColorField.tsx:99-109 at aff01683) was a CONTROLLED <input type=\"color\">: React's onChange (the native `input`) only previewed, React's controlled restore then wrote the OLD value back into the DOM, and the native `change` listener (:67-80) saw el.value === pickerHex(current) and returned without committing. Every Format-tab colour row of every family (chart, pivot, slicer, timeline, control, floating grid, navigator) -- among them the chart's Effects > Background the owner reported -- previewed the pick and then reverted it.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Select a chart, Format tab > Effects > Background, pick a colour in the native picker: the preview shows, then the swatch and the chart revert and nothing is written. Unit: BuiltIn/ObjectPane/__tests__/colorBox.test.tsx '[A] input then change commits the picked colour (failed on the controlled picker)'."
+      },
+      "triage": "ObjectPane: a controlled native colour input compared its commit against a value React had already restored.",
+      "fix": "ONE shared hook, _shared/components/colorPick/useNativeColorPick.ts (P1 S1): the base is snapshotted when a pick STARTS, a step previews, the native change commits once against that base, blur ends the pick; ColorBox spreads it (P1 S2). Unit: _shared/components/__tests__/useNativeColorPick.test.tsx [A]-[J], ObjectPane/__tests__/colorBox.test.tsx.",
+      "notes": "Unit-proved; the live proof is journey app/e2e/journeys/canvas-round2-quick.spec.ts (P1 S8), run in the round's proof phase. Siblings filed beside this row: the chart Data-tab series swatch and the Chart elements card (a commit per input event)."
+    },
+    {
+      "id": "BUG-0504",
+      "status": "fixed",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P1 review round 2 (R1-2): code reading of RangeSourceEditor + ChartRangeDataTab, proved by ChartRangeDataTab.test.tsx"
+      },
+      "violation": {
+        "oracleId": "chart-data-tab-series-colour-never-persists",
+        "severity": "medium",
+        "message": "A SERIES COLOUR PICKED ON THE CHART DATA TAB NEVER PERSISTED: the commit patch was diffed against the on-screen DRAFT and came out empty. Each `input` step set the pane's draftColors (pane/ChartRangeDataTab.tsx:321-330 at aff01683), the editor received the draft as `spec` (shownSpec, :286-288), and the native `change` built its patch against that draft (data/RangeSourceEditor.tsx:178-183), so seriesColorPatch saw current[name] === hex and returned null (lib/chartDataReader.ts:580). Nothing was written and the draft stayed on screen, unpersisted.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Chart on a range, object pane > Data > pick a series colour: the bar recolours, nothing is saved, and reselecting the chart shows the old colour. Unit: Charts/components/pane/__tests__/ChartRangeDataTab.test.tsx 'input then change writes the picked colour once, and the draft is dropped'."
+      },
+      "triage": "Charts components: a draft overlay used as the commit base.",
+      "fix": "P1 S3: SeriesColorSwatch spreads useNativeColorPick; RangeSourceEditor takes `storedSeriesColors` (the host passes spec.seriesColors ?? {} -- never undefined, which would fall back to the draft) and diffs the commit against it; the draft is dropped on commit and on pick end.",
+      "notes": "Behind this defect stood a second one, BUG-0502 (the chart spec schema refused `seriesColors`, so even a non-empty patch was refused at the schema gate); both stood between a pick and a write, the draft diff first. Unit-proved; live in canvas-round2-quick.spec.ts Q8 (proof phase)."
+    },
+    {
+      "id": "BUG-0505",
+      "status": "fixed",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P1 (G1) code reading of Charts/components/ChartFormatPane.tsx local ColorField"
+      },
+      "violation": {
+        "oracleId": "chart-element-card-colour-commits-per-input",
+        "severity": "low",
+        "message": "THE CHART ELEMENTS CARD'S COLOUR SWATCHES COMMITTED ON EVERY `input` EVENT (ChartFormatPane.tsx:1185 at aff01683), so dragging in the picker wrote, and recorded an undo step, per drag step; its Background swatch also showed #ffffff whatever was painted, because ChartAreaSections resolved the theme with no container (:2051).",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Select a chart, Format tab > Chart elements > Chart area fill, drag in the picker: each drag step is one undo entry. Unit: Charts/components/__tests__/elementCardOneStep.test.tsx \"the chart area's Background writes the CONTAINER (Format Object), never the theme -- once, on the pick's change\"."
+      },
+      "triage": "Charts components: preview and commit were the same event.",
+      "fix": "P1 S3: the card's ColorField spreads useNativeColorPick (step = preview, change = the ONE write, end = end preview); the Background swatch shows the colour resolved WITH the container (resolveChartContainer) and commits solidBackgroundPatch against {stored, resolved}.",
+      "notes": "Unit-proved only until the proof phase runs the round-2 journey."
+    },
+    {
+      "id": "BUG-0506",
+      "status": "fixed",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P1 (owner finding G1) code reading of Charts/rendering/chartTheme.ts + chartPainterUtils.ts"
+      },
+      "violation": {
+        "oracleId": "chart-plot-area-default-fill-hides-container",
+        "severity": "low",
+        "message": "THE PLOT AREA'S DEFAULT FILL HID THE VISUAL CONTAINER BACKGROUND ON EVERY CARTESIAN CHART AND MULTI-ROW CARD. DEFAULT_CHART_THEME.plotBackground was \"#fafafa\" (chartTheme.ts:71 at aff01683), filled by drawPlotBackground from 12 painters and the 2 chrome helpers, and multi-row card rows filled theme.plotBackground directly (multiRowCardPainter.ts:103-105, ignoring the plot gradient), so a background colour set on the visual showed only in the margin around the plot.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Column chart, Format tab > Effects > Background = dark blue: only the frame around the plot turns blue; the plot stays near-white. Unit: Charts/rendering/__tests__/plotFill.test.ts 'the DEFAULT theme paints nothing and touches no fillStyle'."
+      },
+      "triage": "Charts rendering: a default that is not Power BI's (Power BI's plot area is transparent by default).",
+      "fix": "P1 S4: plotBackground defaults to \"\" (no fill); ONE helper pair hasPlotFill / fillPlotShape in chartPainterUtils.ts paints the plot (rect or row path, solid or gradient) and the multi-row card uses it; the colorful-1..8 and outline-1..3 presets drop their plot tint, the mono / dark / outline-4 / gradient presets keep theirs. Census: plotFill.test.ts fails on any other .plotBackground read under Charts/rendering/.",
+      "notes": "Owner decision (DECISIONS2 P1). Visual goldens are stale anyway (R14)."
+    },
+    {
+      "id": "BUG-0507",
+      "status": "fixed",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P1 (owner finding G2-A 'a filter added from Controls shows no values') code reading of ControlsPane/lib/filterPaneStore.ts"
+      },
+      "violation": {
+        "oracleId": "ribbon-filter-first-dot-split-hides-failure",
+        "severity": "medium",
+        "message": "A RIBBON FILTER ON A SCHEMA-QUALIFIED TABLE SHOWED NO VALUES, AND HID WHY. refreshFilterItems (filterPaneStore.ts:486-544 at aff01683) split the field key \"BI.dim_date.year\" at the FIRST dot (parseBiFieldName, :546-553) and sent table \"BI\" to bi_get_column_values, which failed; the sibling constraints (:510) and getBiColumnAvailableValues (:519-527) used the same splitter. The error went only to console.error (:541-543), the card marked itself loaded anyway (RibbonFilterCard.tsx:89-95) so it never retried, and the dropdown printed 'No matching values' -- which reads as an empty column, not a failure.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "AdventureWorks model (tables named BI.dim_*), Controls > Add > Filter on BI.dim_date.year, open it: 'No matching values'. Unit: ControlsPane/lib/__tests__/filterPaneStore.test.ts \"a dotted table name reaches the engine whole (never the first-dot split 'BI')\"; ControlsPane/__tests__/ribbonFilterItemsError.test.tsx \"a failed load shows the alert (the whole field key named), never 'No matching values'; Retry loads\"."
+      },
+      "triage": "ControlsPane store: a hand-rolled key split instead of the shared splitBiFieldKey, and a swallowed error.",
+      "fix": "P1 S5: all three call sites split with splitBiFieldKey over the connection's table names (longest prefix; a key whose table is not in the model is refused with a sentence, never sent); parseBiFieldName deleted. refreshFilterItems returns a FilterItemsOutcome; the card shows an alert naming the whole field key with a Retry, never marks a failed load as loaded, and a failed dependent-filter narrowing says so above the list.",
+      "notes": "Unit-proved; live in canvas-round2-quick.spec.ts F1-F3 (proof phase)."
+    },
+    {
+      "id": "BUG-0508",
+      "status": "fixed",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P1 S5 code reading: filterPaneApi.getBiModelInfo vs bi/commands.rs bi_get_model_info"
+      },
+      "violation": {
+        "oracleId": "getBiModelInfo-typed-non-null",
+        "severity": "low",
+        "message": "getBiModelInfo (ControlsPane/lib/filterPaneApi.ts) was typed Promise<BiModelInfo> while the Rust command returns Result<Option<BiModelInfo>, String> (app/src-tauri/src/bi/commands.rs bi_get_model_info), so a connection with no model loaded resolved null where callers read .tables -- a TypeError the type system said could not happen.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Unit: ControlsPane/lib/__tests__/filterPaneStore.test.ts \"a connection with no model loaded fails with the 'not loaded' sentence\"."
+      },
+      "triage": "ControlsPane API wrapper: the TS signature did not mirror the Rust Option.",
+      "fix": "P1 S5: typed Promise<BiModelInfo | null>; refreshFilterItems answers 'The model of this filter's connection is not loaded.' and AddFilterDialog skips such a connection with a console warning.",
+      "notes": "Unit-proved only."
+    },
+    {
+      "id": "BUG-0509",
+      "status": "fixed",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P1 S2 (ruling Q9): code reading of app/src-tauri/src/object_bindings/container_literal.rs"
+      },
+      "violation": {
+        "oracleId": "container-literal-solid-colour-keeps-gradient",
+        "severity": "low",
+        "message": "A SCRIPT / MCP / OBJECT-BINDING LITERAL WRITE OF A CONTAINER BACKGROUND COLOUR LEFT A STORED GRADIENT VISIBLE (and a background switched off stayed off), so the write showed nothing -- the same 'a pick that does nothing' as G1, through the Rust container-literal door instead of the Format pane.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Chart with a stored container gradient; a script or MCP literal write of /container/background/color = #ff0000: the gradient still paints. Rust: object_bindings/container_literal_tests.rs a_solid_background_colour_clears_the_gradient_and_shows_the_background."
+      },
+      "triage": "Rust container-literal writer: a solid colour write did not apply the solid-commit rule.",
+      "fix": "P1 S2 per RULINGS2 Q9: next_container takes the family's default show; a non-empty /background/color write clears background.gradient and sets show:true when the stored show or the family default (false only for a floating range) would hide it. Tests: a_solid_background_colour_clears_the_gradient_and_shows_the_background, a_solid_background_colour_shows_a_background_that_is_off_by_default.",
+      "notes": "The spec had this as an open item; ruling Q9 moved it in. What is still open is filed separately (the page navigator's flat key and a formula-bound colour)."
+    },
+    {
+      "id": "BUG-0510",
+      "status": "open",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P1 S2 (ruling Q9 follow-up): the doors the container-literal fix does not reach"
+      },
+      "violation": {
+        "oracleId": "solid-background-rule-unrouted-doors",
+        "severity": "low",
+        "message": "TWO BACKGROUND-COLOUR DOORS STILL SKIP THE SOLID-COMMIT RULE. (1) A page navigator's flat `containerBackgroundColor` key goes through the control arm (set_control_property_core), not object_bindings/container_literal.rs, and the navigator's default show is false (Controls navigatorModel.ts:228), so a script/MCP colour write on a navigator whose background is off shows nothing. (2) A FORMULA-bound background colour is an overlay applied at resolve time, not a literal write, so it still sits under a stored gradient.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "(1) Page navigator, background not shown: a script setProperty('containerBackgroundColor', '#ff0000') paints nothing. (2) Chart with a stored container gradient; bind /container/background/color to =A1 holding #ff0000: the gradient still paints. Not reproduced live."
+      },
+      "triage": "Rust controls property arm + the binding resolve overlay: outside the container-literal door P1 fixed.",
+      "notes": "Shapes, text boxes and buttons are unaffected (their background is `fill`, with no show or gradient). Listed in docs/design/open-items.md §2.al (P1)."
+    },
+    {
+      "id": "BUG-0511",
+      "status": "open",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P3 S7 (paint primitive + CF paint seam): read while factoring paintDataBar / paintIconSetIcon"
+      },
+      "violation": {
+        "oracleId": "cf-glyph-rule-options-ignored",
+        "severity": "low",
+        "message": "DATA BARS AND ICON SETS IGNORE MOST OF THEIR RULE'S OPTIONS. The one data-bar painter (app/extensions/ConditionalFormatting/rendering/dataBarRenderer.ts paintDataBar) reads only fillColor and gradientFill: borderColor, negativeFillColor/negativeBorderColor, axisColor/axisPosition, direction and showValue (Excel's 'Show Bar Only') are never read, so a negative value paints a positive-coloured bar from the left edge and 'Show Bar Only' still shows the value. The icon painter (iconSetRenderer.ts paintIconSetIcon) has no reader for IconSetRule.showIconOnly anywhere in the app, so 'Show Icon Only' still shows the number. A rule-option search of app/ finds showIconOnly/showValue only in lib/presetRules.ts. Pre-existing; found by reading, not seen on screen.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Data Bars on a range holding -5 and 10: Excel draws the -5 bar red, leftwards from an axis; Calcula draws it in the fill colour from the left edge (percent from the backend). New Rule > Icon Sets > Show Icon Only: the value is still painted. Not reproduced live."
+      },
+      "triage": "ConditionalFormatting rendering (paintDataBar / paintIconSetIcon, now shared by the grid overlay and the @api/conditionalFormatPaint painter) plus the cell text pass for the two 'only' switches; the backend may also need to send the sign / axis position with dataBarPercent.",
+      "notes": "Fixing it in the shared painters fixes the sheet and floating grids at once (P3 S7 made them one painter)."
+    },
+    {
+      "id": "BUG-0512",
+      "status": "fixed",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P3 S2 (cell-target foundation); found by the P3 spec review, finding 5"
+      },
+      "violation": {
+        "oracleId": "protection-gate-parity",
+        "severity": "medium",
+        "message": "TYPING INTO A FLOATING GRID IGNORED THE HOST SHEET'S PROTECTION. update_floating_range_cell_inner (the in-cell editor, the floating grid's Delete fallback and the script floatingRangeSetCells loop) gated only through update_cell_on_sheets_inner on the BACKING sheet, whose protection is never set, so a locked cell of a floating grid on a protected host was written freely while the same sheet refused the same edit in its own cells (and refused moving the grid, BUG-0176).",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "BUG-0176 gated the floating range's OBJECT doors by the host; the cells' door was documented as 'the backing sheet's', which was never protected.",
+      "repro": {
+        "description": "Protect Sheet1 with every cell locked; type 9 into a cell of a floating grid on Sheet1: the value is stored and the document is dirty."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-16",
+        "description": "cell_target.rs gate_target_cells asks the HOST's protection (flag and options, allow-edit ranges cleared because they name host coordinates) over the BACKING cells' lock flags; update_floating_range_cell_inner resolves its id through resolve_cell_target and calls it holding nothing, before any effect. Test the_in_cell_edit_door_is_gated_by_the_host (sabotage: gate removed -> red)."
+      }
+    },
+    {
+      "id": "BUG-0513",
+      "status": "open",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P3 S10 (grid-command, clipboard and painter doors on floating grids)"
+      },
+      "violation": {
+        "oracleId": "cell-target-route-gap",
+        "severity": "medium",
+        "message": "NO STYLE-ONLY WRITE REACHES A FLOATING GRID'S CELLS. Format Painter into a floating grid, Paste Formatting and Paste (No Borders) onto a floating grid assign a source style INDEX per destination cell (set_cell_style), and no backend command that sets a style index takes a cell target: set_cell_style acts on the active sheet only, and update_cells_batch's target route always writes a VALUE with the style. Owner finding G3 asks for Format Painter sheet-to-floating-grid; P3 S10 refuses these doors on a floating grid with one sentence instead of painting the host's hidden cells.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The P3 spec lists Format Painter both ways but its Rust steps (S3/S4) teach apply_formatting and update_cells_batch only; a style-INDEX assignment is neither (a FormattingOptions copy of a style is lossy and drifts).",
+      "repro": {
+        "description": "Select a sheet cell with a fill, Home > Format Painter, click a floating grid's cell: 'Format Painter cannot paint into a floating grid's cells yet' (expected: the fill is painted there). Same for Home > Paste > Formatting on a floating grid's cell."
+      },
+      "fix": {
+        "status": "open",
+        "description": "Give set_cell_style (or a style-only CellUpdateInput / a set_cell_styles batch) a `target: Option<CellTargetRef>` resolved through cell_target.rs (host gate 'formatCells', extent, backing index, one owned undo step), add it to TARGET_COMMANDS, then route formatPainterLogic.applyFormatToTarget and the 'formats'/'allExceptBorders' paste attributes (pasteSpecialExecute TARGET_PASTE_ATTRIBUTES) through it."
+      },
+      "links": [
+        "BUG-0185"
+      ]
+    },
+    {
+      "id": "BUG-0514",
+      "status": "open",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P3 S11 (editing, find, CF doors on floating grids)"
+      },
+      "violation": {
+        "oracleId": "cell-target-route-gap",
+        "severity": "low",
+        "message": "CUSTOM SORT OFFERS NO CELL ICON ON A FLOATING GRID. The Sort dialog's 'Cell Icon' order list asks get_range_icons which icons a column SHOWS; that command reads the ACTIVE sheet only and takes no cell target, and re-deriving the answer from the rule list is BUG-0107's mistake. So on a floating grid's cells the list is empty ('no icons found') and a sort by cell icon cannot be chosen there. Every other sort (values, cell colour, font colour, custom lists) works on the object's cells with its target.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Found while migrating the Sort doors to cell targets (P3 S11); the icon scan was the one read with no target route.",
+      "repro": {
+        "description": "Put an icon-set rule on a floating grid's column, select a cell of it, Home > Sort & Filter > Custom Sort, Sort On 'Cell Icon': the Order list says no icons were found."
+      },
+      "fix": {
+        "status": "open",
+        "description": "Give get_range_icons a `target: Option<CellTargetRef>` (resolve_icons over the backing sheet's rules, clipped to the extent), add it to TARGET_COMMANDS, and pass the dialog's target in sortHelpers.getUniqueIconsInColumn."
+      }
+    },
+    {
+      "id": "BUG-0515",
+      "status": "fixed",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P3 S5 (structure and line sizes take a cell target)"
+      },
+      "violation": {
+        "oracleId": "formula-text-spelling",
+        "severity": "low",
+        "message": "AN OFF-SHEET ROW/COLUMN INSERT OR DELETE SHOUTED THE SHEET NAME IN EVERY FORMULA IT RE-POINTED. shift_cross_sheet_formulas_for_off_sheet_edit (commands/structure.rs) re-parses the rewritten text, and the lexer uppercases bare sheet qualifiers, so =Sheet2!A3 on Sheet1 became =SHEET2!A5 after inserting two rows on the non-active Sheet2 -- and, through P3's table semantics, every host formula reading a floating grid (=Float1!A3 -> =FLOAT1!A5). The value and the dependency edge were right (lookups are case-insensitive); the formula bar showed the wrong spelling and it was saved that way.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The cell doors restamp the workbook's casing (update_cell_on_sheets_inner, split_entered_formula); this rewrite path never did, and the off-sheet structural edit had no test that read the formula TEXT back, only values.",
+      "repro": {
+        "description": "Two sheets, Sheet1 active. Sheet1!E1 = =Sheet2!A3. Insert two rows at row 2 on Sheet2 without activating it (off_sheet_structural_edit, or insertRows with sheetIndex 1): Sheet1!E1 reads =SHEET2!A5."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-16",
+        "description": "The rewrite calls crate::sheet_names::restamp_sheet_casing on the re-parsed AST against the official names before storing it (no lock taken). Test commands::data::structure_target_tests::an_off_sheet_row_insert_keeps_the_sheet_name_spelling_and_the_edge (sabotage: restamp removed -> red with SHEET2!A5). Not covered: named-range and table casing in the same rewrite (would need named_ranges/tables locks under the held grid locks); the same-sheet store_rewritten_formula path was not audited."
+      }
+    },
+    {
+      "id": "BUG-0516",
+      "status": "fixed",
+      "discovered": "2026-10-16",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P3 (floating-grid Home commands); owner canvas test 2026-10-16, finding G3"
+      },
+      "violation": {
+        "oracleId": "selection-owner-door-parity",
+        "severity": "medium",
+        "message": "Home commands refused on floating-grid cells (owner G3). With a floating grid's cell selected, every Home command (Bold, fills, borders, number formats and decimals, alignment, wrap, Clear, Sort, Fill, AutoSum, Insert Function, Merge, Conditional Formatting, Row Height / Column Width, Hide / Unhide, Insert / Delete Sheet Rows and Columns, Copy / Paste / Paste Special, Format Painter from the grid, Find & Replace, Go To Special) refused with \"... is not available for a floating range's cells yet\". BUG-0185 had made those doors refuse instead of writing Core's hidden sheet cell under the grid; BUG-0493 owned the selection without a cell target. Nothing could act on the grid's own cells.",
+        "digestDiffPaths": []
+      },
+      "links": [
+        "BUG-0185",
+        "BUG-0493"
+      ],
+      "whyNobodyNoticed": "The refusal was the deliberate BUG-0185 safety net, documented as 'not yet'; the owner's canvas test was the first to need the grid's cells formatted.",
+      "repro": {
+        "description": "Select a cell of a floating grid on Sheet1 and press Home > Bold (or Decrease Decimal, Sort A to Z, ...): one refusal toast, nothing changes."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-16",
+        "description": "Round 2 P3: one cell-target seam (@api/cellTarget resolveCellTarget(action, capability), SelectionOwner.cellTarget/actsOn), an explicit `target: CellTargetRef` on 30 backend commands plus the styled read get_cell_target_cells resolved once in Rust (cell_target.rs, host protection over the backing cells), the floating grid as an owner that admits read/format/numberFormat/content/clear/sort/structure/lineSize/merge/conditionalFormat, and a styled renderer (paintStyledCellBox, CF with the backing rules, merges, object-hidden lines). Format as Table, Filter and Insert/Delete Cells with a shift still refuse with their own sentences. Proofs: the S2-S5 Rust target tests, cellTargetDoorCensus.test.ts and the door tests of S8-S11; live journey app/e2e/journeys/floating-grid-home.spec.ts (written, run in the proof phase)."
+      }
+    },
+    {
+      "id": "BUG-0517",
+      "status": "fixed",
+      "discovered": "2026-10-17",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P2 S4 (the member shape: pinning member_key_of == bi_get_column_values keys)"
+      },
+      "violation": {
+        "oracleId": "member-key-identity",
+        "severity": "medium",
+        "message": "A BI Decimal value between -1 and 0 lost its sign in its text: arrow_value_to_string computed `raw / divisor` (0 for -0.50) and printed the absolute fraction, so -0.50 read \"0.50\" -- in query results written to the grid, in every model value list (slicer, ribbon filter, CUBE builder) and so as the member KEY, where -0.50 and +0.50 became one member and selecting one selected both.",
+        "digestDiffPaths": []
+      },
+      "links": [],
+      "whyNobodyNoticed": "Fixtures used positive decimals; the sign is lost only for |x| < 1, and the text still looked like a valid number.",
+      "repro": {
+        "description": "Arrow Decimal128(10,2) value -50 -> bi::commands::arrow_value_to_string gives \"0.50\" (expected \"-0.50\")."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-17",
+        "description": "app/src-tauri/src/bi/commands.rs arrow_value_to_string writes the sign separately. Pinned by member_shape_tests::a_negative_fractional_decimal_keeps_its_sign_in_the_key (list key and model-pivot key both \"-0.50\")."
+      }
+    },
+    {
+      "id": "BUG-0518",
+      "status": "fixed",
+      "discovered": "2026-10-17",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P2 S4 (the member shape: pinning member_key_of == bi_get_column_values keys)"
+      },
+      "violation": {
+        "oracleId": "member-key-identity",
+        "severity": "medium",
+        "message": "A model pivot keyed a Decimal member differently from the model's value list: the BI pivot cache interns a Decimal128 as an f64 and spelled its member key format!(\"{}\", f64) (\"5.5\", \"10\"), while bi_get_column_values keys it by the exact decimal text (\"5.50\", \"10.00\"). The P2/P4 contract (member_key_of == the model list's key, byte for byte) did not hold for any Decimal column; a hidden item named by a list key (\"5.50\") resolved to nothing in the pivot engine.",
+        "digestDiffPaths": []
+      },
+      "links": [],
+      "whyNobodyNoticed": "Host matching was numerically tolerant (cache_value_is_selected), which hid the spelling difference until keys had to be byte-equal.",
+      "repro": {
+        "description": "BI table with a Decimal(10,2) price 5.50: bi_get_column_values -> \"5.50\"; a BI pivot on price -> header key \"5.5\"."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-17",
+        "description": "pivot_engine::MemberKind::Decimal { scale } set by the host's BI cache builder (pivot/operations.rs build_cache_from_arrow_batches) makes FieldCache::member_key write the scale; resolve_hidden_ids also matches a member by its key. Pinned by member_shape_tests::member_key_of_equals_every_bi_header_members_key_and_the_model_lists_keys and pivot-engine decimal_keys_keep_their_scale_and_hidden_items_resolve_by_key_and_fold_the_blank."
+      }
+    },
+    {
+      "id": "BUG-0519",
+      "status": "fixed",
+      "discovered": "2026-10-17",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P2 S7 (the member shape in the ribbon filter checklist)"
+      },
+      "violation": {
+        "oracleId": "member-key-identity",
+        "severity": "medium",
+        "message": "The ribbon filter's advanced conditions (ControlsPane FilterDropdown evalCondition) compared DISPLAY text: 'is blank' / 'is empty' tested the item text, which for the model's blank member was \"(blank)\", so it never matched the blank member; the numeric conditions ran parseFloat on both sides, so a de-DE target \"3.000,5\" read as 3 (and kept 1234.5 for 'is greater than'); the date conditions were plain string comparisons of the item text against what the user typed, so 'is after 01.02.2024' compared \"2024-03-01\" > \"01.02.2024\" lexically.",
+        "digestDiffPaths": []
+      },
+      "links": [
+        "BUG-0407"
+      ],
+      "whyNobodyNoticed": "Every manual check ran under an en-US-like locale with ISO-typed dates, where parseFloat and lexical comparison happen to agree with the intended answer; the blank case needs a model column with NULLs.",
+      "repro": {
+        "description": "Model column with values 1234.5, 3578.27 and a NULL; ribbon filter > Advanced: 'is greater than' 3.000,5 under de-DE kept both numbers; 'is blank' kept nothing."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-17",
+        "description": "evalCondition(member: SlicerItem, op, target): numbers compare the invariant KEY (memberKeyNumber) with the target read by @api/locale parseNumber; dates compare the ISO key's serial (memberKeyDate) with parseDate(target); text reads the label; blank/empty read the key (\"\" for the blank, ruling Q8). Pinned by app/extensions/ControlsPane/components/__tests__/filterDropdownConditions.test.tsx (sabotage: parseFloat of the label fails it)."
+      },
+      "validatedBy": [
+        "app/extensions/ControlsPane/components/__tests__/filterDropdownConditions.test.tsx"
+      ]
+    },
+    {
+      "id": "BUG-0520",
+      "status": "fixed",
+      "discovered": "2026-10-17",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P2 S9 (TS input parsing in the app locale)"
+      },
+      "violation": {
+        "oracleId": "app-locale-input",
+        "severity": "medium",
+        "message": "A value typed into a BI pivot's writeback column under a comma-decimal app locale was rewritten before submission: submitWritebackValue folded any \"<digits>,<digits>\" into \"<digits>.<digits>\" for EVERY column type, so a TEXT writeback column (a note, a code such as \"1,5\") stored \"1.5\" -- not what the user typed. For NUMBER columns the same fold left the foreign spelling to the backend's lenient parse_value (which replaces ',' with '.'), so a de-DE \"1.5\" was accepted as one and a half and a de-DE \"1.234,5\" was refused instead of read as 1234.5.",
+        "digestDiffPaths": []
+      },
+      "links": [
+        "BUG-0407"
+      ],
+      "whyNobodyNoticed": "Manual checks used numeric columns with en-US-like input, where the fold never fires and the lenient backend parse agrees.",
+      "repro": {
+        "description": "sv-SE app locale; a model with a String writeback column placed as a lookup row field of a BI pivot; type 1,5 into a leaf cell -> the stored entry is \"1.5\". de-DE with a Float64 writeback column: type 1.234,5 -> refused ('expects a number'); type 1.5 -> stored 1.5."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-17",
+        "description": "app/extensions/Pivot/lib/writebackEditing.ts: WritebackCellTarget carries the column's dataType; only a Float64/Int64 column's input is read, strictly in the app locale (@api/locale parseNumber), and sent as the invariant number; text that is no number there is refused in TS with the backend's message shape; any other column's text goes as typed. Pinned by app/extensions/Pivot/lib/__tests__/writebackEditing.test.ts (sabotaged and confirmed: restoring a comma fold plus Number() fails 3 of its 5 tests).",
+        "filesChanged": [
+          "app/extensions/Pivot/lib/writebackEditing.ts",
+          "app/extensions/Pivot/lib/__tests__/writebackEditing.test.ts"
+        ]
+      }
+    },
+    {
+      "id": "BUG-0521",
+      "status": "fixed",
+      "discovered": "2026-10-17",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P2 S11 (locale census classification pass)"
+      },
+      "violation": {
+        "oracleId": "app-locale-fill-series",
+        "severity": "high",
+        "message": "The fill handle (drag, double-click fill to the edge, Fill > Series > AutoFill) and the script api.fillRange({type:\"series\"}) read each source cell's DISPLAY text with parseFloat and wrote generated numbers as String(n). Under a comma-decimal app locale this produced a WRONG SERIES with nothing on screen to say so: de-DE cells 1,5 and 2,5 read as 1 and 2 and filled 3, 4, 5; de-DE 1.000 / 2.000 read as 1 and 2; and a generated fraction was written as \"3.5\", which the batch write parses in the app locale (de-DE: a mis-grouped TEXT). parseFloat also read \"10 kg\" as 10, so a unit column filled \"30\" with its unit dropped.",
+        "digestDiffPaths": []
+      },
+      "links": [
+        "BUG-0407"
+      ],
+      "whyNobodyNoticed": "Every fill test ran under the invariant locale, where parseFloat and String(n) agree with the app's spelling; the owner's sv-SE grid mostly holds integers, which parseFloat reads correctly.",
+      "repro": {
+        "description": "App locale de-DE (File > Options > General). Type 1,5 in A1 and 2,5 in A2, select both, drag the fill handle down to A5 -> A3:A5 hold 3, 4, 5 (expected 3,5 / 4,5 / 5,5). Same with 0,1 / 0,2 under sv-SE -> 0 / 0 / 0 or text."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-17",
+        "description": "app/src/core/lib/fillEngine.ts: new fillNumberOf (display text read STRICTLY in the app locale, core parseNumberIn) and fillNumberText (the app locale's spelling, 15 significant digits, no grouping) replace parseFloat / String(n) in detectPattern and generateFillValue; app/src/api/scriptHost/host.ts scriptSeriesPattern uses fillNumberOf for its lone-number seed. Pinned by app/src/core/lib/__tests__/fillEngine.locale.test.ts (sabotaged and confirmed: restoring parseFloat in fillNumberOf fails 6 of its 8 tests). The locale census (app/src/api/__tests__/localeCensus.test.ts) now holds fillEngine.ts at its 5 [PERF] log toFixed calls.",
+        "filesChanged": [
+          "app/src/core/lib/fillEngine.ts",
+          "app/src/api/scriptHost/host.ts",
+          "app/src/core/lib/__tests__/fillEngine.locale.test.ts"
+        ]
+      }
+    },
+    {
+      "id": "BUG-0522",
+      "status": "open",
+      "discovered": "2026-10-17",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P2 spec DC3 (app locale everywhere); filed by P2 S12"
+      },
+      "violation": {
+        "oracleId": "dax-format-not-app-locale",
+        "severity": "medium",
+        "message": "DAX FORMAT() does not format in the app locale, nor with .NET semantics in ANY locale: model-engine-lib compiles FORMAT to SQL TO_CHAR (engine-core compute/expression/text.rs:221-225), which is pushed down to Postgres for DirectQuery. TO_CHAR does not implement .NET format strings (\"Currency\", \"#,0.00\", \"Percent\"), so FORMAT([Revenue], \"#,0.00\") is wrong under en-US too, and a de-DE or sv-SE user gets en-US-shaped text from a measure that formats itself.",
+        "digestDiffPaths": []
+      },
+      "links": [
+        "BUG-0447"
+      ],
+      "repro": {
+        "description": "A model measure =FORMAT(SUM(Sales[Amount]), \"#,0.00\") on the AdventureWorks Postgres source, shown in a canvas Card under app locale de-DE: the text is not 1.234,50-shaped (and is not .NET's #,0.00 under en-US either)."
+      },
+      "notes": "Not fixable inside P2 (decision DC3): a correct fix is a feature -- a .NET-format interpreter, a DataFusion UDF for it, and pushdown exclusion of FORMAT so Postgres never sees it; model-engine-lib has no dependency on grid_engine's format-code interpreter. No model-engine-lib code changed in P2, so no host-integration-changelog entry. Recorded in docs/design/open-items.md section 2.al (P2).",
+      "whyNobodyNoticed": "FORMAT is rare in the shipped models; measures carry a format_string that the HOST formats in the app locale instead."
+    },
+    {
+      "id": "BUG-0523",
+      "status": "open",
+      "discovered": "2026-10-17",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P2 spec DC2 (app locale everywhere); filed by P2 S12"
+      },
+      "violation": {
+        "oracleId": "table-slicer-key-is-display-text",
+        "severity": "low",
+        "message": "A TABLE-source slicer's member key is the app-locale DISPLAY text of each cell (slicer/commands.rs format_cell_value(&cell.value, style, &locale)), because its selection is applied through AutoFilter value matching, which is display text by Excel's semantics (autofilter.rs, tables.rs). So after an app-locale switch a stored selection on a numeric or date column ('1.234,5', '15.01.2024' under de-DE) no longer matches the new display ('1 234,5', '2024-01-15' under sv-SE): the slicer shows nothing selected and the table comes back unfiltered or empty. Pivot, BI, model-slicer and design-query members ARE invariant-keyed (MemberRef.key); only table slicers are not.",
+        "digestDiffPaths": []
+      },
+      "links": [
+        "BUG-0166"
+      ],
+      "repro": {
+        "description": "Table with a number column (1234.5, 99) and a slicer on it; app locale de-DE; select '1.234,5'. Switch File > Options > Locale to sv-SE: the slicer's stored selection '1.234,5' matches no item, the table filter no longer keeps the row."
+      },
+      "notes": "Deliberately NOT fixed in P2 (decision DC2): re-keying table slicers alone would make them disagree with AutoFilter, whose matching is display text exactly as Excel's (Excel has the same behaviour when the regional format changes). A fix re-keys AutoFilter value lists and table slicers together (invariant value keys, display labels). Table slicers already carry the {key,label} shape (key = label = display text), so P4 sees one shape.",
+      "whyNobodyNoticed": "Locale switches mid-document were impossible to persist before P2; the owner's workbooks are authored and read in one locale."
+    },
+    {
+      "id": "BUG-0524",
+      "status": "fixed",
+      "discovered": "2026-10-17",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P2 package verifier (adversarial review of the member shape)"
+      },
+      "violation": {
+        "oracleId": "app-locale-display",
+        "severity": "low",
+        "message": "The Value Field Settings dialog's Base item list (Show Values As: Difference From / % Of) showed member KEYS as its option text: P2 S7 projected getPivotFieldUniqueValues().members to keys for the dialog, so a de-DE user saw invariant \"1234.5\" instead of \"1234,5\", sv-SE month groups read \"Jan\" instead of \"jan\", and the blank member was an EMPTY option instead of \"(Blank)\".",
+        "digestDiffPaths": []
+      },
+      "links": [
+        "BUG-0407"
+      ],
+      "whyNobodyNoticed": "The projection was correct for what is SAVED (resolve_base_item_id reads keys), and the dialog only needs items for two Show Values As modes; every check ran on text members, where key and label agree.",
+      "repro": {
+        "description": "Range pivot with a numeric row field holding 1234.5 and a blank; app locale de-DE; Value Field Settings > Show Values As: Difference From > Base field = that field: the Base item options read \"1234.5\" and an empty option."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-17",
+        "description": "BaseFieldChoice.items is MemberRef[] (baseFieldChoices.ts); PivotEditor hands the members through; ValueFieldSettingsModal renders option value = key, text = label. Pinned by app/extensions/Pivot/components/__tests__/valueFieldSettingsBaseField.test.tsx \"shows each base item's LABEL (app locale) and saves its KEY (P2)\" (sabotage: render item.key as the text fails it)."
+      },
+      "validatedBy": [
+        "app/extensions/Pivot/components/__tests__/valueFieldSettingsBaseField.test.tsx"
+      ]
+    },
+    {
+      "id": "BUG-0525",
+      "status": "fixed",
+      "discovered": "2026-10-17",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P4 S1 (model-engine-lib tuple filter) -- found while writing tuple_filter_tests"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "engine-contested-empty-in-list",
+        "severity": "medium",
+        "message": "An EMPTY contested IN-list (a scoped IN slicer with nothing selected that some requested measure CLEARs) made the whole query fail with DataFusion Internal(\"predicate did not evaluate to an array\") instead of keeping no row for the honouring measures: the local executor rendered the empty list as the constant FALSE inside CASE WHEN and the row-domain probe, and DataFusion refuses a constant CASE predicate there.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Every contested-filter test selected at least one member; an empty selection only reaches the contested path when a clearing measure is in the same request.",
+      "repro": {
+        "description": "model-engine-lib: measures [Revenue, Total=SUM(amount, RESET())], scoped_in_filters [Store[region] IN ()] level 1 -> Err(DataFusion Internal). Test: tuple_filter_tests::an_empty_contested_in_list_matches_nothing."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-17",
+        "description": "local_aggregation.rs in_list_expression (shared by contested IN-lists and tuple filters) renders 'matches nothing' as a predicate over the column (col IS NULL AND NOT col IS NULL), never the literal FALSE. Revenue = 0, Total = 127."
+      }
+    },
+    {
+      "id": "BUG-0526",
+      "status": "fixed",
+      "discovered": "2026-10-17",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P4 S1 (model-engine-lib tuple filter) -- found while writing tuple_filter_tests"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "engine-contested-probe-join",
+        "severity": "medium",
+        "message": "A GROUPED query whose every measure clears a contested DIMENSION filter (e.g. group by Store[region], measure SUM(amount, CLEAR(Product)), scoped IN on Product[cat]) failed with DataFusion SchemaError FieldNotFound product.cat: the row-domain probe in HAVING reads the contested column, but the dimension was joined only when some measure kept the filter.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Contested-filter tests always carried at least one measure that honours the filter, which pulls the dimension into the join set.",
+      "repro": {
+        "description": "Test: tuple_filter_tests::a_contested_filter_cleared_by_every_measure_still_bounds_the_grouped_rows (cached and connector engines)."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-17",
+        "description": "local_aggregation.rs: on a grouped query every contested and tuple filter table joins (context_join_tables) before the JOIN build, so the probe always reads a joined column. x = 21, y = 42, z absent."
+      }
+    },
+    {
+      "id": "BUG-0527",
+      "status": "fixed",
+      "discovered": "2026-10-17",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P4 S5 (Charts cross-filter) -- found while writing designQueryCrossFilter.test.ts"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "charts-design-query-unknown-table-filter",
+        "severity": "low",
+        "message": "mergePageFilters (Charts/lib/designQueryChartDataReader.ts) promised to skip a filter whose field names no table of the model, but splitBiFieldKey falls back to a first-dot split, so a DOTTED field on a table the model lacks ('Gone.Region') was sent as table 'Gone' and the backend refused the WHOLE design query instead of dropping that one filter. The new tuple-filter merge inherited the same split.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The only skip test used a dot-free field ('Gone'), the one shape the fallback does reject; every live publisher sends model fields.",
+      "repro": {
+        "description": "Tests: designQueryChartDataReader.test.ts 'skips a DOTTED field whose table the model does not have'; designQueryCrossFilter.test.ts 'a tuple filter naming a column the model does not have is skipped WHOLE'."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-17",
+        "description": "designQueryChartDataReader.ts splitModelField: a split whose table is not one of the model's tables is treated as unresolved, in both mergePageFilters and mergeTupleFilters (a tuple filter is skipped whole, never widened)."
+      }
+    },
+    {
+      "id": "BUG-0528",
+      "status": "fixed",
+      "discovered": "2026-10-17",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Round 2 P4 package verifier -- adversarial review of S8/S12"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "script-crossfilter-slicer-source",
+        "severity": "low",
+        "message": "api.setCrossFilter accepted a MODEL SLICER as the source once S8 registered the Slicer @api/modelVisuals provider (role.source true). The script then held a cross-filter 'selection' on the slicer that filtered every other visual of the page while the slicer itself showed nothing selected, and Clear All Slicers did not clear it (visual selections are kept apart from slicers): a filter nobody can see. No gesture creates such a selection; only charts and pivots hold one.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "S12 landed before the Slicer provider (S8) and refused slicer refs as 'not a visual on canvas'; S8 then made them listed and the host's only check was role.source.",
+      "repro": {
+        "description": "Script: api.setCrossFilter({kind:'slicer', id:<model slicer>}, {fields:['Geo.Region'], tuples:[['Pacific']]}) on a canvas page -> accepted; getCrossFilters() lists it. Test: crossFilterScriptRows.test.ts 'refuses a model slicer as a source'."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-17",
+        "description": "scriptHost/host.ts executeSetCrossFilter refuses a slicer source with 'filters through its own items; select them on the slicer, not with api.setCrossFilter'; typings doc updated."
+      }
+    },
+    {
+      "id": "BUG-0529",
+      "status": "fixed",
+      "discovered": "2026-10-17",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas round 2 -- review findings (owner/integrity/security lenses), confirmed by two votes each"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "pivot-filtered-view-model-format",
+        "severity": "medium",
+        "message": "A canvas BI pivot box lost its model number formats as soon as another visual cross-filtered it: run_bi_pivot_filtered_view rebuilt the query through bi_request_from_definition, which leaves a format ADOPTED from the model out of the request, and nothing on the design-query path re-adopts it, so every value cell of the filtered view painted in General.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The filtered-view tests used a measure without a format string; the no-selection pin compared numbers, not formattedValue.",
+      "repro": {
+        "description": "Measure Money = SUM(amount) FORMAT \"#,##0.00\" on a BI pivot; run_bi_pivot_filtered_view with a tuple -> grand total formattedValue \"60\" instead of \"60.00\". Test: filtered_view_tests::the_filtered_view_paints_the_model_format_the_real_pivot_adopted."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-17",
+        "description": "headless.rs bi_pivot_filtered_view carries every value field's effective number_format (and number_format_from_model) from the real definition onto the transient one by measure name + calc_item (carry_value_formats) and recomputes the view."
+      }
+    },
+    {
+      "id": "BUG-0530",
+      "status": "fixed",
+      "discovered": "2026-10-17",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas round 2 -- review findings (owner/integrity/security lenses), confirmed by two votes each"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "crossfilter-source-vanished",
+        "severity": "medium",
+        "message": "A cross-filter selection outlived its source when the chart or pivot box disappeared any way other than the explicit Delete command (Ctrl+Z of its creation, a script/MCP/AI removal, a sheet delete): only performChartDeleteLanded / notePivotDeleted cleared it, so the page stayed filtered and every other visual badged 'Filtered by' a visual that no longer existed.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Every cross-filter test removed its source through the Delete command; the reload routes ('objects', the region sync) were never asked about selections.",
+      "repro": {
+        "description": "Selection on chart A, Ctrl+Z removes A, Charts reloads the store -> getCrossFilters() still lists chart:A. Tests: reportFilters.pruneMissing.test.ts, chartCrossFilterPrune.test.ts, pivotCrossFilterView.test.ts 'a pivot box gone from its page by any route'."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-17",
+        "description": "New seam pruneMissingCrossFilterSources(kind, liveIds, pageSheetId?) in @api/reportFilters; Charts reloadCharts calls pruneVanishedChartSelections after every store swap, and the Pivot region sync prunes the page's pivot selections whose box is no longer announced."
+      }
+    },
+    {
+      "id": "BUG-0531",
+      "status": "fixed",
+      "discovered": "2026-10-17",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas round 2 -- review findings (owner/integrity/security lenses), confirmed by two votes each"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "timeline-labels-locale-switch",
+        "severity": "medium",
+        "message": "Timeline period labels kept the old locale after a runtime locale switch: the labels are written by Rust in the app locale and cached per timeline, and TimelineSlicer had no LOCALE_CHANGED listener (nothing else reached its store on a switch).",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "P2 moved the labels into Rust; the re-read on a locale switch was assumed to ride pivot:refresh, which Pivot's locale handler never dispatches.",
+      "repro": {
+        "description": "Months timeline under en-US, switch to sv-SE -> labels stay 'Jan', 'Q1'. Test: TimelineSlicer/__tests__/timelineLocaleRefresh.test.ts."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-17",
+        "description": "TimelineSlicer/index.ts listens for AppEvents.LOCALE_CHANGED and re-reads every timeline (refreshCache, then redraw)."
+      }
+    },
+    {
+      "id": "BUG-0532",
+      "status": "fixed",
+      "discovered": "2026-10-17",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas round 2 -- review findings (owner/integrity/security lenses), confirmed by two votes each"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "pivot-filtered-view-locale-signature",
+        "severity": "medium",
+        "message": "A cross-filtered canvas pivot box kept its filtered view in the OLD locale after a locale switch: the view's cache signature was {version, request}, neither of which a locale switch moves, so the re-fetch after LOCALE_CHANGED returned early with the stale Rust-formatted text.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The signature was designed for staleness against definition changes only.",
+      "repro": {
+        "description": "Selection filters box p1, switch en-US -> de-DE -> no second run_bi_pivot_filtered_view. Tests: pivotCrossFilterView.test.ts 'a locale switch re-reads the filtered view', 'a real view re-announced after a locale switch re-asks'."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-17",
+        "description": "pivotCrossFilterView.ts puts getAppLocale().localeId in the signature and re-reads every box on AppEvents.LOCALE_CHANGED."
+      }
+    },
+    {
+      "id": "BUG-0533",
+      "status": "fixed",
+      "discovered": "2026-10-17",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas round 2 -- review findings (owner/integrity/security lenses), confirmed by two votes each"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "paste-special-operation-display-parse",
+        "severity": "high",
+        "message": "Paste Special Add/Subtract/Multiply/Divide re-parsed DISPLAY text with Number() (a de-DE '1,5', or an en-US '1,234.00' / '$5.00' / '50%', read as 0) and wrote String(result) ('3.5') back as user input, which a comma-decimal locale does not read as 3,5 -- on sheets and on the new floating-grid route.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The P2 locale census lints parseFloat/toFixed, not Number(); the operation tests used unformatted integers under en-US.",
+      "repro": {
+        "description": "de-DE: A1=1,5, B1=2; copy A1, Paste Special Add on B1 -> 2. Test: PasteSpecial/__tests__/pasteSpecialOperationTyped.test.ts."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-17",
+        "description": "pasteSpecialExecute.ts reads the operands TYPED before writing (source: getRangeCellsTyped on its sheet or getCellTargetCellsTyped on its object, rows via sourceRows; destination: the same on the paste's place) and writes the result with invariant: true; the lint bans Number/parseFloat/parseInt(x.display) (eslint.boundaries.js, localeGlobalsBan.test.ts)."
+      }
+    },
+    {
+      "id": "BUG-0534",
+      "status": "fixed",
+      "discovered": "2026-10-17",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas round 2 -- review findings (owner/integrity/security lenses), confirmed by two votes each"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "design-query-decimal-inclusion-inversion",
+        "severity": "medium",
+        "message": "On the host-mask route a design query's inclusion list hid exactly the SELECTED members of a Decimal column: apply_design_query_zones compared the member KEYS ('5.50') with get_unique_values_for_filter's display spelling ('5.5'), so the selected member was pushed into hidden_items and the chart answered empty or wrong totals with no error.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "BUG-0518 fixed the key spelling and hidden-item resolution; the inclusion inversion compared display spellings only and every inclusion test used text members.",
+      "repro": {
+        "description": "Cache field with MemberKind::Decimal{scale:2}, values 5.5/10/7.25; included_items ['5.50'] -> hidden_items held '5.5'. Test: headless.rs design_query_filter_tests::an_inclusion_of_a_decimal_member_key_keeps_that_member."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-17",
+        "description": "apply_design_query_zones keeps a member when the inclusion names its display spelling OR its member key (FieldCache::member_key)."
+      }
+    },
+    {
+      "id": "BUG-0535",
+      "status": "fixed",
+      "discovered": "2026-10-17",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas round 2 -- review findings (owner/integrity/security lenses), confirmed by two votes each"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "setstate-style-property-unvalidated",
+        "severity": "low",
+        "message": "object.setState aspects chart.setStyleProperty and slicer.setStyleProperty had no vSetState row: they reached the `return true` tail, so a restricted script with no capability could write a value of any type and size into the chart's persisted spec as _style_<name> (the schema skips _style_* keys) and from there into a signed .calp -- the shape.setProperty class.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "validators.test.ts listed chart.setStyleProperty as an aspect with 'no gate of its own' beside the shape.setProperty lesson; predates round 2.",
+      "repro": {
+        "description": "vSetState(['chart.setStyleProperty', ['bg', 'x'.repeat(3e6)]]) -> true. Test: setStateAspectRows.test.ts 'each style-override aspect has its own vSetState row'."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-17",
+        "description": "validators.ts checkStylePropertyAspect: an identifier name (max 64), a string value (max 256), no data: URI or url(...); both aspects route there, the unlocked door through vObjectAspect too."
+      }
+    },
+    {
+      "id": "BUG-0536",
+      "status": "open",
+      "discovered": "2026-10-17",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas round 2 proof phase -- canvas-round2-quick.spec.ts Q7 (live WebView2 picker)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "native-colour-input-commits-per-step",
+        "severity": "medium",
+        "message": "WebView2 opens Chromium's in-page colour popup (not the OS ChooseColor) for <input type=\"color\">, and one pick there fires MANY `input` events before its one `change` (measured live: 8 inputs + 1 change for a keyboard pick of R=100 G=30 B=200; a drag fires one per pointer step). The colour inputs that still commit on React onChange (= every `input`) therefore write once per step: the layout kit's ColorPopover custom picker (src/api/layout/primitives/Color.tsx, the `${testId}-custom` input) and the page navigator buttons' colour rows (extensions/Controls/PropertiesPane/PageNavigatorButtonsSection.tsx). Expected: one write and one undo step per pick, as useNativeColorPick gives the object pane.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Every journey fired a synthetic input+change pair; the real picker was never driven until Q7 (the ChooseColor driver found no dialog, because WebView2 shows none).",
+      "repro": {
+        "description": "Live: canvas-round2-quick Q7 records native-pick-events input=8 change=1. The per-step commit of the two listed inputs is inferred from their onChange={(e) => onChange(e.target.value)} wiring, not yet driven live: pick a custom colour through either and count undo steps."
+      }
+    },
+    {
+      "id": "BUG-0537",
+      "status": "fixed",
+      "discovered": "2026-10-17",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas round 2 proof phase -- floating-grid-home.spec.ts (live)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "colour-hex-enter-same-colour-noop",
+        "severity": "medium",
+        "message": "Typing a hex colour into a colour palette's hex box and pressing Enter applied NOTHING when it equalled the palette's `value`. For Home > Fill Color / Font Color `value` is the REMEMBERED colour (Excel's yellow by default), not the cell's, so typing #FFFF00 + Enter filled nothing -- on sheets and floating grids alike -- while a click on the same yellow swatch did apply.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Unit tests typed colours different from the palette's value; floating-grid-home FG2 was the first live test to type Excel's default fill colour.",
+      "repro": {
+        "description": "Home > Fill Color chevron, hex box '#FFFF00', Enter on any selection: the cells stay white. Test: colorPalette.test.tsx 'Enter in the hex field applies the colour the palette ALREADY shows'."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-17",
+        "description": "src/api/layout/primitives/Color.tsx commitHex: Enter is a pick and always calls onChange; only a blur that typed back the shown colour is a no-op."
+      }
+    },
+    {
+      "id": "BUG-0538",
+      "status": "fixed",
+      "discovered": "2026-10-17",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas round 2 proof phase -- floating-grid-home.spec.ts (live)"
+      },
+      "links": [
+        "BUG-0516"
+      ],
+      "violation": {
+        "oracleId": "fill-menu-greying-reads-hidden-selection",
+        "severity": "medium",
+        "message": "Home > Fill's Down/Right/Up/Left greying read Core's selection even while a floating grid's cells held the selection. Core's hidden selection is then usually A1, where Down and Right are always grey, so Fill Down on Float1!B1:B2 could not be clicked at all although the command supports floating grids (P3).",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "P3 migrated the Fill commands to cell targets but not the menu's enablement; the unit tests only mocked Core's selection.",
+      "repro": {
+        "description": "Select Float1!B1:B2 (Sheet1 A1 active underneath), Home > Fill: Down is disabled. Test: fillMenuButton.test.tsx 'a floating grid's cells: the greying reads ITS selection'."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-17",
+        "description": "FillMenuButton reads cellTargetFor('content') through editingRules.fillSourceView: an owner's own selection and window bounds; a refusing owner leaves the rows enabled so the command says why."
+      }
+    },
+    {
+      "id": "BUG-0539",
+      "status": "fixed",
+      "discovered": "2026-10-17",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas round 2 proof phase, group 2 -- app-locale.spec.ts J5 (live, AdventureWorks)"
+      },
+      "links": [
+        "BUG-0518"
+      ],
+      "violation": {
+        "oracleId": "getpivotdata-names-the-member-key",
+        "severity": "medium",
+        "message": "GETPIVOTDATA on a model pivot's DECIMAL member named and matched the cache's f64 label (\"2.29\") instead of the member KEY (\"2.2900000000\", which carries the column's scale since BUG-0518). The round-2 contract is that selections, filters, cross-filter tuples and GETPIVOTDATA match on the key, so a GETPIVOTDATA that names a list price by the key the value list, the slicers and the cross-filter carry answered #REF!.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "BUG-0518 changed FieldCache::member_key for Decimal columns only, while the GETPIVOTDATA pick and lookup kept reading group_path_item_label; the unit pin (member_shape_tests month case) used a grouped field, whose key and label are the same text.",
+      "repro": {
+        "description": "Canvas BI pivot with rows BI.dim_product.listprice: get_pivot_data_formula on the 2.29 row's value answered the item \"2.29\" while the header's member.key was \"2.2900000000\"; GETPIVOTDATA(.., \"listprice\", \"2.2900000000\") answered #REF!."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-17",
+        "description": "pivot/operations.rs: new group_path_item_key (member_key_of, \"(blank)\" for the blank member); resolve_pivot_data_formula writes the KEY, and lookup_pivot_data accepts the key AND the older label spelling, so formulas written before keep their value. Pinned by member_shape_tests::getpivotdata_on_a_decimal_member_writes_the_key_and_reads_key_and_label (each half, undone alone, fails it) and live by app-locale J5."
+      }
+    },
+    {
+      "id": "BUG-0540",
+      "status": "fixed",
+      "discovered": "2026-10-17",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas round 2 proof phase, group 2 -- canvas-crossfilter.spec.ts J10 (live) + a two-sheet probe"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "cross-sheet-edges-after-load",
+        "severity": "high",
+        "message": "After File > Open, a formula on any sheet other than the one active at load did not follow its precedents on other sheets until that sheet was visited. open_file rebuilds cross-sheet edges for the ACTIVE sheet only (the installer register_object_sheet_edges covered floating-range backing sheets alone), and the off-sheet cascade finds dependents through the cross-sheet map only. Live: Sheet1!B1 = Sheet2!A1*10 in a file saved on Sheet2 stayed 20 after Sheet2!A1 became 3; a Sheet1 GETPIVOTDATA on a canvas pivot kept the old value after the pivot re-folded. Stale values, silently.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Every cross-sheet recalc test builds its workbook in session (edges registered at entry) or switches sheets (which rebuilds); the load path was only pinned for floating ranges (GAP B), and journeys visit Sheet1 before reading it.",
+      "repro": {
+        "description": "Sheet1!B1 = Sheet2!A1*10, Sheet2!A1 = 2; save with Sheet2 active; reopen; set Sheet2!A1 = 3: Sheet1!B1 still reads 20 (30 after a visit to Sheet1 and the next edit)."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-17",
+        "description": "floating_range.rs register_object_sheet_edges (the ONE shared installer the load, .calp pull/refresh and reset paths already call) now registers every NON-active sheet's cross-sheet edges, user sheets included. Pinned by cross_sheet_recalc_tests::after_a_load_an_unvisited_sheet_follows_the_active_sheet (fails with user sheets skipped again) and live by canvas-crossfilter J10."
+      }
+    },
+    {
+      "id": "BUG-0541",
+      "status": "fixed",
+      "discovered": "2026-10-17",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Canvas round 2 proof phase, group 3 -- canvas-pick-cells.spec.ts J1/J3/J8/J9 (live, AdventureWorks, sv-SE)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "pivot-autofit-measures-characters",
+        "severity": "medium",
+        "message": "Pivot auto-fit (auto_fit_pivot_columns) sized each column from the UTF-8 BYTE length of its widest shown text, not its character count. Since round 2 (P2) a pivot's numbers are shown in the app locale, and sv-SE groups with a non-breaking space (two bytes), so every value column fitted about 12 px wider than drawn ('21 143 338' = 12 bytes, 10 characters). On a 640 px canvas pivot box the last year column (2026) moved entirely past the box's right edge and could not be clicked, picked or selected; any non-ASCII member label (a/o with ring or umlaut, CJK) over-widened the same way.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Before P2 every pivot number was formatted en-US (ASCII only), and the AdventureWorks member labels are ASCII; no test measured a fitted width against a non-ASCII text.",
+      "repro": {
+        "description": "App locale sv-SE; a canvas model pivot box 640 px wide, rows territorygroup/territoryname, columns year, values Revenue: the year columns fit 86.4 px each (12 x 6.2 + 12) instead of 74, so the fourth year column started at 659 px and the box (638 px of content) showed none of it; cellSheetRect(view row, 4) was null."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-17",
+        "description": "app/src-tauri/src/pivot/operations.rs: new auto_fit_text_len (chars().count() plus the indent and expand-button room), used by auto_fit_pivot_columns. Pinned by pivot::operations::auto_fit_len_tests (two of three fail with display.len() back) and live by canvas-pick-cells 15/15."
+      }
     }
   ]
 }

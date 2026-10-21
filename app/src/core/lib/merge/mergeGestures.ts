@@ -27,8 +27,18 @@
 //   order, and formulas that read that value are re-pointed to it.
 // - Every command is ONE undo step.
 // - Refused on a protected sheet (Excel disables the control there).
+//
+// ON AN OBJECT'S CELLS (a floating grid's, P3 -- `MergeGestureHost.target`):
+// the same gesture, the same warning, the same value rule (ruling Q4: one
+// behaviour, not two), one undo step. Every probe, merge, unmerge and
+// alignment names the target, and the merges it reads are the object's backing
+// merges (`getCellTargetCells`), never the active sheet's. The one difference:
+// a value the value rule moves into the top-left cell is NOT re-pointed by
+// `relocateCellReferences`, which acts on the active sheet only -- a formula
+// elsewhere that read the moved value keeps its old address.
 
-import type { Selection } from "../../types";
+import type { CellTargetRef, Selection } from "../../types";
+import { getCellTargetCells } from "../../../api/cellTarget";
 import {
   applyFormatting,
   beginUndoTransaction,
@@ -65,8 +75,10 @@ import {
 
 /** What a gesture needs from the grid that runs it. */
 export interface MergeGestureHost {
-  /** The selection the gesture acts on. */
+  /** The selection the gesture acts on (the target's own coordinates with a target). */
   selection: Selection | null;
+  /** The OBJECT whose cells the gesture merges (a floating grid's), or absent for the active sheet. */
+  target?: CellTargetRef;
   /** Repaint after the change (re-read cells, redraw, announce). */
   refresh(): Promise<void>;
 }
@@ -101,14 +113,21 @@ function messageOf(error: unknown): string {
  * else only its top-left cell (see MERGE_ALIGN_CELL_LIMIT -- the merged cell
  * is drawn from its top-left cell's style, so the result looks the same).
  */
-async function alignArea(area: Block | MergedRegion, textAlign: "center" | "general"): Promise<void> {
-  if (cellCount(area) <= MERGE_ALIGN_CELL_LIMIT) {
-    await applyFormatting(rowsOf(area), colsOf(area), { textAlign });
-  } else {
-    await applyFormatting([Math.min(area.startRow, area.endRow)], [Math.min(area.startCol, area.endCol)], {
-      textAlign,
-    });
-  }
+async function alignArea(
+  area: Block | MergedRegion,
+  textAlign: "center" | "general",
+  target?: CellTargetRef,
+): Promise<void> {
+  const rows = cellCount(area) <= MERGE_ALIGN_CELL_LIMIT ? rowsOf(area) : [Math.min(area.startRow, area.endRow)];
+  const cols = cellCount(area) <= MERGE_ALIGN_CELL_LIMIT ? colsOf(area) : [Math.min(area.startCol, area.endCol)];
+  if (target) await applyFormatting(rows, cols, { textAlign }, { target });
+  else await applyFormatting(rows, cols, { textAlign });
+}
+
+/** The merged regions intersecting `box`: the object's backing merges with a target, else the active sheet's. */
+async function mergesIn(box: Block, target?: CellTargetRef): Promise<MergedRegion[]> {
+  if (!target) return getMergedRegions(box);
+  return (await getCellTargetCells(target, box)).merges;
 }
 
 /**
@@ -145,7 +164,7 @@ async function runGesture(kind: MergeGestureKind, host: MergeGestureHost): Promi
 
   let touching: MergedRegion[];
   try {
-    touching = regionsTouching(blocks, await getMergedRegions(box));
+    touching = regionsTouching(blocks, await mergesIn(box, host.target));
   } catch (error) {
     await alertAsync(messageOf(error));
     return;
@@ -178,7 +197,10 @@ async function unmergeBlocks(
     tx = ownUndoTransaction(await beginUndoTransaction(label), UNDO_CLOSES);
     const removed: MergedRegion[] = [];
     for (const b of blocks) {
-      const result = await unmergeCells(b.startRow, b.startCol, undefined, { endRow: b.endRow, endCol: b.endCol });
+      const end = { endRow: b.endRow, endCol: b.endCol };
+      const result = host.target
+        ? await unmergeCells(b.startRow, b.startCol, undefined, end, { target: host.target })
+        : await unmergeCells(b.startRow, b.startCol, undefined, end);
       if (result?.success) {
         applied = true;
         removed.push(...(result.removedRegions ?? []));
@@ -187,7 +209,7 @@ async function unmergeBlocks(
     // Excel's toggle: General alignment over the FORMER MERGED AREAS only;
     // the other selected cells keep theirs. Unmerge Cells keeps alignment.
     if (resetAlignment) {
-      for (const r of removed) await alignArea(r, "general");
+      for (const r of removed) await alignArea(r, "general", host.target);
     }
     await tx.commit();
   } catch (error) {
@@ -216,10 +238,10 @@ async function mergeBlocks(
   let lossy = 0;
   for (const b of mergeable) {
     try {
-      const plan = await mergeCells(b.startRow, b.startCol, b.endRow, b.endCol, undefined, {
-        ...options,
-        probe: true,
-      });
+      const probe: MergeOptions = { ...options, probe: true };
+      const plan = host.target
+        ? await mergeCells(b.startRow, b.startCol, b.endRow, b.endCol, undefined, probe, { target: host.target })
+        : await mergeCells(b.startRow, b.startCol, b.endRow, b.endCol, undefined, probe);
       lossy += plan?.lossyRegions ?? 0;
     } catch (error) {
       await alertAsync(messageOf(error));
@@ -241,7 +263,9 @@ async function mergeBlocks(
     tx = ownUndoTransaction(await beginUndoTransaction(label), UNDO_CLOSES);
     const moved: MovedCell[] = [];
     for (const b of mergeable) {
-      const result = await mergeCells(b.startRow, b.startCol, b.endRow, b.endCol, undefined, options);
+      const result = host.target
+        ? await mergeCells(b.startRow, b.startCol, b.endRow, b.endCol, undefined, options, { target: host.target })
+        : await mergeCells(b.startRow, b.startCol, b.endRow, b.endCol, undefined, options);
       if (result?.success) {
         applied = true;
         moved.push(...(result.movedCells ?? []));
@@ -249,12 +273,14 @@ async function mergeBlocks(
     }
     // A moved value keeps its readers: formulas that pointed at it now point
     // at the merged cell (Excel re-points them the way a cut and paste does).
-    for (const m of moved) {
+    // Never for a target: relocateCellReferences acts on the ACTIVE sheet's
+    // coordinates, and an object's (row, col) would re-point the host's cells.
+    for (const m of host.target ? [] : moved) {
       await relocateCellReferences(m.fromRow, m.fromCol, m.fromRow, m.fromCol, m.toRow, m.toCol);
     }
     if (kind === "mergeCenter") {
       for (const b of [...mergeable, ...centreOnly]) {
-        await alignArea(b, "center");
+        await alignArea(b, "center", host.target);
         applied = true;
       }
     }
@@ -292,8 +318,9 @@ async function finish(blocks: Block[], host: MergeGestureHost): Promise<void> {
   }
   // The MAIN block is the first one (selectionBlocks lists it first):
   // announce at its top-left, as Clear All does.
+  // Not for a target: a cell event's (row, col) names an ACTIVE-sheet cell.
   const main = blocks[0];
-  if (main) {
+  if (main && !host.target) {
     cellEvents.emit({ row: main.startRow, col: main.startCol, oldValue: undefined, newValue: "", formula: null });
   }
 }

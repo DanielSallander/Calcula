@@ -69,6 +69,9 @@ import {
 } from "../../../../api/layout";
 import type { GridMenuContext } from "../../../../api/extensions";
 
+/** The options a write on Core's own selection carries: no target (P3). */
+const GRID = { target: undefined };
+
 // ============================================================================
 // Harness
 // ============================================================================
@@ -281,7 +284,7 @@ describe("MiniFormatToolbar — formatting", () => {
     window.addEventListener("grid:refresh", refresh);
     await render();
     await click(byTestId("mini-format-bold"));
-    expect(applyMock).toHaveBeenCalledWith([1, 2], [2, 3], { bold: false });
+    expect(applyMock).toHaveBeenCalledWith([1, 2], [2, 3], { bold: false }, GRID);
     expect(emitMock).toHaveBeenCalledWith(expect.objectContaining({ row: 1, col: 2, newValue: "x" }));
     expect(refresh).toHaveBeenCalled();
     expect(byTestId("mini-format-bold").getAttribute("aria-pressed")).toBe("false");
@@ -291,31 +294,31 @@ describe("MiniFormatToolbar — formatting", () => {
   it("applies font family and size from the selects", async () => {
     await render();
     await selectValue(byTestId<HTMLSelectElement>("mini-format-font"), "Verdana");
-    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { fontFamily: "Verdana" });
+    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { fontFamily: "Verdana" }, GRID);
     await selectValue(byTestId<HTMLSelectElement>("mini-format-size"), "14");
-    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { fontSize: 14 });
+    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { fontSize: 14 }, GRID);
   });
 
   it("steps the font size through the size list", async () => {
     await render();
     await click(byTestId("mini-format-grow"));
-    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { fontSize: 12 });
+    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { fontSize: 12 }, GRID);
     await click(byTestId("mini-format-shrink"));
-    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { fontSize: 11 });
+    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { fontSize: 11 }, GRID);
   });
 
   it("applies alignment and the number-format shortcuts", async () => {
     await render();
     await click(byTestId("mini-format-align-right"));
-    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { textAlign: "right" });
+    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { textAlign: "right" }, GRID);
     expect(byTestId("mini-format-align-right").getAttribute("aria-pressed")).toBe("true");
     await click(byTestId("mini-format-percent"));
-    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { numberFormat: "0%" });
+    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { numberFormat: "0%" }, GRID);
     // Comma Style is Excel's: Accounting with no symbol and 2 decimals -- the
     // backend's `comma` preset, the same one the Home tab sends. It used to be
     // `#,##0.00`, a third Comma Style of the app's own.
     await click(byTestId("mini-format-comma"));
-    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { numberFormat: "comma" });
+    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { numberFormat: "comma" }, GRID);
   });
 
   it("Increase / Decrease Decimal go through the backend's decimal step, the ACTIVE cell first", async () => {
@@ -324,9 +327,9 @@ describe("MiniFormatToolbar — formatting", () => {
     // The active cell (the selection's END) leads both lists: it decides.
     await render(menuContext({ selection: { startRow: 1, startCol: 2, endRow: 3, endCol: 4, type: "cells" } as never }));
     await click(byTestId("mini-format-decimal-increase"));
-    expect(adjustMock).toHaveBeenLastCalledWith([3, 1, 2], [4, 2, 3], 1);
+    expect(adjustMock).toHaveBeenLastCalledWith([3, 1, 2], [4, 2, 3], 1, GRID);
     await click(byTestId("mini-format-decimal-decrease"));
-    expect(adjustMock).toHaveBeenLastCalledWith([3, 1, 2], [4, 2, 3], -1);
+    expect(adjustMock).toHaveBeenLastCalledWith([3, 1, 2], [4, 2, 3], -1, GRID);
     // Never through applyFormatting with a format of the toolbar's own.
     expect(applyMock).not.toHaveBeenCalled();
     // The grid hears about it like any other format change.
@@ -370,7 +373,7 @@ describe("MiniFormatToolbar — colours", () => {
     expect(body!.closest("[data-section-flyout]")?.getAttribute("aria-label")).toBe("Font colour");
 
     await click(body!.querySelector('[aria-label="Red"]')!);
-    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { textColor: "#ff0000" });
+    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { textColor: "#ff0000" }, GRID);
     expect(colourPopover("text")).toBeNull();
   });
 
@@ -378,7 +381,7 @@ describe("MiniFormatToolbar — colours", () => {
     await render();
     await click(byTestId("mini-format-fill-color"));
     await click(colourPopover("fill")!.querySelector('[aria-label="Yellow"]')!);
-    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { backgroundColor: "#ffff00" });
+    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { backgroundColor: "#ffff00" }, GRID);
   });
 
   it("opening one colour palette closes the other", async () => {
@@ -436,7 +439,7 @@ describe("MiniFormatToolbar — colours", () => {
     expect(colourPopover("text")).not.toBeNull();
     await click(byTestId("mini-format-underline"));
     expect(colourPopover("text")).toBeNull();
-    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { underline: "single" });
+    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { underline: "single" }, GRID);
   });
 
   it("a press inside the open palette keeps it open and the context menu too", async () => {
@@ -672,7 +675,7 @@ describe("MiniFormatToolbar — the shared selection and font rules", () => {
   it("Grow at 24pt gives Excel's 26 (the toolbar's own ladder had no 26)", async () => {
     await renderAtSize(24);
     await click(byTestId("mini-format-grow"));
-    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { fontSize: 26 });
+    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { fontSize: 26 }, GRID);
   });
 
   it("Grow at 72pt writes NOTHING (it wrote 74 and an undo step)", async () => {
@@ -690,7 +693,7 @@ describe("MiniFormatToolbar — the shared selection and font rules", () => {
   it("a size between rungs moves to the next rung: Grow at 10.5 gives 11", async () => {
     await renderAtSize(10.5);
     await click(byTestId("mini-format-grow"));
-    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { fontSize: 11 });
+    expect(applyMock).toHaveBeenLastCalledWith([1, 2], [2, 3], { fontSize: 11 }, GRID);
   });
 
   it("formats EVERY block of a Ctrl+click selection, the main one first, as ONE undo step", async () => {
@@ -705,8 +708,8 @@ describe("MiniFormatToolbar — the shared selection and font rules", () => {
     );
     await click(byTestId("mini-format-italic"));
     expect(applyMock.mock.calls).toEqual([
-      [[1, 2], [2, 3], { italic: true }],
-      [[5, 6], [0], { italic: true }],
+      [[1, 2], [2, 3], { italic: true }, GRID],
+      [[5, 6], [0], { italic: true }, GRID],
     ]);
     expect(beginMock).toHaveBeenCalledTimes(1);
     expect(commitMock).toHaveBeenCalledWith(77);

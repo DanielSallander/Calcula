@@ -1,17 +1,36 @@
 //! FILENAME: app/extensions/Charts/lib/__tests__/chartStylePresets.test.ts
 // PURPOSE: Tests for chart style preset definitions and application logic.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
+
+// The BUG-0489 repro below drives the REAL chart store, which reaches these.
+vi.mock("@api/dialogs", () => ({ alertAsync: vi.fn(() => Promise.resolve()) }));
+vi.mock("@api/gridOverlays", () => ({
+  removeGridRegionsByType: vi.fn(),
+  addGridRegions: vi.fn(),
+}));
+vi.mock("@api/events", () => ({
+  AppEvents: { GRID_REFRESH: "app:grid-refresh", MUTATION_REFRESH: "app:mutation-refresh" },
+  emitAppEvent: vi.fn(),
+}));
+
 import {
   CHART_STYLE_PRESETS,
+  PRESET_THEME_KEYS,
   getPresetById,
   getPresetsByCategory,
   getPresetColors,
+  applyPreset,
   buildPresetUpdates,
   presetContainerPatch,
+  presetThemePatch,
   specHasPresetBackground,
   type ChartStylePreset,
 } from "../chartStylePresets";
+import { getChartById, loadChartsFromBackend, resetChartStore, updateChartSpec } from "../chartStore";
+import { chartsBackend } from "../chartsBackend";
+import { resolveChartTheme, DEFAULT_CHART_THEME } from "../../rendering/chartTheme";
+import type { ChartSpec } from "../../types";
 
 // ============================================================================
 // Preset Collection Tests
@@ -150,7 +169,11 @@ describe("buildPresetUpdates", () => {
     expect((updates.config as any).theme).toBeDefined();
     expect((updates.config as any).theme.background).toBeUndefined();
     // The background rides the container, merged (padding, border ... stay).
-    expect(updates.container).toEqual({ background: { color: "#ffffff" } });
+    // A preset is a SOLID background commit (round 2, G1): it shows the
+    // background and clears a gradient -- `undefined`, the deep-merge spelling
+    // of "clear" (a `null` would be stored).
+    expect(updates.container).toEqual({ background: { color: "#ffffff", show: true, gradient: undefined } });
+    expect("gradient" in (updates.container as { background: object }).background).toBe(true);
     expect(updates.container).toEqual(presetContainerPatch(preset));
   });
 
@@ -192,6 +215,168 @@ describe("buildPresetUpdates", () => {
       const r = parseInt(bg.slice(1, 3), 16);
       expect(r).toBeLessThan(64);
     }
+  });
+});
+
+// ============================================================================
+// Transparent plot area (Power BI) -- which presets keep a tinted plot
+// ============================================================================
+
+describe("preset plot fill", () => {
+  const TRANSPARENT_PLOT = [
+    "colorful-1", "colorful-2", "colorful-3", "colorful-4",
+    "colorful-5", "colorful-6", "colorful-7", "colorful-8",
+    "outline-1", "outline-2", "outline-3",
+  ];
+
+  it("the colorful and light outline presets set NO plot fill, so the visual's background shows", () => {
+    for (const id of TRANSPARENT_PLOT) {
+      const preset = getPresetById(id)!;
+      expect(preset, id).toBeDefined();
+      expect("plotBackground" in preset.theme, id).toBe(false);
+      expect(resolveChartTheme({ theme: presetThemePatch(preset) }).plotBackground, id).toBe("");
+    }
+  });
+
+  it("mono, dark, outline-4 and gradient presets keep their deliberately tinted plot", () => {
+    for (const preset of CHART_STYLE_PRESETS) {
+      if (TRANSPARENT_PLOT.includes(preset.id)) continue;
+      expect(preset.theme.plotBackground, preset.id).toMatch(/^#[0-9a-fA-F]{3,8}$/);
+      expect(preset.theme.plotBackground!.toLowerCase(), preset.id).not.toBe(preset.background.toLowerCase());
+    }
+  });
+});
+
+// ============================================================================
+// BUG-0489 -- a preset must not inherit the previous preset's theme keys
+// ============================================================================
+
+describe("BUG-0489: applying a preset resets the theme keys it does not set", () => {
+  it("PRESET_THEME_KEYS lists every theme key any preset sets", () => {
+    for (const preset of CHART_STYLE_PRESETS) {
+      for (const key of Object.keys(preset.theme)) {
+        expect(PRESET_THEME_KEYS, `${preset.id}.${key}`).toContain(key);
+      }
+    }
+    expect(PRESET_THEME_KEYS).toContain("plotBackground");
+    expect(PRESET_THEME_KEYS).toContain("plotBackgroundGradient");
+    expect(PRESET_THEME_KEYS).toContain("barBorderRadius");
+  });
+
+  it("the theme patch carries every key, unset ones as an explicit undefined", () => {
+    const patch = presetThemePatch(getPresetById("colorful-1")!) as Record<string, unknown>;
+    for (const key of PRESET_THEME_KEYS) expect(key in patch, key).toBe(true);
+    expect(patch.axisColor).toBeUndefined();
+    expect(patch.titleColor).toBeUndefined();
+    expect(patch.plotBackground).toBeUndefined();
+    expect(patch.gridLineColor).toBe("#e8e8e8");
+    expect(patch.barBorderRadius).toBe(2);
+  });
+
+  it("applyPreset and buildPresetUpdates send the same palette, theme and container", () => {
+    const preset = getPresetById("mono-blue")!;
+    const built = buildPresetUpdates(preset, {
+      yAxis: { gridLines: false } as ChartSpec["yAxis"],
+    });
+    const applied = applyPreset(preset);
+    expect(applied.palette).toBe(built.palette);
+    expect(applied.config).toEqual(built.config);
+    expect(applied.container).toEqual(built.container);
+    // applyPreset needs no current axis and must never clear it.
+    expect("yAxis" in applied).toBe(false);
+  });
+
+  describe("through the real chart store", () => {
+    const ID = "chart-0489";
+    const invokeBackend = vi.fn();
+
+    function seedSpec(): ChartSpec {
+      return {
+        mark: "bar",
+        data: "Sheet1!A1:C4",
+        hasHeaders: true,
+        seriesOrientation: "columns",
+        categoryIndex: 0,
+        series: [{ name: "Revenue", sourceIndex: 1, color: null }],
+        title: "t",
+        xAxis: {},
+        yAxis: { gridLines: true },
+        legend: { visible: true, position: "right" },
+        palette: "default",
+      } as unknown as ChartSpec;
+    }
+
+    async function seed(): Promise<void> {
+      resetChartStore();
+      invokeBackend.mockReset();
+      invokeBackend.mockImplementation(async (command: string) => {
+        if (command === "get_charts") {
+          return [{
+            id: ID,
+            sheetIndex: 0,
+            specJson: JSON.stringify({ chartId: ID, name: ID, sheetIndex: 0, x: 0, y: 0, width: 400, height: 300, spec: seedSpec() }),
+          }];
+        }
+        return undefined;
+      });
+      chartsBackend.set(invokeBackend);
+      await loadChartsFromBackend();
+      invokeBackend.mockClear();
+    }
+
+    function applyThroughStore(presetId: string): void {
+      const chart = getChartById(ID)!;
+      updateChartSpec(ID, buildPresetUpdates(getPresetById(presetId)!, chart.spec) as Partial<ChartSpec>);
+    }
+
+    afterEach(() => resetChartStore());
+
+    it("mono-blue then colorful-1 leaves no blue axis or title (in memory, painted, and after JSON)", async () => {
+      await seed();
+      applyThroughStore("mono-blue");
+      expect(getChartById(ID)!.spec.config?.theme?.axisColor).toBe("#4E79A7");
+      expect(getChartById(ID)!.spec.config?.theme?.titleColor).toBe("#2c4a6e");
+
+      applyThroughStore("colorful-1");
+      const spec = getChartById(ID)!.spec;
+      expect(spec.config?.theme?.axisColor).toBeUndefined();
+      expect(spec.config?.theme?.titleColor).toBeUndefined();
+      expect(spec.config?.theme?.plotBackground).toBeUndefined();
+
+      // What the painter reads, before any JSON round trip: the defaults.
+      const painted = resolveChartTheme(spec.config);
+      expect(painted.axisColor).toBe(DEFAULT_CHART_THEME.axisColor);
+      expect(painted.titleColor).toBe(DEFAULT_CHART_THEME.titleColor);
+      expect(painted.plotBackground).toBe("");
+
+      // What is saved: JSON drops the reset keys entirely.
+      const saved = JSON.parse(JSON.stringify(spec)) as ChartSpec;
+      const theme = (saved.config?.theme ?? {}) as Record<string, unknown>;
+      expect("axisColor" in theme).toBe(false);
+      expect("titleColor" in theme).toBe(false);
+      expect("plotBackground" in theme).toBe(false);
+      expect(theme.gridLineColor).toBe("#e8e8e8");
+    });
+
+    it("a preset over a stored container gradient (background switched off) paints its solid colour", async () => {
+      await seed();
+      updateChartSpec(ID, {
+        container: {
+          background: {
+            show: false,
+            gradient: { type: "linear", stops: [{ offset: 0, color: "#ff0000" }, { offset: 1, color: "#0000ff" }] },
+          },
+        },
+      } as Partial<ChartSpec>);
+      expect(getChartById(ID)!.spec.container?.background?.gradient).toBeDefined();
+
+      applyThroughStore("dark-1");
+      const saved = JSON.parse(JSON.stringify(getChartById(ID)!.spec)) as ChartSpec;
+      const background = (saved.container?.background ?? {}) as Record<string, unknown>;
+      expect("gradient" in background).toBe(false);
+      expect(background.show).toBe(true);
+      expect(background.color).toBe(getPresetById("dark-1")!.background);
+    });
   });
 });
 

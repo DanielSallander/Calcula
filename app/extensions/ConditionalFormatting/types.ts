@@ -9,6 +9,7 @@
 //          colours are DATA -- the colours ARE the presets -- so their literals
 //          stay; the chrome that shows them paints with @api/layout tokens.
 
+import type { CellTargetRef } from "@api/cellTarget";
 import type {
   ConditionalFormatDefinition,
   CellConditionalFormat,
@@ -235,6 +236,8 @@ export type NewRuleFormatStyle = "colorScale" | "dataBar" | "iconSet";
  */
 export interface NewRuleDialogData {
   selection: { startRow: number; startCol: number; endRow: number; endCol: number } | null;
+  /** A floating grid's cells (P3): the rule is written with this target. */
+  target?: CellTargetRef;
   initialCategory?: NewRuleCategory;
   initialFormatStyle?: NewRuleFormatStyle;
 }

@@ -7,8 +7,9 @@ import { CoreCommands } from '@api/commands';
 import { registerMenu, unregisterMenu } from '@api/ui';
 import type { MenuDefinition } from '@api/ui';
 import { applyFormatting } from '@api/lib';
-import { cellEvents, useGridState, IconFormatCells, IconCellStyles } from '@api';
-import { refuseIfSelectionOwned } from '@api/selectionOwner';
+import { useGridState, IconFormatCells, IconCellStyles } from '@api';
+import { resolveCellTarget, targetRefOf } from '@api/cellTarget';
+import { announceFormattingResult } from '@api/announceFormatting';
 import { CellStylesGallery } from '../../_shared/components/CellStylesGallery';
 import type { CellStyleDefinition } from '../../_shared/components/CellStylesGallery';
 
@@ -21,10 +22,14 @@ function CellStylesMenuPanel({ onClose }: { onClose: () => void }) {
 
   const handleApply = React.useCallback(
     async (formatting: CellStyleDefinition["formatting"]) => {
-      // The style lands on Core's selection -- a cell hidden under a floating
-      // grid while that grid's cell is selected (BUG-0185). Refused, once.
-      if (refuseIfSelectionOwned("Cell Style")) return;
-      const sel = gridState.selection;
+      // WHICH cells (P3): Core's selection, or a floating grid's own cells
+      // (written through their target) when its owner admits "format". An
+      // owner that does not admit it refuses, once -- the style never lands
+      // on the sheet cell hidden under the grid (BUG-0185).
+      const t = resolveCellTarget("Cell Style", "format");
+      if (t === null) return;
+      const target = targetRefOf(t);
+      const sel = t.kind === "object" ? t.selection : gridState.selection;
       if (!sel) return;
       const startRow = Math.min(sel.startRow, sel.endRow);
       const endRow = Math.max(sel.startRow, sel.endRow);
@@ -39,18 +44,11 @@ function CellStylesMenuPanel({ onClose }: { onClose: () => void }) {
           rows,
           cols,
           formatting as Parameters<typeof applyFormatting>[2],
+          { target },
         );
-        for (const cell of result.cells) {
-          cellEvents.emit({
-            row: cell.row,
-            col: cell.col,
-            oldValue: undefined,
-            newValue: cell.display,
-            formula: cell.formula,
-          });
-        }
-        window.dispatchEvent(new CustomEvent("styles:refresh"));
-        window.dispatchEvent(new CustomEvent("grid:refresh"));
+        // The ONE announcement: cell events (none for a target), then the
+        // style and grid refreshes.
+        announceFormattingResult(result, { target });
       } catch (err) {
         console.error("[FormatMenu] Failed to apply cell style:", err);
       }

@@ -188,6 +188,79 @@ const DIALOG_PLUGIN_DYNAMIC_IMPORTS = [
   },
 ]
 
+// =============================================================================
+// APP LOCALE -- every number and date a user reads or types is in the app locale
+// =============================================================================
+// The owner rule (P2, 2026-10-16): Calcula has ONE locale, the one chosen in
+// File > Options (else the OS regional format), held by the Rust backend and
+// mirrored into every window by @api/locale. Display text and user input go
+// through formatNumber / parseNumber / formatDate / ... there.
+//
+// toLocaleString / toLocaleDateString / toLocaleTimeString and Intl.NumberFormat
+// / Intl.DateTimeFormat follow the BROWSER's locale, not the app's: under an
+// app locale of de-DE on an en-US machine they print "1,234.5" beside a grid
+// that reads "1.234,5". getCachedLocale (retired: getAppLocale is never null)
+// and parseDisplayNumber (the old guesser that read "1.234" as either 1.234 or
+// 1234 depending on what else it saw) are deleted names; a re-introduction is
+// refused by name.
+//
+// The shapes that are SOMETIMES right -- toFixed, parseFloat, Number(raw) in a
+// [PERF] log, a stored geometry literal, a <select> value -- are not banned
+// here; they are COUNTED by src/api/__tests__/localeCensus.test.ts against an
+// allowlist with a reason per file.
+//
+// These entries are SPREAD into the dialog block's no-restricted-properties /
+// no-restricted-syntax and into both colour blocks' no-restricted-syntax below.
+// A separate block setting those rule ids would replace the dialog guard's own
+// entries for every file it matched (flat config is last-wins per rule id) --
+// the window.confirm ban would go silent. dialogGlobalsBan.test.ts pins that.
+const LOCALE_MESSAGE =
+  'Banned: this formats or reads a number/date in the BROWSER locale (or is a retired name). ' +
+  'Use @api/locale -- formatNumber / formatNumberWithCode / formatDate / formatDateTime / ' +
+  'parseNumber / parseDate / getAppLocale -- so the text follows the APP locale.'
+
+const LOCALE_RESTRICTED_PROPERTIES = [
+  { property: 'toLocaleString', message: LOCALE_MESSAGE },
+  { property: 'toLocaleDateString', message: LOCALE_MESSAGE },
+  { property: 'toLocaleTimeString', message: LOCALE_MESSAGE },
+]
+
+const LOCALE_RESTRICTED_SYNTAX = [
+  {
+    selector:
+      "NewExpression[callee.object.name='Intl'][callee.property.name=/^(NumberFormat|DateTimeFormat)$/]",
+    message: LOCALE_MESSAGE,
+  },
+  {
+    selector:
+      "CallExpression[callee.object.name='Intl'][callee.property.name=/^(NumberFormat|DateTimeFormat)$/]",
+    message: LOCALE_MESSAGE,
+  },
+  { selector: "Identifier[name='getCachedLocale']", message: LOCALE_MESSAGE },
+  { selector: "Identifier[name='parseDisplayNumber']", message: LOCALE_MESSAGE },
+  // Re-reading a cell's DISPLAY text as a number: `display` is the app
+  // locale's and the number format's ("1,5", "$1,234.00", "50%"), so
+  // Number(cell.display) reads every formatted number -- and every fraction
+  // under a comma-decimal locale -- as NaN. Paste Special's operations shipped
+  // that way (round-2 review). Read the cell TYPED (getRangeCellsTyped /
+  // getCellTargetCellsTyped), or parseNumber for text a user typed.
+  {
+    selector:
+      "CallExpression[callee.name=/^(Number|parseFloat|parseInt)$/] > MemberExpression.arguments[property.name='display']",
+    message: LOCALE_MESSAGE,
+  },
+  {
+    selector:
+      "CallExpression[callee.name=/^(Number|parseFloat|parseInt)$/] > ChainExpression.arguments > MemberExpression[property.name='display']",
+    message: LOCALE_MESSAGE,
+  },
+  {
+    selector:
+      "CallExpression[callee.object.name='Number'][callee.property.name=/^(parseFloat|parseInt)$/] > .arguments[property.name='display']",
+    message: LOCALE_MESSAGE,
+  },
+]
+
 export const dialogGuardConfigs = [
   {
     files: ['src/**/*.{ts,tsx}', 'extensions/**/*.{ts,tsx}'],
@@ -218,9 +291,12 @@ export const dialogGuardConfigs = [
             message: DIALOG_GLOBAL_MESSAGE,
           })),
         ),
+        // The app-locale bans share this rule id, so they live IN this array
+        // (a later block would replace the dialog entries: last-wins).
+        ...LOCALE_RESTRICTED_PROPERTIES,
       ],
       '@typescript-eslint/no-restricted-imports': ['error', { paths: [DIALOG_PLUGIN_IMPORT_PATH] }],
-      'no-restricted-syntax': ['error', ...DIALOG_PLUGIN_DYNAMIC_IMPORTS],
+      'no-restricted-syntax': ['error', ...DIALOG_PLUGIN_DYNAMIC_IMPORTS, ...LOCALE_RESTRICTED_SYNTAX],
     },
   },
 ]
@@ -306,9 +382,11 @@ const modelEditorColorConfigs = [
           selector: 'Literal[value=/rgba?\\(/]',
           message: MODEL_EDITOR_HEX_MESSAGE,
         },
-        // The dialog block's selector: this block's no-restricted-syntax
-        // replaces that block's for these files (flat config is last-wins).
+        // The dialog block's selectors and the app-locale bans: this block's
+        // no-restricted-syntax replaces that block's for these files (flat
+        // config is last-wins), so both are repeated here.
         ...DIALOG_PLUGIN_DYNAMIC_IMPORTS,
+        ...LOCALE_RESTRICTED_SYNTAX,
       ],
     },
   },
@@ -424,9 +502,11 @@ const chromeColorConfigs = [
           selector: 'TemplateElement[value.raw=/^(?![\\s\\S]*var\\()[\\s\\S]*\\brgba?\\(/]',
           message: CHROME_HEX_MESSAGE,
         },
-        // The dialog block's selector: this block's no-restricted-syntax
-        // replaces that block's for these files (flat config is last-wins).
+        // The dialog block's selectors and the app-locale bans: this block's
+        // no-restricted-syntax replaces that block's for these files (flat
+        // config is last-wins), so both are repeated here.
         ...DIALOG_PLUGIN_DYNAMIC_IMPORTS,
+        ...LOCALE_RESTRICTED_SYNTAX,
       ],
     },
   },

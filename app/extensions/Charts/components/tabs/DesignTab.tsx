@@ -32,6 +32,7 @@ import {
   FieldGroup,
   Label,
   Input,
+  NumberBox,
   Select,
   CheckboxLabel,
   PalettePreview,
@@ -202,27 +203,17 @@ export function DesignTab({ spec, onSpecChange, previewSeriesNames }: DesignTabP
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
             <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Min:</span>
-            <Input
-              type="number"
-              value={spec.yAxis.min ?? ""}
+            <NumberBox
+              value={spec.yAxis.min ?? null}
               placeholder="auto"
-              onChange={(e) =>
-                onSpecChange({
-                  yAxis: { ...spec.yAxis, min: e.target.value === "" ? null : Number(e.target.value) },
-                })
-              }
+              onChange={(v) => onSpecChange({ yAxis: { ...spec.yAxis, min: v } })}
               style={{ width: "70px" }}
             />
             <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Max:</span>
-            <Input
-              type="number"
-              value={spec.yAxis.max ?? ""}
+            <NumberBox
+              value={spec.yAxis.max ?? null}
               placeholder="auto"
-              onChange={(e) =>
-                onSpecChange({
-                  yAxis: { ...spec.yAxis, max: e.target.value === "" ? null : Number(e.target.value) },
-                })
-              }
+              onChange={(v) => onSpecChange({ yAxis: { ...spec.yAxis, max: v } })}
               style={{ width: "70px" }}
             />
           </div>
@@ -430,47 +421,35 @@ function MarkOptions({ spec, onSpecChange }: DesignTabProps): React.ReactElement
           <Label>Bar Options</Label>
           <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
             <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Gap width %:</span>
-            <Input
-              type="number"
+            <NumberBox
               min={0}
               max={500}
               step={10}
               value={(opts as any).gapWidth ?? 150}
-              onChange={(e) => {
-                const v = Number(e.target.value);
-                updateMarkOptions({ gapWidth: Number.isNaN(v) ? 150 : v });
-              }}
+              onChange={(v) => updateMarkOptions({ gapWidth: v ?? 150 })}
               style={{ width: "60px" }}
               title="Gap between category groups, as % of bar width (Excel: Gap Width)"
             />
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
             <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Series overlap %:</span>
-            <Input
-              type="number"
+            <NumberBox
               min={-100}
               max={100}
               step={5}
               value={(opts as any).seriesOverlap ?? 0}
-              onChange={(e) => {
-                const v = Number(e.target.value);
-                updateMarkOptions({ seriesOverlap: Number.isNaN(v) ? 0 : v });
-              }}
+              onChange={(v) => updateMarkOptions({ seriesOverlap: v ?? 0 })}
               style={{ width: "60px" }}
               title="Overlap between series bars; negative adds a gap (Excel: Series Overlap)"
             />
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
             <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Corner radius:</span>
-            <Input
-              type="number"
+            <NumberBox
               min={0}
               max={20}
               value={(opts as any).borderRadius ?? 2}
-              onChange={(e) => {
-                const v = Number(e.target.value);
-                updateMarkOptions({ borderRadius: Number.isNaN(v) ? 2 : v });
-              }}
+              onChange={(v) => updateMarkOptions({ borderRadius: v ?? 2 })}
               style={{ width: "60px" }}
             />
           </div>
@@ -634,13 +613,12 @@ function MarkOptions({ spec, onSpecChange }: DesignTabProps): React.ReactElement
           </CheckboxLabel>
           <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
             <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Fill opacity:</span>
-            <Input
-              type="number"
+            <NumberBox
               min={0}
               max={1}
               step={0.1}
               value={(opts as any).fillOpacity ?? 0.2}
-              onChange={(e) => updateMarkOptions({ fillOpacity: parseFloat(e.target.value) || 0.2 })}
+              onChange={(v) => updateMarkOptions({ fillOpacity: v || 0.2 })}
               style={{ width: "60px" }}
             />
           </div>
@@ -653,35 +631,32 @@ function MarkOptions({ spec, onSpecChange }: DesignTabProps): React.ReactElement
           <Label>Bubble Options</Label>
           <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
             <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Min bubble size:</span>
-            <Input
-              type="number"
+            <NumberBox
               min={1}
               max={50}
               value={(opts as any).minBubbleSize ?? 4}
-              onChange={(e) => updateMarkOptions({ minBubbleSize: parseInt(e.target.value, 10) || 4 })}
+              onChange={(v) => updateMarkOptions({ minBubbleSize: Math.trunc(v ?? 0) || 4 })}
               style={{ width: "60px" }}
             />
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
             <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Max bubble size:</span>
-            <Input
-              type="number"
+            <NumberBox
               min={5}
               max={100}
               value={(opts as any).maxBubbleSize ?? 30}
-              onChange={(e) => updateMarkOptions({ maxBubbleSize: parseInt(e.target.value, 10) || 30 })}
+              onChange={(v) => updateMarkOptions({ maxBubbleSize: Math.trunc(v ?? 0) || 30 })}
               style={{ width: "60px" }}
             />
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
             <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Opacity:</span>
-            <Input
-              type="number"
+            <NumberBox
               min={0}
               max={1}
               step={0.1}
               value={(opts as any).bubbleOpacity ?? 0.7}
-              onChange={(e) => updateMarkOptions({ bubbleOpacity: parseFloat(e.target.value) || 0.7 })}
+              onChange={(v) => updateMarkOptions({ bubbleOpacity: v || 0.7 })}
               style={{ width: "60px" }}
             />
           </div>
@@ -694,12 +669,11 @@ function MarkOptions({ spec, onSpecChange }: DesignTabProps): React.ReactElement
           <Label>Histogram Options</Label>
           <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
             <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Number of bins:</span>
-            <Input
-              type="number"
+            <NumberBox
               min={2}
               max={100}
               value={(opts as any).binCount ?? 10}
-              onChange={(e) => updateMarkOptions({ binCount: parseInt(e.target.value, 10) || 10 })}
+              onChange={(v) => updateMarkOptions({ binCount: Math.trunc(v ?? 0) || 10 })}
               style={{ width: "60px" }}
             />
           </div>
@@ -733,13 +707,12 @@ function MarkOptions({ spec, onSpecChange }: DesignTabProps): React.ReactElement
           )}
           <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
             <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Neck width ratio:</span>
-            <Input
-              type="number"
+            <NumberBox
               min={0.05}
               max={0.9}
               step={0.05}
               value={(opts as any).neckWidthRatio ?? 0.3}
-              onChange={(e) => updateMarkOptions({ neckWidthRatio: parseFloat(e.target.value) || 0.3 })}
+              onChange={(v) => updateMarkOptions({ neckWidthRatio: v || 0.3 })}
               style={{ width: "60px" }}
             />
           </div>
@@ -816,13 +789,12 @@ function MarkOptions({ spec, onSpecChange }: DesignTabProps): React.ReactElement
           </CheckboxLabel>
           <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
             <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Box width:</span>
-            <Input
-              type="number"
+            <NumberBox
               min={0.1}
               max={0.9}
               step={0.1}
               value={(opts as any).boxWidth ?? 0.5}
-              onChange={(e) => updateMarkOptions({ boxWidth: parseFloat(e.target.value) || 0.5 })}
+              onChange={(v) => updateMarkOptions({ boxWidth: v || 0.5 })}
               style={{ width: "60px" }}
             />
           </div>
@@ -1038,16 +1010,11 @@ function VisualOptions({ spec, onSpecChange }: DesignTabProps): React.ReactEleme
   const numberField = (key: string, label: string, testId: string): React.ReactElement => (
     <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
       <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>{label}</span>
-      <Input
-        type="number"
-        data-testid={testId}
-        value={typeof opts[key] === "number" ? (opts[key] as number) : ""}
+      <NumberBox
+        testId={testId}
+        value={typeof opts[key] === "number" ? (opts[key] as number) : null}
         placeholder="auto"
-        onChange={(e) => {
-          const raw = e.target.value;
-          const n = Number(raw);
-          set(key, raw === "" || !Number.isFinite(n) ? undefined : n);
-        }}
+        onChange={(v) => set(key, v ?? undefined)}
         style={{ width: "80px" }}
       />
     </div>
@@ -1233,12 +1200,11 @@ function ErrorBarsSection({ spec, onSpecChange }: DesignTabProps): React.ReactEl
               <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>
                 {errorBars.type === "percentage" ? "Percentage:" : errorBars.type === "standardDeviation" ? "Multiplier:" : "Value:"}
               </span>
-              <Input
-                type="number"
+              <NumberBox
                 min={0}
                 step={errorBars.type === "percentage" ? 1 : 0.1}
                 value={errorBars.value ?? (errorBars.type === "percentage" ? 10 : 1)}
-                onChange={(e) => updateErrorBars({ value: parseFloat(e.target.value) || 0 })}
+                onChange={(v) => updateErrorBars({ value: v ?? 0 })}
                 style={{ width: "70px" }}
               />
             </div>

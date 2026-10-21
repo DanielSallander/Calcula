@@ -364,9 +364,9 @@ function pointerAt(s: Session, e: MouseEvent): PointerAt | null {
 /** The run from the pressed item to the one under the pointer, in sweep order; null when the pressed item is gone. */
 function runOf(s: ItemsSession): string[] | null {
   const items = getCachedItems(s.slicerId) ?? [];
-  const anchor = items.findIndex((i) => i.value === s.anchorValue);
+  const anchor = items.findIndex((i) => i.key === s.anchorValue);
   if (anchor < 0 || s.current < 0 || s.current >= items.length) return null;
-  const run = items.slice(Math.min(anchor, s.current), Math.max(anchor, s.current) + 1).map((i) => i.value);
+  const run = items.slice(Math.min(anchor, s.current), Math.max(anchor, s.current) + 1).map((i) => i.key);
   return s.current < anchor ? run.reverse() : run;
 }
 
@@ -460,7 +460,7 @@ function stopAutoScroll(s: Session): void {
 function commitItems(s: ItemsSession): void {
   const items = getCachedItems(s.slicerId) ?? [];
   if (!s.moved) {
-    if (!items.some((i) => i.value === s.anchorValue)) return;
+    if (!items.some((i) => i.key === s.anchorValue)) return;
     void clickSlicerItem(s.slicerId, s.anchorValue, s.additive);
     return;
   }

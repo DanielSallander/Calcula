@@ -1006,6 +1006,8 @@ fn a_chart_source_that_hosts_a_floating_range_brings_its_backing_sheet_too() {
             show_column_headers: true,
             show_row_headers: true,
             container: None,
+            hidden_rows: Vec::new(),
+            hidden_cols: Vec::new(),
         });
         state.floating_ranges.write(&seed).unwrap().push(row);
     }
@@ -1030,6 +1032,8 @@ fn a_chart_source_that_hosts_a_floating_range_brings_its_backing_sheet_too() {
             show_column_headers: true,
             show_row_headers: true,
             container: None,
+            hidden_rows: Vec::new(),
+            hidden_cols: Vec::new(),
         });
         state.floating_ranges.write(&seed).unwrap().push(row);
     }
@@ -1486,6 +1490,8 @@ fn floating_range_on(state: &AppState, host: usize, name: &str) -> usize {
         show_column_headers: true,
         show_row_headers: true,
         container: None,
+        hidden_rows: Vec::new(),
+        hidden_cols: Vec::new(),
     });
     state.floating_ranges.write(&seed).unwrap().push(row);
     backing

@@ -1,6 +1,6 @@
 //! FILENAME: app/extensions/Slicer/__tests__/slicerPageFiltersWiring.test.ts
 // PURPOSE: The REAL `activate()` installs the page-filter publisher (@api/
-//          pageFilters) and `deactivate()` withdraws what it published.
+//          reportFilters) and `deactivate()` withdraws what it published.
 // CONTEXT: lib/__tests__-level tests pin WHAT is published; this pins the one
 //          line in index.ts that makes it happen at all. Its absence is
 //          silent at runtime -- every design-query chart on a canvas would
@@ -9,7 +9,17 @@
 //          precedent for driving activate() with a fake host.)
 
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
-import { getPageFilters } from "@api/pageFilters";
+import { resolvePageBase } from "@api/reportFilters";
+
+// The page list (P4: pages are sheet IDS): sheet 4 is "page-4". Starting it is
+// a no-op here (no backend).
+vi.mock("@api/reportPages", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@api/reportPages")>()),
+  startReportPages: () => () => {},
+  getReportPagesSnapshot: () => ({ pages: [], sheetIdByIndex: new Map([[4, "page-4"]]), activeIndex: 4, version: 1 }),
+}));
+
+const pageFilters = () => resolvePageBase("page-4", "conn-a").filters;
 
 function modelSlicerRow() {
   return {
@@ -71,14 +81,14 @@ afterAll(() => {
 
 describe("the Slicer extension publishes its model slicers' page filters", () => {
   it("from activate() until deactivate()", () => {
-    expect(getPageFilters(4, "conn-a")).toEqual([]);
+    expect(pageFilters()).toEqual([]);
 
     extension.activate(context);
-    expect(getPageFilters(4, "conn-a").map((f) => [f.sourceId, f.field, f.includedItems])).toEqual([
-      ["s-model", "Geo.Region", ["East"]],
+    expect(pageFilters().map((f) => [f.from, f.field, f.includedKeys])).toEqual([
+      ["Slicer_Region", "Geo.Region", ["East"]],
     ]);
 
     extension.deactivate?.();
-    expect(getPageFilters(4, "conn-a")).toEqual([]);
+    expect(pageFilters()).toEqual([]);
   });
 });

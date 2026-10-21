@@ -36,6 +36,7 @@ import { runInUndoTransaction } from "@api/objectGeometry";
 import { showToast } from "@api/notifications";
 import { confirmPivotOverwriteOrUndo } from "@api/pivotOverwrite";
 import { resolveSlicerContainer, slicerRegionId } from "./slicerObjectFormat";
+import { noteVisualConstraintsSent, slicerVisualConstraints } from "./slicerVisualConstraints";
 
 // ============================================================================
 // Module-level cache
@@ -194,7 +195,7 @@ function deleteEffect(slicer: Slicer | undefined): SlicerDeleteEffect {
 /** What a slicer delete disturbs outside the slicer store (the cascade
  *  census follows this helper by its `announce` name). */
 function announceSlicersDeleted(effect: SlicerDeleteEffect): void {
-  // §3bn: ribbon filters name canvas slicers in crossFilterSlicerTargets, and
+  // §3bn: ribbon filters name canvas slicers in dependentSlicers, and
   // the backend just pruned this one out of them. The Controls pane caches
   // those filters, so without the announcement it keeps a cross-link to a
   // slicer that no longer exists and re-resolves it on every selection.
@@ -553,9 +554,26 @@ function announceDataChanged(): void {
   window.dispatchEvent(new Event(SlicerEvents.SLICER_DATA_CHANGED));
 }
 
+/** The latest items read started per slicer: an older read that answers last is not cached. */
+const itemReads = new Map<string, number>();
+let itemReadSeq = 0;
+
 export async function refreshSlicerItems(slicerId: string): Promise<SlicerItem[]> {
+  // A MODEL slicer's has-data follows the other visuals' cross-filter
+  // selections on its page (P4): computed now, at read time, and recorded so
+  // a report-filter change can tell whether this slicer's answer moved
+  // (slicerVisualConstraints.ts).
+  const cached = cachedSlicers.find((s) => s.id === slicerId);
+  const visualConstraints = cached ? slicerVisualConstraints(cached) : undefined;
+  noteVisualConstraintsSent(slicerId, visualConstraints);
+  // Reads of one slicer can overlap (a run of Ctrl+clicks on a chart re-reads
+  // it per click); only the LATEST one may land in the cache, or an older
+  // answer would shade the items for a selection the user has left.
+  const mine = ++itemReadSeq;
+  itemReads.set(slicerId, mine);
   try {
-    const items = await api.getSlicerItems(slicerId);
+    const items = await api.getSlicerItems(slicerId, visualConstraints);
+    if (itemReads.get(slicerId) !== mine) return items;
     itemsCache.set(slicerId, items);
     announceDataChanged();
     return items;
@@ -830,6 +848,7 @@ async function settleAfterTakeBack(reconcilesBefore: number): Promise<void> {
 export function resetStore(): void {
   cachedSlicers = [];
   itemsCache.clear();
+  itemReads.clear();
   clickQueue = Promise.resolve();
   reconcilesSettled = Promise.resolve();
   removeGridRegionsByType("slicer");

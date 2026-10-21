@@ -117,12 +117,15 @@ describe("A Date Occurring (quick dialog)", () => {
     choose(periods, "thisMonth");
     act(() => button("OK").click());
     await settle();
-    expect(h.addConditionalFormat).toHaveBeenCalledWith({
-      rule: { type: "timePeriod", period: "thisMonth" },
-      format: { backgroundColor: "#FFC7CE", textColor: "#9C0006" },
-      ranges: [SELECTION],
-      stopIfTrue: false,
-    });
+    expect(h.addConditionalFormat).toHaveBeenCalledWith(
+      {
+        rule: { type: "timePeriod", period: "thisMonth" },
+        format: { backgroundColor: "#FFC7CE", textColor: "#9C0006" },
+        ranges: [SELECTION],
+        stopIfTrue: false,
+      },
+      { target: undefined },
+    );
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 

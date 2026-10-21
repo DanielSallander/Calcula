@@ -18,6 +18,7 @@ import {
   type AuditEntry,
 } from "@api/collaboration";
 import { confirmAsync } from "@api/dialogs";
+import { formatDateTime } from "@api/locale";
 
 type Category = "subscription" | "override" | "writeback" | "publish" | "script" | "capability" | "protection" | "ai" | "other";
 
@@ -113,7 +114,7 @@ function eventMeta(event: string): { label: string; category: Category } {
 /** Format an ISO timestamp for display; fall back to the raw string. */
 function fmtTime(ts: string): string {
   const d = new Date(ts);
-  return isNaN(d.getTime()) ? ts : d.toLocaleString();
+  return isNaN(d.getTime()) ? ts : formatDateTime(d);
 }
 
 // --- styles (match the other Collaboration panes) ---------------------------

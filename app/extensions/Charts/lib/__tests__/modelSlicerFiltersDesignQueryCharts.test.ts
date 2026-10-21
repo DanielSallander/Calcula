@@ -5,7 +5,7 @@
 //          clearing the slicer restores the chart's unfiltered query.
 // CONTEXT: Three owners meet here and none imports another: the Slicer
 //          extension PUBLISHES (Slicer/lib/slicerPageFilters.ts), the seam
-//          holds and announces (@api/pageFilters), Charts LISTENS
+//          holds and announces (@api/reportFilters), Charts LISTENS
 //          (chartQueryProvider.ts) and MERGES (designQueryChartDataReader.ts).
 //          Each has unit tests; this one runs them together with the real
 //          event wiring, so a rename on either side, or a publisher that fires
@@ -59,7 +59,24 @@ vi.mock("../../rendering/chartRenderer", () => ({
 const mockEmitAppEvent = vi.fn();
 vi.mock("@api/events", () => ({
   emitAppEvent: (...a: unknown[]) => mockEmitAppEvent(...a),
-  AppEvents: { GRID_REFRESH: "app:grid-refresh" },
+  onAppEvent: () => () => {},
+  AppEvents: { GRID_REFRESH: "app:grid-refresh", AFTER_NEW: "app:after-new", AFTER_OPEN: "app:after-open" },
+}));
+
+// --- the page list (P4: pages are sheet IDS): the canvas is sheet 3 ---------
+vi.mock("@api/reportPages", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@api/reportPages")>()),
+  startReportPages: () => () => {},
+  onReportPagesChanged: () => () => {},
+  getReportPagesSnapshot: () => ({
+    pages: [],
+    sheetIdByIndex: new Map([
+      [0, "sheet1-id"],
+      [3, "canvas-id"],
+    ]),
+    activeIndex: 3,
+    version: 1,
+  }),
 }));
 
 import { installSlicerPageFilterPublisher } from "../../../Slicer/lib/slicerPageFilters";
@@ -125,6 +142,14 @@ async function cardValue(chart: typeof CHART_ON_CANVAS): Promise<number> {
   return data.series[0].values[0];
 }
 
+/** One animation frame (chartQueryProvider coalesces its repaints into one per frame). */
+function nextFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => resolve());
+    else setTimeout(resolve, 20);
+  });
+}
+
 function lastSentRequest(): DesignQueryRequest {
   const calls = mockInvoke.mock.calls.filter((c) => c[0] === "run_design_query");
   return (calls[calls.length - 1][1] as { request: DesignQueryRequest }).request;
@@ -161,6 +186,7 @@ describe("a model slicer filters the design-query charts on its own canvas", () 
     select(["East"]);
 
     expect(invalidated).toEqual(["card-canvas"]);
+    await nextFrame(); // the provider repaints once per frame
     expect(mockEmitAppEvent).toHaveBeenCalledTimes(1);
     expect(mockEmitAppEvent).toHaveBeenCalledWith("app:grid-refresh");
     expect(await cardValue(CHART_ON_CANVAS)).toBe(10);
@@ -191,13 +217,15 @@ describe("a model slicer filters the design-query charts on its own canvas", () 
     expect(lastSentRequest().pageFilterFields ?? []).toEqual([]);
   });
 
-  it("a store re-read that changed nothing re-runs nothing (a sheet switch costs no model query)", () => {
+  it("a store re-read that changed nothing re-runs nothing (a sheet switch costs no model query)", async () => {
     select(["East"]);
+    await nextFrame();
     invalidated.length = 0;
     mockEmitAppEvent.mockClear();
 
     select(["East"], SlicerEvents.SLICER_DATA_CHANGED);
     select(["East"], SlicerEvents.SLICER_DATA_CHANGED);
+    await nextFrame();
 
     expect(invalidated).toEqual([]);
     expect(mockEmitAppEvent).not.toHaveBeenCalled();

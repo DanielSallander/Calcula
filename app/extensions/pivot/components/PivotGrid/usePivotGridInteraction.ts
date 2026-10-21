@@ -270,9 +270,9 @@ export function usePivotGridInteraction(
           const filterRow: FilterRowData = {
             fieldIndex: clickedFilter.fieldIndex,
             fieldName: response.fieldName,
-            uniqueValues: response.uniqueValues,
-            // Use existing selected values from metadata, or default to all selected
-            selectedValues: filterRowMeta?.selectedValues ?? response.uniqueValues,
+            members: response.members,
+            // Use existing selected values (KEYS) from metadata, or default to all selected
+            selectedValues: filterRowMeta?.selectedValues ?? response.members.map((m) => m.key),
             displayValue: filterRowMeta?.displayValue ?? '(All)',
             viewRow: filterRowMeta?.viewRow ?? 0,
           };

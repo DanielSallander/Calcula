@@ -11,6 +11,7 @@ import {
   isChartMarkRegistered,
   listChartMarks,
   chartMarkFurniture,
+  chartMarkCrossFilter,
   type ChartMarkDefinition,
   type ChartMarkMeta,
 } from "../chartMarks";
@@ -85,5 +86,29 @@ describe("@api chartMarks furniture (contract 4.2)", () => {
 
   it("an UNREGISTERED mark has the full furniture: refusing a legend to a mark we cannot see is a lie", () => {
     expect(chartMarkFurniture("__never_registered_tile__")).toBe("full");
+  });
+});
+
+describe("@api chartMarks cross-filter capability (P4)", () => {
+  it("an UNDECLARED mark answers { false, false }: a filter-only target (fail closed)", () => {
+    registerChartMark("__api_xf_silent__", fakeDef("Silent", "cartesian"));
+    expect(chartMarkCrossFilter("__api_xf_silent__")).toEqual({ source: false, canHighlight: false });
+    unregisterChartMark("__api_xf_silent__");
+  });
+
+  it("an unregistered id answers { false, false } too", () => {
+    expect(chartMarkCrossFilter("__api_xf_never__")).toEqual({ source: false, canHighlight: false });
+  });
+
+  it("a declared mark answers exactly what it declared, nothing truthy-ish", () => {
+    registerChartMark("__api_xf_src__", fakeDef("Line-like", "cartesian", { crossFilter: { source: true, canHighlight: false } }));
+    registerChartMark(
+      "__api_xf_bad__",
+      fakeDef("Sloppy", "cartesian", { crossFilter: { source: 1 as unknown as boolean, canHighlight: "yes" as unknown as boolean } }),
+    );
+    expect(chartMarkCrossFilter("__api_xf_src__")).toEqual({ source: true, canHighlight: false });
+    expect(chartMarkCrossFilter("__api_xf_bad__")).toEqual({ source: false, canHighlight: false });
+    unregisterChartMark("__api_xf_src__");
+    unregisterChartMark("__api_xf_bad__");
   });
 });

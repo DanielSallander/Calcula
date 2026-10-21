@@ -94,7 +94,7 @@ let a11y: AccessibilityOverride = {};
 let ribbonLabelMode: RibbonLabelMode | null = null;
 let userTokens: Record<string, string> | null = null;
 
-// --- Persistence (direct localStorage, app-global like calcula.locale) ---------
+// --- Persistence (direct localStorage, app-global per machine) ----------------
 
 function readPersistedId(): string | null {
   return readKey(SKIN_STORAGE_KEY);

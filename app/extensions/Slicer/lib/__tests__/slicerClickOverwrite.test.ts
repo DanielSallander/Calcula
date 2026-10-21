@@ -37,7 +37,7 @@ const h = vi.hoisted(() => ({
   /** Answer `getAllSlicers` a macrotask later, as an IPC round trip does. */
   ipcDelay: false,
   /** What `getSlicerItems` answers (a Ctrl+click toggle needs the list). */
-  items: [] as Array<{ value: string; selected: boolean; hasData: boolean }>,
+  items: [] as Array<{ key: string; label: string; selected: boolean; hasData: boolean }>,
   /** Every selection written, in order. */
   history: [] as Array<string[] | null>,
   /** Where the backend put the gesture's step. */
@@ -294,7 +294,7 @@ describe("a slicer click that grows pivots over the user's cells", () => {
 // click reads it (fix round 5 review, finding 1)
 // ---------------------------------------------------------------------------
 
-const FOUR = ["East", "North", "West", "South"].map((value) => ({ value, selected: false, hasData: true }));
+const FOUR = ["East", "North", "West", "South"].map((value) => ({ key: value, label: value, selected: false, hasData: true }));
 
 /** A selection with North in it grows a pivot over the user's cell. */
 function northOverwrites(): void {

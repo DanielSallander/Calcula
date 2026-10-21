@@ -31,7 +31,7 @@
 //   entries since the rust-structure lane's change; the transaction below makes
 //   them one step with the rest.)
 
-import type { Selection } from "../../types";
+import type { CellTargetRef, Selection } from "../../types";
 import {
   beginUndoTransaction,
   cancelUndoTransaction,
@@ -59,8 +59,18 @@ export type ClearGestureKind =
 
 /** What a gesture needs from the grid that runs it. */
 export interface ClearGestureHost {
-  /** The selection the gesture acts on. */
+  /** The selection the gesture acts on (the target's own coordinates with a target). */
   selection: Selection | null;
+  /**
+   * The OBJECT whose cells the gesture clears (a floating grid's, P3), or
+   * absent for the active sheet. With a target every write names it, and only
+   * what an object's cells can hold is cleared: contents and formats. Comments,
+   * notes and hyperlinks have no door onto an object's cells (their doors keep
+   * refusing there), so Clear Comments / Clear Hyperlinks / Remove Hyperlinks
+   * change nothing, and Clear All clears contents and formats in ONE call --
+   * never the active sheet's comments, notes or links at the same coordinates.
+   */
+  target?: CellTargetRef;
   /**
    * Re-read what the clear changed, once its writes have landed: the grid's
    * cells and, through `grid:refresh` (and `styles:refresh` when FORMATS
@@ -134,7 +144,8 @@ function clearsFormats(kind: ClearGestureKind): boolean {
  * call -- the same multi-range clear that would make a scattered Delete one
  * call instead of one per area -- and there is none yet.
  */
-async function writesFor(kind: ClearGestureKind, blocks: Block[]): Promise<Write[]> {
+async function writesFor(kind: ClearGestureKind, blocks: Block[], target?: CellTargetRef): Promise<Write[]> {
+  if (target) return targetWritesFor(kind, blocks, target);
   const phases: Write[][] = [];
   const add = (phase: number, write: Write): void => {
     (phases[phase] ??= []).push(write);
@@ -180,6 +191,19 @@ async function writesFor(kind: ClearGestureKind, blocks: Block[]): Promise<Write
 }
 
 /**
+ * The writes `kind` makes over an OBJECT's cells: one `clearRangeWithOptions`
+ * per block, with the target (one undo step each; several are bracketed by the
+ * runner). Only contents and formats exist there (see ClearGestureHost.target).
+ */
+function targetWritesFor(kind: ClearGestureKind, blocks: Block[], target: CellTargetRef): Write[] {
+  const applyTo = kind === "clearContents" ? "contents" : kind === "clearFormatting" ? "formats" : kind === "clearAll" ? "all" : null;
+  if (applyTo === null) return [];
+  return blocks.map((b) => () =>
+    clearRangeWithOptions(b.startRow, b.startCol, b.endRow, b.endCol, applyTo, undefined, { target }),
+  );
+}
+
+/**
  * Run one of Excel's Clear commands over `host.selection`. Never throws:
  * every refusal reaches the user as an alert.
  */
@@ -189,7 +213,7 @@ export async function runClearGesture(kind: ClearGestureKind, host: ClearGesture
 
   let writes: Write[];
   try {
-    writes = await writesFor(kind, blocks);
+    writes = await writesFor(kind, blocks, host.target);
   } catch (error) {
     console.error(`[clearGestures] ${kind}: reading the selection failed:`, error);
     await alertAsync(messageOf(error));
@@ -234,12 +258,17 @@ export async function runClearGesture(kind: ClearGestureKind, host: ClearGesture
 
   // One announcement for the gesture (the grid re-reads its cells). Clear
   // Contents and Clear All tell listeners it was a CLEAR, as they always have.
+  // Not for a target: a cell event's (row, col) names an ACTIVE-sheet cell,
+  // and an object's coordinates would alias the host's cell there. The
+  // object's cells re-read through the refresh's "grid:refresh".
   const first = blocks[0];
   const source = kind === "clearContents" || kind === "clearAll" ? "clear" : undefined;
-  cellEvents.emit(
-    { row: first.startRow, col: first.startCol, oldValue: undefined, newValue: "", formula: null },
-    source,
-  );
+  if (!host.target) {
+    cellEvents.emit(
+      { row: first.startRow, col: first.startCol, oldValue: undefined, newValue: "", formula: null },
+      source,
+    );
+  }
 
   // Then the grid, and everything that shows the active cell's state, re-read.
   try {

@@ -85,6 +85,11 @@ const KNOWN_SAFE_HEURISTIC_MATCHES: Record<string, string> = {
     "compute (the pivot compute pipeline, read-only against a workbook BI " +
     "connection's model; no grid write, no code execution) — the data source " +
     "behind design-query charts and grid reports.",
+  run_bi_pivot_filtered_view:
+    "matches the 'run_' heuristic but is feature-open: the paint-only view of one " +
+    "BI pivot under another visual's selection (P4 cross-filter) -- the pivot's own " +
+    "query re-run as a headless design query, read-only (no store, cell or undo " +
+    "write, no code execution), the same compute run_design_query performs.",
 };
 
 describe("backend command capability model (A3)", () => {

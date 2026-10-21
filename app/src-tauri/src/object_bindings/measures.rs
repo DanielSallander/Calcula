@@ -10,17 +10,20 @@
 //          Values feed `eval::reevaluate`, which only the command (mod.rs) and
 //          the MCP tool call -- never this file.
 //
-// THE QUERY. Per (page, connection) ONE measure-only design query
-// (`pivot::headless::compute_design_query_view`, the exact Card path,
-// CONTRACT-CANVAS 4.8, host-mask fallback included) with every measure the
-// page's bindings read in VALUES and the page's mirrored model filters as
-// `page_filter_fields`. A failed batch is retried one measure at a time (at
+// THE QUERY. Per (page, connection, filter signature) ONE measure-only design
+// query (`pivot::headless::compute_design_query_view`, the exact Card path,
+// CONTRACT-CANVAS 4.8, host-mask fallback included) with every measure those
+// bindings read in VALUES, the mirrored model filters as `page_filter_fields`
+// and other visuals' selections as `tuple_filters` (P4). An object whose
+// interaction differs from the page default (a `none` pair) carries its own
+// OVERRIDE set and is queried under it, so it fetches apart from its siblings. A failed batch is retried one measure at a time (at
 // most `MAX_SEPARATE_MEASURE_QUERIES`) so one bad measure fails one binding.
 //
 // THE CACHE KEY. (page, connection id, UPPERCASE measure, filter signature).
-// A pass reads only the entry under the page's CURRENT signature, so after a
-// slicer click a measure is PENDING until its new value arrives -- never the
-// previous filter's number shown as current.
+// A pass reads only the entry under the CURRENT signature of the binding's
+// object (its override, else its page's set), so after a slicer click a
+// measure is PENDING until its new value arrives -- never the previous
+// filter's number shown as current.
 //
 // CUBE. Literal-argument CUBE calls are prefetched through the same resolvers
 // a cube CELL uses (`bi::cube::resolve_value` / `resolve_object`), keyed by
@@ -38,9 +41,9 @@ use std::sync::Arc;
 
 use engine::{BuiltinFunction, CellValue, CubeBinding, CubeCallResult, CubeResolver, Expression, LocaleSettings};
 
-use crate::api_types::{BindingModelMeasures, ObjectBindingRef, PageFilterPageWire, PageFilterWire};
+use crate::api_types::{BindingModelMeasures, ObjectBindingRef, PageFilterPageWire, PageFilterWire, TupleFilterWire};
 use crate::bi::types::{BiState, ConnectionId};
-use crate::pivot::headless::{DesignQueryFieldRef, DesignQueryRequest};
+use crate::pivot::headless::{DesignQueryColumn, DesignQueryFieldRef, DesignQueryRequest, DesignQueryTupleFilter};
 use crate::pivot::types::BiValueFieldRef;
 use crate::AppState;
 
@@ -61,12 +64,47 @@ type EngineArc = Arc<tokio::sync::Mutex<bi_engine::Engine>>;
 // Signature, model resolution
 // ---------------------------------------------------------------------------
 
-/// A page's filters as one number: each filter's (field, level, items sorted),
-/// the filters sorted -- the `signatures()` rule of `@api/pageFilters`: order
-/// of publication and order of items are not meaning. No filters at all has a
-/// signature too (the unfiltered page).
-pub fn filter_signature(filters: &[PageFilterWire]) -> u64 {
-    let mut parts: Vec<String> = filters
+/// The model filters ONE (page, connection) -- or one object's override on it
+/// -- applies to a bound measure: the ordinary per-column filters and the
+/// OR-of-AND tuple filters of another visual's selection (P4).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PageFilterSet {
+    pub filters: Vec<PageFilterWire>,
+    pub tuple_filters: Vec<TupleFilterWire>,
+}
+
+impl PageFilterSet {
+    pub fn new(filters: Vec<PageFilterWire>, tuple_filters: Vec<TupleFilterWire>) -> PageFilterSet {
+        PageFilterSet { filters, tuple_filters }
+    }
+
+    /// No filter of either kind (the unfiltered page).
+    pub fn is_empty(&self) -> bool {
+        self.filters.is_empty() && self.tuple_filters.is_empty()
+    }
+}
+
+/// The empty set (no filters at all), for a page or object with none mirrored.
+pub static NO_FILTERS: PageFilterSet = PageFilterSet { filters: Vec::new(), tuple_filters: Vec::new() };
+
+/// An object's own filters on one connection (P4: an interaction other than
+/// the page default), with the page it was mirrored under -- so a moved
+/// override reports its page as changed even after it is gone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObjectFilterOverride {
+    pub page: identity::SheetId,
+    pub set: PageFilterSet,
+}
+
+/// A filter set as one number: each filter's (field, level, items sorted) and
+/// each tuple filter's (fields, tuples sorted), all sorted -- the
+/// `signatures()` rule of `@api/reportFilters`: order of publication, of items
+/// and of tuples is not meaning. No filters at all has a signature too (the
+/// unfiltered page), and an empty tuple list (keeps nothing) is not "no tuple
+/// filter".
+pub fn filter_signature(set: &PageFilterSet) -> u64 {
+    let mut parts: Vec<String> = set
+        .filters
         .iter()
         .map(|f| {
             let mut items = f.included_items.clone();
@@ -74,6 +112,11 @@ pub fn filter_signature(filters: &[PageFilterWire]) -> u64 {
             serde_json::json!([f.field, f.filter_level, items]).to_string()
         })
         .collect();
+    parts.extend(set.tuple_filters.iter().map(|t| {
+        let mut tuples = t.tuples.clone();
+        tuples.sort();
+        serde_json::json!(["tuple", t.fields, tuples]).to_string()
+    }));
     parts.sort();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     parts.hash(&mut hasher);
@@ -255,31 +298,45 @@ pub async fn page_models(cx: &ObjectStores<'_>, bi: &BiState, sheet_index: usize
 // ---------------------------------------------------------------------------
 
 /// REPLACE the page-filter mirror with the frontend's full snapshot (the seam
-/// sends every page) and return the pages whose filters changed, sorted. The
-/// frontend (`@api/pageFilters`) stays the authority; this is a derived copy,
-/// so nothing is dirtied (D §9 D1). Sheet table, then the runtime; each
-/// released.
+/// sends every page) and return the pages whose filters changed, sorted: a
+/// page whose own set moved, or on which some object's OVERRIDE appeared,
+/// moved or went away (P4). The frontend (`@api/reportFilters`) stays the
+/// authority; this is a derived copy, so nothing is dirtied (D §9 D1). Pages
+/// arrive by SHEET ID (P4 DC-4), so no sheet table is read: the runtime lock
+/// only. A sheet id the runtime's last build did not know is kept (it is inert
+/// until such a page exists) and said in the log once.
 pub fn replace_page_filters(state: &AppState, pages: Vec<PageFilterPageWire>) -> Vec<identity::SheetId> {
-    let ids: Vec<identity::SheetId> = state.sheet_ids.read().map(|g| g.clone()).unwrap_or_default();
-    let mut mirror: HashMap<(identity::SheetId, String), Vec<PageFilterWire>> = HashMap::new();
+    let mut mirror: HashMap<(identity::SheetId, String), PageFilterSet> = HashMap::new();
+    let mut overrides: HashMap<ObjectBindingRef, HashMap<String, ObjectFilterOverride>> = HashMap::new();
     for page in pages {
-        match ids.get(page.sheet_index) {
-            Some(id) => {
-                mirror.insert((*id, page.connection_id), page.filters);
-            }
-            None => crate::log_warn!(
-                "BINDINGS",
-                "page filters for sheet {} were skipped: there is no such sheet",
-                page.sheet_index
-            ),
+        for object in page.objects {
+            overrides.entry(object.object).or_default().insert(
+                page.connection_id.clone(),
+                ObjectFilterOverride { page: page.sheet_id, set: PageFilterSet::new(object.filters, object.tuple_filters) },
+            );
         }
+        mirror.insert((page.sheet_id, page.connection_id), PageFilterSet::new(page.filters, page.tuple_filters));
     }
     let mut changed: Vec<identity::SheetId> = {
         let Ok(mut runtime) = state.object_binding_runtime.lock() else { return Vec::new() };
+        if runtime.built {
+            let unknown: Vec<identity::SheetId> = mirror
+                .keys()
+                .map(|(page, _)| *page)
+                .filter(|page| !runtime.built_for_sheets.contains(page))
+                .collect();
+            for page in unknown {
+                if runtime.warned_unknown_sheets.insert(page) {
+                    crate::log_warn!(
+                        "BINDINGS",
+                        "page filters arrived for sheet id {page}, which is not a sheet of this workbook (yet);                          they reach no bound property until it is"
+                    );
+                }
+            }
+        }
         let mut changed: Vec<identity::SheetId> = Vec::new();
-        for (key, filters) in &mirror {
-            let before = runtime.page_filters.get(key).map(|f| filter_signature(f));
-            if before != Some(filter_signature(filters)) {
+        for (key, set) in &mirror {
+            if runtime.page_filters.get(key) != Some(set) {
                 changed.push(key.0);
             }
         }
@@ -288,7 +345,30 @@ pub fn replace_page_filters(state: &AppState, pages: Vec<PageFilterPageWire>) ->
                 changed.push(key.0);
             }
         }
+        // An override that appeared, moved or went away changes the page it is
+        // (or was) mirrored under.
+        for (object, by_connection) in &overrides {
+            let before = runtime.object_filters.get(object);
+            for (connection, now) in by_connection {
+                let was = before.and_then(|b| b.get(connection));
+                if was != Some(now) {
+                    changed.push(now.page);
+                    if let Some(was) = was {
+                        changed.push(was.page);
+                    }
+                }
+            }
+        }
+        for (object, by_connection) in &runtime.object_filters {
+            let now = overrides.get(object);
+            for (connection, was) in by_connection {
+                if now.and_then(|n| n.get(connection)).is_none() {
+                    changed.push(was.page);
+                }
+            }
+        }
         runtime.page_filters = mirror;
+        runtime.object_filters = overrides;
         changed
     };
     changed.sort();
@@ -322,6 +402,36 @@ pub fn page_filter_fields(filters: &[PageFilterWire], table_names: &[String]) ->
             included_items: Some(filter.included_items.clone()),
             level: (filter.filter_level > 1).then_some(filter.filter_level),
         });
+    }
+    out
+}
+
+/// The mirrored TUPLE filters of one (page, connection) as the design query's
+/// `tuple_filters`, each field split against the model's own tables like
+/// [`page_filter_fields`]. A tuple filter with ANY field the model does not
+/// have is skipped WHOLE and said in the log (BUG-0527, the `mergeTupleFilters`
+/// rule): dropping one column of a tuple would widen the selection to rows it
+/// never named. Keys go in as KEYS -- `engine_tuple_filters` re-spells them
+/// for the engine (the blank key `""`, a float key), never this function.
+pub fn tuple_filter_fields(tuples: &[TupleFilterWire], table_names: &[String]) -> Vec<DesignQueryTupleFilter> {
+    let mut out = Vec::new();
+    'filters: for tuple in tuples {
+        let mut fields = Vec::with_capacity(tuple.fields.len());
+        for field in &tuple.fields {
+            let (table, column) =
+                crate::pivot::commands::split_bi_field_key(field, table_names.iter().map(String::as_str));
+            if table.is_empty() || column.is_empty() || !table_names.iter().any(|t| *t == table) {
+                crate::log_warn!(
+                    "BINDINGS",
+                    "a selection on ({}) was not applied to bound measures: the model has no table for '{}'",
+                    tuple.fields.join(", "),
+                    field
+                );
+                continue 'filters;
+            }
+            fields.push(DesignQueryColumn { table, column });
+        }
+        out.push(DesignQueryTupleFilter { fields, tuples: tuple.tuples.clone(), level: None });
     }
     out
 }
@@ -440,12 +550,13 @@ pub fn measure_only_values(
 }
 
 /// Run ONE measure-only design query for `measures` on `connection` under
-/// `page_fields`: the Card path.
+/// `page_fields` and `tuple_fields`: the Card path.
 async fn run_measure_only(
     bi: &BiState,
     connection: ConnectionId,
     measures: &[String],
     page_fields: &[DesignQueryFieldRef],
+    tuple_fields: &[DesignQueryTupleFilter],
 ) -> Result<Vec<MeasureValue>, String> {
     let request = DesignQueryRequest {
         connection_id: connection,
@@ -457,6 +568,7 @@ async fn run_measure_only(
             .collect(),
         filter_fields: Vec::new(),
         page_filter_fields: page_fields.to_vec(),
+        tuple_filters: tuple_fields.to_vec(),
         calculated_fields: None,
         value_column_order: None,
         layout: None,
@@ -493,14 +605,14 @@ async fn classify_failure(bi: &BiState, connection: ConnectionId, measure: &str,
 /// A measure's value as a bound property shows it: formatted with the
 /// model's `format_string` (an Excel format code) in the user's locale, else
 /// the plain number.
-fn format_measure(value: f64, format: Option<&str>, locale: &LocaleSettings) -> String {
+pub(super) fn format_measure(value: f64, format: Option<&str>, locale: &LocaleSettings) -> String {
     match format.map(str::trim).filter(|f| !f.is_empty()) {
         Some(code) => engine::format_number(
             value,
             &crate::commands::styles::parse_number_format_with_locale(code, locale),
             locale,
         ),
-        None => crate::format_cell_value_simple(&CellValue::Number(value)),
+        None => crate::format_cell_value_display(&CellValue::Number(value), locale),
     }
 }
 
@@ -512,14 +624,17 @@ fn outcome_of(value: MeasureValue, format: Option<&str>, locale: &LocaleSettings
     }
 }
 
-/// Every measure of `measures` on `connection` under `filters`: ONE query, and
-/// on its failure one query per measure (at most
-/// [`MAX_SEPARATE_MEASURE_QUERIES`]) so a bad measure fails only itself.
+/// Every measure of `measures` on `connection` under `filters` (the page's set,
+/// or one object's override): ONE query, and on its failure one query per
+/// measure (at most [`MAX_SEPARATE_MEASURE_QUERIES`]) so a bad measure fails
+/// only itself. A tuple filter the engine refuses for a measure (a compound
+/// measure that clears part of it) fails that measure with the engine's
+/// sentence -- never an unfiltered number.
 pub async fn query_page_measures(
     bi: &BiState,
     connection: ConnectionId,
     measures: &[String],
-    filters: &[PageFilterWire],
+    filters: &PageFilterSet,
     locale: &LocaleSettings,
 ) -> Vec<(String, MeasureOutcome)> {
     let Some(engine_arc) = engine_of(bi, connection) else {
@@ -537,10 +652,11 @@ pub async fn query_page_measures(
             .collect();
         (tables, formats)
     };
-    let fields = page_filter_fields(filters, &table_names);
+    let fields = page_filter_fields(&filters.filters, &table_names);
+    let tuple_fields = tuple_filter_fields(&filters.tuple_filters, &table_names);
     let format_of = |m: &str| formats.get(&m.to_uppercase()).map(String::as_str);
 
-    match run_measure_only(bi, connection, measures, &fields).await {
+    match run_measure_only(bi, connection, measures, &fields, &tuple_fields).await {
         Ok(values) => measures
             .iter()
             .zip(values)
@@ -558,7 +674,7 @@ pub async fn query_page_measures(
                     continue;
                 }
                 let one = std::slice::from_ref(measure);
-                let outcome = match run_measure_only(bi, connection, one, &fields).await {
+                let outcome = match run_measure_only(bi, connection, one, &fields, &tuple_fields).await {
                     Ok(mut values) => outcome_of(values.pop().unwrap_or(MeasureValue::Blank), format_of(measure), locale),
                     Err(error) => classify_failure(bi, connection, measure, error).await,
                 };
@@ -606,11 +722,29 @@ impl FetchScope {
     }
 }
 
-/// The measures of one (page, model key) the pass fetches.
+/// The measures one group of bindings on a page reads from one model key. The
+/// bindings of a group share the same object OVERRIDES (P4), so they read the
+/// same filters once the model's connection is known: one Card under a `none`
+/// pair and its neighbour under the selection are two needs.
 #[derive(Debug, Clone)]
 struct MeasureNeed {
     page: identity::SheetId,
     model_key: String,
+    /// The overrides of the group's object(s), by connection id (empty: the
+    /// page's own set on every connection).
+    overrides: BTreeMap<String, PageFilterSet>,
+    measures: Vec<String>,
+}
+
+/// One query the fetch runs: a need resolved to its connection, under the
+/// object's EFFECTIVE set (its override, else the page's) and that set's
+/// signature -- the cache key the values are installed under.
+#[derive(Debug, Clone)]
+struct MeasureQuery {
+    page: identity::SheetId,
+    connection: ConnectionId,
+    signature: u64,
+    filters: PageFilterSet,
     measures: Vec<String>,
 }
 
@@ -618,7 +752,7 @@ struct MeasureNeed {
 #[derive(Debug, Default)]
 struct FetchPlan {
     needs: Vec<MeasureNeed>,
-    filters: HashMap<(identity::SheetId, String), Vec<PageFilterWire>>,
+    filters: HashMap<(identity::SheetId, String), PageFilterSet>,
     cube: Vec<CubeCall>,
     /// Every CUBE key a binding still reads (for pruning on a full refresh).
     live_cube_keys: HashSet<String>,
@@ -642,6 +776,15 @@ struct Fetched {
     cube: HashMap<String, CubeCallResult>,
 }
 
+/// The override identity a need groups by: each connection's override
+/// signature, in connection order.
+fn override_identity(overrides: &BTreeMap<String, PageFilterSet>) -> Vec<(String, u64)> {
+    overrides.iter().map(|(c, set)| (c.clone(), filter_signature(set))).collect()
+}
+
+/// (page, model key, override identity) -- how `plan_fetch` groups bindings.
+type NeedKey = (identity::SheetId, String, Vec<(String, u64)>);
+
 /// Plan a fetch (sync): the runtime is rebuilt if the store moved, the object
 /// locations and locale are copied, then the runtime alone is read and
 /// released.
@@ -652,7 +795,7 @@ fn plan_fetch(cx: &ObjectStores<'_>, scope: &FetchScope) -> FetchPlan {
     let locale = cx.state.locale.lock().map(|g| g.clone()).unwrap_or_else(|_| LocaleSettings::invariant());
 
     let Ok(runtime) = cx.state.object_binding_runtime.lock() else { return FetchPlan::default() };
-    let mut grouped: BTreeMap<(identity::SheetId, String), Vec<String>> = BTreeMap::new();
+    let mut grouped: BTreeMap<NeedKey, (BTreeMap<String, PageFilterSet>, Vec<String>)> = BTreeMap::new();
     let mut cube: Vec<CubeCall> = Vec::new();
     let mut cube_seen: HashSet<String> = HashSet::new();
     let mut live_cube_keys: HashSet<String> = HashSet::new();
@@ -680,18 +823,25 @@ fn plan_fetch(cx: &ObjectStores<'_>, scope: &FetchScope) -> FetchPlan {
             continue;
         }
         let Some(model) = &prepared.model else { continue };
-        let entry = grouped.entry((location.sheet_id, model.clone())).or_default();
+        let overrides: BTreeMap<String, PageFilterSet> = runtime
+            .object_filters
+            .get(&key.object)
+            .map(|by_connection| by_connection.iter().map(|(c, o)| (c.clone(), o.set.clone())).collect())
+            .unwrap_or_default();
+        let group: NeedKey = (location.sheet_id, model.clone(), override_identity(&overrides));
+        let entry = grouped.entry(group).or_insert_with(|| (overrides, Vec::new()));
         for measure in &prepared.measure_refs {
-            let wanted = !scope.only_missing || runtime.measure_outcome(location.sheet_id, model, measure).is_none();
-            if wanted && !entry.iter().any(|m| m.eq_ignore_ascii_case(measure)) {
-                entry.push(measure.clone());
+            let wanted = !scope.only_missing
+                || runtime.measure_outcome(location.sheet_id, &key.object, model, measure).is_none();
+            if wanted && !entry.1.iter().any(|m| m.eq_ignore_ascii_case(measure)) {
+                entry.1.push(measure.clone());
             }
         }
     }
     let needs: Vec<MeasureNeed> = grouped
         .into_iter()
-        .filter(|(_, measures)| !measures.is_empty())
-        .map(|((page, model_key), measures)| MeasureNeed { page, model_key, measures })
+        .filter(|(_, (_, measures))| !measures.is_empty())
+        .map(|((page, model_key, _), (overrides, measures))| MeasureNeed { page, model_key, overrides, measures })
         .collect();
     FetchPlan {
         filters: if needs.is_empty() { HashMap::new() } else { runtime.page_filters.clone() },
@@ -703,49 +853,90 @@ fn plan_fetch(cx: &ObjectStores<'_>, scope: &FetchScope) -> FetchPlan {
     }
 }
 
-/// Run a plan (async; holds no std guard).
-async fn fetch(bi: &BiState, plan: &FetchPlan) -> Fetched {
-    let locale = plan.locale.clone().unwrap_or_else(LocaleSettings::invariant);
-    let mut fetched = Fetched::default();
+/// Resolve each need to its connection and EFFECTIVE filter set, and merge the
+/// needs that end up reading the same (page, connection, signature) into one
+/// query. A model key that names no loaded model is recorded in `models` and
+/// produces no query. Connection table taken and released per lookup.
+fn resolve_queries(bi: &BiState, plan: &FetchPlan, models: &mut HashMap<String, Option<String>>) -> Vec<MeasureQuery> {
     let mut resolved: HashMap<String, Option<ConnectionId>> = HashMap::new();
+    let mut queries: Vec<MeasureQuery> = Vec::new();
     for need in &plan.needs {
         let connection_id = match resolved.get(&need.model_key) {
             Some(known) => *known,
             None => {
                 let id = resolve_model(bi, &need.model_key).filter(|id| engine_of(bi, *id).is_some());
                 resolved.insert(need.model_key.clone(), id);
-                fetched.models.insert(need.model_key.clone(), id.map(|i| i.to_string()));
+                models.insert(need.model_key.clone(), id.map(|i| i.to_string()));
                 id
             }
         };
         // Not connected: `measure_models` says so for every measure of it.
         let Some(connection_id) = connection_id else { continue };
         let connection = connection_id.to_string();
-        let filters = plan.filters.get(&(need.page, connection.clone())).cloned().unwrap_or_default();
+        let filters = match need.overrides.get(&connection) {
+            Some(set) => set.clone(),
+            None => plan.filters.get(&(need.page, connection)).cloned().unwrap_or_default(),
+        };
         let signature = filter_signature(&filters);
-        let values = Box::pin(query_page_measures(bi, connection_id, &need.measures, &filters, &locale)).await;
-        fetched.pages.push((need.page, connection, signature, values));
+        match queries
+            .iter_mut()
+            .find(|q| q.page == need.page && q.connection == connection_id && q.signature == signature)
+        {
+            Some(query) => {
+                for measure in &need.measures {
+                    if !query.measures.iter().any(|m| m.eq_ignore_ascii_case(measure)) {
+                        query.measures.push(measure.clone());
+                    }
+                }
+            }
+            None => queries.push(MeasureQuery {
+                page: need.page,
+                connection: connection_id,
+                signature,
+                filters,
+                measures: need.measures.clone(),
+            }),
+        }
+    }
+    queries
+}
+
+/// Run a plan (async; holds no std guard).
+async fn fetch(bi: &BiState, plan: &FetchPlan) -> Fetched {
+    let locale = plan.locale.clone().unwrap_or_else(LocaleSettings::invariant);
+    let mut fetched = Fetched::default();
+    let queries = resolve_queries(bi, plan, &mut fetched.models);
+    for query in queries {
+        let values =
+            Box::pin(query_page_measures(bi, query.connection, &query.measures, &query.filters, &locale)).await;
+        fetched.pages.push((query.page, query.connection.to_string(), query.signature, values));
     }
     fetched.cube = prefetch_cube(bi, &plan.cube).await;
     fetched
 }
 
 /// Write what a fetch brought into the runtime (sync, runtime only). For each
-/// (page, connection) fetched, entries under any OTHER signature than the one
-/// fetched and the page's current one are dropped: a filter that moved on
-/// while the query ran keeps its own newer values.
+/// (page, connection) fetched, entries are kept only under a signature this
+/// fetch brought or one that is CURRENT for some object on that page (the
+/// page's own set, or an object's override -- P4); every other entry of that
+/// (page, connection) is dropped. A filter that moved on while the query ran
+/// keeps its own newer values.
 fn install(state: &AppState, plan: &FetchPlan, fetched: Fetched) {
     let Ok(mut runtime) = state.object_binding_runtime.lock() else { return };
     for (model, connection) in fetched.models {
         runtime.measure_models.insert(model, connection);
     }
+    let mut keep: HashMap<(identity::SheetId, String), HashSet<u64>> = HashMap::new();
+    for (page, connection, signature, _) in &fetched.pages {
+        keep.entry((*page, connection.clone()))
+            .or_insert_with(|| runtime.current_signatures(*page, connection))
+            .insert(*signature);
+    }
+    runtime.measure_cache.retain(|(p, c, _, s), _| match keep.get(&(*p, c.clone())) {
+        Some(signatures) => signatures.contains(s),
+        None => true,
+    });
     for (page, connection, signature, values) in fetched.pages {
-        let current = filter_signature(
-            runtime.page_filters.get(&(page, connection.clone())).map(Vec::as_slice).unwrap_or(&[]),
-        );
-        runtime
-            .measure_cache
-            .retain(|(p, c, _, s), _| *p != page || *c != connection || *s == signature || *s == current);
         for (measure, outcome) in values {
             runtime.measure_cache.insert((page, connection.clone(), measure.to_uppercase(), signature), outcome);
         }

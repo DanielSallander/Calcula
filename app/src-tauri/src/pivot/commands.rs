@@ -10,6 +10,7 @@ use crate::pivot::totals::{
 };
 use crate::pivot::types::*;
 use crate::pivot::utils::*;
+use crate::api_types::MemberRef;
 use crate::{log_debug, log_info, log_perf, AppState};
 use crate::pivot::types::PivotState;
 use pivot_engine::{
@@ -591,6 +592,9 @@ pub(crate) fn create_pivot_core(
     row_field_names: Vec<String>,
     value_specs: Vec<(String, AggregationType)>,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     log_info!(
         "PIVOT",
         "create_pivot_table source={} dest={} dest_sheet={:?} framed={}",
@@ -800,7 +804,7 @@ pub(crate) fn create_pivot_core(
     let effect = crate::document_effect::DocumentEffect::mutates(file_state);
 
     store_view(pivot_state, pivot_id, &view);
-    let mut response = view_to_response(&view, &definition, &mut cache_mut);
+    let mut response = view_to_response(&view, &definition, &mut cache_mut, &display_locale);
 
     // The user's cells a CONFIGURED create writes over (an empty create writes
     // nothing), saved BEFORE the region exists so none is skipped as the
@@ -1188,6 +1192,9 @@ pub async fn update_pivot_fields(
     slicer_state: State<'_, crate::slicer::SlicerState>,
     request: UpdatePivotFieldsRequest,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     // Refusal-first: verify the pivot exists BEFORE minting the eager `mutates`
     // token, so a refused command leaves the document clean.
     let effect = pivot_mutation_token(&state, &pivot_state, &file_state, request.pivot_id)?;
@@ -1368,7 +1375,7 @@ pub async fn update_pivot_fields(
     emit_pivot_progress(&window, pivot_id, "Preparing response...", 2, 4);
 
     let t1 = Instant::now();
-    let mut response = view_to_response(&view, &definition, &mut cache);
+    let mut response = view_to_response(&view, &definition, &mut cache, &display_locale);
     let serialize_ms = t1.elapsed().as_secs_f64() * 1000.0;
     let auto_fit = definition.layout.auto_fit_column_widths;
     let destination = definition.destination;
@@ -1497,6 +1504,9 @@ pub fn toggle_pivot_group(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: ToggleGroupRequest,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     // Refusal-first: verify the pivot exists BEFORE minting the eager `mutates`
     // token, so a refused command leaves the document clean.
     let effect = pivot_mutation_token(&state, &pivot_state, &file_state, request.pivot_id)?;
@@ -1637,7 +1647,7 @@ pub fn toggle_pivot_group(
                 let calc_ms = t_calc.elapsed().as_secs_f64() * 1000.0;
 
                 let t_resp = Instant::now();
-                let mut response = view_to_response(&view, definition, cache);
+                let mut response = view_to_response(&view, definition, cache, &display_locale);
                 let serialize_ms = t_resp.elapsed().as_secs_f64() * 1000.0;
 
                 store_view(&pivot_state, pivot_id, &view);
@@ -1672,7 +1682,7 @@ pub fn toggle_pivot_group(
             let toggle_ms = t_toggle.elapsed().as_secs_f64() * 1000.0;
 
             let t_resp = Instant::now();
-            let mut response = view_to_response(view, definition, cache);
+            let mut response = view_to_response(view, definition, cache, &display_locale);
             let serialize_ms = t_resp.elapsed().as_secs_f64() * 1000.0;
 
             // Store updated view
@@ -1708,7 +1718,7 @@ pub fn toggle_pivot_group(
     let calc_ms = t_calc.elapsed().as_secs_f64() * 1000.0;
 
     let t_resp = Instant::now();
-    let mut response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache, &display_locale);
     let serialize_ms = t_resp.elapsed().as_secs_f64() * 1000.0;
 
     // Store view for windowed cell fetching
@@ -1742,10 +1752,13 @@ pub fn toggle_pivot_group(
 /// Gets the current view of a pivot table
 #[tauri::command]
 pub fn get_pivot_view(
-    _state: State<AppState>,
+    state: State<AppState>,
     pivot_state: State<'_, PivotState>,
     pivot_id: Option<PivotId>,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     // Use provided ID or active pivot
     let id = match pivot_id {
         Some(id) => id,
@@ -1768,7 +1781,18 @@ pub fn get_pivot_view(
     let calc_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     let t1 = Instant::now();
-    let response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache, &display_locale);
+    // A BI pivot's cells carry their members' keys (P4). Same lock order as
+    // the refresh: pivot_tables, then bi_metadata (read, released here).
+    if let Ok(bi_meta) = pivot_state.bi_metadata.read() {
+        if let Some(meta) = bi_meta.get(&id) {
+            crate::pivot::utils::fill_group_members(
+                &mut response,
+                &crate::pivot::utils::bi_placed_field_keys(definition, meta),
+                cache,
+            );
+        }
+    }
     let serialize_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
     log_perf!(
@@ -1788,11 +1812,15 @@ pub fn get_pivot_view(
 /// Fetches a window of cell data from a stored PivotView (for scroll-triggered loading).
 #[tauri::command]
 pub fn get_pivot_cell_window(
+    state: State<'_, AppState>,
     pivot_state: State<'_, PivotState>,
     pivot_id: PivotId,
     start_row: usize,
     row_count: usize,
 ) -> Result<PivotCellWindowResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     let views = pivot_state.views.lock().unwrap();
     let view = views
         .get(&pivot_id)
@@ -1807,7 +1835,7 @@ pub fn get_pivot_cell_window(
         });
     }
 
-    let rows = extract_cell_window(view, start_row, row_count);
+    let rows = extract_cell_window(view, start_row, row_count, &display_locale);
     let version = view.version;
     drop(views);
 
@@ -2514,6 +2542,82 @@ pub(crate) fn value_column_order_to_defs(order: &[pivot_engine::ValueColumnRef])
         .collect()
 }
 
+/// The design query that reproduces a BI pivot's GRID from its rebuilt
+/// request (`bi_request_from_definition`) -- what `run_bi_pivot_filtered_view`
+/// runs under another visual's selection (P4). PURE.
+///
+/// - ROWS, COLUMNS and FILTERS map onto the design query's own zones, each
+///   with its hidden items (the filter area the real pivot SHOWS is the
+///   query's FILTERS, placed as filter fields on the report route).
+/// - The SLICER fields (their hidden items) and every stored `engine_filters`
+///   entry (its `selected_items` as an inclusion, at its own level) become
+///   ENGINE-ROUTED `page_filter_fields`, never FILTERS: the real pivot shows
+///   no filter row for them, and the displayed grid must have its shape.
+/// - Values, calculated fields, value-column order and layout carry over.
+///
+/// It REFUSES what a design query cannot reproduce yet -- row or column
+/// hierarchies, a placed calculation group, LOOKUP columns -- each with a
+/// sentence the pivot's badge can show.
+pub(crate) fn design_query_from_bi_pivot(
+    req: &UpdateBiPivotFieldsRequest,
+    connection_id: crate::bi::types::ConnectionId,
+    engine_filters: &[pivot_engine::EngineFilter],
+) -> Result<crate::pivot::headless::DesignQueryRequest, String> {
+    use crate::pivot::headless::{DesignQueryFieldRef, DesignQueryRequest};
+    let refuse = |what: &str| format!("This PivotTable uses {what}, which a visual's selection cannot filter yet.");
+    if !req.row_hierarchies.is_empty() || !req.column_hierarchies.is_empty() {
+        return Err(refuse("hierarchies"));
+    }
+    let zones = || {
+        req.row_fields
+            .iter()
+            .chain(req.column_fields.iter())
+            .chain(req.filter_fields.iter())
+            .chain(req.slicer_fields.iter().flatten())
+    };
+    if zones().any(|f| f.is_calc_group()) {
+        return Err(refuse("a calculation group"));
+    }
+    if zones().any(|f| f.is_lookup) {
+        return Err(refuse("LOOKUP columns"));
+    }
+    let zone_field = |f: &BiFieldRef| DesignQueryFieldRef {
+        table: f.table.clone(),
+        column: f.column.clone(),
+        is_lookup: false,
+        hidden_items: f.hidden_items.clone(),
+        included_items: None,
+        level: None,
+    };
+    let mut page_filter_fields: Vec<DesignQueryFieldRef> = req
+        .slicer_fields
+        .iter()
+        .flatten()
+        .filter(|f| !f.hidden().is_empty())
+        .map(zone_field)
+        .collect();
+    page_filter_fields.extend(engine_filters.iter().map(|ef| DesignQueryFieldRef {
+        table: ef.table.clone(),
+        column: ef.column.clone(),
+        is_lookup: false,
+        hidden_items: None,
+        included_items: Some(ef.selected_items.clone()),
+        level: Some(ef.level),
+    }));
+    Ok(DesignQueryRequest {
+        connection_id,
+        row_fields: req.row_fields.iter().map(zone_field).collect(),
+        column_fields: req.column_fields.iter().map(zone_field).collect(),
+        value_fields: req.value_fields.clone(),
+        filter_fields: req.filter_fields.iter().map(zone_field).collect(),
+        page_filter_fields,
+        tuple_filters: Vec::new(),
+        calculated_fields: req.calculated_fields.clone(),
+        value_column_order: req.value_column_order.clone(),
+        layout: req.layout.clone(),
+    })
+}
+
 /// Rebuild the `update_bi_pivot_fields` request that reproduces a BI pivot's
 /// stored definition -- what a refresh re-runs and what an ensure extends.
 ///
@@ -2707,28 +2811,63 @@ pub(crate) fn model_slicer_reads_connection(
             }))
 }
 
-/// The page's active model slicers for one BI pivot, in a deterministic order.
-/// Pure over a snapshot of the slicer store.
+/// The page fold of one BI pivot (P4 DC-9): the page's active model slicers
+/// that APPLY their selection to it, and the ones whose visual interaction
+/// with it is `none`, which the fold CLEARS instead -- their level-1 hidden
+/// items emptied and the pin each owns dropped, so a pivot whose pair moved to
+/// `none` comes out of its next rebuild unfiltered by that slicer.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct PageSlicerFold {
+    pub apply: Vec<PageModelSlicer>,
+    pub clear: Vec<PageModelSlicer>,
+}
+
+/// The page's active model slicers for one BI pivot, in a deterministic order
+/// (by slicer id), split by the canvas's visual interactions. Pure over a
+/// snapshot of the slicer store, of `sheet_ids` and of the page's
+/// interactions (taken BEFORE the slicer lock, P4 2.5 lock order item 2).
+///
+/// THE PAGE is matched by sheet IDENTITY (P4 DC-4): a slicer is on the
+/// pivot's page when `sheet_ids[slicer.sheet_index]` is `dest_sheet_id`. A
+/// slicer reaches the pivot when it reads the pivot's connection, holds a
+/// selection, and names a column of the pivot's model; it then goes to
+/// `apply`, unless `interactions` stores its pair to `pivot_ref` as `none`,
+/// in which case it goes to `clear`. `interactions` is `None` for a page that
+/// is not a canvas (a worksheet has no interactions: every slicer applies).
 pub(crate) fn page_model_slicers<'s, I>(
     slicers: I,
     meta: &BiPivotMetadata,
-    dest_sheet: usize,
-) -> Vec<PageModelSlicer>
+    dest_sheet_id: identity::SheetId,
+    sheet_ids: &[identity::SheetId],
+    pivot_ref: &::persistence::CanvasObjectRef,
+    interactions: Option<&::persistence::CanvasInteractions>,
+) -> PageSlicerFold
 where
     I: IntoIterator<Item = &'s crate::slicer::Slicer>,
 {
-    let mut out: Vec<PageModelSlicer> = slicers
-        .into_iter()
-        .filter(|s| s.sheet_index == dest_sheet)
-        .filter(|s| model_slicer_reads_connection(s, meta.connection_id, meta.data_source_id.as_deref()))
-        .filter_map(|s| {
-            let selected = s.selected_items.clone()?;
-            let (table, column) = split_model_column_key(&s.field_name, meta).ok()?;
-            Some(PageModelSlicer { slicer_id: s.id, table, column, selected, level: s.filter_level })
-        })
-        .collect();
-    out.sort_by(|a, b| a.slicer_id.cmp(&b.slicer_id));
-    out
+    let mut fold = PageSlicerFold::default();
+    for s in slicers {
+        if sheet_ids.get(s.sheet_index) != Some(&dest_sheet_id) {
+            continue;
+        }
+        if !model_slicer_reads_connection(s, meta.connection_id, meta.data_source_id.as_deref()) {
+            continue;
+        }
+        let Some(selected) = s.selected_items.clone() else { continue };
+        let Ok((table, column)) = split_model_column_key(&s.field_name, meta) else { continue };
+        let entry = PageModelSlicer { slicer_id: s.id, table, column, selected, level: s.filter_level };
+        let slicer_ref = ::persistence::CanvasObjectRef { kind: "slicer".to_string(), id: s.id.to_string() };
+        let ignored = interactions.and_then(|i| i.explicit(&slicer_ref, pivot_ref))
+            == Some(::persistence::VisualInteractionMode::None);
+        if ignored {
+            fold.clear.push(entry);
+        } else {
+            fold.apply.push(entry);
+        }
+    }
+    fold.apply.sort_by(|a, b| a.slicer_id.cmp(&b.slicer_id));
+    fold.clear.sort_by(|a, b| a.slicer_id.cmp(&b.slicer_id));
+    fold
 }
 
 /// Whether a cache value is one of `selected`, spelled either the cache's way
@@ -2789,38 +2928,40 @@ pub(crate) fn hidden_for_selection(
 /// What the list a level-1 selection was made from offered for the BLANK --
 /// which decides what the selection means for the blank (NULL) records and
 /// for the EMPTY-STRING members (`CacheValue::Text("")`).
+///
+/// ONE BLANK MEMBER (orchestrator ruling Q8, P2 S4). A NULL and an empty
+/// string are one member, keyed "" and labelled "(Blank)", in EVERY list:
+/// a pivot's own dropdowns (`pivot::utils::field_members`), a pivot slicer
+/// and a model list alike. The pivot's own lists used to keep "(blank)" (the
+/// NULL records) and "" (the empty strings) as two items -- a `Separate`
+/// listing -- but once the blank member's KEY is "" the two cannot be told
+/// apart by key, so the own lists fold exactly as a model list does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BlankListing {
     /// No blank item: the selection cannot say, so the NULL and the ""
     /// records are both left showing.
     NotListed,
-    /// A pivot's OWN list (its header and filter-cell dropdowns,
-    /// `get_pivot_field_unique_values`): "(blank)" is the NULL records' item
-    /// and "" is an item of its own. Each is kept exactly when the selection
-    /// names it -- and read back that way (`pivot_field_info_core`).
-    Separate,
     /// A PIVOT slicer's list (`slicer::commands::get_pivot_field_values`):
-    /// ONE "(blank)", offered only when the column has NULL records, and
-    /// never a "" item -- so the "" rows have no item of their own. With
-    /// "(blank)" offered this is [`BlankListing::FoldsEmpty`] (the "" rows
-    /// follow it); without it, [`BlankListing::NotListed`]. Resolved against
-    /// the records the mask is computed over ([`BlankListing::resolved`]),
-    /// which a BI re-query may have replaced since the request was read.
-    /// Classed as `Separate` before (the review of wave D), East + (blank)
-    /// hid the "" rows with no slicer item that could bring them back.
+    /// the blank member, offered only when the column HAS one (NULL records
+    /// or an empty-string item). With it offered this is
+    /// [`BlankListing::FoldsEmpty`]; without it, [`BlankListing::NotListed`].
+    /// Resolved against the records the mask is computed over
+    /// ([`BlankListing::resolved`]), which a BI re-query may have replaced
+    /// since the request was read.
     PivotSlicer,
-    /// A MODEL's value list (a model slicer, a ribbon filter): ONE "(blank)"
-    /// for the NULL and the "" rows, as the engine's pinned filter reads it.
-    /// A selection naming it -- "(blank)" in any case, or "" -- keeps both;
-    /// one that does not hides both (wave D, X2: "East + (blank)" hid the ""
-    /// rows the user had just chosen).
+    /// A list that offers ONE blank member for the NULL and the "" rows: a
+    /// MODEL's value list (a model slicer, a ribbon filter), as the engine's
+    /// pinned filter reads it, and a pivot's own dropdowns. A selection naming
+    /// it -- "" (its key) or "(blank)" in any case -- keeps both; one that
+    /// does not hides both (wave D, X2: "East + (blank)" hid the "" rows the
+    /// user had just chosen).
     FoldsEmpty,
 }
 
 impl BlankListing {
-    /// The listing over a column that has blank (NULL) records exactly when
-    /// `has_blank`: a [`BlankListing::PivotSlicer`] offered its "(blank)"
-    /// only then. Every other listing is what it says.
+    /// The listing over a column that has a blank member exactly when
+    /// `has_blank`: a [`BlankListing::PivotSlicer`] offered it only then.
+    /// Every other listing is what it says.
     pub(crate) fn resolved(self, has_blank: bool) -> BlankListing {
         match self {
             BlankListing::PivotSlicer if has_blank => BlankListing::FoldsEmpty,
@@ -2839,16 +2980,14 @@ pub(crate) fn hidden_for_selection_listed(
     listing: BlankListing,
 ) -> Vec<String> {
     let has_blank = idx < cache.fields.len() && cache.has_blank_values(idx);
-    let listing = listing.resolved(has_blank);
-    // Whether the selection keeps the blank ITEM (the NULL records).
+    let listing = listing.resolved(crate::pivot::utils::has_blank_member(cache, idx));
+    // Whether the selection keeps the blank MEMBER (the NULL records and the
+    // empty strings, ruling Q8).
     let names_blank = match listing {
         BlankListing::FoldsEmpty => selection_names_blank(selected),
-        BlankListing::Separate => selected.iter().any(|s| pivot_engine::is_blank_item_label(s)),
         // `PivotSlicer` never survives `resolved`.
         BlankListing::NotListed | BlankListing::PivotSlicer => true,
     };
-    // Whether "" belongs to that item rather than being an item of its own.
-    let empty_is_blank = matches!(listing, BlankListing::FoldsEmpty | BlankListing::NotListed);
     let Some(field_cache) = cache.fields.get_mut(idx) else { return Vec::new() };
     let sorted_ids = field_cache.sorted_ids().to_vec();
     let mut hidden: Vec<String> = sorted_ids
@@ -2856,7 +2995,7 @@ pub(crate) fn hidden_for_selection_listed(
         .filter(|&&id| id != VALUE_ID_EMPTY)
         .filter_map(|&id| field_cache.get_value(id).cloned())
         .filter(|v| {
-            if empty_is_blank && matches!(v, pivot_engine::CacheValue::Text(s) if s.is_empty()) {
+            if matches!(v, pivot_engine::CacheValue::Text(s) if s.is_empty()) {
                 !names_blank
             } else {
                 !cache_value_is_selected(v, selected)
@@ -2870,17 +3009,18 @@ pub(crate) fn hidden_for_selection_listed(
     hidden
 }
 
-/// Whether a selection names the BLANK item of a MODEL list: `(blank)` in any
-/// case, or the empty string (a model's NULL member).
+/// Whether a selection names the BLANK member: its key "" (ruling Q8) or the
+/// legacy header text `(blank)` in any case.
 pub(crate) fn selection_names_blank(selected: &[String]) -> bool {
-    selected.iter().any(|s| s.is_empty() || pivot_engine::is_blank_item_label(s))
+    selected.iter().any(|s| pivot_engine::is_blank_member_key(s))
 }
 
 /// Whether a MODEL's value list -- the one every model slicer, ribbon filter
 /// and pinned pivot slicer lists its items from
 /// (`bi::commands::bi_get_column_values_core`) -- offers the blank (NULL)
-/// member. It does (wave C, W6): NULL and empty values are listed last as
-/// `pivot_engine::BLANK_ITEM_LABEL`, so a level-1 selection made from a model
+/// member. It does (wave C, W6): NULL and empty values are listed last as ONE
+/// blank member, keyed "" since ruling Q8 (`MemberRef::blank()`; the legacy
+/// "(blank)" still names it), so a level-1 selection made from a model
 /// list that does not name it hides the blank rows, exactly like a pivot's own
 /// lists ([`BlankListing`]); a pinned one travels to
 /// the engine, which reads the label as BLANK. The test
@@ -2893,13 +3033,12 @@ pub(crate) const MODEL_VALUE_LISTS_NAME_THE_BLANK: bool = true;
 ///
 /// A write NAMING A SLICER was made from that slicer's list, whichever key it
 /// uses (a range pivot is written by field index, a BI pivot by model key):
-/// a PIVOT slicer lists its pivot's cache values with one "(blank)" and no ""
-/// item ([`BlankListing::PivotSlicer`]); a MODEL slicer lists the model's
-/// values ([`MODEL_VALUE_LISTS_NAME_THE_BLANK`]), one "(blank)" for both.
-/// Otherwise the key decides: a write by cache field index comes from the
-/// pivot's own dropdowns, which list "(blank)" and "" apart
-/// ([`BlankListing::Separate`]); a write by MODEL KEY naming no slicer is a
-/// ribbon filter, which lists the model's values.
+/// a PIVOT slicer lists its pivot's cache values with the blank member only
+/// when the column has one ([`BlankListing::PivotSlicer`]); a MODEL slicer
+/// lists the model's values ([`MODEL_VALUE_LISTS_NAME_THE_BLANK`]), one blank
+/// member for both. Otherwise the write comes from the pivot's own dropdowns
+/// or a ribbon filter, and both list ONE blank member for the NULL and the ""
+/// rows ([`BlankListing::FoldsEmpty`], ruling Q8).
 ///
 /// The slicer is checked FIRST (the review of wave D): the field-index
 /// shortcut classed a range pivot's slicer as the pivot's own list, and its
@@ -2923,7 +3062,9 @@ pub(crate) fn selection_list_blank_listing(
     match slicer_is_model {
         Some(true) => model_list,
         Some(false) => BlankListing::PivotSlicer,
-        None if request.bi_field_key.is_none() => BlankListing::Separate,
+        // A pivot's own dropdown (a write by cache field index) lists the one
+        // blank member exactly as a model list does (`field_members`).
+        None if request.bi_field_key.is_none() => BlankListing::FoldsEmpty,
         None => model_list,
     }
 }
@@ -2934,6 +3075,21 @@ pub(crate) fn selection_list_blank_listing(
 ///
 /// `model_key` ("Table.Column", BI pivots) is stamped on the slicer filter so
 /// it is identified by its column, never by the bare cache name.
+/// The hidden items the field at cache index `idx` carries, looked up the way
+/// [`set_hidden_items_at`] writes them: a row/column/filter field, else the
+/// slicer filter. Empty when none holds the index.
+fn hidden_items_at(definition: &PivotDefinition, idx: usize) -> Vec<String> {
+    definition
+        .row_fields
+        .iter()
+        .chain(definition.column_fields.iter())
+        .find(|f| f.source_index == idx)
+        .map(|f| f.hidden_items.clone())
+        .or_else(|| definition.filter_fields.iter().find(|f| f.field.source_index == idx).map(|f| f.field.hidden_items.clone()))
+        .or_else(|| definition.slicer_filters.iter().find(|sf| sf.source_index == idx).map(|sf| sf.hidden_items.clone()))
+        .unwrap_or_default()
+}
+
 fn set_hidden_items_at(
     definition: &mut PivotDefinition,
     idx: usize,
@@ -2972,7 +3128,11 @@ fn set_hidden_items_at(
 /// The current view of a pivot, rendered without touching the document (the
 /// no-op answer of an ensure on an empty pivot or a clear of a column the
 /// pivot does not carry).
-fn current_pivot_view(pivot_state: &PivotState, pivot_id: PivotId) -> Result<PivotViewResponse, String> {
+fn current_pivot_view(
+    pivot_state: &PivotState,
+    pivot_id: PivotId,
+    display_locale: &engine::LocaleSettings,
+) -> Result<PivotViewResponse, String> {
     let mut pivot_tables = pivot_state
         .pivot_tables
         .write(&pivot_render_effect())
@@ -2982,7 +3142,7 @@ fn current_pivot_view(pivot_state: &PivotState, pivot_id: PivotId) -> Result<Piv
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
     let view = safe_calculate_pivot(definition, cache);
     store_view(pivot_state, pivot_id, &view);
-    Ok(view_to_response(&view, definition, cache))
+    Ok(view_to_response(&view, definition, cache, display_locale))
 }
 
 /// Refresh a BI pivot's model snapshot (`model_tables`, `measures`,
@@ -3360,6 +3520,9 @@ pub async fn refresh_pivot_cache(
     slicer_state: State<'_, crate::slicer::SlicerState>,
     pivot_id: PivotId,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     // Refusal-first: verify the pivot exists BEFORE minting the eager `mutates`
     // token, so a refused command leaves the document clean.
     let effect = pivot_mutation_token(&state, &pivot_state, &file_state, pivot_id)?;
@@ -3497,7 +3660,7 @@ pub async fn refresh_pivot_cache(
     emit_pivot_progress(&window, pivot_id, "Preparing response...", 2, 4);
 
     let t1 = Instant::now();
-    let mut response = view_to_response(&view, &definition, &mut cache);
+    let mut response = view_to_response(&view, &definition, &mut cache, &display_locale);
     let serialize_ms = t1.elapsed().as_secs_f64() * 1000.0;
     let framed = definition.canvas_frame.is_some();
     let style = definition.style.clone();
@@ -3954,23 +4117,28 @@ pub(crate) fn pivot_regions_for_sheet(state: &AppState, pivot_state: &PivotState
 /// Get unique values for a pivot field (for filter dropdowns)
 #[tauri::command]
 pub fn get_pivot_field_unique_values(
-    _state: State<AppState>,
+    state: State<AppState>,
     pivot_state: State<'_, PivotState>,
     pivot_id: PivotId,
     field_index: usize,
 ) -> Result<FieldUniqueValuesResponse, String> {
-    pivot_field_unique_values_core(&pivot_state, pivot_id, field_index)
+    // Leaf lock first: taken, cloned and dropped before `pivot_tables`.
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
+    pivot_field_unique_values_core(&pivot_state, pivot_id, field_index, &display_locale)
 }
 
 /// [`get_pivot_field_unique_values`] over a borrowed store.
 ///
-/// A column with BLANK records lists the blank item LAST, as `(blank)` (wave
-/// B, A2): Excel lists it in a pivot field's filter, and without it the
-/// dropdown could neither show nor hide the blank rows.
+/// The field's MEMBERS (`{ key, label }`, the label in `locale`). A column
+/// with a BLANK member -- NULL records or an empty string, ONE member under
+/// ruling Q8 -- lists it LAST, key "" and label "(Blank)" (wave B, A2): Excel
+/// lists it in a pivot field's filter, and without it the dropdown could
+/// neither show nor hide the blank rows.
 pub(crate) fn pivot_field_unique_values_core(
     pivot_state: &PivotState,
     pivot_id: PivotId,
     field_index: usize,
+    locale: &engine::LocaleSettings,
 ) -> Result<FieldUniqueValuesResponse, String> {
     log_debug!(
         "PIVOT",
@@ -3983,11 +4151,10 @@ pub(crate) fn pivot_field_unique_values_core(
     let (_, cache) = pivot_tables
         .get_mut(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
-    let has_blank = field_index < cache.fields.len() && cache.has_blank_values(field_index);
 
     // Get field cache
     let field = cache.fields
-        .get_mut(field_index)
+        .get(field_index)
         .ok_or_else(|| format!("Field index {} out of range", field_index))?;
 
     let field_name = field.name.clone();
@@ -4000,43 +4167,29 @@ pub(crate) fn pivot_field_unique_values_core(
         let bi_meta = pivot_state.bi_metadata.read().unwrap();
         if let Some(meta) = bi_meta.get(&pivot_id) {
             if let Some(g) = meta.calculation_groups.iter().find(|g| g.name == field_name) {
+                // A calculation-group item is its own name: key = label.
                 return Ok(FieldUniqueValuesResponse {
                     field_index,
                     field_name,
-                    unique_values: g.items.iter().map(|i| i.name.clone()).collect(),
+                    members: g.items.iter().map(|i| MemberRef::verbatim(i.name.clone())).collect(),
                 });
             }
         }
     }
 
-    // Collect unique values as strings
-    // Clone sorted_ids to end the mutable borrow before calling get_value
-    let sorted_ids = field.sorted_ids().to_vec();
-    
-    let mut unique_values: Vec<String> = sorted_ids
-        .iter()
-        .filter_map(|&id| {
-            if id == VALUE_ID_EMPTY {
-                return None;
-            }
-            field.get_value(id).map(|value| cache_value_to_string(value))
-        })
-        .collect();
-    if has_blank {
-        unique_values.push(pivot_engine::BLANK_ITEM_LABEL.to_string());
-    }
+    let members = crate::pivot::utils::field_members(cache, field_index, locale);
 
     log_debug!(
         "PIVOT",
-        "get_pivot_field_unique_values returning {} unique values for field '{}'",
-        unique_values.len(),
+        "get_pivot_field_unique_values returning {} members for field '{}'",
+        members.len(),
         field_name
     );
 
     Ok(FieldUniqueValuesResponse {
         field_index,
         field_name,
-        unique_values,
+        members,
     })
 }
 
@@ -4424,6 +4577,9 @@ pub(crate) fn change_pivot_data_source_core(
     progress: &dyn Fn(&str, u32, u32),
     request: ChangePivotDataSourceRequest,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     let pivot_id = request.pivot_id;
     log_info!(
         "PIVOT",
@@ -4629,7 +4785,7 @@ pub(crate) fn change_pivot_data_source_core(
         let (_def, cache) = pivot_tables.get(&pivot_id).unwrap();
         cache.clone()
     };
-    let mut response = view_to_response(&view, &definition, &mut final_cache);
+    let mut response = view_to_response(&view, &definition, &mut final_cache, &display_locale);
     response.overwritten_cell_count = overwritten;
 
     // Repointing a pivot at a different range is ONE undoable action, recorded
@@ -4791,6 +4947,9 @@ pub fn update_pivot_layout(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: UpdatePivotLayoutRequest,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     log_info!("PIVOT", "update_pivot_layout pivot_id={}", request.pivot_id);
 
     let (effect, mut pivot_tables) = pivot_write(&state, &pivot_state, &file_state, request.pivot_id)?;
@@ -4836,7 +4995,7 @@ pub fn update_pivot_layout(
     // Recalculate view
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let mut response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache, &display_locale);
 
     // Get destination info
     let destination = definition.destination;
@@ -5018,6 +5177,9 @@ pub fn add_pivot_hierarchy(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: AddHierarchyRequest,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     log_info!(
         "PIVOT",
         "add_pivot_hierarchy pivot_id={} field={} axis={:?}",
@@ -5090,7 +5252,7 @@ pub fn add_pivot_hierarchy(
     // Recalculate view
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let mut response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache, &display_locale);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -5116,6 +5278,9 @@ pub fn remove_pivot_hierarchy(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: RemoveHierarchyRequest,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     log_info!(
         "PIVOT",
         "remove_pivot_hierarchy pivot_id={} axis={:?} pos={}",
@@ -5167,7 +5332,7 @@ pub fn remove_pivot_hierarchy(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let mut response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache, &display_locale);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -5193,6 +5358,9 @@ pub fn move_pivot_field(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: MoveFieldRequest,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     log_info!(
         "PIVOT",
         "move_pivot_field pivot_id={} field={} target={:?}",
@@ -5302,7 +5470,7 @@ pub fn move_pivot_field(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let mut response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache, &display_locale);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -5328,6 +5496,9 @@ pub fn set_pivot_aggregation(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: SetAggregationRequest,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     log_info!(
         "PIVOT",
         "set_pivot_aggregation pivot_id={} field={} func={:?}",
@@ -5356,7 +5527,7 @@ pub fn set_pivot_aggregation(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let mut response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache, &display_locale);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -5406,6 +5577,9 @@ pub(crate) fn set_pivot_number_format_core(
     recalc: PivotRecalcStates<'_>,
     request: SetNumberFormatRequest,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     log_info!(
         "PIVOT",
         "set_pivot_number_format pivot_id={} field={} format={}",
@@ -5434,7 +5608,7 @@ pub(crate) fn set_pivot_number_format_core(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(pivot_state, request.pivot_id, &view);
-    let mut response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache, &display_locale);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -5520,6 +5694,9 @@ pub(crate) async fn apply_pivot_filter_core_keeping(
     ctx: &PivotCmdCtx<'_>,
     request: ApplyPivotFilterRequest,
 ) -> Result<(PivotViewResponse, FilterWriteKeep), String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(ctx.state);
     // The reconcile's re-apply records nothing anywhere below: the ensure,
     // the re-query and the overwrite step all read `ctx.record_undo`.
     let quiet;
@@ -5575,7 +5752,7 @@ pub(crate) async fn apply_pivot_filter_core_keeping(
                     request.pivot_id,
                     key
                 );
-                return current_pivot_view(pivot_state, request.pivot_id).map(|r| (r, kept));
+                return current_pivot_view(pivot_state, request.pivot_id, &display_locale).map(|r| (r, kept));
             }
             EnsuredBiField::NotCarried => {
                 log_info!(
@@ -5584,7 +5761,7 @@ pub(crate) async fn apply_pivot_filter_core_keeping(
                     request.pivot_id,
                     key
                 );
-                return current_pivot_view(pivot_state, request.pivot_id).map(|r| (r, kept));
+                return current_pivot_view(pivot_state, request.pivot_id, &display_locale).map(|r| (r, kept));
             }
         },
         None => (
@@ -5850,7 +6027,7 @@ pub(crate) async fn apply_pivot_filter_core_keeping(
         } else {
             let view = safe_calculate_pivot(definition, cache);
             store_view(pivot_state, request.pivot_id, &view);
-            let mut response = view_to_response(&view, definition, cache);
+            let mut response = view_to_response(&view, definition, cache, &display_locale);
 
             let destination = definition.destination;
             let pivot_id = definition.id;
@@ -6185,6 +6362,9 @@ pub(crate) async fn clear_pivot_filter_core_keeping(
     ctx: &PivotCmdCtx<'_>,
     request: ClearPivotFilterRequest,
 ) -> Result<(PivotViewResponse, FilterWriteKeep), String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(ctx.state);
     let quiet;
     let ctx: &PivotCmdCtx<'_> = if request.reconcile {
         quiet = PivotCmdCtx { record_undo: false, ..*ctx };
@@ -6222,7 +6402,7 @@ pub(crate) async fn clear_pivot_filter_core_keeping(
             match resolved {
                 Some((idx, key)) => (idx, Some(key)),
                 None => {
-                    return current_pivot_view(pivot_state, request.pivot_id).map(|r| (r, FilterWriteKeep::default()))
+                    return current_pivot_view(pivot_state, request.pivot_id, &display_locale).map(|r| (r, FilterWriteKeep::default()))
                 }
             }
         }
@@ -6429,6 +6609,9 @@ pub(crate) fn clear_pivot_filter_local(
     field_index: usize,
     model_key: Option<&(String, String)>,
 ) -> Result<FilterStep, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     let (effect, mut pivot_tables) = pivot_write(state, pivot_state, file_state, pivot_id)?;
     let (definition, cache) = pivot_tables
         .get_mut(&pivot_id)
@@ -6501,7 +6684,7 @@ pub(crate) fn clear_pivot_filter_local(
     } else {
         let view = safe_calculate_pivot(definition, cache);
         store_view(pivot_state, pivot_id, &view);
-        let mut response = view_to_response(&view, definition, cache);
+        let mut response = view_to_response(&view, definition, cache, &display_locale);
 
         let destination = definition.destination;
 
@@ -6531,6 +6714,9 @@ pub fn sort_pivot_field(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: SortPivotFieldRequest,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     log_info!(
         "PIVOT",
         "sort_pivot_field pivot_id={} field={} by={:?}",
@@ -6565,7 +6751,7 @@ pub fn sort_pivot_field(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let mut response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache, &display_locale);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -6599,10 +6785,11 @@ pub fn get_pivot_field_info(
 /// `get_pivot_field_unique_values`, which lists `(blank)` last: without it
 /// here, `(blank)` showed UNCHECKED while its rows were visible, and any OK
 /// then sent a selection without it -- hiding blank rows the user never
-/// touched. Listed last when the column has blank records, visible unless a
-/// hidden item names it by its label (any case -- "" is an item of its own),
-/// and in the manual filter's selection when visible -- the filter-cell rule
-/// of `view_to_response`.
+/// touched. Listed last when the column has a blank member (NULL records or
+/// an empty string -- ONE member under ruling Q8, named by its key ""),
+/// visible unless a hidden item names it ("" or "(blank)" in any case), and
+/// in the manual filter's selection when visible -- the filter-cell rule of
+/// `view_to_response`. Every item is named by its member KEY.
 pub(crate) fn pivot_field_info_core(
     pivot_state: &PivotState,
     pivot_id: PivotId,
@@ -6612,7 +6799,7 @@ pub(crate) fn pivot_field_info_core(
     let (definition, cache) = pivot_tables
         .get_mut(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
-    let has_blank = field_index < cache.fields.len() && cache.has_blank_values(field_index);
+    let has_blank = crate::pivot::utils::has_blank_member(cache, field_index);
 
     // Get field name from cache
     let field_name = cache.field_name(field_index)
@@ -6629,7 +6816,9 @@ pub(crate) fn pivot_field_info_core(
     let show_all_items = hidden_items.is_empty();
     let is_filtered = !hidden_items.is_empty();
 
-    // Get unique values and build items
+    // Get unique values and build items. Each item is NAMED BY ITS MEMBER KEY
+    // (`FieldCache::member_key`), the spelling `get_pivot_field_unique_values`
+    // lists it under, so the header dropdown's checked set and its list agree.
     let mut items: Vec<PivotItemInfo> = if let Some(field_cache) = cache.fields.get_mut(field_index) {
         let sorted_ids = field_cache.sorted_ids().to_vec();
         sorted_ids.iter()
@@ -6637,15 +6826,21 @@ pub(crate) fn pivot_field_info_core(
                 if id == VALUE_ID_EMPTY {
                     return None;
                 }
-                field_cache.get_value(id).map(|value| {
-                    let name = cache_value_to_string(value);
-                    let visible = !hidden_items.contains(&name);
-                    PivotItemInfo {
+                field_cache.get_value(id).and_then(|value| {
+                    // The empty string is the blank member (ruling Q8), listed
+                    // once below.
+                    if matches!(value, pivot_engine::CacheValue::Text(s) if s.is_empty()) {
+                        return None;
+                    }
+                    let name = field_cache.member_key(id);
+                    let visible = !crate::pivot::utils::hidden_names_member(&hidden_items, &name)
+                        && !hidden_items.contains(&cache_value_to_string(value));
+                    Some(PivotItemInfo {
                         id,
                         name,
                         is_expanded: true, // Default to expanded
                         visible,
-                    }
+                    })
                 })
             })
             .collect()
@@ -6655,14 +6850,12 @@ pub(crate) fn pivot_field_info_core(
     if has_blank {
         items.push(PivotItemInfo {
             id: VALUE_ID_EMPTY,
-            name: pivot_engine::BLANK_ITEM_LABEL.to_string(),
+            // THE blank member: key "" (ruling Q8) -- the NULL records and
+            // the empty strings are ONE item, hidden by either spelling of it
+            // ("" or "(blank)" in any case), exactly as the engine resolves it.
+            name: pivot_engine::BLANK_MEMBER_KEY.to_string(),
             is_expanded: true,
-            // By its label only: "" is an item of its own here, as in the
-            // write ([`BlankListing::Separate`]) and in the engine, which
-            // hides only the "" rows by "". Counting "" as a spelling of
-            // (blank) read (blank) UNCHECKED after only "" was unchecked, and
-            // OK-unchanged then hid the (blank) rows (the review of wave D).
-            visible: !hidden_items.iter().any(|h| pivot_engine::is_blank_item_label(h)),
+            visible: !hidden_items.iter().any(|h| pivot_engine::is_blank_member_key(h)),
         });
     }
 
@@ -6704,6 +6897,9 @@ pub fn set_pivot_item_visibility(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: SetItemVisibilityRequest,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     log_info!(
         "PIVOT",
         "set_pivot_item_visibility pivot_id={} field={} item={} visible={}",
@@ -6751,7 +6947,7 @@ pub fn set_pivot_item_visibility(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let mut response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache, &display_locale);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -6933,6 +7129,9 @@ pub fn set_pivot_item_expanded(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: SetItemExpandedRequest,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     log_info!(
         "PIVOT",
         "set_pivot_item_expanded pivot_id={} field_idx={} item='{}' expanded={}",
@@ -6974,7 +7173,7 @@ pub fn set_pivot_item_expanded(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let mut response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache, &display_locale);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -7000,6 +7199,9 @@ pub fn expand_collapse_level(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: ExpandCollapseLevelRequest,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     log_info!(
         "PIVOT",
         "expand_collapse_level pivot_id={} is_row={} field_idx={} expand={}",
@@ -7038,7 +7240,7 @@ pub fn expand_collapse_level(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let mut response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache, &display_locale);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -7064,6 +7266,9 @@ pub fn expand_collapse_all(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: ExpandCollapseAllRequest,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     log_info!(
         "PIVOT",
         "expand_collapse_all pivot_id={} expand={}",
@@ -7085,7 +7290,7 @@ pub fn expand_collapse_all(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let mut response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache, &display_locale);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -7249,6 +7454,9 @@ pub fn group_pivot_field(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: GroupFieldRequest,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     log_info!(
         "PIVOT",
         "group_pivot_field pivot_id={} field_index={} grouping={:?}",
@@ -7281,7 +7489,7 @@ pub fn group_pivot_field(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let mut response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache, &display_locale);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -7307,6 +7515,9 @@ pub fn create_manual_group(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: CreateManualGroupRequest,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     log_info!(
         "PIVOT",
         "create_manual_group pivot_id={} field_index={} group_name={} members={:?}",
@@ -7358,7 +7569,7 @@ pub fn create_manual_group(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let mut response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache, &display_locale);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -7384,6 +7595,9 @@ pub fn ungroup_pivot_field(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: UngroupFieldRequest,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     log_info!(
         "PIVOT",
         "ungroup_pivot_field pivot_id={} field_index={}",
@@ -7415,7 +7629,7 @@ pub fn ungroup_pivot_field(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let mut response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache, &display_locale);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -8574,6 +8788,9 @@ pub async fn create_pivot_from_bi_model(
     bi_state: State<'_, BiState>,
     request: CreatePivotFromBiModelRequest,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     // NOTHING BELOW WRITES PERSISTED STATE UNTIL THE DESTINATION IS DECIDED, and
     // it is decided only AFTER the last `.await`. The canvas gate used to run up
     // here, before the engine lock and the connect/bind awaits (which can take
@@ -8703,7 +8920,7 @@ pub async fn create_pivot_from_bi_model(
     let mut cache_mut = cache;
     let view = safe_calculate_pivot(&definition, &mut cache_mut);
     store_view(&pivot_state, pivot_id, &view);
-    let response = view_to_response(&view, &definition, &mut cache_mut);
+    let response = view_to_response(&view, &definition, &mut cache_mut, &display_locale);
 
     // Update pivot region tracking
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
@@ -8911,6 +9128,9 @@ pub(crate) async fn update_bi_pivot_fields_unrecorded(
     request: UpdateBiPivotFieldsRequest,
     masks: Vec<PostQueryMask>,
 ) -> Result<(PivotViewResponse, Option<BiFieldChangeUndo>), String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(ctx.state);
     let state = ctx.state;
     let file_state = ctx.file_state;
     let pivot_state = ctx.pivot_state;
@@ -9089,11 +9309,45 @@ pub(crate) async fn update_bi_pivot_fields_unrecorded(
     // Resolved from the slicer store here, never from the frontend: a pivot
     // added to a filtered canvas, or rebuilt by the field list, must come out
     // filtered in THIS command, with no second write from a view listener.
-    let page_slicers: Vec<PageModelSlicer> = if otherwise_empty {
-        Vec::new()
+    // LOCK ORDER (P4 2.5 item 2): `sheet_ids` and the page's interactions are
+    // copied out and released BEFORE the slicer store is read.
+    let page_fold: PageSlicerFold = if otherwise_empty {
+        PageSlicerFold::default()
     } else {
-        let slicers = ctx.slicer_state.slicers.read().map_err(|e| e.to_string())?;
-        page_model_slicers(slicers.values(), &meta_snapshot, dest_sheet)
+        let sheet_ids: Vec<identity::SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
+        let page_interactions = crate::sheets::canvas_interactions_of(state, dest_sheet);
+        match sheet_ids.get(dest_sheet).copied() {
+            None => PageSlicerFold::default(),
+            Some(dest_sheet_id) => {
+                let pivot_ref = ::persistence::CanvasObjectRef { kind: "pivot".to_string(), id: pivot_id.to_string() };
+                let slicers = ctx.slicer_state.slicers.read().map_err(|e| e.to_string())?;
+                page_model_slicers(
+                    slicers.values(),
+                    &meta_snapshot,
+                    dest_sheet_id,
+                    &sheet_ids,
+                    &pivot_ref,
+                    page_interactions.as_ref(),
+                )
+            }
+        }
+    };
+    let PageSlicerFold { apply: page_slicers, clear: cleared_slicers } = page_fold;
+    // The columns a `none` pair CLEARS (P4 DC-9): emptied of their level-1
+    // hidden items below -- unless a slicer that still APPLIES names the same
+    // column (it re-sets it), or an external filter (a pivot slicer or a
+    // ribbon filter targeting this pivot) holds it: that filter's own
+    // selection lives in the same hidden items and must not be wiped with it.
+    let cleared_columns: std::collections::HashSet<(String, String)> = if cleared_slicers.is_empty() {
+        std::collections::HashSet::new()
+    } else {
+        let external = external_filter_columns(ctx, pivot_id, &meta_snapshot, dest_sheet)?;
+        cleared_slicers
+            .iter()
+            .map(|ps| (ps.table.clone(), ps.column.clone()))
+            .filter(|key| !external.contains(key))
+            .filter(|(t, c)| !page_slicers.iter().any(|ps| &ps.table == t && &ps.column == c))
+            .collect()
     };
 
     // The gesture's own post-query masks (see `PostQueryMask`): like the
@@ -9179,6 +9433,19 @@ pub(crate) async fn update_bi_pivot_fields_unrecorded(
     let fold_adds_columns = page_slicers.iter().any(|ps| {
         resolve_bi_field_index(&old_definition, &old_cache, &meta_snapshot, &ps.table, &ps.column).is_none()
     });
+    // A `none` pair whose slicer still has a pin or hidden items on this
+    // pivot (P4 DC-9) changes the query and the fold: never the cosmetic fast
+    // path, which renders the old records and never reaches the fold.
+    let fold_clears_something = cleared_slicers.iter().any(|ps| {
+        let owner = ps.slicer_id.to_string();
+        old_definition
+            .engine_filters
+            .iter()
+            .any(|ef| ef.table == ps.table && ef.column == ps.column && ef.slicer_id.as_deref() == Some(owner.as_str()))
+            || (cleared_columns.contains(&(ps.table.clone(), ps.column.clone()))
+                && resolve_bi_field_index(&old_definition, &old_cache, &meta_snapshot, &ps.table, &ps.column)
+                    .is_some_and(|idx| !hidden_items_at(&old_definition, idx).is_empty()))
+    });
 
     // Fast path: if only custom_name changed on value fields (no structural
     // changes to dimensions, measures, filters, layout, etc.), skip the
@@ -9202,6 +9469,7 @@ pub(crate) async fn update_bi_pivot_fields_unrecorded(
             let cosmetic_only = placement.is_none()
                 && !request.force_requery
                 && !fold_adds_columns
+                && !fold_clears_something
                 && masks.is_empty()
                 && !stored_cache.records.is_empty()
                 && is_bi_cosmetic_only_change(definition, &request);
@@ -9219,7 +9487,12 @@ pub(crate) async fn update_bi_pivot_fields_unrecorded(
 
                 let view = safe_calculate_pivot(definition, stored_cache);
                 store_view(&pivot_state, pivot_id, &view);
-                let mut response = view_to_response(&view, definition, stored_cache);
+                let mut response = view_to_response(&view, definition, stored_cache, &display_locale);
+                crate::pivot::utils::fill_group_members(
+                    &mut response,
+                    &crate::pivot::utils::bi_placed_field_keys(definition, &meta_snapshot),
+                    stored_cache,
+                );
                 let destination = definition.destination;
                 let auto_fit = definition.layout.auto_fit_column_widths;
                 let framed = definition.canvas_frame.is_some();
@@ -9306,7 +9579,7 @@ pub(crate) async fn update_bi_pivot_fields_unrecorded(
 
         let empty_cache = PivotCache::new(pivot_id, 0);
         let view = create_empty_view(pivot_id, definition.version);
-        let mut response = view_to_response(&view, definition, &mut empty_cache.clone());
+        let mut response = view_to_response(&view, definition, &mut empty_cache.clone(), &display_locale);
 
         let destination = definition.destination;
         let dest_ref = PivotDestSheet::of(definition);
@@ -9385,7 +9658,7 @@ pub(crate) async fn update_bi_pivot_fields_unrecorded(
 
         let empty_cache = PivotCache::new(pivot_id, 0);
         let view = create_empty_view(pivot_id, definition.version);
-        let mut response = view_to_response(&view, definition, &mut empty_cache.clone());
+        let mut response = view_to_response(&view, definition, &mut empty_cache.clone(), &display_locale);
         let destination = definition.destination;
         let dest_ref = PivotDestSheet::of(definition);
         *stored_cache = empty_cache;
@@ -9835,13 +10108,24 @@ pub(crate) async fn update_bi_pivot_fields_unrecorded(
                 .retain(|ef| !(same_column(ef) && ef.slicer_id.as_deref() == Some(owner.as_str())));
         }
     }
+    // A slicer whose pair with this pivot is `none` (P4 DC-9) drops the pin it
+    // OWNS, before the query runs. A pin with no slicer owner (a ribbon
+    // filter's) or another slicer's is left alone.
+    for ps in &cleared_slicers {
+        let owner = ps.slicer_id.to_string();
+        engine_filters_for_query.retain(|ef| {
+            !(ef.table == ps.table && ef.column == ps.column && ef.slicer_id.as_deref() == Some(owner.as_str()))
+        });
+    }
     let scoped_in_filters: Vec<bi_engine::ScopedInFilter> = engine_filters_for_query
         .iter()
         .map(|ef| bi_engine::ScopedInFilter {
             table: Some(ef.table.clone()),
+            // Member KEYS, the blank member ("" under ruling Q8) spelled as
+            // the engine's IN-list reads it (`engine_in_value`).
             filter: bi_engine::InFilter::new(
                 ef.column.clone(),
-                ef.selected_items.iter().cloned(),
+                ef.selected_items.iter().map(|k| crate::bi::member::engine_in_value(k)),
             ),
             level: ef.level,
         })
@@ -9989,7 +10273,7 @@ pub(crate) async fn update_bi_pivot_fields_unrecorded(
 
                 let empty_cache = PivotCache::new(pivot_id, 0);
                 let view = create_empty_view(pivot_id, definition.version);
-                let mut response = view_to_response(&view, definition, &mut empty_cache.clone());
+                let mut response = view_to_response(&view, definition, &mut empty_cache.clone(), &display_locale);
                 let destination = definition.destination;
                 let dest_ref = PivotDestSheet::of(definition);
                 *stored_cache = empty_cache;
@@ -10534,6 +10818,22 @@ pub(crate) async fn update_bi_pivot_fields_unrecorded(
             })
             .or_else(|| field_to_cache_idx.get(&(table.to_string(), column.to_string())).copied())
     };
+    // FIRST the `none` pairs (P4 DC-9): the column's level-1 hidden items are
+    // emptied with the same writer the fold uses -- what the retired TS
+    // `modelColumnWrite` clear did, now in one place -- except on a column
+    // `cleared_columns` excludes (an applying slicer or an external filter
+    // holds it). Its pin was dropped before the query. The applying slicers
+    // run after, so they win on a shared column. (A slicer that APPLIES
+    // re-sets its column on every rebuild too, so a header filter on that
+    // column never outlives a rebuild under either mode.)
+    for ps in &cleared_slicers {
+        if !cleared_columns.contains(&(ps.table.clone(), ps.column.clone())) {
+            continue;
+        }
+        let key_name = format!("{}.{}", ps.table, ps.column);
+        let Some(idx) = fold_index(definition, &ps.table, &ps.column) else { continue };
+        set_hidden_items_at(definition, idx, Vec::new(), Some(&key_name));
+    }
     for ps in &page_slicers {
         let key_name = format!("{}.{}", ps.table, ps.column);
         let Some(idx) = fold_index(definition, &ps.table, &ps.column) else { continue };
@@ -10663,7 +10963,14 @@ pub(crate) async fn update_bi_pivot_fields_unrecorded(
     let calc_ms = t_calc.elapsed().as_secs_f64() * 1000.0;
 
     let t_resp = Instant::now();
-    let mut response = view_to_response(&view, definition, stored_cache);
+    let mut response = view_to_response(&view, definition, stored_cache, &display_locale);
+    // The cells' member keys (P4), from the snapshot this command resolved
+    // every name against.
+    crate::pivot::utils::fill_group_members(
+        &mut response,
+        &crate::pivot::utils::bi_placed_field_keys(definition, &meta_snapshot),
+        stored_cache,
+    );
     let resp_ms = t_resp.elapsed().as_secs_f64() * 1000.0;
     let destination = definition.destination;
     let auto_fit = definition.layout.auto_fit_column_widths;
@@ -11011,6 +11318,9 @@ pub fn add_calculated_field(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: CalculatedFieldRequest,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     log_info!(
         "PIVOT",
         "add_calculated_field pivot_id={} name={} formula={}",
@@ -11038,7 +11348,7 @@ pub fn add_calculated_field(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let mut response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache, &display_locale);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -11064,6 +11374,9 @@ pub fn update_calculated_field(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: UpdateCalculatedFieldRequest,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     log_info!(
         "PIVOT",
         "update_calculated_field pivot_id={} index={} name={} formula={}",
@@ -11099,7 +11412,7 @@ pub fn update_calculated_field(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let mut response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache, &display_locale);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -11125,6 +11438,9 @@ pub fn remove_calculated_field(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: RemoveCalculatedFieldRequest,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     log_info!(
         "PIVOT",
         "remove_calculated_field pivot_id={} index={}",
@@ -11150,7 +11466,7 @@ pub fn remove_calculated_field(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let mut response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache, &display_locale);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -11180,6 +11496,9 @@ pub fn add_calculated_item(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: CalculatedItemRequest,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     log_info!(
         "PIVOT",
         "add_calculated_item pivot_id={} field_index={} name={} formula={}",
@@ -11207,7 +11526,7 @@ pub fn add_calculated_item(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let mut response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache, &display_locale);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -11233,6 +11552,9 @@ pub fn remove_calculated_item(
     user_files_state: State<'_, crate::persistence::UserFilesState>,
     request: RemoveCalculatedItemRequest,
 ) -> Result<PivotViewResponse, String> {
+    // The app locale for the display text (leaf lock: taken, cloned and
+    // dropped here, before any other guard).
+    let display_locale = crate::pivot::utils::display_locale_of(&state);
     log_info!(
         "PIVOT",
         "remove_calculated_item pivot_id={} index={}",
@@ -11258,7 +11580,7 @@ pub fn remove_calculated_item(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let mut response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache, &display_locale);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -12068,20 +12390,28 @@ mod blank_member_tests {
         assert_eq!(hidden(&["East"]), strings(&["", "(blank)", "West"]), "East alone");
     }
 
-    /// A pivot's OWN list shows "(blank)" (the NULL records) and "" (the
-    /// empty strings) as two items: each is kept exactly when it is checked.
-    /// Folding "" into "(blank)" there would ignore an unchecked "" item.
+    /// A pivot's OWN list offers ONE blank member for the NULL records and
+    /// the empty strings (ruling Q8: key "", label "(Blank)"), exactly as a
+    /// model list does -- so a selection naming it by either spelling keeps
+    /// both, and one that does not hides both. (Before Q8 the own list kept
+    /// "(blank)" and "" apart; with one key for both that cannot be offered.)
     #[test]
-    fn a_pivots_own_list_keeps_blank_and_empty_string_apart() {
+    fn a_pivots_own_list_folds_blank_and_empty_string_into_one_member() {
         let own = |selected: &[&str]| {
             let mut cache = east_null_empty_west();
-            let mut h = hidden_for_selection_listed(&mut cache, 0, &strings(selected), BlankListing::Separate);
+            let mut h = hidden_for_selection_listed(&mut cache, 0, &strings(selected), BlankListing::FoldsEmpty);
             h.sort();
             h
         };
-        assert_eq!(own(&["East", "(blank)"]), strings(&["", "West"]), "(blank) checked, \"\" unchecked");
-        assert_eq!(own(&["East", ""]), strings(&["(blank)", "West"]), "\"\" checked, (blank) unchecked");
-        assert_eq!(own(&["East", "", "(blank)"]), strings(&["West"]), "both checked");
+        assert_eq!(own(&["East", "(blank)"]), strings(&["West"]), "the legacy spelling keeps both");
+        assert_eq!(own(&["East", ""]), strings(&["West"]), "the blank KEY keeps both");
+        assert_eq!(own(&["East"]), strings(&["", "(blank)", "West"]), "not named: both hidden");
+        // The list itself offers the blank member ONCE, last, keyed "".
+        let mut cache = east_null_empty_west();
+        let members = crate::pivot::utils::field_members(&mut cache, 0, &engine::LocaleSettings::invariant());
+        let keys: Vec<&str> = members.iter().map(|m| m.key.as_str()).collect();
+        assert_eq!(keys, vec!["East", "West", ""], "one blank member, last");
+        assert_eq!(members[2].label, "(Blank)");
         // A list that never offered the blank leaves both spellings showing.
         let mut cache = east_null_empty_west();
         let mut h = hidden_for_selection_listed(&mut cache, 0, &strings(&["East"]), BlankListing::NotListed);
@@ -12104,7 +12434,7 @@ mod blank_member_tests {
             slicer_id: None,
             reconcile: false,
         };
-        assert_eq!(selection_list_blank_listing(&slicers, &request(None)), BlankListing::Separate);
+        assert_eq!(selection_list_blank_listing(&slicers, &request(None)), BlankListing::FoldsEmpty);
         assert_eq!(selection_list_blank_listing(&slicers, &request(Some("Sales.region"))), BlankListing::FoldsEmpty);
     }
 
@@ -12325,11 +12655,17 @@ mod blank_member_tests {
     async fn a_level1_selection_of_east_and_blank_on_a_model_pivot_hides_only_west() {
         let fx = Fx::new(sales_with_null_and_empty()).await;
         let values = crate::bi::commands::bi_get_column_values_core(&fx.bi, fx.conn, "Sales", "region").await.unwrap();
-        assert_eq!(values, strings(&["East", "West", "(blank)"]), "fixture: the model list offers ONE (blank)");
+        assert_eq!(values, strings(&["East", "West", ""]), "fixture: the model list offers ONE blank member, keyed \"\" (Q8)");
         let pivot = fx.add_bi_pivot().await;
         fx.lay_out_region(pivot).await;
         assert_eq!(fx.grand_total(pivot), Some(110.0), "fixture: every row");
 
+        // By the blank member's KEY, as a list built from `values` sends it.
+        fx.select_level1(pivot, &["East", ""]).await;
+        assert_eq!(fx.hidden_on_region(pivot), Some(strings(&["West"])), "only West is hidden");
+        assert_eq!(fx.grand_total(pivot), Some(90.0), "East 10 + NULL 30 + empty 50");
+
+        // The legacy header spelling still names it.
         fx.select_level1(pivot, &["East", "(blank)"]).await;
         assert_eq!(fx.hidden_on_region(pivot), Some(strings(&["West"])), "only West is hidden");
         assert_eq!(fx.grand_total(pivot), Some(90.0), "East 10 + NULL 30 + empty 50");
@@ -12356,30 +12692,30 @@ mod blank_member_tests {
         let items = info.items.iter().map(|i| (i.name.clone(), i.visible)).collect();
         let checked = info.filters.manual_filter.map(|m| m.selected_items).unwrap_or_default();
         let mut rehidden =
-            hidden_for_selection_listed(&mut east_null_empty_west(), 0, &checked, BlankListing::Separate);
+            hidden_for_selection_listed(&mut east_null_empty_west(), 0, &checked, BlankListing::FoldsEmpty);
         rehidden.sort();
         (items, rehidden)
     }
 
-    /// The (blank) item follows its OWN checkbox on the read side too: the
-    /// write keeps "" and (blank) apart ([`BlankListing::Separate`]) and the
-    /// engine hides only the `""` rows by `""`, but the read still counted
-    /// `""` as a spelling of (blank) -- so after unchecking only "", the
-    /// reopened dropdown showed (blank) UNCHECKED over rows that were
-    /// showing, and OK-unchanged hid them.
+    /// The blank member reads back as ONE item on the read side too (ruling
+    /// Q8): unchecking it hides the NULL rows AND the "" rows, the reopened
+    /// dropdown shows it -- keyed "", the key `get_pivot_field_unique_values`
+    /// lists it under -- UNCHECKED, and OK-unchanged hides nothing new.
     #[test]
-    fn the_reopened_header_dropdown_keeps_blank_checked_after_unchecking_only_the_empty_string() {
+    fn the_reopened_header_dropdown_reads_the_one_blank_member_back() {
         let hidden = hidden_for_selection_listed(
             &mut east_null_empty_west(),
             0,
-            &strings(&["East", "West", "(blank)"]),
-            BlankListing::Separate,
+            &strings(&["East", "West"]),
+            BlankListing::FoldsEmpty,
         );
-        assert_eq!(hidden, strings(&[""]), "fixture: unchecking only \"\" hides only \"\"");
+        let mut sorted = hidden.clone();
+        sorted.sort();
+        assert_eq!(sorted, strings(&["", "(blank)"]), "fixture: unchecking the blank hides both spellings");
         let pivots = PivotState::new();
         let id = own_list_pivot(&pivots, hidden);
 
-        // The engine shows the (blank) row and hides only the "" row.
+        // The engine hides the (blank) row and the "" row.
         let labels: Vec<String> = {
             let mut tables = pivots.pivot_tables.write(&test_seed_effect()).unwrap();
             let (def, cache) = tables.get_mut(&id).unwrap();
@@ -12392,34 +12728,45 @@ mod blank_member_tests {
                 .map(|(_, c)| c[0].formatted_value.clone())
                 .collect()
         };
-        assert_eq!(labels, strings(&["(blank)", "East", "West"]), "fixture: the engine keeps the (blank) row");
+        assert_eq!(labels, strings(&["East", "West"]), "the engine hides the whole blank member");
 
         let (items, rehidden) = reopen_and_ok(&pivots, id);
         assert_eq!(
             items,
-            vec![
-                (String::new(), false),
-                ("East".to_string(), true),
-                ("West".to_string(), true),
-                ("(blank)".to_string(), true),
-            ],
-            "the dropdown reads each item as the engine shows it",
+            vec![("East".to_string(), true), ("West".to_string(), true), (String::new(), false)],
+            "one blank item, keyed \"\", read as the engine shows it",
         );
-        assert_eq!(rehidden, strings(&[""]), "reopen + OK unchanged hides nothing new");
+        assert_eq!(rehidden, strings(&["", "(blank)"]), "reopen + OK unchanged hides nothing new");
     }
 
-    /// The mirror: unchecking only (blank) reads back with "" checked.
+    /// A hidden list written in the LEGACY spelling ("(blank)", any case)
+    /// names the same one member: the engine hides both the NULL and the ""
+    /// rows, and the dropdown reads the blank member back unchecked.
     #[test]
-    fn the_reopened_header_dropdown_keeps_the_empty_string_checked_after_unchecking_only_blank() {
+    fn a_legacy_blank_spelling_hides_and_reads_back_the_one_blank_member() {
         let pivots = PivotState::new();
         let id = own_list_pivot(&pivots, strings(&["(blank)"]));
         let (items, rehidden) = reopen_and_ok(&pivots, id);
-        assert_eq!(items[0], (String::new(), true), "\"\" stays checked: {items:?}");
-        assert_eq!(items[3], ("(blank)".to_string(), false), "(blank) reads unchecked: {items:?}");
-        assert_eq!(rehidden, strings(&["(blank)"]), "reopen + OK unchanged");
+        assert_eq!(items.len(), 3, "no separate \"\" item: {items:?}");
+        assert_eq!(items[2], (String::new(), false), "the blank member reads unchecked: {items:?}");
+        assert_eq!(rehidden, strings(&["", "(blank)"]), "reopen + OK unchanged");
         // Any spelling of the label hides it, as the engine reads it.
         let id = own_list_pivot(&pivots, strings(&["(Blank)"]));
-        assert_eq!(reopen_and_ok(&pivots, id).0[3], ("(blank)".to_string(), false));
+        assert_eq!(reopen_and_ok(&pivots, id).0[2], (String::new(), false));
+        // And the engine hides both kinds of blank row by the legacy spelling.
+        let id = own_list_pivot(&pivots, strings(&["(blank)"]));
+        let mut tables = pivots.pivot_tables.write(&test_seed_effect()).unwrap();
+        let (def, cache) = tables.get_mut(&id).unwrap();
+        let def = def.clone();
+        let view = crate::pivot::operations::safe_calculate_pivot(&def, cache);
+        let labels: Vec<String> = view
+            .rows
+            .iter()
+            .zip(view.cells.iter())
+            .filter(|(d, _)| d.row_type == pivot_engine::PivotRowType::Data)
+            .map(|(_, c)| c[0].formatted_value.clone())
+            .collect();
+        assert_eq!(labels, strings(&["East", "West"]));
     }
 
     // ---- a PIVOT slicer's list (wave D fix-up) ----
@@ -12462,11 +12809,11 @@ mod blank_member_tests {
             },
         )
         .expect("create the pivot slicer");
-        let items = crate::slicer::commands::get_slicer_items_core(&fx.state, &fx.pivots, &fx.slicer, &fx.filters, &fx.bi, slicer.id)
+        let items = crate::slicer::commands::get_slicer_items_core(&fx.state, &fx.pivots, &fx.slicer, &fx.filters, &fx.bi, slicer.id, None)
             .await
             .expect("list the slicer")
             .into_iter()
-            .map(|i| i.value)
+            .map(|i| i.key)
             .collect();
         (id, slicer.id, items)
     }
@@ -12494,17 +12841,21 @@ mod blank_member_tests {
         h
     }
 
-    /// A pivot slicer lists ONE (blank) and never a "" item, so "" belongs
-    /// to its (blank): the write was classed as the pivot's OWN list ("" an
-    /// item of its own), and East + (blank) -- every blank the slicer offers
-    /// -- hid the "" rows, with no slicer item that could bring them back.
+    /// A pivot slicer lists ONE blank member (key "", ruling Q8) and never a
+    /// separate "" item, so "" belongs to it: East + the blank member -- every
+    /// blank the slicer offers -- keeps the NULL rows AND the "" rows.
     #[tokio::test]
     async fn a_pivot_slicer_selection_naming_blank_keeps_the_empty_string_rows() {
         let fx = Fx::new(sales_with_null_and_empty()).await;
         let (pivot, slicer, items) = pivot_slicer_fixture(&fx, sales_with_null_and_empty()).await;
-        assert_eq!(items, strings(&["East", "West", "(blank)"]), "fixture: ONE (blank), no \"\" item");
+        assert_eq!(items, strings(&["East", "West", ""]), "fixture: ONE blank member, keyed \"\"");
         assert_eq!(fx.grand_total(pivot), Some(110.0), "fixture: every row");
 
+        apply_pivot_filter_core(&fx.ctx(), slicer_write(pivot, slicer, &["East", ""])).await.expect("apply");
+        assert_eq!(own_hidden(&fx, pivot), strings(&["West"]), "East + the blank KEY hides only West");
+        assert_eq!(fx.grand_total(pivot), Some(90.0), "East 10 + NULL 30 + empty 50");
+
+        // The legacy spelling of a stored selection still names it.
         apply_pivot_filter_core(&fx.ctx(), slicer_write(pivot, slicer, &["East", "(blank)"])).await.expect("apply");
         assert_eq!(own_hidden(&fx, pivot), strings(&["West"]), "East + (blank) hides only West");
         assert_eq!(fx.grand_total(pivot), Some(90.0), "East 10 + NULL 30 + empty 50");
@@ -12514,11 +12865,13 @@ mod blank_member_tests {
         assert_eq!(fx.grand_total(pivot), Some(10.0));
     }
 
-    /// With NO null records the pivot slicer offers no (blank) at all: the
-    /// selection cannot say whether the "" rows should show, so they are
-    /// left showing -- "select every item" must not drop them.
+    /// With NO null records the "" rows ARE the blank member (ruling Q8), so
+    /// the pivot slicer offers it: "select every item" keeps them, and a
+    /// selection that leaves it out hides them, with an item to bring them
+    /// back. (A list that offers no blank hides nothing for it: the NotListed
+    /// case of `a_pivots_own_list_folds_blank_and_empty_string_into_one_member`.)
     #[tokio::test]
-    async fn a_pivot_slicer_that_offers_no_blank_leaves_the_empty_string_rows_showing() {
+    async fn a_pivot_slicer_offers_the_blank_member_for_empty_strings_alone() {
         let fx = Fx::new(sales_with_null_and_empty()).await;
         let batch = RecordBatch::try_new(
             Arc::new(Schema::new(vec![
@@ -12534,11 +12887,15 @@ mod blank_member_tests {
         )
         .unwrap();
         let (pivot, slicer, items) = pivot_slicer_fixture(&fx, batch).await;
-        assert_eq!(items, strings(&["East", "West"]), "fixture: no blank item offered");
+        assert_eq!(items, strings(&["East", "West", ""]), "fixture: the \"\" rows are the blank member");
 
-        apply_pivot_filter_core(&fx.ctx(), slicer_write(pivot, slicer, &["East", "West"])).await.expect("apply");
+        apply_pivot_filter_core(&fx.ctx(), slicer_write(pivot, slicer, &["East", "West", ""])).await.expect("apply");
         assert_eq!(own_hidden(&fx, pivot), Vec::<String>::new(), "every listed item selected hides nothing");
         assert_eq!(fx.grand_total(pivot), Some(80.0));
+
+        apply_pivot_filter_core(&fx.ctx(), slicer_write(pivot, slicer, &["East", "West"])).await.expect("apply");
+        assert_eq!(own_hidden(&fx, pivot), strings(&[""]), "leaving the blank member out hides the \"\" rows");
+        assert_eq!(fx.grand_total(pivot), Some(30.0));
     }
 
     /// Which list a write NAMING A SLICER came from is the slicer's, whatever
@@ -12592,7 +12949,7 @@ mod blank_member_tests {
         assert_eq!(listing(Some(pivot_slicer.id), Some("Sales.region")), BlankListing::PivotSlicer, "BI pivot's slicer");
         assert_eq!(listing(Some(model_slicer.id), None), BlankListing::FoldsEmpty, "model slicer on a range pivot");
         assert_eq!(listing(Some(model_slicer.id), Some("Sales.region")), BlankListing::FoldsEmpty);
-        assert_eq!(listing(Some(new_id()), None), BlankListing::Separate, "an unknown slicer: the key decides");
+        assert_eq!(listing(Some(new_id()), None), BlankListing::FoldsEmpty, "an unknown slicer: the own list, one blank member (Q8)");
         assert_eq!(listing(Some(new_id()), Some("Sales.region")), BlankListing::FoldsEmpty);
     }
     // ---- BUG-0478: a BI pivot keeps the user's value number format ----
@@ -12609,7 +12966,7 @@ mod blank_member_tests {
             .iter()
             .flatten()
             .filter(|c| c.cell_type == pivot_engine::PivotCellType::Data)
-            .map(|c| crate::pivot::utils::pivot_cell_to_data(c).formatted_value)
+            .map(|c| crate::pivot::utils::pivot_cell_to_data(c, &engine::LocaleSettings::invariant()).formatted_value)
             .collect();
         texts.sort();
         texts

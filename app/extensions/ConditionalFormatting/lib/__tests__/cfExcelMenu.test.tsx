@@ -300,7 +300,7 @@ describe("gallery picks", () => {
       format: {},
       ranges: [{ startRow: 1, startCol: 1, endRow: 3, endCol: 2 }],
       stopIfTrue: false,
-    });
+    }, { target: undefined });
     expect(h.invalidateAndRefresh).toHaveBeenCalledTimes(1);
   });
 });
@@ -370,7 +370,7 @@ describe("Clear Rules from Selected Cells", () => {
     h.clearConditionalFormatsInRange.mockResolvedValue(2);
     await items.get("cf:clearFromSelection")!.action!();
     await flush();
-    expect(h.clearConditionalFormatsInRange).toHaveBeenCalledWith(1, 1, 3, 2);
+    expect(h.clearConditionalFormatsInRange).toHaveBeenCalledWith(1, 1, 3, 2, undefined, { target: undefined });
     expect(toasts).toEqual([]);
     expect(h.invalidateAndRefresh).toHaveBeenCalledTimes(1);
   });
@@ -439,7 +439,7 @@ describe("Clear Rules from This Table / This PivotTable follow the ACTIVE cell",
     await refreshClearScopes();
     await items.get("cf:clearFromTable")!.action!();
     await flush();
-    expect(h.clearConditionalFormatsInRange).toHaveBeenCalledWith(0, 0, 9, 3);
+    expect(h.clearConditionalFormatsInRange).toHaveBeenCalledWith(0, 0, 9, 3, undefined, { target: undefined });
     expect(h.invalidateAndRefresh).toHaveBeenCalledTimes(1);
   });
 
@@ -451,7 +451,7 @@ describe("Clear Rules from This Table / This PivotTable follow the ACTIVE cell",
     expect(items.get("cf:clearFromTable")!.disabled).toBe(true);
     await items.get("cf:clearFromPivot")!.action!();
     await flush();
-    expect(h.clearConditionalFormatsInRange).toHaveBeenCalledWith(20, 5, 30, 8);
+    expect(h.clearConditionalFormatsInRange).toHaveBeenCalledWith(20, 5, 30, 8, undefined, { target: undefined });
   });
 
   it("a pivot drawn on a canvas sheet is not a grid range the active cell can be in", async () => {

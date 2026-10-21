@@ -88,7 +88,45 @@ describe("Format > Cell Styles", () => {
     await act(async () => {
       await h.onApplyStyle!({ bold: true });
     });
-    expect(h.applyFormatting).toHaveBeenCalledWith([0, 1], [0, 1], { bold: true });
+    expect(h.applyFormatting).toHaveBeenCalledWith([0, 1], [0, 1], { bold: true }, { target: undefined });
     expect(toasts).toEqual([]);
+  });
+
+  // P3 S9 (owner finding G3): a floating grid that admits "format" gets the
+  // style on ITS cells, through its target.
+  const REF = { kind: "floatingRange" as const, id: "fr-4" };
+  const floatingGrid = (actsOn?: readonly ("format" | "read")[]): (() => void) =>
+    registerSelectionOwner({
+      id: "floatingRange",
+      label: "a floating grid's cells",
+      ownsSelection: () => true,
+      cellTarget: () => ({
+        ref: REF,
+        selection: { startRow: 2, startCol: 3, endRow: 4, endCol: 3, activeRow: 2, activeCol: 3, type: "cells" },
+        bounds: { rows: 10, cols: 6 },
+        label: "Float1",
+        wholeObject: false,
+      }),
+      ...(actsOn ? { actsOn } : {}),
+    });
+
+  it("a floating grid that admits the act: the style lands on ITS cells with { target }, never Core's", async () => {
+    release = floatingGrid(["format"]);
+    await openCellStyles();
+    await act(async () => {
+      await h.onApplyStyle!({ bold: true });
+    });
+    expect(h.applyFormatting.mock.calls).toEqual([[[2, 3, 4], [3], { bold: true }, { target: REF }]]);
+    expect(toasts).toEqual([]);
+  });
+
+  it("inert until S8: a floating grid that admits nothing refuses, once", async () => {
+    release = floatingGrid(undefined);
+    await openCellStyles();
+    await act(async () => {
+      await h.onApplyStyle!({ bold: true });
+    });
+    expect(h.applyFormatting).not.toHaveBeenCalled();
+    expect(toasts.length).toBe(1);
   });
 });

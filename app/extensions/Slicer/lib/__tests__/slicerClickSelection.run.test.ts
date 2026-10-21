@@ -26,7 +26,8 @@ import { selectionAfterItemRun, selectionShownDuringRun } from "../slicerClickSe
 import type { Slicer, SlicerItem } from "../slicerTypes";
 
 const ITEMS: SlicerItem[] = ["East", "West", "North", "South", "Mid"].map((value) => ({
-  value,
+  key: value,
+  label: value,
   selected: true,
   hasData: true,
 }));

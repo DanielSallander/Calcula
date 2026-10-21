@@ -14,6 +14,8 @@ import {
   containerFieldPatch,
   containerFieldRange,
   readContainerField,
+  solidBackgroundIsNoop,
+  solidBackgroundPatch,
   type ContainerFieldId,
   type ResolvedVisualContainer,
   type VisualContainerPatch,
@@ -105,6 +107,13 @@ export function normaliseFieldValue(id: ContainerFieldId, value: unknown): unkno
  * The patch a row commits for `value` (`null` = clear back to the family's
  * default), or null when it would change nothing (the same literal again) or
  * the value is not a value.
+ *
+ * A background COLOUR is a solid background commit (round 2, G1): it also
+ * clears a stored or resolved gradient and switches a hidden background on, so
+ * re-picking the colour that shows on a gradient-only container (the chart
+ * Fill card writes only `background.gradient`) or on a floating grid (default
+ * `show:false`) still paints it. It is decided BEFORE both no-op branches
+ * below, which would otherwise swallow exactly those picks.
  */
 export function rowPatch(
   snapshot: ObjectFormatSnapshot,
@@ -117,6 +126,10 @@ export function rowPatch(
   }
   const v = normaliseFieldValue(id, value);
   if (v === undefined) return null;
+  if (id === "background.color" && typeof v === "string" && v !== "") {
+    const base = { stored: snapshot.stored, resolved: snapshot.resolved };
+    return solidBackgroundIsNoop(v, base) ? null : solidBackgroundPatch(v, base);
+  }
   const stored = readContainerField(snapshot.stored, id);
   if (stored !== undefined && stored !== null) return Object.is(stored, v) ? null : containerFieldPatch(id, v);
   // An untouched field: committing what already shows stores nothing (a

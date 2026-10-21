@@ -7,11 +7,19 @@
 //          Without the claim, Ctrl+C inside a floating grid's cell copied the
 //          whole range object (or, as a range cannot be copied, answered with
 //          "not copied") instead of speaking about the cell.
+//          P3 S10: the range also NAMES the cell clipboard for the Copy /
+//          Paste doors (`innerClipboardCommand`); the cell clipboard's
+//          grid-command door resolves the range's cells as the target.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type { FloatingRangeInfo } from "@api/floatingRanges";
 import type { GridRegion } from "@api/gridOverlays";
-import { objectOwnsKey, resetObjectSelectionProviders } from "@api/objectSelection";
+import {
+  innerSelectionClipboardCommand,
+  objectOwnsKey,
+  resetObjectSelectionProviders,
+} from "@api/objectSelection";
+import { CoreCommands } from "@api/commands";
 import {
   createFloatingRangeSelectionProvider,
   registerFloatingRangeObjectSelection,
@@ -83,5 +91,27 @@ describe("the clipboard keys belong to a floating range's selected cell", () => 
     expect(objectOwnsKey("Clipboard")).toBe(false);
     setLocalSelection({ frId: "fr-a", anchorRow: 0, anchorCol: 0, endRow: 0, endCol: 0 });
     expect(objectOwnsKey("Clipboard")).toBe(true);
+  });
+
+  // P3 S10: the Copy / Paste DOORS (Home tab, Edit menu) name the CELL
+  // clipboard for a selected cell, whose grid-command door resolves the
+  // range's cells as the target -- never an object clipboard ahead of it.
+  it("names the cell clipboard's Copy / Paste for a selected cell, and nothing without one", () => {
+    const p = createFloatingRangeSelectionProvider();
+    expect(p.innerClipboardCommand!("copy"), "a range with no cell selected named the cell clipboard").toBeNull();
+    setLocalSelection({ frId: "fr-a", anchorRow: 1, anchorCol: 1, endRow: 1, endCol: 1 });
+    expect(p.innerClipboardCommand!("copy")).toBe(CoreCommands.COPY);
+    expect(p.innerClipboardCommand!("paste")).toBe(CoreCommands.PASTE);
+    // A stale selection (the range is gone) names nothing.
+    setLocalSelection({ frId: "fr-gone", anchorRow: 0, anchorCol: 0, endRow: 0, endCol: 0 });
+    expect(p.innerClipboardCommand!("copy")).toBeNull();
+  });
+
+  it("answers through the seam the clipboard DOORS ask", () => {
+    registerFloatingRangeObjectSelection();
+    expect(innerSelectionClipboardCommand("copy")).toBeNull();
+    setLocalSelection({ frId: "fr-a", anchorRow: 0, anchorCol: 0, endRow: 0, endCol: 0 });
+    expect(innerSelectionClipboardCommand("copy")).toBe(CoreCommands.COPY);
+    expect(innerSelectionClipboardCommand("paste")).toBe(CoreCommands.PASTE);
   });
 });

@@ -36,8 +36,8 @@ export async function slicerRow(page: Page, sid: string): Promise<SlicerRow> {
 
 /** The slicer's item values in the order it shows them (the live store's cache). */
 export async function slicerItemValues(page: Page, sid: string): Promise<string[]> {
-  const items = await callModule<Array<{ value: string }> | undefined>(page, MOD.SLICER_STORE, "getCachedItems", [sid]);
-  return (items ?? []).map((i) => i.value);
+  const items = await callModule<Array<{ key: string }> | undefined>(page, MOD.SLICER_STORE, "getCachedItems", [sid]);
+  return (items ?? []).map((i) => i.key);
 }
 
 /** Wait until no slicer click is still landing its undo step (the store's own flag). */

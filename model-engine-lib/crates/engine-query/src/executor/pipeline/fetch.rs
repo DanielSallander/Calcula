@@ -719,6 +719,7 @@ mod tests {
             TotalsMode::None,
             None,
             &[],
+            &[],
             &model,
             &registry,
             Some(&cache),

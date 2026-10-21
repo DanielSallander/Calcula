@@ -4,8 +4,13 @@ import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 export interface FilterDropdownProps {
   fieldName: string;
   fieldIndex: number;
+  /** The values offered, as KEYS: what `selectedValues` holds and what
+   *  `onApply` returns. */
   uniqueValues: string[];
   selectedValues: string[];
+  /** The display text of a key (a member's app-locale label). Default: the
+   *  key itself. The list SHOWS and SEARCHES labels and returns KEYS. */
+  labelOf?: (key: string) => string;
   anchorRect: { x: number; y: number; width: number; height: number } | undefined;
   onApply: (fieldIndex: number, selectedValues: string[], hiddenItems: string[]) => Promise<void>;
   onClose: () => void;
@@ -16,10 +21,12 @@ export const FilterDropdown: React.FC<FilterDropdownProps> = ({
   fieldIndex,
   uniqueValues,
   selectedValues,
+  labelOf,
   anchorRect,
   onApply,
   onClose,
 }) => {
+  const displayOf = useCallback((key: string) => (labelOf ? labelOf(key) : key), [labelOf]);
   // Defensive: ensure arrays are valid (memoized for stable deps)
   const safeUniqueValues = useMemo(
     () => Array.isArray(uniqueValues) ? uniqueValues : [],
@@ -91,8 +98,9 @@ export const FilterDropdown: React.FC<FilterDropdownProps> = ({
     return null;
   }
 
+  // Search over what the user SEES (the label); the list still holds keys.
   const filteredValues = safeUniqueValues.filter((v) =>
-    v.toLowerCase().includes(searchText.toLowerCase())
+    displayOf(v).toLowerCase().includes(searchText.toLowerCase())
   );
 
   return (
@@ -219,7 +227,7 @@ export const FilterDropdown: React.FC<FilterDropdownProps> = ({
                 whiteSpace: 'nowrap',
               }}
             >
-              {value || '(Blank)'}
+              {displayOf(value) || '(Blank)'}
             </span>
           </label>
         ))}

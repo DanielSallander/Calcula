@@ -17,10 +17,18 @@
 //          true sheet index) and BY SHEET ID for provenance (an index shifts on
 //          insert/delete/move; the id does not, and matching by name would bind
 //          a collision-renamed pulled sheet to the subscriber's own).
+//
+//          Edit interactions (P4 S10). Every applied layout and every refresh
+//          also PUBLISHES each canvas's `interactions` to @api/reportFilters
+//          (by sheet id), and withdraws (null) the pages that are no longer
+//          canvases, so the cross-filter resolver answers synchronously from
+//          the same copy the ribbon and the overlay read. A page is published
+//          again only when its interactions actually changed.
 
 import { getSheets } from "@api";
 import type { CanvasLayout, SheetInfo } from "@api";
 import { getSheetProvenance } from "@api/collaboration";
+import { publishPageInteractions, type PageInteractions } from "@api/reportFilters";
 
 /** One canvas sheet as the store knows it. */
 export interface CanvasSheetEntry {
@@ -49,6 +57,55 @@ let version = 0;
 let generation = 0;
 let snapshot: CanvasSheetSnapshot = freeze();
 const listeners = new Set<() => void>();
+/** What was last published to @api/reportFilters, per sheet id (JSON, for the change test). */
+let publishedInteractions = new Map<string, string>();
+
+/**
+ * A layout's `interactions` in the seam's shape, or null at the default (no
+ * pairs, no default mode). Pure; exported for tests.
+ */
+export function pageInteractionsOf(layout: CanvasLayout | null | undefined): PageInteractions | null {
+  const held = layout?.interactions;
+  if (!held) return null;
+  const pairs = (held.pairs ?? []).map((p) => ({
+    source: { kind: p.source.kind, id: p.source.id },
+    target: { kind: p.target.kind, id: p.target.id },
+    mode: p.mode,
+  })) as PageInteractions["pairs"];
+  const defaultMode = held.defaultMode === "filter" || held.defaultMode === "highlight" ? held.defaultMode : undefined;
+  if (pairs.length === 0 && defaultMode === undefined) return null;
+  return defaultMode === undefined ? { pairs } : { defaultMode, pairs };
+}
+
+/**
+ * Publish every canvas's interactions (by sheet id) and withdraw the pages no
+ * longer present. Unchanged pages are not re-published.
+ */
+function syncPublishedInteractions(): void {
+  const next = new Map<string, string>();
+  const values = new Map<string, PageInteractions | null>();
+  for (const entry of canvases.values()) {
+    if (!entry.sheetId) continue;
+    const value = pageInteractionsOf(entry.layout);
+    next.set(entry.sheetId, JSON.stringify(value));
+    values.set(entry.sheetId, value);
+  }
+  for (const sheetId of publishedInteractions.keys()) {
+    if (!next.has(sheetId)) safePublish(sheetId, null);
+  }
+  for (const [sheetId, json] of next) {
+    if (publishedInteractions.get(sheetId) !== json) safePublish(sheetId, values.get(sheetId) ?? null);
+  }
+  publishedInteractions = next;
+}
+
+function safePublish(sheetId: string, value: PageInteractions | null): void {
+  try {
+    publishPageInteractions(sheetId, value);
+  } catch (err) {
+    console.error("[CanvasSheet] publishing a page's interactions failed:", err);
+  }
+}
 
 function freeze(): CanvasSheetSnapshot {
   const active = canvases.get(activeIndex) ?? null;
@@ -100,6 +157,7 @@ export async function refreshCanvasSheets(): Promise<boolean> {
     if (mine !== generation) return false;
     canvases = canvasEntriesFrom(result.sheets);
     activeIndex = result.activeIndex;
+    syncPublishedInteractions();
     publish();
     return true;
   } catch (err) {
@@ -134,12 +192,21 @@ export function applyCanvasLayout(index: number, layout: CanvasLayout): void {
   const next = new Map(canvases);
   next.set(index, { ...entry, layout });
   canvases = next;
+  syncPublishedInteractions();
   publish();
 }
 
 /** The canvas at `index`, or null for a worksheet (or an unknown index). */
 export function canvasAt(index: number): CanvasSheetEntry | null {
   return canvases.get(index) ?? null;
+}
+
+/** The canvas whose sheet id is `sheetId`, or null. */
+export function canvasBySheetId(sheetId: string): CanvasSheetEntry | null {
+  for (const entry of canvases.values()) {
+    if (entry.sheetId === sheetId) return entry;
+  }
+  return null;
 }
 
 /** Whether the canvas at `index` is subscribed from an application. */
@@ -165,5 +232,6 @@ export function resetCanvasSheetStore(): void {
   canvases = new Map();
   subscribedIds = new Set();
   activeIndex = 0;
+  syncPublishedInteractions();
   publish();
 }

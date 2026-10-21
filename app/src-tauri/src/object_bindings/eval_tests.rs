@@ -286,6 +286,10 @@ fn a_canvas_page_colour_binding_is_coerced() {
 #[test]
 fn the_display_of_a_single_cell_uses_the_cells_number_format() {
     let wb = Wb::new();
+    // Pinned: `create_app_state` starts on the MACHINE's regional format, and
+    // a computed binding's display is General in the app locale (P2 S5) --
+    // "0,5" on a Swedish machine. This test is about single cell vs computed.
+    *wb.state.locale.lock().unwrap() = engine::LocaleSettings::invariant();
     let percent = wb
         .state
         .style_registry

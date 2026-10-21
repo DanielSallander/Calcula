@@ -30,7 +30,8 @@ describe("the bridge forwards args", () => {
     const handler = vi.fn();
     gridCommands.register("autoFitRowHeight", handler);
     await CommandRegistry.execute(CoreCommands.AUTOFIT_ROW_HEIGHT, { growOnly: true });
-    expect(handler).toHaveBeenCalledWith({ growOnly: true });
+    // The second argument is the target the door resolved (P3): the grid here.
+    expect(handler).toHaveBeenCalledWith({ growOnly: true }, { target: { kind: "grid", selection: null } });
   });
 
   it("no args stays no args (every existing door: menus, keys, the right-click menu)", async () => {
@@ -45,7 +46,8 @@ describe("the bridge forwards args", () => {
     const handler = vi.fn();
     gridCommands.register("autoFitColumnWidth", handler);
     await expect(gridCommands.execute("autoFitColumnWidth", { growOnly: true })).resolves.toBe(true);
-    expect(handler).toHaveBeenCalledWith({ growOnly: true });
+    // The second argument is the target the door resolved (P3): the grid here.
+    expect(handler).toHaveBeenCalledWith({ growOnly: true }, { target: { kind: "grid", selection: null } });
   });
 });
 

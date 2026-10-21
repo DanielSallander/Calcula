@@ -79,6 +79,7 @@ impl Wb {
             pivots: &self.pivots,
             pane: &self.pane,
             ribbon: &self.ribbon,
+            user_files: Box::leak(Box::new(crate::persistence::UserFilesState::default())),
         }
     }
 

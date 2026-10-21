@@ -73,6 +73,7 @@ import {
   Chip,
   Slider,
   Input,
+  NumberField,
   ColorSwatch,
   Tile,
   TileGallery,
@@ -999,18 +1000,16 @@ function VisualControls({
     // would keep the old value (the seriesColorPatch lesson); JSON drops it.
     updateSpec({ markOptions: { ...opts, [key]: value } as ChartSpec["markOptions"] });
   };
+  // Typed and shown in the APP locale ("1,5" under de-DE), not the browser's
+  // as a native number input was (P2 S11). Blank clears the key.
   const numberInput = (key: string, label: string): React.ReactElement => (
-    <Input
-      type="number"
-      value={typeof opts[key] === "number" ? String(opts[key]) : ""}
+    <NumberField
+      value={typeof opts[key] === "number" ? (opts[key] as number) : null}
       placeholder={`${label} (auto)`}
-      aria-label={label}
-      data-testid={`chart-visual-${spec.mark}-${key}`}
-      onChange={(e) => {
-        const raw = e.target.value;
-        const n = Number(raw);
-        set(key, raw === "" || !Number.isFinite(n) ? undefined : n);
-      }}
+      ariaLabel={label}
+      testId={`chart-visual-${spec.mark}-${key}`}
+      width={64}
+      onChange={(n) => set(key, n === null ? undefined : n)}
     />
   );
   const units = (

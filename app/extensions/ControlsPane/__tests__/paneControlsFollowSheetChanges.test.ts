@@ -55,7 +55,12 @@ vi.mock("../lib/filterPaneStore", () => ({
   refreshCache: h.refreshCache,
   clearCache: () => undefined,
   isRibbonFilterChangeLanding: () => false,
+  // The report-filter publisher (filterReportPublisher.ts) reads the cache.
+  getAllFilters: () => [],
   refreshCacheAndReapplyChangedFilters: async () => [],
+  getFilterItemsError: () => null,
+  getFilterNarrowingError: () => null,
+  getFilterLoadAttempts: () => 0,
 }));
 vi.mock("../lib/controlsPaneStore", () => ({
   refreshControlsCache: h.refreshControlsCache,

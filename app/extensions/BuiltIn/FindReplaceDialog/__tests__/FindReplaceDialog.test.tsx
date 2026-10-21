@@ -164,11 +164,16 @@ describe("Find & Replace dialog — harness sanity", () => {
 
   it("searches and reports the match count", async () => {
     await openWithMatches();
-    expect(findAllMock).toHaveBeenCalledWith("old", {
-      caseSensitive: false,
-      matchEntireCell: false,
-      searchFormulas: false,
-    });
+    expect(findAllMock).toHaveBeenCalledWith(
+      "old",
+      {
+        caseSensitive: false,
+        matchEntireCell: false,
+        searchFormulas: false,
+      },
+      // No floating grid's cell is selected: the active sheet (no target).
+      { target: undefined },
+    );
     expect(container.textContent).toContain("1 of 2 matches");
   });
 });
@@ -262,7 +267,7 @@ describe("single Replace refused by the writeback guard", () => {
 
     await click(buttonWithText("Replace"));
 
-    expect(replaceSingleMock).toHaveBeenCalledWith(1, 1, "old", "", false);
+    expect(replaceSingleMock).toHaveBeenCalledWith(1, 1, "old", "", false, undefined, { target: undefined });
     expect(alertText()).toBe(REFUSAL);
   });
 });

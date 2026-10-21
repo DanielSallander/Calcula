@@ -70,7 +70,7 @@ import {
   getStyle,
   getViewportCells,
 } from "@api/lib";
-import { refuseIfSelectionOwned } from "@api/selectionOwner";
+import { resolveCellTarget, targetRefOf, getCellTargetCells, type CellTarget, type CellTargetRef } from "@api/cellTarget";
 import { selectionBlocks } from "@api/selectionBlocks";
 import { announceFormattingResult } from "@api/announceFormatting";
 import type { CellData, StyleData } from "@api/types";
@@ -377,8 +377,13 @@ const DEFAULT_BOUNDS: SheetBounds = { rows: 1048576, cols: 16384 };
 /** The selection's blocks -- `@api/selectionBlocks`, the ONE split every
  *  formatting door uses (the main block first, each Ctrl+click range
  *  normalised, an exact repeat dropped; this file's own copy did not drop
- *  repeats) -- and the sheet's size, from the grid's live snapshot. */
-function selectionAndBounds(): { blocks: CellRect[]; bounds: SheetBounds } | null {
+ *  repeats) -- and the sheet's size, from the grid's live snapshot. For a
+ *  floating grid's cells (P3) they are the grid's own selection and its
+ *  write extent: a neighbour strip past the extent is not the grid's. */
+function selectionAndBounds(t: CellTarget): { blocks: CellRect[]; bounds: SheetBounds } | null {
+  if (t.kind === "object") {
+    return { blocks: selectionBlocks(t.selection), bounds: { rows: t.bounds.rows, cols: t.bounds.cols } };
+  }
   const snapshot = getGridStateSnapshot();
   const sel = snapshot?.selection;
   if (!sel) return null;
@@ -403,12 +408,22 @@ const NO_LINE: SideParam = { style: "none", color: AUTOMATIC_LINE_COLOR };
  * caches each style once, and writes only the cells that have a line there --
  * a neighbour with no border gets nothing written.
  */
-async function clearSharedEdge(rect: CellRect, edge: Edge, bounds: SheetBounds, styleCache: Map<number, Promise<StyleData>>): Promise<CellData[]> {
+async function clearSharedEdge(
+  rect: CellRect,
+  edge: Edge,
+  bounds: SheetBounds,
+  styleCache: Map<number, Promise<StyleData>>,
+  target: CellTargetRef | undefined,
+): Promise<CellData[]> {
   const strip = sharedEdgeStrip(rect, edge, bounds);
   if (!strip) return [];
   const length = (strip.endRow - strip.startRow + 1) * (strip.endCol - strip.startCol + 1);
   if (length > NEIGHBOUR_READ_LIMIT) return [];
-  const cells = await getViewportCells(strip.startRow, strip.startCol, strip.endRow, strip.endCol);
+  // A floating grid's neighbours are ITS cells (the styled read resolves row
+  // and column tiers too); never the active sheet's under it.
+  const cells: CellData[] = target
+    ? (await getCellTargetCells(target, strip)).cells
+    : await getViewportCells(strip.startRow, strip.startCol, strip.endRow, strip.endCol);
   const owners: CellData[] = [];
   for (const cell of cells) {
     let style = styleCache.get(cell.styleIndex);
@@ -425,11 +440,11 @@ async function clearSharedEdge(rect: CellRect, edge: Edge, bounds: SheetBounds, 
   const horizontal = edge === "top" || edge === "bottom";
   const rows = horizontal ? [strip.startRow] : owners.map((c) => c.row);
   const cols = horizontal ? owners.map((c) => c.col) : [strip.startCol];
-  const result = await applyFormatting(rows, cols, { [strip.side]: NO_LINE });
+  const result = await applyFormatting(rows, cols, { [strip.side]: NO_LINE }, { target });
   return result.cells;
 }
 
-async function runWrite(write: BorderWrite): Promise<CellData[]> {
+async function runWrite(write: BorderWrite, target: CellTargetRef | undefined): Promise<CellData[]> {
   if (write.kind === "preset") {
     const { rect } = write;
     const result = await applyBorderPreset(
@@ -441,17 +456,19 @@ async function runWrite(write: BorderWrite): Promise<CellData[]> {
       write.style,
       write.color,
       write.width,
+      { target },
     );
     return result.cells;
   }
-  const result = await applyFormatting(write.rows, write.cols, write.formatting);
+  const result = await applyFormatting(write.rows, write.cols, write.formatting, { target });
   return result.cells;
 }
 
 /** What every Home formatting door does after a write: the ONE announcement
- *  (`@api/announceFormatting`) -- the cells, then a style and grid repaint. */
-function announce(cells: CellData[]): void {
-  announceFormattingResult({ cells, styles: [] });
+ *  (`@api/announceFormatting`) -- the cells, then a style and grid repaint
+ *  (for a floating grid's cells: no per-cell events, the target is told). */
+function announce(cells: CellData[], target: CellTargetRef | undefined): void {
+  announceFormattingResult({ cells, styles: [] }, { target });
 }
 
 /**
@@ -459,15 +476,18 @@ function announce(cells: CellData[]): void {
  * selection, as ONE undo step named after the preset. Answers whether it
  * applied; never throws -- a refusal reaches the user.
  *
- * Asks the selection owner FIRST, before a transaction is opened: a floating
- * grid's cell owning the selection refuses here with one toast, and no empty
- * step is left behind.
+ * Asks WHICH cells FIRST, before a transaction is opened
+ * (`resolveCellTarget(action, "format")`, P3): Core's selection, or a floating
+ * grid's own cells written through `{ target }`. An owner that does not admit
+ * the act refuses here with one toast, and no empty step is left behind.
  */
 export async function applyBorderChoice(preset: BorderPresetId, pen: BorderPen = borderPen.get()): Promise<boolean> {
   const row = borderPresetRow(preset);
   const action = row.label;
-  if (refuseIfSelectionOwned(action)) return false;
-  const selection = selectionAndBounds();
+  const t = resolveCellTarget(action, "format");
+  if (t === null) return false;
+  const target = targetRefOf(t);
+  const selection = selectionAndBounds(t);
   if (!selection) return false;
 
   // A begin that fails still lets the preset apply (as several steps, what
@@ -483,9 +503,9 @@ export async function applyBorderChoice(preset: BorderPresetId, pen: BorderPen =
     const styleCache = new Map<number, Promise<StyleData>>();
     for (const rect of selection.blocks) {
       const plan = planBorderPreset(preset, rect, pen);
-      for (const write of plan.writes) written.push(...(await runWrite(write)));
+      for (const write of plan.writes) written.push(...(await runWrite(write, target)));
       for (const edge of plan.sharedEdges) {
-        written.push(...(await clearSharedEdge(rect, edge, selection.bounds, styleCache)));
+        written.push(...(await clearSharedEdge(rect, edge, selection.bounds, styleCache, target)));
       }
     }
   } catch (err) {
@@ -495,7 +515,7 @@ export async function applyBorderChoice(preset: BorderPresetId, pen: BorderPen =
     // COMMIT, never cancel: what landed stays undoable (a cancel drops the
     // undo record and keeps the writes). An empty step commits to nothing.
     await tx.commit().catch((err) => console.error("[HomeTab] Borders: closing the undo step failed:", err));
-    announce(written);
+    announce(written, target);
   }
   return ok;
 }

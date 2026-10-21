@@ -804,17 +804,24 @@ fn assemble_publish_workbook(
     // exist), so the restore of a collision rename below reaches their formulas
     // and core publish picks the rows of the objects it carries
     // (`published_object_bindings`). The live-object walk reads and releases the
-    // family stores before the (leaf) store is read.
-    {
+    // family stores before the (leaf) store is read. The walk is HOISTED: the
+    // canvas interactions and the ribbon filters' "Selected visuals" (already
+    // in `workbook`, from `build_workbook_for_save_with_slicers`) are pruned
+    // against it, as the `.cala` save does (P4 DC-2).
+    let live_locations = {
         let stores = crate::object_bindings::object_json::ObjectStores {
             state,
             slicers: slicer_state,
             timelines: timeline_state,
             pivots: pivot_state,
         };
-        let live = crate::object_bindings::object_json::live_object_refs(&stores);
+        let locations = crate::object_bindings::object_json::object_locations(&stores);
+        let live: std::collections::HashSet<crate::api_types::ObjectBindingRef> =
+            locations.iter().map(|(r, _)| r.clone()).collect();
         workbook.object_bindings = crate::object_bindings::store::collect_bindings_for_save(state, &live);
-    }
+        locations
+    };
+    crate::persistence::prune_dead_visual_refs_for_save(&mut workbook, &live_locations);
 
     for &idx in sheet_indices {
         if idx >= workbook.sheets.len() {

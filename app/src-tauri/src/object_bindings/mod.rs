@@ -176,9 +176,27 @@ pub struct BindingCx<'a> {
     pub pivots: &'a crate::pivot::types::PivotState,
     pub pane: &'a crate::pane_control::PaneControlState,
     pub ribbon: &'a crate::ribbon_filter::RibbonFilterState,
+    /// For the pivot re-fold an `/interactions` write needs (P4 DC-9).
+    pub user_files: &'a crate::persistence::UserFilesState,
 }
 
 impl BindingCx<'_> {
+    /// The pivot command context over these stores and `bi`, recording undo
+    /// (the `/interactions` door's re-fold, P4 DC-9).
+    pub(crate) fn pivot_ctx<'b>(&'b self, bi: &'b crate::bi::types::BiState) -> crate::pivot::commands::PivotCmdCtx<'b> {
+        crate::pivot::commands::PivotCmdCtx {
+            state: self.state,
+            file_state: self.file_state,
+            pivot_state: self.pivots,
+            pane_control_state: self.pane,
+            ribbon_filter_state: self.ribbon,
+            user_files_state: self.user_files,
+            bi_state: bi,
+            slicer_state: self.slicers,
+            record_undo: true,
+        }
+    }
+
     pub fn stores(&self) -> ObjectStores<'_> {
         ObjectStores { state: self.state, slicers: self.slicers, timelines: self.timelines, pivots: self.pivots }
     }
@@ -200,10 +218,13 @@ impl BindingCx<'_> {
 pub struct Handled {
     pub response: ObjectBindingsResponse,
     pub layout: Option<crate::sheets::CanvasLayoutChanged>,
+    /// The BI pivots an `/interactions` write re-folded (P4 DC-9); empty
+    /// for every other op.
+    pub refreshed_pivots: Vec<pivot_engine::PivotId>,
 }
 
 fn plain(response: ObjectBindingsResponse) -> Handled {
-    Handled { response, layout: None }
+    Handled { response, layout: None, refreshed_pivots: Vec::new() }
 }
 
 /// THE binding command. Every op body is a `_core` over plain references
@@ -222,6 +243,7 @@ pub async fn object_bindings(
     pivot_state: tauri::State<'_, crate::pivot::types::PivotState>,
     pane_control_state: tauri::State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: tauri::State<'_, crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: tauri::State<'_, crate::persistence::UserFilesState>,
     request: ObjectBindingsRequest,
 ) -> Result<ObjectBindingsResponse, String> {
     let cx = BindingCx {
@@ -232,15 +254,34 @@ pub async fn object_bindings(
         pivots: pivot_state.inner(),
         pane: pane_control_state.inner(),
         ribbon: ribbon_filter_state.inner(),
+        user_files: user_files_state.inner(),
     };
     // Boxed: the dispatcher nests the design-query path and then the
     // evaluator; its state lives on the heap, not in the worker's 2 MB stack.
     let handled = Box::pin(handle_request_async(&cx, bi_state.inner(), request)).await?;
-    if let Some(layout) = handled.layout {
-        use tauri::Emitter;
-        let _ = app.emit(crate::sheets::CANVAS_LAYOUT_EVENT, layout);
-    }
+    announce_handled(&app, &handled);
     Ok(handled.response)
+}
+
+/// Emit what a handled op owes, with every guard dropped: the canvas-layout
+/// event of a page literal write and, when an `/interactions` write re-folded
+/// pivots (P4 DC-9), a `mutation:refresh` of the pivot domain.
+pub(crate) fn announce_handled(app: &tauri::AppHandle, handled: &Handled) {
+    use tauri::Emitter;
+    if let Some(layout) = &handled.layout {
+        let _ = app.emit(crate::sheets::CANVAS_LAYOUT_EVENT, layout.clone());
+    }
+    if !handled.refreshed_pivots.is_empty() {
+        if let Some(domain) = crate::object_deps::UiDomain::Pivot.wire_name() {
+            let _ = app.emit(
+                crate::object_deps::MUTATION_REFRESH_EVENT,
+                crate::object_deps::MutationRefreshEvent {
+                    domains: vec![domain.to_string()],
+                    source: "commit".to_string(),
+                },
+            );
+        }
+    }
 }
 
 /// Every connected model of the workbook and its measures, as a binding names
@@ -323,8 +364,65 @@ pub async fn handle_request_async(
             Box::pin(measures::refresh_measures(&cx.stores(), bi, &measures::FetchScope::missing(None))).await;
             Ok(plain(ObjectBindingsResponse::Resolved { values: resolve_all_core(cx) }))
         }
+        ObjectBindingsRequest::SetLiteral { object, path, value, source }
+            if object.kind == ObjectBindingKind::CanvasPage && path == catalog::CANVAS_INTERACTIONS_PATH =>
+        {
+            let source = source.unwrap_or(BindingEditSource::User);
+            Box::pin(set_interactions_literal_async(cx, bi, &object, value, &source)).await
+        }
         other => handle_request(cx, &[], other),
     }
+}
+
+/// `SetLiteral` of a canvas page's `/interactions` (P4 S4d): planned and
+/// refused by `literal::plan_interactions_write`, then written through
+/// `sheets::set_canvas_layout_refolding` -- the SAME door `set_canvas_layout`
+/// uses, so the layout and the pivot re-fold it causes are ONE undo step, all
+/// or nothing (DC-9). A script or AI source leaves an audit row, exactly as
+/// [`set_literal_core`] does. The command announces the result
+/// ([`announce_handled`]).
+pub async fn set_interactions_literal_async(
+    cx: &BindingCx<'_>,
+    bi: &crate::bi::types::BiState,
+    object: &ObjectBindingRef,
+    value: serde_json::Value,
+    source: &BindingEditSource,
+) -> Result<Handled, String> {
+    let shown = value.to_string();
+    let result = match literal::plan_interactions_write(&cx.literal_ctx(), object, value) {
+        Err(e) => Err(e),
+        Ok(plan) => {
+            let ctx = cx.pivot_ctx(bi);
+            let write = crate::sheets::set_canvas_layout_refolding(&ctx, cx.timelines, Some(plan.index), &plan.patch);
+            Box::pin(write).await.map(|done| (plan.before, done))
+        }
+    };
+    if *source != BindingEditSource::User {
+        audit::record_binding_edit(
+            cx.state,
+            source,
+            audit::ACTION_LITERAL_SET,
+            object,
+            catalog::CANVAS_INTERACTIONS_PATH,
+            &shown,
+            result.as_ref().err().map(String::as_str),
+        );
+    }
+    let (before, done) = result?;
+    if before.as_ref() == Some(&done.changed.layout) {
+        return Ok(plain(ObjectBindingsResponse::LiteralSet { domains: Vec::new() }));
+    }
+    let mut domains = vec!["sheets".to_string()];
+    if !done.refreshed.is_empty() {
+        if let Some(pivot) = crate::object_deps::UiDomain::Pivot.wire_name() {
+            domains.push(pivot.to_string());
+        }
+    }
+    Ok(Handled {
+        response: ObjectBindingsResponse::LiteralSet { domains },
+        layout: Some(done.changed),
+        refreshed_pivots: done.refreshed,
+    })
 }
 
 /// After a `Set`: fetch what the binding's page is missing (its measures under
@@ -795,6 +893,7 @@ pub fn set_literal_core(
         literal::LiteralWriteOutcome::Written { domains, layout } => Handled {
             response: ObjectBindingsResponse::LiteralSet { domains: domains.into_iter().map(str::to_string).collect() },
             layout,
+            refreshed_pivots: Vec::new(),
         },
         literal::LiteralWriteOutcome::Unchanged => plain(ObjectBindingsResponse::LiteralSet { domains: Vec::new() }),
     })
@@ -840,7 +939,7 @@ pub fn cells_changed_core(cx: &BindingCx<'_>, cells: Option<Vec<ChangedCellRef>>
 }
 
 /// REPLACE the page-filter mirror with the frontend's full snapshot (D §3.8:
-/// `@api/pageFilters` stays the authority; this is a derived copy, so it
+/// `@api/reportFilters` stays the authority; this is a derived copy, so it
 /// constructs no `DocumentEffect` -- D §9 D1), then re-evaluate the pages
 /// whose filters changed from what the runtime holds. The command goes through
 /// [`set_page_filters_async`], which runs the measure pass in between.

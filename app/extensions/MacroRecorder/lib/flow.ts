@@ -20,7 +20,7 @@
 import { showDialog } from "@api/ui";
 import type { Selection } from "@api";
 import { getActiveSheet } from "@api/lib";
-import { getCachedLocale } from "@api/locale";
+import { getAppLocale } from "@api/locale";
 import type { MacroTarget, RecordedAction } from "./types";
 import { RESULT_DIALOG_ID } from "./ids";
 import { generateMacroSource } from "./actionCodegen";
@@ -113,7 +113,7 @@ export function generateStoredSource(options: {
     target,
     wrapper: target === "notebook" ? "notebookCell" : "objectScript",
     name,
-    decimalSeparator: getCachedLocale()?.decimalSeparator ?? ".",
+    decimalSeparator: getAppLocale().decimalSeparator,
     recordedAt,
   }).source;
 }

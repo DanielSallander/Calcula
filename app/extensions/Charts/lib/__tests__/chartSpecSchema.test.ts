@@ -214,7 +214,7 @@ const DEFS = SCHEMA.definitions as Record<string, any>;
 // when ChartSpec itself changes — then update the schema to match.
 const CHART_SPEC_KEYS: Array<keyof ChartSpec> = [
   "mark", "data", "hasHeaders", "seriesOrientation", "categoryIndex", "series",
-  "title", "xAxis", "yAxis", "legend", "palette", "markOptions", "layers",
+  "title", "xAxis", "yAxis", "legend", "palette", "seriesColors", "markOptions", "layers",
   "transform", "config", "tooltip", "trendlines", "dataLabels", "dataTable",
   "seriesRefs", "filters", "dataPointOverrides", "encoding", "repeat", "facet", "concat", "params",
   "plotHiddenCells", "container", "fieldFormats",
@@ -652,6 +652,16 @@ describe("ChartContainerFormat mirrors the shared visual-container schema", () =
 });
 
 describe("chartSpecJsonSchema nested drift guard", () => {
+  it("the TOP-LEVEL schema keys equal the ChartSpec interface parsed from types.ts", () => {
+    // The hand-kept CHART_SPEC_KEYS list above drifted once already: it never
+    // listed `seriesColors`, so the schema refused it ("unknown property")
+    // and the object pane's series colour pick was rejected by the data
+    // commit's schema gate (round 2, G1). Parsing the interface cannot drift.
+    const typeKeys = interfaceProperties(typesSrc, "ChartSpec").sort();
+    expect(typeKeys.length).toBeGreaterThan(20);
+    expect(Object.keys(SCHEMA.properties).sort()).toEqual(typeKeys);
+  });
+
   it("the parser actually finds properties (guard against a silently empty diff)", () => {
     // A property extractor that returns [] would make every assertion below
     // pass vacuously. Pin a couple of known members and the brace handling.

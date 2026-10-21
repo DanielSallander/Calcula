@@ -74,6 +74,7 @@ pub mod formula;
 pub mod logging;
 pub mod sheets;
 pub mod floating_range;
+pub mod cell_target;
 /// The ONE rule for what a sheet may be called (register F6, product half).
 pub mod sheet_names;
 pub mod undo_commands;
@@ -141,6 +142,7 @@ pub mod control_values;
 pub mod row_visibility;
 pub mod timeline_slicer;
 pub mod mcp;
+pub mod app_locale;
 pub mod locale_commands;
 /// Windows regional settings -> `engine::LocaleSettings` (open-items 1.3).
 pub mod os_locale;
@@ -244,6 +246,19 @@ mod tests;
 
 #[cfg(test)]
 mod eval_budget_tests;
+
+#[cfg(test)]
+mod app_locale_tests;
+
+/// THE member shape `{ key, label }` at the Rust boundary (P2 S4): keys
+/// invariant, labels in the app locale, the blank member key "" (Q8).
+#[cfg(test)]
+mod member_shape_tests;
+
+/// The Rust display-locale census (P2 S5): production display text uses the
+/// app locale; every invariant hit is allowlisted with its reason.
+#[cfg(test)]
+mod display_locale_census_tests;
 
 /// Enum variant fields cross the wire in camelCase (the Data Validation
 /// list-from-range rule was refused on the wire; found live 2026-09-29).
@@ -867,6 +882,11 @@ impl AppState {
 pub fn create_app_state() -> AppState {
     log_info!("SYS", "Creating AppState");
     let initial_grid = Grid::new();
+    // THE APP LOCALE: a valid persisted override, else the OS REGIONAL FORMAT
+    // (not the display language -- see os_locale.rs, open-items 1.3). Decided
+    // by `app_locale`, the one authority, and installed at the end of this
+    // function (state.locale + the evaluator's mirror, which TEXT() reads).
+    let (startup_locale, startup_override) = app_locale::startup_locale();
     let app_state = AppState {
         grids: document_effect::Persisted::new(vec![initial_grid.clone()]),
         sheet_names: document_effect::Persisted::new(vec!["Sheet1".to_string()]),
@@ -947,25 +967,7 @@ pub fn create_app_state() -> AppState {
         scenarios: document_effect::Persisted::new(HashMap::new()),
         animation_snapshots: Mutex::new(HashMap::new()),
         // linked_sheets removed
-        locale: Mutex::new({
-            // THE REGIONAL FORMAT, NOT THE DISPLAY LANGUAGE. This used to be
-            // `sys_locale::get_locale()`, which is `GetUserPreferredUILanguages`
-            // -- the language Windows shows its own menus in. The separators,
-            // date patterns and currency symbol Excel uses come from the
-            // REGIONAL FORMAT, a different setting entirely, so an
-            // English-display machine with a Swedish region got `.` decimals
-            // and `,` formula separators while Excel beside it used `,` and
-            // `;`. See os_locale.rs (open-items 1.3).
-            let locale = crate::os_locale::system_locale_settings();
-            log_info!("SYS", "Detected system regional format: {}", locale.locale_id);
-            // Mirror it where every `Evaluator` can see it. `TEXT(value,
-            // format)` is the one formula that formats for display, and the
-            // alternative to a mirror is a locale parameter on the ~19
-            // `evaluate_formula*` wrappers — the same trade `eval_budget`
-            // already made for the work budget, and for the same reason.
-            crate::eval_budget::set_formula_locale(locale.clone());
-            locale
-        }),
+        locale: Mutex::new(startup_locale.clone()),
         auto_recover_enabled: Mutex::new(true),
         auto_recover_interval_ms: Mutex::new(300_000), // 5 minutes
         named_styles: document_effect::Persisted::new(HashMap::new()),
@@ -1027,6 +1029,10 @@ pub fn create_app_state() -> AppState {
 
     // Populate built-in named styles
     named_styles_cmd::init_builtin_named_styles(&app_state);
+
+    // The one writer of the app locale (state.locale + the process mirror the
+    // evaluator reads; the mirror only outside a test build).
+    app_locale::install(&app_state, startup_locale, startup_override);
 
     app_state
 }
@@ -1198,6 +1204,19 @@ pub fn format_cell_value_simple(value: &CellValue) -> String {
         CellValue::Error(e) => cell_error_display(e),
         CellValue::List(items) => format!("[List({})]", items.len()),
         CellValue::Dict(entries) => format!("[Dict({})]", entries.len()),
+    }
+}
+
+/// A value as the USER reads it with no number format of its own: General,
+/// in the app locale's separators ("1234,5" under de-DE). The DISPLAY twin
+/// of `format_cell_value_simple`, which stays invariant because its callers
+/// COMPARE text (CF/DV, sort, filter keys) rather than show it.
+/// TRUE/FALSE and the error codes stay as Excel writes them in every locale
+/// (prose and codes are not localised; only digits are).
+pub fn format_cell_value_display(value: &CellValue, locale: &engine::LocaleSettings) -> String {
+    match value {
+        CellValue::Number(n) => engine::format_number(*n, &engine::NumberFormat::General, locale),
+        other => format_cell_value_simple(other),
     }
 }
 
@@ -5425,6 +5444,8 @@ pub fn run() {
             floating_range::get_floating_range_spill_ranges,
             floating_range::rename_floating_range,
             floating_range::delete_floating_range,
+            // P3: the styled read of a cell target (a floating grid's backing cells)
+            cell_target::get_cell_target_cells,
             sheets::set_freeze_panes,
             sheets::get_freeze_panes,
             sheets::set_split_window,
@@ -5501,6 +5522,7 @@ pub fn run() {
             pivot::create_pivot_from_bi_model,
             pivot::update_bi_pivot_fields,
             pivot::headless::run_design_query,
+            pivot::headless::run_bi_pivot_filtered_view,
             pivot::headless::get_connection_bi_model,
             report::create_report,
             report::refresh_report,

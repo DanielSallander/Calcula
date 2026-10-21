@@ -2,7 +2,7 @@
 // PURPOSE: Tauri command wrappers for ribbon filter backend operations.
 
 import { filterPaneBackend } from "./filterPaneBackend";
-import type { CellData } from "@api/types";
+import type { CellData, MemberRef } from "@api/types";
 import type { PivotFilterGesture, PivotFilterGestureResponse } from "@api/pivotTypes";
 import type {
   RibbonFilter,
@@ -100,7 +100,7 @@ export async function recalcControlDependents(
 }
 
 // ============================================================================
-// Slicer helpers (for cross-filter UI)
+// Slicer helpers (for the dependent-filters UI)
 // ============================================================================
 
 export interface SlicerInfo {
@@ -151,10 +151,12 @@ export async function getBiConnections(): Promise<BiConnectionInfo[]> {
   return filterPaneBackend.invoke<BiConnectionInfo[]>("bi_get_connections");
 }
 
+/** The model behind a connection, or null when the connection has no model
+ *  loaded (the Rust command returns an Option: bi/commands.rs bi_get_model_info). */
 export async function getBiModelInfo(
   connectionId: string,
-): Promise<BiModelInfo> {
-  return filterPaneBackend.invoke<BiModelInfo>("bi_get_model_info", { connectionId });
+): Promise<BiModelInfo | null> {
+  return filterPaneBackend.invoke<BiModelInfo | null>("bi_get_model_info", { connectionId });
 }
 
 /** List the BI pivots backed by the given model connection. */
@@ -167,34 +169,38 @@ export async function getPivotsForBiConnection(
   );
 }
 
+/** The column's members ({ key, label }), the blank member (key "", label
+ *  "(Blank)") last. A filter SELECTS by key and SHOWS the label. */
 export async function getBiColumnValues(
   connectionId: string,
   table: string,
   column: string,
-): Promise<string[]> {
-  return filterPaneBackend.invoke<string[]>("bi_get_column_values", {
+): Promise<MemberRef[]> {
+  return filterPaneBackend.invoke<MemberRef[]>("bi_get_column_values", {
     connectionId,
     table,
     column,
   });
 }
 
-export interface BiCrossFilter {
+export interface BiValueConstraint {
   table: string;
   column: string;
   values: string[];
 }
 
+/** The member KEYS of the column that still have data under `constraints`
+ *  (whose `values` are keys too): a key set for has-data dimming only. */
 export async function getBiColumnAvailableValues(
   connectionId: string,
   table: string,
   column: string,
-  crossFilters: BiCrossFilter[],
+  constraints: BiValueConstraint[],
 ): Promise<string[]> {
   return filterPaneBackend.invoke<string[]>("bi_get_column_available_values", {
     connectionId,
     table,
     column,
-    crossFilters,
+    constraints,
   });
 }

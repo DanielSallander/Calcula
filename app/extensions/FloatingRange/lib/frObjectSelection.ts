@@ -22,6 +22,7 @@ import {
 } from "@api/objectSelection";
 import { requestOverlayRedraw } from "@api/gridOverlays";
 import { canvasObjectRef } from "@api/canvasSheet";
+import { CoreCommands } from "@api/commands";
 import { FLOATING_RANGE_REGION_TYPE, getFloatingRangeById } from "./floatingRangeStore";
 import { isFrContextMenuOpen } from "./frContextMenu";
 import { frSelectionOnScreen } from "./frKeyRouting";
@@ -125,6 +126,19 @@ export function createFloatingRangeSelectionProvider(
       if (key !== "Tab" && key !== "Escape" && key !== "Arrow" && key !== "Clipboard") return false;
       const local = getLocalSelection();
       return local !== null && getFloatingRangeById(local.frId) !== null;
+    },
+
+    // The Copy / Paste DOORS (Home tab, Edit menu) while a CELL of the range is
+    // selected: the CELL clipboard (Core's Copy / Paste). Its grid-command door
+    // resolves the range's cells as the target (P3, owner finding G3) -- the
+    // copy reads them, the paste writes them -- or refuses with the range's
+    // own sentence while the range does not admit the act. Named explicitly so
+    // no object clipboard ahead of it (a canvas's, W25) can take the keys
+    // from a cell selection. Without a cell selected: null, the object doors.
+    innerClipboardCommand(action: "copy" | "paste"): string | null {
+      const local = getLocalSelection();
+      if (local === null || getFloatingRangeById(local.frId) === null) return null;
+      return action === "copy" ? CoreCommands.COPY : CoreCommands.PASTE;
     },
 
     refOf(region: GridRegion) {

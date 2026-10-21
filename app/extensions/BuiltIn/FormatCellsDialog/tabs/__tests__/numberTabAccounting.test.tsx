@@ -19,10 +19,8 @@ import { createRoot, type Root } from "react-dom/client";
 
 vi.mock("@api", () => ({
   previewNumberFormat: vi.fn(async () => ({ display: "Sample" })),
-  getCachedLocale: () => null,
-  getLocaleSettings: async () => {
-    throw new Error("no locale in this test");
-  },
+  // The invariant locale, as getAppLocale() answers before the app locale lands.
+  getAppLocale: () => ({ decimalSeparator: ".", thousandsSeparator: "," }),
   getRibbonNumberFormats: async () => {
     throw new Error("no ribbon formats in this test");
   },

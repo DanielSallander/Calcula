@@ -25,6 +25,7 @@ use crate::{
 };
 
 use super::types::*;
+use crate::api_types::MemberRef;
 use super::engine_registry::{EngineRegistry, ModelKey};
 
 // ---------------------------------------------------------------------------
@@ -424,11 +425,18 @@ pub fn batches_to_result(batches: &[arrow::record_batch::RecordBatch]) -> BiQuer
             columns: vec![],
             rows: vec![],
             row_count: 0,
+            column_kinds: vec![],
         };
     }
 
     let schema = batches[0].schema();
     let columns: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
+    // DC1: the column TYPE travels with the string rows.
+    let column_kinds: Vec<super::member::BiColumnKind> = schema
+        .fields()
+        .iter()
+        .map(|f| super::member::column_kind(f.data_type()))
+        .collect();
 
     let mut rows: Vec<Vec<Option<String>>> = Vec::new();
 
@@ -448,6 +456,7 @@ pub fn batches_to_result(batches: &[arrow::record_batch::RecordBatch]) -> BiQuer
         columns,
         rows,
         row_count,
+        column_kinds,
     }
 }
 
@@ -519,10 +528,14 @@ pub(crate) fn arrow_value_to_string(array: &dyn Array, idx: usize) -> Option<Str
             if scale == 0 {
                 Some(raw.to_string())
             } else {
+                // The sign is written on its own: `raw / divisor` is 0 for
+                // every value between -1 and 0, so -0.50 used to read "0.50"
+                // -- the same text (and so the same member KEY) as +0.50.
                 let divisor = 10i128.pow(scale);
-                let whole = raw / divisor;
+                let sign = if raw < 0 { "-" } else { "" };
+                let whole = (raw / divisor).abs();
                 let frac = (raw % divisor).abs();
-                Some(format!("{}.{:0>width$}", whole, frac, width = scale as usize))
+                Some(format!("{}{}.{:0>width$}", sign, whole, frac, width = scale as usize))
             }
         }
         ArrowDataType::Dictionary(key_type, _) => {
@@ -561,11 +574,6 @@ pub(crate) fn arrow_value_to_string(array: &dyn Array, idx: usize) -> Option<Str
             Some(format!("<unsupported: {:?}>", array.data_type()))
         }
     }
-}
-
-/// Try to parse a string value as f64 for numeric cells.
-fn try_parse_number(s: &str) -> Option<f64> {
-    s.parse::<f64>().ok()
 }
 
 /// Get current ISO 8601 timestamp.
@@ -3278,26 +3286,55 @@ fn validate_readonly_sql(sql: &str) -> Result<(), String> {
 /// Executes a GROUP BY query with no measures to retrieve unique values.
 /// Used by slicers and ribbon filters that connect directly to a BI model.
 /// Auto-connects and auto-binds the table if needed.
+///
+/// Returns THE member shape (`MemberRef { key, label }`): the key is the
+/// invariant machine text (`arrow_value_to_string`), the label is written for
+/// the app locale from the typed Arrow value (`bi::member::arrow_member`).
 #[tauri::command]
 pub async fn bi_get_column_values(
+    state: State<'_, AppState>,
     bi_state: State<'_, BiState>,
     connection_id: ConnectionId,
     table: String,
     column: String,
-) -> Result<Vec<String>, String> {
-    bi_get_column_values_core(&bi_state, connection_id, &table, &column).await
+) -> Result<Vec<MemberRef>, String> {
+    // Leaf lock: take, clone, drop -- before anything else.
+    let locale = state.locale.lock().unwrap().clone();
+    bi_get_column_members_core(&bi_state, connection_id, &table, &column, &locale).await
 }
 
-/// [`bi_get_column_values`] over a borrowed `BiState` -- the one path every
-/// model value list takes (ribbon filters, pinned pivot slicers, MODEL
-/// slicers), so auto-connect, auto-bind and the connection's RLS/OLS role
-/// apply to all of them alike.
+/// The KEYS of [`bi_get_column_members_core`], in its order: the value list
+/// of every internal key consumer (a hidden-items complement, a slicer's
+/// domain, a test). The blank member is its key, `""` (ruling Q8).
 pub(crate) async fn bi_get_column_values_core(
     bi_state: &BiState,
     connection_id: ConnectionId,
     table: &str,
     column: &str,
 ) -> Result<Vec<String>, String> {
+    let members = bi_get_column_members_core(
+        bi_state,
+        connection_id,
+        table,
+        column,
+        &engine::LocaleSettings::invariant(),
+    )
+    .await?;
+    Ok(members.into_iter().map(|m| m.key).collect())
+}
+
+/// [`bi_get_column_values`] over a borrowed `BiState` -- the one path every
+/// model value list takes (ribbon filters, pinned pivot slicers, MODEL
+/// slicers), so auto-connect, auto-bind and the connection's RLS/OLS role
+/// apply to all of them alike. `locale` writes the LABELS only; the keys and
+/// their order never depend on it.
+pub(crate) async fn bi_get_column_members_core(
+    bi_state: &BiState,
+    connection_id: ConnectionId,
+    table: &str,
+    column: &str,
+    locale: &engine::LocaleSettings,
+) -> Result<Vec<MemberRef>, String> {
     log_info!(
         "BI",
         "bi_get_column_values: conn={}, {}.{}",
@@ -3341,19 +3378,22 @@ pub(crate) async fn bi_get_column_values_core(
         log_info!("BI", "bi_get_column_values: data fetched from DATABASE for: {}", refreshed_tables.join(", "));
     }
 
-    // Extract unique values from the first column (group_by column).
+    // Extract unique members from the first column (group_by column).
     //
-    // THE BLANK MEMBER (wave C, W6). NULL and the empty string -- which a list
-    // shows as ONE item, as a pivot's own lists do -- are offered LAST as
-    // `pivot_engine::BLANK_ITEM_LABEL` ("(blank)", Excel's spelling). They used
-    // to be dropped: a model slicer, a ribbon filter or a pinned pivot slicer
-    // then had no item for the blank rows, so a selection could not say whether
-    // they should show, and a PINNED selection (an IN-list the engine applies)
-    // dropped them in silence. The engine reads the label in a scoped IN-list
-    // as BLANK (`bi_engine::BLANK_MEMBER_LABEL`), and the host's level-1 mask
-    // hides the blank rows when a selection from this list does not name it
-    // (`pivot::commands::MODEL_VALUE_LISTS_NAME_THE_BLANK`).
-    let mut values: Vec<String> = Vec::new();
+    // THE BLANK MEMBER (wave C, W6; ruling Q8). NULL and the empty string --
+    // which a list shows as ONE item -- are offered LAST as
+    // `MemberRef::blank()`: key "" and label "(Blank)", Power BI's spelling.
+    // They used to be dropped: a model slicer, a ribbon filter or a pinned
+    // pivot slicer then had no item for the blank rows, so a selection could
+    // not say whether they should show, and a PINNED selection (an IN-list the
+    // engine applies) dropped them in silence. A key handed to the engine as
+    // an IN-list goes through `bi::member::engine_in_value`, which spells the
+    // blank the way the engine reads it (`bi_engine::BLANK_MEMBER_LABEL`), and
+    // the host's level-1 mask hides the blank rows when a selection from this
+    // list does not name it (`pivot::commands::MODEL_VALUE_LISTS_NAME_THE_BLANK`).
+    //
+    // Sorted by KEY, as before: the order is locale-independent and stable.
+    let mut members: Vec<MemberRef> = Vec::new();
     let mut has_blank = false;
     for batch in &batches {
         if batch.num_columns() == 0 {
@@ -3361,51 +3401,51 @@ pub(crate) async fn bi_get_column_values_core(
         }
         let col = batch.column(0);
         for row_idx in 0..batch.num_rows() {
-            match arrow_value_to_string(col, row_idx) {
-                Some(v) if !v.is_empty() => values.push(v),
-                _ => has_blank = true,
+            match super::member::arrow_member(col.as_ref(), row_idx, locale) {
+                Some(m) => members.push(m),
+                None => has_blank = true,
             }
         }
     }
 
-    values.sort();
-    values.dedup();
+    members.sort_by(|a, b| a.key.cmp(&b.key));
+    members.dedup_by(|a, b| a.key == b.key);
     if has_blank {
         // A literal "(blank)" value and the blank member are one item.
-        values.retain(|v| !pivot_engine::is_blank_item_label(v));
-        values.push(pivot_engine::BLANK_ITEM_LABEL.to_string());
+        members.retain(|m| !pivot_engine::is_blank_member_key(&m.key));
+        members.push(MemberRef::blank());
     }
 
     log_info!(
         "BI",
         "bi_get_column_values: returned {} unique values",
-        values.len()
+        members.len()
     );
 
-    Ok(values)
+    Ok(members)
 }
 
-/// Get distinct values for a column, filtered by cross-filter constraints.
+/// Get distinct values for a column, filtered by the dependent-filter / sibling-slicer constraints.
 #[tauri::command]
 pub async fn bi_get_column_available_values(
     bi_state: State<'_, BiState>,
     connection_id: ConnectionId,
     table: String,
     column: String,
-    cross_filters: Vec<BiCrossFilter>,
+    constraints: Vec<BiValueConstraint>,
 ) -> Result<Vec<String>, String> {
-    bi_get_column_available_values_core(&bi_state, connection_id, &table, &column, &cross_filters).await
+    bi_get_column_available_values_core(&bi_state, connection_id, &table, &column, &constraints).await
 }
 
 /// [`bi_get_column_available_values`] over a borrowed `BiState`: the values of
-/// `table.column` that still have rows under `cross_filters` (a model
+/// `table.column` that still have rows under `constraints` (a model
 /// slicer's has-data shading).
 pub(crate) async fn bi_get_column_available_values_core(
     bi_state: &BiState,
     connection_id: ConnectionId,
     table: &str,
     column: &str,
-    cross_filters: &[BiCrossFilter],
+    constraints: &[BiValueConstraint],
 ) -> Result<Vec<String>, String> {
     // Auto-connect + auto-bind, unless every table is already cache-warm (offline).
     let all_tables: Vec<String> = {
@@ -3421,9 +3461,9 @@ pub(crate) async fn bi_get_column_available_values_core(
         auto_bind_tables_on_connection(&bi_state, connection_id, &table_refs).await?;
     }
 
-    // Build GROUP BY: target column + all cross-filter columns
+    // Build GROUP BY: target column + all constraint columns
     let mut group_by = vec![bi_engine::ColumnRef::new(table, column)];
-    for cf in cross_filters {
+    for cf in constraints {
         group_by.push(bi_engine::ColumnRef::new(&cf.table, &cf.column));
     }
 
@@ -3445,23 +3485,23 @@ pub(crate) async fn bi_get_column_available_values_core(
         log_info!("BI", "bi_get_column_available_values: data fetched from DATABASE for: {}", refreshed_tables.join(", "));
     }
 
-    // Post-filter: for each row, check if all cross-filter columns match.
+    // Post-filter: for each row, check if all constraint columns match.
     //
     // THE BLANK MEMBER, both ways (W6, the twin of `bi_get_column_values_core`):
     // a record whose target value is NULL or empty makes the blank member
-    // available (listed last, as the value list lists it), and a cross filter
+    // available (listed last, as the value list lists it), and a constraint
     // admits a record whose value there is NULL or empty when its selection
     // names the blank member -- `(blank)` in any case, or the empty string, the
     // mask rule's own test (`pivot::commands::selection_names_blank`).
     let mut values = std::collections::HashSet::new();
     let mut blank_available = false;
 
-    let allowed: Vec<(std::collections::HashSet<&str>, bool)> = cross_filters
+    let allowed: Vec<(std::collections::HashSet<&str>, bool)> = constraints
         .iter()
         .map(|cf| {
             (
                 cf.values.iter().map(|v| v.as_str()).collect(),
-                cf.values.iter().any(|v| v.is_empty() || pivot_engine::is_blank_item_label(v)),
+                cf.values.iter().any(|v| pivot_engine::is_blank_member_key(v)),
             )
         })
         .collect();
@@ -3498,11 +3538,13 @@ pub(crate) async fn bi_get_column_available_values_core(
         }
     }
 
+    // A KEY SET (has-data dimming only): the blank member is its key, ""
+    // (ruling Q8), the key `bi_get_column_values` lists it under.
     let mut result: Vec<String> = values.into_iter().collect();
     result.sort();
     if blank_available {
-        result.retain(|v| !pivot_engine::is_blank_item_label(v));
-        result.push(pivot_engine::BLANK_ITEM_LABEL.to_string());
+        result.retain(|v| !pivot_engine::is_blank_member_key(v));
+        result.push(pivot_engine::BLANK_MEMBER_KEY.to_string());
     }
     Ok(result)
 }
@@ -3535,6 +3577,9 @@ pub async fn bi_insert_result(
     if query_result.columns.is_empty() {
         return Err("No query result to insert.".to_string());
     }
+    // The app locale (leaf lock: take, clone, drop) picks the short-date
+    // pattern a date column is shown with (DC4).
+    let locale = state.locale.lock().map_err(|e| e.to_string())?.clone();
 
     let num_cols = query_result.columns.len() as u32;
     let num_data_rows = query_result.row_count as u32;
@@ -3570,10 +3615,11 @@ pub async fn bi_insert_result(
         // The header style is minted AFTER the gate. It used to be created above
         // it, which added an entry to the persisted style registry even when the
         // sheet-index check then refused the whole insert.
-        let bold_style_idx = {
+        let (bold_style_idx, cell_writer) = {
             let mut styles = state.style_registry.write(&effect).unwrap();
             let style = CellStyle::new().with_bold(true);
-            styles.get_or_create(style)
+            let bold = styles.get_or_create(style);
+            (bold, super::member::ResultCellWriter::new(&query_result.column_kinds, &locale, &mut styles))
         };
 
         let mut grids = grids.authorize(&effect);
@@ -3586,22 +3632,12 @@ pub async fn bi_insert_result(
             grid.set_cell(start_row, start_col + col_idx as u32, cell);
         }
 
-        // Write data rows
+        // Write data rows: each cell typed by its column's declared kind (DC1).
         for (row_idx, row) in query_result.rows.iter().enumerate() {
             let grid_row = start_row + 1 + row_idx as u32;
             for (col_idx, value) in row.iter().enumerate() {
                 let grid_col = start_col + col_idx as u32;
-                let cell = match value {
-                    Some(s) => {
-                        if let Some(num) = try_parse_number(s) {
-                            Cell::new_number(num)
-                        } else {
-                            Cell::new_text(s.clone())
-                        }
-                    }
-                    None => Cell::new(),
-                };
-                grid.set_cell(grid_row, grid_col, cell);
+                grid.set_cell(grid_row, grid_col, cell_writer.cell(col_idx, value.as_deref()));
             }
         }
     }
@@ -3801,6 +3837,9 @@ pub async fn bi_refresh_connection(
     }
 
     let engine_arc = get_engine_arc(&bi_state, connection_id)?;
+    // The app locale (leaf lock: take, clone, drop) picks the short-date
+    // pattern a refreshed date column is shown with (DC4).
+    let refresh_locale = state.locale.lock().map_err(|e| e.to_string())?.clone();
     let mut any_refreshed = false;
     let mut results = Vec::new();
     // PHASE B seeds (§2m). Each iteration below rewrites one query's whole
@@ -3887,10 +3926,11 @@ pub async fn bi_refresh_connection(
             // Refusal-first: the gates are behind us, so the effect is minted
             // here and authorizes every write below.
             let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-            let bold_style_idx = {
+            let (bold_style_idx, cell_writer) = {
                 let mut styles = state.style_registry.write(&effect).unwrap();
                 let style = CellStyle::new().with_bold(true);
-                styles.get_or_create(style)
+                let bold = styles.get_or_create(style);
+                (bold, super::member::ResultCellWriter::new(&result.column_kinds, &refresh_locale, &mut styles))
             };
             let mut grids = target.grids.authorize(&effect);
 
@@ -3913,17 +3953,7 @@ pub async fn bi_refresh_connection(
                     let grid_row = start_row + 1 + row_idx as u32;
                     for (col_idx, value) in row.iter().enumerate() {
                         let grid_col = start_col + col_idx as u32;
-                        let cell = match value {
-                            Some(s) => {
-                                if let Some(num) = try_parse_number(s) {
-                                    Cell::new_number(num)
-                                } else {
-                                    Cell::new_text(s.clone())
-                                }
-                            }
-                            None => Cell::new(),
-                        };
-                        grid.set_cell(grid_row, grid_col, cell);
+                        grid.set_cell(grid_row, grid_col, cell_writer.cell(col_idx, value.as_deref()));
                     }
                 }
             }

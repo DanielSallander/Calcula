@@ -63,7 +63,7 @@ import {
   SHAPE_HIT_REGION_ID_RE,
   SHAPE_HIT_REGION_KEY_SET,
 } from "./shapeHitRegionSpec";
-import { checkCanvasLayoutPatch } from "../canvasSheet";
+import { CANVAS_INTERACTION_KINDS, CANVAS_MAX_OBJECT_REFS, checkCanvasLayoutPatch } from "../canvasSheet";
 import type { CanvasLayoutPatch } from "../lib";
 // The bindable-path catalog MIRROR (D §3.4). A cycle: catalog.ts reads
 // SCRIPT_REFUSED_SHAPE_PROPERTY_KEYS from this module, LAZILY, and this module
@@ -235,6 +235,15 @@ export const vSetState: Validator = ([aspect, aspectArgs]) => {
   if (aspect === "shape.setProperty") {
     return checkShapeSetProperty(aspectArgs);
   }
+  // A chart's / slicer's STYLE override (`setStyleProperty(name, value)`).
+  // Until this row existed both fell through to `return true`: the chart arm
+  // writes `_style_<name>` into the PERSISTED spec, and the chart schema skips
+  // `_style_*` keys, so a restricted script with no capability could put a
+  // value of any type and any size into charts.json and from there into a
+  // signed .calp -- the shape.setProperty lesson again.
+  if (aspect === "chart.setStyleProperty" || aspect === "slicer.setStyleProperty") {
+    return checkStylePropertyAspect(aspectArgs);
+  }
   // Property BINDINGS and pointer-addressed literals (D-BIND, D §3.19): the
   // three aspects behind `bindProperty` / `unbindProperty` / `setProperty` of a
   // ScriptObjectHandle (`api.object(kind, id)` and `context.self`). Each has its
@@ -284,6 +293,15 @@ export const vSetState: Validator = ([aspect, aspectArgs]) => {
       "a canvas layout is not an object aspect; use api.setCanvasLayout(patch, sheet?) " +
       "(and api.getCanvasLayout(sheet?) to read it)"
     );
+  }
+  // A visual's cross-filter SELECTION (P4) is view state of the report page,
+  // not a property of the object a script is attached to: it has its own rows
+  // (api.getCrossFilters / api.setCrossFilter / api.clearCrossFilters), whose
+  // host check proves the source exists on that canvas and can be a source.
+  // Refused BY NAME so the `return true` tail cannot become a second, unchecked
+  // door to the same state.
+  if (typeof aspect === "string" && aspect.startsWith("crossFilter.")) {
+    return "a visual's cross-filter is not an object aspect; use api.setCrossFilter(source, selection, sheet?)";
   }
   return true;
 };
@@ -5512,6 +5530,43 @@ export const MAX_SHAPE_PROPERTY_KEY = 64;
  */
 export const MAX_SHAPE_PROPERTY_CHARS = 8_192;
 
+/** The longest style-override NAME a script may write (`setStyleProperty`). */
+export const MAX_STYLE_PROPERTY_NAME = 64;
+/** The longest style-override VALUE: a colour, a size, a font name -- never content. */
+export const MAX_STYLE_PROPERTY_CHARS = 256;
+const STYLE_PROPERTY_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * `chart.setStyleProperty` / `slicer.setStyleProperty` aspect args:
+ * [name, value]. The name is an identifier (it becomes the `_style_<name>`
+ * spec key); the value is a short string. A data: URI or a CSS `url(...)` is
+ * refused: a style is a look, never a way to introduce bytes.
+ */
+export function checkStylePropertyAspect(aspectArgs: unknown): true | string {
+  const args = Array.isArray(aspectArgs) ? aspectArgs : [];
+  if (args.length < 2) return "expected [name, value]";
+  const [name, value] = args;
+  if (typeof name !== "string" || name.length === 0 || name.length > MAX_STYLE_PROPERTY_NAME || !STYLE_PROPERTY_NAME_RE.test(name)) {
+    return (
+      `style property name must be an identifier -- a letter or underscore, then letters, ` +
+      `digits or underscores (max ${MAX_STYLE_PROPERTY_NAME} chars)`
+    );
+  }
+  if (typeof value !== "string") {
+    return `style property "${name}" must be a string (a colour, a size or a font name)`;
+  }
+  if (value.length > MAX_STYLE_PROPERTY_CHARS) {
+    return `style property "${name}" is ${value.length} characters (max ${MAX_STYLE_PROPERTY_CHARS})`;
+  }
+  if (/^\s*data:/i.test(value) || /url\s*\(/i.test(value)) {
+    return (
+      `style property "${name}" may not carry a data: URI or a url(...): a script may ` +
+      `reference media already in the document, never introduce bytes`
+    );
+  }
+  return true;
+}
+
 /**
  * `shape.setProperty` aspect args: [key, value].
  *
@@ -6787,13 +6842,20 @@ export const vAddSheet: Validator = ([name, position, kind]) => {
  * binds it. All three stay readable through api.getCanvasLayout.
  * `wallpaper` is cosmetic, exactly like `background`, and is settable.
  *
+ * `interactions` (P4 Edit interactions) names other objects too, but is
+ * SETTABLE by owner decision DC-5: it changes how visuals filter each other,
+ * never where an object is or whether it may move. Its shape is checked by
+ * `checkCanvasInteractions` below, and the host checks that every ref of a
+ * pair exists on THAT canvas (executeSetCanvasLayout) before the backend sees
+ * it. It is replaced WHOLE, like the Rust `CanvasLayoutPatch.interactions`.
+ *
  * Every field of the Rust `CanvasLayout` is in exactly ONE of this map and
  * CANVAS_LAYOUT_READ_ONLY_KEYS -- a census in canvasSheetScriptRows.test.ts
  * reads the Rust struct, so a new field cannot arrive unclassified (before
  * 2026-10-08 wallpaper and objectsLocked were in neither, refused as
  * "unknown" and unsettable only by omission).
  */
-export const CANVAS_LAYOUT_SCRIPT_KEYS: Readonly<Record<string, "boolean" | "number" | "string">> = {
+export const CANVAS_LAYOUT_SCRIPT_KEYS: Readonly<Record<string, "boolean" | "number" | "string" | "interactions">> = {
   snapToGrid: "boolean",
   gridSizePx: "number",
   showGrid: "boolean",
@@ -6802,6 +6864,7 @@ export const CANVAS_LAYOUT_SCRIPT_KEYS: Readonly<Record<string, "boolean" | "num
   pageHeight: "number",
   background: "string",
   wallpaper: "string",
+  interactions: "interactions",
 };
 
 /** Why each read-only layout key cannot be set from a script (see above). */
@@ -6851,12 +6914,166 @@ export const vCanvasLayout: Validator = ([patch, sheet]) => {
   for (const k of keys) {
     const want = CANVAS_LAYOUT_SCRIPT_KEYS[k];
     const v = p[k];
+    if (want === "interactions") {
+      const shaped = checkCanvasInteractions(v);
+      if (shaped !== true) return shaped;
+      continue;
+    }
     if (want === "number" ? !isFiniteNumber(v) : typeof v !== want) {
       return `${k} must be a ${want}`;
     }
   }
   const inRange = checkCanvasLayoutPatch(p as CanvasLayoutPatch);
   if (inRange !== null) return inRange;
+  return checkOptionalSheetRef(sheet, "sheet");
+};
+
+/** The JS spelling of an interaction ref's kinds, for messages. */
+const INTERACTION_KIND_LIST = CANVAS_INTERACTION_KINDS.join(", ");
+
+/**
+ * One `{kind, id}` that may take part in an interaction pair or a cross-filter
+ * selection: a kind from CANVAS_INTERACTION_KINDS (the @api/canvasSheet mirror
+ * of the Rust list) and a non-blank, unpadded, bounded id. The backend
+ * re-checks the exact Rust bound; this is the specific first answer.
+ */
+function checkVisualRef(v: unknown, label: string): true | string {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) {
+    return `${label} must be an object like { kind: "chart", id: "..." }`;
+  }
+  const r = v as Record<string, unknown>;
+  for (const k of Object.keys(r)) {
+    if (k !== "kind" && k !== "id") return `${label} has an unknown key "${k.slice(0, 64)}" (allowed: kind, id)`;
+  }
+  if (typeof r.kind !== "string" || !(CANVAS_INTERACTION_KINDS as readonly string[]).includes(r.kind)) {
+    const got = typeof r.kind === "string" ? `"${r.kind.slice(0, 40)}"` : typeof r.kind;
+    return `${label}.kind must be one of ${INTERACTION_KIND_LIST} (got ${got})`;
+  }
+  if (!isBoundedString(r.id, MAX_KEY) || r.id.trim() === "" || r.id.trim() !== r.id) {
+    return `${label}.id must be a non-empty object id without surrounding spaces`;
+  }
+  return true;
+}
+
+const INTERACTION_MODES: readonly string[] = ["filter", "highlight", "none"];
+
+/**
+ * The `interactions` value of a canvas layout patch:
+ * `{ defaultMode?: "filter" | "highlight", pairs?: [{ source, target, mode }] }`,
+ * at most CANVAS_MAX_OBJECT_REFS pairs, no visual paired with itself, no
+ * (source, target) named twice. Replaced WHOLE by the backend.
+ */
+export function checkCanvasInteractions(v: unknown): true | string {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) {
+    return 'interactions must be an object like { defaultMode: "filter", pairs: [...] }';
+  }
+  const o = v as Record<string, unknown>;
+  for (const k of Object.keys(o)) {
+    if (k !== "defaultMode" && k !== "pairs") {
+      return `interactions has an unknown key "${k.slice(0, 64)}" (allowed: defaultMode, pairs)`;
+    }
+  }
+  if (o.defaultMode !== undefined && o.defaultMode !== "filter" && o.defaultMode !== "highlight") {
+    return 'interactions.defaultMode must be "filter" or "highlight" (set "none" per pair)';
+  }
+  if (o.pairs === undefined) return true;
+  if (!Array.isArray(o.pairs)) return "interactions.pairs must be an array";
+  if (o.pairs.length > CANVAS_MAX_OBJECT_REFS) {
+    return `interactions.pairs has ${o.pairs.length} entries; the limit is ${CANVAS_MAX_OBJECT_REFS}`;
+  }
+  const seen = new Set<string>();
+  for (let i = 0; i < o.pairs.length; i++) {
+    const pair = o.pairs[i] as unknown;
+    const label = `interactions.pairs[${i}]`;
+    if (typeof pair !== "object" || pair === null || Array.isArray(pair)) {
+      return `${label} must be an object like { source, target, mode }`;
+    }
+    const p = pair as Record<string, unknown>;
+    for (const k of Object.keys(p)) {
+      if (k !== "source" && k !== "target" && k !== "mode") {
+        return `${label} has an unknown key "${k.slice(0, 64)}" (allowed: source, target, mode)`;
+      }
+    }
+    const src = checkVisualRef(p.source, `${label}.source`);
+    if (src !== true) return src;
+    const tgt = checkVisualRef(p.target, `${label}.target`);
+    if (tgt !== true) return tgt;
+    if (typeof p.mode !== "string" || !INTERACTION_MODES.includes(p.mode)) {
+      return `${label}.mode must be "filter", "highlight" or "none"`;
+    }
+    const s = p.source as { kind: string; id: string };
+    const t = p.target as { kind: string; id: string };
+    if (s.kind === t.kind && s.id === t.id) {
+      return `${label}: a visual cannot interact with itself (${s.kind} "${s.id}")`;
+    }
+    const key = JSON.stringify([s.kind, s.id, t.kind, t.id]);
+    if (seen.has(key)) {
+      return `${label} names the pair ${s.kind} "${s.id}" -> ${t.kind} "${t.id}" twice`;
+    }
+    seen.add(key);
+  }
+  return true;
+}
+
+/** The most grouping fields one script-set cross-filter selection may name. */
+export const MAX_CROSS_FILTER_FIELDS = 8;
+/** The most tuples one script-set cross-filter selection may hold. */
+export const MAX_CROSS_FILTER_TUPLES = 1000;
+/** The longest member key a script-set selection may carry (a text member's canonical spelling). */
+const MAX_CROSS_FILTER_KEY_CHARS = 4096;
+
+/** api.getCrossFilters / api.clearCrossFilters args: [sheet?]. Omitted = every page. */
+export const vCrossFilterQuery: Validator = ([sheet]) => checkOptionalSheetRef(sheet, "sheet");
+/** api.clearCrossFilters args: [sheet?]. Omitted = every page. */
+export const vClearCrossFilters: Validator = ([sheet]) => checkOptionalSheetRef(sheet, "sheet");
+
+/**
+ * api.setCrossFilter args: [source, selection, sheet?]. `selection` is
+ * `{ fields: string[], tuples: string[][] }` (member KEYS aligned to the
+ * fields; the blank member is "") or null to clear the source's selection.
+ * At most MAX_CROSS_FILTER_FIELDS fields and MAX_CROSS_FILTER_TUPLES tuples.
+ * Whether the source exists on that canvas and can be a source is live state,
+ * answered host-side.
+ */
+export const vSetCrossFilter: Validator = ([source, selection, sheet]) => {
+  const ref = checkVisualRef(source, "source");
+  if (ref !== true) return ref;
+  if (selection !== null) {
+    if (typeof selection !== "object" || Array.isArray(selection)) {
+      return 'selection must be { fields: ["Table.Column"], tuples: [["key"]] } or null to clear it';
+    }
+    const s = selection as Record<string, unknown>;
+    for (const k of Object.keys(s)) {
+      if (k !== "fields" && k !== "tuples") {
+        return `selection has an unknown key "${k.slice(0, 64)}" (allowed: fields, tuples)`;
+      }
+    }
+    if (!Array.isArray(s.fields) || s.fields.length === 0) {
+      return 'selection.fields must be a non-empty array of "Table.Column" names';
+    }
+    if (s.fields.length > MAX_CROSS_FILTER_FIELDS) {
+      return `selection.fields has ${s.fields.length} fields; the limit is ${MAX_CROSS_FILTER_FIELDS}`;
+    }
+    for (const f of s.fields) {
+      if (!isBoundedString(f, MAX_KEY) || f.trim() === "") {
+        return 'every selection field must be a non-empty "Table.Column" name';
+      }
+    }
+    if (new Set(s.fields as string[]).size !== s.fields.length) return "selection.fields names a field twice";
+    if (!Array.isArray(s.tuples)) return "selection.tuples must be an array of member-key lists";
+    if (s.tuples.length > MAX_CROSS_FILTER_TUPLES) {
+      return `selection.tuples has ${s.tuples.length} tuples; the limit is ${MAX_CROSS_FILTER_TUPLES}`;
+    }
+    for (let i = 0; i < s.tuples.length; i++) {
+      const t = s.tuples[i] as unknown;
+      if (!Array.isArray(t) || t.length !== s.fields.length) {
+        return `selection.tuples[${i}] must hold one member key per field (${s.fields.length})`;
+      }
+      if (t.some((k) => !isBoundedString(k, MAX_CROSS_FILTER_KEY_CHARS))) {
+        return `selection.tuples[${i}] must hold member KEYS as strings (the blank member is "")`;
+      }
+    }
+  }
   return checkOptionalSheetRef(sheet, "sheet");
 };
 

@@ -97,14 +97,102 @@ export function frInnerBox(entry: FloatingRangeEntry): { x: number; y: number; w
 // Per-index sizes (override maps with defaults)
 // ============================================================================
 
-export function frColWidth(entry: FloatingRangeEntry, col: number): number {
+// HIDDEN LINES (P3, Home > Format > Hide & Unhide on a floating grid's cells).
+// A line the object hides is ZERO pixels, exactly like a hidden chrome strip:
+// every derived coordinate -- the frame size, the offsets, the hit router, the
+// editor rect -- moves with it, and a zero-size line is never "at" any point
+// (offsetSearch.ts), so it can neither paint nor be hit. Its stored size stays
+// in the override map (`frStoredColWidth`), for when it is shown again.
+
+const EMPTY_LINES: readonly number[] = [];
+/** A hidden set as a Set, cached by the array's identity (the store replaces, never mutates). */
+const lineSets = new WeakMap<readonly number[], Set<number>>();
+
+function lineSetOf(lines: readonly number[] | undefined): Set<number> {
+  const key = lines ?? EMPTY_LINES;
+  let set = lineSets.get(key);
+  if (!set) {
+    set = new Set(key);
+    lineSets.set(key, set);
+  }
+  return set;
+}
+
+/** Whether the object hides column `col`. */
+export function frColHidden(entry: FloatingRangeEntry, col: number): boolean {
+  return lineSetOf(entry.hiddenCols).has(col);
+}
+
+/** Whether the object hides row `row`. */
+export function frRowHidden(entry: FloatingRangeEntry, row: number): boolean {
+  return lineSetOf(entry.hiddenRows).has(row);
+}
+
+/** Column `col`'s size when SHOWN (its override, else the default), hidden or not. */
+export function frStoredColWidth(entry: FloatingRangeEntry, col: number): number {
   const w = entry.colWidths[col];
   return typeof w === "number" && isFinite(w) && w > 0 ? w : FR_DEFAULT_COL_W;
 }
 
-export function frRowHeight(entry: FloatingRangeEntry, row: number): number {
+/** Row `row`'s size when SHOWN (its override, else the default), hidden or not. */
+export function frStoredRowHeight(entry: FloatingRangeEntry, row: number): number {
   const h = entry.rowHeights[row];
   return typeof h === "number" && isFinite(h) && h > 0 ? h : FR_DEFAULT_ROW_H;
+}
+
+/** Column `col`'s painted width: 0 when the object hides it. */
+export function frColWidth(entry: FloatingRangeEntry, col: number): number {
+  return frColHidden(entry, col) ? 0 : frStoredColWidth(entry, col);
+}
+
+/** Row `row`'s painted height: 0 when the object hides it. */
+export function frRowHeight(entry: FloatingRangeEntry, row: number): number {
+  return frRowHidden(entry, row) ? 0 : frStoredRowHeight(entry, row);
+}
+
+/**
+ * The nearest SHOWN line to `index` within [0, count): `index` itself when it
+ * is shown, else the first shown one in direction `dir` (+1 / -1), else the
+ * first in the other direction; `index` when every line is hidden. Navigation
+ * and the hit router use it so a selection never rests on a hidden line.
+ */
+export function frNearestShown(
+  hidden: (i: number) => boolean,
+  index: number,
+  count: number,
+  dir: 1 | -1 = 1,
+): number {
+  if (count <= 0) return index;
+  const i = Math.max(0, Math.min(count - 1, index));
+  if (!hidden(i)) return i;
+  for (let j = i + dir; j >= 0 && j < count; j += dir) if (!hidden(j)) return j;
+  for (let j = i - dir; j >= 0 && j < count; j -= dir) if (!hidden(j)) return j;
+  return i;
+}
+
+/**
+ * Step from `index` by `delta` lines, SKIPPING hidden ones (Excel's arrow over
+ * hidden rows), clamped to [0, count). A step that finds no shown line in its
+ * direction stays where it was.
+ */
+export function frStepShown(
+  hidden: (i: number) => boolean,
+  index: number,
+  delta: number,
+  count: number,
+): number {
+  if (delta === 0 || count <= 0) return index;
+  const dir = delta > 0 ? 1 : -1;
+  let at = index;
+  let remaining = Math.abs(delta);
+  while (remaining > 0) {
+    let next = at + dir;
+    while (next >= 0 && next < count && hidden(next)) next += dir;
+    if (next < 0 || next >= count) break;
+    at = next;
+    remaining--;
+  }
+  return at;
 }
 
 // ============================================================================
@@ -371,9 +459,13 @@ export function localCellFromPoint(
   const colOff = frColOffsets(entry, view.cols);
   const rowOff = frRowOffsets(entry, view.rows);
   // The index under a content coordinate, clamped to the last one when the
-  // point is past the end (the viewport's far edge is inclusive).
-  const colAt = (x: number) => Math.min(view.cols - 1, firstEndingAfter(colOff, 0, view.cols, x));
-  const rowAt = (y: number) => Math.min(view.rows - 1, firstEndingAfter(rowOff, 0, view.rows, y));
+  // point is past the end (the viewport's far edge is inclusive). A hidden
+  // line is never the answer: inside the content the search already skips it
+  // (zero size), and past the end the clamp steps back to the last SHOWN one.
+  const colAt = (x: number) =>
+    frNearestShown((c) => frColHidden(entry, c), Math.min(view.cols - 1, firstEndingAfter(colOff, 0, view.cols, x)), view.cols, -1);
+  const rowAt = (y: number) =>
+    frNearestShown((r) => frRowHidden(entry, r), Math.min(view.rows - 1, firstEndingAfter(rowOff, 0, view.rows, y)), view.rows, -1);
 
   // Column from x (points in the local row-header gutter have no column).
   const colX = ix - frRowHdrW(entry);
@@ -544,7 +636,9 @@ export function trackedColIndices(entry: FloatingRangeEntry, extentCols = 0): nu
   const span = Math.max(entry.cols, extentCols);
   for (let c = 0; c < span; c++) seen.add(c);
   for (const key of Object.keys(entry.colWidths)) seen.add(Number(key));
-  return [...seen].sort((a, b) => a - b);
+  // A HIDDEN column is not scaled (P3): it keeps its stored width, and a drag
+  // never re-shows or resizes it (`scaledColWidths` carries it unchanged).
+  return [...seen].filter((c) => !frColHidden(entry, c)).sort((a, b) => a - b);
 }
 
 /** The row twin of {@link trackedColIndices} (`extentRows`: the rows the content reaches). */
@@ -553,7 +647,7 @@ export function trackedRowIndices(entry: FloatingRangeEntry, extentRows = 0): nu
   const span = Math.max(entry.rows, extentRows);
   for (let r = 0; r < span; r++) seen.add(r);
   for (const key of Object.keys(entry.rowHeights)) seen.add(Number(key));
-  return [...seen].sort((a, b) => a - b);
+  return [...seen].filter((r) => !frRowHidden(entry, r)).sort((a, b) => a - b);
 }
 
 /**
@@ -629,7 +723,11 @@ function roundSize(v: number): number {
   return Math.round(v * 100) / 100;
 }
 
-/** Apply a scale to every tracked column, returning a NEW dense map. */
+/**
+ * Apply a scale to every tracked column, returning a NEW dense map. A hidden
+ * column's stored override is carried UNCHANGED (it is not tracked, so it is
+ * not scaled, and dropping it would reset it to the default).
+ */
 export function scaledColWidths(
   entry: FloatingRangeEntry,
   scale: number,
@@ -639,10 +737,14 @@ export function scaledColWidths(
   for (const c of trackedColIndices(entry, extentCols)) {
     out[c] = roundSize(frColWidth(entry, c) * scale);
   }
+  for (const c of entry.hiddenCols ?? []) {
+    const stored = entry.colWidths[c];
+    if (typeof stored === "number" && isFinite(stored) && stored > 0) out[c] = stored;
+  }
   return out;
 }
 
-/** Apply a scale to every tracked row, returning a NEW dense map. */
+/** Apply a scale to every tracked row, returning a NEW dense map (hidden rows carried unchanged). */
 export function scaledRowHeights(
   entry: FloatingRangeEntry,
   scale: number,
@@ -651,6 +753,10 @@ export function scaledRowHeights(
   const out: Record<number, number> = {};
   for (const r of trackedRowIndices(entry, extentRows)) {
     out[r] = roundSize(frRowHeight(entry, r) * scale);
+  }
+  for (const r of entry.hiddenRows ?? []) {
+    const stored = entry.rowHeights[r];
+    if (typeof stored === "number" && isFinite(stored) && stored > 0) out[r] = stored;
   }
   return out;
 }

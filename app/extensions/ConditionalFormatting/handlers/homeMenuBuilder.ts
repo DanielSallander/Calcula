@@ -41,6 +41,14 @@
 //
 //          Every write goes through lib/ruleWrites.ts: a backend refusal is a
 //          toast, never an unhandled promise rejection.
+//
+//          P3 (owner finding G3): every item that acts on the selection asks
+//          resolveCellTarget(action, "conditionalFormat"). On a floating
+//          grid's cells the rule is built over the OBJECT's selection and
+//          written with its target; the dialogs are opened with that target;
+//          Manage Rules lists the object's rules ("This floating grid
+//          (Float1)"). An object holds no table or PivotTable, so the two
+//          region rows stay disabled there.
 
 import React from "react";
 import type { ExtensionContext } from "@api/contract";
@@ -80,7 +88,14 @@ import type { MenuItemDefinition } from "@api/uiTypes";
 import type { PivotRegionData } from "@api/pivot";
 import { getTableAtCell, getPivotRegionsForSheet } from "@api/backend";
 import { MENU_ICON_BLANK } from "@api/layout";
-import { refuseIfSelectionOwned } from "@api/selectionOwner";
+import {
+  resolveCellTarget,
+  cellTargetFor,
+  onCellTargetChanged,
+  targetRefOf,
+  type CellTarget,
+  type CellTargetRef,
+} from "@api/cellTarget";
 import { addRuleReporting, clearRulesReporting } from "../lib/ruleWrites";
 import { colorScaleRule, dataBarRule, iconSetRule } from "../lib/presetRules";
 import type { PresetColorScale, NewRuleCategory, NewRuleFormatStyle } from "../types";
@@ -134,14 +149,42 @@ function activeCell(): { row: number; col: number } | null {
 }
 
 /**
- * The selection these items act on is Core's. While something else owns the
- * selection (BUG-0185: a floating grid's selected cell, Core's selection
- * HIDDEN under it) every item that builds a rule over it, opens a dialog
- * seeded with it, or clears it refuses -- once -- and does nothing. Manage
- * Rules and Clear Rules from Entire Sheet are not about the selection.
+ * The cells these items act on: Core's selection, or a floating grid's own
+ * (P3). Any other owner of the selection (BUG-0185: Core's selection HIDDEN
+ * under it) refuses -- once -- and the item does nothing. Manage Rules and
+ * Clear Rules from Entire Sheet are not about the selection.
  */
-function refusedForSelection(action: string): boolean {
-  return refuseIfSelectionOwned(action);
+interface CFPlace {
+  /** The rule's range: the object's selection, or Core's (from the cache). */
+  range: ConditionalFormatRange | null;
+  /** The object's target; undefined for the active sheet. */
+  target: CellTargetRef | undefined;
+}
+
+function rangeOf(sel: { startRow: number; startCol: number; endRow: number; endCol: number }): ConditionalFormatRange {
+  return {
+    startRow: Math.min(sel.startRow, sel.endRow),
+    startCol: Math.min(sel.startCol, sel.endCol),
+    endRow: Math.max(sel.startRow, sel.endRow),
+    endCol: Math.max(sel.startCol, sel.endCol),
+  };
+}
+
+function placeOf(t: CellTarget): CFPlace {
+  if (t.kind === "object") return { range: rangeOf(t.selection), target: t.ref };
+  return { range: getSelectionRange(), target: undefined };
+}
+
+/** Ask the door's question; null = refused (announced once). */
+function placeFor(action: string): CFPlace | null {
+  const t = resolveCellTarget(action, "conditionalFormat");
+  return t === null ? null : placeOf(t);
+}
+
+/** Whether a floating grid's cells (an object target) hold the selection now. */
+function objectHoldsSelection(): boolean {
+  const t = cellTargetFor("conditionalFormat", "Conditional Formatting");
+  return "kind" in t && t.kind === "object";
 }
 
 // ============================================================================
@@ -154,21 +197,28 @@ async function addQuickRule(
   rule: ConditionalFormatRule,
   format: ConditionalFormat
 ): Promise<void> {
-  if (refusedForSelection("Conditional Formatting")) return;
-  const range = getSelectionRange();
-  if (!range) return;
-  await addRuleReporting({
-    rule,
-    format,
-    ranges: [range],
-    stopIfTrue: false,
-  });
+  const place = placeFor("Conditional Formatting");
+  if (!place?.range) return;
+  await addRuleReporting(
+    {
+      rule,
+      format,
+      ranges: [place.range],
+      stopIfTrue: false,
+    },
+    place.target,
+  );
 }
 
 /** Show a quick dialog for threshold-based rules */
 function showQuickDialog(ruleType: string): void {
-  if (refusedForSelection("Conditional Formatting")) return;
-  showDialog(QUICK_CF_DIALOG_ID, { ruleType, selection: getSelectionRange() });
+  const place = placeFor("Conditional Formatting");
+  if (!place) return;
+  showDialog(QUICK_CF_DIALOG_ID, {
+    ruleType,
+    selection: place.range,
+    ...(place.target ? { target: place.target } : {}),
+  });
 }
 
 /** Open New Rule, seeded with the current selection, on the page the door
@@ -177,21 +227,43 @@ function showNewRuleDialog(start?: {
   initialCategory: NewRuleCategory;
   initialFormatStyle?: NewRuleFormatStyle;
 }): void {
-  if (refusedForSelection("New Rule")) return;
-  showDialog(NEW_RULE_DIALOG_ID, { selection: getSelectionRange(), ...(start ?? {}) });
+  const place = placeFor("New Rule");
+  if (!place) return;
+  showDialog(NEW_RULE_DIALOG_ID, {
+    selection: place.range,
+    ...(place.target ? { target: place.target } : {}),
+    ...(start ?? {}),
+  });
 }
 
 /** Clear rules from the current selection -- and say so when nothing went. */
 async function handleClearRulesFromSelection(): Promise<void> {
-  if (refusedForSelection("Clear Rules")) return;
-  const range = getSelectionRange();
-  if (!range) return;
-  const removed = await clearRulesReporting(range);
+  const place = placeFor("Clear Rules");
+  if (!place?.range) return;
+  const removed = await clearRulesReporting(place.range, place.target);
   if (removed === 0) {
     showToast("Clear Rules: no conditional formatting rule was cleared from the selected cells.", {
       variant: "info",
     });
   }
+}
+
+/**
+ * Manage Rules...: the rules of the place the selection is in -- a floating
+ * grid's own ("This floating grid (Float1)") while one of its cells is
+ * selected, else the active sheet's. Asked silently: Manage Rules is not about
+ * the selection's cells, so another owner of the selection does not refuse it.
+ */
+export function showRulesManager(): void {
+  const t = cellTargetFor("conditionalFormat", "Manage Rules");
+  if ("kind" in t && t.kind === "object") {
+    showDialog(RULES_MANAGER_DIALOG_ID, {
+      target: targetRefOf(t),
+      scopeLabel: `This floating grid (${t.label})`,
+    });
+    return;
+  }
+  showDialog(RULES_MANAGER_DIALOG_ID);
 }
 
 /** Clear all rules from the entire sheet */
@@ -251,7 +323,9 @@ async function pivotRangeAt(row: number, col: number): Promise<ConditionalFormat
  */
 export async function refreshClearScopes(): Promise<void> {
   const generation = ++scopeGeneration;
-  const cell = activeCell();
+  // A floating grid's cells hold the selection: Core's active cell is HIDDEN
+  // under the object, and the object holds no table or PivotTable.
+  const cell = objectHoldsSelection() ? null : activeCell();
   let inTable = false;
   let inPivot = false;
   if (cell) {
@@ -282,12 +356,19 @@ export async function refreshClearScopes(): Promise<void> {
  * and a cell that is no longer in one clears nothing and says why.
  */
 async function handleClearRulesFromRegion(kind: "table" | "pivot"): Promise<void> {
-  if (refusedForSelection("Clear Rules")) return;
+  const place = placeFor("Clear Rules");
+  if (!place) return;
+  const what = kind === "table" ? "a table" : "a PivotTable";
+  const which = kind === "table" ? "this table" : "this PivotTable";
+  if (place.target) {
+    // A floating grid's cells: the object holds no table or PivotTable.
+    showToast(`Clear Rules: the active cell is not in ${what}.`, { variant: "info" });
+    void refreshClearScopes();
+    return;
+  }
   const cell = activeCell();
   if (!cell) return;
   const range = await settled(kind === "table" ? tableRangeAt(cell.row, cell.col) : pivotRangeAt(cell.row, cell.col));
-  const what = kind === "table" ? "a table" : "a PivotTable";
-  const which = kind === "table" ? "this table" : "this PivotTable";
   if (!range) {
     showToast(`Clear Rules: the active cell is not in ${what}.`, { variant: "info" });
     void refreshClearScopes();
@@ -545,12 +626,16 @@ export function registerCFMenuItems(context: ExtensionContext): () => void {
         id: "cf:manageRules",
         label: "Manage Rules...",
         icon: IconManageRules,
-        action: () => showDialog(RULES_MANAGER_DIALOG_ID),
+        action: () => showRulesManager(),
       },
     ],
   });
 
+  // A floating grid's selection moving changes what the region rows describe.
+  const stopTargetWatch = onCellTargetChanged(() => void refreshClearScopes());
+
   return () => {
+    stopTargetWatch();
     context.ui.menus.unregisterItem("format", "format:cf-separator");
     context.ui.menus.unregisterItem("format", "format:conditionalFormatting");
     if (clearFromTableItem === clearFromTable) clearFromTableItem = null;

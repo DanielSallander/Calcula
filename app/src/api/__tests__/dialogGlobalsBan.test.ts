@@ -269,3 +269,54 @@ describe("the plugin-dialog question ban", () => {
     expect(pluginImportErrors(result)).toEqual([]);
   });
 });
+
+// ============================================================================
+// The app-locale bans share these rule ids (P2 S11) -- and must not silence them
+// ============================================================================
+// LOCALE_RESTRICTED_PROPERTIES / LOCALE_RESTRICTED_SYNTAX are spread INTO the
+// dialog block's no-restricted-properties / no-restricted-syntax arrays and
+// into the colour blocks' no-restricted-syntax. Flat config is last-wins per
+// rule id: had they gone into a separate, later block, that block's arrays
+// would REPLACE these, and window.confirm would lint clean again. One source
+// carrying both shapes proves both entries are live in the same file.
+
+describe("the dialog ban survives the app-locale entries (shared rule ids)", () => {
+  beforeAll(async () => {
+    await lint("src/core/lib/__warmup3__.ts", "export const warm = 3;\n");
+  }, 300_000);
+
+  const BOTH = `export function f(n: number) {\n  if (!window.confirm("x")) return "";\n  return n.toLocaleString();\n}\n`;
+
+  const PATHS = [
+    "src/core/lib/__synthetic__.ts",
+    "extensions/Pivot/lib/__synthetic__.ts",
+    "extensions/ModelEditor/components/__synthetic__.tsx",
+    "extensions/Settings/components/__synthetic__.tsx",
+  ];
+
+  for (const relPath of PATHS) {
+    it(`reports window.confirm once AND the locale ban once in ${relPath}`, async () => {
+      const result = await lint(relPath, BOTH);
+      const confirmHits = result.messages.filter(
+        (m) => m.ruleId === "no-restricted-properties" && m.message.includes("confirmAsync"),
+      );
+      const localeHits = result.messages.filter(
+        (m) => m.ruleId === "no-restricted-properties" && m.message.includes("@api/locale"),
+      );
+      expect(confirmHits.length, JSON.stringify(result.messages)).toBe(1);
+      expect(confirmHits[0].line).toBe(2);
+      expect(localeHits.length, JSON.stringify(result.messages)).toBe(1);
+      expect(localeHits[0].line).toBe(3);
+    });
+  }
+
+  it("still reports the dynamic plugin-dialog import in a chrome-colour file beside a locale ban", async () => {
+    const result = await lint(
+      "extensions/Settings/components/__synthetic__.tsx",
+      `export async function f() {\n  const { ask } = await import("@tauri-apps/plugin-dialog");\n  return [ask, new Intl.NumberFormat()];\n}\n`,
+    );
+    const syntax = result.messages.filter((m) => m.ruleId === "no-restricted-syntax");
+    expect(syntax.some((m) => m.message.includes("plugin-dialog") && m.line === 2), JSON.stringify(syntax)).toBe(true);
+    expect(syntax.some((m) => m.message.includes("@api/locale") && m.line === 3), JSON.stringify(syntax)).toBe(true);
+  });
+});

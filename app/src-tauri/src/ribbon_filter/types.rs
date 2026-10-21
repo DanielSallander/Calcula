@@ -84,24 +84,31 @@ pub struct RibbonFilter {
     /// For bySheet mode: which sheet indices to auto-connect pivots from
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connected_sheets: Vec<usize>,
+    /// For manual mode ("Selected visuals"): the NON-pivot visuals this filter
+    /// reaches -- design-query charts, cards, KPIs, gauges -- by canvas object
+    /// ref. Pivots stay in `connected_pivots` (the pivot backend route reads
+    /// that list); the UI shows both as one checklist (P4 DC-3). Cleared, like
+    /// `connected_pivots`, when the mode is not manual.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connected_visuals: Vec<::persistence::CanvasObjectRef>,
     /// Display mode: checklist, buttons, or dropdown
     #[serde(default)]
     pub display_mode: RibbonFilterDisplayMode,
     /// Selected items. None = all selected (no filter applied).
     /// Some(vec) = only these items are selected.
     pub selected_items: Option<Vec<String>>,
-    /// IDs of other ribbon filters that this filter cross-filters.
+    /// IDs of other ribbon filters that are dependent filters of this one.
     /// When this filter's selection changes, the listed filters' items
-    /// are re-evaluated for hasData. Empty = no cross-filtering.
+    /// are re-evaluated for hasData. Empty = no dependent filters.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cross_filter_targets: Vec<identity::EntityId>,
-    /// IDs of canvas slicers that this filter cross-filters.
+    pub dependent_filters: Vec<identity::EntityId>,
+    /// IDs of canvas slicers that are dependents of this filter (dependent slicers).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cross_filter_slicer_targets: Vec<identity::EntityId>,
+    pub dependent_slicers: Vec<identity::EntityId>,
     /// Advanced filter condition (None = basic checklist mode).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advanced_filter: Option<AdvancedFilter>,
-    /// Hide items that have no matching data (cross-filter)
+    /// Hide items that have no matching data (dependent-filter narrowing)
     #[serde(default)]
     pub hide_no_data: bool,
     /// Visually dim items that have no matching data
@@ -134,6 +141,43 @@ pub struct RibbonFilter {
 
 pub(crate) fn default_filter_level() -> u8 {
     1
+}
+
+/// The kinds a ribbon filter's "Selected visuals" list may name: the canvas
+/// visual kinds that take part in interactions (charts -- which include cards,
+/// KPIs and gauges --, pivots and slicers).
+pub(crate) const CONNECTED_VISUAL_KINDS: &[&str] = ::persistence::CANVAS_INTERACTION_KINDS;
+
+/// `refs` as a ribbon filter stores them in `connected_visuals`: trimmed and
+/// de-duplicated (first occurrence kept), or REFUSED -- before any effect --
+/// when a ref is blank, padded past trimming, over-long, of a kind outside
+/// [`CONNECTED_VISUAL_KINDS`], or the list is over
+/// [`::persistence::CANVAS_MAX_OBJECT_REFS`]. A ref to an object that does
+/// not exist is accepted (it is inert, and dropped at save -- P4 DC-2).
+pub(crate) fn normalize_connected_visuals(
+    refs: &[::persistence::CanvasObjectRef],
+) -> Result<Vec<::persistence::CanvasObjectRef>, String> {
+    let normalized = ::persistence::normalize_canvas_object_refs(refs);
+    if normalized.len() > ::persistence::CANVAS_MAX_OBJECT_REFS {
+        return Err(format!(
+            "A ribbon filter can reach at most {} selected visuals; {} were given.",
+            ::persistence::CANVAS_MAX_OBJECT_REFS,
+            normalized.len()
+        ));
+    }
+    for r in &normalized {
+        if let Some(why) = r.problem() {
+            return Err(format!("A ribbon filter's selected visuals: {}.", why));
+        }
+        if !CONNECTED_VISUAL_KINDS.contains(&r.kind.as_str()) {
+            return Err(format!(
+                "A ribbon filter's selected visuals cannot name a '{}' (use one of {}).",
+                r.kind,
+                CONNECTED_VISUAL_KINDS.join(", ")
+            ));
+        }
+    }
+    Ok(normalized)
 }
 
 /// Operator for advanced filter conditions.
@@ -242,6 +286,9 @@ pub struct CreateRibbonFilterParams {
     pub connected_pivots: Vec<identity::EntityId>,
     #[serde(default)]
     pub connected_sheets: Vec<usize>,
+    /// Manual mode's non-pivot visuals (see `RibbonFilter::connected_visuals`).
+    #[serde(default)]
+    pub connected_visuals: Vec<::persistence::CanvasObjectRef>,
     pub display_mode: Option<RibbonFilterDisplayMode>,
     pub order: Option<u32>,
 }
@@ -258,8 +305,10 @@ pub struct UpdateRibbonFilterParams {
     pub connection_mode: Option<ConnectionMode>,
     pub connected_pivots: Option<Vec<identity::EntityId>>,
     pub connected_sheets: Option<Vec<usize>>,
-    pub cross_filter_targets: Option<Vec<identity::EntityId>>,
-    pub cross_filter_slicer_targets: Option<Vec<identity::EntityId>>,
+    /// Manual mode's non-pivot visuals (see `RibbonFilter::connected_visuals`).
+    pub connected_visuals: Option<Vec<::persistence::CanvasObjectRef>>,
+    pub dependent_filters: Option<Vec<identity::EntityId>>,
+    pub dependent_slicers: Option<Vec<identity::EntityId>>,
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub advanced_filter: Option<Option<AdvancedFilter>>,
     pub hide_no_data: Option<bool>,

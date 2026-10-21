@@ -709,12 +709,24 @@ fn pattern_matches(pattern: &str, segments: &[String]) -> bool {
 /// segment alone, because `name` is a control's identity while
 /// `/spec/series/3/name` is a chart row; (3) the first row of `kind` whose
 /// pattern matches, exact rows before `*` rows.
+/// The canvas page's visual interactions: a LITERAL-only path (P4 DC-6). It
+/// is written whole by `set_object_property` (`literal::write_literal`), never
+/// a catalog row, so a binding on it is refused by name.
+pub const CANVAS_INTERACTIONS_PATH: &str = "/interactions";
+
+/// The refusal of a binding on [`CANVAS_INTERACTIONS_PATH`].
+pub const INTERACTIONS_NOT_BINDABLE: &str = "Interactions are set as a value, not bound to a formula.";
+
 pub fn match_path(kind: ObjectBindingKind, path: &str) -> Result<&'static BindablePathSpec, String> {
     let escaped = pointer_segments(path)?;
     let segments: Vec<String> = escaped
         .iter()
         .map(|s| unescape_segment(s).unwrap_or_default())
         .collect();
+
+    if kind == ObjectBindingKind::CanvasPage && segments.first().map(String::as_str) == Some("interactions") {
+        return Err(INTERACTIONS_NOT_BINDABLE.to_string());
+    }
 
     if kind == ObjectBindingKind::Control && segments.len() >= 2 && segments[0] == "properties" {
         if let Some(reason) = never_bindable_control_reason(&segments[1]) {

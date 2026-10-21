@@ -49,6 +49,15 @@ pub fn create_ribbon_filter(
         }
     };
 
+    // Manual mode keeps the "Selected visuals" list as sent (normalized, or
+    // refused here -- before the effect); the other modes resolve their
+    // targets dynamically and store none.
+    let connected_visuals = if params.connection_mode == ConnectionMode::Manual {
+        normalize_connected_visuals(&params.connected_visuals)?
+    } else {
+        vec![]
+    };
+
     let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
 
     let filter = RibbonFilter {
@@ -66,10 +75,11 @@ pub fn create_ribbon_filter(
             vec![]
         },
         connected_sheets: params.connected_sheets,
+        connected_visuals,
         display_mode: params.display_mode.unwrap_or_default(),
         selected_items: None,
-        cross_filter_targets: vec![],
-        cross_filter_slicer_targets: vec![],
+        dependent_filters: vec![],
+        dependent_slicers: vec![],
         advanced_filter: None,
         hide_no_data: false,
         indicate_no_data: true,
@@ -117,7 +127,7 @@ pub fn create_ribbon_filter(
 
 /// Delete a ribbon filter.
 ///
-/// §3bn: filters cross-filter EACH OTHER — `cross_filter_targets` holds sibling
+/// §3bn: filters narrow EACH OTHER — `dependent_filters` holds sibling
 /// FILTER ids, not pivots — so deleting one left every sibling that named it
 /// holding a dead id, which the item-fetch path then re-resolved on every
 /// selection change. The prune is
@@ -190,6 +200,12 @@ pub(crate) fn update_ribbon_filter_core(
     if let Some(level) = params.filter_level {
         crate::slicer::types::validate_filter_level(level)?;
     }
+    // The "Selected visuals" list is normalized (or refused) here, before
+    // the effect, like the level.
+    let connected_visuals = match &params.connected_visuals {
+        Some(refs) => Some(normalize_connected_visuals(refs)?),
+        None => None,
+    };
 
     // Refusal (unknown id) BEFORE the effect; the store guard is dropped
     // before the undo stack is taken (never both), and the step JOINS an open
@@ -229,20 +245,24 @@ pub(crate) fn update_ribbon_filter_core(
     if let Some(connected_pivots) = params.connected_pivots {
         filter.connected_pivots = connected_pivots;
     }
+    if let Some(connected_visuals) = connected_visuals {
+        filter.connected_visuals = connected_visuals;
+    }
     // Manual-mode-only invariant: a stale manual list must not survive a
-    // switch to bySheet/workbook (it would keep driving slicer cross-filtering
-    // and get persisted).
+    // switch to bySheet/workbook (it would keep driving dependent-slicer narrowing
+    // and get persisted). The "Selected visuals" list is manual-only too.
     if filter.connection_mode != ConnectionMode::Manual {
         filter.connected_pivots.clear();
+        filter.connected_visuals.clear();
     }
     if let Some(connected_sheets) = params.connected_sheets {
         filter.connected_sheets = connected_sheets;
     }
-    if let Some(cross_filter_targets) = params.cross_filter_targets {
-        filter.cross_filter_targets = cross_filter_targets;
+    if let Some(dependent_filters) = params.dependent_filters {
+        filter.dependent_filters = dependent_filters;
     }
-    if let Some(cross_filter_slicer_targets) = params.cross_filter_slicer_targets {
-        filter.cross_filter_slicer_targets = cross_filter_slicer_targets;
+    if let Some(dependent_slicers) = params.dependent_slicers {
+        filter.dependent_slicers = dependent_slicers;
     }
     if let Some(advanced_filter) = params.advanced_filter {
         filter.advanced_filter = advanced_filter;

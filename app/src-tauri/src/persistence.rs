@@ -1718,7 +1718,7 @@ fn collect_ribbon_filters_for_save(
         .collect()
 }
 
-fn ribbon_filter_to_saved(f: &crate::ribbon_filter::RibbonFilter) -> persistence::SavedRibbonFilter {
+pub(crate) fn ribbon_filter_to_saved(f: &crate::ribbon_filter::RibbonFilter) -> persistence::SavedRibbonFilter {
     persistence::SavedRibbonFilter {
         id: f.id,
         name: f.name.clone(),
@@ -1733,14 +1733,15 @@ fn ribbon_filter_to_saved(f: &crate::ribbon_filter::RibbonFilter) -> persistence
         },
         connected_pivots: f.connected_pivots.clone(),
         connected_sheets: f.connected_sheets.clone(),
+        connected_visuals: f.connected_visuals.clone(),
         display_mode: match f.display_mode {
             crate::ribbon_filter::RibbonFilterDisplayMode::Checklist => persistence::SavedRibbonFilterDisplayMode::Checklist,
             crate::ribbon_filter::RibbonFilterDisplayMode::Buttons => persistence::SavedRibbonFilterDisplayMode::Buttons,
             crate::ribbon_filter::RibbonFilterDisplayMode::Dropdown => persistence::SavedRibbonFilterDisplayMode::Dropdown,
         },
         selected_items: f.selected_items.clone(),
-        cross_filter_targets: f.cross_filter_targets.clone(),
-        cross_filter_slicer_targets: f.cross_filter_slicer_targets.clone(),
+        dependent_filters: f.dependent_filters.clone(),
+        dependent_slicers: f.dependent_slicers.clone(),
         advanced_filter: f.advanced_filter.as_ref().map(|af| {
             persistence::SavedAdvancedFilter {
                 condition1: persistence::SavedAdvancedFilterCondition {
@@ -1769,6 +1770,59 @@ fn ribbon_filter_to_saved(f: &crate::ribbon_filter::RibbonFilter) -> persistence
     }
 }
 
+/// Drop, from a workbook being SAVED, every visual reference to an object that
+/// no longer exists (P4 DC-2, the `collect_bindings_for_save` precedent):
+///
+/// * each canvas layout keeps only the interaction pairs whose source AND
+///   target are interaction-capable objects ON THAT CANVAS
+///   ([`::persistence::CanvasInteractions::retain_live`]);
+/// * each ribbon filter keeps only the `connected_visuals` that exist on some
+///   sheet.
+///
+/// `locations` is ONE live-object walk (`object_json::object_locations`),
+/// taken by the caller before any save-wide lock. The live stores are never
+/// touched: undoing the delete brings the object, and so its pairs, back
+/// alive, and the next save writes them again. Each drop is logged.
+pub(crate) fn prune_dead_visual_refs_for_save(
+    workbook: &mut Workbook,
+    locations: &[(crate::api_types::ObjectBindingRef, crate::object_bindings::object_json::ObjectLocation)],
+) {
+    let by_sheet = crate::object_bindings::object_json::canvas_refs_by_sheet(locations);
+    let empty = std::collections::HashSet::new();
+    let mut dropped_pairs = 0usize;
+    for sheet in workbook.sheets.iter_mut() {
+        if let ::persistence::SheetKind::Canvas(layout) = &mut sheet.kind {
+            if layout.interactions.pairs.is_empty() {
+                continue;
+            }
+            let live = by_sheet.get(&sheet.id).unwrap_or(&empty);
+            dropped_pairs += layout.interactions.retain_live(live);
+        }
+    }
+    let anywhere: std::collections::HashSet<&::persistence::CanvasObjectRef> =
+        by_sheet.values().flat_map(|set| set.iter()).collect();
+    let mut dropped_visuals = 0usize;
+    for filter in workbook.ribbon_filters.iter_mut() {
+        let before = filter.connected_visuals.len();
+        filter.connected_visuals.retain(|r| anywhere.contains(r));
+        dropped_visuals += before - filter.connected_visuals.len();
+    }
+    if dropped_pairs > 0 {
+        crate::log_info!(
+            "CANVAS",
+            "{} visual interaction pair(s) naming an object that no longer exists were not saved",
+            dropped_pairs
+        );
+    }
+    if dropped_visuals > 0 {
+        crate::log_info!(
+            "RIBBON_FILTER",
+            "{} ribbon filter visual target(s) naming an object that no longer exists were not saved",
+            dropped_visuals
+        );
+    }
+}
+
 /// Convert one SavedRibbonFilter back to the live entity. pub(crate): the
 /// .calp pull path (calp_commands) materializes pulled ribbon filters through
 /// the same converter so wire-format handling can never drift from .cala load.
@@ -1787,14 +1841,15 @@ pub(crate) fn saved_to_ribbon_filter(saved: &persistence::SavedRibbonFilter) -> 
         },
         connected_pivots: saved.connected_pivots.clone(),
         connected_sheets: saved.connected_sheets.clone(),
+        connected_visuals: saved.connected_visuals.clone(),
         display_mode: match saved.display_mode {
             persistence::SavedRibbonFilterDisplayMode::Checklist => crate::ribbon_filter::RibbonFilterDisplayMode::Checklist,
             persistence::SavedRibbonFilterDisplayMode::Buttons => crate::ribbon_filter::RibbonFilterDisplayMode::Buttons,
             persistence::SavedRibbonFilterDisplayMode::Dropdown => crate::ribbon_filter::RibbonFilterDisplayMode::Dropdown,
         },
         selected_items: saved.selected_items.clone(),
-        cross_filter_targets: saved.cross_filter_targets.clone(),
-        cross_filter_slicer_targets: saved.cross_filter_slicer_targets.clone(),
+        dependent_filters: saved.dependent_filters.clone(),
+        dependent_slicers: saved.dependent_slicers.clone(),
         advanced_filter: saved.advanced_filter.as_ref().map(|af| {
             crate::ribbon_filter::AdvancedFilter {
                 condition1: crate::ribbon_filter::AdvancedFilterCondition {
@@ -2080,6 +2135,10 @@ pub(crate) fn collect_floating_ranges_for_save(
             show_column_headers: fr.show_column_headers,
             show_row_headers: fr.show_row_headers,
             container: fr.container.clone(),
+            // Written ascending whatever order the row holds (the core
+            // serializer sorts and deduplicates); no key when empty.
+            hidden_rows: fr.hidden_rows.clone(),
+            hidden_cols: fr.hidden_cols.clone(),
         })
         .collect();
     saved.sort_by_key(|fr| fr.id.to_string());
@@ -2117,6 +2176,15 @@ pub(crate) fn saved_floating_range_to_row(
             .map(|(index, size)| (*index, *size))
             .collect::<std::collections::HashMap<u32, f64>>()
     };
+    // Hidden line sets: the "sorted, deduplicated, in range" invariant the
+    // edit path (`validate_line_set`) and `patched()` rely on, restored as a
+    // FILTER -- an index past the cap is dropped, never the whole object.
+    let lines = |set: &[u32], cap: u32| {
+        let mut out: Vec<u32> = set.iter().copied().filter(|i| *i < cap).collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    };
     crate::api_types::FloatingRange {
         id: s.id,
         backing_sheet_id: s.backing_sheet_id,
@@ -2144,6 +2212,8 @@ pub(crate) fn saved_floating_range_to_row(
         show_row_headers: s.show_row_headers,
         // LOAD direction: repaired (the lenient reader already did; idempotent).
         container: s.container.clone().and_then(|c| c.sanitized()),
+        hidden_rows: lines(&s.hidden_rows, MAX_FLOATING_RANGE_ROWS),
+        hidden_cols: lines(&s.hidden_cols, MAX_FLOATING_RANGE_COLS),
     }
 }
 
@@ -2579,23 +2649,33 @@ fn assemble_workbook_for_save(
     // the live-object walk reads `sheet_ids` itself, and a std mutex is not
     // reentrant. The family stores are read and released by the walk, and only
     // then is the (leaf) binding store read; a binding whose object no longer
-    // exists is not written.
-    {
+    // exists is not written. The walk's result is HOISTED out of the block:
+    // the canvas interactions and the ribbon filters' "Selected visuals" are
+    // pruned against the same walk below (P4 DC-2), never by a second walk
+    // taken while `sheet_ids_save` is held.
+    let live_locations = {
         let stores = crate::object_bindings::object_json::ObjectStores {
             state,
             slicers: slicer_state,
             timelines: timeline_state,
             pivots: pivot_state,
         };
-        let live = crate::object_bindings::object_json::live_object_refs(&stores);
+        let locations = crate::object_bindings::object_json::object_locations(&stores);
+        let live: std::collections::HashSet<crate::api_types::ObjectBindingRef> =
+            locations.iter().map(|(r, _)| r.clone()).collect();
         workbook.object_bindings = crate::object_bindings::store::collect_bindings_for_save(state, &live);
-    }
+        locations
+    };
 
     let sheet_ids_save = state.sheet_ids.read().map_err(|e| e.to_string())?;
     workbook.slicers = collect_slicers_for_save(slicer_state, &sheet_ids_save);
     workbook.timeline_slicers =
         collect_timeline_slicers_for_save(timeline_state, pivot_state, &sheet_ids_save);
     workbook.ribbon_filters = collect_ribbon_filters_for_save(ribbon_filter_state);
+    // AFTER the ribbon filters and the canvas layouts (build_workbook_for_save)
+    // are in `workbook`: a pair or a "Selected visuals" ref naming an object
+    // that no longer exists is not written (P4 DC-2). Touches `workbook` only.
+    prune_dead_visual_refs_for_save(&mut workbook, &live_locations);
     workbook.pane_controls = collect_pane_controls_for_save(pane_control_state);
     workbook.pivot_layouts = state.pivot_layouts.read().unwrap().clone();
     workbook.object_scripts = state.object_scripts.read().unwrap().clone();
@@ -4331,11 +4411,13 @@ pub fn open_file(
     restamp_workbook_name_casing(&state, &load_effect);
     crate::undo_commands::rebuild_all_dependencies(&state);
     // GAP B: the rebuild above registers cross-sheet edges for the ACTIVE
-    // sheet only; every other sheet gets its edges when it becomes active. A
-    // floating range's backing sheet never does, so its formulas would come
-    // back present and permanently dead (§2z). The installer scans the
-    // object-backed sheets and registers their edges through the shared
-    // normalizer. (Pinned by the_edge_installer_revives_a_loaded_floating_range.)
+    // sheet only. A floating range's backing sheet never becomes active, so
+    // its formulas would come back present and permanently dead (§2z), and a
+    // user sheet stayed dead the same way until its first visit (BUG-0540). The
+    // installer scans every NON-active sheet and registers its edges through
+    // the shared normalizer. (Pinned by
+    // the_edge_installer_revives_a_loaded_floating_range and
+    // after_a_load_an_unvisited_sheet_follows_the_active_sheet.)
     crate::floating_range::register_object_sheet_edges(&state);
 
     // DYNAMIC-ARRAY SPILL OWNERSHIP FOR THE WORKBOOK JUST READ (§2ab), and the

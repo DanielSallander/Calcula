@@ -1,8 +1,14 @@
 //! FILENAME: app/extensions/ConditionalFormatting/rendering/iconSetRenderer.ts
 // PURPOSE: Grid overlay renderer for conditional formatting icon sets.
 // CONTEXT: Draws small icons inside cells based on the icon index from evaluation results.
+//
+// ONE PAINTER, TWO CALLERS. `paintIconSetIcon(ctx, box, iconSet, index)` draws
+// one glyph in a cell box. The grid overlay below and the registered
+// `@api/conditionalFormatPaint` painter (conditionalFormatPainter.ts) both end
+// there, so a floating grid's icon and the sheet's cannot be drawn two ways.
 
 import type { OverlayRenderContext, IconSetType } from "@api";
+import type { CellBox } from "@api/cellPaint";
 import {
   overlayGetColumnX,
   overlayGetRowY,
@@ -16,6 +22,26 @@ import { getEvaluationForCell } from "../lib/cfStore";
 import { drawIcon } from "./iconShapes";
 
 const ICON_SIZE = 14;
+/** Inset of the icon from the cell's left edge, in px. */
+const ICON_INSET_X = 2;
+
+/**
+ * Paint one icon-set glyph into `box`: at the left edge, vertically centred.
+ * `iconSet` and `index` are the backend's resolved pair (BUG-0107: both come
+ * from the ONE rule that produced them, never re-derived here).
+ */
+export function paintIconSetIcon(
+  ctx: CanvasRenderingContext2D,
+  box: CellBox,
+  iconSet: IconSetType,
+  index: number,
+): void {
+  const iconX = box.x + ICON_INSET_X;
+  const iconY = box.y + (box.height - ICON_SIZE) / 2;
+  ctx.save();
+  drawIcon(ctx, iconSet, index, iconX, iconY, ICON_SIZE);
+  ctx.restore();
+}
 
 /**
  * Render icon sets for all visible cf-icon-set regions.
@@ -72,12 +98,16 @@ export function renderIconSets(context: OverlayRenderContext): void {
     if (!iconCf || iconCf.iconIndex == null || iconCf.iconSet == null) continue;
     const iconSetType: IconSetType = iconCf.iconSet;
 
-    // Position icon at left side of cell, vertically centered
-    const iconX = Math.max(cellX, rhw) + 2;
-    const iconY = Math.max(cellY, chh) + (cellH - ICON_SIZE) / 2;
-
-    ctx.save();
-    drawIcon(ctx, iconSetType, iconCf.iconIndex, iconX, iconY, ICON_SIZE);
-    ctx.restore();
+    // The box starts at the VISIBLE cell's top-left (never under a header) and
+    // keeps the cell's full height, which reproduces this overlay's geometry
+    // from before the painter was factored out, unchanged.
+    const left = Math.max(cellX, rhw);
+    const top = Math.max(cellY, chh);
+    paintIconSetIcon(
+      ctx,
+      { x: left, y: top, width: Math.max(0, cellX + cellW - left), height: cellH },
+      iconSetType,
+      iconCf.iconIndex,
+    );
   }
 }

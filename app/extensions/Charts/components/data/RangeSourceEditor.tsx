@@ -18,12 +18,23 @@
 //          every step of the picker, as the dialog always did; a caller that
 //          must WRITE once per pick (the pane: one undo step) also passes
 //          `onSeriesColorCommit`, which fires on the native `change` event --
-//          when the picker closes -- not on every step of the drag.
+//          when the picker closes -- not on every step of the drag. The picker
+//          is driven by the shared `useNativeColorPick` (round 2, G1).
+//
+//          A caller that SHOWS a draft (the pane puts every step into a draft
+//          and passes the drafted spec as `spec`) passes its STORED colours as
+//          `storedSeriesColors`: the commit patch is diffed against those,
+//          never against the draft on screen. Diffed against the draft, the
+//          picked colour already "was" the series colour, the patch came out
+//          empty and the pick never persisted (round 2, review R1-2). A pick
+//          that changes nothing calls `onSeriesColorEnd` instead, so the caller
+//          can drop its draft.
 
-import React, { useEffect, useRef } from "react";
+import React from "react";
 import type { ChartSpec, ChartSeries, SeriesOrientation } from "../../types";
 import { getSeriesColor } from "../../rendering/chartTheme";
 import { readSeriesColor, seriesColorPatch } from "../../lib/chartDataReader";
+import { useNativeColorPick } from "../../../_shared/components/colorPick";
 import {
   FieldGroup,
   Label,
@@ -69,6 +80,17 @@ export interface RangeSourceEditorProps {
   onSpecChange: (updates: Partial<ChartSpec>) => void;
   /** Fires once per colour PICK (the native change), with the same patch. */
   onSeriesColorCommit?: (updates: Partial<ChartSpec>) => void;
+  /**
+   * The STORED series colours, the base a colour commit is diffed against.
+   * Default `spec.seriesColors`. A caller whose `spec` is a DRAFT carrying the
+   * previewed colour must pass its stored colours here -- `{}` when none are
+   * stored, never `undefined` (which falls back to the draft) -- or every pick
+   * diffs to "no change" and is never written.
+   */
+  storedSeriesColors?: Record<string, string>;
+  /** A colour pick ended without a write (the stored colour picked back, or
+   *  the picker closed without a change): drop any draft of the steps. */
+  onSeriesColorEnd?: () => void;
   /** Available column/row labels for the category dropdown. */
   availableAxes: RangeAxis[];
   /** Palette name for colour previews. */
@@ -79,40 +101,24 @@ export interface RangeSourceEditorProps {
   testIdPrefix?: string;
 }
 
-/** A series colour swatch that reports the end of a pick separately from its steps. */
+/** A series colour swatch that reports the end of a pick separately from its
+ *  steps: every `input` step is `onStep`, the native `change` is ONE
+ *  `onCommit`, and a pick that ends on the colour it started from is `onEnd`. */
 function SeriesColorSwatch({
   value,
   onStep,
   onCommit,
+  onEnd,
   testId,
 }: {
   value: string;
   onStep: (hex: string) => void;
-  onCommit?: (hex: string) => void;
+  onCommit: (hex: string) => void;
+  onEnd?: () => void;
   testId?: string;
 }): React.ReactElement {
-  const ref = useRef<HTMLInputElement | null>(null);
-  const commitRef = useRef(onCommit);
-  commitRef.current = onCommit;
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    // React's onChange is the INPUT stream (every step of the picker); the
-    // native change fires once, when the pick is made.
-    const onNativeChange = (): void => commitRef.current?.(el.value);
-    el.addEventListener("change", onNativeChange);
-    return () => el.removeEventListener("change", onNativeChange);
-  }, []);
-  return (
-    <ColorSwatch
-      ref={ref}
-      type="color"
-      value={value}
-      onChange={(e) => onStep(e.target.value)}
-      title="Series color"
-      data-testid={testId}
-    />
-  );
+  const picker = useNativeColorPick({ value, onStep, onCommit, onEnd });
+  return <ColorSwatch {...picker} title="Series color" data-testid={testId} />;
 }
 
 export function RangeSourceEditor({
@@ -132,6 +138,8 @@ export function RangeSourceEditor({
   spec,
   onSpecChange,
   onSeriesColorCommit,
+  storedSeriesColors,
+  onSeriesColorEnd,
   availableAxes,
   palette,
   orientationGroupName = "orientation",
@@ -175,12 +183,20 @@ export function RangeSourceEditor({
     const patch = seriesColorPatch(spec ?? {}, seriesName, color);
     if (patch !== null) onSpecChange(patch);
   };
-  const handleSeriesColorCommit = onSeriesColorCommit
-    ? (seriesName: string, color: string) => {
-        const patch = seriesColorPatch(spec ?? {}, seriesName, color);
-        if (patch !== null) onSeriesColorCommit(patch);
-      }
-    : undefined;
+  // The ONE write of a pick, diffed against the STORED colours (never the
+  // draft this editor may be showing). Without a committing caller (the
+  // dialog, which writes on OK), the pick's last colour goes to the dialog's
+  // spec overlay like every step does.
+  const handleSeriesColorCommit = (seriesName: string, color: string) => {
+    if (!onSeriesColorCommit) {
+      handleSeriesColorChange(seriesName, color);
+      return;
+    }
+    const base = { seriesColors: storedSeriesColors ?? spec?.seriesColors };
+    const patch = seriesColorPatch(base, seriesName, color);
+    if (patch !== null) onSeriesColorCommit(patch);
+    else onSeriesColorEnd?.();
+  };
 
   // Build all possible series indices (all axes except the category axis)
   const allSeriesIndices = availableAxes
@@ -309,7 +325,8 @@ export function RangeSourceEditor({
                         ?? getSeriesColor(palette, colorIndex, null)
                       }
                       onStep={(hex) => handleSeriesColorChange(seriesDef.name, hex)}
-                      onCommit={handleSeriesColorCommit ? (hex) => handleSeriesColorCommit(seriesDef.name, hex) : undefined}
+                      onCommit={(hex) => handleSeriesColorCommit(seriesDef.name, hex)}
+                      onEnd={onSeriesColorEnd}
                       testId={tid(`series-color-${idx}`)}
                     />
                   )}

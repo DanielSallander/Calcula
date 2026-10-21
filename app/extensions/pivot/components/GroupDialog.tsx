@@ -5,6 +5,8 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { css } from "@emotion/css";
 import { useDialogWindow } from "@api/dialogWindow";
+import { formatNumber, parseNumber } from "@api/locale";
+import { memberKeyDate, memberKeyNumber } from "@api/pivotMembers";
 import {
   groupPivotField,
   getPivotFieldUniqueValues,
@@ -227,27 +229,30 @@ export function GroupDialog({ isOpen, onClose, data }: GroupDialogProps): React.
     getPivotFieldUniqueValues(pivotId, fieldIndex)
       .then((resp) => {
         setFieldName(resp.fieldName);
-        // Heuristic: if most values look like dates, default to date mode
-        const datePattern = /^\d{4}[-/]\d{1,2}[-/]\d{1,2}/;
-        const dateCount = resp.uniqueValues.filter((v) => datePattern.test(v)).length;
-        if (dateCount > resp.uniqueValues.length * 0.5) {
+        // Heuristic: if most members are dates, default to date mode. Member
+        // KEYS are invariant (ISO dates, machine numbers) and are read
+        // invariantly; a localised LABEL is never parsed.
+        const keys = resp.members.map((m) => m.key);
+        const dateCount = keys.filter((k) => memberKeyNumber(k) === null && memberKeyDate(k) !== null).length;
+        if (dateCount > keys.length * 0.5) {
           setMode("date");
         } else {
           setMode("number");
           // Try to auto-detect range from values
-          const nums = resp.uniqueValues
-            .map((v) => parseFloat(v))
-            .filter((n) => !isNaN(n));
+          const nums = keys
+            .map((k) => memberKeyNumber(k))
+            .filter((n): n is number => n !== null);
           if (nums.length > 0) {
             const min = Math.floor(Math.min(...nums));
             const max = Math.ceil(Math.max(...nums));
-            setBinStart(String(min));
-            setBinEnd(String(max));
+            // The boxes are typed in the app locale, so they show it too.
+            setBinStart(formatNumber(min));
+            setBinEnd(formatNumber(max));
             const range = max - min;
             if (range > 0) {
               // Pick a reasonable interval (roughly 10 bins)
               const interval = Math.max(1, Math.round(range / 10));
-              setBinInterval(String(interval));
+              setBinInterval(formatNumber(interval));
             }
           }
         }
@@ -282,9 +287,9 @@ export function GroupDialog({ isOpen, onClose, data }: GroupDialogProps): React.
     } else {
       grouping = {
         type: "numberBinning",
-        start: parseFloat(binStart) || 0,
-        end: parseFloat(binEnd) || 100,
-        interval: parseFloat(binInterval) || 10,
+        start: parseNumber(binStart) ?? 0,
+        end: parseNumber(binEnd) ?? 100,
+        interval: parseNumber(binInterval) ?? 10,
       };
     }
 
@@ -299,13 +304,16 @@ export function GroupDialog({ isOpen, onClose, data }: GroupDialogProps): React.
 
   if (!isOpen) return null;
 
+  // The bin boxes are typed in the APP locale ("12,5" under de-DE); text that
+  // is no number there keeps Apply disabled rather than being misread.
+  const typedInterval = parseNumber(binInterval);
   const isValid =
     mode === "date"
       ? selectedLevels.size > 0
-      : !isNaN(parseFloat(binStart)) &&
-        !isNaN(parseFloat(binEnd)) &&
-        !isNaN(parseFloat(binInterval)) &&
-        parseFloat(binInterval) > 0;
+      : parseNumber(binStart) !== null &&
+        parseNumber(binEnd) !== null &&
+        typedInterval !== null &&
+        typedInterval > 0;
 
   return (
     <div className={styles.overlay} onClick={onClose}>
@@ -368,7 +376,8 @@ export function GroupDialog({ isOpen, onClose, data }: GroupDialogProps): React.
                 <label>Starting at:</label>
                 <input
                   className={styles.input}
-                  type="number"
+                  type="text"
+                  inputMode="decimal"
                   value={binStart}
                   onChange={(e) => setBinStart(e.target.value)}
                 />
@@ -377,7 +386,8 @@ export function GroupDialog({ isOpen, onClose, data }: GroupDialogProps): React.
                 <label>Ending at:</label>
                 <input
                   className={styles.input}
-                  type="number"
+                  type="text"
+                  inputMode="decimal"
                   value={binEnd}
                   onChange={(e) => setBinEnd(e.target.value)}
                 />
@@ -386,10 +396,10 @@ export function GroupDialog({ isOpen, onClose, data }: GroupDialogProps): React.
                 <label>By:</label>
                 <input
                   className={styles.input}
-                  type="number"
+                  type="text"
+                  inputMode="decimal"
                   value={binInterval}
                   onChange={(e) => setBinInterval(e.target.value)}
-                  min="1"
                 />
               </div>
             </div>

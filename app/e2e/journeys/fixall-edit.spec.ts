@@ -112,8 +112,49 @@ import { clickCanvasControl } from "../helpers/canvas-live";
 // that hosts it): shared with canvas-pick-cells.spec.ts, so it lives in the helper.
 import { frEditText } from "../helpers/adventureworks-live";
 
-/** The one sentence a floating grid's claim answers every refused door with. */
-const FR_REFUSAL = /is not available for a floating range's cells yet\. Nothing was changed\./;
+/**
+ * The floating grid's refusal. Since round 2 P3 (owner finding G3, BUG-0516)
+ * the Home doors ACT on a floating grid's cells; the doors that still refuse
+ * say "<action> is not available inside a floating grid yet. Nothing was
+ * changed." (Format as Table / Filter: "... inside a floating grid: a floating
+ * grid is already a table-like object.").
+ */
+const FR_REFUSAL = /is not available inside a floating grid/;
+
+/** The floating grid's own cell as a door target (`api_types::CellTargetRef`). */
+function frRef(fr: FrInfo): { kind: "floatingRange"; id: string } {
+  return { kind: "floatingRange", id: fr.id };
+}
+
+/** The style of a floating grid's cell, read through the grid's styled read (`get_cell_target_cells`). */
+async function frStyleAt(page: Page, fr: FrInfo, row: number, col: number): Promise<Record<string, unknown> & { index: number }> {
+  const read = await invoke<{ cells: Array<{ row: number; col: number; styleIndex?: number }> }>(page, "get_cell_target_cells", {
+    target: frRef(fr),
+    startRow: row,
+    startCol: col,
+    endRow: row,
+    endCol: col,
+  });
+  const index = read.cells.find((c) => c.row === row && c.col === col)?.styleIndex ?? 0;
+  const style = await invoke<Record<string, unknown>>(page, "get_style", { index });
+  return { ...style, index };
+}
+
+/** No toast at all is the floating grid's refusal (the door acted on its cells). */
+async function expectNoFrRefusal(page: Page, mark: number, door: string): Promise<void> {
+  await page.waitForTimeout(500);
+  const toasts = await toastsSince(page, mark);
+  expect(toasts.filter((t) => FR_REFUSAL.test(t.message)).map((t) => t.message), `${door}: refused on a floating grid's cell`).toEqual([]);
+}
+
+/** Core's hidden cell under the grid is untouched (value and style); an undo step of the GRID's own is allowed. */
+async function expectHiddenCellUntouched(page: Page, before: DocSnapshot, door: string): Promise<void> {
+  const now = await docSnapshot(page);
+  expect(now.a1, `${door}: A1 (Core's hidden cell) changed`).toBe(before.a1);
+  expect(now.a1Style, `${door}: A1's style changed`).toBe(before.a1Style);
+  const sel = await gridSelection(page);
+  expect(sel && [sel.startRow, sel.startCol, sel.endRow, sel.endCol], `${door}: Core's hidden selection moved off A1`).toEqual([0, 0, 0, 0]);
+}
 
 /** Where this spec's floating grid floats on a worksheet (sheet px): columns G.., rows 10.. */
 const FR_POS = { x: 420, y: 180 };
@@ -251,12 +292,14 @@ test.beforeEach(async ({ appPage }) => {
 });
 
 // ===========================================================================
-// 1. THE SELECTION OWNER: every door refuses once while a floating-grid cell
-//    holds the selection on a worksheet, and works again on a sheet cell.
+// 1. THE SELECTION OWNER: while a floating-grid cell holds the selection on a
+//    worksheet, the Home doors act on THAT cell (round 2 P3, owner finding G3,
+//    BUG-0516) and never on Core's hidden cell under it (BUG-0185); the doors
+//    that are not Home commands still refuse once. On a sheet cell they act.
 // ===========================================================================
 
 test.describe("selection owner: a floating grid's cell on a worksheet", () => {
-  test("BUG-0185 K1/E7: Home Bold, Font Color, Format > Cell Styles, Paste Special, Format Painter, CF Data Bars, More Number Formats, More Fill Options, Ctrl+B and Ctrl+1 each refuse once and leave A1 alone; on a sheet cell they act", async ({
+  test("BUG-0185 K1/E7 + G3: Home Bold, Font Color, Format > Cell Styles, Paste Special, Format Painter, CF Data Bars, More Number Formats, More Fill Options, Ctrl+B and Ctrl+1 each act on the floating grid's cell (no refusal) and leave A1 alone; on a sheet cell they act", async ({
     appPage: page,
     grid,
   }) => {
@@ -266,20 +309,42 @@ test.describe("selection owner: a floating grid's cell on a worksheet", () => {
       await startToastLog(page);
       await writeCells(page, [[0, 0, "keep"]]);
       const fr = await createFr(page, FR_POS.x, FR_POS.y, "EditFR");
+      await setFrCell(page, fr.id, 0, 0, "grid");
       await claimWithFrCell(page, grid, fr);
       const before = await docSnapshot(page);
+      const sheetRulesBefore = await invoke<unknown[]>(page, "get_all_conditional_formats");
 
-      const doors: Array<{ name: string; act: () => Promise<void> }> = [
-        { name: "Home > Bold", act: () => page.locator('[data-testid="fmt-bold"]').click() },
+      const frStyle = () => frStyleAt(page, fr, 0, 0);
+      const dialogOpen = (id: string, tab?: string) => async () => {
+        const d = (await openDialogs(page)).find((x) => x.id === id);
+        return !!d && (tab === undefined || (d.data as { tab?: string } | null)?.tab === tab);
+      };
+
+      const doors: Array<{
+        name: string;
+        act: () => Promise<void>;
+        /** Whether the door ACTED on the grid's cell, given its style before the door. */
+        acted: (styleBefore: Record<string, unknown> & { index: number }) => Promise<boolean>;
+      }> = [
+        {
+          name: "Home > Bold",
+          act: () => page.locator('[data-testid="fmt-bold"]').click(),
+          acted: async () => (await frStyle()).bold === true,
+        },
         // Font Color is Excel's split since 2026-10-04: the face APPLIES the
         // colour on its bar, the chevron opens the palette. Both are doors.
-        { name: "Home > Font Color (face)", act: () => page.locator('[data-testid="fmt-textColor"]').click() },
+        {
+          name: "Home > Font Color (face)",
+          act: () => page.locator('[data-testid="fmt-textColor"]').click(),
+          acted: async (b) => String((await frStyle()).textColor) !== String(b.textColor),
+        },
         {
           name: "Home > Font Color (palette)",
           act: async () => {
             await page.locator('[data-testid="fmt-textColor-options"]').click();
             await page.locator('[data-testid="fmt-textColor-popover"] button[data-colour-swatch]').nth(5).click();
           },
+          acted: async (b) => String((await frStyle()).textColor) !== String(b.textColor),
         },
         {
           name: "Format > Cell Styles",
@@ -287,15 +352,26 @@ test.describe("selection owner: a floating grid's cell on a worksheet", () => {
             await hoverMenuPath(page, ["Format", "Cell Styles"]);
             await page.locator('[data-testid="cell-styles-gallery"]').getByText("Good", { exact: true }).first().click();
           },
+          acted: async (b) => (await frStyle()).index !== b.index,
         },
-        { name: "Edit > Paste > Paste Special", act: () => runMenuItem(page, ["Edit", "Paste", "Paste Special..."]) },
-        { name: "Home > Format Painter", act: () => page.locator('[data-testid="fmt-formatPainter"]').click() },
+        {
+          name: "Edit > Paste > Paste Special",
+          act: () => runMenuItem(page, ["Edit", "Paste", "Paste Special..."]),
+          acted: dialogOpen("paste-special"),
+        },
+        {
+          name: "Home > Format Painter",
+          act: () => page.locator('[data-testid="fmt-formatPainter"]').click(),
+          acted: () => callModule<boolean>(page, FORMAT_PAINTER_STATE, "isFormatPainterActive"),
+        },
         {
           name: "Format > Conditional Formatting > Data Bars",
           act: async () => {
             await hoverMenuPath(page, ["Format", "Conditional Formatting", "Data Bars"]);
             await page.locator('button[title^="Gradient"]').first().click();
           },
+          // The rule lands on the grid's BACKING sheet, read through the target.
+          acted: async () => (await invoke<unknown[]>(page, "get_all_conditional_formats", { target: frRef(fr) })).length > 0,
         },
         {
           name: "Home > Number > More Number Formats...",
@@ -303,6 +379,7 @@ test.describe("selection owner: a floating grid's cell on a worksheet", () => {
             await page.locator('[data-testid="fmt-numberFormat"]').click();
             await page.locator('[data-testid="fmt-numberFormat-option-__more-number-formats__"]').click();
           },
+          acted: dialogOpen("format-cells", "number"),
         },
         {
           name: "Home > Fill > More Fill Options...",
@@ -311,6 +388,7 @@ test.describe("selection owner: a floating grid's cell on a worksheet", () => {
             await page.locator('[data-testid="fmt-backgroundColor-options"]').click();
             await page.locator('[data-testid="fmt-backgroundColor-more"]').click();
           },
+          acted: dialogOpen("format-cells", "fill"),
         },
         {
           name: "Ctrl+B",
@@ -318,6 +396,8 @@ test.describe("selection owner: a floating grid's cell on a worksheet", () => {
             await focusGrid(page);
             await page.keyboard.press("Control+b");
           },
+          // Bold is on since the first door: Ctrl+B toggles it OFF on the grid's cell.
+          acted: async (b) => (await frStyle()).bold !== b.bold,
         },
         {
           name: "Ctrl+1",
@@ -325,27 +405,33 @@ test.describe("selection owner: a floating grid's cell on a worksheet", () => {
             await focusGrid(page);
             await page.keyboard.press("Control+1");
           },
+          acted: dialogOpen("format-cells"),
         },
       ];
 
       for (const door of doors) {
         await test.step(door.name, async () => {
           // The claim must still hold for every door: re-select the floating
-          // cell if a previous door's popover/menu took it.
+          // cell if a previous door's popover/menu/dialog took it.
           if (!(await selectionOwned(page))) await clickFrCell(page, fr, 0, 0);
           expect(await selectionOwned(page), `${door.name}: precondition, the claim holds`).toBe(true);
+          const styleBefore = await frStyle();
           const mark = await toastMark(page);
           await door.act();
-          await expectOneRefusal(page, mark, door.name);
-          await expectNothingWritten(page, before, door.name);
+          await eventually(() => door.acted(styleBefore), (v) => v === true, `${door.name}: did not act on the floating grid's cell`);
+          await expectNoFrRefusal(page, mark, door.name);
+          await expectHiddenCellUntouched(page, before, door.name);
+          expect(await invoke<unknown[]>(page, "get_all_conditional_formats"), `${door.name}: a rule landed on Sheet1`).toEqual(sheetRulesBefore);
+          await page.keyboard.press("Escape");
+          await closeDialogsAndOverlays(page);
+          await page.waitForTimeout(150);
           expect(
             await callModule<boolean>(page, FORMAT_PAINTER_STATE, "isFormatPainterActive"),
-            `${door.name}: Format Painter started`,
+            `${door.name}: Format Painter is still armed after Escape`,
           ).toBe(false);
-          await page.keyboard.press("Escape");
-          await page.waitForTimeout(150);
         });
       }
+      expect(await cellAt(page, 0, 0).then((c) => String(c?.display ?? "")), "A1 under the claim changed").toBe("keep");
 
       // ---- POSITIVE CONTROL: on a sheet cell every door acts ----------------
       await grid.clickCell("A1");
@@ -393,7 +479,7 @@ test.describe("selection owner: a floating grid's cell on a worksheet", () => {
 });
 
 test.describe("selection owner: menu and key doors (D4, W18, E7)", () => {
-  test("D4 (BUG-0185 class): Sort, Filter, Group, Remove Duplicates, Data Validation, Ctrl+T, Ctrl+Shift+B, Ctrl+K, Ctrl+Alt+M, Cell Protection, Alt+;, Ctrl+E, Set Print Area, Cell Type > Checkbox, Paste Names each refuse once with a floating-grid cell selected; on a sheet cell they act", async ({
+  test("D4 (BUG-0185 class) + G3: Filter, Group, Remove Duplicates, Data Validation, Ctrl+T, Ctrl+Shift+B, Ctrl+K, Ctrl+Alt+M, Cell Protection, Alt+;, Set Print Area, Cell Type > Checkbox, Paste Names each refuse once with a floating-grid cell selected; Sort A to Z and Ctrl+E act on the (empty) grid and say so in its own words; on a sheet cell they act", async ({
     appPage: page,
     grid,
   }) => {
@@ -419,7 +505,6 @@ test.describe("selection owner: menu and key doors (D4, W18, E7)", () => {
         await page.keyboard.press(combo);
       };
       const doors: Array<{ name: string; act: () => Promise<void> }> = [
-        { name: "Data > Sort A to Z", act: menu(["Data", "Sort A to Z"]) },
         { name: "Data > Filter", act: menu(["Data", "Filter"]) },
         { name: "Data > Outline > Group", act: menu(["Data", "Outline", "Group"]) },
         { name: "Data > Remove Duplicates", act: menu(["Data", "Remove Duplicates..."]) },
@@ -430,7 +515,6 @@ test.describe("selection owner: menu and key doors (D4, W18, E7)", () => {
         { name: "Ctrl+Alt+M", act: key("Control+Alt+m") },
         { name: "Review > Cell Protection", act: menu(["Review", "Cell Protection..."]) },
         { name: "Alt+;", act: key("Alt+;") },
-        { name: "Ctrl+E", act: key("Control+e") },
         { name: "View > Print Area > Set Print Area", act: menu(["View", "Print Area", "Set Print Area"]) },
         { name: "Insert > Cell Type > Checkbox", act: menu(["Insert", "Cell Type", "Checkbox"]) },
         { name: "Formulas > Paste Names", act: menu(["Formulas", "Paste Names..."]) },
@@ -451,6 +535,31 @@ test.describe("selection owner: menu and key doors (D4, W18, E7)", () => {
             await callModule<boolean>(page, BOOKMARK_STORE, "hasBookmarkAt", [0, 0, 0]),
             `${door.name}: a bookmark was added at the hidden cell`,
           ).toBe(false);
+          await page.keyboard.press("Escape");
+          await page.waitForTimeout(150);
+        });
+      }
+      // ---- G3: Sort A to Z and Flash Fill are Home commands now. On the
+      // grid's EMPTY cells each answers in its own words (no refusal) and
+      // writes nothing -- neither the grid nor Core's hidden column.
+      const gridDoors: Array<{ name: string; act: () => Promise<void>; says: RegExp }> = [
+        { name: "Data > Sort A to Z", act: menu(["Data", "Sort A to Z"]), says: /no data here to sort/i },
+        { name: "Ctrl+E", act: key("Control+e"), says: /Flash Fill|example value|No (source )?data/i },
+      ];
+      for (const door of gridDoors) {
+        await test.step(`${door.name} (acts on the grid)`, async () => {
+          // A CELL of the grid, not merely "owned": the Escape that ends each
+          // previous door leaves the WHOLE OBJECT selected, and a whole-object
+          // selection is refused for a sort ("Select cells inside the floating
+          // grid first.") before the grid can answer (found live 2026-10-17).
+          await clickFrCell(page, fr, 0, 0);
+          const mark = await toastMark(page);
+          await door.act();
+          const said = await eventually(() => toastsSince(page, mark), (t) => t.length > 0, `${door.name}: the grid said nothing`);
+          expect(said.map((t) => t.message).join(" | "), `${door.name}: not the grid's own answer`).toMatch(door.says);
+          expect(said.filter((t) => FR_REFUSAL.test(t.message)).map((t) => t.message), `${door.name}: refused on a floating grid's cell`).toEqual([]);
+          await expectNothingWritten(page, before, door.name);
+          expect(await frCell(page, fr.id, 0, 0), `${door.name}: wrote the grid's empty cell`).toBeNull();
           await page.keyboard.press("Escape");
           await page.waitForTimeout(150);
         });
@@ -524,7 +633,7 @@ test.describe("selection owner: menu and key doors (D4, W18, E7)", () => {
     }
   });
 
-  test("W18: with an AutoFilter on and a floating-grid cell selected, Ctrl+Shift+L turns the filter off; Ctrl+T/K/E, Shift+F2, Ctrl+Shift+B, Alt+Shift+Right/Left and Ctrl+C/V/X/D/R refuse once without moving the grid's selection; Alt+Down refuses as Pick From List; Shift+Right and F2 still work", async ({
+  test("W18: with an AutoFilter on and a floating-grid cell selected, Ctrl+Shift+L turns the filter off; Ctrl+T/K, Shift+F2, Ctrl+Shift+B and Alt+Shift+Right/Left refuse once without moving the grid's selection; Ctrl+E/C/V/X/D/R act on the grid (G3) and never on Core's hidden cell; Alt+Down refuses as Pick From List; Shift+Right and F2 still work", async ({
     appPage: page,
     grid,
   }) => {
@@ -559,7 +668,8 @@ test.describe("selection owner: menu and key doors (D4, W18, E7)", () => {
       expect((await toastsSince(page, mark)).filter((t) => FR_REFUSAL.test(t.message)), "turning the filter off was refused").toEqual([]);
       const afterFilterOff = await docSnapshot(page);
 
-      const refused = ["Control+t", "Control+k", "Control+e", "Shift+F2", "Control+Shift+B", "Alt+Shift+ArrowRight", "Alt+Shift+ArrowLeft", "Control+c", "Control+v", "Control+x", "Control+d", "Control+r"];
+      // Not Home commands: Create Table, Insert Hyperlink, New Comment, Bookmark, Group / Ungroup.
+      const refused = ["Control+t", "Control+k", "Shift+F2", "Control+Shift+B", "Alt+Shift+ArrowRight", "Alt+Shift+ArrowLeft"];
       for (const combo of refused) {
         await test.step(combo, async () => {
           if (JSON.stringify(await frSel()) !== "[0,0,0,0]") await clickFrCell(page, fr, 0, 0);
@@ -575,13 +685,33 @@ test.describe("selection owner: menu and key doors (D4, W18, E7)", () => {
         });
       }
 
+      // Home commands since round 2 P3 (G3): Flash Fill, Copy, Paste, Cut, Fill
+      // Down / Right act on the GRID's cell. None is refused, none reaches
+      // Core's hidden A1, and none puts marching ants round it.
+      for (const combo of ["Control+e", "Control+c", "Control+v", "Control+x", "Control+d", "Control+r"]) {
+        await test.step(`${combo} (acts on the grid)`, async () => {
+          if (JSON.stringify(await frSel()) !== "[0,0,0,0]") await clickFrCell(page, fr, 0, 0);
+          mark = await toastMark(page);
+          await focusGrid(page);
+          await page.keyboard.press(combo);
+          await expectNoFrRefusal(page, mark, combo);
+          await expectHiddenCellUntouched(page, afterFilterOff, combo);
+          expect(await frSel(), `${combo}: the floating grid's selection moved or extended`).toEqual([0, 0, 0, 0]);
+          expect(await frEditorOpen(page), `${combo}: the floating grid's cell editor opened`).toBe(false);
+          const clip = await page.evaluate(() => (window as unknown as AppWindow).__CALCULA_GRID_STATE__?.clipboard?.mode ?? "none");
+          expect(clip, `${combo}: Core's hidden cell was copied/cut (marching ants)`).toBe("none");
+          await page.keyboard.press("Escape");
+          await page.waitForTimeout(150);
+        });
+      }
+
       mark = await toastMark(page);
       await focusGrid(page);
       await page.keyboard.press("Alt+ArrowDown");
       await page.waitForTimeout(700);
       const pick = await toastsSince(page, mark);
       expect(pick.map((t) => t.message), "Alt+Down: one Pick From List refusal").toHaveLength(1);
-      expect(pick[0].message).toMatch(/^Pick From List is not available for a floating range's cells yet/);
+      expect(pick[0].message).toMatch(/^Pick From List is not available inside a floating grid yet/);
 
       // Still the grid's own keys: Shift+Right extends, F2 opens its editor.
       await clickFrCell(page, fr, 0, 0);
@@ -601,7 +731,7 @@ test.describe("selection owner: menu and key doors (D4, W18, E7)", () => {
     }
   });
 
-  test("E7 (BUG-0199): Copy remapped to Ctrl+Shift+Q is refused once on a floating-grid cell and copies nothing; on a sheet cell the new key copies", async ({
+  test("E7 (BUG-0199) + G3: Copy remapped to Ctrl+Shift+Q copies the floating grid's OWN cell (never Core's hidden A1: no refusal, no marching ants; pasted on B3 it reads the grid's value); on a sheet cell the new key copies", async ({
     appPage: page,
     grid,
   }) => {
@@ -614,14 +744,24 @@ test.describe("selection owner: menu and key doors (D4, W18, E7)", () => {
       await callModule(page, API_KEYBINDINGS, "setUserKeybinding", ["core.copy", "Ctrl+Shift+Q"]);
       expect(await callModule<string>(page, API_KEYBINDINGS, "getEffectiveCombo", ["core.copy"])).toBe("Ctrl+Shift+Q");
       const fr = await createFr(page, FR_POS.x, FR_POS.y, "CopyFR");
+      await setFrCell(page, fr.id, 0, 0, "fromGrid");
       await claimWithFrCell(page, grid, fr);
+      const before = await docSnapshot(page);
       const clipMode = () => page.evaluate(() => (window as unknown as AppWindow).__CALCULA_GRID_STATE__?.clipboard?.mode ?? "none");
 
       const mark = await toastMark(page);
       await focusGrid(page);
       await page.keyboard.press("Control+Shift+Q");
-      await expectOneRefusal(page, mark, "remapped Copy (Ctrl+Shift+Q)");
+      await expectNoFrRefusal(page, mark, "remapped Copy (Ctrl+Shift+Q)");
+      await expectHiddenCellUntouched(page, before, "remapped Copy (Ctrl+Shift+Q)");
+      // An object's copy draws no marching ants (they belong to the sheet's cells).
       expect(await clipMode(), "the remapped Copy copied Core's hidden A1").toBe("none");
+      // What it copied is the GRID's cell: pasted on a sheet cell it reads the grid's value.
+      await grid.clickCell("B3");
+      await focusGrid(page);
+      await page.keyboard.press("Control+v");
+      await eventually(() => cellsOn(page, [[0, 2, 1]]), (v) => v[0] === "fromGrid", "the remapped Copy did not copy the floating grid's cell (B3 after Ctrl+V)");
+      expect(await cellsOn(page, [[0, 0, 0]]), "A1 changed").toEqual(["keep"]);
 
       // POSITIVE CONTROL: on a sheet cell the NEW key copies (marching ants).
       await grid.clickCell("A1");
@@ -1458,7 +1598,7 @@ test.describe("sv-SE and AltGr keys (W17, E13, X16, D5, R5)", () => {
     }
   });
 
-  test("NEW (found live): the Font Color popover's hex field + Enter applies the colour ONCE -- one undo step on a sheet cell, one refusal on a floating-grid cell", async ({ appPage: page, grid }) => {
+  test("NEW (found live): the Font Color popover's hex field + Enter applies the colour ONCE -- one undo step on a sheet cell, and (G3) one undo step on a floating-grid cell, whose own cell takes the colour while Core's hidden A1 does not", async ({ appPage: page, grid }) => {
     try {
       await newFile(page);
       await startToastLog(page);
@@ -1476,12 +1616,23 @@ test.describe("sv-SE and AltGr keys (W17, E13, X16, D5, R5)", () => {
       expect.soft((await undoState(page)).undoDepth, "hex + Enter applied the colour more than once (undo steps)").toBe(depth + 1);
 
       const fr = await createFr(page, FR_POS.x, FR_POS.y, "HexFR");
+      await setFrCell(page, fr.id, 0, 0, "grid");
       await claimWithFrCell(page, grid, fr);
+      const before = await docSnapshot(page);
+      const frDepth = (await undoState(page)).undoDepth;
       const mark = await toastMark(page);
       await page.locator('[data-testid="fmt-textColor-options"]').click();
       await hex.fill("#00AA00");
       await hex.press("Enter");
-      await expectOneRefusal(page, mark, "Font Color hex + Enter");
+      await eventually(
+        () => frStyleAt(page, fr, 0, 0),
+        (st) => String(st.textColor).toLowerCase().includes("00aa00"),
+        "hex + Enter did not colour the floating grid's cell",
+      );
+      await page.waitForTimeout(600);
+      await expectNoFrRefusal(page, mark, "Font Color hex + Enter");
+      await expectHiddenCellUntouched(page, before, "Font Color hex + Enter");
+      expect.soft((await undoState(page)).undoDepth, "hex + Enter on the grid's cell applied the colour more than once (undo steps)").toBe(frDepth + 1);
     } finally {
       await cleanup(page);
     }
@@ -2887,7 +3038,7 @@ async function chartsOnSheet(page: Page, sheetIndex: number): Promise<Array<{ id
 }
 
 test.describe("canvas object clipboard through every door (Y11 / X12)", () => {
-  test("Y11 (X12): on a canvas, two selected charts copied and pasted through Edit > Copy/Paste, the Home tab and Ctrl+C/Ctrl+V arrive as two copies 20 px offset, selected, and one Ctrl+Z removes both; a floating-grid cell's Copy is refused; on a worksheet the doors copy cells", async ({
+  test("Y11 (X12): on a canvas, two selected charts copied and pasted through Edit > Copy/Paste, the Home tab and Ctrl+C/Ctrl+V arrive as two copies 20 px offset, selected, and one Ctrl+Z removes both; a floating-grid cell's Copy copies its CELLS (G3), never an object; on a worksheet the doors copy cells", async ({
     appPage: page,
     grid,
   }) => {
@@ -2913,18 +3064,21 @@ test.describe("canvas object clipboard through every door (Y11 / X12)", () => {
       const base = await chartsOnSheet(page, canvas.index);
       expect(base).toHaveLength(2);
 
-      // A floating grid's CELL on the canvas: Edit > Copy is refused and copies no object.
+      // A floating grid's CELL on the canvas: Edit > Copy copies the grid's
+      // cells (round 2 P3, G3) -- no refusal -- and never an object: a Paste
+      // on the empty page afterwards adds no chart.
       const fr = await createFr(page, 640, 320, "ClipFR");
+      await setFrCell(page, fr.id, 0, 0, "cell");
       await clickFrCell(page, fr, 0, 0);
       await eventually(() => frLocalSelection(page), (s) => s !== null, "the canvas floating grid's cell was not selected");
       const mark = await toastMark(page);
       await runMenuItem(page, ["Edit", "Copy"]);
-      await expectOneRefusal(page, mark, "Edit > Copy with a floating-grid cell selected");
+      await expectNoFrRefusal(page, mark, "Edit > Copy with a floating-grid cell selected");
       const empty = await sheetPointToPage(page, 900, 600);
       await page.mouse.click(empty.x, empty.y);
       await runMenuItem(page, ["Edit", "Paste", "Paste"]);
       await page.waitForTimeout(800);
-      expect(await chartsOnSheet(page, canvas.index), "a refused copy still pasted objects").toHaveLength(2);
+      expect(await chartsOnSheet(page, canvas.index), "a floating grid's cell copy pasted objects").toHaveLength(2);
 
       const selectBoth = async () => {
         const from = await sheetPointToPage(page, 20, 20);

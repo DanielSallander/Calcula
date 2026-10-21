@@ -14,7 +14,7 @@ use tauri::State;
 use crate::api_types::{EvalPlanNode, EvalReductionStep, FormulaEvalPlan};
 use crate::evaluate_formula::{
     build_display, builtin_fn_name, evaluate_single_node,
-    find_next_eval_node, get_node_mut, table_specifier_to_display, value_to_display,
+    find_next_eval_node, get_node_mut, table_specifier_to_display, value_to_display, value_to_display_localized,
 };
 use crate::{convert_expr, AppState};
 
@@ -665,11 +665,16 @@ fn estimate_cost(expr: &Expression) -> f64 {
 // ============================================================================
 
 /// Build the complete evaluation plan for a formula AST.
+///
+/// `locale` is the APP locale. It localises each step's evaluated VALUE (the
+/// node values, the step descriptions, the final result) and nothing else:
+/// the formula text and its literals stay invariant (P2 DC5).
 fn build_eval_plan(
     ast: &Expression,
     grids: &[engine::Grid],
     sheet_names: &[String],
     sheet_index: usize,
+    locale: &engine::LocaleSettings,
 ) -> FormulaEvalPlan {
     // 1. Assign node IDs
     let (node_infos, path_to_id) = assign_node_ids(ast);
@@ -744,7 +749,7 @@ fn build_eval_plan(
                 // Evaluate this node
                 let node_expr = get_node_by_path(&working_ast, &next_node.path);
                 let result_value = evaluate_single_node(node_expr, grids, sheet_names, sheet_index);
-                let display_val = value_to_display(&result_value);
+                let display_val = value_to_display_localized(&result_value, locale);
                 let raw_val = match &result_value {
                     Value::Number(n) => Some(*n),
                     Value::Boolean(b) => Some(if *b { 1.0 } else { 0.0 }),
@@ -894,6 +899,9 @@ pub fn get_formula_eval_plan(
     row: u32,
     col: u32,
 ) -> Result<FormulaEvalPlan, String> {
+    // The app locale, read FIRST (leaf lock: take, clone, drop), before any
+    // grid guard is taken.
+    let locale = state.locale.lock().map_err(|e| e.to_string())?.clone();
     let grids = state.grids.read().unwrap();
     let sheet_names = state.sheet_names.read().unwrap();
     let active_sheet = *state.active_sheet.read().unwrap();
@@ -953,6 +961,10 @@ pub fn get_formula_eval_plan(
         Err(e) => return Err(format!("Parse error: {}", e)),
     };
 
-    let plan = build_eval_plan(&ast, &grids, &sheet_names, active_sheet);
+    let plan = build_eval_plan(&ast, &grids, &sheet_names, active_sheet, &locale);
     Ok(plan)
 }
+
+#[cfg(test)]
+#[path = "formula_eval_plan_locale_tests.rs"]
+mod formula_eval_plan_locale_tests;

@@ -148,6 +148,23 @@ mod number_text_tests;
 #[cfg(test)]
 mod error_propagation_tests;
 
+/// Member labels (key stays invariant, label follows the locale).
+#[cfg(test)]
+mod member_label_tests;
+
+/// DOLLAR / EURO / FIXED / DATEVALUE / TIMEVALUE in the evaluator's locale.
+/// Its own file because the rule (text a formula PRODUCES or READS follows the
+/// app locale, the formula itself stays invariant) spans four builtins that
+/// each used to hard-code the en-US spelling.
+#[cfg(test)]
+mod locale_text_function_tests;
+
+/// THE shared Rust <-> TypeScript number/date text corpus
+/// (`tests/fixtures/locale_text_corpus.json`). The TS formatter in
+/// `app/src/core/lib/locale/` asserts the same rows, so the two cannot drift.
+#[cfg(test)]
+mod locale_corpus_tests;
+
 pub mod array_lift;
 pub mod budget;
 pub mod cell;
@@ -164,6 +181,11 @@ pub mod id_operations;
 pub mod identity_graph;
 pub mod grid;
 pub mod locale;
+/// A member's app-locale LABEL written from its invariant KEY plus a
+/// locale-free `MemberSource` (P2, app locale everywhere). The one place a
+/// pivot/BI/slicer member's display text is produced, so no caller re-parses
+/// display text to find a key again.
+pub mod member_label;
 pub mod navigation;
 pub mod lookup_cache;
 pub mod number_format;
@@ -210,6 +232,7 @@ pub use navigation::{
 };
 pub use formula_locale::{delocalize_formula, localize_formula};
 pub use locale::{CalendarNames, LocaleCurrencyPosition, LocaleSettings};
+pub use member_label::{iso_member_source, member_label, MemberSource, BLANK_MEMBER_LABEL};
 pub use number_format::{format_number, format_number_with_color, format_text_with_color};
 pub use row_visibility::{
     active as active_row_visibility, begin_pass as begin_visibility_pass, HiddenScope,

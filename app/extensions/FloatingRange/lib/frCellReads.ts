@@ -14,6 +14,26 @@
 
 import { getFloatingRangeCells } from "@api/floatingRanges";
 import type { TypedCellData } from "@api/lib";
+import { getCellTargetCells, type CellTargetCells, type CellTargetRef } from "@api/cellTarget";
+
+/** The cell-target reference of floating grid `frId` (what the backend resolves). */
+export function frTargetRef(frId: string): CellTargetRef {
+  return { kind: "floatingRange", id: frId };
+}
+
+/**
+ * The STYLED read the renderer paints from (P3): every stored cell with its
+ * display in the app locale and its style index, the backing merges, the
+ * conditional formats evaluated on the BACKING sheet with the rules that
+ * produced them, and the styles the cells use. Banded inside
+ * `getCellTargetCells` (100,000 cells per call, the same ceiling as below).
+ */
+export async function readFrStyledCells(frId: string, rect: FrCellRect): Promise<CellTargetCells> {
+  if (rect.endRow < rect.startRow || rect.endCol < rect.startCol) {
+    return { cells: [], merges: [], conditional: [], styles: [], rules: [] };
+  }
+  return getCellTargetCells(frTargetRef(frId), rect);
+}
 
 /** The backend's per-read ceiling (MAX_TYPED_RANGE_CELLS; the test is `count > max`). */
 export const FR_MAX_READ_CELLS = 100_000;

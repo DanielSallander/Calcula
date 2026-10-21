@@ -1126,8 +1126,11 @@ async fn query_scalar(
     // filter on that label matches no row (the CUBEVALUE answered `#N/A`), so
     // such a member goes to the engine as a scoped IN-list -- which reads the
     // label as BLANK -- at the level a plain filter takes (`LEVEL_SLICER`).
+    // Since ruling Q8 the list's blank member is KEYED "" (label "(Blank)"):
+    // either spelling names it, and it reaches the engine in the engine's
+    // own spelling (`bi::member::engine_in_value`).
     let (blank, plain): (Vec<&(String, String)>, Vec<&(String, String)>) =
-        filters.iter().partition(|(_, val)| bi_engine::is_blank_member_label(val));
+        filters.iter().partition(|(_, val)| pivot_engine::is_blank_member_key(val));
     let req = bi_engine::QueryRequest {
         measures: vec![measure.to_string()],
         group_by: vec![],
@@ -1145,7 +1148,7 @@ async fn query_scalar(
             .iter()
             .map(|(col, val)| bi_engine::ScopedInFilter {
                 table: None,
-                filter: bi_engine::InFilter::new(col.clone(), [val.clone()]),
+                filter: bi_engine::InFilter::new(col.clone(), [crate::bi::member::engine_in_value(val)]),
                 level: bi_engine::LEVEL_SLICER,
             })
             .collect(),

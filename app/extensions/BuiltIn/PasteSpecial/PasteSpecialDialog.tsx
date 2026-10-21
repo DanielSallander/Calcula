@@ -9,6 +9,7 @@ import type { DialogProps } from "@api/uiTypes";
 import { useDialogWindow } from "@api/dialogWindow";
 import { useGridState } from "@api";
 import { getInternalClipboard } from "@api/lib";
+import type { CellTarget } from "@api/cellTarget";
 import { executePasteSpecial, executePasteLink } from "./pasteSpecialExecute";
 import type { PasteAttribute, PasteOperation } from "./types";
 import { DEFAULT_PASTE_SPECIAL_OPTIONS } from "./types";
@@ -43,15 +44,27 @@ const OPERATIONS: { value: PasteOperation; label: string }[] = [
 // Main Dialog Component
 // ============================================================================
 
+/** The OBJECT target the dialog was opened for, or null (Core's selection). */
+function objectTargetOf(data: Record<string, unknown> | undefined): Extract<CellTarget, { kind: "object" }> | null {
+  const t = data?.target as CellTarget | undefined;
+  return t && t.kind === "object" ? t : null;
+}
+
 export function PasteSpecialDialog(props: DialogProps): React.ReactElement | null {
-  const { onClose } = props;
+  const { onClose, data } = props;
 
   // Movable + resizable dialog window (shared @api hook)
   const win = useDialogWindow({ minWidth: 360, minHeight: 280 });
 
   const gridState = useGridState();
-  const selection = gridState.selection;
-  const config = gridState.config;
+  // Opened for a floating grid's cells (P3: the PASTE_SPECIAL door resolved
+  // an OBJECT target and handed it in): the paste lands in the object's
+  // selection, within its extent, through its target. Otherwise Core's.
+  const owned = objectTargetOf(data);
+  const selection = owned ? owned.selection : gridState.selection;
+  const totalRows = owned ? owned.bounds.rows : gridState.config.totalRows;
+  const totalCols = owned ? owned.bounds.cols : gridState.config.totalCols;
+  const target = owned?.ref;
 
   // Dialog state
   const [pasteAttribute, setPasteAttribute] = useState<PasteAttribute>(
@@ -78,8 +91,10 @@ export function PasteSpecialDialog(props: DialogProps): React.ReactElement | nul
         clipboard!,
         selection,
         { pasteAttribute, operation, skipBlanks, transpose },
-        config.totalRows,
-        config.totalCols
+        totalRows,
+        totalCols,
+        "Paste Special",
+        target,
       );
       onClose();
     } catch (err) {
@@ -95,8 +110,9 @@ export function PasteSpecialDialog(props: DialogProps): React.ReactElement | nul
     operation,
     skipBlanks,
     transpose,
-    config.totalRows,
-    config.totalCols,
+    totalRows,
+    totalCols,
+    target,
     onClose,
     isExecuting,
   ]);
@@ -107,19 +123,14 @@ export function PasteSpecialDialog(props: DialogProps): React.ReactElement | nul
 
     setIsExecuting(true);
     try {
-      await executePasteLink(
-        clipboard!,
-        selection,
-        config.totalRows,
-        config.totalCols
-      );
+      await executePasteLink(clipboard!, selection, totalRows, totalCols, "Paste Link", target);
       onClose();
     } catch (err) {
       console.error("[PasteSpecialDialog] Paste Link failed:", err);
     } finally {
       setIsExecuting(false);
     }
-  }, [hasClipboard, clipboard, selection, config.totalRows, config.totalCols, onClose, isExecuting]);
+  }, [hasClipboard, clipboard, selection, totalRows, totalCols, target, onClose, isExecuting]);
 
   // Handle Cancel
   const handleCancel = useCallback(() => {

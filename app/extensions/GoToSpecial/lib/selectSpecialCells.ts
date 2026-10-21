@@ -8,6 +8,10 @@
 //          and would have inherited its bounding-box selection (see
 //          matchAreas.ts). Moved here so the two doors cannot select
 //          differently.
+//          P3 (owner finding G3): on a floating grid's cells it searches the
+//          OBJECT's cells (goToSpecial with its target, clipped to its extent)
+//          and selects the matches in the object (selectTargetCells; several
+//          areas ride the selection's additionalRanges).
 
 import {
   goToSpecial,
@@ -19,7 +23,7 @@ import {
 import { dispatchGridAction } from "@api/gridDispatch";
 import { getUsedRange } from "@api/lib";
 import { showToast } from "@api/notifications";
-import { refuseIfSelectionOwned } from "@api/selectionOwner";
+import { resolveCellTarget, selectTargetCells, type CellTargetRef } from "@api/cellTarget";
 import { selectionForMatches, type MatchedCell, type MatchArea } from "./matchAreas";
 
 /** Every criteria the backend (and @api/grid) accepts, for validating a command's args. */
@@ -116,24 +120,43 @@ export function clipToUsedExtent(
   return clipped;
 }
 
-/** Search (within the given areas, or the whole sheet) and return every match. */
+/**
+ * An OBJECT to search instead of the active sheet (a floating grid's cells,
+ * P3): its target, and its extent (the cells a search may reach).
+ */
+export interface SpecialCellsObject {
+  ref: CellTargetRef;
+  bounds: { rows: number; cols: number };
+}
+
+/**
+ * Search (within the given areas, or the whole sheet -- or the whole OBJECT)
+ * and return every match. With `object`, every criterion is answered over the
+ * object's cells (the backend clips to its extent, "lastCell" included) and a
+ * scanned area is clipped to the object's extent, never the active sheet's
+ * used range.
+ */
 export async function findSpecialCells(
   criteria: GoToSpecialCriteria,
   areas: MatchArea[] | null,
+  object?: SpecialCellsObject,
 ): Promise<MatchedCell[]> {
+  const target = object?.ref;
   if (areas === null || criteria === "lastCell") {
-    return (await goToSpecial(criteria)).cells;
+    return (await goToSpecial(criteria, undefined, { target })).cells;
   }
   let searchIn = areas;
   if (SCANNED_CRITERIA.has(criteria)) {
-    const used = await getUsedRange();
+    const used = object
+      ? { endRow: object.bounds.rows - 1, endCol: object.bounds.cols - 1, empty: object.bounds.rows <= 0 || object.bounds.cols <= 0 }
+      : await getUsedRange();
     searchIn = areas
       .map((a) => clipToUsedExtent(a, used))
       .filter((a): a is MatchArea => a !== null);
   }
   const found: MatchedCell[] = [];
   for (const area of searchIn) {
-    const result = await goToSpecial(criteria, area);
+    const result = await goToSpecial(criteria, area, { target });
     found.push(...result.cells);
   }
   return found;
@@ -158,20 +181,25 @@ export async function selectSpecialCells(
     return { kind: "refused", message };
   };
 
-  // It searches (inside) Core's selection and REPLACES it: while something
-  // else owns the selection (a floating grid's cell, a selected object) that
-  // selection is hidden, so refuse with the owner's sentence (D4, BUG-0185).
-  if (refuseIfSelectionOwned("Go To Special")) {
+  // It searches (inside) the target's selection and REPLACES it: Core's, or
+  // a floating grid's own (P3). Any other owner of the selection -- whose
+  // Core selection is hidden -- refuses with its sentence (D4, BUG-0185).
+  const t = resolveCellTarget("Go To Special", "read");
+  if (t === null) {
     return { kind: "refused", message: "The selection belongs to an object." };
   }
-  const snapshot = getGridStateSnapshot();
-  // A canvas sheet holds objects, not cells (the View menu's Go To Special is
-  // disabled there for the same reason).
-  if (snapshot?.surface === "canvas") {
-    return refuse("Go To Special is not available on a canvas sheet: it holds objects, not cells.");
+  let matches: MatchedCell[];
+  if (t.kind === "object") {
+    matches = await findSpecialCells(criteria, searchAreasFor(t.selection), { ref: t.ref, bounds: t.bounds });
+  } else {
+    const snapshot = getGridStateSnapshot();
+    // A canvas sheet holds objects, not cells (the View menu's Go To Special is
+    // disabled there for the same reason).
+    if (snapshot?.surface === "canvas") {
+      return refuse("Go To Special is not available on a canvas sheet: it holds objects, not cells.");
+    }
+    matches = await findSpecialCells(criteria, searchAreasFor(snapshot?.selection));
   }
-
-  const matches = await findSpecialCells(criteria, searchAreasFor(snapshot?.selection));
   let payload;
   try {
     payload = selectionForMatches(matches);
@@ -183,8 +211,17 @@ export async function selectSpecialCells(
     return { kind: "none" };
   }
 
-  dispatchGridAction(setSelection(payload));
-  dispatchGridAction(scrollToCell(payload.endRow, payload.endCol, false));
+  if (t.kind === "object") {
+    selectTargetCells(t, {
+      ...payload,
+      type: payload.type ?? "cells",
+      activeRow: payload.endRow,
+      activeCol: payload.endCol,
+    });
+  } else {
+    dispatchGridAction(setSelection(payload));
+    dispatchGridAction(scrollToCell(payload.endRow, payload.endCol, false));
+  }
   return {
     kind: "selected",
     cells: matches.length,

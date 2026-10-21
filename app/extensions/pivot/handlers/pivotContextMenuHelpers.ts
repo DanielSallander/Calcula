@@ -10,10 +10,13 @@
 //          nothing there (BUG-0455). Bounds are the view's row COUNT
 //          (`viewRowCount`), never `view.rows.length`.
 //
-//          Items NAME an item by `pivotCellLabel` (formattedValue, else the
-//          value as text), so an unformatted numeric header is never "" (BUG-0454).
+//          Captions NAME an item by `pivotCellDisplayText` (its member label,
+//          else formattedValue, else the value in the app locale), so an
+//          unformatted numeric header is never "" (BUG-0454). Actions that
+//          FILTER or TOGGLE an item send `pivotCellItemKey` instead (identity).
 
 import type { GridMenuContext } from "@api";
+import { pivotCellDisplayText } from "@api/pivotMembers";
 import { getGridStateSnapshot } from "@api/grid";
 import { findPivotRegionAtCell } from "./selectionHandler";
 import { getCachedPivotView } from "../lib/pivotViewStore";
@@ -26,7 +29,7 @@ import {
   type PivotRowData,
   type PivotViewResponse,
 } from "../lib/pivot-api";
-import { getPivotViewRow, governingRowHeader, pivotCellLabel } from "../lib/pivotChromeActions";
+import { getPivotViewRow, governingRowHeader } from "../lib/pivotChromeActions";
 import { viewRowCount } from "../rendering/pivotVisualRenderer";
 import type { PivotRegionData } from "../types";
 
@@ -208,7 +211,7 @@ export function getFieldNameForCell(ctx: GridMenuContext): string | null {
   }
 
   // Fallback: the cell's own label (this is the item label, not the field name)
-  return pivotCellLabel(cell) || null;
+  return pivotCellDisplayText(cell) || null;
 }
 
 /**
@@ -234,7 +237,7 @@ export function getFieldIndexForCell(ctx: GridMenuContext): number | null {
 export function getItemLabelForCell(ctx: GridMenuContext): string | null {
   const cached = getCachedCellData(ctx);
   if (!cached) return null;
-  return pivotCellLabel(cached.cell) || null;
+  return pivotCellDisplayText(cached.cell) || null;
 }
 
 // ============================================================================
@@ -275,7 +278,7 @@ export function expandDisabledReason(ctx: GridMenuContext, expand: boolean): str
   const target = expandTargetFor(ctx);
   const verb = expand ? "expand" : "collapse";
   if (!target) return `Nothing to ${verb} here.`;
-  const label = pivotCellLabel(target.header);
+  const label = pivotCellDisplayText(target.header);
   if (!target.header.isExpandable) {
     return label ? `"${label}" has nothing to ${verb}.` : `Nothing to ${verb} here.`;
   }

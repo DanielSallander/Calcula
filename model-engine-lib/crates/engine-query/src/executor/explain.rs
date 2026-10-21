@@ -118,6 +118,7 @@ impl super::QueryExecutor {
                 totals,
                 hierarchy,
                 contested_filters,
+                tuple_filters,
             } => {
                 let start = Instant::now();
 
@@ -137,6 +138,17 @@ impl super::QueryExecutor {
                     );
                 }
 
+                // Surface tuple (multi-column) filters: the exact predicate is
+                // applied per measure in the local SQL (projected onto the
+                // columns a measure does not clear); the uncleared columns
+                // also pre-narrow their fetch with an IN of their values.
+                for tf in tuple_filters {
+                    node.add_property(
+                        "tuple_filter",
+                        PlanValue::Text(crate::planner::explain::describe_tuple_filter(tf)),
+                    );
+                }
+
                 let batches = Self::execute_local_aggregation(
                     fetches,
                     measures,
@@ -147,6 +159,7 @@ impl super::QueryExecutor {
                     *totals,
                     hierarchy.as_ref(),
                     contested_filters,
+                    tuple_filters,
                     model,
                     registry,
                     cache,

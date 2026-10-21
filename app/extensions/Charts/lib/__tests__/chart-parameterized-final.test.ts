@@ -156,7 +156,9 @@ describe("formatTickValue", () => {
     [100.1, "100.1"],
     [999.5, "999.5"],
     [0.0001, "0.0"],
-    [0.15, "0.1"],
+    // Excel's half-away-from-zero on the decimal value (P2 S8: the app-locale
+    // formatter), not JS toFixed's binary "0.1".
+    [0.15, "0.2"],
     [3.14159, "3.1"],
     [2.71828, "2.7"],
     [-0.5, "-0.5"],

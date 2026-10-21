@@ -114,6 +114,8 @@ fn workbook_with_unordered_collections(fixed: &FixedIds) -> Workbook {
         show_column_headers: false,
         show_row_headers: true,
         container: None,
+        hidden_rows: Vec::new(),
+        hidden_cols: Vec::new(),
     }];
     wb.pivot_definitions = vec![persistence::SavedPivotDefinition {
         id: fixed.pivot,

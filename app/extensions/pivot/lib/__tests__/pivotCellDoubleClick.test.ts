@@ -2,10 +2,11 @@
 // PURPOSE: The ONE double-click implementation both pivot surfaces call
 //          (worksheet interceptor, canvas box `onDoubleClick`), WP-A S8:
 //          - TOGGLE. An expandable row header toggles by its GROUP PATH (the
-//            identity the backend matches exactly), with the shown label as the
-//            fallback name (`pivotCellLabel`: formattedValue, else the raw value
-//            -- a numeric year header with an empty formattedValue sends
-//            "2013"); a failure is a TOAST, never console-only (BUG-0457,
+//            identity the backend matches exactly), with the item KEY as the
+//            fallback name (`pivotCellItemKey`: member.key, else the raw value
+//            as invariant text -- a numeric year header with an empty
+//            formattedValue sends "2013", BUG-0454, and a formatted one sends
+//            its key, never its display); a failure is a TOAST, never console-only (BUG-0457,
 //            BUG-0096). The refresh follows the toggle, never a failed one.
 //          - DRILL. A data / total cell runs `runPivotDrillThrough`, the
 //            extracted drill: drill_through_to_sheet with the cell's groupPath,
@@ -51,7 +52,7 @@ vi.mock("../pivot-api", () => ({
 }));
 
 import { runPivotCellDoubleClick, runPivotDrillThrough } from "../pivotCellDoubleClick";
-import { pivotCellLabel } from "../pivotChromeActions";
+import { pivotCellItemKey } from "@api/pivotMembers";
 import type { PivotCellData } from "../pivot-api";
 
 function cell(extra: Partial<PivotCellData>): PivotCellData {
@@ -79,15 +80,20 @@ beforeEach(() => {
   window.addEventListener("pivot:refresh", onRefresh);
 });
 
-describe("pivotCellLabel", () => {
-  it("is formattedValue when the backend formatted it", () => {
-    expect(pivotCellLabel(cell({ cellType: "RowHeader", value: 2013, formattedValue: "FY2013" }))).toBe("FY2013");
+describe("pivotCellItemKey (the identity a toggle names; pivotCellLabel is deleted)", () => {
+  it("is the member KEY when the backend attached one, never the formatted or localised text", () => {
+    expect(pivotCellItemKey(cell({ cellType: "RowHeader", value: 2013, formattedValue: "FY2013" }))).toBe("2013");
+    expect(
+      pivotCellItemKey(cell({ cellType: "RowHeader", value: 1234.5, member: { key: "1234.5", label: "1234,5" } })),
+    ).toBe("1234.5");
+    // The blank member: key "" (ruling Q8), whatever its label reads.
+    expect(pivotCellItemKey(cell({ cellType: "RowHeader", value: "(blank)", member: { key: "", label: "(Blank)" } }))).toBe("");
   });
 
-  it("falls back to the raw value: a text label and an unformatted numeric header", () => {
-    expect(pivotCellLabel(cell({ cellType: "RowHeader", value: "Europe", formattedValue: "" }))).toBe("Europe");
-    expect(pivotCellLabel(cell({ cellType: "RowHeader", value: 2013 }))).toBe("2013");
-    expect(pivotCellLabel(cell({ cellType: "RowHeader", value: null }))).toBe("");
+  it("falls back to the raw value: a text label and an unformatted numeric header (BUG-0454)", () => {
+    expect(pivotCellItemKey(cell({ cellType: "RowHeader", value: "Europe", formattedValue: "" }))).toBe("Europe");
+    expect(pivotCellItemKey(cell({ cellType: "RowHeader", value: 2013 }))).toBe("2013");
+    expect(pivotCellItemKey(cell({ cellType: "RowHeader", value: null }))).toBe("");
   });
 });
 

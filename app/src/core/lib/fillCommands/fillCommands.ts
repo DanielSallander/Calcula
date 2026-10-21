@@ -23,7 +23,7 @@
 //   from and the command does nothing.
 // - The backend's fill_range is one undo step (it opens one, or joins).
 
-import type { Selection, SelectionRange } from "../../types";
+import type { CellTargetRef, Selection, SelectionRange } from "../../types";
 import { fillRange } from "../tauri-api";
 import { alertAsync } from "../dialogs";
 import { cellEvents, cellToChange } from "../cellEvents";
@@ -39,9 +39,18 @@ export interface FillPlan {
 /** What a fill needs from the grid that runs it. */
 export interface FillCommandHost {
   selection: Selection | null;
-  /** The sheet's size: Fill Up / Left on the last row / column has no source. */
+  /** The sheet's size: Fill Up / Left on the last row / column has no source.
+   *  For a target, the object's extent (its last row / column is its edge). */
   totalRows: number;
   totalCols: number;
+  /**
+   * The OBJECT whose cells both ranges are in (a floating grid's, P3), or
+   * absent for the active sheet. The fill then runs on the object's backing
+   * cells; its result names backing coordinates, so no active-sheet cell event
+   * is emitted (it would alias the host's cell) -- the object re-reads through
+   * "grid:refresh".
+   */
+  target?: CellTargetRef;
 }
 
 function range(startRow: number, startCol: number, endRow: number, endCol: number): SelectionRange {
@@ -101,6 +110,15 @@ export async function runFillCommand(direction: FillDirection, host: FillCommand
   try {
     // ONE IPC call: the backend tiles the source over the target and shifts
     // formula references by each target cell's offset.
+    if (host.target) {
+      await fillRange(
+        s.startRow, s.startCol, s.endRow, s.endCol,
+        t.startRow, t.startCol, t.endRow, t.endCol,
+        { target: host.target },
+      );
+      window.dispatchEvent(new CustomEvent("grid:refresh"));
+      return;
+    }
     const updatedCells = await fillRange(
       s.startRow, s.startCol, s.endRow, s.endCol,
       t.startRow, t.startCol, t.endRow, t.endCol,

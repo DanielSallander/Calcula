@@ -18,7 +18,7 @@ import { CoreCommands } from "@api/commands";
 import { DialogExtensions } from "@api/ui";
 import { getGridStateSnapshot } from "@api/state";
 import { getInternalClipboard } from "@api/lib";
-import { refuseIfSelectionOwned } from "@api/selectionOwner";
+import { resolveCellTarget, targetRefOf, type CellTargetRef } from "@api/cellTarget";
 import { alertAsync } from "@api/dialogs";
 import { canvasOwnsObjectClipboard } from "@api/objectClipboard";
 import { PasteSpecialDialog } from "./PasteSpecialDialog";
@@ -41,11 +41,12 @@ type PasteRun = (
   totalRows: number,
   totalCols: number,
   label: string,
+  target: CellTargetRef | undefined,
 ) => Promise<boolean>;
 
 /** A Paste Special attribute with no operation, no skip-blanks. */
 function special(pasteAttribute: PasteAttribute, transpose = false): PasteRun {
-  return (clipboard, selection, totalRows, totalCols, label) =>
+  return (clipboard, selection, totalRows, totalCols, label, target) =>
     executePasteSpecial(
       clipboard,
       selection,
@@ -53,6 +54,7 @@ function special(pasteAttribute: PasteAttribute, transpose = false): PasteRun {
       totalRows,
       totalCols,
       label,
+      target,
     );
 }
 
@@ -89,10 +91,13 @@ const PASTE_VARIANT_COMMANDS: readonly string[] = [
  */
 function pasteVariant(label: string, run: PasteRun): () => Promise<void> {
   return async () => {
-    // Something else owns the selection (BUG-0185, an object selected on a
-    // worksheet): its own toast, first, as every grid door says it.
-    if (refuseIfSelectionOwned(label)) return;
-    if (canvasOwnsObjectClipboard()) {
+    // THE door's question, first: Core's selection, a floating grid's cells
+    // (P3: the paste lands there, through its target), or -- an owner that
+    // does not admit pasting -- its own toast, once (BUG-0185).
+    const t = resolveCellTarget(label, "content");
+    if (t === null) return;
+    const target = targetRefOf(t);
+    if (!target && canvasOwnsObjectClipboard()) {
       void alertAsync(pasteRefusalSentence.canvas(label));
       return;
     }
@@ -101,13 +106,18 @@ function pasteVariant(label: string, run: PasteRun): () => Promise<void> {
       void alertAsync(pasteRefusalSentence.nothingCopied(label));
       return;
     }
+    // The cells pasted into: the object's selection within its extent, or
+    // Core's selection on the sheet.
     const state = getGridStateSnapshot();
-    if (!state?.selection) {
+    const selection = t.kind === "object" ? t.selection : state?.selection;
+    if (!selection) {
       void alertAsync(pasteRefusalSentence.noSelection(label));
       return;
     }
+    const totalRows = t.kind === "object" ? t.bounds.rows : state!.config.totalRows;
+    const totalCols = t.kind === "object" ? t.bounds.cols : state!.config.totalCols;
     try {
-      await run(clipboard, state.selection, state.config.totalRows, state.config.totalCols, label);
+      await run(clipboard, selection, totalRows, totalCols, label, target);
     } catch (err) {
       // The executor has already told the user why (alertAsync) and closed
       // its undo step; the detail is for the log only.
@@ -152,8 +162,11 @@ function activate(context: ExtensionContext): void {
   // dialog.
   context.commands.register(CoreCommands.PASTE_SPECIAL, () => {
     const label = "Paste Special";
-    if (refuseIfSelectionOwned(label)) return;
-    if (canvasOwnsObjectClipboard()) {
+    // A floating grid's cells (P3) are a place to paste into: the dialog is
+    // opened WITH that target, and its OK / Paste Link write there.
+    const t = resolveCellTarget(label, "content");
+    if (t === null) return;
+    if (t.kind !== "object" && canvasOwnsObjectClipboard()) {
       void alertAsync(pasteRefusalSentence.canvas(label));
       return;
     }
@@ -161,7 +174,8 @@ function activate(context: ExtensionContext): void {
       void alertAsync(pasteRefusalSentence.afterCut(label));
       return;
     }
-    DialogExtensions.openDialog("paste-special");
+    if (t.kind === "object") DialogExtensions.openDialog("paste-special", { target: t });
+    else DialogExtensions.openDialog("paste-special");
   });
 
   // The quick pastes (the Edit menu's Paste submenu).
@@ -170,8 +184,8 @@ function activate(context: ExtensionContext): void {
   context.commands.register(CoreCommands.PASTE_FORMATTING, pasteVariant("Paste Formatting", special("formats")));
   context.commands.register(
     CoreCommands.PASTE_LINK,
-    pasteVariant("Paste Link", (clipboard, selection, totalRows, totalCols, label) =>
-      executePasteLink(clipboard, selection, totalRows, totalCols, label),
+    pasteVariant("Paste Link", (clipboard, selection, totalRows, totalCols, label, target) =>
+      executePasteLink(clipboard, selection, totalRows, totalCols, label, target),
     ),
   );
 
@@ -183,8 +197,8 @@ function activate(context: ExtensionContext): void {
   context.commands.register(CoreCommands.PASTE_NO_BORDERS, pasteVariant("Paste (No Borders)", special("allExceptBorders")));
   context.commands.register(
     CoreCommands.PASTE_KEEP_SOURCE_COLUMN_WIDTHS,
-    pasteVariant("Paste (Keep Source Column Widths)", (clipboard, selection, totalRows, totalCols, label) =>
-      executePasteKeepSourceColumnWidths(clipboard, selection, totalRows, totalCols, label),
+    pasteVariant("Paste (Keep Source Column Widths)", (clipboard, selection, totalRows, totalCols, label, target) =>
+      executePasteKeepSourceColumnWidths(clipboard, selection, totalRows, totalCols, label, target),
     ),
   );
   context.commands.register(CoreCommands.PASTE_TRANSPOSE, pasteVariant("Paste (Transpose)", special("all", true)));

@@ -3539,6 +3539,46 @@ declare interface ScriptCanvasLayout {
   /** Objects locked against move/resize (absent when empty). READ-ONLY to
    *  scripts. */
   locked?: ScriptCanvasObjectRef[];
+  /** How the page's visuals filter each other (Canvas > Edit interactions);
+   *  absent at its default (no pairs, no default mode). */
+  interactions?: ScriptCanvasInteractions;
+}
+
+/** A visual on a canvas page that can take part in cross-filtering. */
+declare interface ScriptVisualRef {
+  kind: "chart" | "pivot" | "slicer";
+  id: string;
+}
+
+/**
+ * How one canvas page's visuals filter each other -- Power BI's Edit
+ * interactions. A pair not listed follows `defaultMode`, or, when that is
+ * absent, the target's own default (highlight where the target can paint one,
+ * else filter; a slicer always filters).
+ */
+declare interface ScriptCanvasInteractions {
+  /** What a visual source gives a target with no pair. Never "none". */
+  defaultMode?: "filter" | "highlight";
+  /** Explicit pairs: at most 4096, no visual paired with itself, no
+   *  (source, target) twice. Both refs must be visuals on THIS canvas. */
+  pairs?: Array<{ source: ScriptVisualRef; target: ScriptVisualRef; mode: "filter" | "highlight" | "none" }>;
+}
+
+/**
+ * One visual's cross-filter selection, as `api.getCrossFilters()` answers it.
+ * View state: it is never saved and never undone. Keys are member KEYS (the
+ * invariant canonical text; the blank member is ""), aligned to `fields`.
+ */
+declare interface ScriptCrossFilter {
+  source: ScriptVisualRef;
+  sourceName: string;
+  /** The canvas page it is on (-1 / "" when the page list has not named it). */
+  sheetIndex: number;
+  sheetName: string;
+  /** "Table.Column" names, in order. */
+  fields: string[];
+  /** Each tuple holds one member key per field. */
+  tuples: string[][];
 }
 
 /**
@@ -3555,6 +3595,8 @@ declare interface ScriptCanvasLayoutPatch {
   pageHeight?: number;
   background?: string;
   wallpaper?: string;
+  /** Replaced WHOLE. Every ref must be a visual on this canvas. */
+  interactions?: ScriptCanvasInteractions;
 }
 
 /**
@@ -5138,10 +5180,51 @@ declare interface UnlockedAPI {
    * await api.setCanvasLayout({ pagePreset: "custom", pageWidth: 1600, pageHeight: 900 });
    * ```
    *
-   * Calcula policy (generated): Change a canvas sheet's page layout (page size, snap grid, grid display, background) — only the settings named are touched.
+   * Calcula policy (generated): Change a canvas sheet's page layout (page size, snap grid, grid display, background) and how its visuals filter each other (interactions) — only the settings named are touched.
    * Reach: broker `api.setCanvasLayout`, unlocked tier, class mutate.
    */
   setCanvasLayout(patch: ScriptCanvasLayoutPatch, sheet?: SheetRef): Promise<ScriptCanvasLayout>;
+
+  // -- Cross-filter (a visual's selection on a canvas page) --
+  // View state, the same act as clicking a bar: nothing is saved and nothing
+  // enters the undo stack.
+
+  /**
+   * The visual selections filtering one canvas page; `sheet` is a 0-based
+   * index or a name, omitted = every page.
+   *
+   * Calcula policy (generated): Read which visuals' selections are filtering the other visuals of a canvas page (or of every page).
+   * Reach: broker `api.getCrossFilters`, unlocked tier, class read.
+   */
+  getCrossFilters(sheet?: SheetRef): Promise<ScriptCrossFilter[]>;
+  /**
+   * Select member tuples in a visual, so the page's other visuals filter or
+   * highlight to them (per the page's interactions). `selection` is
+   * `{ fields, tuples }` -- at most 8 "Table.Column" fields and 1000 tuples of
+   * member keys -- or null to clear the visual's selection. The visual must be
+   * a chart or PivotTable on that canvas, able to filter others (a slicer
+   * filters through its own items and is refused); `sheet` omitted = the
+   * active sheet.
+   *
+   * ```js
+   * await api.setCrossFilter({ kind: "chart", id: chartId },
+   *   { fields: ["Sales.Region"], tuples: [["Pacific"]] });
+   * ```
+   *
+   * Calcula policy (generated): Select data points of a visual on a canvas page, so the page's other visuals filter or highlight to them — like clicking a bar; nothing is saved.
+   * Reach: broker `api.setCrossFilter`, unlocked tier, class emit.
+   */
+  setCrossFilter(
+    source: ScriptVisualRef,
+    selection: { fields: string[]; tuples: string[][] } | null,
+    sheet?: SheetRef,
+  ): Promise<void>;
+  /** Clear the visual selections on one canvas page; omitted = every page.
+   *
+   * Calcula policy (generated): Clear the visual selections filtering a canvas page (or every page); nothing is saved.
+   * Reach: broker `api.clearCrossFilters`, unlocked tier, class emit.
+   */
+  clearCrossFilters(sheet?: SheetRef): Promise<void>;
 
   // -- Range discovery (VBA's Range.End / CurrentRegion / UsedRange) --
   // All three are answered by the SAME engine function the grid's own
@@ -6663,9 +6746,11 @@ declare interface SlicerContext extends BaseObjectContext {
   selectAll(): Promise<void>;
   /** Style customization namespace. */
   style: {
-    /** Override the item renderer for custom appearance. */
+    /** Override the item renderer for custom appearance. `item.text` is the
+     *  DISPLAY label (app locale); `item.key` is the invariant member key --
+     *  what `setSelectedItems` speaks. */
     itemRenderer(renderer: (
-      item: { text: string; selected: boolean; hasData: boolean; index: number },
+      item: { text: string; key: string; selected: boolean; hasData: boolean; index: number },
       ctx: CanvasRenderingContext2D,
       bounds: { x: number; y: number; width: number; height: number },
     ) => void): () => void;

@@ -25,6 +25,7 @@ import {
   type FunctionBuilderProps,
   type ConnectionInfo,
   type BiModelInfo,
+  type MemberRef,
 } from "@api";
 import {
   buildCubeFormula,
@@ -72,6 +73,13 @@ const s: Record<string, React.CSSProperties> = {
   error: { color: "#c00", marginBottom: 10, fontSize: 12 },
 };
 
+/** The text a picked member INSERTS into a CUBE formula: its invariant KEY,
+ *  never its label ("2024-01-15", not "15.01.2024"). The blank member (key "")
+ *  inserts "(Blank)", the blank's own spelling the CUBE routing accepts. */
+export function cubeMemberText(member: MemberRef): string {
+  return member.key === "" ? member.label : member.key;
+}
+
 export function CubeFormulaBuilderPanel(props: FunctionBuilderProps): React.ReactElement {
   const { context, onFormulaChange, onSubmit } = props;
   const func = context.functionName.toUpperCase() as CubeFunc;
@@ -97,7 +105,9 @@ export function CubeFormulaBuilderPanel(props: FunctionBuilderProps): React.Reac
   const [kpiProperty, setKpiProperty] = useState(1);
 
   // Cache of distinct column values for member-value pickers.
-  const [valueCache, setValueCache] = useState<Record<string, string[]>>({});
+  // Per "table.column": the column's members. The list SHOWS each label (app
+  // locale) and INSERTS the key (invariant) into the CUBE formula.
+  const [valueCache, setValueCache] = useState<Record<string, MemberRef[]>>({});
 
   const connName = useMemo(
     () => connections.find((c) => c.id === connId)?.name ?? "",
@@ -215,9 +225,15 @@ export function CubeFormulaBuilderPanel(props: FunctionBuilderProps): React.Reac
           onKeyDown={submitOnEnter}
         />
         <datalist id={listId}>
-          {(valueCache[key] ?? []).map((v) => (
-            <option key={v} value={v} />
-          ))}
+          {(valueCache[key] ?? []).map((m) => {
+            // The blank member's key is "" (ruling Q8), which a formula cannot
+            // name; its spelling "(Blank)" is read back as the blank key by
+            // the CUBE routing (`is_blank_member_key`, any case).
+            const inserted = cubeMemberText(m);
+            return (
+              <option key={m.key} value={inserted} label={m.label !== inserted ? m.label : undefined} />
+            );
+          })}
         </datalist>
       </>
     );

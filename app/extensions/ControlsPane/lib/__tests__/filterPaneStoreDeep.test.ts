@@ -1,6 +1,6 @@
 //! FILENAME: app/extensions/ControlsPane/lib/__tests__/filterPaneStoreDeep.test.ts
 // PURPOSE: Deep tests for FilterPane store: multiple active filters interaction,
-//          filter ordering, cache invalidation, cross-filtering, BI filter items,
+//          filter ordering, cache invalidation, dependent filters, BI filter items,
 //          multi-connection isolation, and concurrent operations.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -16,7 +16,18 @@ const mockUpdateRibbonFilterSelection = vi.fn();
 const mockGetAllRibbonFilters = vi.fn();
 const mockGetBiConnections = vi.fn();
 const mockGetBiColumnValues = vi.fn();
+
+/** bi_get_column_values answers MEMBERS (P2): key = label for plain text. */
+const members = (keys: string[]) => keys.map((key) => ({ key, label: key }));
 const mockGetBiColumnAvailableValues = vi.fn();
+// The model behind every connection: the store splits field keys against its
+// table names. Every table these fixtures name (a vi.fn implementation, so it
+// survives vi.clearAllMocks()).
+const mockGetBiModelInfo = vi.fn(async (_connectionId: string) => ({
+  tables: ["Products", "Sales", "Other", "T"].map((name) => ({ name, columns: [] })),
+  measures: [],
+  relationships: [],
+}));
 // Fire-and-forget GET.CONTROLVALUE recalc: must return a promise (the store
 // chains .then/.catch on it). Implementation survives vi.clearAllMocks().
 const mockRecalcControlDependents = vi.fn(() => Promise.resolve([]));
@@ -28,6 +39,7 @@ vi.mock("../filterPaneApi", () => ({
   updateRibbonFilterSelection: (...args: unknown[]) => mockUpdateRibbonFilterSelection(...args),
   getAllRibbonFilters: (...args: unknown[]) => mockGetAllRibbonFilters(...args),
   getBiConnections: (...args: unknown[]) => mockGetBiConnections(...args),
+  getBiModelInfo: (connectionId: string) => mockGetBiModelInfo(connectionId),
   getBiColumnValues: (...args: unknown[]) => mockGetBiColumnValues(...args),
   getBiColumnAvailableValues: (...args: unknown[]) => mockGetBiColumnAvailableValues(...args),
   recalcControlDependents: (...args: unknown[]) => mockRecalcControlDependents(...args),
@@ -103,8 +115,8 @@ function makeFilter(overrides: Partial<RibbonFilter> = {}): RibbonFilter {
     connectedSheets: [],
     displayMode: "checklist",
     selectedItems: null,
-    crossFilterTargets: [],
-    crossFilterSlicerTargets: [],
+    dependentFilters: [],
+    dependentSlicers: [],
     advancedFilter: null,
     hideNoData: false,
     indicateNoData: true,
@@ -295,7 +307,7 @@ describe("cache invalidation", () => {
 
   it("clearCache removes all filters, items, and connection names", async () => {
     await seedFilters([makeFilter({ id: "f-1" })]);
-    mockGetBiColumnValues.mockResolvedValue(["A"]);
+    mockGetBiColumnValues.mockResolvedValue(members(["A"]));
     await refreshFilterItems("f-1");
 
     expect(getAllFilters()).toHaveLength(1);
@@ -310,7 +322,7 @@ describe("cache invalidation", () => {
 
   it("deleteFilterAsync removes items from cache", async () => {
     await seedFilters([makeFilter({ id: "f-5" })]);
-    mockGetBiColumnValues.mockResolvedValue(["X"]);
+    mockGetBiColumnValues.mockResolvedValue(members(["X"]));
     await refreshFilterItems("f-5");
     expect(getCachedItems("f-5")).toBeDefined();
 
@@ -348,16 +360,16 @@ describe("cache invalidation", () => {
     await seedFilters(filters);
 
     mockGetBiColumnValues
-      .mockResolvedValueOnce(["A1"])
-      .mockResolvedValueOnce(["B1"])
-      .mockResolvedValueOnce(["C1"]);
+      .mockResolvedValueOnce(members(["A1"]))
+      .mockResolvedValueOnce(members(["B1"]))
+      .mockResolvedValueOnce(members(["C1"]));
 
     await refreshAllItems();
 
     expect(mockGetBiColumnValues).toHaveBeenCalledTimes(3);
-    expect(getCachedItems("f-1")).toEqual([{ value: "A1", selected: true, hasData: true }]);
-    expect(getCachedItems("f-2")).toEqual([{ value: "B1", selected: true, hasData: true }]);
-    expect(getCachedItems("f-3")).toEqual([{ value: "C1", selected: true, hasData: true }]);
+    expect(getCachedItems("f-1")).toEqual([{ key: "A1", label: "A1", selected: true, hasData: true }]);
+    expect(getCachedItems("f-2")).toEqual([{ key: "B1", label: "B1", selected: true, hasData: true }]);
+    expect(getCachedItems("f-3")).toEqual([{ key: "C1", label: "C1", selected: true, hasData: true }]);
   });
 
   it("refreshCache dispatches FILTERS_REFRESHED event", async () => {
@@ -382,7 +394,7 @@ describe("cache invalidation", () => {
 });
 
 // ============================================================================
-// BI filter items with cross-filtering
+// BI filter items with dependent-filter narrowing
 // ============================================================================
 
 describe("BI filter items", () => {
@@ -398,17 +410,17 @@ describe("BI filter items", () => {
     });
     await seedFilters([filter]);
 
-    mockGetBiColumnValues.mockResolvedValue(["North", "South", "East", "West"]);
+    mockGetBiColumnValues.mockResolvedValue(members(["North", "South", "East", "West"]));
 
     await refreshFilterItems("f-1");
 
     expect(mockGetBiColumnValues).toHaveBeenCalledWith(CONN_A, "Sales", "Region");
     const items = getCachedItems("f-1");
     expect(items).toHaveLength(4);
-    expect(items!.map((i) => i.value)).toEqual(["North", "South", "East", "West"]);
+    expect(items!.map((i) => i.key)).toEqual(["North", "South", "East", "West"]);
     // All selected (selectedItems is null)
     expect(items!.every((i) => i.selected)).toBe(true);
-    // All have data (no cross-filters)
+    // All have data (no value constraints)
     expect(items!.every((i) => i.hasData)).toBe(true);
   });
 
@@ -420,23 +432,23 @@ describe("BI filter items", () => {
     });
     await seedFilters([filter]);
 
-    mockGetBiColumnValues.mockResolvedValue(["North", "South", "East", "West"]);
+    mockGetBiColumnValues.mockResolvedValue(members(["North", "South", "East", "West"]));
 
     await refreshFilterItems("f-1");
 
     const items = getCachedItems("f-1")!;
-    expect(items.find((i) => i.value === "North")?.selected).toBe(true);
-    expect(items.find((i) => i.value === "South")?.selected).toBe(true);
-    expect(items.find((i) => i.value === "East")?.selected).toBe(false);
-    expect(items.find((i) => i.value === "West")?.selected).toBe(false);
+    expect(items.find((i) => i.key === "North")?.selected).toBe(true);
+    expect(items.find((i) => i.key === "South")?.selected).toBe(true);
+    expect(items.find((i) => i.key === "East")?.selected).toBe(false);
+    expect(items.find((i) => i.key === "West")?.selected).toBe(false);
   });
 
-  it("applies cross-filter hasData from sibling filters", async () => {
+  it("applies dependent-filter hasData from sibling filters", async () => {
     const filterA = makeFilter({
       id: "f-1",
       fieldName: "Sales.Category",
       selectedItems: ["Electronics"],
-      crossFilterTargets: ["f-2"], // targets filter B
+      dependentFilters: ["f-2"], // targets filter B
     });
     const filterB = makeFilter({
       id: "f-2",
@@ -445,25 +457,25 @@ describe("BI filter items", () => {
     });
     await seedFilters([filterA, filterB]);
 
-    mockGetBiColumnValues.mockResolvedValue(["North", "South", "East", "West"]);
-    // When cross-filtered by Category=Electronics, only North and East have data
+    mockGetBiColumnValues.mockResolvedValue(members(["North", "South", "East", "West"]));
+    // When narrowed by Category=Electronics, only North and East have data
     mockGetBiColumnAvailableValues.mockResolvedValue(["North", "East"]);
 
     await refreshFilterItems("f-2");
 
     const items = getCachedItems("f-2")!;
-    expect(items.find((i) => i.value === "North")?.hasData).toBe(true);
-    expect(items.find((i) => i.value === "South")?.hasData).toBe(false);
-    expect(items.find((i) => i.value === "East")?.hasData).toBe(true);
-    expect(items.find((i) => i.value === "West")?.hasData).toBe(false);
+    expect(items.find((i) => i.key === "North")?.hasData).toBe(true);
+    expect(items.find((i) => i.key === "South")?.hasData).toBe(false);
+    expect(items.find((i) => i.key === "East")?.hasData).toBe(true);
+    expect(items.find((i) => i.key === "West")?.hasData).toBe(false);
   });
 
-  it("does not cross-filter from sibling with null selection", async () => {
+  it("does not narrow by a sibling with null selection", async () => {
     const filterA = makeFilter({
       id: "f-1",
       fieldName: "Sales.Category",
       selectedItems: null, // all selected = no filter
-      crossFilterTargets: ["f-2"],
+      dependentFilters: ["f-2"],
     });
     const filterB = makeFilter({
       id: "f-2",
@@ -471,7 +483,7 @@ describe("BI filter items", () => {
     });
     await seedFilters([filterA, filterB]);
 
-    mockGetBiColumnValues.mockResolvedValue(["North", "South"]);
+    mockGetBiColumnValues.mockResolvedValue(members(["North", "South"]));
 
     await refreshFilterItems("f-2");
 
@@ -480,12 +492,12 @@ describe("BI filter items", () => {
     expect(getCachedItems("f-2")!.every((i) => i.hasData)).toBe(true);
   });
 
-  it("does not cross-filter from sibling on a different model connection", async () => {
+  it("does not narrow by a sibling on a different model connection", async () => {
     const filterA = makeFilter({
       id: "f-1",
       fieldName: "Sales.Category",
       selectedItems: ["X"],
-      crossFilterTargets: ["f-2"],
+      dependentFilters: ["f-2"],
     });
     const filterB = makeFilter({
       id: "f-2",
@@ -494,25 +506,27 @@ describe("BI filter items", () => {
     });
     await seedFilters([filterA, filterB]);
 
-    mockGetBiColumnValues.mockResolvedValue(["A", "B"]);
+    mockGetBiColumnValues.mockResolvedValue(members(["A", "B"]));
 
     await refreshFilterItems("f-2");
 
     expect(mockGetBiColumnAvailableValues).not.toHaveBeenCalled();
   });
 
-  it("parses field name without dot as empty table", async () => {
+  it("refuses a field name without a table (no dot) instead of sending table \"\"", async () => {
     const filter = makeFilter({
       id: "f-1",
-      fieldName: "SimpleColumn", // no dot
+      fieldName: "SimpleColumn", // no dot: names no table of the model
     });
     await seedFilters([filter]);
 
-    mockGetBiColumnValues.mockResolvedValue(["val"]);
+    mockGetBiColumnValues.mockResolvedValue(members(["val"]));
 
-    await refreshFilterItems("f-1");
-
-    expect(mockGetBiColumnValues).toHaveBeenCalledWith(CONN_A, "", "SimpleColumn");
+    await expect(refreshFilterItems("f-1")).resolves.toEqual({
+      ok: false,
+      error: '"SimpleColumn" names no table of this model.',
+    });
+    expect(mockGetBiColumnValues).not.toHaveBeenCalled();
   });
 });
 
@@ -546,7 +560,7 @@ describe("multi-connection attribution", () => {
 });
 
 // ============================================================================
-// Sibling filter refresh (cross-filtering cascade)
+// Sibling filter refresh (dependent-filter cascade)
 // ============================================================================
 
 describe("sibling filter refresh on selection change", () => {
@@ -555,11 +569,11 @@ describe("sibling filter refresh on selection change", () => {
     clearCache();
   });
 
-  it("refreshes cross-filter targets", async () => {
+  it("refreshes dependent filters", async () => {
     const filterA = makeFilter({
       id: "f-1",
       fieldName: "T.Col1",
-      crossFilterTargets: ["f-2"],
+      dependentFilters: ["f-2"],
       order: 0,
     });
     const filterB = makeFilter({
@@ -571,16 +585,16 @@ describe("sibling filter refresh on selection change", () => {
 
     mockUpdateRibbonFilterSelection.mockResolvedValue(undefined);
     mockApplyRibbonFilter.mockResolvedValue(undefined);
-    mockGetBiColumnValues.mockResolvedValue(["A", "B"]);
+    mockGetBiColumnValues.mockResolvedValue(members(["A", "B"]));
 
     await updateFilterSelectionAsync("f-1", ["val1"]);
 
-    // Filter B should be refreshed as a cross-filter target
+    // Filter B should be refreshed as a dependent filter
     expect(mockGetBiColumnValues).toHaveBeenCalled();
   });
 
-  it("refreshes reverse cross-filter direction", async () => {
-    // Filter B targets filter A in its crossFilterTargets
+  it("refreshes the reverse dependent-filter direction", async () => {
+    // Filter B targets filter A in its dependentFilters
     const filterA = makeFilter({
       id: "f-1",
       fieldName: "T.Col1",
@@ -589,14 +603,14 @@ describe("sibling filter refresh on selection change", () => {
     const filterB = makeFilter({
       id: "f-2",
       fieldName: "T.Col2",
-      crossFilterTargets: ["f-1"], // B targets A
+      dependentFilters: ["f-1"], // B targets A
       order: 1,
     });
     await seedFilters([filterA, filterB]);
 
     mockUpdateRibbonFilterSelection.mockResolvedValue(undefined);
     mockApplyRibbonFilter.mockResolvedValue(undefined);
-    mockGetBiColumnValues.mockResolvedValue(["X"]);
+    mockGetBiColumnValues.mockResolvedValue(members(["X"]));
 
     // Changing filter A's selection should also refresh B (reverse target)
     await updateFilterSelectionAsync("f-1", ["val"]);
@@ -664,7 +678,7 @@ describe("error handling", () => {
   it("refreshFilterItems handles backend error without crashing", async () => {
     mockGetBiColumnValues.mockRejectedValue(new Error("Network error"));
 
-    await expect(refreshFilterItems("f-1")).resolves.toBeUndefined();
+    await expect(refreshFilterItems("f-1")).resolves.toMatchObject({ ok: false });
   });
 
   it("updateFilterSelectionAsync handles backend error without crashing", async () => {

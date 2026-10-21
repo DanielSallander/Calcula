@@ -274,6 +274,7 @@ fn inserted_rows_take_the_format_tier_height_and_rules_of_the_row_above() {
         &fx.state,
         &fx.file,
         crate::conditional_formatting::AddCFParams {
+            target: None,
             rule: crate::conditional_formatting::ConditionalFormatRule::CellValue(
                 crate::conditional_formatting::CellValueRule {
                     operator: crate::conditional_formatting::CellValueOperator::GreaterThan,

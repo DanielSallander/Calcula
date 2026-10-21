@@ -9,7 +9,9 @@
 //          - "biConnection" -> a MODEL slicer's PAGE: every BI pivot of the
 //                              model connection whose destination is the
 //                              slicer's own sheet (or canvas), resolved at
-//                              apply time so it covers pivots added later.
+//                              apply time so it covers pivots added later,
+//                              less the pivots the page's Edit interactions
+//                              set to None for this slicer (P4, pageTargets).
 //
 //          The switch over the source type is EXHAUSTIVE (a `never` check): a
 //          new source type is a compile error here, not a silent fall-through.
@@ -55,8 +57,11 @@ import { surfacePivotNotices } from "@api/pivotNotices";
 import { createPivotOverwriteTally, type PivotOverwriteTally } from "@api/pivotOverwrite";
 import { requireAutoFilterController } from "@api/autoFilterService";
 import { emitAppEvent, AppEvents } from "@api";
+import type { MemberRef } from "@api/pivotMembers";
 import type { MutationRefreshPayload } from "@api/events";
 import { showToast } from "@api/notifications";
+import { interactionFor, type InteractionMode, type VisualRef } from "@api/reportFilters";
+import { getReportPagesSnapshot, sheetIdAt } from "@api/reportPages";
 import { splitBiFieldKey } from "../../_shared/lib/biFieldKey";
 import { slicerBackend } from "./slicerBackend";
 import { applySlicerSelection } from "./slicer-api";
@@ -148,20 +153,55 @@ function assertNever(value: never, what: string): never {
   throw new Error(`[Slicer] Unhandled ${what}: ${String(value)}`);
 }
 
+/** How a slicer's filter reaches one visual of its page (Edit interactions). */
+export type SlicerInteractionLookup = (slicer: VisualRef, target: VisualRef) => InteractionMode;
+
+/** The canvas object a slicer is, as Edit interactions names it. */
+export function slicerVisualRef(slicerId: string): VisualRef {
+  return { kind: "slicer", id: String(slicerId) };
+}
+
+/**
+ * The page's Edit interactions, as @api/reportFilters holds them, for a slicer
+ * on `sheetIndex`. A slicer never highlights (the seam forces "filter"), so the
+ * answer is "filter" or "none". A sheet the page list has no id for yet (its
+ * first read has not answered) has no interactions anyone could have set: it
+ * filters, which is also what an older document without the feature does.
+ */
+export function slicerInteractionLookup(sheetIndex: number): SlicerInteractionLookup {
+  const sheetId = sheetIdAt(getReportPagesSnapshot(), sheetIndex);
+  return (slicer, target) =>
+    sheetId === null ? "filter" : interactionFor(sheetId, slicer, { ref: target, canHighlight: false }, true);
+}
+
 /**
  * The PAGE rule, pure: a model slicer filters exactly the pivots of its model
- * whose destination is the slicer's own sheet. Another sheet's pivot of the
+ * whose destination is the slicer's own sheet, LESS the ones the page's Edit
+ * interactions set to None for this slicer (P4). Another sheet's pivot of the
  * same model is never touched.
+ *
+ * The None pivots are the live apply's business only: their stored filter is
+ * cleared or re-applied by Rust inside the interaction change's own undo step
+ * (set_canvas_layout's re-fold, DC-9), and the backend's page fold skips them
+ * on every rebuild. What this function must not do is WRITE the slicer's mask
+ * onto a pivot the user excluded, which a click on the slicer would otherwise
+ * do through apply_pivot_filter.
  */
 export function pageTargets(
   pivots: readonly ModelConnectionPivot[],
   sheetIndex: number,
+  slicerRef: VisualRef,
+  interactionsOf: SlicerInteractionLookup,
 ): ModelConnectionPivot[] {
-  return pivots.filter((p) => p.sheetIndex === sheetIndex);
+  return pivots.filter(
+    (p) =>
+      p.sheetIndex === sheetIndex &&
+      interactionsOf(slicerRef, { kind: "pivot", id: String(p.id) }) !== "none",
+  );
 }
 
-/** The BI pivots a model slicer on `sheetIndex` filters, read now. */
-export async function getModelSlicerPageTargets(
+/** Every BI pivot of `connectionId` on `sheetIndex` (the page rule alone), read now. */
+export async function getModelSlicerPagePivots(
   connectionId: string,
   sheetIndex: number,
 ): Promise<ModelConnectionPivot[]> {
@@ -169,7 +209,17 @@ export async function getModelSlicerPageTargets(
     "get_pivots_for_bi_connection",
     { connectionId },
   );
-  return pageTargets(pivots ?? [], sheetIndex);
+  return (pivots ?? []).filter((p) => p.sheetIndex === sheetIndex);
+}
+
+/** The BI pivots the model slicer `slicerId` on `sheetIndex` filters, read now. */
+export async function getModelSlicerPageTargets(
+  connectionId: string,
+  sheetIndex: number,
+  slicerId: string,
+): Promise<ModelConnectionPivot[]> {
+  const page = await getModelSlicerPagePivots(connectionId, sheetIndex);
+  return pageTargets(page, sheetIndex, slicerVisualRef(slicerId), slicerInteractionLookup(sheetIndex));
 }
 
 /**
@@ -201,7 +251,7 @@ export async function resolveFilterTargets(
         break;
       case "biConnection":
         try {
-          const page = await getModelSlicerPageTargets(conn.sourceId, slicer.sheetIndex);
+          const page = await getModelSlicerPageTargets(conn.sourceId, slicer.sheetIndex, slicer.id);
           for (const p of page) pushPivot({ kind: "modelPivot", pivotId: p.id });
         } catch (err) {
           console.warn("[Slicer] Could not list the model's pivots for", conn, err);
@@ -389,7 +439,8 @@ export async function listPivotSlicerItemsFromModel(slicer: Slicer): Promise<Sli
     (model.tables ?? []).map((t) => t.name),
   );
   if (!table) return null;
-  const values = await slicerBackend.invoke<string[]>("bi_get_column_values", {
+  // Members (P2): the selection matches the KEY, the slicer shows the label.
+  const members = await slicerBackend.invoke<MemberRef[]>("bi_get_column_values", {
     connectionId: model.connectionId,
     table,
     column,
@@ -398,9 +449,10 @@ export async function listPivotSlicerItemsFromModel(slicer: Slicer): Promise<Sli
   // The same rule get_slicer_items applies: no selection = every item on.
   // Availability is not shaded -- it would have to come from the pivot cache,
   // which is exactly what does not carry the column.
-  return (values ?? []).map((value) => ({
-    value,
-    selected: selected === null || selected.includes(value),
+  return (members ?? []).map((m) => ({
+    key: m.key,
+    label: m.label,
+    selected: selected === null || selected.includes(m.key),
     hasData: true,
   }));
 }

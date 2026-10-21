@@ -23,7 +23,7 @@ import type { ChartSpec, ParsedChartData, ChartLayout, BarRect, MultiRowCardMark
 import type { ChartRenderTheme } from "../chartTheme";
 import { getSeriesColor } from "../chartTheme";
 import { resolveDatumStyle } from "../../lib/dataPointOverrides";
-import { drawRoundedRect, truncateText } from "../chartPainterUtils";
+import { drawRoundedRect, fillPlotShape, truncateText } from "../chartPainterUtils";
 import { datumValue, formatVisualValue, visualFormatFor } from "./visualValues";
 import { computeVisualLayout, drawVisualFrame, fitFontSize } from "./visualLayout";
 
@@ -99,10 +99,15 @@ export function paintMultiRowCardChart(
   for (let ci = 0; ci < g.visible; ci++) {
     const rowY = plotArea.y + ci * (g.rowHeight + ROW_GAP);
 
-    // Row card and its accent bar.
-    ctx.fillStyle = theme.plotBackground;
-    drawRoundedRect(ctx, plotArea.x, rowY, plotArea.width, g.rowHeight, 3);
-    ctx.fill();
+    // Row card (only when the theme sets a plot fill -- by default the row
+    // cards are transparent and the visual's background shows; a plot
+    // GRADIENT with no plot colour paints the gradient) and its accent bar.
+    fillPlotShape(
+      ctx,
+      theme,
+      { x: plotArea.x, y: rowY, width: plotArea.width, height: g.rowHeight },
+      (c) => drawRoundedRect(c, plotArea.x, rowY, plotArea.width, g.rowHeight, 3),
+    );
     if (showAccent) {
       ctx.fillStyle = accent;
       ctx.fillRect(plotArea.x, rowY, ACCENT_WIDTH, g.rowHeight);

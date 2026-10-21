@@ -18,6 +18,7 @@ import {
   visualFormatFor,
   BLANK_TEXT,
 } from "../visualValues";
+import { useAppLocale, useInvariantLocale } from "../../../lib/__tests__/appLocaleTestKit";
 
 describe("visualFormatFor: a Data format the author chose is honoured unless units were chosen too", () => {
   it("unset units + a format for the series' measure -> 'none' (the formatted source text is written)", () => {
@@ -81,9 +82,16 @@ describe("formatVisualNumber: Power BI display units", () => {
     expect(formatVisualNumber(1234.5, { displayUnits: "none", sourceText: "$1,234.50" })).toBe("$1,234.50");
   });
 
-  it("a scaled value keeps the source's currency prefix and suffix", () => {
+  it("a scaled value keeps the source's currency prefix and suffix", async () => {
     expect(formatVisualNumber(11732, { displayUnits: "auto", sourceText: "$11,732.00" })).toBe("$12K");
-    expect(formatVisualNumber(25000, { displayUnits: "auto", sourceText: "25 000 kr" })).toBe("25K kr");
+    // "25 000 kr" is sv-SE text: the engine writes it only under an sv-SE app
+    // locale, and it is read as a number only there (P2 S8).
+    await useAppLocale("sv-SE");
+    try {
+      expect(formatVisualNumber(25000, { displayUnits: "auto", sourceText: "25 000 kr" })).toBe("25K kr");
+    } finally {
+      await useInvariantLocale();
+    }
   });
 
   it("a percent is never scaled into nonsense like '1.2K%'", () => {

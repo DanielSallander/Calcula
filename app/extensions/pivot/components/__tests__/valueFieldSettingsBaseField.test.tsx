@@ -38,7 +38,7 @@ afterEach(() => {
 
 const zone = (sourceIndex: number, name: string, extra: Partial<ZoneField> = {}): ZoneField => ({ sourceIndex, name, isNumeric: false, ...extra });
 const SALES = { ...zone(2, "Sales"), isNumeric: true, aggregation: "sum" as const };
-const REGION: BaseFieldChoice = { name: "Region", items: ["North", "South"] };
+const REGION: BaseFieldChoice = { name: "Region", items: [{ key: "North", label: "North" }, { key: "South", label: "South" }] };
 
 function selectLabelled(label: string): HTMLSelectElement | null {
   // The dialog renders through a PORTAL on document.body.
@@ -94,6 +94,36 @@ describe("the Value Field Settings dialog's Base field", () => {
     expect(Array.from(item!.options).map((o) => o.value)).toContain("(previous)");
   });
 
+  it("shows each base item's LABEL (app locale) and saves its KEY (P2)", () => {
+    const onSave = vi.fn();
+    const PRICE: BaseFieldChoice = {
+      name: "Price",
+      items: [{ key: "1234.5", label: "1234,5" }, { key: "", label: "(Blank)" }],
+    };
+    act(() => {
+      root.render(
+        <ValueFieldSettingsModal
+          isOpen
+          field={{ ...SALES, showValuesAs: "difference", baseField: "Price" }}
+          availableFields={[PRICE]}
+          onSave={onSave}
+          onCancel={() => {}}
+        />,
+      );
+    });
+    const item = selectLabelled("Base item")!;
+    const shown = Array.from(item.options).map((o) => [o.value, o.textContent]);
+    expect(shown).toContainEqual(["1234.5", "1234,5"]);
+    expect(shown).toContainEqual(["", "(Blank)"]);
+    act(() => {
+      item.value = "1234.5";
+      item.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const ok = Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "OK")!;
+    act(() => ok.click());
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ baseField: "Price", baseItem: "1234.5" }));
+  });
+
   it("opens on the field's OWN Show Values As and base, not on Normal", () => {
     act(() => {
       root.render(
@@ -122,7 +152,7 @@ describe("the choices PivotEditor hands the dialog", () => {
 
   it("read each field's items while the dialog is open", async () => {
     let out: BaseFieldChoice[] = [];
-    const readItems = vi.fn(async (i: number) => (i === 0 ? ["North", "South"] : ["Apples"]));
+    const readItems = vi.fn(async (i: number) => (i === 0 ? REGION.items : [{ key: "Apples", label: "Apples" }]));
     // STABLE zones, as PivotEditor's state is between renders.
     const rows = [zone(0, "Region")];
     const columns = [zone(1, "Product")];
@@ -136,7 +166,7 @@ describe("the choices PivotEditor hands the dialog", () => {
     expect(out).toEqual([{ name: "Region", items: [] }, { name: "Product", items: [] }]);
     act(() => root.render(<Probe open />));
     await settle();
-    expect(out).toEqual([{ name: "Region", items: ["North", "South"] }, { name: "Product", items: ["Apples"] }]);
+    expect(out).toEqual([{ name: "Region", items: REGION.items }, { name: "Product", items: [{ key: "Apples", label: "Apples" }] }]);
   });
 
   it("PivotEditor passes them (the dialog got none, so Base field never showed)", () => {

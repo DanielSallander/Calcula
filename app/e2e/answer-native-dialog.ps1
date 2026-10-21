@@ -11,6 +11,17 @@
 #               close                  the title-bar X (WM_SYSCOMMAND / SC_CLOSE)
 #               escape                 the Escape key, delivered to the dialog itself
 #   -Button     with -Action button: the label to press ("&" accelerators ignored)
+#   -Action setcolor -Rgb "r,g,b"
+#               the OS colour picker (ChooseColor, opened by an <input type="color">):
+#               finds the app-owned #32770 that carries the Red/Green/Blue edit
+#               boxes (control ids 706/707/708, COLOR_RED/GREEN/BLUE -- Chromium
+#               opens ChooseColor with CC_FULLOPEN, so they exist), types the three
+#               numbers into them, presses OK (WM_COMMAND IDOK) and reports
+#               SET:<r,g,b> then GONE | STILLOPEN. -TitleLike is not used to find
+#               it: the picker's title is in the SYSTEM locale ("Color", "Farg" on sv-SE),
+#               so it is found by its edit boxes, not its title. Reports
+#               NOCOLORDIALOG when no such window appears within -TimeoutMs, and
+#               NOEDITS:<ids> (pressing nothing) when a #32770 lacks the boxes.
 #
 # Finds the dialog owned by app.exe, enumerates its child BUTTONs, and posts
 # BM_CLICK to the matching one. Clicking the real button is used in preference to
@@ -39,9 +50,10 @@
 # an owned dialog), not a separate top-level window.
 param(
   [Parameter(Mandatory = $true)][string]$TitleLike,
-  [Parameter(Mandatory = $true)][ValidateSet("ok", "cancel", "read", "button", "close", "escape")][string]$Action,
+  [Parameter(Mandatory = $true)][ValidateSet("ok", "cancel", "read", "button", "close", "escape", "setcolor")][string]$Action,
   [int]$TimeoutMs = 20000,
-  [string]$Button = ""
+  [string]$Button = "",
+  [string]$Rgb = ""
 )
 $ErrorActionPreference = "Stop"
 
@@ -61,6 +73,8 @@ public class DlgWin {
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wp, IntPtr lp);
   [DllImport("user32.dll")] public static extern int GetDlgCtrlID(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageW")] public static extern IntPtr SendMessageText(IntPtr hWnd, uint msg, IntPtr wp, string lp);
+  [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr hDlg, int id);
 }
 "@
 
@@ -92,6 +106,85 @@ function Find-Dialog {
   }
   [DlgWin]::EnumWindows($cb, [IntPtr]::Zero) | Out-Null
   return $script:found
+}
+
+# --- setcolor: the OS colour picker (ChooseColor) ---
+# Found by its Red/Green/Blue edit boxes rather than by its title (system locale).
+# WM_SETTEXT on a single-line edit sends EN_CHANGE to the dialog, which is what
+# ChooseColor listens to; WM_COMMAND IDOK is what its OK button sends, delivered
+# without depending on focus or on the window being in the foreground.
+if ($Action -eq "setcolor") {
+  $parts = @($Rgb -split "," | ForEach-Object { $_.Trim() })
+  if ($parts.Count -ne 3 -or ($parts | Where-Object { $_ -notmatch "^[0-9]{1,3}$" -or [int]$_ -gt 255 }).Count -gt 0) {
+    Write-Output ("BADRGB:" + $Rgb)
+    exit 0
+  }
+  $COLOR_RED = 706
+  $COLOR_GREEN = 707
+  $COLOR_BLUE = 708
+  $picker = [IntPtr]::Zero
+  $lastIds = ""
+  $until = (Get-Date).AddMilliseconds($TimeoutMs)
+  while ((Get-Date) -lt $until -and $picker -eq [IntPtr]::Zero) {
+    $procIds = Get-AppPids
+    $candidates = New-Object System.Collections.ArrayList
+    $cbTop = [DlgWin+EnumProc]{
+      param($hWnd, $lParam)
+      $p = 0
+      [DlgWin]::GetWindowThreadProcessId($hWnd, [ref]$p) | Out-Null
+      if ($procIds -contains [int]$p -and [DlgWin]::IsWindowVisible($hWnd)) {
+        $cls = New-Object System.Text.StringBuilder 256
+        [DlgWin]::GetClassName($hWnd, $cls, 256) | Out-Null
+        if ($cls.ToString() -eq "#32770") { $null = $candidates.Add($hWnd) }
+      }
+      return $true
+    }
+    [DlgWin]::EnumWindows($cbTop, [IntPtr]::Zero) | Out-Null
+    foreach ($h in $candidates) {
+      if ([DlgWin]::GetDlgItem($h, $COLOR_RED) -ne [IntPtr]::Zero -and
+          [DlgWin]::GetDlgItem($h, $COLOR_GREEN) -ne [IntPtr]::Zero -and
+          [DlgWin]::GetDlgItem($h, $COLOR_BLUE) -ne [IntPtr]::Zero) {
+        $picker = $h
+        break
+      }
+      $ids = New-Object System.Collections.ArrayList
+      $cbIds = [DlgWin+EnumProc]{
+        param($c, $l)
+        $null = $ids.Add([DlgWin]::GetDlgCtrlID($c))
+        return $true
+      }
+      [DlgWin]::EnumChildWindows($h, $cbIds, [IntPtr]::Zero) | Out-Null
+      $lastIds = ($ids -join "|")
+    }
+    if ($picker -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 200 }
+  }
+  if ($picker -eq [IntPtr]::Zero) {
+    if ($lastIds -ne "") { Write-Output ("NOEDITS:" + $lastIds) } else { Write-Output "NOCOLORDIALOG" }
+    exit 0
+  }
+  $title = New-Object System.Text.StringBuilder 512
+  [DlgWin]::GetWindowText($picker, $title, 512) | Out-Null
+  Write-Output ("TITLE:" + $title.ToString())
+  $WM_SETTEXT = 0x000C
+  $edits = @($COLOR_RED, $COLOR_GREEN, $COLOR_BLUE)
+  for ($i = 0; $i -lt 3; $i++) {
+    $edit = [DlgWin]::GetDlgItem($picker, $edits[$i])
+    [DlgWin]::SendMessageText($edit, $WM_SETTEXT, [IntPtr]::Zero, $parts[$i]) | Out-Null
+  }
+  Write-Output ("SET:" + ($parts -join ","))
+  $WM_COMMAND = 0x0111
+  $IDOK = 1
+  $okHwnd = [DlgWin]::GetDlgItem($picker, $IDOK)
+  [DlgWin]::PostMessage($picker, $WM_COMMAND, [IntPtr]$IDOK, $okHwnd) | Out-Null
+  Write-Output "CLICKED:OK"
+  $gone = "STILLOPEN"
+  $goneBy = (Get-Date).AddMilliseconds(5000)
+  while ((Get-Date) -lt $goneBy) {
+    if (-not [DlgWin]::IsWindow($picker) -or -not [DlgWin]::IsWindowVisible($picker)) { $gone = "GONE"; break }
+    Start-Sleep -Milliseconds 100
+  }
+  Write-Output $gone
+  exit 0
 }
 
 # --- wait for the dialog ---

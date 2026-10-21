@@ -27,6 +27,8 @@
 //          AutoFill is not here: it is the fill handle's own machinery
 //          (lib/runSeries.ts hands it to @api/fillPatterns).
 
+import { parseNumber } from "@api/locale";
+
 /** A cell of the line, as read from the sheet (index 0 is the start). */
 export interface SeriesLineCell {
   row: number;
@@ -75,15 +77,12 @@ export function defaultSeriesIn(r: { startRow: number; startCol: number; endRow:
   return cols > rows ? "rows" : "columns";
 }
 
-/** A number typed into Step or Stop: either decimal mark; null when blank or
- *  not a number. */
+/** A number typed into Step or Stop, read STRICTLY in the APP locale (P2):
+ *  de-DE "1.000" is 1000 and "0,5" is 0.5, where the old either-decimal-mark
+ *  guess read "1.000" as 1. Null when blank or not a number there. */
 export function parseSeriesNumber(text: string): number | null {
-  const t = text.trim();
-  if (t === "") return null;
-  const normalised = t.includes(",") && !t.includes(".") ? t.replace(",", ".") : t;
-  if (!/^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/.test(normalised)) return null;
-  const n = Number(normalised);
-  return Number.isFinite(n) ? n : null;
+  if (text.trim() === "") return null;
+  return parseNumber(text);
 }
 
 // ============================================================================

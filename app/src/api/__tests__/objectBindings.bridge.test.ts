@@ -10,7 +10,13 @@
 //              a family that repaints by emitting it cannot start a loop;
 //            * filter first, then bind: Set sees the current filters;
 //            * the backend's WINDOW event "grid:refresh" IS a trigger;
-//            * File > New resets the cache and re-reads in the spec's order.
+//            * File > New resets the cache and re-reads in the spec's order;
+//            * (P4 S11) the wire names pages by SHEET ID; each page carries
+//              its BASE set (resolvePageBase) and an OVERRIDE only for a model
+//              visual that resolves differently -- a visuals-scoped ribbon
+//              filter, a filter-mode selection, a none pair; highlights never
+//              reach the wire; one send per frame; a check trigger (page list,
+//              object refresh) re-sends only a changed wire.
 // CONTEXT: The real seam over a doubled backend door, a doubled Tauri event
 //          listener and a hand-driven animation-frame clock.
 
@@ -25,6 +31,22 @@ const h = vi.hoisted(() => ({
   onCellsChanged: null as null | (() => unknown[]),
   frames: [] as Array<() => void>,
   tauri: new Map<string, (payload: unknown) => void>(),
+  /** The sheets get_sheets answers: index i has id `sheet-${i}`. */
+  sheetCount: 5,
+}));
+
+vi.mock("../../core/lib/tauri-api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../core/lib/tauri-api")>()),
+  getSheets: async () => ({
+    sheets: Array.from({ length: h.sheetCount }, (_, i) => ({
+      index: i,
+      name: `Sheet${i}`,
+      visibility: "visible",
+      sheetId: `sheet-${i}`,
+      kind: "worksheet",
+    })),
+    activeIndex: 0,
+  }),
 }));
 
 vi.mock("../backend", async (importOriginal) => ({
@@ -65,7 +87,9 @@ vi.mock("../../core/state/GridContext", async (importOriginal) => ({
 
 let seam: typeof import("../objectBindings");
 let events: typeof import("../events");
-let pageFilters: typeof import("../pageFilters");
+let reportFilters: typeof import("../reportFilters");
+/** What the test's @api/modelVisuals provider lists (read at every call). */
+let visuals: import("../modelVisuals").ModelVisualInfo[] = [];
 let uninstall: () => void = () => {};
 
 const CHART: ObjectBindingRef = { kind: "chart", id: "c1" };
@@ -94,19 +118,88 @@ beforeEach(async () => {
   h.onCellsChanged = null;
   h.frames = [];
   h.tauri.clear();
+  h.sheetCount = 5;
   vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
     h.frames.push(() => cb(0));
     return h.frames.length;
   });
   seam = await import("../objectBindings");
   events = await import("../events");
-  pageFilters = await import("../pageFilters");
+  reportFilters = await import("../reportFilters");
+  visuals = [];
+  const modelVisuals = await import("../modelVisuals");
+  modelVisuals.registerModelVisualProvider({ kind: "chart", list: () => visuals });
 });
 
 afterEach(() => {
   uninstall();
   vi.unstubAllGlobals();
 });
+
+/** A model slicer's filter as the Slicer extension publishes it (page by sheet id). */
+function slicerFilter(
+  sourceId: string,
+  sourceName: string,
+  sheetIndex: number,
+  connectionId: string,
+  field: string,
+  includedKeys: string[],
+  filterLevel?: number,
+): import("../reportFilters").ReportFilterInput {
+  return {
+    sourceId,
+    sourceName,
+    sourceRef: { kind: "slicer", id: sourceId },
+    scope: { kind: "page", sheetId: `sheet-${sheetIndex}` },
+    connectionId,
+    field,
+    includedKeys,
+    ...(filterLevel !== undefined ? { filterLevel } : {}),
+  };
+}
+
+/** A ribbon filter (no canvas object behind it) on any scope. */
+function ribbonFilter(
+  sourceId: string,
+  sourceName: string,
+  scope: import("../reportFilters").ReportFilterScope,
+  connectionId: string,
+  field: string,
+  includedKeys: string[],
+): import("../reportFilters").ReportFilterInput {
+  return { sourceId, sourceName, sourceRef: null, scope, connectionId, field, includedKeys };
+}
+
+/** A model visual on sheet `sheet-${sheetIndex}`, as a family provider lists it. */
+function visual(
+  kind: "chart" | "pivot" | "slicer",
+  id: string,
+  sheetIndex: number,
+  connectionId: string,
+  canHighlight = false,
+  target = true,
+): import("../modelVisuals").ModelVisualInfo {
+  return {
+    ref: { kind, id },
+    name: id,
+    sheetIndex,
+    sheetId: `sheet-${sheetIndex}`,
+    connectionId,
+    role: { source: true, target, canHighlight, reason: target ? null : "Follows nothing" },
+    label: "Column chart",
+  };
+}
+
+/** One page of the wire. */
+function page(
+  sheetId: string,
+  connectionId: string,
+  filters: Array<{ field: string; includedItems: string[]; filterLevel: number }>,
+  tupleFilters: Array<{ fields: string[]; tuples: string[][] }> = [],
+  objects: unknown[] = [],
+): Record<string, unknown> {
+  return { sheetId, connectionId, filters, tupleFilters, objects };
+}
 
 async function install(): Promise<void> {
   uninstall = seam.installObjectBindingsBridge();
@@ -156,41 +249,42 @@ describe("the binding bridge", () => {
     events.emitAppEvent(events.AppEvents.MUTATION_REFRESH, { domains: ["objects"], source: "commit" });
     await frame();
     expect(sent("cellsChanged")).toHaveLength(0);
+    expect(sent("setPageFilters"), "a check trigger with an unchanged wire re-sends nothing").toHaveLength(0);
 
-    pageFilters.publishPageFilters("slicer", [
-      { sourceId: "s1", sourceName: "Slicer_Region", sheetIndex: 3, connectionId: "conn-1", field: "Geo.Region", includedItems: ["North"] },
-    ]);
+    reportFilters.publishReportFilters("slicer", [slicerFilter("s1", "Slicer_Region", 3, "conn-1", "Geo.Region", ["North"])]);
     await frame();
     expect(sent("setPageFilters")).toEqual([
       {
         op: "setPageFilters",
-        pages: [{ sheetIndex: 3, connectionId: "conn-1", filters: [{ field: "Geo.Region", includedItems: ["North"], filterLevel: 1 }] }],
+        pages: [page("sheet-3", "conn-1", [{ field: "Geo.Region", includedItems: ["North"], filterLevel: 1 }])],
       },
     ]);
   });
 
-  it("SetPageFilters carries the FULL snapshot, not only the page that moved", async () => {
+  it("SetPageFilters carries the FULL snapshot, not only the page that moved -- pages by SHEET ID", async () => {
     await install();
-    pageFilters.publishPageFilters("slicer", [
-      { sourceId: "s1", sourceName: "A", sheetIndex: 1, connectionId: "m", field: "T.A", includedItems: ["x"] },
-      { sourceId: "s2", sourceName: "B", sheetIndex: 4, connectionId: "m", field: "T.B", includedItems: ["y"], filterLevel: 2 },
+    reportFilters.publishReportFilters("slicer", [
+      slicerFilter("s1", "A", 1, "m", "T.A", ["x"]),
+      slicerFilter("s2", "B", 4, "m", "T.B", ["y"], 2),
     ]);
     await frame();
     h.requests = [];
-    pageFilters.publishPageFilters("slicer", [
-      { sourceId: "s1", sourceName: "A", sheetIndex: 1, connectionId: "m", field: "T.A", includedItems: ["x", "z"] },
-      { sourceId: "s2", sourceName: "B", sheetIndex: 4, connectionId: "m", field: "T.B", includedItems: ["y"], filterLevel: 2 },
+    reportFilters.publishReportFilters("slicer", [
+      slicerFilter("s1", "A", 1, "m", "T.A", ["x", "z"]),
+      slicerFilter("s2", "B", 4, "m", "T.B", ["y"], 2),
     ]);
     await frame();
     expect(sent("setPageFilters")).toEqual([
       {
         op: "setPageFilters",
         pages: [
-          { sheetIndex: 1, connectionId: "m", filters: [{ field: "T.A", includedItems: ["x", "z"], filterLevel: 1 }] },
-          { sheetIndex: 4, connectionId: "m", filters: [{ field: "T.B", includedItems: ["y"], filterLevel: 2 }] },
+          page("sheet-1", "m", [{ field: "T.A", includedItems: ["x", "z"], filterLevel: 1 }]),
+          page("sheet-4", "m", [{ field: "T.B", includedItems: ["y"], filterLevel: 2 }]),
         ],
       },
     ]);
+    const wire = sent("setPageFilters")[0] as unknown as { pages: Array<Record<string, unknown>> };
+    for (const p of wire.pages) expect(p, "the wire still names a sheet INDEX").not.toHaveProperty("sheetIndex");
   });
 
   it("a_volatile_binding_costs_one_evaluation_per_real_trigger (GRID_REFRESH is not a trigger)", async () => {
@@ -228,8 +322,8 @@ describe("the binding bridge", () => {
   it("filter_first_then_bind_uses_the_current_filters", async () => {
     h.bindings = [];
     await install();
-    pageFilters.publishPageFilters("slicer", [
-      { sourceId: "s1", sourceName: "Region", sheetIndex: 2, connectionId: "aw", field: "BI.dim_territory.Region", includedItems: ["Europe"] },
+    reportFilters.publishReportFilters("slicer", [
+      slicerFilter("s1", "Region", 2, "aw", "BI.dim_territory.Region", ["Europe"]),
     ]);
     // The frame has NOT run: the filter change is still queued.
     await seam.setBinding(CHART, "/spec/markOptions/goal", "=[Revenue]*1.1");
@@ -238,8 +332,205 @@ describe("the binding bridge", () => {
     expect(order.indexOf("setPageFilters")).toBeLessThan(order.indexOf("set"));
     expect(sent("setPageFilters")[0]).toEqual({
       op: "setPageFilters",
-      pages: [{ sheetIndex: 2, connectionId: "aw", filters: [{ field: "BI.dim_territory.Region", includedItems: ["Europe"], filterLevel: 1 }] }],
+      pages: [page("sheet-2", "aw", [{ field: "BI.dim_territory.Region", includedItems: ["Europe"], filterLevel: 1 }])],
     });
+  });
+
+  it("an all-pages filter reaches every sheet; a page-scoped id is sent as given (Rust ignores an unknown one)", async () => {
+    await install();
+    reportFilters.publishReportFilters("ribbon", [
+      ribbonFilter("rf", "Year", { kind: "all" }, "m", "T.Y", ["2024"]),
+      ribbonFilter("rf-gone", "Gone", { kind: "page", sheetId: "no-such-sheet" }, "m", "T.G", ["g"]),
+    ]);
+    await frame();
+    expect(sent("setPageFilters").at(-1)).toEqual({
+      op: "setPageFilters",
+      pages: [
+        ...[0, 1, 2, 3, 4].map((i) => page(`sheet-${i}`, "m", [{ field: "T.Y", includedItems: ["2024"], filterLevel: 1 }])),
+        // Resolver order: publisher, then sourceId ("rf" < "rf-gone").
+        page("no-such-sheet", "m", [
+          { field: "T.Y", includedItems: ["2024"], filterLevel: 1 },
+          { field: "T.G", includedItems: ["g"], filterLevel: 1 },
+        ]),
+      ],
+    });
+  });
+
+  it("an all-pages filter re-sends when the page list grows (and an unchanged list sends nothing)", async () => {
+    h.sheetCount = 2;
+    await install();
+    reportFilters.publishReportFilters("ribbon", [ribbonFilter("rf", "Year", { kind: "all" }, "m", "T.Y", ["2024"])]);
+    await frame();
+    const idsOf = (r: unknown): string[] => (r as { pages: Array<{ sheetId: string }> }).pages.map((p) => p.sheetId);
+    expect(idsOf(sent("setPageFilters").at(-1))).toEqual(["sheet-0", "sheet-1"]);
+
+    h.requests = [];
+    h.sheetCount = 3;
+    window.dispatchEvent(new Event("sheets:refresh"));
+    await settle();
+    await frame();
+    expect(sent("setPageFilters").map(idsOf)).toEqual([["sheet-0", "sheet-1", "sheet-2"]]);
+
+    h.requests = [];
+    window.dispatchEvent(new Event("sheets:refresh"));
+    await settle();
+    await frame();
+    expect(sent("setPageFilters")).toHaveLength(0);
+  });
+
+  it("an override ONLY where a visual resolves differently: a slicer's none pair drops the filter for that Card alone", async () => {
+    await install();
+    visuals = [visual("chart", "card-a", 1, "m"), visual("chart", "card-b", 1, "m"), visual("chart", "card-z", 2, "m")];
+    reportFilters.publishReportFilters("slicer", [slicerFilter("s1", "Region", 1, "m", "T.R", ["North"])]);
+    await frame();
+    expect(sent("setPageFilters").at(-1), "no pair: every visual reads the base, so no override").toEqual({
+      op: "setPageFilters",
+      pages: [page("sheet-1", "m", [{ field: "T.R", includedItems: ["North"], filterLevel: 1 }])],
+    });
+
+    h.requests = [];
+    reportFilters.publishPageInteractions("sheet-1", {
+      pairs: [{ source: { kind: "slicer", id: "s1" }, target: { kind: "chart", id: "card-b" }, mode: "none" }],
+    });
+    await frame();
+    expect(sent("setPageFilters")).toEqual([
+      {
+        op: "setPageFilters",
+        pages: [
+          page("sheet-1", "m", [{ field: "T.R", includedItems: ["North"], filterLevel: 1 }], [], [
+            { object: { kind: "chart", id: "card-b" }, filters: [], tupleFilters: [] },
+          ]),
+        ],
+      },
+    ]);
+  });
+
+  it("a visuals-scoped ribbon filter yields an OVERRIDE on its target, never a base filter", async () => {
+    await install();
+    visuals = [visual("chart", "card-a", 1, "m"), visual("chart", "card-b", 1, "m")];
+    reportFilters.publishReportFilters("ribbon", [
+      ribbonFilter("rf-v", "Visual", { kind: "visuals", targets: [{ kind: "chart", id: "card-a" }] }, "m", "T.V", ["v"]),
+    ]);
+    await frame();
+    expect(sent("setPageFilters").at(-1)).toEqual({
+      op: "setPageFilters",
+      pages: [
+        page("sheet-1", "m", [], [], [
+          { object: { kind: "chart", id: "card-a" }, filters: [{ field: "T.V", includedItems: ["v"], filterLevel: 1 }], tupleFilters: [] },
+        ]),
+      ],
+    });
+  });
+
+  it("highlights never reach bindings; a filter-mode selection does, as field or TUPLE filters; the source keeps the base", async () => {
+    await install();
+    visuals = [
+      visual("chart", "src", 1, "m", true),
+      visual("chart", "bar", 1, "m", true),
+      visual("chart", "card", 1, "m", false),
+      visual("chart", "range", 1, "m", false, false),
+    ];
+    // Default highlight: the bar paints a highlight (not sent), the card cannot
+    // highlight so it is FILTERED, the range chart follows nothing.
+    reportFilters.setCrossFilter({
+      source: { kind: "chart", id: "src" },
+      sourceName: "Src",
+      pageSheetId: "sheet-1",
+      connectionId: "m",
+      fields: ["T.A", "T.B"],
+      tuples: [
+        ["a1", "b1"],
+        ["a2", "b2"],
+      ],
+    });
+    await frame();
+    const tuple = { fields: ["T.A", "T.B"], tuples: [["a1", "b1"], ["a2", "b2"]] };
+    expect(sent("setPageFilters").at(-1)).toEqual({
+      op: "setPageFilters",
+      pages: [page("sheet-1", "m", [], [], [{ object: { kind: "chart", id: "card" }, filters: [], tupleFilters: [tuple] }])],
+    });
+    expect(JSON.stringify(sent("setPageFilters")), "a highlight leaked onto the wire").not.toMatch(/highlight/i);
+
+    // defaultMode filter: the bar is filtered too; a rectangular selection is per-field.
+    h.requests = [];
+    reportFilters.publishPageInteractions("sheet-1", { defaultMode: "filter", pairs: [] });
+    reportFilters.setCrossFilter({
+      source: { kind: "chart", id: "src" },
+      sourceName: "Src",
+      pageSheetId: "sheet-1",
+      connectionId: "m",
+      fields: ["T.A"],
+      tuples: [["a1"], ["a2"]],
+    });
+    await frame();
+    const filtered = { filters: [{ field: "T.A", includedItems: ["a1", "a2"], filterLevel: 1 }], tupleFilters: [] };
+    expect(sent("setPageFilters"), "two changes in one frame are ONE send").toEqual([
+      {
+        op: "setPageFilters",
+        pages: [
+          page("sheet-1", "m", [], [], [
+            { object: { kind: "chart", id: "bar" }, ...filtered },
+            { object: { kind: "chart", id: "card" }, ...filtered },
+          ]),
+        ],
+      },
+    ]);
+  });
+
+  it("a change coalesces to ONE send per frame, however many moved", async () => {
+    await install();
+    visuals = [visual("chart", "card", 1, "m")];
+    reportFilters.publishReportFilters("slicer", [slicerFilter("s1", "A", 1, "m", "T.A", ["x"])]);
+    reportFilters.publishReportFilters("ribbon", [ribbonFilter("rf", "Y", { kind: "page", sheetId: "sheet-1" }, "m", "T.Y", ["1"])]);
+    reportFilters.publishPageInteractions("sheet-1", {
+      pairs: [{ source: { kind: "slicer", id: "s1" }, target: { kind: "chart", id: "card" }, mode: "none" }],
+    });
+    reportFilters.setCrossFilter({
+      source: { kind: "chart", id: "other" },
+      sourceName: "Other",
+      pageSheetId: "sheet-1",
+      connectionId: "m",
+      fields: ["T.B"],
+      tuples: [["b"]],
+    });
+    expect(sent("setPageFilters"), "nothing before the frame").toHaveLength(0);
+    await frame();
+    expect(sent("setPageFilters")).toHaveLength(1);
+  });
+
+  it("a visual that appears under a live selection re-sends on the next object refresh (and an unchanged one does not)", async () => {
+    await install();
+    reportFilters.publishPageInteractions("sheet-1", { defaultMode: "filter", pairs: [] });
+    reportFilters.setCrossFilter({
+      source: { kind: "chart", id: "src" },
+      sourceName: "Src",
+      pageSheetId: "sheet-1",
+      connectionId: "m",
+      fields: ["T.A"],
+      tuples: [["a1"]],
+    });
+    await frame();
+    expect(sent("setPageFilters").at(-1)).toEqual({ op: "setPageFilters", pages: [page("sheet-1", "m", [])] });
+
+    h.requests = [];
+    visuals = [visual("chart", "card", 1, "m")];
+    events.emitAppEvent(events.AppEvents.MUTATION_REFRESH, { domains: ["objects"], source: "commit" });
+    await frame();
+    expect(sent("setPageFilters")).toEqual([
+      {
+        op: "setPageFilters",
+        pages: [
+          page("sheet-1", "m", [], [], [
+            { object: { kind: "chart", id: "card" }, filters: [{ field: "T.A", includedItems: ["a1"], filterLevel: 1 }], tupleFilters: [] },
+          ]),
+        ],
+      },
+    ]);
+
+    h.requests = [];
+    events.emitAppEvent(events.AppEvents.MUTATION_REFRESH, { domains: ["objects"], source: "commit" });
+    await frame();
+    expect(sent("setPageFilters")).toHaveLength(0);
   });
 
   it("grid_refresh_window_event_is_a_trigger (backend-made writes: MCP, AI, scripts)", async () => {

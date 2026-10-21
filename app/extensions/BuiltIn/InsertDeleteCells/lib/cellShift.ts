@@ -27,12 +27,22 @@
 // - Excel ASKS before unmerging a merged region the shift cuts: "This operation
 //   will cause some merged cells to unmerge. Do you wish to continue?" -- OK
 //   unmerges and shifts, Cancel changes nothing.
+//
+// ON A FLOATING GRID'S CELLS (P3, owner finding G3): the door asks the
+// cell-target question. Entire rows / columns are the GRID's own lines (table
+// semantics: its content shifts and its window grows or shrinks) -- capability
+// "structure", run through the same row / column grid commands, whose door
+// hands the target on. A cell SHIFT asks "shiftCells", which no floating grid
+// admits this round (the backend's cell shift is an active-sheet pipeline over
+// ~30 per-sheet stores), so it refuses with the grid's own sentence ("Insert
+// Cells is not available inside a floating grid yet. Nothing was changed.")
+// and never invokes anything.
 
 import { CommandRegistry, CoreCommands } from "@api/commands";
 import { alertAsync, confirmAsync } from "@api/dialogs";
 import { getGridStateSnapshot, refreshGridData } from "@api/grid";
 import { insertCellsRange, deleteCellsRange, type CellShiftResult } from "@api/lib";
-import { refuseIfSelectionOwned } from "@api/selectionOwner";
+import { cellTargetFor, resolveCellTarget } from "@api/cellTarget";
 import { DEFAULT_GRID_CONFIG, type GridConfig, type Selection } from "@api/types";
 
 /** Which command family: Insert or Delete. */
@@ -165,6 +175,38 @@ export function gestureLabel(mode: CellShiftMode): string {
   return mode === "insert" ? "Insert" : "Delete";
 }
 
+/** The label a cell SHIFT asks (and is refused) by -- Excel's menu item names. */
+export function shiftLabel(mode: CellShiftMode): string {
+  return mode === "insert" ? "Insert Cells" : "Delete Cells";
+}
+
+/** Where a door acts: the selection, and the size its whole-line rule measures against. */
+export interface CellShiftPlace {
+  selection: Selection;
+  size: { totalRows: number; totalCols: number };
+}
+
+/**
+ * THE DOOR'S QUESTION, asked once per gesture. An owner holding the selection
+ * that admits line acts ("structure" -- a floating grid's cells): its selection,
+ * measured against its OWN extent. No owner: Core's selection and the sheet.
+ * An owner that admits no line act: the shift question is asked so the owner's
+ * own sentence is announced, and null (nothing runs, no dialog opens).
+ */
+export function resolveShiftPlace(mode: CellShiftMode): CellShiftPlace | null {
+  const t = cellTargetFor("structure", gestureLabel(mode));
+  if ("refusal" in t) {
+    // Announce once, through the question the owner explains best.
+    resolveCellTarget(shiftLabel(mode), "shiftCells");
+    return null;
+  }
+  if (t.kind === "object") {
+    return { selection: t.selection, size: { totalRows: t.bounds.rows, totalCols: t.bounds.cols } };
+  }
+  const selection = currentSelection();
+  return selection ? { selection, size: sheetSize() } : null;
+}
+
 /**
  * Run one choice over `selection`. Never throws: every refusal reaches the
  * user (an alert), and the grid is refreshed after a change.
@@ -173,17 +215,36 @@ export function gestureLabel(mode: CellShiftMode): string {
  * rows / columns the selection SPANS). A cell shift calls the backend; when it
  * stops to ask about merges, the user's answer decides (Cancel = nothing).
  */
-export async function runChoice(mode: CellShiftMode, selection: Selection, choice: CellShiftChoice): Promise<void> {
+export async function runChoice(
+  mode: CellShiftMode,
+  selection: Selection,
+  choice: CellShiftChoice,
+  size: { totalRows: number; totalCols: number } = sheetSize(),
+): Promise<void> {
   if (choice === "entireRow" || choice === "entireColumn") {
+    // The row / column grid command's own door resolves where it acts (a
+    // floating grid's lines, or the sheet's) and hands the target on.
     await CommandRegistry.execute(lineCommand(mode, choice));
     return;
   }
   // A range that spans every column (row) is entire rows (columns) whatever
   // shift was named (Excel's rule, see the header) -- through Core's gesture,
   // so its refusals and guards apply, never the cell shift's whole-line branch.
-  const line = wholeLineChoice(selection);
+  const line = wholeLineChoice(selection, size);
   if (line) {
     await CommandRegistry.execute(lineCommand(mode, line));
+    return;
+  }
+  // A cell SHIFT. No owner admits "shiftCells" this round, so on a floating
+  // grid's cell this refuses with the grid's sentence and nothing is invoked;
+  // on a sheet cell it is the grid target and the shift runs as before.
+  const target = resolveCellTarget(shiftLabel(mode), "shiftCells");
+  if (target === null) return;
+  if (target.kind === "object") {
+    // An owner that admitted it would need an object route the backend does
+    // not have (insert_cells / delete_cells take no target): never fall
+    // through to Core's hidden cell under the object.
+    await alertAsync(`${shiftLabel(mode)} is not available for ${target.label}'s cells. Nothing was changed.`);
     return;
   }
   if (selection.additionalRanges && selection.additionalRanges.length > 0) {
@@ -218,13 +279,13 @@ export async function runChoice(mode: CellShiftMode, selection: Selection, choic
  * way Excel's shape rule says.
  */
 export async function runMainHalf(mode: CellShiftMode): Promise<void> {
-  if (refuseIfSelectionOwned(gestureLabel(mode))) return;
-  const selection = currentSelection();
-  if (!selection) return;
-  const line = wholeLineChoice(selection);
+  const place = resolveShiftPlace(mode);
+  if (!place) return;
+  const { selection, size } = place;
+  const line = wholeLineChoice(selection, size);
   if (line) {
-    await runChoice(mode, selection, line);
+    await runChoice(mode, selection, line, size);
     return;
   }
-  await runChoice(mode, selection, shapeShift(mode, selectionRect(selection)));
+  await runChoice(mode, selection, shapeShift(mode, selectionRect(selection)), size);
 }

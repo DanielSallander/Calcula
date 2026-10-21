@@ -33,7 +33,7 @@ let unsupported: string[] = [];
 
 vi.mock("@api/notifications", () => ({ showToast: vi.fn() }));
 vi.mock("@api/lib", () => ({ requestMacroToNotebook: vi.fn() }));
-vi.mock("@api/locale", () => ({ getCachedLocale: () => ({ decimalSeparator: "." }) }));
+vi.mock("@api/locale", () => ({ getAppLocale: () => ({ decimalSeparator: "." }) }));
 
 // PARTIAL: `a1.ts` pulls `colLetter` from this same module, so a wholesale
 // replacement breaks the anchor field before the layout is even rendered.

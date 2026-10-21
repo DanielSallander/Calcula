@@ -30,13 +30,15 @@ import {
   type ExpressionWorkspaceHandle,
 } from "./ExpressionWorkspace";
 import { ME } from "../theme";
+import { formatNumber } from "@api/locale";
 
 /** Best-effort preview of a number-format code applied to a sample value.
  *  Covers the common cases (decimals, thousands grouping, %, currency prefix);
- *  the authoritative formatting still happens in the engine. */
+ *  the authoritative formatting still happens in the engine. The digits use
+ *  the APP locale's separators (the code itself stays invariant syntax). */
 function previewFormat(value: number, fmt: string): string {
   const f = fmt.trim();
-  if (!f) return String(value); // General
+  if (!f) return formatNumber(value); // General
   const isPercent = f.includes("%");
   const n = isPercent ? value * 100 : value;
   const dot = f.indexOf(".");
@@ -46,11 +48,7 @@ function previewFormat(value: number, fmt: string): string {
   const cur = /\[\$([^\]]+)\]/.exec(f);
   if (cur) prefix = `${cur[1].split("-")[0].trim()} `;
   else if (f.includes("$")) prefix = "$";
-  const body = new Intl.NumberFormat(undefined, {
-    minimumFractionDigits: decimals,
-    maximumFractionDigits: decimals,
-    useGrouping: grouping,
-  }).format(n);
+  const body = formatNumber(n, { decimals, grouping });
   return `${prefix}${body}${isPercent ? "%" : ""}`;
 }
 

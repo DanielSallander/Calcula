@@ -1210,11 +1210,11 @@ test.describe.serial("canvas sheets, live", () => {
       const slicer = created.find((x) => x.sourceType === "biConnection")!;
       expect(slicer.sheetIndex, "the slicer sits on the canvas").toBe(canvas.index);
       const items = await eventually(
-        () => callModule<Array<{ value: string }> | undefined>(page, SLICER_STORE, "getCachedItems", [slicer.id]),
+        () => callModule<Array<{ key: string }> | undefined>(page, SLICER_STORE, "getCachedItems", [slicer.id]),
         (it) => (it?.length ?? 0) > 0,
         "the model slicer shows no items",
       );
-      expect(items!.map((i) => i.value).sort(), "its items are the model column's distinct values").toEqual(ALL);
+      expect(items!.map((i) => i.key).sort(), "its items are the model column's distinct values").toEqual(ALL);
 
       // ---- A click filters the canvas pivots and NOT the Sheet1 pivot.
       await callModule(page, SLICER_STORE, "updateSlicerSelectionAsync", [slicer.id, ["Gadgets"]]);

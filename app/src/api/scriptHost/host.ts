@@ -224,12 +224,14 @@ import { showToast } from "../notifications";
 // The fill-handle's own machinery (drag parity for api.fillRange): SHARED with
 // core/hooks/useFillHandle so a script fill and a drag fill cannot diverge.
 import {
+  fillNumberOf,
   fillPatternFor,
   processPendingFills,
   replicateMergeRegions,
   type PatternResult,
   type PendingFill,
 } from "../../core/lib/fillEngine";
+import { formatNumberIn, getActiveLocale } from "../../core/lib/locale";
 import { revokeScriptKeybindingsForScript } from "../keybindings";
 // A1 parsing for the Wave-4 `range` option: the SAME pure, dependency-free
 // parser the worker realm uses, so both realms read "B2:D10" identically.
@@ -240,6 +242,15 @@ import {
 import { getCellBehaviorById } from "../cellBehaviors";
 import { getSlicerStoreService, getTimelineStoreService, getChartStoreService, getPivotStoreService, getPaneControlStoreService } from "../componentStoreRegistry";
 import { getControlsProvider } from "../controlsService";
+import { listModelVisuals, modelVisualOf, type ModelVisualInfo } from "../modelVisuals";
+import {
+  clearCrossFilter,
+  clearCrossFilters,
+  getCrossFilters,
+  setCrossFilter,
+  type VisualRef,
+} from "../reportFilters";
+import { getReportPagesSnapshot, type ReportPage } from "../reportPages";
 import type { ChartPlacement } from "../componentStoreRegistry";
 import {
   chartToRef,
@@ -3703,7 +3714,7 @@ function qualifiesForDebugAutoEnd(session: DebugSessionState): boolean {
 /** Human duration for the completion line. */
 function formatRunDuration(ms: number): string {
   if (ms < 1000) return `${Math.max(0, Math.round(ms))} ms`;
-  return `${(ms / 1000).toFixed(1)} s`;
+  return `${formatNumberIn(getActiveLocale(), ms / 1000, { decimals: 1 })} s`;
 }
 
 /**
@@ -6101,6 +6112,25 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       const [patch, sheetRef] = args as [CanvasLayoutPatch, (number | string | null)?];
       const lib = await getLib();
       return executeSetCanvasLayout(lib, patch, sheetRef);
+    }
+    // P4 cross-filter rows: VIEW STATE over @api/reportFilters. No backend
+    // invoke at all -- the page comes from @api/reportPages' snapshot and the
+    // source from @api/modelVisuals, both in memory.
+    case "api.getCrossFilters": {
+      const [sheetRef] = args as [(number | string | null)?];
+      return executeGetCrossFilters(sheetRef);
+    }
+    case "api.setCrossFilter": {
+      const [source, selection, sheetRef] = args as [
+        VisualRef,
+        { fields: string[]; tuples: string[][] } | null,
+        (number | string | null)?,
+      ];
+      return executeSetCrossFilter(source, selection, sheetRef);
+    }
+    case "api.clearCrossFilters": {
+      const [sheetRef] = args as [(number | string | null)?];
+      return executeClearCrossFilters(sheetRef);
     }
     case "api.setTabColor": {
       // The one sheet attribute the CRUD rows left write-only-from-the-UI. The
@@ -9363,7 +9393,9 @@ function scriptSeriesPattern(values: string[]): PatternResult {
     pattern.type === "copy" &&
     basis.length === 1 &&
     basis[0].trim() !== "" &&
-    !Number.isNaN(parseFloat(basis[0]))
+    // The drag's own number reader (the app locale), so a lone "1,5" under
+    // de-DE counts on from 1,5 and is not mistaken for text or for 1.
+    fillNumberOf(basis[0]) !== null
   ) {
     return { type: "series", baseValues: basis, step: 1 };
   }
@@ -10856,7 +10888,7 @@ async function resolveCanvasSheet(
   lib: Awaited<ReturnType<typeof getLib>>,
   sheetRef: number | string | null | undefined,
   method: string,
-): Promise<{ index: number; name: string; layout: CanvasLayout }> {
+): Promise<{ index: number; name: string; layout: CanvasLayout; sheetId: string | null }> {
   const { sheets, activeIndex } = await lib.getSheets();
   const index =
     sheetRef === undefined || sheetRef === null
@@ -10884,7 +10916,49 @@ async function resolveCanvasSheet(
       `${method}: canvas sheet '${sheet.name}' was reported without its layout`,
     );
   }
-  return { index, name: sheet.name, layout: sheet.canvasLayout };
+  return { index, name: sheet.name, layout: sheet.canvasLayout, sheetId: sheet.sheetId ?? null };
+}
+
+/** Whether a listed visual sits on the canvas at (index, sheetId). The id
+ *  decides when both sides have one; a visual the page list has not named yet
+ *  falls back to its TRUE sheet index. */
+function visualIsOnCanvas(v: ModelVisualInfo, index: number, sheetId: string | null): boolean {
+  if (sheetId && v.sheetId) return v.sheetId === sheetId;
+  return v.sheetIndex === index;
+}
+
+/** `chart "c1", pivot "p2"` -- the visuals a refusal lists, at most 12. */
+function describeVisuals(visuals: readonly ModelVisualInfo[]): string {
+  if (visuals.length === 0) return "none";
+  const shown = visuals.slice(0, 12).map((v) => `${v.ref.kind} "${v.ref.id}"`);
+  return visuals.length > 12 ? `${shown.join(", ")}, ...` : shown.join(", ");
+}
+
+/**
+ * The interaction refs of a layout patch must name visuals that exist on THAT
+ * canvas (owner decision DC-5): a pair naming an object on another page, or
+ * nothing at all, would be stored and silently do nothing. Existence is asked
+ * of @api/modelVisuals, the seam every visual family lists its objects on.
+ */
+function checkInteractionRefsOnCanvas(
+  patch: CanvasLayoutPatch,
+  canvas: { index: number; name: string; sheetId: string | null },
+): void {
+  const pairs = patch.interactions?.pairs ?? [];
+  if (pairs.length === 0) return;
+  const here = listModelVisuals().filter((v) => visualIsOnCanvas(v, canvas.index, canvas.sheetId));
+  const known = new Set(here.map((v) => `${v.ref.kind}:${v.ref.id}`));
+  pairs.forEach((pair, i) => {
+    for (const end of ["source", "target"] as const) {
+      const ref = pair[end];
+      if (known.has(`${ref.kind}:${ref.id}`)) continue;
+      throw new BrokerError(
+        "ValidationError",
+        `setCanvasLayout: interactions.pairs[${i}].${end} names ${ref.kind} "${ref.id}", which is not a visual ` +
+          `on canvas '${canvas.name}' (visuals there: ${describeVisuals(here)})`,
+      );
+    }
+  });
 }
 
 /** api.getCanvasLayout — a canvas sheet's layout, exactly as the backend holds
@@ -10910,8 +10984,172 @@ export async function executeSetCanvasLayout(
   patch: CanvasLayoutPatch,
   sheetRef?: number | string | null,
 ): Promise<CanvasLayout> {
-  const { index } = await resolveCanvasSheet(lib, sheetRef, "setCanvasLayout");
+  const { index, name, sheetId } = await resolveCanvasSheet(lib, sheetRef, "setCanvasLayout");
+  checkInteractionRefsOnCanvas(patch, { index, name, sheetId });
   return lib.setCanvasLayout(patch, index);
+}
+
+// ============================================================================
+// Cross-filter (P4): a visual's selection on a canvas page, as view state
+// ============================================================================
+// The same act as clicking a bar: @api/reportFilters holds it, nothing is
+// saved, nothing enters the undo stack, and no backend command is invoked. The
+// page is resolved against @api/reportPages' snapshot (canvas pages only), and
+// the source against @api/modelVisuals (the seam every visual family lists its
+// objects on), so a script can select only what a person could click.
+
+/** One selection as a script reads it. Keys are member KEYS ("" = blank). */
+export interface ScriptCrossFilter {
+  source: VisualRef;
+  sourceName: string;
+  sheetIndex: number;
+  sheetName: string;
+  fields: string[];
+  tuples: string[][];
+}
+
+/**
+ * The canvas page a cross-filter row addresses. undefined/null is the ACTIVE
+ * sheet when `activeByDefault`, otherwise null (every page). Index or name
+ * otherwise; a worksheet is refused by name, never treated as "no page".
+ */
+function resolveCrossFilterPage(
+  sheetRef: number | string | null | undefined,
+  method: string,
+  activeByDefault: boolean,
+): ReportPage | null {
+  const snapshot = getReportPagesSnapshot();
+  const pages = snapshot.pages;
+  const describe = (): string =>
+    pages.length === 0 ? "none" : pages.map((p) => `"${p.name}" (${p.index})`).join(", ");
+  let page: ReportPage | undefined;
+  if (sheetRef === undefined || sheetRef === null) {
+    if (!activeByDefault) return null;
+    page = pages.find((p) => p.index === snapshot.activeIndex);
+    if (!page) {
+      throw new BrokerError(
+        "ValidationError",
+        `${method}: the active sheet is not a canvas page; cross-filter works on canvas pages only ` +
+          `(canvas pages: ${describe()})`,
+      );
+    }
+  } else if (typeof sheetRef === "number") {
+    page = pages.find((p) => p.index === sheetRef);
+    if (!page) {
+      const exists = snapshot.sheetIdByIndex.has(sheetRef);
+      throw new BrokerError(
+        "ValidationError",
+        exists
+          ? `${method}: sheet ${sheetRef} is not a canvas page; cross-filter works on canvas pages only (canvas pages: ${describe()})`
+          : `${method}: no sheet with index ${sheetRef} (canvas pages: ${describe()})`,
+      );
+    }
+  } else {
+    const exact = pages.filter((p) => p.name === sheetRef);
+    const lower = sheetRef.toLowerCase();
+    const matches = exact.length > 0 ? exact : pages.filter((p) => p.name.toLowerCase() === lower);
+    if (matches.length > 1) {
+      throw new BrokerError(
+        "ValidationError",
+        `${method}: sheet name "${sheetRef}" is ambiguous ignoring case -- use the exact name or the index`,
+      );
+    }
+    page = matches[0];
+    if (!page) {
+      throw new BrokerError(
+        "ValidationError",
+        `${method}: no canvas page named "${sheetRef}"; cross-filter works on canvas pages only ` +
+          `(canvas pages: ${describe()})`,
+      );
+    }
+  }
+  if (!page.sheetId) {
+    // The page list always carries ids from a current backend; a page without
+    // one is a backend/frontend skew, never something to guess an id for.
+    throw new BrokerError("HostError", `${method}: canvas page '${page.name}' was reported without its sheet id`);
+  }
+  return page;
+}
+
+/** api.getCrossFilters -- the selections on one canvas page, or on every page. */
+export function executeGetCrossFilters(sheetRef?: number | string | null): ScriptCrossFilter[] {
+  const page = resolveCrossFilterPage(sheetRef, "getCrossFilters", false);
+  const pages = getReportPagesSnapshot().pages;
+  return getCrossFilters(page?.sheetId).map((sel) => {
+    const on = pages.find((p) => p.sheetId === sel.pageSheetId);
+    return {
+      source: { kind: sel.source.kind, id: sel.source.id },
+      sourceName: sel.sourceName,
+      sheetIndex: on?.index ?? -1,
+      sheetName: on?.name ?? "",
+      fields: [...sel.fields],
+      tuples: sel.tuples.map((t) => [...t]),
+    };
+  });
+}
+
+/**
+ * api.setCrossFilter -- select `selection` in `source` (null clears it). The
+ * source must be a visual ON THAT CANVAS that can be a source
+ * (`modelVisualOf(ref).role.source`); its model connection and name come from
+ * the seam, never from the script.
+ */
+export function executeSetCrossFilter(
+  source: VisualRef,
+  selection: { fields: string[]; tuples: string[][] } | null,
+  sheetRef?: number | string | null,
+): void {
+  const page = resolveCrossFilterPage(sheetRef, "setCrossFilter", true) as ReportPage;
+  const info = modelVisualOf(source);
+  if (!info || !visualIsOnCanvas(info, page.index, page.sheetId)) {
+    const here = listModelVisuals().filter((v) => visualIsOnCanvas(v, page.index, page.sheetId));
+    throw new BrokerError(
+      "ValidationError",
+      `setCrossFilter: no visual ${source.kind} "${source.id}" on canvas page '${page.name}' ` +
+        `(visuals there: ${describeVisuals(here)})`,
+    );
+  }
+  // A slicer filters through its OWN items, which the user sees ticked. A
+  // script-set "selection" on a slicer would filter the page while the slicer
+  // shows nothing selected, and Clear All Slicers would not clear it (visual
+  // selections are kept apart from slicers): a filter nobody can see. No
+  // gesture makes one either -- only charts and pivots hold selections.
+  if (info.ref.kind === "slicer") {
+    throw new BrokerError(
+      "ValidationError",
+      `setCrossFilter: ${info.label} "${info.name}" filters through its own items; ` +
+        "select them on the slicer, not with api.setCrossFilter",
+    );
+  }
+  if (!info.role.source || !info.connectionId) {
+    throw new BrokerError(
+      "ValidationError",
+      `setCrossFilter: ${info.label} "${info.name}" cannot filter other visuals` +
+        (info.role.reason ? ` (${info.role.reason})` : ""),
+    );
+  }
+  if (selection === null) {
+    clearCrossFilter(info.ref);
+    return;
+  }
+  try {
+    setCrossFilter({
+      source: { kind: info.ref.kind, id: info.ref.id },
+      sourceName: info.name,
+      pageSheetId: page.sheetId,
+      connectionId: info.connectionId,
+      fields: selection.fields,
+      tuples: selection.tuples,
+    });
+  } catch (err) {
+    throw new BrokerError("ValidationError", `setCrossFilter: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/** api.clearCrossFilters -- clear the selections on one canvas page, or on every page. */
+export function executeClearCrossFilters(sheetRef?: number | string | null): void {
+  const page = resolveCrossFilterPage(sheetRef, "clearCrossFilters", false);
+  clearCrossFilters(page?.sheetId);
 }
 
 // ============================================================================
@@ -17958,16 +18196,20 @@ export function hasShapeBitmapRenderer(instanceId: string): boolean {
 
 /**
  * Host blit API for the slicer renderer. Key self-invalidates on state
- * change (slicerId + item text + selected + hasData + size).
+ * change (slicerId + item key + item text + selected + hasData + size).
+ * `item.text` is the DISPLAY label (app locale) and `item.key` the invariant
+ * member key (what `slicer.setSelectedItems` speaks): the cache keys on BOTH,
+ * so a locale switch (same key, new label) repaints, and two members that
+ * happen to share a label never share a bitmap.
  */
 export function getSlicerItemBitmap(
   slicerId: string,
-  item: { text: string; selected: boolean; hasData: boolean },
+  item: { text: string; key: string; selected: boolean; hasData: boolean },
   w: number,
   h: number,
   dpr: number,
 ): ImageBitmap | null {
-  const key = `${slicerId}:${item.text}:${item.selected}:${item.hasData}:${Math.round(w)}x${Math.round(h)}`;
+  const key = `${slicerId}:${item.key + "\u0000" + item.text}:${item.selected}:${item.hasData}:${Math.round(w)}x${Math.round(h)}`;
   const cached = getBitmap("slicerItem", key);
   if (cached) {
     return cached.bitmap;

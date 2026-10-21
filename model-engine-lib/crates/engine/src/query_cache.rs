@@ -353,6 +353,31 @@ pub(crate) fn query_cache_key(
         }
         f.level.hash(&mut hasher);
     }
+    // Tuple (multi-column) slicers: the columns (with table attribution),
+    // the tuples IN ORDER and the level are all part of the key -- two
+    // different Ctrl+click selections must never share one cached answer.
+    request.scoped_tuple_filters.len().hash(&mut hasher);
+    for f in &request.scoped_tuple_filters {
+        f.columns.len().hash(&mut hasher);
+        for c in &f.columns {
+            match &c.table {
+                Some(t) => {
+                    1u8.hash(&mut hasher);
+                    t.hash(&mut hasher);
+                }
+                None => 0u8.hash(&mut hasher),
+            }
+            c.column.hash(&mut hasher);
+        }
+        f.tuples.len().hash(&mut hasher);
+        for t in &f.tuples {
+            t.len().hash(&mut hasher);
+            for v in t {
+                v.hash(&mut hasher);
+            }
+        }
+        f.level.hash(&mut hasher);
+    }
 
     // Lookups (order matters).
     request.lookups.len().hash(&mut hasher);

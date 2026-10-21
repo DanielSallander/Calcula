@@ -23,6 +23,17 @@
 // text goes horizontal, cap 250), Comma Style is the backend's `comma` preset,
 // and Increase/Decrease Decimal are the backend's own step. Each rule's
 // measurement is cited where it is applied.
+//
+// A FLOATING GRID'S CELLS (P3, owner finding G3). Every door here asks
+// `resolveCellTarget(action, capability)` (@api/cellTarget) instead of only
+// refusing: with nothing else holding the selection it is Core's selection as
+// before; with a floating grid's cell selected (and the grid admitting the
+// act) it is THAT grid's own selection, written through `{ target }` -- the
+// backend resolves the grid's hidden backing sheet. An owner that does not
+// admit the act refuses, once, as before (BUG-0185). The ribbon's pressed
+// state reads the same cell the doors write (`cellTargetFor("read")` plus
+// `readTargetCell`), and re-reads when the owner's selection moves
+// (`onCellTargetChanged`), so Bold lights for the floating grid's cell.
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useGridState } from "@api";
@@ -37,7 +48,7 @@ import {
   commitUndoTransaction,
   cancelUndoTransaction,
 } from "@api/lib";
-import type { RichTextRun, CellData, FormattingResult } from "@api/types";
+import type { RichTextRun, CellData, FormattingResult, Selection } from "@api/types";
 import type { StyleData } from "@api/types";
 import { activeCellOf } from "@api/activeCell";
 import { selectionBlocks } from "@api/selectionBlocks";
@@ -49,7 +60,14 @@ import {
 } from "../homeTabConfig";
 import type { CellStyleDefinition } from "../../../_shared/components/CellStylesGallery";
 import { alertAsync } from "@api/dialogs";
-import { refuseIfSelectionOwned } from "@api/selectionOwner";
+import {
+  resolveCellTarget,
+  cellTargetFor,
+  targetRefOf,
+  readTargetCell,
+  onCellTargetChanged,
+  type CellTargetCapability,
+} from "@api/cellTarget";
 import { clipboardDoorCommand } from "@api/objectClipboard";
 import type { MergeMenuCommand } from "./homeTabIcons";
 import { FONT_SIZE_LADDER, fontSizeStep } from "../../../_shared/lib/fontList";
@@ -99,6 +117,36 @@ export function increaseIndentFormatting(style: StyleData | null): Record<string
   return formatting;
 }
 
+/**
+ * The capability a formatting write asks for: a write of the number format
+ * alone is the Number group's ("numberFormat": the dropdown, Percent, Comma,
+ * Accounting); anything else is "format".
+ */
+export function formatCapabilityOf(formatting: Record<string, unknown>): CellTargetCapability {
+  const keys = Object.keys(formatting).filter((k) => formatting[k] !== undefined);
+  return keys.length === 1 && keys[0] === "numberFormat" ? "numberFormat" : "format";
+}
+
+/**
+ * The cell the ribbon describes, read where the doors would write: a floating
+ * grid's active cell (through its target) when its owner admits a read, else
+ * Core's active cell of `gridSelection`. `null`: there is no active cell.
+ * `cell: null`: the active cell stores nothing.
+ */
+export async function readRibbonCell(
+  gridSelection: Selection | null | undefined,
+): Promise<{ cell: CellData | null } | null> {
+  const answer = cellTargetFor("read");
+  if ("kind" in answer && answer.kind === "object") {
+    const active = activeCellOf(answer.selection);
+    if (!active) return null;
+    return { cell: await readTargetCell(answer.ref, active.row, active.col) };
+  }
+  const active = activeCellOf(gridSelection);
+  if (!active) return null;
+  return { cell: await getCell(active.row, active.col) };
+}
+
 export function useHomeTabState() {
   const gridState = useGridState();
   const [currentStyle, setCurrentStyle] = useState<StyleData | null>(null);
@@ -138,8 +186,13 @@ export function useHomeTabState() {
     for (const name of ["grid:refresh", "styles:refresh", "app:sheet-changed"]) {
       window.addEventListener(name, bump);
     }
+    // A floating grid's selection moved (or its cells were written through a
+    // target): the ribbon describes ITS active cell, which Core's selection
+    // object does not follow.
+    const stopTarget = onCellTargetChanged(bump);
     return () => {
       if (timer) clearTimeout(timer);
+      stopTarget();
       for (const name of ["grid:refresh", "styles:refresh", "app:sheet-changed"]) {
         window.removeEventListener(name, bump);
       }
@@ -170,15 +223,15 @@ export function useHomeTabState() {
    * document -- so both are fixed here rather than at the call sites.
    */
   useEffect(() => {
-    const active = activeCellOf(gridState.selection);
-    if (!active) {
-      setCurrentCellData(null);
-      setCurrentStyle(null);
-      return;
-    }
     let cancelled = false;
-    getCell(active.row, active.col).then((cell) => {
+    readRibbonCell(gridState.selection).then((read) => {
       if (cancelled) return;
+      if (!read) {
+        setCurrentCellData(null);
+        setCurrentStyle(null);
+        return;
+      }
+      const cell = read.cell;
       if (!cell) {
         // The cell holds nothing: the ribbon must not keep the last cell that
         // did (BUG-0028) — but a null style is not the truth either. A null
@@ -218,10 +271,9 @@ export function useHomeTabState() {
    */
   const rereadActiveStyle = useCallback(async () => {
     try {
-      const active = activeCellOf(getGridStateSnapshot()?.selection ?? lastSelectionRef.current);
-      if (!active) return;
-      const cell = await getCell(active.row, active.col);
-      if (cell) setCurrentStyle(await getStyle(cell.styleIndex));
+      const read = await readRibbonCell(getGridStateSnapshot()?.selection ?? lastSelectionRef.current);
+      if (!read?.cell) return;
+      setCurrentStyle(await getStyle(read.cell.styleIndex));
     } catch {
       // The coalesced document re-read (above) will catch up.
     }
@@ -231,7 +283,9 @@ export function useHomeTabState() {
    * Apply formatting and refresh. THE Home tab's formatting door: every
    * button, picker, colour and the cell-style gallery come through here, so
    * this is where a selection owner (a floating grid's selected cell, with
-   * Core's selection HIDDEN under it -- BUG-0185) refuses them, once.
+   * Core's selection HIDDEN under it -- BUG-0185) is asked WHICH cells: its
+   * own, when it admits the act (written through `{ target }`), else it
+   * refuses, once. A write of the number format alone asks "numberFormat".
    *
    * EVERY BLOCK of the selection, one applyFormatting call each, inside ONE
    * owned undo transaction when there are several (so one Ctrl+Z restores
@@ -253,8 +307,12 @@ export function useHomeTabState() {
    */
   const applyFormat = useCallback(
     async (formatting: Record<string, unknown>, action = "Formatting"): Promise<boolean> => {
-      if (refuseIfSelectionOwned(action)) return false;
-      const blocks = getSelectionBlocks();
+      // WHICH cells: Core's selection, or a floating grid's own (P3). A refusal
+      // has been announced once; nothing is written.
+      const t = resolveCellTarget(action, formatCapabilityOf(formatting));
+      if (t === null) return false;
+      const target = targetRefOf(t);
+      const blocks = t.kind === "object" ? selectionBlocks(t.selection).map(rowsColsOf) : getSelectionBlocks();
       if (blocks.length === 0) return false;
       // One block: the backend's own step is the one undo step. A begin that
       // fails still lets the write apply (as several steps); a begin that
@@ -270,7 +328,7 @@ export function useHomeTabState() {
       try {
         for (const block of blocks) {
           landed.push(
-            await applyFormatting(block.rows, block.cols, formatting as Parameters<typeof applyFormatting>[2]),
+            await applyFormatting(block.rows, block.cols, formatting as Parameters<typeof applyFormatting>[2], { target }),
           );
         }
         await tx?.commit();
@@ -283,7 +341,7 @@ export function useHomeTabState() {
         );
       }
       if (landed.length === 0) return false;
-      announceFormattingResult(landed);
+      announceFormattingResult(landed, { target });
       await rereadActiveStyle();
       return true;
     },
@@ -331,24 +389,35 @@ export function useHomeTabState() {
         case "strikethrough": await applyFormat({ strikethrough: !(currentStyle?.strikethrough ?? false) }, action); break;
         case "superscript":
         case "subscript": {
-          // Its own write path (rich text, not applyFormat), so its own ask.
-          if (refuseIfSelectionOwned(action)) break;
-          const active = activeCellOf(gridState.selection ?? lastSelectionRef.current);
+          // Its own write path (rich text, not applyFormat), so its own ask --
+          // and its own READ: the cell's text comes from the same place the
+          // rich text is written (a floating grid's cell through its target).
+          const t = resolveCellTarget(action, "format");
+          if (t === null) break;
+          const target = targetRefOf(t);
+          const active = activeCellOf(
+            t.kind === "object" ? t.selection : (gridState.selection ?? lastSelectionRef.current),
+          );
           if (!active) break;
+          const readCell = (row: number, col: number): Promise<CellData | null> =>
+            target ? readTargetCell(target, row, col) : getCell(row, col);
           const isSuperscript = item.id === "superscript";
-          const cellData = await getCell(active.row, active.col);
+          const cellData = await readCell(active.row, active.col);
           const cellText = cellData?.display ?? "";
           if (!cellText) break;
           const runs = cellData?.richText;
           const isCurrentlyActive = runs?.length === 1 &&
             (isSuperscript ? runs[0].superscript : runs[0].subscript);
           if (isCurrentlyActive) {
-            await setCellRichText(active.row, active.col, null);
+            await setCellRichText(active.row, active.col, null, { target });
           } else {
             const run: RichTextRun = { text: cellText, superscript: isSuperscript, subscript: !isSuperscript };
-            await setCellRichText(active.row, active.col, [run]);
+            await setCellRichText(active.row, active.col, [run], { target });
           }
-          const updated = await getCell(active.row, active.col);
+          // A floating grid repaints from its own read: tell it (and the
+          // ribbon) that its cell changed. Core's grid hears the backend.
+          if (target) announceFormattingResult(null, { target });
+          const updated = await readCell(active.row, active.col);
           if (updated) setCurrentCellData(updated);
           break;
         }

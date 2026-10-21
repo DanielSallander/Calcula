@@ -325,9 +325,16 @@ export function ChartRangeDataTab({ ctx, chartId, getChart, onEditInDialog }: Ch
             if (updates.seriesColors) setDraftColors({ ...updates.seriesColors });
           }}
           onSeriesColorCommit={(updates) => {
-            if (readOnly) return;
+            if (readOnly) {
+              setDraftColors(null);
+              return;
+            }
             void write(updates).finally(() => setDraftColors(null));
           }}
+          // The STORED colours (never the draft): {} when none are stored, because
+          // an absent prop means "diff against `spec`" -- which here is the draft.
+          storedSeriesColors={spec.seriesColors ?? {}}
+          onSeriesColorEnd={() => setDraftColors(null)}
           availableAxes={stored.availableAxes}
           palette={spec.palette ?? "default"}
           orientationGroupName={groupName}

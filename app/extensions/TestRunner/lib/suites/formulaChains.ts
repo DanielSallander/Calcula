@@ -14,6 +14,7 @@ import {
   expectCellContains,
 } from "../assertions";
 import { recalculateFormulas } from "@api/backend";
+import { parseNumber } from "@api/locale";
 
 const A = AREA_FORMULA_CHAINS;
 
@@ -729,13 +730,13 @@ export const formulaChainsSuite: TestSuite = {
         let cell = await ctx.getCell(r, c + 3);
         // "TRUE" entered as text is still non-empty, so COUNTA = 3
         // But engine may parse "TRUE" as boolean, making COUNTA = 3
-        const countA = parseInt(cell!.display, 10);
+        const countA = parseNumber(cell!.display) ?? NaN;
         assertTrue(countA >= 3, `COUNTA should be >= 3, got ${countA}`);
 
         cell = await ctx.getCell(r + 1, c + 3);
         // COUNT counts numeric values. "TRUE" may be counted as numeric (boolean=1).
         // Engine counts: 10 (number) + TRUE (boolean=numeric) = at least 1
-        const countVal = parseInt(cell!.display, 10);
+        const countVal = parseNumber(cell!.display) ?? NaN;
         assertTrue(countVal >= 1, `COUNT should be >= 1, got ${countVal}`);
       },
     },

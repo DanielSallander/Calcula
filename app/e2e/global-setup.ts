@@ -24,6 +24,7 @@ import {
   surveyCalculaProcesses,
 } from "./processResidue";
 import { resetVolatilePersistedStateOverCdp } from "./volatilePersistedState";
+import { recordLocaleBaseline } from "./localeBaseline";
 import {
   resolveBuildTarget,
   describeBinary,
@@ -141,6 +142,20 @@ export default async function globalSetup(config: FullConfig) {
       );
     }
     clearRecordedPids(); // a fresh ledger: these are not ours to kill later
+  }
+
+  // THE APP-LOCALE BASELINE (P2 S11), recorded READ-ONLY. The backend persists
+  // every explicit `set_locale` to %LOCALAPPDATA%\Calcula\app-settings.json, so
+  // a spec that forgets to restore leaves the owner's profile in another
+  // locale. This never edits that file (manual mode included): it records what
+  // the profile held, and journeys/zz-persisted-residue.spec.ts compares the
+  // live override against it at the end of the run. See e2e/localeBaseline.ts.
+  {
+    const baseline = recordLocaleBaseline();
+    console.log(
+      `[e2e] app-locale baseline: localeOverride=${JSON.stringify(baseline.localeOverride)} ` +
+        `(read-only from ${baseline.source}${baseline.note ? `; ${baseline.note}` : ""})`,
+    );
   }
 
   // NOTE ON THE DEPENDENCY CACHE (BUG-0082's second mechanism, §32). Nothing is

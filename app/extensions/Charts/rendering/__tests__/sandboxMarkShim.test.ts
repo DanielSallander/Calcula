@@ -111,7 +111,8 @@ describe("buildSandboxMarkDefinition (B8.D shim + Feature 2 chrome/geometry)", (
     const layout = def.computeLayout(400, 300, spec, data, theme);
     const ctx = spyCtx();
     def.paint(ctx as never, data, spec, layout, theme);
-    expect(ctx.fillRect).toHaveBeenCalled(); // background + plot bg chrome
+    // The plot area is transparent by default (Power BI): no plot fill.
+    expect(ctx.fillRect).not.toHaveBeenCalled();
     expect(ctx.stroke).toHaveBeenCalled(); // axis lines drawn (full chrome)
     expect(ctx.drawImage).not.toHaveBeenCalled();
     expect(getChartMarkBitmap).toHaveBeenCalledTimes(1);
@@ -153,13 +154,27 @@ describe("buildSandboxMarkDefinition (B8.D shim + Feature 2 chrome/geometry)", (
     expect(vi.mocked(getChartMarkBitmap).mock.calls[0][1]).toBe(vi.mocked(getChartMarkGeometry).mock.calls[0][0]);
   });
 
+  it("a theme plot fill is painted over the plot rect by both chrome families", () => {
+    vi.mocked(getChartMarkBitmap).mockReturnValue(null);
+    const tinted = resolveChartTheme({ theme: { plotBackground: "#f0f5fa" } });
+    for (const layoutFamily of ["cartesian", "radial"] as const) {
+      const def = buildSandboxMarkDefinition("scriptX", "sandbox:demo", { label: "Demo", layoutFamily });
+      const layout = def.computeLayout(400, 300, spec, data, tinted);
+      const ctx = spyCtx();
+      def.paint(ctx as never, data, spec, layout, tinted);
+      const pa = layout.plotArea;
+      expect(ctx.fillRect, layoutFamily).toHaveBeenCalledWith(pa.x, pa.y, pa.width, pa.height);
+    }
+  });
+
   it("RADIAL: uses a radial frame and exposes no per-datum geometry", () => {
     vi.mocked(getChartMarkBitmap).mockReturnValue(null);
     const def = buildSandboxMarkDefinition("scriptX", "sandbox:pie", { label: "Pie", layoutFamily: "radial" });
     const layout = def.computeLayout(400, 300, spec, data, theme);
     const ctx = spyCtx();
     def.paint(ctx as never, data, spec, layout, theme);
-    expect(ctx.fillRect).toHaveBeenCalled(); // background chrome
+    // The plot area is transparent by default (Power BI): no plot fill.
+    expect(ctx.fillRect).not.toHaveBeenCalled();
     expect(def.computeGeometry(data, spec, layout, theme)).toEqual({ type: "bars", rects: [] });
     // Radial never consults the cartesian geometry cache.
     expect(getChartMarkGeometry).not.toHaveBeenCalled();

@@ -21,7 +21,7 @@ const h = vi.hoisted(() => ({
 
 vi.mock("../lib/slicerStore", () => ({
   getSlicerById: (id: string) => (id === "s1" ? (h.slicer ?? undefined) : undefined),
-  getCachedItems: (id: string) => (id === "s1" ? [{ value: "North", selected: true, hasData: true }] : undefined),
+  getCachedItems: (id: string) => (id === "s1" ? [{ key: "North", label: "North", selected: true, hasData: true }] : undefined),
 }));
 
 vi.mock("@api/objectScriptBadge", () => ({

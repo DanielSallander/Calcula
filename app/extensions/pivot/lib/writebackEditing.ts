@@ -18,7 +18,7 @@ import {
   biWritebackSetValue,
   type BiWritebackFieldMeta,
 } from "@api";
-import { getLocaleSettings } from "@api/locale";
+import { parseNumber } from "@api/locale";
 import type {
   PivotRegionInfo,
   PivotViewResponse,
@@ -28,6 +28,7 @@ import type {
 } from "@api/pivotTypes";
 import { getPivotAtCell } from "./pivot-api";
 import { getCachedPivotView, getCellWindowCache } from "./pivotViewStore";
+import { isShowingFilteredView } from "./pivotCrossFilterView";
 import { findPivotRegionAtCell, getCachedRegions } from "../handlers/selectionHandler";
 import type { PivotRegionData } from "../types";
 
@@ -42,6 +43,15 @@ export interface WritebackCellTarget {
   /** The host row's key values (label text), in the meta's keyColumns order. */
   key: string[];
   columnName: string;
+  /** The writeback column's declared type, as the backend names it
+   *  ("Float64", "Int64", "Boolean", "String"). A number column's input is
+   *  read in the app locale; any other column's text goes as typed. */
+  dataType?: string;
+}
+
+/** The writeback types the backend parses as numbers (`parse_value`). */
+function isNumericWritebackType(dataType: string | undefined): boolean {
+  return dataType === "Float64" || dataType === "Int64";
 }
 
 /** How to read one key value from the pivot view. */
@@ -338,6 +348,10 @@ export function resolveWritebackCell(
 
   const region = findPivotRegionAtCell(sheetRow, sheetCol);
   if (!region || region.pivotId !== pivotId || region.isEmpty) return null;
+  // A canvas box showing a FILTERED view (P4 S7) shows cells of a transient
+  // view: the grain rule below reads the REAL view, so an edit there would
+  // write a row the user is not looking at. Refused -- not editable.
+  if (isShowingFilteredView(pivotId)) return null;
 
   const view = getCachedPivotView(pivotId);
   if (!view) return null;
@@ -375,6 +389,7 @@ export function resolveWritebackCell(
     writebackId: editable.meta.id,
     key,
     columnName: editable.meta.name,
+    dataType: editable.meta.dataType,
   };
 }
 
@@ -398,17 +413,17 @@ export async function submitWritebackValue(
     );
   }
   let value: string | null = trimmed === "" ? null : trimmed;
-  if (value !== null) {
-    // The backend parses numbers invariantly; fold a locale decimal comma
-    // ("1,5") into "1.5" so numeric input works under e.g. sv-SE.
-    try {
-      const locale = await getLocaleSettings();
-      if (locale.decimalSeparator === "," && /^-?\d+,\d+$/.test(value)) {
-        value = value.replace(",", ".");
-      }
-    } catch {
-      // Locale lookup is best-effort; submit the raw value.
+  if (value !== null && isNumericWritebackType(target.dataType)) {
+    // A NUMBER column: what the user typed is read STRICTLY in the app locale
+    // ("1.234,5" under de-DE is 1234.5) and the number goes to the backend in
+    // its invariant spelling, which is what Rust parses. Text that is no number
+    // in the app locale is refused here, never handed to the backend's
+    // lenient reader, which would take a de-DE "1.5" as one and a half.
+    const typed = parseNumber(value);
+    if (typed === null) {
+      throw new Error(`'${target.columnName}' expects a number, got '${value}'`);
     }
+    value = String(typed);
   }
   await biWritebackSetValue(target.connectionId, target.writebackId, target.key, value);
 }

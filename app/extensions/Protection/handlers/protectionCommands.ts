@@ -24,7 +24,8 @@ import {
 } from "@api";
 import { getGridStateSnapshot, refreshGridData } from "@api/grid";
 import { showToast } from "@api/notifications";
-import { refuseIfSelectionOwned } from "@api/selectionOwner";
+import { applyFormatting, getStyle } from "@api/lib";
+import { resolveCellTarget, targetRefOf, readTargetCell, notifyCellTargetChanged } from "@api/cellTarget";
 import { ownUndoTransaction, type OwnedUndoTransaction, type UndoTransactionCloses } from "@api/undoTicket";
 import { toggleProtectSheet } from "./reviewMenuBuilder";
 import { isCurrentSheetProtected, refreshProtectionState } from "../lib/protectionStore";
@@ -66,14 +67,23 @@ async function protectSheetCommand(): Promise<void> {
  * - The lock lives in the cell's STYLE (a cell format attribute), so the
  *   grid's cached cells -- whose style indices a later copy or Format Painter
  *   reads -- are refreshed afterwards.
+ * - WHICH cells (P3, owner finding G3): Core's selection, or a floating grid's
+ *   own cells when its owner admits "format". A floating grid's cells take
+ *   the `locked` flag of their style through their target
+ *   (`applyFormatting(.., { locked }, { target })`, gated by the HOST's
+ *   protection, which is the active sheet's), and the active cell's flag is
+ *   read through the target too. An owner that does not admit it refuses,
+ *   once -- never the sheet cell hidden under the grid (BUG-0185).
  */
 export async function toggleLockCell(): Promise<void> {
-  if (refuseIfSelectionOwned("Lock Cell")) return;
+  const t = resolveCellTarget("Lock Cell", "format");
+  if (t === null) return;
   if (isCurrentSheetProtected()) {
     showToast(PROTECTED_REFUSAL, { variant: "info" });
     return;
   }
-  const selection = getGridStateSnapshot()?.selection ?? null;
+  const target = targetRefOf(t);
+  const selection = t.kind === "object" ? t.selection : (getGridStateSnapshot()?.selection ?? null);
   if (!selection) return;
 
   // The active cell is (endRow, endCol) in Calcula's selection model; the
@@ -82,7 +92,13 @@ export async function toggleLockCell(): Promise<void> {
   const activeCol = selection.activeCol ?? selection.endCol;
   let locked: boolean;
   try {
-    locked = !(await getCellProtection(activeRow, activeCol)).locked;
+    if (target) {
+      // The style's flag (an empty cell carries the default style, locked).
+      const cell = await readTargetCell(target, activeRow, activeCol);
+      locked = !((await getStyle(cell?.styleIndex ?? 0)).locked ?? true);
+    } else {
+      locked = !(await getCellProtection(activeRow, activeCol)).locked;
+    }
   } catch (err) {
     console.error("[Protection] Lock Cell: could not read the active cell's protection:", err);
     showToast("Could not read whether the active cell is locked.", { variant: "error" });
@@ -95,6 +111,17 @@ export async function toggleLockCell(): Promise<void> {
   try {
     tx = ownUndoTransaction(await beginUndoTransaction(locked ? "Lock cells" : "Unlock cells"), UNDO_CLOSES);
     for (const area of areas) {
+      if (target) {
+        // A floating grid's cells: the style flag through the target. A
+        // refusal throws (caught below) and stops the gesture.
+        const rows: number[] = [];
+        const cols: number[] = [];
+        for (let r = Math.min(area.startRow, area.endRow); r <= Math.max(area.startRow, area.endRow); r++) rows.push(r);
+        for (let c = Math.min(area.startCol, area.endCol); c <= Math.max(area.startCol, area.endCol); c++) cols.push(c);
+        await applyFormatting(rows, cols, { locked }, { target });
+        landed++;
+        continue;
+      }
       const result = await setCellProtection({
         startRow: Math.min(area.startRow, area.endRow),
         startCol: Math.min(area.startCol, area.endCol),
@@ -124,7 +151,11 @@ export async function toggleLockCell(): Promise<void> {
       console.error("[Protection] Lock Cell: closing the undo step failed:", err);
     }
   }
-  if (landed > 0) refreshGridData();
+  if (landed > 0) {
+    refreshGridData();
+    // A floating grid repaints and the ribbon re-reads from the target.
+    if (target) notifyCellTargetChanged();
+  }
 }
 
 /**

@@ -39,17 +39,31 @@
 //      too since D4; the exclusive binding keeps it to one sentence, the
 //      range's, and keeps the key from anything else on the window).
 //
+// P3 (owner finding G3, 2026-10-16): the claim ANSWERS as well as refuses. A
+// door that supports cell targets asks `resolveCellTarget(action, capability)`
+// and, for every capability in FR_ACTS_ON, acts on the range's OWN cells
+// (lib/frCellTarget.ts) -- the backing sheet, by the range's id -- instead of
+// refusing. Format as Table and Filter are refused for good (a floating grid
+// is already table-like), Insert/Delete Cells with a shift for this round, and
+// every door with no target support keeps refusing with the sentence below.
+//
 // Delete/Backspace stay a guarded binding of the RANGE (not a refusal): they
 // clear the range's cells, which is a real action. A remapped Clear Contents
 // is refused by the owner (its command bridges to `gridCommands`).
 
 import { CommandRegistry } from "@api/commands";
 import { registerKeybinding, isGridFocused } from "@api/keybindings";
-import { registerSelectionOwner } from "@api/selectionOwner";
-import { deleteSelectedObjects, shouldActOnWholeObjectSelection } from "@api/objectSelection";
+import { registerSelectionOwner, type CellTargetCapability } from "@api/selectionOwner";
+import { notifyCellTargetChanged } from "@api/cellTarget";
+import {
+  deleteSelectedObjects,
+  onObjectSelectionChanged,
+  shouldActOnWholeObjectSelection,
+} from "@api/objectSelection";
 import { showToast } from "@api";
 import { getFloatingRangeById, getFrActiveSheetIndex } from "./floatingRangeStore";
-import { getLocalSelection, getSelectedFloatingRange } from "./frSelection";
+import { getLocalSelection, getSelectedFloatingRange, onLocalSelectionChanged } from "./frSelection";
+import { frCellTarget, frEditActiveCell, frSelectCells } from "./frCellTarget";
 import { isFrEditorOpen } from "../editor/frEditor";
 
 /** The range's Delete/Backspace command (clear the cells, or delete the object). */
@@ -62,12 +76,57 @@ export const FR_SELECTION_OWNER_ID = "floatingRange";
 export const FR_SELECTION_OWNER_LABEL = "a floating grid's cells";
 
 /**
- * The ONE sentence every refused door shows -- a key, a ribbon button, a menu
- * item, a remapped shortcut -- so the user hears the same thing whichever way
- * they asked.
+ * The kinds of cell act a door may perform on a floating grid's cells (P3,
+ * owner finding G3): every Home command that works on a grid -- everything
+ * EXCEPT what a floating grid cannot hold ("table", "filter": it is already a
+ * table-like object) and the shifting Insert/Delete Cells ("shiftCells",
+ * refused this round, spec 1.3). Spelled out, never derived, so a new
+ * capability is admitted by decision, not by accident.
  */
-export function frSelectionRefusal(action: string): string {
-  return `${action} is not available for a floating range's cells yet. Nothing was changed.`;
+export const FR_ACTS_ON: readonly CellTargetCapability[] = [
+  "read",
+  "format",
+  "numberFormat",
+  "content",
+  "clear",
+  "sort",
+  "structure",
+  "lineSize",
+  "merge",
+  "conditionalFormat",
+];
+
+/** Format as Table on a floating grid's cells (spec 1.3). */
+export const FR_TABLE_REFUSAL =
+  "Format as Table is not available inside a floating grid: a floating grid is already a table-like object. Nothing was changed.";
+
+/** AutoFilter (Filter / Clear / Reapply) on a floating grid's cells (spec 1.3). */
+export const FR_FILTER_REFUSAL =
+  "Filter is not available inside a floating grid: a floating grid is already a table-like object. Nothing was changed.";
+
+/** A door that needs CELLS while only the grid OBJECT is selected (spec 2.7). */
+export const FR_WHOLE_OBJECT_REFUSAL = "Select cells inside the floating grid first.";
+
+/**
+ * The ONE sentence a refused door shows -- a key, a ribbon button, a menu
+ * item, a remapped shortcut -- so the user hears the same thing whichever way
+ * they asked. `capability`: the kind of act a target-aware door asked for, so
+ * the sentence can say WHY ("table" / "filter": a floating grid cannot hold the
+ * concept; "shiftCells": not this round). `reason` "wholeObject": the act is
+ * admitted but the OBJECT, not a cell, is selected.
+ */
+export function frSelectionRefusal(
+  action: string,
+  capability?: CellTargetCapability,
+  reason?: "wholeObject",
+): string {
+  if (reason === "wholeObject") return FR_WHOLE_OBJECT_REFUSAL;
+  if (capability === "table") return FR_TABLE_REFUSAL;
+  if (capability === "filter") return FR_FILTER_REFUSAL;
+  // Everything else names the act and says "yet" -- "shiftCells" included
+  // ("Insert Cells is not available inside a floating grid yet.", spec 1.3),
+  // and every door that has no target support (refuseIfSelectionOwned).
+  return `${action} is not available inside a floating grid yet. Nothing was changed.`;
 }
 
 /** A key with no command behind it, refused as a COMBINATION. */
@@ -195,7 +254,10 @@ export function installFrKeyRouting(deps: {
   }
 
   // 1. The claim. Asked by every door, every time (never cached), so it cannot
-  //    outlive the selection it describes.
+  //    outlive the selection it describes. Since P3 the claim also ANSWERS:
+  //    a door that supports cell targets (`resolveCellTarget`) acts on the
+  //    grid's own cells for every kind of act in FR_ACTS_ON; a door that does
+  //    not (`refuseIfSelectionOwned`) still refuses, with the sentence above.
   cleanups.push(
     registerSelectionOwner({
       id: FR_SELECTION_OWNER_ID,
@@ -203,8 +265,16 @@ export function installFrKeyRouting(deps: {
       ownsSelection: frSelectionOnScreen,
       refusal: frSelectionRefusal,
       receivesTyping: frReceivesTyping,
+      cellTarget: frCellTarget,
+      actsOn: FR_ACTS_ON,
+      selectCells: frSelectCells,
+      editActiveCell: frEditActiveCell,
     }),
   );
+  // The target moves with the grid's selection (cells, and the object): the
+  // ribbon's pressed state and every other listener re-read through it.
+  cleanups.push(onLocalSelectionChanged(notifyCellTargetChanged));
+  cleanups.push(onObjectSelectionChanged(notifyCellTargetChanged));
 
   // 2. The combinations no command stands behind. (No refusal by command id:
   //    every command that acts on the selection asks the claim itself -- W18.)

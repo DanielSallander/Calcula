@@ -6,6 +6,37 @@
 import type { ParsedChartData, ChartFilters } from "../types";
 
 /**
+ * The cross-filter identity fields (P4: `categoryMembers`, `seriesMembers`,
+ * `highlightValues`, `crossFilterSelf`) narrowed to the kept series and
+ * categories (null = all kept), exactly as the numbers are. A click on a
+ * filtered chart must select the member of the bar it hit, and a highlight
+ * must sit on its own datum: an unfiltered list beside filtered numbers would
+ * hand both to the neighbour. Absent fields stay absent.
+ */
+function keepIdentity(
+  data: ParsedChartData,
+  keptSeries: readonly number[] | null,
+  keptCategories: readonly number[] | null,
+): Partial<ParsedChartData> {
+  const pickS = <T,>(xs: readonly T[]): T[] => (keptSeries ? keptSeries.map((i) => xs[i]) : [...xs]);
+  const pickC = <T,>(xs: readonly T[]): T[] => (keptCategories ? keptCategories.map((i) => xs[i]) : [...xs]);
+  const out: Partial<ParsedChartData> = {};
+  if (data.categoryMembers) out.categoryMembers = pickC(data.categoryMembers);
+  if (data.seriesMembers) out.seriesMembers = pickS(data.seriesMembers);
+  if (data.highlightValues) out.highlightValues = pickS(data.highlightValues).map((row) => pickC(row ?? []).map((v) => v ?? 0));
+  if (data.crossFilterSelf) {
+    const self = data.crossFilterSelf;
+    const datums = pickS(self.datums).map((row) => pickC(row ?? []).map((b) => b === true));
+    out.crossFilterSelf = {
+      categories: pickC(self.categories).map((b) => b === true),
+      ...(self.series ? { series: pickS(self.series).map((b) => b === true) } : {}),
+      datums,
+    };
+  }
+  return out;
+}
+
+/**
  * Keep only the categories whose label is in `keep` (selection-as-filter, S4).
  * Aligns every series' values to the kept categories. An empty/undefined keep
  * set is a no-op (full data) — matching the "empty selection = all" semantics.
@@ -42,6 +73,7 @@ export function applySelectionKeep(
       ? { datumKinds: data.datumKinds.map((row) => keptIdx.map((i) => row[i] ?? "blank")) }
       : {}),
     seriesTotals: undefined,
+    ...keepIdentity(data, null, keptIdx),
     // Compose with any prior category filter so the map stays painter→ORIGINAL.
     keptCategoryIndices: keptIdx.map((i) => data.keptCategoryIndices ? data.keptCategoryIndices[i] : i),
   };
@@ -74,10 +106,15 @@ export function applyChartFilters(
   let keptSeriesIndices = data.keptSeriesIndices;
   let keptCategoryIndices = data.keptCategoryIndices;
 
+  // The kept indices, for the cross-filter identity fields (keepIdentity).
+  let keptS: number[] | null = null;
+  let keptC: number[] | null = null;
+
   // Filter series
   if (hasSeriesFilter) {
     const hiddenSet = new Set(hiddenSeries);
     const survivingS = data.series.map((_, i) => i).filter((i) => !hiddenSet.has(i));
+    keptS = survivingS;
     filteredSeries = survivingS.map((i) => data.series[i]);
     if (filteredText) filteredText = survivingS.map((i) => filteredText![i] ?? []);
     if (filteredKinds) filteredKinds = survivingS.map((i) => filteredKinds![i] ?? []);
@@ -93,6 +130,7 @@ export function applyChartFilters(
       .filter((i) => !hiddenCatSet.has(i));
 
     filteredCategories = visibleCatIndices.map((i) => data.categories[i]);
+    keptC = visibleCatIndices;
 
     // Also filter the values array in each series to match
     filteredSeries = filteredSeries.map((s) => ({
@@ -115,6 +153,7 @@ export function applyChartFilters(
     ...(filteredText ? { displayValues: filteredText } : {}),
     ...(filteredKinds ? { datumKinds: filteredKinds } : {}),
     seriesTotals: filteredTotals,
+    ...keepIdentity(data, keptS, keptC),
     keptSeriesIndices,
     keptCategoryIndices,
   };

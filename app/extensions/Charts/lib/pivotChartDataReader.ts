@@ -5,6 +5,7 @@
 //          the pivot view data into the chart rendering pipeline.
 
 import { pivot } from "@api/pivot";
+import { pivotCellDisplayText } from "@api/pivotMembers";
 import type {
   PivotViewResponse,
   PivotRowData,
@@ -12,6 +13,7 @@ import type {
   PivotColumnData,
 } from "@api/pivot";
 import type { ParsedChartData, PivotDataSource, ChartSeries, PivotChartFieldInfo, DatumKind, SeriesTotal } from "../types";
+import { memberPathsOfView } from "./chartMemberPaths";
 
 // ============================================================================
 // Public API
@@ -147,6 +149,8 @@ export function extractChartData(
 
   // Extract categories and data values from data rows
   const categories: string[] = [];
+  // The rows charted, in category order: what the member paths are read from.
+  const chartedRows: PivotRowData[] = [];
 
   for (const row of view.rows) {
     // Skip filter rows and column header rows
@@ -164,6 +168,7 @@ export function extractChartData(
     // Build category label from row header cells
     const label = extractRowLabel(row, rowLabelColCount);
     categories.push(label);
+    chartedRows.push(row);
 
     // Extract data values for each series
     for (const [viewCol, seriesData] of seriesMap) {
@@ -193,9 +198,13 @@ export function extractChartData(
   // the backend's blank total) is "blank", which the visuals write "(Blank)"
   // -- its 0 in `values` is only where a bar chart draws it.
   const datumKinds = all.map((s) => s.kinds);
+  // WHO each category and series is, by member KEY (P4): only when the view
+  // carries `groupMembers` and every charted datum resolves (chartMemberPaths).
+  const paths = memberPathsOfView(view, chartedRows, dataColumns);
   const extras = {
     datumKinds,
     ...(seriesTotals ? { seriesTotals } : {}),
+    ...(paths ? { categoryMembers: paths.categoryMembers, seriesMembers: paths.seriesMembers } : {}),
   };
   const displayValues = all.map((s) => s.texts);
   // Nothing to say beyond the numbers: leave the field absent (the design-query
@@ -205,20 +214,15 @@ export function extractChartData(
 }
 
 /**
- * Display text for a pivot cell. The backend only fills `formattedValue` for
- * custom-formatted numbers (view_to_response trims the rest of the payload) —
- * plain text/number cells carry their content in `value`, exactly like the
- * pivot grid renderer derives its display. Charts must do the same, otherwise
- * every row/column header reads as "" (invisible axis labels, "Value 1"
- * series names).
+ * Display text for a pivot cell: `pivotCellDisplayText` (@api), the ONE
+ * reading the pivot grid uses too -- a header's member LABEL (app locale:
+ * "jan", "15.01.2024", "(Blank)"), else `formattedValue` (custom-formatted
+ * numbers), else the value (a number in the app locale). Without it every
+ * row/column header read as "" (invisible axis labels, "Value 1" series
+ * names). Display only: nothing matches on this text.
  */
 function cellDisplayText(cell: PivotCellData): string {
-  if (cell.formattedValue) return cell.formattedValue;
-  const v = cell.value;
-  if (typeof v === "string") return v;
-  if (typeof v === "number") return String(v);
-  if (typeof v === "boolean") return v ? "TRUE" : "FALSE";
-  return "";
+  return pivotCellDisplayText(cell);
 }
 
 /**
@@ -333,15 +337,13 @@ function cellKind(cell: PivotCellData): DatumKind {
 }
 
 /**
- * Extract a numeric value from a pivot cell.
- * Returns 0 for non-numeric or empty cells.
+ * Extract a numeric value from a pivot cell, from its TYPED value: a number is
+ * that number, a boolean 1/0. Text (an error such as "#DIV/0!", a text value)
+ * and empty cells give 0 -- text is never re-parsed, so no locale's spelling
+ * can be misread as a number (`datumKind` says which cells were text).
  */
 function cellToNumber(cell: PivotCellData): number {
   if (typeof cell.value === "number") return cell.value;
-  if (typeof cell.value === "string") {
-    const num = parseFloat(cell.value);
-    return isNaN(num) ? 0 : num;
-  }
   if (typeof cell.value === "boolean") return cell.value ? 1 : 0;
   return 0;
 }

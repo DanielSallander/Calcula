@@ -185,9 +185,10 @@ describe("clientToChartCanvas (BUG-0156)", () => {
   it("every pointer path of Charts/index.ts goes through it (no raw clientX - rect.left left)", () => {
     const src = readFileSync(path.resolve(__dirname, "../../index.ts"), "utf8");
     expect(src).not.toMatch(/=\s*e\.clientX\s*-\s*rect\.left\s*;/);
-    // The hover, the right-click, and the release of a press on one of the
-    // chart's own buttons (BUG-0258 phase 4b: it acts only over the same button).
-    expect(src.match(/clientToChartCanvas\(e\.clientX, e\.clientY, rect/g)?.length).toBe(3);
+    // The hover, the right-click, the release of a press on one of the
+    // chart's own buttons (BUG-0258 phase 4b: it acts only over the same button),
+    // and the release of a cross-filter press (P4 S6: over the same datum only).
+    expect(src.match(/clientToChartCanvas\(e\.clientX, e\.clientY, rect/g)?.length).toBe(4);
     expect(src.match(/chartCanvasToClient\(canvasX, canvasY, rect\)/g)?.length).toBe(2);
   });
 });

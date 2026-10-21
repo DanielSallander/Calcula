@@ -231,6 +231,19 @@ export interface ChartMarkMeta {
    * no-op this codebase keeps finding. Ask {@link chartMarkFurniture}.
    */
   furniture?: ChartMarkFurniture;
+  /**
+   * The mark's part in Power BI cross-filtering on a canvas (P4, G4):
+   *
+   *   - `source`: its datums (and legend entries) carry member-key paths, so a
+   *     click on one filters the other visuals of the page;
+   *   - `canHighlight`: it can paint a CROSS-HIGHLIGHT (the selection's part of
+   *     each datum over a faded whole) instead of being filtered.
+   *
+   * A DECLARATION, like {@link honoursDataPointOverrides}: a mark that does not
+   * say so is neither a source nor highlightable -- it stays a filter-only
+   * target (fail closed). Ask {@link chartMarkCrossFilter}.
+   */
+  crossFilter?: { source: boolean; canHighlight: boolean };
 }
 
 /** The furniture a mark has (see {@link ChartMarkMeta.furniture}). */
@@ -328,4 +341,18 @@ export function chartMarkHonoursDataPointOverrides(mark: string): boolean {
  */
 export function chartMarkFurniture(mark: string): ChartMarkFurniture {
   return registry.get(mark)?.meta.furniture === "titleOnly" ? "titleOnly" : "full";
+}
+
+/**
+ * The mark's cross-filter capability: what it DECLARED in
+ * {@link ChartMarkMeta.crossFilter}, else `{ source: false, canHighlight: false }`
+ * -- for an undeclared mark and for an unregistered id alike. FAIL CLOSED, the
+ * same direction as {@link chartMarkHonoursDataPointOverrides}: a mark that
+ * never promised to paint a highlight would be asked for one and paint the
+ * whole chart unfiltered, and a mark whose datums carry no member path would
+ * cross-filter on nothing. Such a chart is still FILTERED by the others.
+ */
+export function chartMarkCrossFilter(mark: string): { source: boolean; canHighlight: boolean } {
+  const declared = registry.get(mark)?.meta.crossFilter;
+  return { source: declared?.source === true, canHighlight: declared?.canHighlight === true };
 }

@@ -222,7 +222,9 @@ describe("paintWaterfallChart", () => {
       paintWaterfallChart(ctx, data, spec, layout, DEFAULT_CHART_THEME);
     }).not.toThrow();
 
-    expect(ctx.fillRect).toHaveBeenCalled();
+    // The bars (rounded: the default theme radius is 2). The plot area itself
+    // paints nothing by default (Power BI), so fillRect is not the signal.
+    expect(ctx.fill).toHaveBeenCalled();
   });
 
   it("draws connector lines when enabled", () => {

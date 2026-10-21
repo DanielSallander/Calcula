@@ -160,6 +160,47 @@ pub fn write_cell_range(
     Ok(format!("Set {} cell(s)", cells.len()))
 }
 
+/// The most interaction pairs one canvas's inventory line lists; the rest are
+/// counted ("... N more"), so a page with hundreds of pairs cannot crowd the
+/// summary out of its character budget.
+pub(crate) const CANVAS_INVENTORY_MAX_PAIRS: usize = 20;
+
+fn interaction_mode_word(mode: ::persistence::VisualInteractionMode) -> &'static str {
+    match mode {
+        ::persistence::VisualInteractionMode::Filter => "filter",
+        ::persistence::VisualInteractionMode::Highlight => "highlight",
+        ::persistence::VisualInteractionMode::None => "none",
+    }
+}
+
+/// The interactions line of one canvas in the `## Canvases` section, or None
+/// for a canvas whose interactions were never edited:
+/// `  interactions: default=<filter|highlight|per-visual>; <kind:id> -> <kind:id> = <mode>; ...`.
+/// `per-visual` is an unset default: each target highlights where it can and
+/// filters otherwise (Power BI). At most [`CANVAS_INVENTORY_MAX_PAIRS`] pairs.
+pub(crate) fn format_canvas_interactions(interactions: &::persistence::CanvasInteractions) -> Option<String> {
+    if interactions.is_default() {
+        return None;
+    }
+    let default = interactions.default_mode.map(interaction_mode_word).unwrap_or("per-visual");
+    let mut line = format!("  interactions: default={}", default);
+    for p in interactions.pairs.iter().take(CANVAS_INVENTORY_MAX_PAIRS) {
+        line.push_str(&format!(
+            "; {}:{} -> {}:{} = {}",
+            p.source.kind,
+            p.source.id,
+            p.target.kind,
+            p.target.id,
+            interaction_mode_word(p.mode)
+        ));
+    }
+    let more = interactions.pairs.len().saturating_sub(CANVAS_INVENTORY_MAX_PAIRS);
+    if more > 0 {
+        line.push_str(&format!("; ... {} more", more));
+    }
+    Some(line)
+}
+
 /// The `## Canvases` section of the AI summary: one line per canvas sheet with
 /// its index, page and snap grid, and the rule an AI most needs -- a canvas
 /// holds objects only and its data lives on worksheets. Pure (unit-tested);
@@ -186,6 +227,10 @@ pub(crate) fn format_canvas_inventory(
             if layout.snap_to_grid { "on" } else { "off" },
             layout.grid_size_px
         ));
+        if let Some(line) = format_canvas_interactions(&layout.interactions) {
+            lines.push_str(&line);
+            lines.push('\n');
+        }
     }
     if lines.is_empty() {
         return None;
@@ -315,12 +360,29 @@ pub fn get_sheet_summary(
         if !rows.is_empty() {
             let mut lines = String::new();
             for info in &rows {
+                // Hidden window lines (P3): the AI must not describe a row the
+                // author hid as visible. 1-based, like the A1 references.
+                let mut hidden = String::new();
+                if !info.range.hidden_rows.is_empty() {
+                    let list: Vec<String> = info.range.hidden_rows.iter().map(|r| (r + 1).to_string()).collect();
+                    hidden.push_str(&format!("; hidden rows {}", list.join(", ")));
+                }
+                if !info.range.hidden_cols.is_empty() {
+                    let list: Vec<String> = info
+                        .range
+                        .hidden_cols
+                        .iter()
+                        .map(|c| crate::pivot::utils::col_index_to_letter(*c))
+                        .collect();
+                    hidden.push_str(&format!("; hidden columns {}", list.join(", ")));
+                }
                 lines.push_str(&format!(
-                    "- {} ({} rows x {} cols, floating over sheet {}; reference its cells as {}!A1)\n",
+                    "- {} ({} rows x {} cols, floating over sheet {}{}; reference its cells as {}!A1)\n",
                     info.name,
                     info.range.row_count,
                     info.range.col_count,
                     info.host_sheet_index,
+                    hidden,
                     info.name
                 ));
             }
@@ -2374,6 +2436,7 @@ mod tests {
                 vec![Some("South".to_string()), None],
             ],
             row_count: 2,
+            column_kinds: vec![],
         };
         let out = format_bi_query_result(&result);
         assert!(out.contains("| Region | Revenue |"));
@@ -2385,7 +2448,7 @@ mod tests {
         let many: Vec<Vec<Option<String>>> = (0..250)
             .map(|i| vec![Some(format!("R{}", i)), Some(i.to_string())])
             .collect();
-        let big = BiQueryResult { columns: vec!["A".to_string(), "B".to_string()], rows: many, row_count: 250 };
+        let big = BiQueryResult { columns: vec!["A".to_string(), "B".to_string()], rows: many, row_count: 250, column_kinds: vec![] };
         let out_big = format_bi_query_result(&big);
         assert!(out_big.contains("50 more row(s) not shown"));
         assert!(out_big.contains("250 row(s), 2 column(s)."));
@@ -2393,7 +2456,7 @@ mod tests {
 
     #[test]
     fn bi_query_result_empty_columns() {
-        let result = BiQueryResult { columns: vec![], rows: vec![], row_count: 0 };
+        let result = BiQueryResult { columns: vec![], rows: vec![], row_count: 0, column_kinds: vec![] };
         assert_eq!(format_bi_query_result(&result), "(query returned no columns)");
     }
 
@@ -2483,5 +2546,66 @@ mod tests {
         let json = output_item_to_json(&item);
         assert_eq!(json["type"], "text");
         assert_eq!(json["text"], "hello");
+    }
+
+    // P4 S4a: the `## Canvases` line of a canvas with edited interactions.
+    fn canvas_ref(kind: &str, id: &str) -> ::persistence::CanvasObjectRef {
+        ::persistence::CanvasObjectRef { kind: kind.to_string(), id: id.to_string() }
+    }
+
+    #[test]
+    fn the_canvas_inventory_lists_edited_interactions_and_only_those() {
+        use ::persistence::{CanvasInteraction, CanvasInteractions, CanvasLayout, SheetKind, VisualInteractionMode};
+        let names = vec!["Page 1".to_string(), "Page 2".to_string()];
+        let visibility = vec!["visible".to_string(), "visible".to_string()];
+        let edited = CanvasLayout {
+            interactions: CanvasInteractions {
+                default_mode: Some(VisualInteractionMode::Highlight),
+                pairs: vec![
+                    CanvasInteraction {
+                        source: canvas_ref("slicer", "s1"),
+                        target: canvas_ref("chart", "c1"),
+                        mode: VisualInteractionMode::None,
+                    },
+                    CanvasInteraction {
+                        source: canvas_ref("chart", "c1"),
+                        target: canvas_ref("pivot", "p1"),
+                        mode: VisualInteractionMode::Filter,
+                    },
+                ],
+            },
+            ..Default::default()
+        };
+        let kinds = vec![SheetKind::Canvas(edited), SheetKind::Canvas(CanvasLayout::default())];
+        let text = format_canvas_inventory(&names, &visibility, &kinds).expect("two canvases are listed");
+        assert!(
+            text.contains(
+                "  interactions: default=highlight; slicer:s1 -> chart:c1 = none; chart:c1 -> pivot:p1 = filter"
+            ),
+            "the edited page's interactions line: {text}"
+        );
+        assert_eq!(text.matches("interactions:").count(), 1, "an unedited canvas gets no interactions line: {text}");
+        let page1 = text.find("name=\"Page 1\"").unwrap();
+        let line = text.find("  interactions:").unwrap();
+        let page2 = text.find("name=\"Page 2\"").unwrap();
+        assert!(page1 < line && line < page2, "the line follows ITS canvas: {text}");
+    }
+
+    #[test]
+    fn the_interactions_line_is_capped_and_an_unset_default_reads_per_visual() {
+        use ::persistence::{CanvasInteraction, CanvasInteractions, VisualInteractionMode};
+        let pairs: Vec<CanvasInteraction> = (0..CANVAS_INVENTORY_MAX_PAIRS + 3)
+            .map(|i| CanvasInteraction {
+                source: canvas_ref("slicer", "s"),
+                target: canvas_ref("chart", &format!("c{i}")),
+                mode: VisualInteractionMode::None,
+            })
+            .collect();
+        let line = format_canvas_interactions(&CanvasInteractions { default_mode: None, pairs })
+            .expect("pairs make a line");
+        assert!(line.starts_with("  interactions: default=per-visual; "), "{line}");
+        assert_eq!(line.matches(" -> ").count(), CANVAS_INVENTORY_MAX_PAIRS, "capped at the limit: {line}");
+        assert!(line.ends_with("; ... 3 more"), "the rest is counted: {line}");
+        assert!(format_canvas_interactions(&CanvasInteractions::default()).is_none(), "the default makes no line");
     }
 }

@@ -8,7 +8,7 @@ import { computeTrendline } from "../trendlineComputation";
 import { applyChartFilters } from "../chartFilters";
 import { resolvePointColor, resolvePointOpacity } from "../encodingResolver";
 import { getPresetById, buildPresetUpdates, CHART_STYLE_PRESETS } from "../chartStylePresets";
-import { resolveChartTheme, getSeriesColor, PALETTES } from "../../rendering/chartTheme";
+import { resolveChartTheme, getSeriesColor, PALETTES, DEFAULT_CHART_THEME } from "../../rendering/chartTheme";
 import type {
   ParsedChartData,
   TransformSpec,
@@ -282,7 +282,9 @@ describe("style presets + theme override interaction", () => {
     const combined = { ...preset!.theme, titleColor: "#FF0000" };
     const theme = resolveChartTheme({ theme: combined });
     expect(theme.titleColor).toBe("#FF0000");
-    expect(theme.plotBackground).toBe(preset!.theme.plotBackground);
+    // colorful-1 sets no plot fill (transparent plot, Power BI): the default shows.
+    expect(preset!.theme.plotBackground).toBeUndefined();
+    expect(theme.plotBackground).toBe(DEFAULT_CHART_THEME.plotBackground);
   });
 
   it("buildPresetUpdates includes gridLines and barBorderRadius", () => {

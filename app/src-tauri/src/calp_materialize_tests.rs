@@ -878,6 +878,8 @@ fn workbook_with_floating_range() -> (Workbook, identity::EntityId) {
         show_column_headers: true,
         show_row_headers: false,
         container: None,
+        hidden_rows: Vec::new(),
+        hidden_cols: Vec::new(),
     }];
     (wb, id)
 }
@@ -975,6 +977,8 @@ fn a_refreshed_floating_range_replaces_only_the_owned_row_on_the_old_sheets() {
         show_column_headers: true,
         show_row_headers: true,
         container: None,
+        hidden_rows: Vec::new(),
+        hidden_cols: Vec::new(),
     });
     let owned_v1_id = owned_v1.id;
     h.state.floating_ranges.write(&effect).unwrap().push(owned_v1);
@@ -995,6 +999,8 @@ fn a_refreshed_floating_range_replaces_only_the_owned_row_on_the_old_sheets() {
         show_column_headers: true,
         show_row_headers: true,
         container: None,
+        hidden_rows: Vec::new(),
+        hidden_cols: Vec::new(),
     };
     let owned: std::collections::HashSet<String> = [owned_v1_id.to_string()].into_iter().collect();
     let resolve = |sid: identity::SheetId| {
@@ -2279,6 +2285,8 @@ fn a_saved_floating_range_is_clamped_into_the_window_caps_on_the_way_in() {
         show_column_headers: true,
         show_row_headers: true,
         container: None,
+        hidden_rows: Vec::new(),
+        hidden_cols: Vec::new(),
     });
     assert_eq!(row.row_count, MAX_FLOATING_RANGE_ROWS);
     assert_eq!(row.col_count, 1);
@@ -2327,6 +2335,8 @@ fn pulled_range(id: identity::EntityId, host: identity::SheetId, backing: identi
         show_column_headers: true,
         show_row_headers: true,
         container: None,
+        hidden_rows: Vec::new(),
+        hidden_cols: Vec::new(),
     }
 }
 

@@ -10,6 +10,7 @@
 //          (for Base item) are read from the pivot's source afterwards.
 
 import { useEffect, useMemo, useState } from "react";
+import type { MemberRef } from "@api/pivotMembers";
 
 /** What a base-field choice needs of a zone field (both the Pivot and the
  *  shared zone-field types have it). */
@@ -19,9 +20,12 @@ export interface BaseFieldSource {
   isLookup?: boolean;
 }
 
+/** A field and its items as MEMBERS: a base item is stored and resolved by
+ *  its KEY (Rust `resolve_base_item_id`), and shown by its app-locale LABEL
+ *  (P2: a de-DE user sees "1234,5" and "(Blank)", never "1234.5" and ""). */
 export interface BaseFieldChoice {
   name: string;
-  items: string[];
+  items: MemberRef[];
 }
 
 /** The fields a Show Values As base can name: row fields, then column fields,
@@ -47,10 +51,10 @@ export function useBaseFieldChoices(
   open: boolean,
   rows: BaseFieldSource[],
   columns: BaseFieldSource[],
-  readItems: ((sourceIndex: number) => Promise<string[]>) | null,
+  readItems: ((sourceIndex: number) => Promise<MemberRef[]>) | null,
 ): BaseFieldChoice[] {
   const fields = useMemo(() => baseFieldNames(rows, columns), [rows, columns]);
-  const [items, setItems] = useState<Record<string, string[]>>({});
+  const [items, setItems] = useState<Record<string, MemberRef[]>>({});
 
   useEffect(() => {
     if (!open || !readItems) return;
@@ -60,7 +64,7 @@ export function useBaseFieldChoices(
         try {
           return [f.name, await readItems(f.sourceIndex)] as const;
         } catch {
-          return [f.name, [] as string[]] as const;
+          return [f.name, [] as MemberRef[]] as const;
         }
       }),
     ).then((pairs) => {

@@ -1638,7 +1638,7 @@ test.describe("fix-all canvas, live", () => {
   // X12 / Y11 -- the Edit menu's and the Home tab's Copy / Paste on a canvas
   // -------------------------------------------------------------------------
 
-  test("X12 + Y11: on a canvas, Edit > Copy / Edit > Paste > Paste and the Home tab's Copy / Paste copy a chart + shape selection (two copies at +20, selected, ONE Ctrl+Z); with a floating-grid cell selected Edit > Copy is the grid's refusal and copies no object; on a worksheet both doors still copy cells", async ({
+  test("X12 + Y11: on a canvas, Edit > Copy / Edit > Paste > Paste and the Home tab's Copy / Paste copy a chart + shape selection (two copies at +20, selected, ONE Ctrl+Z); with a floating-grid cell selected Edit > Copy is the grid's own cell copy (round 2, P3: no refusal) and copies no object; on a worksheet both doors still copy cells", async ({
     appPage: page,
     grid,
   }) => {
@@ -1670,7 +1670,8 @@ test.describe("fix-all canvas, live", () => {
         await eventually(() => held(page, ci), (h) => h.charts === 1 && h.shapes === 1, `${door}: one Ctrl+Z did not remove both copies`);
       }
 
-      // ---- A floating-grid cell selected on the canvas: Edit > Copy is the grid's refusal, no object copied.
+      // ---- A floating-grid cell selected on the canvas: Edit > Copy copies the grid's CELLS (round 2, P3 /
+      // owner G3: Home and Edit clipboard commands act on floating-grid cells), never an object.
       await callModule(page, MOD.OBJ_CLIP, "resetObjectClipboard");
       await callModule(page, MOD.FLOATING_RANGES, "createFloatingRange", [640, 96, "FloatX12"]);
       const fr = await eventually(async () => (await objects(page)).find((o) => o.type === "floating-range"), (o) => !!o, "the floating grid was not published");
@@ -1681,8 +1682,7 @@ test.describe("fix-all canvas, live", () => {
       await page.waitForTimeout(800);
       expect(await callModule<boolean>(page, MOD.OBJ_CLIP, "hasObjectClipboard"), "Edit > Copy on a floating-grid cell copied an OBJECT").toBe(false);
       const t = await toasts(page);
-      expect(t.length, `ONE refusal toast: ${JSON.stringify(t)}`).toBe(1);
-      expect(t[0].text).toContain("floating range");
+      expect(t, "Edit > Copy on a floating-grid cell was refused (P3 copies the grid's cells)").toEqual([]);
 
       // ---- On a worksheet, the doors are the cell clipboard.
       await page.keyboard.press("Escape");

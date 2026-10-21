@@ -1119,6 +1119,60 @@ fn rollback_answer_without_restore(state: &AppState, refusal: Option<&str>) -> U
     }
 }
 
+/// A backend command's own ALL-OR-NOTHING: take back every change recorded in
+/// the open transaction after `at` (its change count before the command's
+/// first write), through the restore Ctrl+Z
+/// uses, leaving no undo and no redo step -- the savepoint mechanism
+/// (`roll_back_to_undo_savepoint_core`) without a frontend ticket, because the
+/// command opened or joined the step itself and has held it throughout.
+///
+/// Used where a multi-store edit can fail AFTER its first write (P3 2.5: a
+/// floating grid's line insert/delete whose window patch fails after the
+/// backing sheet shifted -- only a poisoned store lock can cause that). The
+/// changes before `at` (a caller's, in a joined step) are untouched. Holding
+/// NOTHING: the restore takes the grid pair before the stack.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn roll_back_open_changes_after(
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &UserFilesState,
+    pivot_state: &PivotState,
+    slicer_state: &SlicerState,
+    ribbon_filter_state: &RibbonFilterState,
+    pane_control_state: &PaneControlState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+    at: usize,
+) {
+    let taken = {
+        let mut undo_stack = match state.undo_stack.lock() {
+            Ok(guard) => guard,
+            Err(_) => return,
+        };
+        let Some(open) = undo_stack.current_transaction_mut() else {
+            return;
+        };
+        if at >= open.changes.len() {
+            return;
+        }
+        let mut taken = Transaction::new(open.description.clone());
+        taken.changes = open.changes.split_off(at);
+        taken
+    };
+    let _ = apply_changes_with(
+        state,
+        file_state,
+        user_files_state,
+        pivot_state,
+        slicer_state,
+        ribbon_filter_state,
+        pane_control_state,
+        timeline_state,
+        taken,
+        true,
+        false,
+    );
+}
+
 /// [`roll_back_to_undo_savepoint`] over plain references, for the unit tier.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn roll_back_to_undo_savepoint_core(

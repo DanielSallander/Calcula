@@ -2,11 +2,13 @@
 // PURPOSE: Pure Canvas 2D pie and donut chart drawing.
 // CONTEXT: Radial chart using arc slices. innerRadius=0 for pie, >0 for donut.
 
+import { formatNumber } from "@api/locale";
 import type { ChartSpec, ParsedChartData, ChartLayout, SliceArc, PieMarkOptions } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { resolveDatumStyle } from "../lib/dataPointOverrides";
 import { applyFillStyle } from "./gradientFill";
+import { datumEmphasis, innerArcRadius, HIGHLIGHT_FADE_ALPHA } from "./crossHighlight";
 import { valuesToAngles } from "./scales";
 import {
   computeRadialLayout,
@@ -99,8 +101,14 @@ export function paintPieChart(
       sliceCenterY += Math.sin(midAngle) * explodeOffset;
     }
 
+    // Cross-filter (P4): a highlighted slice is its faded whole plus an inner
+    // arc holding the highlighted share of its area; an unselected slice of a
+    // source is faded.
+    const emphasis = datumEmphasis(data, 0, i);
+
     ctx.save();
-    if (style.opacity !== null) ctx.globalAlpha = style.opacity;
+    if (emphasis.kind !== "plain") ctx.globalAlpha = (style.opacity ?? 1) * HIGHLIGHT_FADE_ALPHA;
+    else if (style.opacity !== null) ctx.globalAlpha = style.opacity;
 
     ctx.beginPath();
     ctx.arc(sliceCenterX, sliceCenterY, outerRadius, startAngle, endAngle);
@@ -126,6 +134,21 @@ export function paintPieChart(
       ctx.strokeStyle = style.borderColor;
       ctx.lineWidth = style.borderWidth ?? 2;
       ctx.stroke();
+    }
+
+    if (emphasis.kind === "partial" && emphasis.ratio > 0) {
+      const highlightRadius = innerArcRadius(values[i] ?? 0, data.highlightValues?.[0]?.[i], innerRadius, outerRadius);
+      ctx.globalAlpha = style.opacity ?? 1;
+      ctx.beginPath();
+      ctx.arc(sliceCenterX, sliceCenterY, highlightRadius, startAngle, endAngle);
+      if (innerRadius > 0) {
+        ctx.arc(sliceCenterX, sliceCenterY, innerRadius, endAngle, startAngle, true);
+      } else {
+        ctx.lineTo(sliceCenterX, sliceCenterY);
+      }
+      ctx.closePath();
+      applyFillStyle(ctx, color, style.gradientFill ?? undefined, sliceBounds.x, sliceBounds.y, sliceBounds.w, sliceBounds.h);
+      ctx.fill();
     }
 
     ctx.restore();
@@ -164,10 +187,10 @@ export function paintPieChart(
       if (labelFormat === "value") {
         labelText = formatTickValue(value);
       } else if (labelFormat === "both") {
-        labelText = `${formatTickValue(value)} (${percent.toFixed(1)}%)`;
+        labelText = `${formatTickValue(value)} (${formatNumber(percent, { decimals: 1 })}%)`;
       } else {
         // "percent"
-        labelText = `${percent.toFixed(1)}%`;
+        labelText = `${formatNumber(percent, { decimals: 1 })}%`;
       }
 
       // Draw a shadow outline for readability against colored slices

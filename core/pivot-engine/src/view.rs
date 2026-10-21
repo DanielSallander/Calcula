@@ -12,6 +12,7 @@
 use serde::{Deserialize, Serialize};
 use crate::definition::PivotId;
 use crate::cache::{CacheValue, ValueId};
+use engine::MemberSource;
 
 // ============================================================================
 // CELL TYPES AND METADATA
@@ -152,6 +153,16 @@ pub struct PivotViewCell {
     
     /// For filter dropdown cells: the field index being filtered.
     pub filter_field_index: Option<usize>,
+
+    /// What the member this cell NAMES is (`engine::MemberSource`), so the
+    /// host can write its LABEL for the app locale at response time
+    /// (`engine::member_label`) while `value` keeps the invariant KEY text.
+    /// Locale-free. Set on RowHeader / ColumnHeader cells that show one
+    /// member of an axis field, and on a filter dropdown that shows exactly
+    /// one selected item; `None` everywhere else (data, totals, "Grand
+    /// Total", "East Total", field names, value-field names).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_source: Option<MemberSource>,
 }
 
 impl PivotViewCell {
@@ -172,6 +183,7 @@ impl PivotViewCell {
             group_path: Vec::new(),
             value_field_index: None,
             filter_field_index: None,
+            member_source: None,
         }
     }
 
@@ -193,6 +205,7 @@ impl PivotViewCell {
             group_path: Vec::new(),
             value_field_index: None,
             filter_field_index: None,
+            member_source: None,
         }
     }
 
@@ -213,6 +226,7 @@ impl PivotViewCell {
             group_path: Vec::new(),
             value_field_index: None,
             filter_field_index: None,
+            member_source: None,
         }
     }
 
@@ -233,6 +247,7 @@ impl PivotViewCell {
             group_path: Vec::new(),
             value_field_index: None,
             filter_field_index: None,
+            member_source: None,
         }
     }
 
@@ -253,6 +268,7 @@ impl PivotViewCell {
             group_path: Vec::new(),
             value_field_index: None,
             filter_field_index: None,
+            member_source: None,
         }
     }
 
@@ -273,6 +289,7 @@ impl PivotViewCell {
             group_path: Vec::new(),
             value_field_index: None,
             filter_field_index: None,
+            member_source: None,
         }
     }
 
@@ -293,6 +310,7 @@ impl PivotViewCell {
             group_path: Vec::new(),
             value_field_index: None,
             filter_field_index: Some(field_index),
+            member_source: None,
         }
     }
 
@@ -313,6 +331,7 @@ impl PivotViewCell {
             group_path: Vec::new(),
             value_field_index: None,
             filter_field_index: Some(field_index),
+            member_source: None,
         }
     }
     
@@ -334,6 +353,7 @@ impl PivotViewCell {
             group_path: Vec::new(),
             value_field_index: None,
             filter_field_index: None,
+            member_source: None,
         }
     }
 
@@ -355,6 +375,7 @@ impl PivotViewCell {
             group_path: Vec::new(),
             value_field_index: None,
             filter_field_index: None,
+            member_source: None,
         }
     }
 
@@ -375,6 +396,13 @@ impl PivotViewCell {
     /// Sets the group path for drill-down.
     pub fn with_group_path(mut self, path: Vec<(usize, ValueId)>) -> Self {
         self.group_path = path;
+        self
+    }
+
+    /// Sets the [`PivotViewCell::member_source`] of a header or filter-item
+    /// cell (the header constructors default it to `None`).
+    pub fn with_member_source(mut self, source: Option<MemberSource>) -> Self {
+        self.member_source = source;
         self
     }
 }
@@ -497,6 +525,13 @@ pub struct FilterRowInfo {
     
     /// All unique values available for this field.
     pub unique_values: Vec<String>,
+
+    /// The [`MemberSource`] of each entry of `unique_values`, index for
+    /// index, so the host writes every item's LABEL for the app locale while
+    /// `unique_values` / `selected_values` stay KEYS. Locale-free;
+    /// serde-default (a snapshot without it reads as "no sources").
+    #[serde(default)]
+    pub member_sources: Vec<MemberSource>,
     
     /// Display string for the dropdown (e.g., "(All)", "Value1", "(Multiple Items)").
     pub display_value: String,

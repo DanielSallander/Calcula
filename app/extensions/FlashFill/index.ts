@@ -3,6 +3,9 @@
 // CONTEXT: Registers the `flashfill.execute` command (the keybinding
 //          registry's Ctrl+E runs it) and the Data menu item.
 //          Detects patterns from user-provided examples and fills remaining cells.
+//          P3 (owner finding G3): it fills the cells the door targets -- Core's
+//          selection, or a floating grid's own cells, read through the styled
+//          read of @api/cellTarget and written with the target.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
@@ -19,8 +22,8 @@ import {
   IconFlashFill,
 } from "@api";
 import { getGridBounds } from "@api/lib";
-import { getGridStateSnapshot } from "@api/grid";
-import { refuseIfSelectionOwned } from "@api/selectionOwner";
+import { getGridStateSnapshot, refreshGridData } from "@api/grid";
+import { resolveCellTarget, getCellTargetCells, targetRefOf, type CellTargetRef } from "@api/cellTarget";
 import { ownUndoTransaction, type UndoTransactionCloses } from "@api/undoTicket";
 import { learn, applyProgram } from "./lib/patternEngine";
 import type { Example, Program } from "./lib/patternEngine";
@@ -39,6 +42,52 @@ const UNDO_CLOSES: UndoTransactionCloses = {
 };
 
 // ============================================================================
+// Where Flash Fill reads
+// ============================================================================
+
+/**
+ * The cells Flash Fill reads: their display text and the data bounds
+ * ([maxRow, maxCol], [0, 0] = no data). The active sheet's through `getCell`,
+ * or an object's own cells (one styled read of its extent, P3).
+ */
+interface FlashFillCells {
+  bounds(): Promise<[number, number]>;
+  display(row: number, col: number): Promise<string>;
+}
+
+function gridCells(): FlashFillCells {
+  return {
+    bounds: () => getGridBounds(),
+    display: async (row, col) => getCellDisplayValue(await getCell(row, col)),
+  };
+}
+
+/**
+ * An object's cells, read ONCE over its whole extent (a floating grid holds at
+ * most 1000 x 256 cells; the read is banded and sparse). Cells past the
+ * extent read as empty: Flash Fill never looks outside the object.
+ */
+async function targetCells(ref: CellTargetRef, extent: { rows: number; cols: number }): Promise<FlashFillCells> {
+  const byKey = new Map<string, string>();
+  let maxRow = 0;
+  let maxCol = 0;
+  if (extent.rows > 0 && extent.cols > 0) {
+    const read = await getCellTargetCells(ref, { startRow: 0, startCol: 0, endRow: extent.rows - 1, endCol: extent.cols - 1 });
+    for (const cell of read.cells) {
+      const text = cell.display ?? "";
+      if (text === "") continue;
+      byKey.set(`${cell.row},${cell.col}`, text);
+      maxRow = Math.max(maxRow, cell.row);
+      maxCol = Math.max(maxCol, cell.col);
+    }
+  }
+  return {
+    bounds: async () => [maxRow, maxCol],
+    display: async (row, col) => byKey.get(`${row},${col}`) ?? "",
+  };
+}
+
+// ============================================================================
 // Flash Fill Logic
 // ============================================================================
 
@@ -54,13 +103,27 @@ const UNDO_CLOSES: UndoTransactionCloses = {
  */
 async function executeFlashFill(): Promise<void> {
   // Every door (Data menu, Ctrl+E, a script) comes through here. It fills the
-  // column of Core's active cell -- HIDDEN while something else owns the
-  // selection (a floating grid's selected cell) -- so refuse, once (D4,
-  // BUG-0185 class).
-  if (refuseIfSelectionOwned("Flash Fill")) return;
-  const snapshot = getGridStateSnapshot();
-  if (!snapshot) return;
-  const selection = snapshot.selection;
+  // column of the active cell the door targets: Core's, or a floating grid's
+  // own (P3). Any other owner of the selection refuses, once -- Core's cell is
+  // HIDDEN under it (D4, BUG-0185 class).
+  const t = resolveCellTarget("Flash Fill", "content");
+  if (t === null) return;
+  let selection: { startRow: number; startCol: number } | null | undefined;
+  let cells: FlashFillCells;
+  if (t.kind === "object") {
+    selection = t.selection;
+    try {
+      cells = await targetCells(t.ref, t.bounds);
+    } catch (err) {
+      showToast(typeof err === "string" ? err : (err as Error)?.message || String(err), { variant: "error" });
+      return;
+    }
+  } else {
+    const snapshot = getGridStateSnapshot();
+    if (!snapshot) return;
+    selection = snapshot.selection;
+    cells = gridCells();
+  }
   if (!selection) {
     showToast("Select a cell in the column you want to fill.", { variant: "warning" });
     return;
@@ -70,24 +133,24 @@ async function executeFlashFill(): Promise<void> {
   const activeRow = selection.startRow;
 
   // Find the data region bounds
-  const [maxRow, maxCol] = await getGridBounds();
+  const [maxRow, maxCol] = await cells.bounds();
   if (maxRow === 0 && maxCol === 0) {
     showToast("No data found for Flash Fill.", { variant: "warning" });
     return;
   }
 
   // Determine the data region: find first row (header detection)
-  const dataStartRow = await findDataStartRow(targetCol, activeRow);
+  const dataStartRow = await findDataStartRow(cells, targetCol, activeRow);
 
   // Determine which adjacent columns contain source data
-  const sourceCols = await findSourceColumns(targetCol, dataStartRow, maxRow, maxCol);
+  const sourceCols = await findSourceColumns(cells, targetCol, dataStartRow, maxRow, maxCol);
   if (sourceCols.length === 0) {
     showToast("No source data found adjacent to the selected column.", { variant: "warning" });
     return;
   }
 
   // Find the last row with data in any source column
-  const dataEndRow = await findDataEndRow(sourceCols, dataStartRow, maxRow);
+  const dataEndRow = await findDataEndRow(cells, sourceCols, dataStartRow, maxRow);
   if (dataEndRow < dataStartRow) {
     showToast("No source data found for Flash Fill.", { variant: "warning" });
     return;
@@ -98,11 +161,10 @@ async function executeFlashFill(): Promise<void> {
   const emptyRows: number[] = [];
 
   for (let row = dataStartRow; row <= dataEndRow; row++) {
-    const targetCell = await getCell(row, targetCol);
-    const targetValue = getCellDisplayValue(targetCell);
+    const targetValue = await cells.display(row, targetCol);
 
     // Read source values for this row
-    const sourceValues = await readSourceValues(row, sourceCols);
+    const sourceValues = await readSourceValues(cells, row, sourceCols);
 
     // Skip rows where all sources are empty
     if (sourceValues.every((v) => v === "")) continue;
@@ -132,7 +194,7 @@ async function executeFlashFill(): Promise<void> {
   }
 
   // Apply pattern to empty rows
-  const updates = await buildUpdates(program, emptyRows, sourceCols, targetCol);
+  const updates = await buildUpdates(cells, program, emptyRows, sourceCols, targetCol);
   if (updates.length === 0) {
     showToast("No cells to fill.");
     return;
@@ -146,7 +208,7 @@ async function executeFlashFill(): Promise<void> {
   // refusal never drops the batch's undo record (wave F, Z6).
   const tx = ownUndoTransaction(await beginUndoTransaction("Flash Fill"), UNDO_CLOSES);
   try {
-    await updateCellsBatch(updates);
+    await updateCellsBatch(updates, { target: targetRefOf(t) });
   } catch (err) {
     await tx.cancel().catch(() => {});
     const msg = typeof err === "string" ? err : (err as Error)?.message || String(err);
@@ -156,6 +218,8 @@ async function executeFlashFill(): Promise<void> {
   await tx.commit();
 
   emitAppEvent(AppEvents.GRID_REFRESH);
+  // An object's cells are re-read by its own staleness listener (grid:refresh).
+  if (t.kind === "object") refreshGridData();
   showToast(
     `Flash Fill: ${updates.length} cell${updates.length !== 1 ? "s" : ""} filled.`,
     { variant: "success" },
@@ -175,11 +239,10 @@ function getCellDisplayValue(cell: CellData | null): string {
  * Find the first row of the data region by scanning upward from the active row.
  * Stops at row 0 or when encountering an empty row.
  */
-async function findDataStartRow(col: number, fromRow: number): Promise<number> {
+async function findDataStartRow(cells: FlashFillCells, col: number, fromRow: number): Promise<number> {
   let row = fromRow;
   while (row > 0) {
-    const cell = await getCell(row - 1, col);
-    const above = getCellDisplayValue(cell);
+    const above = await cells.display(row - 1, col);
     if (above === "") {
       // Check if the row above has data in adjacent columns - it might be a header
       break;
@@ -195,6 +258,7 @@ async function findDataStartRow(col: number, fromRow: number): Promise<number> {
  * Checks columns to the left and right of the target column.
  */
 async function findSourceColumns(
+  cells: FlashFillCells,
   targetCol: number,
   dataStartRow: number,
   maxRow: number,
@@ -207,8 +271,7 @@ async function findSourceColumns(
   for (let col = targetCol - 1; col >= Math.max(0, targetCol - 5); col--) {
     let hasData = false;
     for (let row = dataStartRow; row <= checkRows; row++) {
-      const cell = await getCell(row, col);
-      if (getCellDisplayValue(cell) !== "") {
+      if ((await cells.display(row, col)) !== "") {
         hasData = true;
         break;
       }
@@ -224,8 +287,7 @@ async function findSourceColumns(
   for (let col = targetCol + 1; col <= Math.min(maxCol, targetCol + 5); col++) {
     let hasData = false;
     for (let row = dataStartRow; row <= checkRows; row++) {
-      const cell = await getCell(row, col);
-      if (getCellDisplayValue(cell) !== "") {
+      if ((await cells.display(row, col)) !== "") {
         hasData = true;
         break;
       }
@@ -244,6 +306,7 @@ async function findSourceColumns(
  * Find the last row with data in any of the source columns.
  */
 async function findDataEndRow(
+  cells: FlashFillCells,
   sourceCols: number[],
   startRow: number,
   maxRow: number,
@@ -252,8 +315,7 @@ async function findDataEndRow(
   for (let row = startRow; row <= maxRow; row++) {
     let hasData = false;
     for (const col of sourceCols) {
-      const cell = await getCell(row, col);
-      if (getCellDisplayValue(cell) !== "") {
+      if ((await cells.display(row, col)) !== "") {
         hasData = true;
         break;
       }
@@ -265,8 +327,7 @@ async function findDataEndRow(
       let allEmpty = true;
       for (let ahead = 1; ahead <= 2 && row + ahead <= maxRow; ahead++) {
         for (const col of sourceCols) {
-          const cell = await getCell(row + ahead, col);
-          if (getCellDisplayValue(cell) !== "") {
+          if ((await cells.display(row + ahead, col)) !== "") {
             allEmpty = false;
             break;
           }
@@ -279,16 +340,16 @@ async function findDataEndRow(
   return lastRow;
 }
 
-async function readSourceValues(row: number, sourceCols: number[]): Promise<string[]> {
+async function readSourceValues(cells: FlashFillCells, row: number, sourceCols: number[]): Promise<string[]> {
   const values: string[] = [];
   for (const col of sourceCols) {
-    const cell = await getCell(row, col);
-    values.push(getCellDisplayValue(cell));
+    values.push(await cells.display(row, col));
   }
   return values;
 }
 
 async function buildUpdates(
+  cells: FlashFillCells,
   program: Program,
   emptyRows: number[],
   sourceCols: number[],
@@ -297,7 +358,7 @@ async function buildUpdates(
   const updates: Array<{ row: number; col: number; value: string }> = [];
 
   for (const row of emptyRows) {
-    const sourceValues = await readSourceValues(row, sourceCols);
+    const sourceValues = await readSourceValues(cells, row, sourceCols);
     // Skip if all sources are empty
     if (sourceValues.every((v) => v === "")) continue;
 

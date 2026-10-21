@@ -41,6 +41,12 @@
 //            - DELETE, COPY, PASTE and DUPLICATE of the whole selection across
 //              families (lib/canvasDelete.ts, lib/canvasClipboard.ts through
 //              @api/objectClipboard), each one undo step,
+//            - EDIT INTERACTIONS (Power BI's Format > Edit interactions, P4
+//              S10): the Arrange toggle, the Filter / Highlight / None strips
+//              on every other visual (lib/interactionOverlay.tsx), and the
+//              publish of each page's `interactions` to @api/reportFilters
+//              from the store; a plain click on the empty page and Escape with
+//              nothing selected clear the page's cross-filter selections,
 //            - the store that keeps all of it in step with the backend.
 //
 //          Core already knows the active sheet's SURFACE (it refuses cell
@@ -84,6 +90,9 @@ import { installCanvasLayoutRefs } from "./lib/layoutRefs";
 import { installCanvasGripMenuItems } from "./lib/gripMenuItems";
 import { installObjectsLockedNotice } from "./lib/objectsLock";
 import { installCanvasPageBindings } from "./lib/canvasBindings";
+import { startReportFilters } from "@api/reportFilters";
+import { installEditInteractions } from "./lib/editInteractions";
+import { installInteractionOverlay } from "./lib/interactionOverlay";
 
 /** The id of the page layer; one per app. */
 export const CANVAS_PAGE_LAYER_ID = "canvas-sheet-page";
@@ -219,6 +228,13 @@ function activate(_context: ExtensionContext): void {
   // A drag attempt on a page whose Lock Objects is on is told why (Core has
   // already refused to arm the move: the surface says every object is locked).
   cleanupFns.push(...installObjectsLockedNotice());
+
+  // Edit interactions (P4 S10). The report-filter seam's lifetime services
+  // (the page list, the File > New / Open selection reset) run while this
+  // extension is active; the store publishes every page's interactions there.
+  cleanupFns.push(startReportFilters());
+  cleanupFns.push(...installEditInteractions());
+  cleanupFns.push(...installInteractionOverlay());
 
   cleanupFns.push(() => resetCanvasTab());
   cleanupFns.push(() => resetCanvasSheetStore());

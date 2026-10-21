@@ -61,6 +61,8 @@ describe("vSetState chart spec pre-filter", () => {
 
   it("does NOT constrain setState aspects that have no gate of their own", () => {
     expect(vSetState(["slicer.setSelectedItems", [["a", "b"]]])).toBe(true);
+    // chart.setStyleProperty USED to be in this list too; it now has its own
+    // row (setStateAspectRows.test.ts) for the same reason as shape.setProperty.
     expect(vSetState(["chart.setStyleProperty", ["bg", "#fff"]])).toBe(true);
     // shape.setProperty USED to be in this list. It now has its own gate — see
     // mediaHandles.test.ts — because "no key allowlist, no length bound" on a

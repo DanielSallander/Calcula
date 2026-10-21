@@ -9,6 +9,7 @@ import Editor, { type OnMount, loader } from "@monaco-editor/react";
 import type { editor as monacoEditor } from "monaco-editor";
 import * as monaco from "monaco-editor";
 import { enforceLfLineEndings } from "../../_shared/lib/monacoLineEndings";
+import { formatDate } from "@api/locale";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Monaco 0.52+ moved typescript to top-level; languages.typescript still works at runtime
 const monacoTs = (monaco.languages as any).typescript;
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
@@ -1393,7 +1394,7 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
                         }
                       >
                         <span style={{ color: "#555", marginRight: 8, fontSize: 10 }}>
-                          {new Date(entry.timestamp).toLocaleTimeString()}
+                          {formatDate(new Date(entry.timestamp), "time")}
                         </span>
                         {entry.message}
                       </div>

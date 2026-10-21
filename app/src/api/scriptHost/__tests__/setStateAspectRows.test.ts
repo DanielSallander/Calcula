@@ -32,6 +32,8 @@ import {
   checkBindingClearAspect,
   checkBindingSetAspect,
   checkPropertySetAspect,
+  MAX_STYLE_PROPERTY_CHARS,
+  checkStylePropertyAspect,
   isBindingColor,
   vObjectAspect,
   vSetState,
@@ -234,4 +236,45 @@ describe("property.set (setProperty) is never laxer than the key-based door", ()
       expect(isBindingColor(bad), bad).toBe(false);
     }
   });
+});
+
+// ============================================================================
+// chart.setStyleProperty / slicer.setStyleProperty (round-2 security review)
+// ============================================================================
+//
+// SABOTAGE (2026-10-17): delete the setStyleProperty row from vSetState ->
+// every refusal below goes red (the `return true` tail admits a 3 MB value, a
+// non-string and a data: URI) while "a style value passes" stays green.
+
+describe("each style-override aspect has its own vSetState row (never the `return true` tail)", () => {
+  for (const aspect of ["chart.setStyleProperty", "slicer.setStyleProperty"] as const) {
+    it(`${aspect}: an unbounded value is refused`, () => {
+      expect(vSetState([aspect, ["bg", "x".repeat(3_000_000)]])).toMatch(/max 256/);
+      expect(vSetState([aspect, ["bg", "x".repeat(MAX_STYLE_PROPERTY_CHARS + 1)]])).toMatch(/max 256/);
+    });
+
+    it(`${aspect}: a non-string value or a malformed name is refused`, () => {
+      expect(vSetState([aspect, ["bg", { nested: "x".repeat(10) }]])).toMatch(/must be a string/);
+      expect(vSetState([aspect, ["bg", 42]])).toMatch(/must be a string/);
+      expect(vSetState([aspect, ["", "#fff"]])).toMatch(/identifier/);
+      expect(vSetState([aspect, ["a b", "#fff"]])).toMatch(/identifier/);
+      expect(vSetState([aspect, ["x".repeat(65), "#fff"]])).toMatch(/identifier/);
+      expect(vSetState([aspect, ["bg"]])).toBe("expected [name, value]");
+    });
+
+    it(`${aspect}: a data: URI or a url(...) is refused (reference media, never introduce bytes)`, () => {
+      expect(vSetState([aspect, ["bg", "data:image/png;base64,AAAA"]])).toMatch(/never introduce bytes/);
+      expect(vSetState([aspect, ["bg", "url(https://example.com/x.png)"]])).toMatch(/never introduce bytes/);
+      // The unlocked cross-object door delegates to the same row.
+      expect(vObjectAspect(["chart", "3f9c2a64-0000-7000-8000-000000000001", aspect, ["bg", 42]])).toMatch(
+        /must be a string/,
+      );
+    });
+
+    it(`${aspect}: a style value passes`, () => {
+      expect(vSetState([aspect, ["bg", "#fff"]])).toBe(true);
+      expect(vSetState([aspect, ["font_family", "Segoe UI"]])).toBe(true);
+      expect(checkStylePropertyAspect(["fontSize", "12px"])).toBe(true);
+    });
+  }
 });

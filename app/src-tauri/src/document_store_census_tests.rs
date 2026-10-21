@@ -1086,7 +1086,9 @@ const NOT_DOCUMENT_REPLACING: &[(&str, &str)] = &[
     ("bi_insert_result", "writes a query result into a range"),
     ("bi_refresh_connection", "re-fetches one connection's tables"),
     ("create_report", "adds a report"),
+    ("run_bi_pivot_filtered_view", "a READ: runs one BI pivot's query again under another visual's selection as a headless design query and returns the view; writes no store, no cell and no undo step"),
     ("refresh_report", "re-materializes one report"),
+    ("set_canvas_layout", "patches ONE canvas page's layout; holds PivotState and BiState only to re-fold the BI pivots a visual-interaction change reaches (P4 DC-9), each through refresh_bi_pivot_unrecorded inside the same undo step. The document stays"),
     ("script_collaboration", "the sandboxed gateway for the `.calp` script API; every route it reaches is one of the commands already classified here"),
     ("object_bindings", "the object-property binding command (WP-D): edits ONE binding row or one property's literal through its family's own core, or re-evaluates; holds BiState only to read the models' measure lists and PivotState only to locate a canvas pivot. The document stays"),
 ];

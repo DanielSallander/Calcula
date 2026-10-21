@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use serde::{Deserialize, Serialize};
-use engine::CellValue;
+use engine::{CellValue, MemberSource};
 use crate::definition::{AggregationType, FieldIndex, PivotId};
 
 /// Inline capacity for GroupKey — covers the typical 2-6 field case
@@ -125,6 +125,51 @@ pub fn is_blank_item_label(label: &str) -> bool {
     label.eq_ignore_ascii_case(BLANK_ITEM_LABEL)
 }
 
+/// The blank member's KEY: the empty string (orchestrator ruling Q8,
+/// 2026-10-16 -- Power BI's "(Blank)" semantics: the pivot cache's empty
+/// item, a BI NULL and a BI empty string are ONE member, keyed ""). Its LABEL
+/// is `engine::BLANK_MEMBER_LABEL` ("(Blank)"), written by
+/// `engine::member_label` from [`MemberSource::Blank`].
+///
+/// This is the spelling [`FieldCache::member_key`] returns. The view's HEADER
+/// TEXT for the blank member (`PivotViewCell::value`, `group_path` names,
+/// GETPIVOTDATA and every persisted hidden-items list) still reads
+/// [`BLANK_ITEM_LABEL`] ("(blank)"). A reader that takes a member NAME from
+/// both worlds (a selection written from the key, or one written from the
+/// header text) tests it with [`is_blank_member_key`].
+pub const BLANK_MEMBER_KEY: &str = "";
+
+/// True when `name` names the blank MEMBER: its key "" ([`BLANK_MEMBER_KEY`])
+/// or its header text "(blank)" in any case ([`is_blank_item_label`]).
+pub fn is_blank_member_key(name: &str) -> bool {
+    name == BLANK_MEMBER_KEY || is_blank_item_label(name)
+}
+
+/// What the KEYS of a field are, when the cache cannot tell from the value:
+/// a BI cache stores a Date32 / Timestamp column as its ISO TEXT
+/// ("2024-01-15", "2024-01-15 13:04:05"), so the host's BI cache builder
+/// says so here and [`FieldCache::member_source`] reads such a key as a
+/// date -- no string pattern is ever guessed for a field that did not
+/// declare it (a text code "2024-01-15" in a text column stays text).
+///
+/// A BI Decimal column is interned as an f64, which forgets its scale, while
+/// the model's value list keys it by the exact decimal text ("5.50",
+/// `arrow_value_to_string`). [`MemberKind::Decimal`] gives the scale back to
+/// [`FieldCache::member_key`], so a model pivot's member key and the model
+/// list's key are ONE spelling (P2 S4; P4 pins it byte for byte).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MemberKind {
+    /// Keys are what the cache value says they are.
+    #[default]
+    Plain,
+    /// Text keys are ISO dates (`%Y-%m-%d`).
+    IsoDate,
+    /// Text keys are ISO date-times (`%Y-%m-%d %H:%M:%S`).
+    IsoDateTime,
+    /// Number keys are decimals of `scale` fraction digits ("5.50").
+    Decimal { scale: u32 },
+}
+
 /// A normalized, hashable representation of a cell value.
 /// Used as keys in the unique value store.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -228,6 +273,20 @@ pub struct FieldCache {
     /// grid-sourced cache, whose header names are all it has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_key: Option<String>,
+
+    /// What this field's KEYS are when the value alone cannot say (an ISO
+    /// date stored as text by the BI cache builder). Locale-free; travels in
+    /// undo snapshots, so it is serde-default.
+    #[serde(default)]
+    pub member_kind: MemberKind,
+
+    /// The [`MemberSource`] of every `label_map` entry that the engine wrote
+    /// (date grouping, number binning): what the KEY in `label_map` IS, so
+    /// its LABEL can be written for the app locale at response time
+    /// (`engine::member_label`). `label_map` keeps the invariant KEY in every
+    /// case. Locale-free; serde-default (undo snapshots).
+    #[serde(default)]
+    pub label_source_map: HashMap<ValueId, MemberSource>,
 }
 
 impl FieldCache {
@@ -241,6 +300,76 @@ impl FieldCache {
             sort_dirty: true,
             label_map: HashMap::new(),
             model_key: None,
+            member_kind: MemberKind::Plain,
+            label_source_map: HashMap::new(),
+        }
+    }
+
+    /// THE member KEY of `value_id`: the invariant canonical text every
+    /// selection, filter, page filter and cross-filter tuple matches on.
+    /// Never localised (the app-locale LABEL is `engine::member_label` over
+    /// [`FieldCache::member_source`]).
+    ///
+    /// The body is the pivot engine's header spelling (formerly the private
+    /// `PivotEngine::get_value_label`), moved here so the engine and the host
+    /// spell a member ONE way: `label_map` first (grouping keys), then the
+    /// value -- `format!("{}", n)` / the text / `TRUE`/`FALSE` / `#err`.
+    /// The ONE difference from the header text is the blank member: its key
+    /// is [`BLANK_MEMBER_KEY`] ("", ruling Q8), where the header still reads
+    /// [`BLANK_ITEM_LABEL`] ("(blank)").
+    pub fn member_key(&self, value_id: ValueId) -> String {
+        if value_id == VALUE_ID_EMPTY || value_id == VALUE_ID_BLANK {
+            return BLANK_MEMBER_KEY.to_string();
+        }
+        if let Some(label) = self.label_map.get(&value_id) {
+            return label.clone();
+        }
+        match self.get_value(value_id) {
+            Some(CacheValue::Empty) => BLANK_MEMBER_KEY.to_string(),
+            Some(CacheValue::Number(n)) => match self.member_kind {
+                MemberKind::Decimal { scale } if scale > 0 => format!("{:.*}", scale as usize, n.as_f64()),
+                _ => format!("{}", n.as_f64()),
+            },
+            Some(CacheValue::Text(s)) => s.clone(),
+            Some(CacheValue::Boolean(b)) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+            Some(CacheValue::Error(e)) => format!("#{}", e),
+            None => "(unknown)".to_string(),
+        }
+    }
+
+    /// What the member `value_id` IS, so its label can be written for a
+    /// locale (`engine::member_label`) without re-parsing its key.
+    ///
+    /// `label_source_map` first (the engine's grouping and binning keys);
+    /// any other `label_map` entry is shown as written (`Text`); then the
+    /// cache value: the blank (and an empty text, which shares its key "")
+    /// -> `Blank`, a number -> `Number`, a text -> `Date` / `DateTime` when
+    /// [`FieldCache::member_kind`] declares ISO keys AND the key parses
+    /// strictly (`engine::iso_member_source`), else `Text`; a boolean ->
+    /// `Boolean`; an error -> `Error`. An unknown id is `Text`.
+    pub fn member_source(&self, value_id: ValueId) -> MemberSource {
+        if value_id == VALUE_ID_EMPTY || value_id == VALUE_ID_BLANK {
+            return MemberSource::Blank;
+        }
+        if let Some(source) = self.label_source_map.get(&value_id) {
+            return source.clone();
+        }
+        if self.label_map.contains_key(&value_id) {
+            return MemberSource::Text;
+        }
+        match self.get_value(value_id) {
+            Some(CacheValue::Empty) => MemberSource::Blank,
+            Some(CacheValue::Number(n)) => MemberSource::Number { value: n.as_f64() },
+            Some(CacheValue::Text(s)) if s.is_empty() => MemberSource::Blank,
+            Some(CacheValue::Text(s)) => match self.member_kind {
+                MemberKind::Plain | MemberKind::Decimal { .. } => MemberSource::Text,
+                MemberKind::IsoDate | MemberKind::IsoDateTime => {
+                    engine::iso_member_source(s).unwrap_or(MemberSource::Text)
+                }
+            },
+            Some(CacheValue::Boolean(b)) => MemberSource::Boolean { value: *b },
+            Some(CacheValue::Error(_)) => MemberSource::Error,
+            None => MemberSource::Text,
         }
     }
     
@@ -1033,6 +1162,34 @@ impl PivotCache {
         result
     }
 
+    /// [`PivotCache::get_unique_values_for_filter`] with each member's
+    /// [`MemberSource`]: `(id, key, source)`. The key is that function's OWN
+    /// spelling, unchanged; the source is [`FieldCache::member_source`].
+    pub fn get_unique_members_for_filter(&self, field_index: FieldIndex) -> Vec<(ValueId, String, MemberSource)> {
+        let Some(field_cache) = self.fields.get(field_index) else { return Vec::new() };
+        self.get_unique_values_for_filter(field_index)
+            .into_iter()
+            .map(|(id, key)| {
+                let source = field_cache.member_source(id);
+                (id, key, source)
+            })
+            .collect()
+    }
+
+    /// [`PivotCache::get_unique_values_for_filter_in_data`] with each
+    /// member's [`MemberSource`]: `(id, key, source)`, in that function's
+    /// order and with its OWN key spelling ("(blank)" for the blank).
+    pub fn get_unique_members_for_filter_in_data(&self, field_index: FieldIndex) -> Vec<(ValueId, String, MemberSource)> {
+        let Some(field_cache) = self.fields.get(field_index) else { return Vec::new() };
+        self.get_unique_values_for_filter_in_data(field_index)
+            .into_iter()
+            .map(|(id, key)| {
+                let source = field_cache.member_source(id);
+                (id, key, source)
+            })
+            .collect()
+    }
+
     /// Returns unique values for a filter field that exist in the current filtered dataset.
     /// This is useful when cascading filters (showing only values that exist after other filters).
     ///
@@ -1457,6 +1614,13 @@ impl PivotCache {
             CacheValue::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
             CacheValue::Error(e) => e.clone(),
         })
+    }
+
+    /// The [`MemberSource`] of `value_id` in `field_index` (base or virtual
+    /// field): the sibling of [`PivotCache::get_value_label`], whose own key
+    /// spelling is unchanged. `None` for an unknown field.
+    pub fn get_value_member_source(&self, field_index: usize, value_id: ValueId) -> Option<MemberSource> {
+        Some(self.get_field(field_index)?.member_source(value_id))
     }
 
 }

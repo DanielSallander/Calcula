@@ -32,10 +32,6 @@
  *   calcula-task-pane              a re-docked or resized pane moves the grid's
  *                                  left edge (NOT the 1218 -> 898 px class:
  *                                  `isOpen` is deliberately not persisted)
- *   calcula.locale                 `src/api/locale.ts` pushes a saved override
- *                                  into the BACKEND on first read, silently
- *                                  changing the formula argument separator for
- *                                  a whole run
  *   ext.<extensionId>.<key>        the generic public settings API — an
  *                                  open-ended namespace nothing enumerates
  *
@@ -45,9 +41,17 @@
  * direction that matters: a key nobody remembered is still reset.
  *
  * WHAT IT DELIBERATELY DOES NOT TOUCH: anything outside the app's own storage
- * namespaces, and any file under %APPDATA% (see `script-security.json` handling
- * in global-setup — that one is backed up and restored rather than wiped,
- * because it is also a real user's setting).
+ * namespaces, and any file under %APPDATA% / %LOCALAPPDATA%. Those are a real
+ * user's settings, and nothing in the harness edits them.
+ *
+ * THE APP LOCALE IS NOT HERE ANY MORE (P2, 2026-10-16). The `calcula.locale`
+ * key is retired: the override lives in the Rust backend's
+ * %LOCALAPPDATA%\Calcula\app-settings.json (`{"localeOverride": ...}`), and
+ * every explicit `set_locale` persists there. global-setup records that file
+ * READ-ONLY as `locale-baseline.json` in the run directory, every spec that
+ * switches the locale restores its boot override, and
+ * journeys/zz-persisted-residue.spec.ts fails a run that ends on a different
+ * override than it started with, naming the value.
  */
 import { chromium, type Browser, type Page } from "@playwright/test";
 
@@ -217,14 +221,6 @@ export const GOLDEN_AFFECTING_KEYS: Array<{
       if (Array.isArray(v)) return v.length === 0;
       return !!v && typeof v === "object" && Object.keys(v as object).length === 0;
     },
-  },
-  {
-    key: "calcula.locale",
-    consequence:
-      "src/api/locale.ts pushes a saved override into the BACKEND on first read, silently changing the formula argument separator for the whole next run",
-    // extensions/Settings/SettingsView.tsx (the General page's locale picker)
-    // reads it as `|| "system"`; src/api/locale.ts LOCALE_OVERRIDE_KEY owns it.
-    isClean: (raw) => raw === undefined || raw === "system" || raw === '"system"',
   },
 ];
 

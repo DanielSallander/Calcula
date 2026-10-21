@@ -3,6 +3,7 @@
 // CONTEXT: Computes regression lines, moving averages, and other trendlines
 //          from chart series data. Returns pixel-ready points for the painter.
 
+import { decimalSeparator, formatNumber } from "@api/locale";
 import type { TrendlineType, TrendlineSpec, ParsedChartData } from "../types";
 
 // ============================================================================
@@ -394,10 +395,14 @@ function solveLinearSystem(matrix: number[][], n: number): number[] | null {
   return result;
 }
 
-/** Format a coefficient for display. */
+/**
+ * Format a coefficient for display, in the APP locale ("1,5" in de-DE, as
+ * Excel writes a trendline equation). At most two decimals, trailing zeros
+ * dropped; very large or very small magnitudes in scientific notation.
+ */
 function formatCoeff(v: number): string {
   if (Math.abs(v) >= 1000 || (Math.abs(v) < 0.01 && v !== 0)) {
-    return v.toExponential(2);
+    return v.toExponential(2).replace(".", decimalSeparator());
   }
-  return v.toFixed(2).replace(/\.?0+$/, "") || "0";
+  return formatNumber(v, { maxDecimals: 2, trimZeros: true });
 }

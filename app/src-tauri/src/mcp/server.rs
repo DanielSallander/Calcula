@@ -1278,7 +1278,7 @@ impl CalculaMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
         log_info!("MCP", "Tool call: set_object_property {} {} {}", p.kind, log_summary(&p.id, 60), log_summary(&p.path, 80));
-        match tools_bindings::set_object_property(&self.app_handle, &p.kind, &p.id, &p.path, p.value) {
+        match Box::pin(tools_bindings::set_object_property(&self.app_handle, &p.kind, &p.id, &p.path, p.value)).await {
             Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
             Err(e) => {
                 log_warn!("MCP", "Tool error: set_object_property: {}", log_summary(&e, 200));

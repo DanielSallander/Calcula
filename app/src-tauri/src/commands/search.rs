@@ -58,6 +58,27 @@ fn resolve_search_sheet(
     }
 }
 
+/// The sheet a search acts on when it names an OBJECT's cells (P3: a floating
+/// grid): its BACKING sheet, resolved by id, plus the write extent its matches
+/// are clipped to. Refused together with an explicit sheet. Call holding
+/// nothing.
+fn resolve_search_target(
+    state: &AppState,
+    sheet_index: Option<usize>,
+    target: &crate::api_types::CellTargetRef,
+) -> Result<crate::cell_target::ResolvedCellTarget, String> {
+    crate::cell_target::refuse_target_with_sheet(&Some(target.clone()), sheet_index.is_some())?;
+    crate::cell_target::resolve_cell_target(state, target)
+}
+
+/// Keep only the matches inside a target's write extent.
+fn within_extent(t: &crate::cell_target::ResolvedCellTarget, matches: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+    matches
+        .into_iter()
+        .filter(|&(r, c)| r < t.extent_rows && c < t.extent_cols)
+        .collect()
+}
+
 /// Run a read-only closure against the TARGET sheet's grid: the mirror when
 /// the target is active (grids[active] can lag behind it), grids[target]
 /// otherwise.
@@ -87,11 +108,47 @@ pub fn find_all(
     match_entire_cell: bool,
     search_formulas: bool,
     sheet_index: Option<usize>,
+    target: Option<crate::api_types::CellTargetRef>,
 ) -> Result<FindResult, String> {
-    let (target, active) = resolve_search_sheet(&state, sheet_index)?;
-    let matches = with_search_grid(&state, target, active, |grid| {
-        grid.find_all(&query, case_sensitive, match_entire_cell, search_formulas)
-    });
+    find_all_on(
+        &state,
+        &query,
+        case_sensitive,
+        match_entire_cell,
+        search_formulas,
+        sheet_index,
+        target.as_ref(),
+    )
+}
+
+/// [`find_all`] over plain references. With an OBJECT target (P3) the
+/// object's BACKING sheet is searched, matches clipped to its write extent and
+/// reported in the object's coordinates.
+pub(crate) fn find_all_on(
+    state: &AppState,
+    query: &str,
+    case_sensitive: bool,
+    match_entire_cell: bool,
+    search_formulas: bool,
+    sheet_index: Option<usize>,
+    target: Option<&crate::api_types::CellTargetRef>,
+) -> Result<FindResult, String> {
+    let matches = match target {
+        Some(target) => {
+            let t = resolve_search_target(state, sheet_index, target)?;
+            let active = *state.active_sheet.read().unwrap();
+            let found = with_search_grid(state, t.backing_index, active, |grid| {
+                grid.find_all(query, case_sensitive, match_entire_cell, search_formulas)
+            });
+            within_extent(&t, found)
+        }
+        None => {
+            let (target, active) = resolve_search_sheet(state, sheet_index)?;
+            with_search_grid(state, target, active, |grid| {
+                grid.find_all(query, case_sensitive, match_entire_cell, search_formulas)
+            })
+        }
+    };
     let total_count = matches.len();
     Ok(FindResult { matches, total_count })
 }
@@ -105,7 +162,22 @@ pub fn count_matches(
     match_entire_cell: bool,
     search_formulas: bool,
     sheet_index: Option<usize>,
+    target: Option<crate::api_types::CellTargetRef>,
 ) -> Result<usize, String> {
+    if let Some(target) = target.as_ref() {
+        // An OBJECT's cells (P3): counted over the same clipped match list
+        // find_all reports, so the two can never disagree.
+        return find_all_on(
+            &state,
+            &query,
+            case_sensitive,
+            match_entire_cell,
+            search_formulas,
+            sheet_index,
+            Some(target),
+        )
+        .map(|r| r.total_count);
+    }
     let (target, active) = resolve_search_sheet(&state, sheet_index)?;
     Ok(with_search_grid(&state, target, active, |grid| {
         grid.count_matches(&query, case_sensitive, match_entire_cell, search_formulas)
@@ -338,7 +410,26 @@ pub fn replace_all(
     case_sensitive: bool,
     match_entire_cell: bool,
     sheet_index: Option<usize>,
+    target: Option<crate::api_types::CellTargetRef>,
 ) -> Result<ReplaceResult, String> {
+    // P3: an OBJECT's cells (a floating grid) -- its backing sheet, gated by
+    // the HOST's protection.
+    if let Some(target) = target.as_ref() {
+        return replace_all_on_target(
+            &state,
+            &file_state,
+            &user_files_state,
+            &pivot_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            sheet_index,
+            target,
+            search,
+            replacement,
+            case_sensitive,
+            match_entire_cell,
+        );
+    }
     // Wave 3: an explicit non-active target takes the off-sheet path.
     {
         let (target, active) = resolve_search_sheet(&state, sheet_index)?;
@@ -560,6 +651,95 @@ pub fn replace_all(
     })
 }
 
+/// Replace All on an OBJECT's cells (P3: a floating grid). The match list is
+/// read from the object's BACKING sheet and clipped to its write extent; the
+/// HOST's protection is asked over exactly those cells (a locked cell the
+/// replace never touches does not refuse it, the sheet rule); then the
+/// off-sheet twin writes the backing sheet as ONE sheet-tagged undo step and
+/// recalculates dependents anywhere (a host formula reading the grid
+/// included). Every gate runs holding nothing, before any effect.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn replace_all_on_target(
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pivot_state: &crate::pivot::types::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    sheet_index: Option<usize>,
+    target: &crate::api_types::CellTargetRef,
+    search: String,
+    replacement: String,
+    case_sensitive: bool,
+    match_entire_cell: bool,
+) -> Result<ReplaceResult, String> {
+    let t = resolve_search_target(state, sheet_index, target)?;
+    let matches = {
+        let active = *state.active_sheet.read().unwrap();
+        let found = with_search_grid(state, t.backing_index, active, |grid| {
+            grid.find_all(&search, case_sensitive, match_entire_cell, false)
+        });
+        within_extent(&t, found)
+    };
+    crate::cell_target::gate_target_cell_list(state, &t, &matches)?;
+    replace_all_off_sheet(
+        state,
+        file_state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        t.backing_index,
+        search,
+        replacement,
+        case_sensitive,
+        match_entire_cell,
+    )
+}
+
+/// Replace-Next on an OBJECT's cell (P3): the extent and the HOST's
+/// protection, then the off-sheet twin on the backing sheet.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn replace_single_on_target(
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pivot_state: &crate::pivot::types::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    sheet_index: Option<usize>,
+    target: &crate::api_types::CellTargetRef,
+    row: u32,
+    col: u32,
+    search: String,
+    replacement: String,
+    case_sensitive: bool,
+) -> Result<Option<CellData>, String> {
+    let t = resolve_search_target(state, sheet_index, target)?;
+    crate::cell_target::ensure_in_extent(&t, row, col, row, col)?;
+    crate::cell_target::gate_target_cells(
+        state,
+        &t,
+        (row, col, row, col),
+        crate::cell_target::EDIT_CELLS,
+        "replace in this cell",
+    )?;
+    replace_single_off_sheet(
+        state,
+        file_state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        t.backing_index,
+        row,
+        col,
+        search,
+        replacement,
+        case_sensitive,
+    )
+}
+
 /// Case-insensitive string replacement.
 fn replace_case_insensitive(text: &str, search: &str, replacement: &str) -> String {
     if search.is_empty() {
@@ -739,7 +919,26 @@ pub fn replace_single(
     replacement: String,
     case_sensitive: bool,
     sheet_index: Option<usize>,
+    target: Option<crate::api_types::CellTargetRef>,
 ) -> Result<Option<CellData>, String> {
+    // P3: an OBJECT's cell (a floating grid's).
+    if let Some(target) = target.as_ref() {
+        return replace_single_on_target(
+            &state,
+            &file_state,
+            &user_files_state,
+            &pivot_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            sheet_index,
+            target,
+            row,
+            col,
+            search,
+            replacement,
+            case_sensitive,
+        );
+    }
     // Wave 3: an explicit non-active target takes the off-sheet path.
     {
         let (target, active) = resolve_search_sheet(&state, sheet_index)?;

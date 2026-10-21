@@ -160,6 +160,7 @@ import {
   type AppWindow,
 } from "../helpers/calp-harness";
 import { publishNew, subscribe } from "../helpers/calp-collab";
+import { closeTaskPanes } from "../helpers/object-pane";
 import { escapeRe, startToastLog, toastLog } from "../helpers/pivot-live";
 
 const RUN = Date.now().toString(36);
@@ -169,8 +170,6 @@ const WS = path.join(WORK, "workspace");
 const BUTTONS = "/src/api/buttonControlService.ts";
 const DESIGN_MODE = "/src/api/designMode.ts";
 const FLOATING_STORE = "/extensions/Controls/lib/floatingStore.ts";
-/** The task-pane store the appPage fixture resets (app/src/shell/TaskPane/useTaskPaneStore.ts). */
-const TASK_PANE_STORE = "/src/shell/TaskPane/useTaskPaneStore.ts";
 
 /** A stored macro with no runtime marker runs in the MODULE runtime (the interpreter a button hands code to). */
 const MODULE_MACRO_DESC = "e2e calp-inline-buttons (module runtime)";
@@ -756,26 +755,6 @@ function unsealedVersion1(file: ConsentFileJson, app: string): ConsentFileJson {
       .filter((r) => r.packageName === app)
       .map(({ keyId: _keyId, seal: _seal, ...rest }) => rest),
   };
-}
-
-// ===========================================================================
-// Task panes (afterAll)
-// ===========================================================================
-
-/** Close every task pane through the REAL store -- the appPage fixture's route -- and say what was open. */
-async function closeTaskPanes(page: Page): Promise<{ isOpen: boolean; openPanes: number }> {
-  await installAppImport(page);
-  return bounded(
-    "closeTaskPanes",
-    page.evaluate(async (mod) => {
-      const m = (await (window as unknown as AppWindow).__appImport!(mod)) as {
-        useTaskPaneStore: { getState: () => { reset: () => void; isOpen?: boolean; openPanes?: unknown[] } };
-      };
-      m.useTaskPaneStore.getState().reset();
-      const s = m.useTaskPaneStore.getState();
-      return { isOpen: Boolean(s.isOpen), openPanes: Array.isArray(s.openPanes) ? s.openPanes.length : -1 };
-    }, TASK_PANE_STORE),
-  );
 }
 
 // ===========================================================================

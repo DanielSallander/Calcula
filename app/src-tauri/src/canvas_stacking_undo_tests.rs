@@ -334,3 +334,100 @@ fn the_stacking_step_is_recorded_with_sheet_ids_released() {
     );
     assert_eq!(wb.depth().0, depth + 1, "fixture: the restack recorded its ONE step once the stack was free");
 }
+
+// ---------------------------------------------------------------------------
+// P4 S4a: Edit interactions rides the same `canvas_stacking` step
+// ---------------------------------------------------------------------------
+
+fn pair(source: CanvasObjectRef, target: CanvasObjectRef, mode: persistence::VisualInteractionMode) -> persistence::CanvasInteraction {
+    persistence::CanvasInteraction { source, target, mode }
+}
+
+fn chart_ignores_slicer() -> persistence::CanvasInteractions {
+    persistence::CanvasInteractions {
+        default_mode: None,
+        pairs: vec![pair(obj("slicer", "s1"), obj("chart", "c1"), persistence::VisualInteractionMode::None)],
+    }
+}
+
+/// SABOTAGE: drop the `current.interactions != next.interactions` arm in
+/// `set_canvas_layout_inner` -- the depth assertion fails (no step).
+#[test]
+fn an_interaction_change_is_one_undo_step_and_redo_puts_it_back() {
+    let wb = Wb::new();
+    let (depth, _) = wb.depth();
+
+    wb.patch(CanvasLayoutPatch { interactions: Some(chart_ignores_slicer()), ..Default::default() }).unwrap();
+    assert_eq!(wb.depth().0, depth + 1, "an Edit interactions change must be exactly ONE undo step");
+    assert_eq!(
+        wb.state.undo_stack.lock().unwrap().undo_description(),
+        Some("Change visual interaction"),
+        "the step names what it undoes"
+    );
+
+    let result = wb.undo();
+    assert!(result.success, "the step undoes");
+    assert!(wb.layout().interactions.is_default(), "Ctrl+Z takes the pair back");
+    assert!(
+        result.refresh_domains.iter().any(|d| d == "sheets"),
+        "the restore announces `sheets`: {:?}",
+        result.refresh_domains
+    );
+    wb.redo();
+    assert_eq!(wb.layout().interactions, chart_ignores_slicer(), "Ctrl+Y re-applies it");
+
+    // A default-mode change alone is a step too.
+    let highlight = persistence::CanvasInteractions {
+        default_mode: Some(persistence::VisualInteractionMode::Highlight),
+        ..chart_ignores_slicer()
+    };
+    wb.patch(CanvasLayoutPatch { interactions: Some(highlight.clone()), ..Default::default() }).unwrap();
+    assert_eq!(wb.depth().0, depth + 2, "the default mode is undoable too");
+    wb.undo();
+    assert_eq!(wb.layout().interactions, chart_ignores_slicer(), "and Ctrl+Z restores the previous default");
+}
+
+#[test]
+fn an_interaction_change_inside_an_open_transaction_joins_it() {
+    let wb = Wb::new();
+    let (depth, _) = wb.depth();
+    wb.state.undo_stack.lock().unwrap().begin_transaction("Arrange");
+    wb.patch(CanvasLayoutPatch { z_order: Some(vec![obj("chart", "c1"), obj("slicer", "s1")]), ..Default::default() })
+        .unwrap();
+    wb.patch(CanvasLayoutPatch { interactions: Some(chart_ignores_slicer()), ..Default::default() }).unwrap();
+    assert!(
+        wb.state.undo_stack.lock().unwrap().has_open_transaction(),
+        "the recorder must not commit the caller's transaction"
+    );
+    wb.state.undo_stack.lock().unwrap().commit_transaction();
+    assert_eq!(wb.depth().0, depth + 1, "both changes JOINED the caller's one step");
+    wb.undo();
+    let layout = wb.layout();
+    assert!(layout.z_order.is_empty() && layout.interactions.is_default(), "one Ctrl+Z takes back both");
+}
+
+#[test]
+fn re_sending_the_same_interactions_records_nothing_and_stays_clean() {
+    let wb = Wb::new();
+    wb.patch(CanvasLayoutPatch { interactions: Some(chart_ignores_slicer()), ..Default::default() }).unwrap();
+    crate::document_effect::mark_saved(&wb.file);
+    let (depth, _) = wb.depth();
+
+    // Re-sent padded and with the pair named twice (the last edit wins): it
+    // normalizes to exactly what is stored.
+    let mut resent = chart_ignores_slicer();
+    resent.pairs.insert(0, pair(obj("slicer", " s1"), obj("chart ", "c1"), persistence::VisualInteractionMode::Filter));
+    wb.patch(CanvasLayoutPatch { interactions: Some(resent), ..Default::default() }).unwrap();
+    assert_eq!(wb.layout().interactions, chart_ignores_slicer(), "the LAST of a duplicated pair wins");
+    assert!(!wb.file.is_dirty(), "a patch that changed nothing dirtied the document");
+    assert_eq!(wb.depth().0, depth, "a patch that changed nothing recorded a step");
+}
+
+#[test]
+fn canvas_interactions_of_clones_a_canvas_and_answers_none_for_a_worksheet() {
+    let wb = Wb::new();
+    wb.patch(CanvasLayoutPatch { interactions: Some(chart_ignores_slicer()), ..Default::default() }).unwrap();
+    assert_eq!(crate::sheets::canvas_interactions_of(&wb.state, wb.canvas), Some(chart_ignores_slicer()));
+    assert_eq!(crate::sheets::canvas_interactions_of(&wb.state, 0), None, "sheet 0 is a worksheet");
+    assert_eq!(crate::sheets::canvas_interactions_of(&wb.state, 99), None, "no such sheet");
+}

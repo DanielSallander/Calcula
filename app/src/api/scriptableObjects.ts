@@ -1238,7 +1238,10 @@ export interface SlicerContext extends BaseObjectContext {
   style: {
     /** Override the item renderer for custom appearance. */
     itemRenderer(renderer: (item: {
+      /** The item's DISPLAY label (app locale). */
       text: string;
+      /** The item's invariant member KEY: what `setSelectedItems` speaks. */
+      key: string;
       selected: boolean;
       hasData: boolean;
       index: number;

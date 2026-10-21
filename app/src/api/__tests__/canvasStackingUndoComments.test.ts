@@ -23,9 +23,9 @@ function read(rel: string): string {
   return fs.readFileSync(path.join(APP, rel), "utf8");
 }
 
-/** The `///` doc block directly above `pub fn set_canvas_layout(`. */
+/** The `///` doc block directly above `pub async fn set_canvas_layout(` (async since P4 S4d). */
 function setCanvasLayoutDoc(sheetsRs: string): string {
-  const fnAt = sheetsRs.indexOf("pub fn set_canvas_layout(");
+  const fnAt = sheetsRs.indexOf("pub async fn set_canvas_layout(");
   expect(fnAt, "fixture: set_canvas_layout not found in sheets.rs").toBeGreaterThan(-1);
   const lines = sheetsRs.slice(0, fnAt).split("\n");
   const doc: string[] = [];

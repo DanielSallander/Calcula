@@ -55,6 +55,7 @@ export function SortLevelRow({
     rangeStartRow,
     rangeEndRow,
     rangeStartCol,
+    cellTarget,
     hasHeaders,
     updateLevel,
     selectLevel,
@@ -77,13 +78,13 @@ export function SortLevelRow({
     if (level.sortOn === "cellColor" || level.sortOn === "fontColor") {
       const absoluteCol = rangeStartCol + level.columnKey;
       const dataStartRow = hasHeaders ? rangeStartRow + 1 : rangeStartRow;
-      getUniqueColorsInColumn(dataStartRow, rangeEndRow, absoluteCol, level.sortOn)
+      getUniqueColorsInColumn(dataStartRow, rangeEndRow, absoluteCol, level.sortOn, cellTarget)
         .then(setUniqueColors)
         .catch(() => setUniqueColors([]));
     } else {
       setUniqueColors([]);
     }
-  }, [level.sortOn, level.columnKey, rangeStartRow, rangeEndRow, rangeStartCol, hasHeaders]);
+  }, [level.sortOn, level.columnKey, rangeStartRow, rangeEndRow, rangeStartCol, hasHeaders, cellTarget]);
 
   /**
    * The icons actually present in this level's column, in the set's own order.
@@ -113,7 +114,7 @@ export function SortLevelRow({
     const absoluteCol = rangeStartCol + level.columnKey;
     const dataStartRow = hasHeaders ? rangeStartRow + 1 : rangeStartRow;
     let cancelled = false;
-    getUniqueIconsInColumn(dataStartRow, rangeEndRow, absoluteCol)
+    getUniqueIconsInColumn(dataStartRow, rangeEndRow, absoluteCol, cellTarget)
       .then((icons) => {
         if (!cancelled) setUniqueIcons(icons);
       })
@@ -130,6 +131,7 @@ export function SortLevelRow({
     rangeEndRow,
     rangeStartCol,
     hasHeaders,
+    cellTarget,
   ]);
 
   /**
