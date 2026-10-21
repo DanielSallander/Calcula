@@ -2746,9 +2746,22 @@ export interface WritebackRegionEntry {
    *  distribution brick 3). Run against typed input as an as-you-type check on
    *  top of the authoritative built-in schema. */
   customValidator?: string;
+  /** When a value reaches the workspace, with the default resolved by Rust: a
+   *  declaration that names no policy behaves as "on_submit" (typing saves a
+   *  private draft; Submit sends it). */
+  submissionPolicy?: "immediate" | "on_submit" | "on_approval";
+  /** Who sees a contributor's values, with the default resolved by Rust (no
+   *  declared visibility applies no filter, i.e. "transparent"). */
+  visibility?: "own_only" | "own_plus_aggregate" | "transparent";
+  /** The LOCAL sheet's current name (a subscriber may rename it). */
+  sheetName?: string;
 }
 
-/** Fetch the current writeback regions from the backend. */
+/** Fetch the current writeback regions from the backend.
+ *
+ * `sheetId` / `sheetIndex` / `sheetName` name the sheet the region's cells are on
+ * in THIS workbook (a subscriber's local sheet, never the publisher's id); a
+ * region whose sheet is not in the workbook is not returned at all. */
 export function getWritebackRegions(): Promise<WritebackRegionEntry[]> {
   return invokeBackend("calp_get_writeback_regions");
 }
@@ -2954,14 +2967,26 @@ export interface WritebackLayer {
   drafts: WritebackSubmission[];
 }
 
-/** Save a writeback draft for a cell. */
+/** What a draft save did with a value it accepted (mirrors Rust
+ *  `SaveWritebackDraftResult`). Only an `immediate` region sends on save. */
+export interface SaveWritebackDraftResult {
+  /** The region sends on save and the value LEFT the machine. */
+  sent: boolean;
+  /** The region sends on save but sending failed: the value is kept as an
+   *  UNSENT draft (Submit sends it later), and this says why. */
+  sendError?: string | null;
+}
+
+/** Save a writeback draft for a cell. Rejects only when the value was NOT
+ *  saved (schema, lifecycle, wrong region); a failed send of an `immediate`
+ *  region resolves with `sendError`, because the draft WAS saved. */
 export function saveWritebackDraft(
   regionId: string,
   sheetId: string,
   row: number,
   col: number,
   value: SubmissionValue,
-): Promise<void> {
+): Promise<SaveWritebackDraftResult> {
   return invokeBackend("calp_save_writeback_draft", { regionId, sheetId, row, col, value });
 }
 
@@ -2988,6 +3013,53 @@ export function submitRegion(regionId: string): Promise<number> {
  * Returns the total values submitted; surfaces the first region's error. */
 export function submitAllRegions(): Promise<number> {
   return invokeBackend("calp_submit_all_regions");
+}
+/** One cell of a writeback region (zero-based). Mirrors `WritebackCellRef` in
+ * app/src-tauri/src/calp_commands.rs. */
+export interface WritebackCellRef {
+  row: number;
+  col: number;
+}
+
+/** One grid cell a discard put back. Mirrors `RestoredWritebackCell`. */
+export interface RestoredWritebackCell {
+  /** The workbook sheet the cell is on (the region's local sheet). */
+  sheetIndex: number;
+  row: number;
+  col: number;
+  /** The state of what this subscriber last SENT for the cell, back in the
+   *  layer; null when nothing was ever sent and the cell is blank again. */
+  restoredState: SubmissionState | null;
+  /** The value the cell now holds (`{ type: "empty" }` for a blank cell). */
+  value: SubmissionValue;
+}
+
+/** What `discardWritebackDrafts` did. Mirrors `DiscardWritebackDraftsResult`. */
+export interface DiscardWritebackDraftsResult {
+  /** How many unsent drafts were thrown away (0 = nothing to discard). */
+  discarded: number;
+  /** Every grid cell that was put back, in row/column order. */
+  restoredCells: RestoredWritebackCell[];
+}
+
+/**
+ * Throw away the UNSENT drafts of one writeback region (optionally only `cells`)
+ * and put each cell back to what this subscriber last sent for it -- the sent
+ * entry returns to the layer, so the cell reads submitted/approved/rejected again
+ * -- or to blank when nothing was ever sent. Submitted/approved/rejected entries
+ * are never touched. Dependents recalculate in Rust.
+ *
+ * NOT UNDOABLE (the writeback layer is not in the undo graph): confirm with
+ * `confirmAsync` before calling. Rejects -- changing nothing -- when the region
+ * is not in this workbook, a named cell is outside it, or the workspace cannot be
+ * reached to look up what was sent. Refresh the writeback snapshot and repaint
+ * the grid afterwards.
+ */
+export function discardWritebackDrafts(
+  regionId: string,
+  cells?: WritebackCellRef[],
+): Promise<DiscardWritebackDraftsResult> {
+  return invokeBackend("calp_discard_writeback_drafts", { regionId, cells: cells ?? null });
 }
 
 /** One value that would leave the machine on submit. */

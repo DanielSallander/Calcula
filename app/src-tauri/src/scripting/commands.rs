@@ -3323,8 +3323,8 @@ mod script_apply_tests {
         let (result, active_calls) = apply(&h, &grids, 1, "notebook", "nb-1:cell-1");
         let err = result.expect_err("a claimed writeback cell must refuse the write");
         assert!(
-            err.contains("region-1"),
-            "the refusal must name the region: {}",
+            err.contains("Cell C4 collects input"),
+            "the refusal must name the cell in A1 form: {}",
             err
         );
         assert!(active_calls.is_empty(), "nothing reached the edit pipeline");

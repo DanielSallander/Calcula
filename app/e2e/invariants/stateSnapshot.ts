@@ -101,6 +101,13 @@ export interface LogicalState {
   pivots: PivotInfo[];
   timelines: TimelineInfo[];
   sparklineGroups: SparklineGroupInfo[];
+  /**
+   * Writeback regions in this workbook's index (`calp_get_writeback_regions`:
+   * subscribed regions on sheets that are here). -1 when the read failed --
+   * UNKNOWN, which the "Writeback" tab rule accepts rather than reporting a
+   * violation it cannot know. Optional so hand-built snapshots stay valid.
+   */
+  writebackRegionCount?: number;
   selection: SelectionInfo | null;
   activeSheet: number;
   /** Number of sheets in the workbook (1 if the query fails). */
@@ -434,12 +441,13 @@ async function captureLogicalState(page: Page): Promise<LogicalState> {
     const gridState = (window as any).__CALCULA_GRID_STATE__;
 
     // Fetch backend state in parallel
-    const [slicers, charts, tables, sheetsResult, floatingRanges] = await Promise.all([
+    const [slicers, charts, tables, sheetsResult, floatingRanges, writebackRegions] = await Promise.all([
       tauri.core.invoke("get_all_slicers").catch(() => []),
       tauri.core.invoke("get_charts").catch(() => []),
       tauri.core.invoke("get_all_tables", {}).catch(() => []),
       tauri.core.invoke("get_sheets").catch(() => null),
       tauri.core.invoke("list_floating_ranges").catch(() => []),
+      tauri.core.invoke("calp_get_writeback_regions").catch(() => null),
     ]);
 
     // Pivot regions from frontend cache (no backend command for "get all pivots")
@@ -497,6 +505,7 @@ async function captureLogicalState(page: Page): Promise<LogicalState> {
         id: g.id,
         cellCount: g.cells?.length ?? g.locationCells?.length ?? 1,
       })),
+      writebackRegionCount: Array.isArray(writebackRegions) ? (writebackRegions as any[]).length : -1,
       selection,
       // MEASURED LIVE 2026-08-12: `gridState.activeSheet` DOES NOT EXIST. The
       // grid state object exposes `sheetContext.activeSheetIndex`; the key read

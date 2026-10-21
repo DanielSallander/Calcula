@@ -101,6 +101,7 @@ import {
 } from "../../lib/autoFitCommands";
 import type { GridCommandContext } from "../../lib/gridCommands";
 import type { CellTarget } from "../../lib/selectionOwner";
+import { commitGridCellText } from "../../lib/selectionOwner";
 import { runClearGesture } from "../../lib/clearGestures";
 import { notifyCellTargetChanged, readTargetCell } from "../../../api/cellTarget";
 
@@ -706,6 +707,24 @@ export function useSpreadsheetSelection({
     const maxRow = Math.max(selection.startRow, selection.endRow);
     const minCol = Math.min(selection.startCol, selection.endCol);
     const maxCol = Math.max(selection.startCol, selection.endCol);
+
+    // ONE CELL THAT TAKES ONE EDIT AT A TIME. A range guard can admit a
+    // single-cell EDIT and refuse a bulk write (a writeback cell collects one
+    // answer at a time, and its owner records it in its commit guard). A bulk
+    // clear there is refused by the backend; Delete on that one cell is the
+    // user clearing their answer, so it is ENTERED as an empty edit and the
+    // owner's commit guard sees it -- what F2, Backspace, Enter always did.
+    if (
+      minRow === maxRow &&
+      minCol === maxCol &&
+      !(selection.additionalRanges && selection.additionalRanges.length > 0) &&
+      checkRangeGuards(minRow, minCol, maxRow, maxCol, "other")?.blocked &&
+      !checkRangeGuards(minRow, minCol, maxRow, maxCol, "edit")?.blocked
+    ) {
+      if (await commitGridCellText("")) return;
+      // No committer (or the edit was refused, which says why itself): fall
+      // through to the clear, whose refusal names the remedy.
+    }
 
     console.log(`[useSpreadsheetSelection] Clearing contents from (${minRow},${minCol}) to (${maxRow},${maxCol})`);
 
@@ -2087,7 +2106,7 @@ export function useSpreadsheetSelection({
         }
 
         // Synchronous guard: block editing in protected ranges (e.g., pivot tables)
-        const rangeGuard = checkRangeGuards(cell.row, cell.col, cell.row, cell.col);
+        const rangeGuard = checkRangeGuards(cell.row, cell.col, cell.row, cell.col, "edit");
         if (rangeGuard?.blocked) return;
 
         // First expand selection to cover merged region (for visual feedback)

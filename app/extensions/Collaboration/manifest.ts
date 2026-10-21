@@ -2,6 +2,9 @@
 // PURPOSE: Collaboration extension manifest and UI definitions.
 
 import type { AddInManifest, DialogDefinition, DialogProps } from "@api";
+import type { PanelDefinition } from "@api/uiTypes";
+import { RibbonIcon } from "@api/ribbonIcons";
+import { ICON_SIZE_SM } from "@api/layout";
 import React from "react";
 import { PublishDialog } from "./components/PublishDialog";
 import { CheckoutDialog } from "./components/CheckoutDialog";
@@ -13,6 +16,8 @@ import { DesignateWritebackDialog } from "./components/DesignateWritebackDialog"
 import { ConnectionDialog } from "./components/ConnectionDialog";
 import { PromoteDialog } from "./components/PromoteDialog";
 import { EditPipelineDialog } from "./components/EditPipelineDialog";
+import { WRITEBACK_TAB_SECTIONS } from "./components/WritebackTabSections";
+import { WRITEBACK_PANE_ID, WRITEBACK_TAB_ID } from "./lib/writebackIds";
 
 export const COLLABORATION_EXTENSION_ID = "calcula.collaboration";
 
@@ -26,7 +31,9 @@ export const COLLABORATION_MENU_ID = "collaboration";
 export const WRITEBACK_MENU_ID = "writeback";
 
 export const OVERRIDES_PANE_ID = "collaboration:overrides";
-export const WRITEBACK_PANE_ID = "collaboration:writeback";
+// Defined in lib/writebackIds.ts (a module that imports nothing), so the
+// contextual tab's actions can name the pane without importing this file.
+export { WRITEBACK_PANE_ID, WRITEBACK_TAB_ID };
 export const SUBSCRIPTIONS_PANE_ID = "collaboration:subscriptions";
 export const PUBLISHER_DASHBOARD_PANE_ID = "collaboration:publisherDashboard";
 export const AUDIT_LOG_PANE_ID = "collaboration:auditLog";
@@ -138,4 +145,32 @@ export const EditPipelineDialogDefinition: DialogDefinition = {
   component: EditPipelineDialog as React.ComponentType<DialogProps>,
   priority: 100,
   dismissOnEscape: false,
+};
+
+// ============================================================================
+// The contextual "Writeback" ribbon tab
+// ============================================================================
+
+/** Right of every other contextual tab (Report/Sparkline 510), Excel's place. */
+export const WRITEBACK_TAB_ORDER = 512;
+
+/** The tab's accent: the skin's writeback token, its light value as fallback. */
+export const WRITEBACK_TAB_COLOR = "var(--tab-accent-writeback, #4338ca)";
+
+/**
+ * Shown while Core's ACTIVE cell is inside a subscribed writeback region on the
+ * active sheet (lib/writebackTab.ts). The label is "Writeback" like the
+ * top-level menu; the ids differ (`writeback-tab` vs `writeback`). It never
+ * takes the selection when it appears: a contextual tab that steals the ribbon
+ * on every arrow key into a form would be worse than none.
+ */
+export const WritebackPanelDefinition: PanelDefinition = {
+  id: WRITEBACK_TAB_ID,
+  title: "Writeback",
+  icon: React.createElement(RibbonIcon.Upload, { size: ICON_SIZE_SM }),
+  sections: WRITEBACK_TAB_SECTIONS,
+  defaultPlacement: "ribbon",
+  ribbonOrder: WRITEBACK_TAB_ORDER,
+  ribbonColor: WRITEBACK_TAB_COLOR,
+  priority: 1000 - WRITEBACK_TAB_ORDER,
 };

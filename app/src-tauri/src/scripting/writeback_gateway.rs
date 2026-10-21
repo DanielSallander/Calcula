@@ -621,7 +621,7 @@ fn dispatch(
             let row: u32 = field(p, "row")?;
             let col: u32 = field(p, "col")?;
             let value: calp::writeback::SubmissionValue = field(p, "value")?;
-            calp_cmds::calp_save_writeback_draft(
+            let saved = calp_cmds::calp_save_writeback_draft(
                 state.clone(),
                 file_state.clone(),
                 region_id,
@@ -631,7 +631,9 @@ fn dispatch(
                 value,
                 window.clone(),
             )?;
-            Ok(json!({ "draftSaved": true }))
+            // An `immediate` region sends on save; a failed send keeps the
+            // draft and is reported here rather than raised.
+            Ok(json!({ "draftSaved": true, "sent": saved.sent, "sendError": saved.send_error }))
         }
         Action::SubmitRegion => {
             let region_id: String = field(p, "regionId")?;

@@ -328,6 +328,9 @@ mod calp_include_tests;
 mod subscribed_sheet_tests;
 
 #[cfg(test)]
+mod writeback_local_sheet_tests;
+
+#[cfg(test)]
 mod calp_environments_tests;
 
 #[cfg(test)]
@@ -6174,6 +6177,7 @@ pub fn run() {
             calp_commands::calp_save_writeback_draft,
             calp_commands::calp_get_writeback_layer,
             calp_commands::calp_reconcile_writeback,
+            calp_commands::calp_discard_writeback_drafts,
             calp_commands::calp_submit_region,
             calp_commands::calp_submit_all_regions,
             calp_commands::calp_export_region_submissions_csv,

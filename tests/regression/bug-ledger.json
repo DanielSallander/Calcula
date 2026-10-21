@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 542,
+  "nextId": 551,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -14946,6 +14946,240 @@
         "status": "fixed",
         "date": "2026-10-17",
         "description": "app/src-tauri/src/pivot/operations.rs: new auto_fit_text_len (chars().count() plus the indent and expand-button room), used by auto_fit_pivot_columns. Pinned by pivot::operations::auto_fit_len_tests (two of three fail with display.len() back) and live by canvas-pick-cells 15/15."
+      }
+    },
+    {
+      "id": "BUG-0542",
+      "status": "fixed",
+      "discovered": "2026-10-21",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Writeback subscriber UX programme (owner: 'cannot see if it was written back') -- code reading + unit/Rust tests -- spec D1"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-region-publisher-sheet-id",
+        "severity": "high",
+        "message": "Writeback region selectors kept the PUBLISHER's sheet id, while pull() gives every subscribed sheet a fresh local id (SheetIdMode::FreshLocal). WritebackIndex::to_flat_list fell back to sheetIndex 0 (unwrap_or(0)), every backend guard keyed on the local active sheet id missed, and packageName/registryUrl enrichment (subscribed_sheet() matches local ids) was always None. A subscriber's typed values in the subscribed region became plain cell values: no draft, nothing to submit; the tint and guards landed on the blank Sheet1 instead.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Every writeback test built its region on the publisher's own workbook (same ids) or a fixture whose package and local sheet ids were equal; no test pulled a package with writeback regions and then typed into it.",
+      "repro": {
+        "description": "Publisher: B3:B5 designated writeback (per_subscriber, number, on_submit), published to a workspace. Subscriber: File > New, subscribe, type 1,2,3 into the subscribed sheet's B3:B5: no draft is saved, calp_get_writeback_regions reports sheetIndex 0 with no packageName, and the blank Sheet1!B3:B5 is the guarded range."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-21",
+        "description": "core/calp/src/writeback.rs (localize_region_declarations; to_flat_list drops a region whose sheet is not in the workbook, no unwrap_or(0); region_ids_on_sheet/contains_region/region_location) and app/src-tauri/src/calp_commands.rs (rebuild_writeback_index_inner -> install_writeback_index builds the INDEX from declarations re-keyed package_sheet_id -> local_sheet_id through sub.sheets, dropping unsubscribed sheets; writeback_declarations mirror stays on publisher ids; writeback_region_entries). Pinned by app/src-tauri/src/writeback_local_sheet_tests.rs (7 tests, all fail with the index built from the publisher ids) and calp tests to_flat_list_leaves_out_a_region_whose_sheet_is_not_here, localize_region_declarations_maps_and_drops."
+      }
+    },
+    {
+      "id": "BUG-0543",
+      "status": "fixed",
+      "discovered": "2026-10-21",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Writeback subscriber UX programme (owner: 'cannot see if it was written back') -- code reading + unit/Rust tests -- spec D2"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-snapshot-not-refreshed-on-subscribe",
+        "severity": "high",
+        "message": "Subscribing never refreshed the frontend writeback snapshot: PACKAGE_UPDATED only reloaded subscribed sheets, and the snapshot was re-read only on AFTER_OPEN / AFTER_NEW / a draft commit / activation. In the session where the subscriber subscribed, no region existed for the frontend until a reopen.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The snapshot was filled on open, and every writeback test opened a workbook that already held its regions.",
+      "repro": {
+        "description": "File > New, subscribe to an application with a writeback region, select the region: no outline, no guard, no tab until the workbook is saved and reopened."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-21",
+        "description": "app/extensions/Collaboration/index.ts refreshes the shared store on PACKAGE_UPDATED, SHEET_DELETED, ENVIRONMENTS_CHANGED_EVENT, SHEET_CHANGED without a sheetIndex and WRITEBACK_INDEX_CHANGED_EVENT (own emits carry source 'collaboration:writeback-store' and are ignored, so no loop); app/extensions/Collaboration/lib/writebackStore.ts. Pinned by app/extensions/Collaboration/lib/__tests__/writebackStore.test.ts and writebackTab.test.tsx (re-derive after subscribe/detach)."
+      }
+    },
+    {
+      "id": "BUG-0544",
+      "status": "fixed",
+      "discovered": "2026-10-21",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Writeback subscriber UX programme (owner: 'cannot see if it was written back') -- code reading + unit/Rust tests -- spec D3"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-submit-no-repaint",
+        "severity": "medium",
+        "message": "After Submit / Submit All in the Writeback pane only the pane's own list refreshed: the grid's writeback state cache was not re-read and nothing repainted, so the cells kept looking unsent.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Pane tests asserted the pane's own list, never the grid's cached state after a submit.",
+      "repro": {
+        "description": "Type a value into a writeback cell, open the Writeback pane, Submit: the cell still shows the draft treatment until something else repaints."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-21",
+        "description": "app/extensions/Collaboration/components/WritebackPane.tsx ends every submit in refreshWriteback(); app/extensions/Collaboration/lib/writebackStore.ts notifies subscribers and emits AppEvents.GRID_REFRESH on every refresh. Pinned by writebackStore.test.ts and writebackTab.test.tsx (confirm -> submit -> refresh -> toast order)."
+      }
+    },
+    {
+      "id": "BUG-0545",
+      "status": "fixed",
+      "discovered": "2026-10-21",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Writeback subscriber UX programme (owner: 'cannot see if it was written back') -- code reading + unit/Rust tests -- spec D4"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-range-guard-swallows-typing",
+        "severity": "high",
+        "message": "The Collaboration range guard refused ANY overlap with a writeback region, including the 1x1 range the edit-start paths check for the active cell, so keyboard entry, double-click and F2 on a writeback cell were silently swallowed (preventDefault, no message) and the commit guard that saves a draft never ran. The guard API could not tell an edit from a paste. The Rust backstop refusal named the cell in zero-based coordinates with script jargon.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Hidden behind D1: the guard never matched the subscribed sheet, so nobody could reach it in the real flow.",
+      "repro": {
+        "description": "With D1 fixed, select a subscribed writeback cell and type 1: nothing is entered and no message appears."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-21",
+        "description": "app/src/core/lib/editGuards.ts (RangeGuardOperation 'edit' | 'other', checkRangeGuards(..., operation = 'other')), app/src/api/editGuards.ts, app/src/api/contract.ts; edit-start sites pass 'edit': app/src/core/components/Spreadsheet/useSpreadsheetEditing.ts, useSpreadsheetSelection.ts, app/src/core/hooks/useEditing.ts, app/src/shell/FormulaBar/FormulaInput.tsx; app/extensions/Collaboration/lib/writebackGuards.ts (decideWritebackRangeGuard allows only a 1x1 edit; paste/fill refused with an application-named message) wired in app/extensions/Collaboration/index.ts; Rust backstop reworded (writeback_cell_refusal, A1 references) in app/src-tauri/src/calp_commands.rs. Pinned by app/src/core/lib/__tests__/editGuards.test.ts and app/extensions/Collaboration/lib/__tests__/writebackGuards.test.ts."
+      }
+    },
+    {
+      "id": "BUG-0546",
+      "status": "fixed",
+      "discovered": "2026-10-21",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Writeback subscriber UX programme (owner: 'cannot see if it was written back') -- code reading + unit/Rust tests -- spec D5"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-commit-guard-invariant-number-parse",
+        "severity": "medium",
+        "message": "The writeback commit guard parsed numbers with Number() (invariant locale). In sv-SE '1,5' became text, the backend refused it, and the user was held in edit mode in a retry loop.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Tests typed integers only; the locale census did not cover Number() on user input.",
+      "repro": {
+        "description": "App locale sv-SE; type 1,5 into a number writeback cell: the edit is refused and the cell stays in edit mode."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-21",
+        "description": "app/extensions/Collaboration/lib/writebackGuards.ts coerceWritebackInput uses @api/locale parseNumber (finite only; TRUE/FALSE for booleans), called from app/extensions/Collaboration/index.ts. Pinned by writebackGuards.test.ts."
+      }
+    },
+    {
+      "id": "BUG-0547",
+      "status": "fixed",
+      "discovered": "2026-10-21",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Writeback subscriber UX programme (owner: 'cannot see if it was written back') -- code reading + unit/Rust tests -- spec D6"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-store-cached-sheet-index",
+        "severity": "medium",
+        "message": "The writeback store matched regions by a cached sheetIndex against an activeSheetIndex initialised to 0 and updated only on SHEET_CHANGED events that carried an index, so a sheet insert, move or reopen misplaced the region treatment and guards.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Single-sheet fixtures; index 0 was right by accident.",
+      "repro": {
+        "description": "Subscribed sheet at index 1; insert a sheet before it: the guard and treatment follow index 1, now a different sheet."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-21",
+        "description": "app/extensions/Collaboration/lib/writebackStore.ts keyed by LOCAL sheetId, the active sheet resolved at check time (grid sheetContext.activeSheetIndex -> @api/reportPages sheetIdByIndex), draft lookup through a Map keyed regionId:row:col. Pinned by writebackStore.test.ts (sheet-id lookup sabotage fails it)."
+      }
+    },
+    {
+      "id": "BUG-0548",
+      "status": "fixed",
+      "discovered": "2026-10-21",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Writeback subscriber UX programme (owner: 'cannot see if it was written back') -- code reading + unit/Rust tests -- spec D7"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-tints-break-dark-mode",
+        "severity": "low",
+        "message": "The writeback style interceptor painted hard-coded light per-state tints on every region cell, so in the Dark skin near-white text sat on a near-white fill and the values were unreadable.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Visual checks ran in the light skin only.",
+      "repro": {
+        "description": "Dark skin; a workbook with a writeback region: the region's cell text is unreadable."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-21",
+        "description": "Style interceptor deleted from app/extensions/Collaboration/index.ts; replaced by a theme-toned dashed outline (app/extensions/Collaboration/lib/writebackOutline.ts) and draft/rejected markers (app/extensions/Collaboration/lib/writebackDecorations.ts) whose colours come from getCanvasToneColors() in app/src/api/appearance.ts (active skin incl. Dark). Pinned by writebackPainters.test.ts and app/src/api/__tests__/canvasToneColors.test.ts."
+      }
+    },
+    {
+      "id": "BUG-0549",
+      "status": "fixed",
+      "discovered": "2026-10-21",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Writeback subscriber UX programme (owner: 'cannot see if it was written back') -- code reading + unit/Rust tests -- spec D8"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-pane-error-reads-as-empty",
+        "severity": "medium",
+        "message": "The Writeback pane's refresh caught and only logged a failure, leaving its region list empty, so any read error was shown as 'No writeback regions in this workbook'; the pane also did not hear store changes, only its own refresh.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Pane tests mocked a successful read.",
+      "repro": {
+        "description": "Make calp_get_writeback_regions fail (e.g. an unreadable workspace) and open the pane: it reports no regions instead of the error."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-21",
+        "description": "app/extensions/Collaboration/components/WritebackPane.tsx reads the shared store through useSyncExternalStore and shows the error with a Try again button; app/extensions/Collaboration/lib/writebackStore.ts keeps the previous snapshot and records the error on a failed read. Pinned by writebackStore.test.ts."
+      }
+    },
+    {
+      "id": "BUG-0550",
+      "status": "fixed",
+      "discovered": "2026-10-21",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Writeback subscriber UX programme (owner: 'cannot see if it was written back') -- code reading + unit/Rust tests -- spec D9"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-orphan-drafts-after-detach",
+        "severity": "medium",
+        "message": "calp_detach and detach-sheet left the detached regions' drafts in writeback_layer, where they could never be submitted and were re-saved into the .cala forever.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Detach tests asserted the ledger and the sheets, never the writeback layer.",
+      "repro": {
+        "description": "Subscribe, type a draft into a writeback cell, detach the sheet (or the subscription), save: the draft is still in the saved layer with no region to submit it to."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-21",
+        "description": "app/src-tauri/src/calp_commands.rs: calp_detach clears the writeback_layer under the detach's own DocumentEffect with a WritebackInvalidated audit row; detach_sheet_inner drops layer entries only for regions no longer indexed after the rebuild (an unreachable workspace keeps its unsent work). Pinned by app/src-tauri/src/writeback_local_sheet_tests.rs."
       }
     }
   ]

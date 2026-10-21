@@ -11999,6 +11999,21 @@ pub(crate) fn apply_refresh_payloads(
         }
     }
 
+    // THE SUBSCRIBER'S WRITEBACK VALUES go back onto the refreshed grids, AFTER
+    // the index rebuild above (it is keyed by local sheet id and reflects the
+    // new version's regions, so an entry whose region was removed upstream --
+    // and dropped from the layer just above -- is not resurrected) and BEFORE
+    // the recalculation below, which then sees them like any typed value.
+    let writeback_cells_restored =
+        reproject_writeback_layer_onto_grids(&state, &effect, &refreshed_sheet_ids).len();
+    if writeback_cells_restored > 0 {
+        crate::log_info!(
+            "CALP",
+            "Refresh put {} writeback value(s) back onto the refreshed sheets",
+            writeback_cells_restored
+        );
+    }
+
     // The refreshed grids hold pristine upstream content plus overlays whose
     // formula cells are pending evaluation, and the dependency maps still
     // describe the PRE-refresh active sheet. Rebuild deps (active sheet only —
@@ -12178,6 +12193,27 @@ pub fn calp_detach(
     }
     if let Ok(mut decls) = state.model_writeback_declarations.lock() {
         decls.clear();
+    }
+    // ...and the writeback LAYER. Every entry belongs to a region of an
+    // application this workbook no longer subscribes to: a draft can never be
+    // submitted (`owning_subscription_for_region` finds no owner) and every
+    // entry would be re-saved into the `.cala` forever. Same effect as the
+    // detach itself.
+    let dropped_drafts = {
+        let mut wb_layer = state.writeback_layer.write(&effect).map_err(|e| e.to_string())?;
+        let n = wb_layer.drafts.len();
+        wb_layer.drafts.clear();
+        n
+    };
+    if dropped_drafts > 0 {
+        record_writeback_invalidated(
+            &state,
+            &format!(
+                "Detach dropped {} writeback entr{} (no subscription remains to submit them to)",
+                dropped_drafts,
+                if dropped_drafts == 1 { "y" } else { "ies" }
+            ),
+        );
     }
     invalidate_gather_cache(&state);
 
@@ -12488,6 +12524,37 @@ pub(crate) fn detach_sheet_inner(
         .collect();
     let control_sheet_id = local_sid.to_string();
 
+    // THE WRITEBACK REGIONS THAT MAY LIVE ON THE CLAIMED SHEETS, from BOTH
+    // sources, read before the ledger changes (each lock alone, all released
+    // before `subscriptions` is taken below):
+    // - the INDEX (local sheet ids) answers for a subscription whose regions
+    //   were installed;
+    // - the declaration MIRROR (publisher sheet ids) answers for one the index
+    //   never held -- a deferred HTTP rebuild, or one that was mid-rebuild --
+    //   and is mapped through this subscription's ledger once it is located.
+    // Reading the index AFTER the detach (as this did) missed both, and a
+    // rebuild landing in between produced an index without the sheet at all:
+    // the drafts stayed in the layer forever, never submittable.
+    let index_regions_before: std::collections::HashSet<String> = {
+        let index = state.writeback_index.lock().map_err(|e| e.to_string())?;
+        std::iter::once(local_sid)
+            .chain(hosted_ranges.iter().map(|(_, backing)| *backing))
+            .flat_map(|sid| index.region_ids_on_sheet(sid))
+            .collect()
+    };
+    let mirror_decls: Vec<(String, SheetId)> = state
+        .writeback_declarations
+        .lock()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .map(|d| (d.id.clone(), d.selector.sheet_id))
+        .collect();
+    let rebuild_skips: Vec<WritebackRebuildSkip> = state
+        .writeback_rebuild_skips
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_default();
+
     // GATE AND MUTATION IN ONE CRITICAL SECTION. Tauri dispatches on a thread
     // pool, so a read-then-drop-then-write would be a TOCTOU window in which a
     // concurrent refresh could re-add the very sheet being detached.
@@ -12532,6 +12599,8 @@ pub(crate) fn detach_sheet_inner(
     // Every local sheet this detach claims: the sheet itself, and the backing
     // sheet of each floating range it hosts.
     let mut claimed_sheets: Vec<SheetId> = vec![local_sid];
+    // ...and the same sheets under the PUBLISHER's ids, for the mirror lookup.
+    let mut claimed_package_ids: Vec<SheetId> = vec![package_sheet_id];
     let subscription_removed = {
         let sub = &mut subs.subscriptions[sub_index];
         sub.sheets.retain(|s| s.local_sheet_id != local_sid);
@@ -12583,6 +12652,7 @@ pub(crate) fn detach_sheet_inner(
             }
             record_detached_local_sheet(sub, backing_package, *backing_local);
             claimed_sheets.push(*backing_local);
+            claimed_package_ids.push(backing_package);
         }
 
         // Remove the whole row only when it owns NOTHING else. A library or
@@ -12593,6 +12663,14 @@ pub(crate) fn detach_sheet_inner(
     if subscription_removed {
         subs.subscriptions.remove(sub_index);
     }
+    // Every publisher sheet id some subscription STILL maps, read from the
+    // post-detach ledger inside the same critical section: the orphan test
+    // below asks it, never the subscriptions lock a second time.
+    let still_mapped_package_ids: std::collections::HashSet<SheetId> = subs
+        .subscriptions
+        .iter()
+        .flat_map(|s| s.sheets.iter().map(|sh| sh.package_sheet_id))
+        .collect();
     drop(subs);
 
     // Lock order subscriptions -> override_layer, matching `calp_detach`.
@@ -12603,10 +12681,116 @@ pub(crate) fn detach_sheet_inner(
         before - layer.overrides.len()
     };
 
+    // The writeback regions on the sheets this detach claims: the index's
+    // answer from before the ledger changed, plus every mirrored declaration
+    // naming one of the claimed sheets by its publisher id. Their drafts are
+    // orphaned below.
+    let regions_on_claimed: std::collections::HashSet<String> = index_regions_before
+        .iter()
+        .cloned()
+        .chain(
+            mirror_decls
+                .iter()
+                .filter(|(_, pkg_sid)| claimed_package_ids.contains(pkg_sid))
+                .map(|(id, _)| id.clone()),
+        )
+        .collect();
+    // Neither source knew this application's regions: its manifest was never
+    // read here (unpinned, unreachable, or still loading in the background).
+    // Any unsent writeback entries for the sheet cannot be attributed, so they
+    // are KEPT -- and the audit row says so rather than staying silent.
+    let regions_unknown_reason: Option<String> = if regions_on_claimed.is_empty() {
+        rebuild_skips
+            .iter()
+            .find(|s| s.package_name == package_name)
+            .map(|s| format!("{} ({})", s.reason, s.detail))
+    } else {
+        None
+    };
+
     // A REBUILD, not the hand-clear `calp_detach` does: something usually
     // survives here. It invalidates the gather cache itself, so one call covers
     // both.
     rebuild_writeback_index(state);
+
+    // ORPHANED WRITEBACK ENTRIES. A region on a detached sheet is no longer in
+    // the index (the ledger no longer maps its sheet), so its drafts can never
+    // be submitted and would be re-saved into the `.cala` forever. Only the
+    // regions that WERE on the claimed sheets are candidates -- never "every
+    // region the rebuild did not install": a workspace that is merely
+    // unreachable right now installs nothing, and its drafts are still the
+    // user's unsent work.
+    let dropped_drafts = if regions_on_claimed.is_empty() {
+        0
+    } else {
+        // STILL LIVE = still declared on a sheet some subscription still maps,
+        // answered from the post-detach LEDGER and the pre-detach mirror -- not
+        // from the index the rebuild just installed: a rebuild can be
+        // superseded (another rebuild claimed the sequence) and install
+        // nothing, which would leave the PRE-detach index in place and every
+        // claimed region looking alive.
+        let still_indexed: std::collections::HashSet<String> = regions_on_claimed
+            .iter()
+            .filter(|id| {
+                mirror_decls
+                    .iter()
+                    .any(|(decl_id, pkg_sid)| decl_id == *id && still_mapped_package_ids.contains(pkg_sid))
+            })
+            .cloned()
+            .collect();
+        let orphaned: std::collections::HashSet<&str> = regions_on_claimed
+            .iter()
+            .filter(|id| !still_indexed.contains(*id))
+            .map(|s| s.as_str())
+            .collect();
+        let has_orphans = state
+            .writeback_layer
+            .read()
+            .map(|l| l.drafts.iter().any(|d| orphaned.contains(d.region_id.as_str())))
+            .unwrap_or(false);
+        if has_orphans {
+            let mut wb_layer = state.writeback_layer.write(&effect).map_err(|e| e.to_string())?;
+            let before = wb_layer.drafts.len();
+            wb_layer.drafts.retain(|d| !orphaned.contains(d.region_id.as_str()));
+            before - wb_layer.drafts.len()
+        } else {
+            0
+        }
+    };
+    if dropped_drafts > 0 {
+        record_writeback_invalidated(
+            state,
+            &format!(
+                "Detaching sheet '{}' dropped {} writeback entr{} of its region(s) {}",
+                sheet_name,
+                dropped_drafts,
+                if dropped_drafts == 1 { "y" } else { "ies" },
+                summarize_ids(regions_on_claimed.iter().map(|s| s.as_str())),
+            ),
+        );
+    }
+    if let Some(reason) = regions_unknown_reason {
+        let unsent_unattributed = state
+            .writeback_layer
+            .read()
+            .map(|l| l.drafts.len())
+            .unwrap_or(0);
+        if unsent_unattributed > 0 {
+            record_writeback_invalidated(
+                state,
+                &format!(
+                    "Detaching sheet '{}' could not tell which writeback entries belonged to it: \
+                     the writeback regions of '{}' were not loaded ({}), so all of the \
+                     workbook's {} writeback entr{} kept rather than guessed at.",
+                    sheet_name,
+                    package_name,
+                    reason,
+                    unsent_unattributed,
+                    if unsent_unattributed == 1 { "y was" } else { "ies were" },
+                ),
+            );
+        }
+    }
 
     {
         let now = chrono::Utc::now().to_rfc3339();
@@ -13435,14 +13619,40 @@ pub fn calp_get_writeback_regions(
     window: tauri::Window,
 ) -> Result<Vec<calp::WritebackRegionEntry>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let index = state.writeback_index.lock().map_err(|e| e.to_string())?;
-    let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
-    let id_to_index: std::collections::HashMap<identity::SheetId, usize> = sheet_ids
-        .iter()
-        .enumerate()
-        .map(|(i, &sid)| (sid, i))
-        .collect();
-    let mut entries = index.to_flat_list(&id_to_index);
+    writeback_region_entries(&state)
+}
+
+/// The body of [`calp_get_writeback_regions`]: every region of the index that
+/// is on a sheet of THIS workbook, enriched from the ledger and the
+/// declarations.
+///
+/// The index is keyed by LOCAL sheet ids (`localized_writeback_declarations`),
+/// so `sheetId` / `sheetIndex` / `sheetName` all name the sheet the cells are
+/// actually on, and a region whose sheet is not in the workbook is not
+/// reported at all (`WritebackIndex::to_flat_list`).
+pub(crate) fn writeback_region_entries(
+    state: &AppState,
+) -> Result<Vec<calp::WritebackRegionEntry>, String> {
+    let mut entries = {
+        let index = state.writeback_index.lock().map_err(|e| e.to_string())?;
+        let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
+        let id_to_index: std::collections::HashMap<identity::SheetId, usize> = sheet_ids
+            .iter()
+            .enumerate()
+            .map(|(i, &sid)| (sid, i))
+            .collect();
+        index.to_flat_list(&id_to_index)
+    };
+    // Deterministic order (the index is hash-keyed): sheet, then position.
+    entries.sort_by(|a, b| {
+        (a.sheet_index, a.row_start, a.col_start).cmp(&(b.sheet_index, b.row_start, b.col_start))
+    });
+
+    if let Ok(names) = state.sheet_names.read() {
+        for e in entries.iter_mut() {
+            e.sheet_name = names.get(e.sheet_index).cloned();
+        }
+    }
 
     // Enrich each entry with its declaration's value type / required / deadline,
     // so the client commit guard can coerce typed input and the UI can show a
@@ -13456,7 +13666,10 @@ pub fn calp_get_writeback_regions(
     // read into N workspace opens and N Ed25519 verifications — while this
     // function holds `writeback_index` and `sheet_ids`. The subscription ledger
     // already records which sheet each subscription materialized, and a region
-    // names its sheet, so the answer is in memory.
+    // names its sheet, so the answer is in memory. The index -- and so
+    // `e.sheet_id` -- is keyed by the LOCAL sheet id, which is what
+    // `subscribed_sheet` matches on; while the index held the publisher's id this
+    // lookup never matched and both fields were always empty.
     if let Ok(subs) = state.subscriptions.read() {
         for e in entries.iter_mut() {
             if let Some((sub, _)) = subs.subscribed_sheet(e.sheet_id) {
@@ -13493,6 +13706,21 @@ pub fn calp_get_writeback_regions(
                 {
                     e.deadline = Some(dl.clone());
                 }
+                // Defaults RESOLVED here, so the subscriber UI never has to know
+                // them: no policy behaves as `on_submit` (only `immediate`
+                // auto-submits, `submission_policy` in `calp_save_writeback_draft`),
+                // and no visibility applies no filter on the read side
+                // (`apply_gather_governance`), which is `transparent`.
+                e.submission_policy = Some(
+                    decl.submission_policy
+                        .clone()
+                        .unwrap_or(calp::writeback::SubmissionPolicy::OnSubmit),
+                );
+                e.visibility = Some(
+                    decl.visibility
+                        .clone()
+                        .unwrap_or(calp::writeback::VisibilityPolicy::Transparent),
+                );
             }
         }
     }
@@ -13653,7 +13881,10 @@ fn rebuild_writeback_index_inner(
         }
     };
 
-    let mut all_decls = Vec::new();
+    // Each subscription's verified declarations, AS PUBLISHED, beside the
+    // subscription (its ledger maps them onto local sheets at install).
+    let mut per_sub_decls: Vec<(calp::manifest::Subscription, Vec<calp::WritebackRegionDeclaration>)> =
+        Vec::new();
     let mut all_model_decls: Vec<calp::ModelWritebackDeclaration> = Vec::new();
     let mut skips: Vec<WritebackRebuildSkip> = Vec::new();
     let mut deferred_any = false;
@@ -13717,7 +13948,7 @@ fn rebuild_writeback_index_inner(
         ) {
             Ok(ver_manifest) => {
                 if let Some(ref wb_regions) = ver_manifest.writeback_regions {
-                    all_decls.extend(wb_regions.iter().cloned());
+                    per_sub_decls.push((sub.clone(), wb_regions.clone()));
                 }
                 // Same trust rule for MODEL writeback columns: only a
                 // signature-verified manifest may declare one. Mirrored here so
@@ -13766,7 +13997,65 @@ fn rebuild_writeback_index_inner(
         };
     }
 
-    let new_index = match calp::WritebackIndex::from_declarations(&all_decls) {
+    install_writeback_index(state, &per_sub_decls, all_model_decls, skips);
+
+    RebuildOutcome {
+        installed: true,
+        deferred_http: deferred_any,
+    }
+}
+
+/// One subscription's published region declarations, re-keyed to the sheets
+/// they live on in THIS workbook.
+///
+/// A declaration names the PUBLISHER's sheet id; `pull()` gives every
+/// subscribed sheet a fresh local id (`SheetIdMode::FreshLocal`), and the
+/// subscription ledger (`sub.sheets`: `package_sheet_id -> local_sheet_id`) is
+/// the only record of which local sheet is which. An index keyed by the
+/// publisher's id matched no local sheet: every guard missed, the regions were
+/// reported on sheet index 0, and a subscriber typing into the subscribed sheet
+/// made plain cell edits with no draft behind them -- nothing to submit, and no
+/// way to see it.
+///
+/// A declaration whose sheet is not (or no longer) in the ledger -- detached,
+/// removed upstream, never materialized -- is DROPPED: it has no cells here.
+pub(crate) fn localized_writeback_declarations(
+    sub: &calp::manifest::Subscription,
+    decls: &[calp::WritebackRegionDeclaration],
+) -> Vec<calp::WritebackRegionDeclaration> {
+    calp::writeback::localize_region_declarations(decls, |package_sheet_id| {
+        sub.sheets
+            .iter()
+            .find(|s| s.package_sheet_id == package_sheet_id)
+            .map(|s| s.local_sheet_id)
+    })
+}
+
+/// Install one rebuild's result: each subscription's verified declarations as
+/// published, beside the subscription they came from.
+///
+/// The INDEX is built from the declarations RE-KEYED to this workbook's local
+/// sheets through each subscription's own ledger
+/// ([`localized_writeback_declarations`]): it answers "is this cell on my sheet
+/// claimed?", and every guard asks it with a local sheet id. The declaration
+/// MIRROR keeps the publisher's ids, because its readers look the sheet up in
+/// the signed manifest (`bi/writeback_source.rs`, `calp_inspector.rs`) and
+/// everything else keys on the region id.
+pub(crate) fn install_writeback_index(
+    state: &AppState,
+    per_sub_decls: &[(calp::manifest::Subscription, Vec<calp::WritebackRegionDeclaration>)],
+    all_model_decls: Vec<calp::ModelWritebackDeclaration>,
+    skips: Vec<WritebackRebuildSkip>,
+) {
+    let index_decls: Vec<calp::WritebackRegionDeclaration> = per_sub_decls
+        .iter()
+        .flat_map(|(sub, decls)| localized_writeback_declarations(sub, decls))
+        .collect();
+    let all_decls: Vec<calp::WritebackRegionDeclaration> = per_sub_decls
+        .iter()
+        .flat_map(|(_, decls)| decls.iter().cloned())
+        .collect();
+    let new_index = match calp::WritebackIndex::from_declarations(&index_decls) {
         Ok(idx) => idx,
         Err(e) => {
             crate::log_warn!("CALP", "Failed to build writeback index: {}", e);
@@ -13787,11 +14076,6 @@ fn rebuild_writeback_index_inner(
     }
     if let Ok(mut s) = state.writeback_rebuild_skips.lock() {
         *s = skips;
-    }
-
-    RebuildOutcome {
-        installed: true,
-        deferred_http: deferred_any,
     }
 }
 
@@ -14215,10 +14499,27 @@ fn check_lifecycle_policy(
     }
 }
 
+/// What [`calp_save_writeback_draft`] did with a value it accepted.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveWritebackDraftResult {
+    /// The region submits on save (`immediate`) and the value LEFT the machine.
+    pub sent: bool,
+    /// The region submits on save, but sending failed: the value is kept as an
+    /// UNSENT draft (Submit sends it later), and this says why.
+    pub send_error: Option<String>,
+}
+
 /// Save a writeback draft for a cell in a writeback region.
 /// Auto-mints a CellId if the cell doesn't have one yet.
 /// Enforces the region's schema and lifecycle policy; regions with the
 /// `immediate` submission policy are auto-submitted to the workspace on save.
+///
+/// An `immediate` region whose send FAILS is not a refused save: the draft was
+/// stored, so the value is kept (the cell shows it, a marker says it is not
+/// sent, Submit retries). It used to return the send's error, and the editor
+/// read that as "the value was not accepted" -- keeping the user in edit mode
+/// over a value that WAS persisted as a draft. The result says which.
 #[tauri::command]
 pub fn calp_save_writeback_draft(
     state: State<AppState>,
@@ -14229,7 +14530,7 @@ pub fn calp_save_writeback_draft(
     col: u32,
     value: calp::writeback::SubmissionValue,
     window: tauri::Window,
-) -> Result<(), String> {
+) -> Result<SaveWritebackDraftResult, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let sid = SheetId::parse(&sheet_id)
         .ok_or_else(|| format!("Invalid sheet_id: {}", sheet_id))?;
@@ -14239,17 +14540,29 @@ pub fn calp_save_writeback_draft(
     // caller-supplied id, so a mismatched id would validate against the wrong
     // declaration (or none at all, silently skipping enforcement).
     {
+        // Shown to the subscriber by the commit guard (a stale frontend snapshot
+        // after a rebuild moved or dropped the region), so it speaks in the
+        // cell's A1 name, never zero-based coordinates.
+        let cell = format!("{}{}", crate::pivot::utils::col_index_to_letter(col), row + 1);
         let wb_index = state.writeback_index.lock().map_err(|e| e.to_string())?;
         match wb_index.region_id_at(sid, row, col) {
             Some(actual) if actual == region_id => {}
             Some(actual) => {
                 return Err(format!(
-                    "Cell ({}, {}) belongs to writeback region '{}', not '{}'",
-                    row, col, actual, region_id
+                    "Your value for cell {} was not saved: the cell now belongs to a different \
+                     writeback region ('{}', not '{}'), because the application changed. Type \
+                     the value into the cell again.",
+                    cell, actual, region_id
                 ));
             }
             None => {
-                return Err(format!("Cell ({}, {}) is not in a writeback region", row, col));
+                return Err(format!(
+                    "Your value for cell {} was not saved: the cell no longer collects input for \
+                     a published application (the application changed, or the sheet was \
+                     detached). Collaboration > Subscriptions shows what this workbook still \
+                     subscribes to.",
+                    cell
+                ));
             }
         }
     }
@@ -14392,11 +14705,23 @@ pub fn calp_save_writeback_draft(
     }
 
     // `immediate` regions go straight to the workspace — saving IS submitting.
+    // A failed send keeps the draft (see the doc comment): reported, not raised.
     if auto_submit {
-        submit_region_internal(&state, &effect, &region_id, window_app_handle(&window))?;
+        return Ok(match submit_region_internal(&state, &effect, &region_id, window_app_handle(&window)) {
+            Ok(_) => SaveWritebackDraftResult { sent: true, send_error: None },
+            Err(e) => {
+                crate::log_warn!(
+                    "CALP",
+                    "immediate writeback region '{}': the value was saved but not sent: {}",
+                    region_id,
+                    e
+                );
+                SaveWritebackDraftResult { sent: false, send_error: Some(e) }
+            }
+        });
     }
 
-    Ok(())
+    Ok(SaveWritebackDraftResult::default())
 }
 
 /// Get the writeback layer (all drafts) for the current workbook.
@@ -14408,6 +14733,89 @@ pub fn calp_get_writeback_layer(
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let layer = state.writeback_layer.read().map_err(|e| e.to_string())?;
     Ok(layer.clone())
+}
+
+/// This subscriber's OWN current workspace record for every cell of one
+/// region: the newest by timestamp across the subscription's resolved version
+/// and the versions it may carry forward from, filtered to the environment it
+/// follows. Shared by reconcile (what became of what I sent?) and discard
+/// (what did I last send for this cell?), so both read the same answer.
+///
+/// `Err` when the region's owning subscription or its workspace cannot be
+/// reached -- "I could not look" is never reported as "nothing was sent".
+///
+/// `strict` decides what an unreadable VERSION means. Reconcile is lenient
+/// (`false`): a version it cannot read just keeps the local state, which is
+/// harmless. Discard is strict (`true`): it ACTS on the answer -- a cell with
+/// no sent record is blanked -- so a read that failed for one version must
+/// refuse the discard rather than look like "nothing was ever sent". A version
+/// with no submissions is not a failure: the workspace answers `Ok(empty)` for
+/// a missing submissions directory, so only a real read error reaches here.
+fn own_current_records_for_region(
+    state: &AppState,
+    region_id: &str,
+    own: &calp::SubmitterIdentity,
+    strict: bool,
+) -> Result<std::collections::HashMap<(u32, u32), calp::writeback::WritebackSubmission>, String> {
+    let OwningSubscription { package_name, resolved_version, registry_path, environment } =
+        owning_subscription_for_region(state, region_id)?;
+    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&registry_path)
+        .map_err(|e| e.to_string())?;
+    // Newest version first: resolved, then older versions sorted descending.
+    // See `rebuild_gather_cache`: an environment carries forward over what
+    // it has HELD. Under the semver rule a review decision recorded against
+    // the version an environment was rolled back FROM never reached the
+    // contributor who made the submission.
+    let mut older =
+        carry_forward_versions(&registry, &package_name, &resolved_version, &environment);
+    older.sort_by(|a, b| match (calp::SemVer::parse(b), calp::SemVer::parse(a)) {
+        (Ok(bv), Ok(av)) => bv.cmp(&av),
+        _ => b.cmp(a),
+    });
+    let mut versions = vec![resolved_version.clone()];
+    versions.extend(older);
+
+    // THE NEWEST RECORD ACROSS VERSIONS, by timestamp. First-seen-wins
+    // assumed the version list ran newest-first, which stopped being true
+    // when this switched to `carry_forward_versions`: after a rollback the
+    // list is the pointer's version followed by HIGHER ones it held, so the
+    // head is the lowest. The contributor then kept seeing a stale state
+    // while the dashboard, on the same data, showed the current one.
+    let mut by_cell: std::collections::HashMap<(u32, u32), calp::writeback::WritebackSubmission> =
+        std::collections::HashMap::new();
+    for version in &versions {
+        let subs = match registry
+            .load_current_submissions_by(&package_name, version, &own.id)
+            // Adopting a state recorded against a different environment
+            // would tell a contributor their prod entry was approved when
+            // what was approved was their test one.
+            .map(|subs| calp::writeback::visible_in(subs, Some(&environment)))
+        {
+            Ok(subs) => subs,
+            Err(e) if strict => {
+                return Err(format!(
+                    "could not read your submissions for version {} of '{}': {}",
+                    version, package_name, e
+                ));
+            }
+            Err(_) => continue,
+        };
+        for s in subs {
+            if s.region_id != region_id {
+                continue;
+            }
+            let key = (s.cell_row, s.cell_col);
+            let newer = by_cell.get(&key).is_none_or(|cur| {
+                calp::fold::cmp_timestamps(&s.updated_at, &cur.updated_at)
+                    .then_with(|| s.id.cmp(&cur.id))
+                    .is_gt()
+            });
+            if newer {
+                by_cell.insert(key, s);
+            }
+        }
+    }
+    Ok(by_cell)
 }
 
 /// Reconcile the local writeback layer's submission STATES from the workspace —
@@ -14457,60 +14865,11 @@ fn reconcile_writeback_layer_internal(
         calp::writeback::WritebackSubmission,
     > = std::collections::HashMap::new();
     for region_id in &region_ids {
-        let Ok(OwningSubscription { package_name, resolved_version, registry_path, environment }) =
-            owning_subscription_for_region(state, region_id)
-        else {
+        let Ok(records) = own_current_records_for_region(state, region_id, &own, false) else {
             continue;
         };
-        let Ok((registry, _scope)) =
-            crate::calp_registry::open_workspace_scoped(&registry_path)
-        else {
-            continue;
-        };
-        // Newest version first: resolved, then older versions sorted descending.
-        // See `rebuild_gather_cache`: an environment carries forward over what
-        // it has HELD. Under the semver rule a review decision recorded against
-        // the version an environment was rolled back FROM never reached the
-        // contributor who made the submission.
-        let mut older =
-            carry_forward_versions(&registry, &package_name, &resolved_version, &environment);
-        older.sort_by(|a, b| match (calp::SemVer::parse(b), calp::SemVer::parse(a)) {
-            (Ok(bv), Ok(av)) => bv.cmp(&av),
-            _ => b.cmp(a),
-        });
-        let mut versions = vec![resolved_version.clone()];
-        versions.extend(older);
-
-        // THE NEWEST RECORD ACROSS VERSIONS, by timestamp. First-seen-wins
-        // assumed the version list ran newest-first, which stopped being true
-        // when this switched to `carry_forward_versions`: after a rollback the
-        // list is the pointer's version followed by HIGHER ones it held, so the
-        // head is the lowest. The contributor then kept seeing a stale state
-        // while the dashboard, on the same data, showed the current one.
-        for version in &versions {
-            let Ok(subs) = registry
-                .load_current_submissions_by(&package_name, version, &own.id)
-                // Adopting a state recorded against a different environment
-                // would tell a contributor their prod entry was approved when
-                // what was approved was their test one.
-                .map(|subs| calp::writeback::visible_in(subs, Some(&environment)))
-            else {
-                continue;
-            };
-            for s in subs {
-                if &s.region_id != region_id {
-                    continue;
-                }
-                let key = (s.region_id.clone(), s.cell_row, s.cell_col);
-                let newer = by_slot.get(&key).is_none_or(|cur| {
-                    calp::fold::cmp_timestamps(&s.updated_at, &cur.updated_at)
-                        .then_with(|| s.id.cmp(&cur.id))
-                        .is_gt()
-                });
-                if newer {
-                    by_slot.insert(key, s);
-                }
-            }
+        for ((row, col), s) in records {
+            by_slot.insert((region_id.clone(), row, col), s);
         }
     }
 
@@ -14570,6 +14929,586 @@ pub fn calp_reconcile_writeback(
     reconcile_writeback_layer_internal(&state, &file_state)?;
     let layer = state.writeback_layer.read().map_err(|e| e.to_string())?;
     Ok(layer.clone())
+}
+
+// ============================================================================
+// Discard unsent writeback drafts
+// ============================================================================
+
+/// One cell of a writeback region, as the discard command names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WritebackCellRef {
+    pub row: u32,
+    pub col: u32,
+}
+
+/// One grid cell a discard put back.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoredWritebackCell {
+    /// The workbook sheet the cell is on (the region's local sheet).
+    pub sheet_index: usize,
+    pub row: u32,
+    pub col: u32,
+    /// The state of what this subscriber last SENT for the cell, now back in
+    /// the writeback layer; `None` when nothing was ever sent and the cell is
+    /// blank again.
+    pub restored_state: Option<calp::writeback::SubmissionState>,
+    /// The value the cell now holds (`empty` for a blank cell).
+    pub value: calp::writeback::SubmissionValue,
+}
+
+/// What [`calp_discard_writeback_drafts`] did.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscardWritebackDraftsResult {
+    /// How many unsent drafts were thrown away.
+    pub discarded: u32,
+    /// Every grid cell that was put back, in row/column order.
+    pub restored_cells: Vec<RestoredWritebackCell>,
+}
+
+/// Throw away the UNSENT drafts of one writeback region (optionally only
+/// `cells`) and put each cell back to what this subscriber last SENT for it, or
+/// to blank when nothing was ever sent.
+///
+/// - Only `draft` entries go: submitted / approved / rejected entries describe
+///   what already left the machine and are never touched.
+/// - "What was last sent" comes from the WORKSPACE (the subscriber's own folded
+///   records), because typing over a submitted cell replaced its layer entry
+///   with the draft. The sent record goes back into the layer, so the cell reads
+///   "submitted" (or approved / rejected) again.
+/// - If the workspace cannot be reached -- or any one version of the
+///   subscriber's submissions cannot be read -- the discard is REFUSED and
+///   nothing changes: blanking a cell whose sent value merely could not be
+///   looked up would show the subscriber a retraction they never made. So a
+///   discard needs the workspace, even for cells that were never sent (the
+///   layer alone cannot tell those apart once a sent cell was typed over).
+/// - NOT UNDOABLE, and it ENDS THE UNDO HISTORY (Excel's rule for an action it
+///   cannot undo). The writeback layer is not part of the undo graph (a draft
+///   save is not either). Leaving the history alone was not neutral: the step
+///   that TYPED the draft value is still on it, so Ctrl+Z then Ctrl+Y would
+///   write the discarded value back into the cell with no draft behind it --
+///   exactly the divergence the write guards exist to prevent. Clearing the
+///   history removes that route. The frontend confirms first and says so.
+/// - Recorded in the audit trail (`WritebackInvalidated`), like the other
+///   ways unsent writeback values are dropped (refresh, detach).
+/// - Dependents of every restored cell recalculate through the shared
+///   two-phase helpers (all guards dropped first).
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn calp_discard_writeback_drafts(
+    state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    region_id: String,
+    cells: Option<Vec<WritebackCellRef>>,
+    window: tauri::Window,
+) -> Result<DiscardWritebackDraftsResult, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    discard_writeback_drafts_inner(
+        &state,
+        &file_state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        &region_id,
+        cells.as_deref(),
+        |state, region_id| {
+            let own = get_subscriber_identity(state)?;
+            own_current_records_for_region(state, region_id, &own, true).map_err(|e| {
+                format!(
+                    "Could not look up what you last sent for this region, so nothing was \
+                     discarded: {}",
+                    e
+                )
+            })
+        },
+    )
+}
+
+/// The grid cell that shows `value`, keeping the cell's existing format.
+/// `None` means "no cell at all" (blank, and nothing formatted to keep).
+fn writeback_display_cell(
+    previous: Option<&engine::Cell>,
+    value: &calp::writeback::SubmissionValue,
+) -> Option<engine::Cell> {
+    use calp::writeback::SubmissionValue as V;
+    let style_index = previous.map(|c| c.style_index).unwrap_or(0);
+    let mut cell = match value {
+        V::Number { value } => engine::Cell::new_number(*value),
+        V::Text { value } => engine::Cell::new_text(value.clone()),
+        V::Boolean { value } => engine::Cell::new_boolean(*value),
+        V::Empty => {
+            if style_index == 0 {
+                return None;
+            }
+            engine::Cell::new()
+        }
+    };
+    cell.style_index = style_index;
+    Some(cell)
+}
+
+/// Every writeback-layer entry whose cell lies inside its region on one of
+/// `sheets` (LOCAL sheet ids), as `(sheet, row, col) -> value`. Where the layer
+/// holds both a sent entry and a newer draft for one cell, the DRAFT is what
+/// the cell shows (it is what the subscriber typed last).
+///
+/// Each store is read alone and released before the next; the caller must
+/// hold no state lock.
+pub(crate) fn writeback_layer_cells_on_sheets(
+    state: &AppState,
+    sheets: &std::collections::HashSet<SheetId>,
+) -> std::collections::HashMap<(SheetId, u32, u32), calp::writeback::SubmissionValue> {
+    let mut out = std::collections::HashMap::new();
+    if sheets.is_empty() {
+        return out;
+    }
+    let entries: Vec<(String, u32, u32, calp::writeback::SubmissionValue, bool)> =
+        match state.writeback_layer.read() {
+            Ok(layer) => layer
+                .drafts
+                .iter()
+                .map(|d| {
+                    (
+                        d.region_id.clone(),
+                        d.cell_row,
+                        d.cell_col,
+                        d.value.clone(),
+                        matches!(d.state, calp::writeback::SubmissionState::Draft),
+                    )
+                })
+                .collect(),
+            Err(_) => return out,
+        };
+    if entries.is_empty() {
+        return out;
+    }
+    let index = match state.writeback_index.lock() {
+        Ok(i) => i,
+        Err(_) => return out,
+    };
+    let mut is_draft: std::collections::HashMap<(SheetId, u32, u32), bool> =
+        std::collections::HashMap::new();
+    for (region_id, row, col, value, draft) in entries {
+        let Some((sid, range)) = index.region_location(&region_id) else {
+            continue;
+        };
+        if !sheets.contains(&sid) || !range.contains(row, col) {
+            continue;
+        }
+        let key = (sid, row, col);
+        // A sent entry never displaces a draft for the same cell.
+        if is_draft.get(&key).copied().unwrap_or(false) && !draft {
+            continue;
+        }
+        is_draft.insert(key, draft);
+        out.insert(key, value);
+    }
+    out
+}
+
+/// Put the writeback layer back on the grid of `sheets` after their cells were
+/// replaced wholesale with the publisher's content (a refresh). The override
+/// layer is re-overlaid the same way; writeback cells are not overrides (the
+/// override recorder skips them on purpose), so without this a refresh blanked
+/// every value the subscriber had typed or sent while the Draft / Submitted
+/// entries stayed in the layer -- a draft marker on an empty cell, and a Submit
+/// that sends values nobody can see. Keeps each cell's style. Returns the
+/// (sheet index, row, col) of every cell written; the caller recalculates.
+pub(crate) fn reproject_writeback_layer_onto_grids(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    sheets: &std::collections::HashSet<SheetId>,
+) -> Vec<(usize, u32, u32)> {
+    let cells = writeback_layer_cells_on_sheets(state, sheets);
+    if cells.is_empty() {
+        return Vec::new();
+    }
+    let sheet_ids: Vec<SheetId> = match state.sheet_ids.read() {
+        Ok(ids) => ids.clone(),
+        Err(_) => return Vec::new(),
+    };
+    let active = state.active_sheet.read().map(|a| *a).unwrap_or(usize::MAX);
+    let mut written = Vec::new();
+    // CANONICAL LOCK ORDER: `grid` before `grids` (see
+    // `apply_override_value_to_grid`).
+    let Ok(mut active_grid) = state.grid.write(effect) else {
+        return written;
+    };
+    let Ok(mut grids) = state.grids.write(effect) else {
+        return written;
+    };
+    let mut ordered: Vec<_> = cells.into_iter().collect();
+    ordered.sort_by_key(|((sid, row, col), _)| (sid.to_string(), *row, *col));
+    for ((sid, row, col), value) in ordered {
+        let Some(idx) = sheet_ids.iter().position(|s| *s == sid) else {
+            continue;
+        };
+        let Some(target) = grids.get_mut(idx) else {
+            continue;
+        };
+        let previous = target.get_cell(row, col).cloned();
+        // The publisher put a FORMULA here: its cell is not an input any more
+        // (and may be a spill origin, which a literal must never replace). The
+        // layer entry stays; the next version that frees the cell shows it.
+        if previous.as_ref().is_some_and(|c| c.has_formula()) {
+            continue;
+        }
+        match writeback_display_cell(previous.as_ref(), &value) {
+            Some(cell) => {
+                if idx == active {
+                    active_grid.set_cell(row, col, cell.clone());
+                }
+                target.set_cell(row, col, cell);
+            }
+            None => {
+                if idx == active {
+                    active_grid.clear_cell(row, col);
+                }
+                target.clear_cell(row, col);
+            }
+        }
+        written.push((idx, row, col));
+    }
+    written
+}
+
+/// End the undo history after a discard changed something. See
+/// [`calp_discard_writeback_drafts`]: the step that typed a discarded value is
+/// still on the history, and Ctrl+Z then Ctrl+Y would put the value back with
+/// no draft behind it. Excel ends the history for an action it cannot undo;
+/// this does the same. Called with no other state lock held.
+fn end_undo_history_after_discard(state: &AppState) {
+    let Ok(mut undo) = state.undo_stack.lock() else {
+        crate::log_error!(
+            "CALP",
+            "discard writeback drafts: the undo history lock is poisoned; history NOT cleared"
+        );
+        return;
+    };
+    let before = undo.cleared_total();
+    undo.clear();
+    let discarded = undo.cleared_total() - before;
+    drop(undo);
+    if discarded > 0 {
+        crate::log_info!(
+            "CALP",
+            "Discarding writeback drafts ended the undo history: {} transaction(s) discarded",
+            discarded
+        );
+    }
+}
+
+/// The body of [`calp_discard_writeback_drafts`]. `sent_records` answers "what
+/// did this subscriber last send for each cell of the region?" (the workspace
+/// read in production; a fixture in tests).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn discard_writeback_drafts_inner(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    region_id: &str,
+    cells: Option<&[WritebackCellRef]>,
+    sent_records: impl FnOnce(
+        &AppState,
+        &str,
+    ) -> Result<
+        std::collections::HashMap<(u32, u32), calp::writeback::WritebackSubmission>,
+        String,
+    >,
+) -> Result<DiscardWritebackDraftsResult, String> {
+    // GATE 1: the region is in this workbook, on a sheet that is here. Each
+    // store is read ALONE and released before the next (the grid locks below
+    // must never be taken while another state lock is held).
+    let location = {
+        let index = state.writeback_index.lock().map_err(|e| e.to_string())?;
+        index.region_location(region_id)
+    };
+    let (sheet_id, range) = location
+        .ok_or_else(|| {
+            "This writeback region is not part of this workbook any more, so it has no \
+             drafts to discard."
+                .to_string()
+        })?;
+    let position = {
+        let ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
+        ids.iter().position(|s| *s == sheet_id)
+    };
+    // Resolved again after the workspace read (GATE 4); this early answer
+    // only refuses before any I/O is spent.
+    position.ok_or_else(|| {
+        "The sheet that holds this writeback region is not in this workbook.".to_string()
+    })?;
+
+    // GATE 2: every named cell is inside the region.
+    let only: Option<Vec<(u32, u32)>> = match cells {
+        None => None,
+        Some(list) => {
+            for c in list {
+                if !range.contains(c.row, c.col) {
+                    return Err(format!(
+                        "Cell {}{} is not part of this writeback region; nothing was discarded.",
+                        crate::pivot::utils::col_index_to_letter(c.col),
+                        c.row + 1
+                    ));
+                }
+            }
+            Some(list.iter().map(|c| (c.row, c.col)).collect())
+        }
+    };
+
+    // Nothing unsent: an honest zero, and the document stays exactly as clean.
+    // (A pre-check that saves the workspace round-trip; the authoritative
+    // answer is re-derived under the layer lock below.)
+    let any_unsent = {
+        let layer = state.writeback_layer.read().map_err(|e| e.to_string())?;
+        !layer.unsent_draft_slots(region_id, only.as_deref()).is_empty()
+    };
+    if !any_unsent {
+        return Ok(DiscardWritebackDraftsResult { discarded: 0, restored_cells: Vec::new() });
+    }
+
+    // GATE 3: what was last sent. Workspace I/O, holding nothing.
+    let sent = sent_records(state, region_id)?;
+
+    // GATE 4, after the I/O: the sheet is STILL here, at an index that has a
+    // grid. A sheet operation can run while the workspace is being read; this
+    // is checked BEFORE the layer changes, so a missing grid can never leave
+    // the drafts gone while the cells still show them.
+    let sheet_index = {
+        let ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
+        ids.iter().position(|s| *s == sheet_id)
+    }
+    .filter(|idx| {
+        state
+            .grids
+            .read()
+            .map(|grids| *idx < grids.len())
+            .unwrap_or(false)
+    })
+    .ok_or_else(|| {
+        "The sheet that holds this writeback region is not in this workbook any more; \
+         nothing was discarded."
+            .to_string()
+    })?;
+
+    // THE LAYER, gate and mutation in ONE critical section: the unsent slots
+    // are re-derived under the lock (a concurrent submit or discard may have
+    // emptied them while the workspace was read), and the effect is
+    // constructed only when something will actually change -- so a no-op never
+    // dirties the document.
+    let (effect, removed, discarded) = {
+        let pending = state.writeback_layer.lock_pending().map_err(|e| e.to_string())?;
+        let slots = pending.unsent_draft_slots(region_id, only.as_deref());
+        if slots.is_empty() {
+            return Ok(DiscardWritebackDraftsResult { discarded: 0, restored_cells: Vec::new() });
+        }
+        // The draft entries about to go, kept so a failure further down can
+        // put them back rather than leave the layer and the grid disagreeing.
+        let removed: Vec<calp::writeback::WritebackSubmission> = pending
+            .drafts
+            .iter()
+            .filter(|d| {
+                d.region_id == region_id
+                    && d.state == calp::writeback::SubmissionState::Draft
+                    && slots.contains(&(d.cell_row, d.cell_col))
+            })
+            .cloned()
+            .collect();
+        // Every gate has passed and something WILL change.
+        let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+        let mut layer = pending.authorize(&effect);
+        let discarded = layer.discard_drafts(region_id, only.as_deref(), &sent);
+        (effect, removed, discarded)
+    };
+
+    let restored_cells: Vec<RestoredWritebackCell> = discarded
+        .iter()
+        .map(|d| RestoredWritebackCell {
+            sheet_index,
+            row: d.row,
+            col: d.col,
+            restored_state: d.restored.as_ref().map(|r| r.state.clone()),
+            value: d
+                .restored
+                .as_ref()
+                .map(|r| r.value.clone())
+                .unwrap_or(calp::writeback::SubmissionValue::Empty),
+        })
+        .collect();
+
+    // PHASE A: the grid. The active sheet lives in BOTH `grid` and
+    // `grids[active]`; any other sheet only in `grids`.
+    let active_sheet = {
+        let active = state.active_sheet.read().map_err(|e| e.to_string())?;
+        *active
+    };
+    let on_active = sheet_index == active_sheet;
+    let mut seeds: Vec<(u32, u32)> = Vec::new();
+    let grid_written: Result<(), String> = (|| {
+        let mut grid = state.grid.write(&effect).map_err(|e| e.to_string())?;
+        let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
+        let mut dependents_map = state.dependents.lock().map_err(|e| e.to_string())?;
+        let mut dependencies_map = state.dependencies.lock().map_err(|e| e.to_string())?;
+        let mut column_dependents_map = state.column_dependents.lock().map_err(|e| e.to_string())?;
+        let mut column_dependencies_map =
+            state.column_dependencies.lock().map_err(|e| e.to_string())?;
+        let mut row_dependents_map = state.row_dependents.lock().map_err(|e| e.to_string())?;
+        let mut row_dependencies_map = state.row_dependencies.lock().map_err(|e| e.to_string())?;
+        let mut cross_sheet_dependents_map =
+            state.cross_sheet_dependents.lock().map_err(|e| e.to_string())?;
+        let mut cross_sheet_dependencies_map =
+            state.cross_sheet_dependencies.lock().map_err(|e| e.to_string())?;
+        let Some(target) = grids.get_mut(sheet_index) else {
+            return Err("The sheet that holds this writeback region is not in this workbook.".to_string());
+        };
+        for cell in &restored_cells {
+            let previous = target.get_cell(cell.row, cell.col).cloned();
+            let had_formula = previous.as_ref().is_some_and(|c| c.has_formula());
+            match writeback_display_cell(previous.as_ref(), &cell.value) {
+                Some(new_cell) => {
+                    if on_active {
+                        grid.set_cell(cell.row, cell.col, new_cell.clone());
+                    }
+                    target.set_cell(cell.row, cell.col, new_cell);
+                }
+                None => {
+                    if on_active {
+                        grid.clear_cell(cell.row, cell.col);
+                    }
+                    target.clear_cell(cell.row, cell.col);
+                }
+            }
+            // A literal has no precedents. A draft is typed as a literal, so this
+            // is normally a no-op -- but a value that arrived as a formula must
+            // not keep feeding the dependency maps after it is gone.
+            if had_formula {
+                crate::update_cross_sheet_dependencies(
+                    (sheet_index, cell.row, cell.col),
+                    Default::default(),
+                    &mut cross_sheet_dependencies_map,
+                    &mut cross_sheet_dependents_map,
+                );
+                if on_active {
+                    crate::update_dependencies(
+                        (cell.row, cell.col),
+                        Default::default(),
+                        &mut dependencies_map,
+                        &mut dependents_map,
+                    );
+                    crate::update_column_dependencies(
+                        (cell.row, cell.col),
+                        Default::default(),
+                        &mut column_dependencies_map,
+                        &mut column_dependents_map,
+                    );
+                    crate::update_row_dependencies(
+                        (cell.row, cell.col),
+                        Default::default(),
+                        &mut row_dependencies_map,
+                        &mut row_dependents_map,
+                    );
+                }
+            }
+            seeds.push((cell.row, cell.col));
+        }
+        Ok(())
+    })();
+    // Every guard above is dropped here: the recalculation takes the same
+    // grid / dependency mutexes and std mutexes are not reentrant.
+
+    // The grid could not be written (the sheet vanished between GATE 4 and
+    // here, or a lock was poisoned): the drafts go BACK, so the layer and the
+    // cells still agree, and the user is told nothing was discarded.
+    if let Err(e) = grid_written {
+        if let Ok(mut layer) = state.writeback_layer.write(&effect) {
+            for draft in removed {
+                // `set_draft` replaces the slot, so a sent record the discard
+                // re-inserted for this cell is displaced by the draft again.
+                layer.set_draft(draft);
+            }
+        }
+        return Err(format!("{} Nothing was discarded.", e));
+    }
+
+    // PHASE B: dependents, through the ONE shared cascade.
+    if !seeds.is_empty() {
+        if on_active {
+            let mut recalculated = Vec::new();
+            crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+                state,
+                user_files_state,
+                pane_control_state,
+                ribbon_filter_state,
+                &seeds,
+                &mut recalculated,
+            );
+        } else {
+            crate::commands::data::recalc_after_off_sheet_write(
+                state,
+                user_files_state,
+                pivot_state,
+                pane_control_state,
+                ribbon_filter_state,
+                &[sheet_index],
+            );
+        }
+    }
+
+    // END THE UNDO HISTORY (see the command's doc): the step that typed a
+    // discarded value must not be redoable into a cell with no draft behind
+    // it. Taken with no other lock held, like the sheet-structure clear.
+    end_undo_history_after_discard(state);
+
+    // THE AUDIT ROW. Discard is not undoable, so the trail is the only record
+    // that the subscriber's unsent input was thrown away.
+    {
+        let sheet_name = state
+            .sheet_names
+            .read()
+            .ok()
+            .and_then(|names| names.get(sheet_index).cloned())
+            .unwrap_or_default();
+        let cells_a1: Vec<String> = restored_cells
+            .iter()
+            .map(|c| {
+                format!(
+                    "{}{}{}",
+                    crate::pivot::utils::col_index_to_letter(c.col),
+                    c.row + 1,
+                    if c.restored_state.is_some() { " (back to the value last sent)" } else { "" }
+                )
+            })
+            .collect();
+        record_writeback_invalidated(
+            state,
+            &format!(
+                "Discarded {} unsent writeback value{} in region '{}' on sheet '{}': {}",
+                restored_cells.len(),
+                if restored_cells.len() == 1 { "" } else { "s" },
+                region_id,
+                sheet_name,
+                cells_a1.join(", "),
+            ),
+        );
+    }
+
+    // No GATHER invalidation: GATHER reads the WORKSPACE, and a discard sends
+    // nothing there.
+    Ok(DiscardWritebackDraftsResult {
+        discarded: discarded.len() as u32,
+        restored_cells,
+    })
 }
 
 // ============================================================================
@@ -16165,12 +17104,35 @@ fn ensure_writeback_draft_on_sheet(
     if writeback_slot_has_draft(state, &region_id, row, col) {
         return Ok(());
     }
-    Err(format!(
-        "Cell ({}, {}) belongs to writeback region '{}'. Values there are collected as \
-         writeback drafts, not written straight to the grid — save a draft first \
-         (scripts: the distribution.writeback capability, action 'cellGuard').",
-        row, col, region_id
-    ))
+    Err(writeback_cell_refusal(state, sheet_id, row, col))
+}
+
+/// The user-facing refusal for a value that reached a writeback cell without
+/// going through the draft path. Names the cell in A1 form and the application
+/// that collects it, and says what to do -- in the words the subscriber sees
+/// on screen, not zero-based coordinates or region ids.
+fn writeback_cell_refusal(
+    state: &AppState,
+    sheet_id: identity::SheetId,
+    row: u32,
+    col: u32,
+) -> String {
+    let cell = format!("{}{}", crate::pivot::utils::col_index_to_letter(col), row + 1);
+    let application = state
+        .subscriptions
+        .read()
+        .ok()
+        .and_then(|subs| subs.subscribed_sheet(sheet_id).map(|(sub, _)| sub.package_name.clone()));
+    let collector = match application {
+        Some(name) => format!("'{}'", name),
+        None => "a published application".to_string(),
+    };
+    format!(
+        "Cell {} collects input for {}. Type into it one cell at a time to save your \
+         value as a draft, then submit it; paste, fill and other bulk writes are not \
+         supported for writeback cells.",
+        cell, collector
+    )
 }
 
 // ============================================================================
@@ -16317,13 +17279,30 @@ pub(crate) fn ensure_cells_unclaimed(
         return Ok(());
     }
     let sheet_id = active_sheet_id(state)?;
-    let index = state.writeback_index.lock().map_err(|e| e.to_string())?;
-    for &(row, col) in cells {
-        if let Some(region_id) = index.region_id_at(sheet_id, row, col) {
-            return Err(claim_refusal_cell(action, region_id, row, col));
+    first_claimed_cell_refusal(state, sheet_id, action, cells)
+}
+
+/// The first claimed cell of `cells` on `sheet_id`, as a refusal. The index
+/// lock is released BEFORE the refusal text is built, because naming the
+/// application reads `subscriptions`, and no state lock may be held across it.
+fn first_claimed_cell_refusal(
+    state: &AppState,
+    sheet_id: identity::SheetId,
+    action: &str,
+    cells: &[(u32, u32)],
+) -> Result<(), String> {
+    let hit: Option<(String, u32, u32)> = {
+        let index = state.writeback_index.lock().map_err(|e| e.to_string())?;
+        cells.iter().find_map(|&(row, col)| {
+            index.region_id_at(sheet_id, row, col).map(|id| (id.to_string(), row, col))
+        })
+    };
+    match hit {
+        Some((region_id, row, col)) => {
+            Err(claim_refusal_cell(state, sheet_id, action, &region_id, row, col))
         }
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// CELL-LIST guard for a NAMED sheet (the off-sheet twin of
@@ -16348,13 +17327,7 @@ pub(crate) fn ensure_cells_unclaimed_on_sheet(
     else {
         return Ok(());
     };
-    let index = state.writeback_index.lock().map_err(|e| e.to_string())?;
-    for &(row, col) in cells {
-        if let Some(region_id) = index.region_id_at(sheet_id, row, col) {
-            return Err(claim_refusal_cell(action, region_id, row, col));
-        }
-    }
-    Ok(())
+    first_claimed_cell_refusal(state, sheet_id, action, cells)
 }
 
 /// SHIFT guard for `insert_rows` / `delete_rows`: refuse when the shift window
@@ -16387,17 +17360,27 @@ fn ensure_range_unclaimed_on_sheet(
     query: &calp::writeback::PositionalRange,
     action: &str,
 ) -> Result<(), String> {
-    let index = state.writeback_index.lock().map_err(|e| e.to_string())?;
-    let hits = index.regions_overlapping(sheet_id, query);
-    let Some(hit) = hits.first() else {
-        return Ok(());
+    let hit: Option<(String, calp::writeback::PositionalRange)> = {
+        let index = state.writeback_index.lock().map_err(|e| e.to_string())?;
+        let hits = index.regions_overlapping(sheet_id, query);
+        hits.first().map(|hit| {
+            // A region's own top-left corner is always inside itself, so this
+            // resolves the id of the rectangle we just matched. Refusal path only.
+            let region_id = index
+                .region_id_at(sheet_id, hit.row_start, hit.col_start)
+                .unwrap_or("<unknown>")
+                .to_string();
+            (region_id, (*hit).clone())
+        })
     };
-    // A region's own top-left corner is always inside itself, so this resolves
-    // the id of the rectangle we just matched. Refusal path only.
-    let region_id = index
-        .region_id_at(sheet_id, hit.row_start, hit.col_start)
-        .unwrap_or("<unknown>");
-    Err(claim_refusal_range(action, region_id, hit))
+    // The index lock is released before the text is built (naming the
+    // application reads `subscriptions`).
+    match hit {
+        Some((region_id, range)) => {
+            Err(claim_refusal_range(state, sheet_id, action, &region_id, &range))
+        }
+        None => Ok(()),
+    }
 }
 
 /// A1 text for a claimed rectangle, e.g. `C5:D8`.
@@ -16411,32 +17394,60 @@ fn range_a1(range: &calp::writeback::PositionalRange) -> String {
     )
 }
 
-/// The shared refusal text. Names WHAT was refused, WHICH region stands in the
-/// way, WHERE that region is, and WHAT the caller can do instead — a caller
-/// that only learns "denied" cannot fix anything.
-fn claim_refusal(action: &str, region_id: &str, where_: &str) -> String {
+/// The shared refusal text. Names WHAT was refused, WHICH application collects
+/// the cells, WHERE they are, and WHAT the user can do instead -- a caller that
+/// only learns "denied" cannot fix anything. Since the index is keyed by the
+/// LOCAL sheet id these refusals fire on the subscriber's own sheet for clear,
+/// sort, merge and shift gestures, so the text is written for that subscriber:
+/// A1 references, the application's name, the gesture that works. The region
+/// id stays in parentheses for whoever has to match it against a manifest.
+/// Called with no state lock held (it reads `subscriptions`).
+fn claim_refusal(
+    state: &AppState,
+    sheet_id: identity::SheetId,
+    action: &str,
+    region_id: &str,
+    where_: &str,
+) -> String {
+    let collector = state
+        .subscriptions
+        .read()
+        .ok()
+        .and_then(|subs| subs.subscribed_sheet(sheet_id).map(|(sub, _)| sub.package_name.clone()))
+        .map(|name| format!("'{}'", name))
+        .unwrap_or_else(|| "a published application".to_string());
     format!(
-        "Can't {}: {} belongs to writeback region '{}', published by a package this \
-         workbook subscribes to. Those cells collect responses — values go in one \
-         draft at a time through the writeback form (scripts: the \
-         distribution.writeback capability, action 'cellGuard'), and clearing, \
-         merging, sorting or shifting them would orphan the answers already \
-         recorded against the published region. Work outside {}, or detach the \
-         subscription first to turn this into a plain workbook.",
-        action, where_, region_id, where_
+        "Can't {}: {} collects input for {} (writeback region '{}'). Those cells take \
+         values one cell at a time: type into a cell to save your value as a draft, then \
+         submit it from the Writeback tab. To clear one of them, select just that cell \
+         and press Delete. Clearing, merging, sorting or shifting several at once would \
+         lose the answers recorded there. Work outside {}, or detach the sheet \
+         (Collaboration > Subscriptions) to make it a plain sheet of your own.",
+        action, where_, collector, region_id, where_
     )
 }
 
 fn claim_refusal_range(
+    state: &AppState,
+    sheet_id: identity::SheetId,
     action: &str,
     region_id: &str,
     range: &calp::writeback::PositionalRange,
 ) -> String {
-    claim_refusal(action, region_id, &range_a1(range))
+    claim_refusal(state, sheet_id, action, region_id, &range_a1(range))
 }
 
-fn claim_refusal_cell(action: &str, region_id: &str, row: u32, col: u32) -> String {
+fn claim_refusal_cell(
+    state: &AppState,
+    sheet_id: identity::SheetId,
+    action: &str,
+    region_id: &str,
+    row: u32,
+    col: u32,
+) -> String {
     claim_refusal(
+        state,
+        sheet_id,
         action,
         region_id,
         &format!(
@@ -16561,8 +17572,11 @@ mod writeback_claim_tests {
         let (state, _) = state_with_region();
         let err = ensure_writeback_draft_before_write(&state, 0, 0)
             .expect_err("a claimed cell with no draft must be refused");
-        assert!(err.contains("writeback region 'r1'"), "got: {}", err);
-        assert!(err.contains("cellGuard"), "the error must say how: {}", err);
+        // User language: the cell in A1 form, what to do, and no zero-based
+        // coordinates or script jargon (the message reaches the subscriber).
+        assert!(err.contains("Cell A1 collects input"), "got: {}", err);
+        assert!(err.contains("one cell at a time"), "the error must say how: {}", err);
+        assert!(!err.contains("cellGuard") && !err.contains("(0, 0)"), "got: {}", err);
     }
 
     #[test]
@@ -16616,7 +17630,7 @@ mod writeback_claim_tests {
         // Sheet 0 carries the region: a claimed cell with no draft is refused.
         let err = ensure_writeback_draft_before_write_on_sheets(&state, &[0], 0, 0)
             .expect_err("a claimed cell on a targeted sheet must be refused");
-        assert!(err.contains("writeback region 'r1'"), "got: {}", err);
+        assert!(err.contains("Cell A1 collects input"), "got: {}", err);
 
         // An unclaimed cell on that sheet is fine...
         assert!(ensure_writeback_draft_before_write_on_sheets(&state, &[0], 9, 9).is_ok());
@@ -22396,6 +23410,22 @@ pub fn calp_reset_subscription(
     // so from this line the command cannot back out.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
 
+    // WRITEBACK CELLS ARE NOT LOCAL EDITS. A writeback value is the subscriber's
+    // answer to the publisher, held in the writeback layer (draft or sent), not
+    // an override of published content -- so "reset to published" keeps it on
+    // the grid exactly as it keeps a cell the author unticked. Replacing it with
+    // the publisher's (blank) cell left the Draft / Submitted entries in the
+    // layer behind an empty cell. Read before the grid locks are taken.
+    let writeback_kept: std::collections::HashMap<SheetId, Vec<(u32, u32)>> = {
+        let sheets: std::collections::HashSet<SheetId> = local_sheet_ids.iter().copied().collect();
+        let mut by_sheet: std::collections::HashMap<SheetId, Vec<(u32, u32)>> =
+            std::collections::HashMap::new();
+        for (sid, r, c) in writeback_layer_cells_on_sheets(&state, &sheets).into_keys() {
+            by_sheet.entry(sid).or_default().push((r, c));
+        }
+        by_sheet
+    };
+
     // Apply: replace each tracked sheet's grid (style-remapped into the shared
     // workspace, exactly like pull/refresh), widths, heights, and merges.
     let mut active_affected = false;
@@ -22426,6 +23456,17 @@ pub fn calp_reset_subscription(
                             // The author kept a cell that is EMPTY locally. That
                             // is a real choice — they deleted it — so the
                             // published content must not come back into it.
+                            None => grid.clear_cell(r, c),
+                        }
+                    }
+                }
+            }
+            // ...and every writeback cell holding the subscriber's answer.
+            if let Some(kept) = writeback_kept.get(local_sid) {
+                if let Some(live) = grids.get(*idx) {
+                    for &(r, c) in kept {
+                        match live.get_cell(r, c) {
+                            Some(cell) => grid.set_cell(r, c, cell.clone()),
                             None => grid.clear_cell(r, c),
                         }
                     }

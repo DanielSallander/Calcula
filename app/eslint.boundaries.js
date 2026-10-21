@@ -453,6 +453,7 @@ const chromeColorConfigs = [
       'extensions/ControlsPane/components/**/*.{ts,tsx}',
       'extensions/Reports/components/ReportTabSection.tsx',
       'extensions/CanvasSheet/components/**/*.{ts,tsx}',
+      'extensions/Collaboration/components/WritebackTabSections.tsx',
       'extensions/ExtensionsManager/AddInsRibbonSection.tsx',
       'extensions/Animation/components/TimelineSections.tsx',
       'extensions/Settings/components/**/*.{ts,tsx}',

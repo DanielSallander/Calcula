@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 541 | Open: 66 | Triaged: 0 | Fixed: 475 | Other: 0
+Total: 550 | Open: 66 | Triaged: 0 | Fixed: 484 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -5616,4 +5616,94 @@ After File > Open, a formula on any sheet other than the one active at load did 
 Pivot auto-fit (auto_fit_pivot_columns) sized each column from the UTF-8 BYTE length of its widest shown text, not its character count. Since round 2 (P2) a pivot's numbers are shown in the app locale, and sv-SE groups with a non-breaking space (two bytes), so every value column fitted about 12 px wider than drawn ('21 143 338' = 12 bytes, 10 characters). On a 640 px canvas pivot box the last year column (2026) moved entirely past the box's right edge and could not be clicked, picked or selected; any non-ASCII member label (a/o with ring or umlaut, CJK) over-widened the same way.
 
 **Repro:** App locale sv-SE; a canvas model pivot box 640 px wide, rows territorygroup/territoryname, columns year, values Revenue: the year columns fit 86.4 px each (12 x 6.2 + 12) instead of 74, so the fourth year column started at 659 px and the box (638 px of content) showed none of it; cellSheetRect(view row, 4) was null.
+**Fix:** fixed
+
+## BUG-0542 `[fixed]`
+
+**Found:** 2026-10-21 (manual)
+**Oracle:** writeback-region-publisher-sheet-id
+
+Writeback region selectors kept the PUBLISHER's sheet id, while pull() gives every subscribed sheet a fresh local id (SheetIdMode::FreshLocal). WritebackIndex::to_flat_list fell back to sheetIndex 0 (unwrap_or(0)), every backend guard keyed on the local active sheet id missed, and packageName/registryUrl enrichment (subscribed_sheet() matches local ids) was always None. A subscriber's typed values in the subscribed region became plain cell values: no draft, nothing to submit; the tint and guards landed on the blank Sheet1 instead.
+
+**Repro:** Publisher: B3:B5 designated writeback (per_subscriber, number, on_submit), published to a workspace. Subscriber: File > New, subscribe, type 1,2,3 into the subscribed sheet's B3:B5: no draft is saved, calp_get_writeback_regions reports sheetIndex 0 with no packageName, and the blank Sheet1!B3:B5 is the guarded range.
+**Fix:** fixed
+
+## BUG-0543 `[fixed]`
+
+**Found:** 2026-10-21 (manual)
+**Oracle:** writeback-snapshot-not-refreshed-on-subscribe
+
+Subscribing never refreshed the frontend writeback snapshot: PACKAGE_UPDATED only reloaded subscribed sheets, and the snapshot was re-read only on AFTER_OPEN / AFTER_NEW / a draft commit / activation. In the session where the subscriber subscribed, no region existed for the frontend until a reopen.
+
+**Repro:** File > New, subscribe to an application with a writeback region, select the region: no outline, no guard, no tab until the workbook is saved and reopened.
+**Fix:** fixed
+
+## BUG-0544 `[fixed]`
+
+**Found:** 2026-10-21 (manual)
+**Oracle:** writeback-submit-no-repaint
+
+After Submit / Submit All in the Writeback pane only the pane's own list refreshed: the grid's writeback state cache was not re-read and nothing repainted, so the cells kept looking unsent.
+
+**Repro:** Type a value into a writeback cell, open the Writeback pane, Submit: the cell still shows the draft treatment until something else repaints.
+**Fix:** fixed
+
+## BUG-0545 `[fixed]`
+
+**Found:** 2026-10-21 (manual)
+**Oracle:** writeback-range-guard-swallows-typing
+
+The Collaboration range guard refused ANY overlap with a writeback region, including the 1x1 range the edit-start paths check for the active cell, so keyboard entry, double-click and F2 on a writeback cell were silently swallowed (preventDefault, no message) and the commit guard that saves a draft never ran. The guard API could not tell an edit from a paste. The Rust backstop refusal named the cell in zero-based coordinates with script jargon.
+
+**Repro:** With D1 fixed, select a subscribed writeback cell and type 1: nothing is entered and no message appears.
+**Fix:** fixed
+
+## BUG-0546 `[fixed]`
+
+**Found:** 2026-10-21 (manual)
+**Oracle:** writeback-commit-guard-invariant-number-parse
+
+The writeback commit guard parsed numbers with Number() (invariant locale). In sv-SE '1,5' became text, the backend refused it, and the user was held in edit mode in a retry loop.
+
+**Repro:** App locale sv-SE; type 1,5 into a number writeback cell: the edit is refused and the cell stays in edit mode.
+**Fix:** fixed
+
+## BUG-0547 `[fixed]`
+
+**Found:** 2026-10-21 (manual)
+**Oracle:** writeback-store-cached-sheet-index
+
+The writeback store matched regions by a cached sheetIndex against an activeSheetIndex initialised to 0 and updated only on SHEET_CHANGED events that carried an index, so a sheet insert, move or reopen misplaced the region treatment and guards.
+
+**Repro:** Subscribed sheet at index 1; insert a sheet before it: the guard and treatment follow index 1, now a different sheet.
+**Fix:** fixed
+
+## BUG-0548 `[fixed]`
+
+**Found:** 2026-10-21 (manual)
+**Oracle:** writeback-tints-break-dark-mode
+
+The writeback style interceptor painted hard-coded light per-state tints on every region cell, so in the Dark skin near-white text sat on a near-white fill and the values were unreadable.
+
+**Repro:** Dark skin; a workbook with a writeback region: the region's cell text is unreadable.
+**Fix:** fixed
+
+## BUG-0549 `[fixed]`
+
+**Found:** 2026-10-21 (manual)
+**Oracle:** writeback-pane-error-reads-as-empty
+
+The Writeback pane's refresh caught and only logged a failure, leaving its region list empty, so any read error was shown as 'No writeback regions in this workbook'; the pane also did not hear store changes, only its own refresh.
+
+**Repro:** Make calp_get_writeback_regions fail (e.g. an unreadable workspace) and open the pane: it reports no regions instead of the error.
+**Fix:** fixed
+
+## BUG-0550 `[fixed]`
+
+**Found:** 2026-10-21 (manual)
+**Oracle:** writeback-orphan-drafts-after-detach
+
+calp_detach and detach-sheet left the detached regions' drafts in writeback_layer, where they could never be submitted and were re-saved into the .cala forever.
+
+**Repro:** Subscribe, type a draft into a writeback cell, detach the sheet (or the subscription), save: the draft is still in the saved layer with no region to submit it to.
 **Fix:** fixed

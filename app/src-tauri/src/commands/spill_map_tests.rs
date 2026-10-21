@@ -1363,6 +1363,7 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("scripting/commands.rs", "parse_script_formula_writes", "builds a detached grid; apply_script_modified_grids_core recalculates"),
         ("calp_merge.rs", "overlay_their_cells", "builds a DETACHED copy of the grids with the intervening version's cells laid over it; it mutates nothing in AppState and hands the result to apply_script_modified_grids, which diffs, records undo and recalculates — the same arrangement parse_script_formula_writes has"),
         ("calp_commands.rs", "calp_hold_back_cells", "the same arrangement as overlay_their_cells above: a DETACHED clone of the grids with the base version's cells laid over the unticked positions, handed to apply_script_modified_grids, which owns the spill map for the write. Nothing in AppState is mutated here"),
+        ("calp_commands.rs", "reproject_writeback_layer_onto_grids", "puts the subscriber's writeback values (LITERALS) back after a refresh replaced the sheet: it skips every cell holding a formula, so it never removes or overwrites a spill origin, and its one caller (the refresh body) installed the sheet's extents through restore_spill_extents_for_sheet just before"),
         ("tables.rs", "write_table_formula_cell", "helper: one totals cell; its two callers seed the shared cascade"),
         // The restore's body since the review of M6b (`apply_changes` is its wrapper; a
         // rollback calls it with `keep_inverse: false`).

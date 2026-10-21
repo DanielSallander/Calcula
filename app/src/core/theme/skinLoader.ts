@@ -82,6 +82,8 @@ const registry = new Map<string, Skin>();
 const subscribers = new Set<() => void>();
 let activeSkinId = BUILTIN_DEFAULT_SKIN_ID;
 let cachedGridTheme: GridTheme = DEFAULT_THEME;
+/** The token map last INJECTED (skin -> user -> accessibility), or null before the first apply. */
+let cachedTokens: Record<string, string> | null = null;
 let styleEl: HTMLStyleElement | null = null;
 let initialized = false;
 let a11y: AccessibilityOverride = {};
@@ -391,6 +393,7 @@ function apply(skin: Skin): void {
   const withUser = { ...getMergedTokens(skin), ...currentUserTokens() };
   const merged = applyAccessibility(skin, withUser, getMergedGridTheme(skin));
   injectTokens(merged.tokens);
+  cachedTokens = merged.tokens;
   cachedGridTheme = merged.grid;
   if (typeof document !== "undefined") {
     // Read by GridCanvas (marching ants) AND by the global rule in
@@ -473,6 +476,16 @@ export function getAccessibility(): AccessibilityOverride {
 /** Current merged GridTheme. Stable reference until the active skin changes. */
 export function getActiveGridTheme(): GridTheme {
   return cachedGridTheme;
+}
+
+/**
+ * The token map the app is actually painted with right now: the active skin's
+ * merged tokens, the user's overrides and the accessibility transforms -- the
+ * same values injected as CSS variables. For CANVAS painters, which cannot read
+ * CSS variables. Stable reference until the next apply; never mutate it.
+ */
+export function getActiveTokens(): Readonly<Record<string, string>> {
+  return cachedTokens ?? getMergedTokens(getActiveSkin());
 }
 
 // --- Ribbon group-label preference ---------------------------------------------
@@ -568,6 +581,7 @@ export function __resetSkinLoaderForTests(): void {
   subscribers.clear();
   activeSkinId = BUILTIN_DEFAULT_SKIN_ID;
   cachedGridTheme = DEFAULT_THEME;
+  cachedTokens = null;
   initialized = false;
   a11y = {};
   ribbonLabelMode = null;

@@ -428,7 +428,8 @@ fn the_grid_readers_and_the_lifecycle_filter_too() {
     for signature in [
         "fn registry_has_own_submission(",
         "fn load_region_current_submissions(",
-        "fn reconcile_writeback_layer_internal(",
+        // Reconcile and discard both read through this one helper.
+        "fn own_current_records_for_region(",
     ] {
         let body = body_of(CALP_SRC, signature);
         assert!(
@@ -444,6 +445,11 @@ fn the_grid_readers_and_the_lifecycle_filter_too() {
             "{signature} must not use the strictly-lower-semver rule",
         );
     }
+    assert!(
+        body_of(CALP_SRC, "fn reconcile_writeback_layer_internal(")
+            .contains("own_current_records_for_region("),
+        "reconcile must read the environment-filtered records through the shared helper",
+    );
 }
 
 /// A SUBMISSION IS STAMPED WHERE IT LEAVES THE MACHINE, not where it is drafted.

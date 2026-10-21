@@ -4,91 +4,15 @@
 //          "spilled" into adjacent cells. Excel shows these with a blue border.
 
 import type { RenderState } from "../types";
-import type { FreezeConfig, DimensionOverrides, GridConfig, Viewport } from "../../../types";
-import { calculateFreezePaneLayout } from "../layout/viewport";
 import { getColumnWidth, getRowHeight } from "../layout/dimensions";
+// The freeze-aware geometry lives in ONE place, shared with the @api
+// rangeToCanvasRect helper (@api/gridLayers) that extensions draw range
+// outlines with.
+import { columnXWithFreeze as getColumnXWithFreeze, rowYWithFreeze as getRowYWithFreeze } from "../layout/rangeRect";
 import { rowHeaderGutter, colHeaderGutter } from "../layout/headerVisibility";
 
 /** Excel-style blue for spill borders */
 const SPILL_BORDER_COLOR = "#4472C4";
-
-/**
- * Calculate the X position of a column accounting for freeze panes.
- */
-function getColumnXWithFreeze(
-  col: number,
-  config: GridConfig,
-  dimensions: DimensionOverrides,
-  viewport: Viewport,
-  freezeConfig?: FreezeConfig,
-  splitBarSize: number = 0
-): number {
-  const rowHeaderWidth = rowHeaderGutter(config);
-  const freezeCol = freezeConfig?.freezeCol ?? 0;
-
-  if (freezeCol > 0 && col < freezeCol) {
-    let x = rowHeaderWidth;
-    for (let c = 0; c < col; c++) {
-      x += getColumnWidth(c, config, dimensions);
-    }
-    return x;
-  } else if (freezeCol > 0) {
-    const layout = calculateFreezePaneLayout(freezeConfig!, config, dimensions);
-    const scrollX = viewport.scrollX || 0;
-    let x = rowHeaderWidth + layout.frozenColsWidth + splitBarSize;
-    for (let c = freezeCol; c < col; c++) {
-      x += getColumnWidth(c, config, dimensions);
-    }
-    x -= scrollX;
-    return x;
-  } else {
-    const scrollX = viewport.scrollX || 0;
-    let x = rowHeaderWidth;
-    for (let c = 0; c < col; c++) {
-      x += getColumnWidth(c, config, dimensions);
-    }
-    return x - scrollX;
-  }
-}
-
-/**
- * Calculate the Y position of a row accounting for freeze panes.
- */
-function getRowYWithFreeze(
-  row: number,
-  config: GridConfig,
-  dimensions: DimensionOverrides,
-  viewport: Viewport,
-  freezeConfig?: FreezeConfig,
-  splitBarSize: number = 0
-): number {
-  const colHeaderHeight = colHeaderGutter(config);
-  const freezeRow = freezeConfig?.freezeRow ?? 0;
-
-  if (freezeRow > 0 && row < freezeRow) {
-    let y = colHeaderHeight;
-    for (let r = 0; r < row; r++) {
-      y += getRowHeight(r, config, dimensions);
-    }
-    return y;
-  } else if (freezeRow > 0) {
-    const layout = calculateFreezePaneLayout(freezeConfig!, config, dimensions);
-    const scrollY = viewport.scrollY || 0;
-    let y = colHeaderHeight + layout.frozenRowsHeight + splitBarSize;
-    for (let r = freezeRow; r < row; r++) {
-      y += getRowHeight(r, config, dimensions);
-    }
-    y -= scrollY;
-    return y;
-  } else {
-    const scrollY = viewport.scrollY || 0;
-    let y = colHeaderHeight;
-    for (let r = 0; r < row; r++) {
-      y += getRowHeight(r, config, dimensions);
-    }
-    return y - scrollY;
-  }
-}
 
 /**
  * Check if any selected cell falls within a spill range.

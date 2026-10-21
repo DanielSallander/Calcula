@@ -540,7 +540,8 @@ export function FormulaInput({
     if (state.selection) {
       const guard = checkRangeGuards(
         state.selection.endRow, state.selection.endCol,
-        state.selection.endRow, state.selection.endCol
+        state.selection.endRow, state.selection.endCol,
+        "edit"
       );
       if (guard?.blocked) {
         // Blur immediately to prevent typing
@@ -792,7 +793,8 @@ export function FormulaInput({
   const isProtectedCell = state.selection
     ? checkRangeGuards(
         state.selection.endRow, state.selection.endCol,
-        state.selection.endRow, state.selection.endCol
+        state.selection.endRow, state.selection.endCol,
+        "edit"
       )?.blocked === true
     : false;
 

@@ -193,7 +193,12 @@ export interface IEditGuardAPI {
 
 /** Range guard registration (blocks drag/move/copy onto protected ranges) */
 export interface IRangeGuardAPI {
-  register(guard: (startRow: number, startCol: number, endRow: number, endCol: number) => { blocked: boolean; message?: string } | null): () => void;
+  /**
+   * `operation` says what is about to happen: "edit" = the user is about to
+   * type into ONE cell (the value then passes the commit guards); "other" =
+   * paste, fill, move or any bulk write. A guard that ignores it blocks both.
+   */
+  register(guard: (startRow: number, startCol: number, endRow: number, endCol: number, operation: "edit" | "other") => { blocked: boolean; message?: string } | null): () => void;
 }
 
 /** Custom worksheet function registration */

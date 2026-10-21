@@ -13,6 +13,12 @@
 //          try/catch so a bad layer cannot corrupt the frame or kill the rest.
 
 import type { GridConfig, Viewport, DimensionOverrides, FreezeConfig } from "./types";
+import {
+  rangeToCanvasRect as coreRangeToCanvasRect,
+  type RangeCanvasRect,
+} from "../core/lib/gridRenderer/layout/rangeRect";
+
+export type { RangeCanvasRect };
 
 // ============================================================================
 // Types
@@ -44,6 +50,12 @@ export interface GridLayerContext {
   canvasHeight: number;
   /** Effective freeze config (split mode is expressed as freeze here). */
   freezeConfig: FreezeConfig | null;
+  /**
+   * Thickness of the split bar in pixels when the window is SPLIT (0 or
+   * absent for frozen panes / no panes). The scrolling pane starts this many
+   * pixels past the pinned one. Read it through {@link rangeToCanvasRect}.
+   */
+  splitBarSize?: number;
 }
 
 export interface GridLayerRegistration {
@@ -130,4 +142,40 @@ export function listGridLayers(): GridLayerRegistration[] {
     all.push(...list);
   }
   return all.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+// ============================================================================
+// Geometry helper
+// ============================================================================
+
+/**
+ * The visible canvas rectangle of a cell range (inclusive bounds) inside a
+ * layer's paint, FROZEN- AND SPLIT-PANE AWARE: a range in the scrolling part
+ * never paints over the pinned rows/columns, and a range that starts pinned
+ * keeps its pinned piece. Clipped below the headers and to the canvas; the
+ * `clipped*` flags say which edges were cut so a perimeter painter can skip
+ * them. `null` when nothing of the range is on screen.
+ *
+ * Use this instead of the `overlayGet*` helpers in @api/gridOverlays for
+ * anything drawn in a grid layer: those subtract the scroll offset from every
+ * column and row and are wrong once panes are frozen. Same math as Core's
+ * spill border (one copy, core/lib/gridRenderer/layout/rangeRect.ts).
+ */
+export function rangeToCanvasRect(
+  context: GridLayerContext,
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+): RangeCanvasRect | null {
+  return coreRangeToCanvasRect(
+    { startRow, startCol, endRow, endCol },
+    context.config,
+    context.dimensions,
+    context.viewport,
+    context.canvasWidth,
+    context.canvasHeight,
+    context.freezeConfig,
+    context.splitBarSize ?? 0,
+  );
 }

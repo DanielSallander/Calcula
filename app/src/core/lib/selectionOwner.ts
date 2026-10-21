@@ -366,6 +366,7 @@ let gridSelectionReader: (() => Selection | null) | null = null;
 
 /** Opens Core's in-cell editor on its active cell with a text (registered by Core). */
 let gridCellEditorOpener: ((text: string) => boolean) | null = null;
+let gridCellTextCommitter: ((text: string) => Promise<boolean>) | null = null;
 
 /**
  * Core registers its selection reader here: a lib cannot read React state, so
@@ -393,6 +394,34 @@ export function readGridSelection(): Selection | null {
  */
 export function setGridCellEditorOpener(open: ((text: string) => boolean) | null): void {
   gridCellEditorOpener = open;
+}
+
+/**
+ * Core registers how a text is ENTERED into the active cell exactly as if the
+ * user had typed it and pressed Enter: the editor opens with the text and
+ * commits, so every commit guard runs. Null unregisters.
+ *
+ * The Delete key uses it for a cell whose range guard admits a one-cell EDIT
+ * but refuses a bulk write (a writeback cell collects one answer at a time):
+ * clearing it as an edit lets the owner's commit guard record the cleared
+ * value, where a bulk clear would be refused by the backend.
+ */
+export function setGridCellTextCommitter(commit: ((text: string) => Promise<boolean>) | null): void {
+  gridCellTextCommitter = commit;
+}
+
+/**
+ * Enter `text` into the active cell through Core's editor and commit it. Resolves
+ * false when no committer is registered, the edit was refused or it threw.
+ */
+export async function commitGridCellText(text: string): Promise<boolean> {
+  if (!gridCellTextCommitter) return false;
+  try {
+    return (await gridCellTextCommitter(text)) === true;
+  } catch (err) {
+    console.error("[selectionOwner] the grid cell text committer threw:", err);
+    return false;
+  }
 }
 
 /** Open Core's editor with `text` (false when none is registered, it refused or threw). */

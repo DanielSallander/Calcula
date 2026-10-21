@@ -252,6 +252,7 @@ fallback equals the light value), `layoutThemeParity.test.ts` (reads `theme.ts`)
 | `--tab-accent-slicer` | #6a48c9 | #b39cff | Slicer Options, Timeline |
 | `--tab-accent-sparkline` | #b8410a | #fb923c | Sparkline |
 | `--tab-accent-report` | #8a3d0b | #fbbf24 | Report |
+| `--tab-accent-writeback` | #4338ca | #a5b4fc | Writeback (a subscribed writeback region under the active cell) |
 | **Sidebar and status** ||||
 | `--activity-bar-bg` | #f3f4f6 | #1b1b1c | a LIGHT rail in Light (owner decision; two tokens revert it) |
 | `--activity-bar-fg` / `-fg-active` | #4b5563 / #111827 | #a1a1aa / #f5f5f5 | |

@@ -7,6 +7,7 @@ export {
   type EditGuardResult,
   type EditGuardFn,
   type RangeGuardFn,
+  type RangeGuardOperation,
   registerEditGuard,
   registerRangeGuard,
   checkEditGuards,

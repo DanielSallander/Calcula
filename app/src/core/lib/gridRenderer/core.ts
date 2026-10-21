@@ -918,6 +918,7 @@ export function renderGrid(
           canvasWidth: width,
           canvasHeight: height,
           freezeConfig: effectiveFreezeConfig,
+          splitBarSize: splitBarThickness,
         }
       : null;
   const paintLayers = (anchor: GridLayerAnchor) => {

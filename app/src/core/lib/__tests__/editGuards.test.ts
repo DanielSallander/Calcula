@@ -152,7 +152,15 @@ describe("checkRangeGuards", () => {
     const spy = vi.fn<RangeGuardFn>(() => null);
     cleanups.push(registerRangeGuard(spy));
     checkRangeGuards(1, 2, 10, 20);
-    expect(spy).toHaveBeenCalledWith(1, 2, 10, 20);
+    // No operation stated = "other": the stricter, bulk-write meaning.
+    expect(spy).toHaveBeenCalledWith(1, 2, 10, 20, "other");
+  });
+
+  it("passes a single-cell edit's operation kind through", () => {
+    const spy = vi.fn<RangeGuardFn>(() => null);
+    cleanups.push(registerRangeGuard(spy));
+    checkRangeGuards(3, 1, 3, 1, "edit");
+    expect(spy).toHaveBeenCalledWith(3, 1, 3, 1, "edit");
   });
 
   it("catches errors in guards and continues", () => {

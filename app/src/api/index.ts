@@ -1670,12 +1670,14 @@ export {
   hasGridLayers,
   paintGridLayers,
   listGridLayers,
+  rangeToCanvasRect,
 } from "./gridLayers";
 
 export type {
   GridLayerAnchor,
   GridLayerContext,
   GridLayerRegistration,
+  RangeCanvasRect,
 } from "./gridLayers";
 
 // Coalesced refresh (an extension re-reading backend state that several

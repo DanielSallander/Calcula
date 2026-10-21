@@ -677,15 +677,51 @@ impl WritebackIndex {
         self.regions_by_sheet.values().all(|v| v.is_empty())
     }
 
+    /// The ids of every region the index holds on one sheet.
+    pub fn region_ids_on_sheet(&self, sheet_id: SheetId) -> Vec<String> {
+        self.region_ids_by_sheet
+            .get(&sheet_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Whether the index holds a region with this id on any sheet.
+    pub fn contains_region(&self, region_id: &str) -> bool {
+        self.region_ids_by_sheet
+            .values()
+            .any(|ids| ids.iter().any(|id| id == region_id))
+    }
+
+    /// Where a region lives: the sheet the index keys it under and its
+    /// rectangle. `None` when the index holds no region with this id.
+    pub fn region_location(&self, region_id: &str) -> Option<(SheetId, PositionalRange)> {
+        for (&sheet_id, ids) in &self.region_ids_by_sheet {
+            if let Some(i) = ids.iter().position(|id| id == region_id) {
+                let range = self.regions_by_sheet.get(&sheet_id)?.get(i)?.clone();
+                return Some((sheet_id, range));
+            }
+        }
+        None
+    }
+
     /// Get the flat list of all regions (for serialization to the frontend).
     /// `sheet_id_to_index` maps stable SheetIds to local workbook sheet indices.
+    ///
+    /// A region whose sheet is NOT in the map is left out. It used to be
+    /// reported at `sheet_index` 0, which put a subscriber's regions (keyed by
+    /// the PUBLISHER's sheet id, which no local sheet carries) on whatever sheet
+    /// happened to be first -- the cells were tinted and guarded on a blank
+    /// `Sheet1` while the subscribed sheet stayed a plain, unguarded range. A
+    /// region with no sheet in this workbook has no cells here to report.
     pub fn to_flat_list(
         &self,
         sheet_id_to_index: &HashMap<SheetId, usize>,
     ) -> Vec<WritebackRegionEntry> {
         let mut entries = Vec::new();
         for (&sheet_id, ranges) in &self.regions_by_sheet {
-            let sheet_index = sheet_id_to_index.get(&sheet_id).copied().unwrap_or(0);
+            let Some(sheet_index) = sheet_id_to_index.get(&sheet_id).copied() else {
+                continue;
+            };
             let ids = self.region_ids_by_sheet.get(&sheet_id);
             for (i, range) in ranges.iter().enumerate() {
                 let region_id = ids.and_then(|v| v.get(i))
@@ -708,11 +744,43 @@ impl WritebackIndex {
                     required: None,
                     deadline: None,
                     custom_validator: None,
+                    submission_policy: None,
+                    visibility: None,
+                    sheet_name: None,
                 });
             }
         }
         entries
     }
+}
+
+/// The region declarations re-keyed to the sheets they actually live on in a
+/// SUBSCRIBER's workbook.
+///
+/// A published declaration names the PUBLISHER's sheet id
+/// (`selector.sheet_id`). A subscriber's pull gives every sheet a fresh local id
+/// (`SheetIdMode::FreshLocal` in `pull.rs`), so an index built from the
+/// declarations as published is keyed by an id no local sheet carries, and every
+/// guard that asks "is this cell on my sheet claimed?" misses. `local_of` maps
+/// a publisher sheet id to the local one (the subscription ledger's
+/// `package_sheet_id -> local_sheet_id`).
+///
+/// A declaration whose sheet has no local counterpart -- never materialized,
+/// detached, or removed upstream -- is DROPPED, never kept on the publisher id:
+/// a region with no sheet here has no cells here.
+pub fn localize_region_declarations(
+    decls: &[WritebackRegionDeclaration],
+    local_of: impl Fn(SheetId) -> Option<SheetId>,
+) -> Vec<WritebackRegionDeclaration> {
+    decls
+        .iter()
+        .filter_map(|d| {
+            let local = local_of(d.selector.sheet_id)?;
+            let mut localized = d.clone();
+            localized.selector.sheet_id = local;
+            Some(localized)
+        })
+        .collect()
 }
 
 impl Default for WritebackIndex {
@@ -727,6 +795,8 @@ impl Default for WritebackIndex {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WritebackRegionEntry {
+    /// The LOCAL sheet's id: the sheet this region's cells are on in THIS
+    /// workbook (a subscriber's sheets carry their own ids, not the publisher's).
     pub sheet_id: SheetId,
     /// The local sheet index in the workbook (set by the caller, not by the index).
     #[serde(default)]
@@ -773,6 +843,21 @@ pub struct WritebackRegionEntry {
     /// registered simply skips it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_validator: Option<String>,
+    /// When a value reaches the workspace, as the declaration states it with
+    /// its default resolved: a declaration that names no policy behaves as
+    /// `on_submit` (saving makes a private draft; Submit sends it). Filled by
+    /// the app command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submission_policy: Option<SubmissionPolicy>,
+    /// Who sees a contributor's values, with its default resolved: a
+    /// declaration that names none is read with no visibility filter, which is
+    /// `transparent`. Filled by the app command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<VisibilityPolicy>,
+    /// The local sheet's CURRENT name (a subscriber may rename it). Filled by
+    /// the app command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet_name: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1258,6 +1343,83 @@ impl WritebackLayer {
         }
         submitted
     }
+
+    /// The cells of a region that hold an UNSENT draft (state `Draft`),
+    /// optionally narrowed to `cells`. Submitted, approved and rejected entries
+    /// are never listed: they describe what already left the machine.
+    pub fn unsent_draft_slots(
+        &self,
+        region_id: &str,
+        cells: Option<&[(u32, u32)]>,
+    ) -> Vec<(u32, u32)> {
+        let mut slots: Vec<(u32, u32)> = self
+            .drafts
+            .iter()
+            .filter(|d| d.region_id == region_id && d.state == SubmissionState::Draft)
+            .map(|d| (d.cell_row, d.cell_col))
+            .filter(|slot| cells.is_none_or(|only| only.contains(slot)))
+            .collect();
+        slots.sort_unstable();
+        slots.dedup();
+        slots
+    }
+
+    /// Throw away a region's UNSENT drafts (optionally only those on `cells`)
+    /// and put back, for each, what this subscriber last SENT for that cell.
+    ///
+    /// `sent` is the subscriber's own current workspace record per cell (the
+    /// folded newest across the versions it may carry forward from). Typing
+    /// over a submitted cell REPLACES its layer entry with a draft
+    /// (`set_draft`), so the layer alone has forgotten what was sent; the
+    /// workspace has not. A cell with a sent record gets that record back --
+    /// it reads "submitted" / "approved" / "rejected" again -- and a cell that
+    /// never sent anything gets no entry at all.
+    ///
+    /// Entries that are not drafts are never touched. Returns one row per
+    /// discarded draft, in row/column order, saying what the cell went back to.
+    pub fn discard_drafts(
+        &mut self,
+        region_id: &str,
+        cells: Option<&[(u32, u32)]>,
+        sent: &HashMap<(u32, u32), WritebackSubmission>,
+    ) -> Vec<DiscardedDraft> {
+        let slots = self.unsent_draft_slots(region_id, cells);
+        if slots.is_empty() {
+            return Vec::new();
+        }
+        self.drafts.retain(|d| {
+            !(d.region_id == region_id
+                && d.state == SubmissionState::Draft
+                && slots.contains(&(d.cell_row, d.cell_col)))
+        });
+        let mut out = Vec::with_capacity(slots.len());
+        for (row, col) in slots {
+            let restored = sent
+                .get(&(row, col))
+                .filter(|rec| {
+                    rec.region_id == region_id
+                        && rec.cell_row == row
+                        && rec.cell_col == col
+                        && rec.state != SubmissionState::Draft
+                })
+                .cloned();
+            if let Some(rec) = &restored {
+                self.set_draft(rec.clone());
+            }
+            out.push(DiscardedDraft { row, col, restored });
+        }
+        out
+    }
+}
+
+/// One cell a [`WritebackLayer::discard_drafts`] touched.
+#[derive(Debug, Clone)]
+pub struct DiscardedDraft {
+    pub row: u32,
+    pub col: u32,
+    /// What this subscriber last sent for the cell, now back in the layer.
+    /// `None` when nothing was ever sent: the cell goes back to blank.
+    pub restored: Option<WritebackSubmission>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1377,6 +1539,118 @@ mod tests {
         let list = idx.to_flat_list(&id_map);
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].sheet_index, 0);
+    }
+
+    /// A region whose sheet is not in this workbook is NOT reported -- it used
+    /// to be reported at sheet index 0, which tinted and guarded the cells of
+    /// whatever sheet came first.
+    ///
+    /// SABOTAGE: restore `.unwrap_or(0)` in `to_flat_list`.
+    #[test]
+    fn to_flat_list_leaves_out_a_region_whose_sheet_is_not_here() {
+        let here = make_sheet_id();
+        let elsewhere = make_sheet_id();
+        let decls = vec![
+            make_decl("mine", here, 0, 1, 0, 1),
+            make_decl("ghost", elsewhere, 0, 1, 0, 1),
+        ];
+        let idx = WritebackIndex::from_declarations(&decls).unwrap();
+        let mut id_map = HashMap::new();
+        id_map.insert(make_sheet_id(), 0usize);
+        id_map.insert(here, 3usize);
+        let list = idx.to_flat_list(&id_map);
+        assert_eq!(list.len(), 1, "the ghost region must not be reported: {:?}", list);
+        assert_eq!(list[0].region_id, "mine");
+        assert_eq!(list[0].sheet_index, 3);
+    }
+
+    /// Declarations are re-keyed to the LOCAL sheet; a declaration whose sheet
+    /// has no local counterpart is dropped, never kept on the publisher id.
+    #[test]
+    fn localize_region_declarations_maps_and_drops() {
+        let pub_a = make_sheet_id();
+        let pub_b = make_sheet_id();
+        let local_a = make_sheet_id();
+        let decls = vec![
+            make_decl("a", pub_a, 2, 4, 1, 1),
+            make_decl("b", pub_b, 0, 0, 0, 0),
+        ];
+        let localized =
+            localize_region_declarations(&decls, |p| (p == pub_a).then_some(local_a));
+        assert_eq!(localized.len(), 1);
+        assert_eq!(localized[0].id, "a");
+        assert_eq!(localized[0].selector.sheet_id, local_a);
+        assert_eq!(localized[0].selector.row_start, 2);
+        // The input is untouched: the publisher-id mirror is built from it.
+        assert_eq!(decls[0].selector.sheet_id, pub_a);
+
+        let idx = WritebackIndex::from_declarations(&localized).unwrap();
+        assert!(idx.contains(local_a, 3, 1));
+        assert!(!idx.contains(pub_a, 3, 1));
+        assert!(idx.contains_region("a"));
+        assert!(!idx.contains_region("b"));
+        assert_eq!(idx.region_ids_on_sheet(local_a), vec!["a".to_string()]);
+        let (sid, range) = idx.region_location("a").unwrap();
+        assert_eq!(sid, local_a);
+        assert_eq!((range.row_start, range.row_end, range.col_start, range.col_end), (2, 4, 1, 1));
+        assert!(idx.region_location("b").is_none());
+    }
+
+    fn layer_entry(region: &str, row: u32, col: u32, value: f64, state: SubmissionState) -> WritebackSubmission {
+        WritebackSubmission {
+            id: format!("{region}-{row}-{col}-{value}"),
+            region_id: region.to_string(),
+            cell_row: row,
+            cell_col: col,
+            cell_id: None,
+            submitter: crate::identity_provider::SubmitterIdentity {
+                display_name: "Tester".to_string(),
+                id: "me".to_string(),
+                extra: HashMap::new(),
+            },
+            value: SubmissionValue::Number { value },
+            state,
+            created_at: "2026-10-21T00:00:00Z".to_string(),
+            updated_at: "2026-10-21T00:00:00Z".to_string(),
+            submitted_at: None,
+            review_reason: None,
+            reviewed_by: None,
+            environment: String::new(),
+            model_key: None,
+            extra: HashMap::new(),
+        }
+    }
+
+    /// Discard removes DRAFTS only, puts back what was sent, and leaves a
+    /// never-sent cell with no entry at all.
+    #[test]
+    fn discard_drafts_restores_what_was_sent() {
+        let mut layer = WritebackLayer::new();
+        layer.drafts.push(layer_entry("r", 2, 1, 10.0, SubmissionState::Draft));
+        layer.drafts.push(layer_entry("r", 3, 1, 20.0, SubmissionState::Draft));
+        layer.drafts.push(layer_entry("r", 4, 1, 30.0, SubmissionState::Submitted));
+        layer.drafts.push(layer_entry("other", 2, 1, 99.0, SubmissionState::Draft));
+
+        let mut sent = HashMap::new();
+        sent.insert((2, 1), layer_entry("r", 2, 1, 7.0, SubmissionState::Approved));
+
+        assert_eq!(layer.unsent_draft_slots("r", None), vec![(2, 1), (3, 1)]);
+        assert_eq!(layer.unsent_draft_slots("r", Some(&[(3, 1), (4, 1)])), vec![(3, 1)]);
+
+        let out = layer.discard_drafts("r", None, &sent);
+        assert_eq!(out.len(), 2);
+        assert_eq!((out[0].row, out[0].col), (2, 1));
+        assert!(matches!(out[0].restored.as_ref().unwrap().value, SubmissionValue::Number { value } if value == 7.0));
+        assert!(out[1].restored.is_none());
+
+        let r21 = layer.get_draft("r", 2, 1).unwrap();
+        assert_eq!(r21.state, SubmissionState::Approved, "the sent record is back");
+        assert!(layer.get_draft("r", 3, 1).is_none(), "never sent: no entry");
+        assert_eq!(layer.get_draft("r", 4, 1).unwrap().state, SubmissionState::Submitted);
+        assert_eq!(layer.get_draft("other", 2, 1).unwrap().state, SubmissionState::Draft);
+
+        // Nothing left to discard is a no-op.
+        assert!(layer.discard_drafts("r", None, &sent).is_empty());
     }
 
     // --- Validation tests ---

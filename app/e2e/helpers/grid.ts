@@ -231,6 +231,54 @@ export function cellRangeRectFrom(
   };
 }
 
+/** Marks the menu-bar button `menuBarButton` resolved, for the locator to click. */
+const MENU_BAR_TARGET_ATTR = "data-e2e-menubar-target";
+
+/**
+ * The TOP-LEVEL MENU-BAR button labelled exactly `label` -- never a ribbon tab
+ * with the same label.
+ *
+ * The menu bar's buttons carry no data attributes, and ribbon tabs are plain
+ * `<button>`s too. Since the contextual "Writeback" ribbon tab exists, the old
+ * `button` + `/^Writeback$/` + `.first()` locator picked by DOM ORDER between
+ * the "Writeback" menu and the tab -- a coin toss every menu spec depended on.
+ * So: a visible button whose trimmed text is exactly the label, OUTSIDE the
+ * ribbon (`[data-testid="ribbon"]`), and of those the topmost (the menu bar is
+ * the first row of the window, above the ribbon). When nothing matches, the
+ * old locator is returned so the click fails with Playwright's normal timeout
+ * message instead of a TypeError.
+ */
+export async function menuBarButton(page: Page, label: string): Promise<Locator> {
+  const found = await page.evaluate(
+    ({ label, attr }) => {
+      document.querySelectorAll(`[${attr}]`).forEach((e) => e.removeAttribute(attr));
+      const ribbon = document.querySelector('[data-testid="ribbon"]');
+      let best: HTMLButtonElement | null = null;
+      let bestTop = Number.POSITIVE_INFINITY;
+      for (const b of Array.from(document.querySelectorAll("button"))) {
+        if ((b.textContent ?? "").trim() !== label) continue;
+        if (ribbon && ribbon.contains(b)) continue;
+        const r = b.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) continue;
+        if (r.top < bestTop) {
+          best = b;
+          bestTop = r.top;
+        }
+      }
+      if (!best) return false;
+      best.setAttribute(attr, "");
+      return true;
+    },
+    { label, attr: MENU_BAR_TARGET_ATTR },
+  );
+  if (found) return page.locator(`[${MENU_BAR_TARGET_ATTR}]`).first();
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return page
+    .locator('button:not([data-testid="ribbon"] button)')
+    .filter({ hasText: new RegExp(`^${escaped}$`) })
+    .first();
+}
+
 export class GridHelper {
   readonly page: Page;
 
@@ -830,7 +878,7 @@ export class GridHelper {
    *             "Formulas", "Review", "Developer"
    */
   async openMenu(menuName: string) {
-    const menuBtn = this.page.locator("button").filter({ hasText: new RegExp(`^${menuName}$`) }).first();
+    const menuBtn = await menuBarButton(this.page, menuName);
     await menuBtn.click();
     await this.page.waitForTimeout(300);
   }

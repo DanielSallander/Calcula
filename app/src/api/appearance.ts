@@ -8,6 +8,8 @@ import * as skinLoader from "../core/theme/skinLoader";
 import type { Skin } from "../core/theme/skin";
 import type { RibbonLabelMode } from "../core/theme/skinLoader";
 import { AppEvents, emitAppEvent, onAppEvent } from "./events";
+import { THEME_TOKENS } from "../core/theme/tokens";
+import { defaultTheme } from "../core/theme/defaultTheme";
 
 export type {
   Skin,
@@ -158,4 +160,56 @@ export function getSkinGridTheme(skin: Skin) {
  */
 export function getActiveGridTheme() {
   return skinLoader.getActiveGridTheme();
+}
+
+// ============================================================================
+// Semantic tones for CANVAS painters
+// ============================================================================
+
+/**
+ * The semantic status colours (the `--tone-*` theme tokens) as concrete colour
+ * strings, for code that paints on the grid canvas and therefore cannot use
+ * `var(--tone-warn-fg)`. `*Fg` is the strong ink of a tone (a marker, an
+ * outline); `*Bg` its quiet surface. Values follow the ACTIVE skin -- Dark
+ * included -- with the user's token overrides and the accessibility transforms
+ * applied, exactly as the chrome is painted. Re-read it inside each paint (it
+ * is cached per skin apply, so the call is cheap); never keep a copy across
+ * frames, or a skin switch leaves stale ink on the grid.
+ */
+export interface CanvasToneColors {
+  warnFg: string;
+  warnBg: string;
+  dangerFg: string;
+  dangerBg: string;
+  infoFg: string;
+  infoBg: string;
+  okFg: string;
+  okBg: string;
+}
+
+/** The light baseline, read only if a token is somehow absent from the active map. */
+const baselineTone = (name: string): string => defaultTheme[name] ?? "";
+
+let toneCacheSource: Readonly<Record<string, string>> | null = null;
+let toneCache: CanvasToneColors | null = null;
+
+export function getCanvasToneColors(): CanvasToneColors {
+  const tokens = skinLoader.getActiveTokens();
+  if (toneCache && tokens === toneCacheSource) return toneCache;
+  const pick = (name: string): string => {
+    const v = tokens[name];
+    return typeof v === "string" && v.trim() !== "" ? v.trim() : baselineTone(name);
+  };
+  toneCache = Object.freeze({
+    warnFg: pick(THEME_TOKENS.TONE_WARN_FG),
+    warnBg: pick(THEME_TOKENS.TONE_WARN_BG),
+    dangerFg: pick(THEME_TOKENS.TONE_DANGER_FG),
+    dangerBg: pick(THEME_TOKENS.TONE_DANGER_BG),
+    infoFg: pick(THEME_TOKENS.TONE_INFO_FG),
+    infoBg: pick(THEME_TOKENS.TONE_INFO_BG),
+    okFg: pick(THEME_TOKENS.TONE_OK_FG),
+    okBg: pick(THEME_TOKENS.TONE_OK_BG),
+  });
+  toneCacheSource = tokens;
+  return toneCache;
 }

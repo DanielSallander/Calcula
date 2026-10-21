@@ -55,6 +55,8 @@ const NO_TARGET: Record<string, string> = {
     "Go To Special resolves a target (TARGET); Insert > Table keeps refusing (an Insert-tab door, and a floating grid holds no table)",
   // ---- Not Home commands: they keep refusing ----
   "extensions/AdvancedFilter/index.ts": NOT_HOME,
+  "extensions/Collaboration/lib/writebackTabModel.ts":
+    `${NOT_HOME}: Writeback > Submit / Discard Drafts act on a subscribed writeback region of Core's sheet, which a floating grid's cells never are`,
   "extensions/BuiltIn/CellBookmarks/lib/bookmarkAtSelection.ts": NOT_HOME,
   "extensions/BuiltIn/StandardMenus/ViewMenu.ts": `${NOT_HOME}: View > Split Window`,
   "extensions/BusinessIntelligence/components/BiPane.tsx": `${NOT_HOME}: BI insert`,

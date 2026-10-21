@@ -2,7 +2,7 @@
 // PURPOSE: Manages the editing lifecycle, formula bar, and inline inputs.
 // CONTEXT: Contains complex logic for handling key events in both the container and inputs.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   useEditing,
   getGlobalEditingValue,
@@ -22,7 +22,7 @@ import {
 } from "../../lib/undoTransactionOwnership";
 import { cellEvents } from "../../lib/cellEvents";
 import { checkRangeGuards } from "../../lib/editGuards";
-import { refuseIfSelectionOwned, setGridCellEditorOpener } from "../../lib/selectionOwner";
+import { refuseIfSelectionOwned, setGridCellEditorOpener, setGridCellTextCommitter } from "../../lib/selectionOwner";
 import {
   beginEditorOpen,
   isEditorOpening,
@@ -246,6 +246,57 @@ export function useSpreadsheetEditing({
     return false;
   }, [commitEdit]);
 
+  // Enter a text into the active cell as if typed and committed (the Delete
+  // key's route for a cell that takes one edit at a time but refuses a bulk
+  // clear -- see selectionOwner.setGridCellTextCommitter).
+  //
+  // The commit runs in an EFFECT once the opened editor is in state, never in
+  // the same callback as the open: `commitEdit` reads the `editing` it closed
+  // over, and a callback that opens and then commits holds the closure from
+  // BEFORE the open -- it would commit nothing (measured: commitEdit -> null).
+  const pendingTextCommitRef = useRef<((ok: boolean) => void) | null>(null);
+  useEffect(() => {
+    setGridCellTextCommitter(
+      (text) =>
+        new Promise<boolean>((resolve) => {
+          // A previous request still waiting is answered "no" (superseded).
+          pendingTextCommitRef.current?.(false);
+          pendingTextCommitRef.current = resolve;
+          void startEditing(text).then(
+            () => {
+              // startEditing raises the global flag only once its guards passed;
+              // no editor means nothing to commit.
+              if (!getGlobalIsEditing() && pendingTextCommitRef.current === resolve) {
+                pendingTextCommitRef.current = null;
+                resolve(false);
+              }
+            },
+            () => {
+              if (pendingTextCommitRef.current === resolve) pendingTextCommitRef.current = null;
+              resolve(false);
+            },
+          );
+        }),
+    );
+    // Re-registered whenever `startEditing` changes -- which the open itself
+    // causes -- so this cleanup must NOT answer a request in flight.
+    return () => setGridCellTextCommitter(null);
+  }, [startEditing]);
+  // ...only an unmount does: a request still waiting is answered "no".
+  useEffect(
+    () => () => {
+      pendingTextCommitRef.current?.(false);
+      pendingTextCommitRef.current = null;
+    },
+    [],
+  );
+  useEffect(() => {
+    const resolve = pendingTextCommitRef.current;
+    if (!resolve || !editing) return;
+    pendingTextCommitRef.current = null;
+    void handleCommitEdit().then(resolve, () => resolve(false));
+  }, [editing, handleCommitEdit]);
+
   const handleFormulaInputChange = useCallback(
     (event: React.ChangeEvent<HTMLInputElement>) => {
       updateValue(event.target.value);
@@ -256,7 +307,7 @@ export function useSpreadsheetEditing({
   const handleFormulaBarFocus = useCallback(async () => {
     if (!isEditing && selection) {
       // Synchronous guard: block editing in protected ranges (e.g., pivot tables)
-      const guard = checkRangeGuards(selection.endRow, selection.endCol, selection.endRow, selection.endCol);
+      const guard = checkRangeGuards(selection.endRow, selection.endCol, selection.endRow, selection.endCol, "edit");
       if (guard?.blocked) {
         // Blur the formula bar to prevent typing
         if (document.activeElement instanceof HTMLElement) {
@@ -375,14 +426,34 @@ export function useSpreadsheetEditing({
     // Capture the value before canceling the edit
     const fillValue = editing.value;
 
-    // Cancel the edit (closes editor without committing to a single cell)
-    cancelEdit();
-
     // Determine the selection bounds
     const minRow = Math.min(selection.startRow, selection.endRow);
     const maxRow = Math.max(selection.startRow, selection.endRow);
     const minCol = Math.min(selection.startCol, selection.endCol);
     const maxCol = Math.max(selection.startCol, selection.endCol);
+
+    // ASK THE RANGE GUARDS FIRST. The fill below is a bulk write that bypasses
+    // the commit guards, and the backend batch path SKIPS a guarded cell
+    // silently -- so a guarded selection used to lose the typed value with no
+    // draft, no marker and no message. A guard that allows a single-cell EDIT
+    // but not a bulk write (a writeback cell collects one answer at a time)
+    // gets the value through the normal commit, where its commit guard runs;
+    // anything else refused keeps the editor open and says why.
+    const fillGuard = checkRangeGuards(minRow, minCol, maxRow, maxCol, "other");
+    if (fillGuard?.blocked) {
+      const single = minRow === maxRow && minCol === maxCol;
+      if (single && !checkRangeGuards(minRow, minCol, maxRow, maxCol, "edit")?.blocked) {
+        // Excel's Ctrl+Enter on one cell: commit and stay.
+        const ok = await handleCommitEdit();
+        if (ok) focusContainerRef.current?.focus();
+        return;
+      }
+      if (fillGuard.message) void alertAsync(fillGuard.message);
+      return;
+    }
+
+    // Cancel the edit (closes editor without committing to a single cell)
+    cancelEdit();
 
     // Build batch updates for every cell in the selection. The fill closes
     // ONLY the undo transaction its own begin opened: inside a script's open
@@ -423,7 +494,7 @@ export function useSpreadsheetEditing({
     }
 
     focusContainerRef.current?.focus();
-  }, [editing, selection, cancelEdit, focusContainerRef]);
+  }, [editing, selection, cancelEdit, handleCommitEdit, focusContainerRef]);
 
   // Handler for arrow key cell reference navigation in formula mode
   const handleArrowKeyReference = useCallback(
@@ -687,7 +758,7 @@ export function useSpreadsheetEditing({
 
       // Synchronous guard: block editing in protected ranges (e.g., pivot tables)
       if (selection) {
-        const guard = checkRangeGuards(selection.endRow, selection.endCol, selection.endRow, selection.endCol);
+        const guard = checkRangeGuards(selection.endRow, selection.endCol, selection.endRow, selection.endCol, "edit");
         if (guard?.blocked) {
           // Allow navigation keys but block all editing keys
           if (event.key !== "Enter" && !navigationKeys.includes(event.key)) {

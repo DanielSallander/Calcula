@@ -107,6 +107,7 @@ export const TOKENS = {
   tabAccentSparkline: "var(--tab-accent-sparkline, #b8410a)",
   tabAccentReport: "var(--tab-accent-report, #8a3d0b)",
   tabAccentCanvas: "var(--tab-accent-canvas, #b0245f)",
+  tabAccentWriteback: "var(--tab-accent-writeback, #4338ca)",
 } as const;
 
 /** The bare custom-property names, for the parity guard to check. */

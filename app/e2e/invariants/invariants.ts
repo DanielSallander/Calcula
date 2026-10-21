@@ -102,6 +102,15 @@ const CONTEXTUAL_TAB_RULES: Record<string, ContextualTabRule> = {
     expectation: "the active sheet must be a canvas sheet",
   },
 
+  // --- Writeback (Collaboration) ---
+  // Shown while the active cell is inside a subscribed writeback region, so a
+  // workbook whose index holds no region must not show it. -1 is an unreadable
+  // index (unknown), never a violation.
+  Writeback: {
+    validate: (s) => (s.logical.writebackRegionCount ?? -1) !== 0,
+    expectation: "at least one writeback region must be in the index",
+  },
+
   // Generic "Design" tab could be chart, table, or pivot — accept any
   Design: {
     validate: (s) =>

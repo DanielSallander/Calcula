@@ -38,6 +38,8 @@ import {
 } from "@api/collaboration";
 import { saveHtmlReport, printHtmlReport } from "../lib/reportExport";
 import { announceSubscribedContentReplaced } from "../lib/refreshAftermath";
+import { totalUnsentDrafts } from "../lib/writebackStore";
+import { valuesText } from "../lib/writebackTabModel";
 
 const subKey = (s: Subscription) => `${s.packageName}@${s.registryUrl}`;
 const trustKey = (t: SubscriptionTrustInfo) => `${t.packageName}@${t.registryUrl}`;
@@ -655,7 +657,14 @@ export function SubscriptionManagerPane(): React.ReactElement {
         <div style={styles.footer}>
           {confirmingDetach ? (
             <>
-              <span style={styles.confirmHint}>Detach from all applications?</span>
+              <span style={styles.confirmHint}>
+                Detach from all applications?
+                {/* Detaching drops every writeback value not yet sent: they could
+                    never be submitted afterwards. Said before the click. */}
+                {totalUnsentDrafts() > 0
+                  ? ` ${valuesText(totalUnsentDrafts())} typed into writeback cells and not yet sent will be discarded; submit them first if the publisher should have them.`
+                  : ""}
+              </span>
               <button onClick={() => setConfirmingDetach(false)} style={styles.smallBtn}>Cancel</button>
               <button onClick={handleDetachAll} style={{ ...styles.smallBtn, ...styles.danger }}>Detach all</button>
             </>

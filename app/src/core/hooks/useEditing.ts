@@ -925,7 +925,7 @@ export function useEditing(): UseEditingReturn {
       }
 
       // Synchronous guard: immediately block editing in protected ranges (no async yield)
-      const rangeGuard = checkRangeGuards(row, col, row, col);
+      const rangeGuard = checkRangeGuards(row, col, row, col, "edit");
       if (rangeGuard?.blocked) {
         console.log("[useEditing] Edit blocked by range guard (sync)");
         lowerUnbackedEditFlag();
@@ -1049,7 +1049,7 @@ export function useEditing(): UseEditingReturn {
       const col = selection.endCol;
 
       // Synchronous guard: immediately block editing in protected ranges (no async yield)
-      const rangeGuard = checkRangeGuards(row, col, row, col);
+      const rangeGuard = checkRangeGuards(row, col, row, col, "edit");
       if (rangeGuard?.blocked) {
         console.log("[useEditing] Edit blocked by range guard (sync)");
         return;
@@ -1888,7 +1888,7 @@ export function useEditing(): UseEditingReturn {
       }
 
       // Synchronous guard: immediately block editing in protected ranges
-      const rangeGuard = checkRangeGuards(selection.endRow, selection.endCol, selection.endRow, selection.endCol);
+      const rangeGuard = checkRangeGuards(selection.endRow, selection.endCol, selection.endRow, selection.endCol, "edit");
       if (rangeGuard?.blocked) {
         console.log("[useEditing] Edit blocked by range guard (sync)");
         return;

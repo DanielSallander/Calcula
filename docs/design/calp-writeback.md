@@ -24,6 +24,14 @@ to ensure the necessary doors were left open.
 > primitive making tabular consolidation possible — works but is missing from
 > the function catalog, so no user can discover it. Filed as **BUG-0095**.
 
+> **Subscriber UX rework 2026-10-21.** The owner's test (subscribe, type 1, 2, 3
+> into B3:B5) showed nothing that said whether the values were written back. The
+> causes and the new surface are in **UI** below: region ids are now the
+> subscriber's LOCAL sheet ids, a single-cell entry saves a draft, the full-cell
+> tints are replaced by one dashed outline per region plus a small marker on
+> unsent and rejected cells, and a contextual **Writeback** ribbon tab carries
+> Submit, Submit All, Discard Drafts and Check Status.
+
 ## Motivation
 
 The v1.0 collaboration system is read-only from the consumer perspective:
@@ -172,18 +180,29 @@ WritebackRegion {
 ### Visibility
 
 - `own_only` - subscribers see only their own contribution; publisher sees all
-- `own_plus_aggregate` - subscribers see their own + the aggregated rollup;
-  publisher sees all
+- `own_plus_aggregate` - the publisher sees all; other subscribers see every
+  value WITHOUT the submitter's name (GATHER anonymizes identities to
+  "Submitter N" -- `apply_gather_governance`, `calp_commands.rs`). It is NOT
+  "totals only": an aggregate needs the values, and they flow. The subscriber
+  is told exactly that ("The publisher sees your values; other subscribers see
+  each value without your name").
 - `transparent` - everyone sees everyone's individual contributions
 - `role_based` - custom roles defined by publisher (deferred beyond v1.1)
 
-Default: `own_plus_aggregate`.
+Default: an unset visibility applies NO filter -- it is `transparent`
+(`writeback_region_entries` resolves a missing value to
+`VisibilityPolicy::Transparent`, and the subscriber's tab says "Everyone
+subscribed can see your values"). A publisher who wants less must declare it.
 
 ### Submission policy
 
 When does a contribution become visible to others?
 
-- `immediate` - on save
+- `immediate` - on save: typing IS submitting. The subscriber is told at the
+  point of entry ("B3 sent to <application>"), the tab's Status says "values are
+  sent as you type", and a send that FAILS keeps the value as an unsent draft
+  (`calp_save_writeback_draft` returns `sendError` rather than refusing a
+  value it saved; the marker shows it and Submit retries)
 - `on_submit` - explicit submit action (separate from save); save without
   submit is private draft
 - `on_approval` - submission queued for publisher approval before joining
@@ -381,33 +400,190 @@ general capability, not a special case for `GATHER`.
 
 ### Grid treatment
 
-Writeback cells are visually distinct from regular cells and from overrides:
+> **REWRITTEN 2026-10-21.** The original plan below this note (a background tint
+> per state, delivered through the style interceptor) was built and then
+> removed: five saturated tints, two of them nearly identical, read as noise and
+> glared on the Dark skin, and none of them said "not sent yet".
 
-- Regular cell: no decoration
-- Overridden cell: left-edge stripe (existing v1.0)
-- Conflicted cell: distinct color (existing v1.0)
-- Writeback cell, empty: subtle "fillable" background tint
-- Writeback cell, draft: tinted background + draft indicator
-- Writeback cell, submitted: tinted background + submitted indicator
-- Writeback cell, locked (post-deadline or post-submit when not allowed):
-  read-only treatment with explanatory tooltip
+What a subscriber sees on a sheet that carries writeback regions:
 
-The visual treatment is delivered through the existing style interceptor
-pipeline, registered by the Collaboration extension. In v1.0 the interceptor
-is registered with a no-op return for writeback cells; v1.1 fills in the
-visual.
+- **One outline per region.** A 1px dashed line (dash 3,2) round each region on
+  the ACTIVE sheet, in the theme's INFO tone at about 70% alpha. No fill: the
+  cells keep their gridlines and the publisher's formatting. It is a grid
+  LAYER under the selection (`collaboration:writeback-outline`,
+  `lib/writebackOutline.ts`), frozen-pane correct through
+  `@api/gridLayers` `rangeToCanvasRect`, and it is not painted on a canvas
+  page.
+- **A marker on cells that need attention.** A ~3px disc at the cell's
+  top-right, inset to sit just LEFT of the 6px note/comment triangle so both
+  stay visible, ringed in the cell's background colour, with a tiny "!" from
+  DPR 1.5 up (`lib/writebackDecorations.ts`, an over-selection decoration at
+  priority 6):
+  - **draft** (typed but not sent -- including a CLEARED cell, which is a
+    pending retraction): the WARN tone;
+  - **rejected**: the DANGER tone;
+  - submitted, approved and empty cells: no marker. "It was sent" is said by the
+    tab's Status line, the success toast and the marker disappearing.
+- Colours come from the active skin's tone tokens
+  (`@api/appearance` `getCanvasToneColors()`), never literals.
+- Both painters are registered only while the workbook HAS regions, so a
+  workbook without writeback pays nothing per frame.
+
+Locked cells (after a deadline, a one-shot region already sent) still have no
+look of their own; an edit there is refused by the backend with its message.
+
+**Typing.** A single-cell edit (a keystroke, F2, a double-click, the formula
+bar) on a writeback cell is allowed, so the commit guard can coerce the value
+by the region's declared type -- numbers in the APP locale (`@api/locale`
+`parseNumber`, so sv-SE "1,5" is a number) -- and save it as a draft. Paste
+(even of one cell, which would bypass the draft path), fill, drag and every
+other bulk operation over a region are refused with: "These cells collect input
+for "<application>". Type into them one cell at a time; paste and fill are not
+supported for writeback cells." The range guard tells an edit from a paste by
+the operation kind Core passes it (`RangeGuardOperation`, `@api/editGuards`).
+The Rust backstop (`ensure_writeback_draft_on_sheet`) refuses a write that
+skipped the draft path with a matching message that names the cell in A1 form
+(`writeback_cell_refusal`). The range refusals for clear, sort, merge and
+shift (`claim_refusal`) name the application and the A1 range the same way,
+with the region id only in parentheses. **One cell at a time also covers
+clearing and Ctrl+Enter:** Delete on a single writeback cell is ENTERED as an
+empty edit (Core's `commitGridCellText`, `core/lib/selectionOwner.ts`), so the
+commit guard saves the pending retraction; Ctrl+Enter on a single writeback cell
+commits through the commit guard (commit and stay), and Ctrl+Enter over a
+selection that overlaps a region is refused with the range guard's message --
+it used to drop the typed value silently (the batch path skips writeback cells).
+
+**Refresh and Reset keep the subscriber's values.** Writeback cells are not
+overrides (the override recorder skips them), so a refresh that replaces a
+subscribed sheet with the publisher's content puts every writeback-layer value
+back afterwards (`reproject_writeback_layer_onto_grids`, before the refresh's
+recalculation; a cell the publisher turned into a formula is left alone), and
+Reset to published keeps those cells exactly as it keeps a cell the author
+unticked (`calp_reset_subscription`). Before, both blanked the cells while the
+Draft / Submitted entries stayed in the layer.
+
+**Region ids are LOCAL.** A pull gives the subscriber's sheets fresh ids, so
+the region index maps each declaration's publisher sheet id to the local one
+through the subscription ledger (`rebuild_writeback_index_inner`). A region
+whose sheet is not (or no longer) attached is left out of the index entirely
+-- never reported on "sheet 0". The frontend snapshot
+(`lib/writebackStore.ts`) is keyed by that local id and resolves the active
+sheet at check time, so inserting, moving or reopening sheets cannot misplace
+it. Detaching a sheet (or a whole subscription) drops the unsent drafts of the
+regions that leave the index, under the detach's own document change. Which
+regions those are is read BEFORE the ledger changes, from the index AND the
+signed-declaration mirror (so a deferred or mid-rebuild subscription's regions
+are found too); when neither knows the application's regions the entries are
+kept and the audit row says why. Both confirms (the sheet tab's Detach and the
+Subscriptions pane's Detach all) say how many unsent values will be discarded.
 
 ### Submit gesture
 
-When submission policy is `on_submit` or `on_approval`, a "Submit" command is
-required to advance a draft to submitted state. This lives:
+When the submission policy is `on_submit` or `on_approval`, typing only saves
+a PRIVATE draft in the `.cala`; nothing leaves the machine until Submit.
+**What Submit means:** every draft of the region is checked again in Rust
+against the signed declaration and the lifecycle, the publisher's custom check
+(if any) runs, and the values are written as a new, never-rewritten event under
+`{ws}/{app}/{ver}/submissions/{submitter}/`. From then on the publisher can
+see them (Collected Responses), and the cells read "submitted" until the
+publisher approves or rejects. One bad value refuses the whole batch.
 
-- As a button in the writeback side pane
-- As a right-click action on writeback cells
-- Possibly as a Ctrl+Enter shortcut on the cell
+Submit lives in three places, all region-scoped, all ending in a re-read of
+the shared snapshot and a grid repaint:
 
-The command is region-scoped: submitting region X does not submit region Y.
-A "Submit all drafts" affordance exists for bulk completion.
+- the contextual **Writeback** ribbon tab (below);
+- the cell context menu: **Submit Writeback Values** on a writeback cell (the
+  same action as the tab's Submit; greyed with the reason when nothing in the
+  region is unsent);
+- the Writeback pane's "Review & submit" and "Submit all".
+
+Every submit door shows exactly which values leave the machine first: the tab,
+the context menu and the pane's "Submit all" (which goes through the tab's own
+`submitAllWriteback`) read `calp_preview_region_submission` and put the
+destination application, the workspace, who it is sent as and the values
+(`B3 = 1`, numbers in the app locale, up to 12, then a count) into a
+`confirmAsync`, which fails closed; the pane's per-region "Review & submit"
+shows the same preview inline and sends on "Confirm & send". (Except for an
+`immediate` region, which sends as you type -- see Submission policy.)
+A region whose publisher check has not been approved yet is stopped BEFORE the
+confirm with an explanation, and the pane (where the consent lives) is opened.
+After sending: "N values sent to <application>. The publisher can now see
+them." -- or the backend's refusal.
+
+### Writeback ribbon tab
+
+A contextual ribbon tab labelled **Writeback** (panel id `writeback-tab`; the
+top-level menu keeps the id `writeback`), accent `--tab-accent-writeback`
+(#4338ca light, #a5b4fc dark; 4.5:1 on the ribbon frame in every built-in
+skin), order 512 -- right of every other contextual tab. Files:
+`app/extensions/Collaboration/manifest.ts` (`WritebackPanelDefinition`),
+`components/WritebackTabSections.tsx`, `lib/writebackTab.ts` (visibility),
+`lib/writebackTabModel.ts` (state and actions).
+
+- **When it shows.** While Core's ACTIVE cell is inside a subscribed writeback
+  region on the active sheet -- the Table Design shape: one gate, the hide is
+  unconditional, re-derived when the cursor moves, when the active sheet
+  changes, whenever the snapshot changes under a cursor that did not move (a
+  subscribe bringing the first regions, a detach taking them away), and when a
+  selection owner's claim starts or ends. It stands aside while a floating
+  grid's cell holds the selection. It never takes the ribbon when it appears.
+- **Badge.** The number of unsent values across the workbook; none at zero.
+- **Submit** -- *Submit* (the drafts of the region under the cursor; its
+  tooltip says how many and to which application) and *Submit All* (every
+  region, one confirm listing them). Each is disabled with its reason in the
+  tooltip when there is nothing to send.
+- **Drafts** -- *Discard Drafts* for the region under the cursor
+  (`calp_discard_writeback_drafts`): only DRAFT entries go; each cell returns
+  to what the subscriber last SENT (that entry comes back, so the cell reads
+  submitted/approved/rejected again) or to blank when nothing was ever sent;
+  dependents recalculate in Rust. **Discard is not undoable and ENDS THE UNDO
+  HISTORY** (Excel's rule for an action it cannot undo): the writeback layer is
+  outside the undo graph, and the step that TYPED the value is still on the
+  history, so Ctrl+Z then Ctrl+Y would write the discarded value back with no
+  draft behind it. The tab confirms first and says so. It needs the workspace
+  (to look up what was last sent): an unreachable workspace, or any version of
+  the subscriber's submissions that cannot be read, refuses the discard whole.
+  It is recorded in the audit trail (`WritebackInvalidated`, with the cells).
+- **Status** -- two lines for the region under the cursor: its state ("<k> not
+  sent" in the warn tone, "<k> rejected - fix and submit again", "Sent - waiting
+  for the publisher's approval" under `on_approval`, "Sent - the publisher can
+  see them" otherwise (a sent value counts at once there), "All approved", or
+  "Nothing entered yet" -- with "(k of n filled)" while cells are still empty),
+  with "- due <date>" (app locale) when it has a deadline; then who sees the
+  input: own_only "Only the publisher sees your values", own_plus_aggregate
+  "The publisher sees your values; other subscribers see each value without
+  your name", transparent (and unset) "Everyone subscribed can see your values".
+- **Responses** -- *Check Status* (one re-read of the shared snapshot -- every
+  read reconciles with the workspace first, so it is ONE round-trip; "Status
+  updated", or a warning naming why the workspace could not be reached, never a
+  claimed update) and *Writeback Pane*.
+
+**Markers.** A draft is a small warn-tone DISC, a rejected value a small
+danger-tone SQUARE in the same place beside the note triangle -- different
+shapes, so they read apart at 100% scaling and without colour; at high DPI the
+disc carries a "!" and the square an "x".
+
+The soak/invariant walk knows the label (`CONTEXTUAL_TAB_RULES.Writeback`,
+`app/e2e/invariants/invariants.ts`: the tab may show only while the index holds
+a region). The tab adds no task-pane context key, so the cascade census's
+selection half does not govern it -- correctly: a writeback region is a
+manifest declaration, not an object in the Rust dependency matrix, and its
+disappearance reaches the tab through the snapshot, not a delete route.
+
+**Out of scope for this version** (kept deliberately, not forgotten):
+
+- **BI pivot writeback cells.** A model writeback column filled through a BI
+  pivot has no draft (it sends on Enter) and no `@api` seam a Collaboration
+  tab could ask; giving it a Submit button needs an owner decision first.
+- **Cells owned by a floating grid.** The tab follows Core's active cell and
+  stands aside while a floating grid holds the selection.
+- **A status-bar item** for the region under the cursor.
+- **A Ctrl+Enter submit shortcut.** (Ctrl+Enter keeps Excel's meaning, "commit
+  and stay"; see Grid treatment.)
+- **A hover tooltip on a marked cell** ("Not sent yet" / "Rejected: <reason>").
+  There is no cell-hover seam in `@api`; the Status line and the pane say it.
+- **A subscriber-side poll** for approve/reject decisions: they arrive on open,
+  on a draft save, on Check Status and when the pane refreshes.
 
 ### Writeback side pane
 
@@ -489,14 +665,15 @@ For v1.0 to leave doors open for v1.1 writeback:
    frontend guards (find-and-replace at minimum) must consult the same index.
 
    > **SUPERSEDED 2026-08-16 by v1.1 Phase 14 — deliberately, not by drift.**
-   > The EDIT guard is gone: `app/extensions/Collaboration/index.ts:392-394`
-   > carries the marker "writeback cells ARE editable (subscriber fills them).
-   > No edit guard block needed." A commit guard took its place
-   > (`index.ts:415`): it coerces the typed value by the region's DECLARED
+   > The EDIT guard is gone: writeback cells ARE editable (the subscriber fills
+   > them). A commit guard took its place (`registerCommitGuard` in
+   > `app/extensions/Collaboration/index.ts`): it coerces the typed value by the region's DECLARED
    > `valueType`, runs the publisher's advisory custom validator, saves a draft,
    > and keeps the user in edit mode on rejection rather than displaying a value
    > that was never saved. The RANGE guard survives and still refuses range
-   > operations overlapping a writeback region (`index.ts:397`).
+   > operations overlapping a writeback region (`context.grid.rangeGuards.register`
+   > in the same file; since 2026-10-21 it lets a single-cell EDIT through and
+   > refuses paste, fill and every bulk operation -- see **UI**).
    >
    > The backend backstop went much further than "find-and-replace at minimum":
    > seven helpers now exist — `ensure_writeback_draft_before_write`,
@@ -508,11 +685,13 @@ For v1.0 to leave doors open for v1.1 writeback:
    > was "the known one" and a survey would find others was right by an order of
    > magnitude.
    >
-   > One artifact of the reversal is still user-visible: the surviving range
-   > guard's message reads "Some cells in this range are reserved for input in a
-   > future version" (`index.ts:404`) — v1.0 wording that outlived the version
-   > it described, since that future version shipped.
-3. The style interceptor pipeline is the delivery mechanism for any future
+   > One artifact of the reversal stayed user-visible until 2026-10-21: the
+   > range guard's message read "Some cells in this range are reserved for
+   > input in a future version" -- v1.0 wording that outlived the version it
+   > described. It now names the application and says what to do instead
+   > (`writebackBulkRefusalMessage`, `lib/writebackGuards.ts`).
+3. *(Superseded 2026-10-21: the visual treatment is a grid layer and a cell
+   decoration, not the style interceptor -- see **UI**.)* The style interceptor pipeline is the delivery mechanism for any future
    writeback visual treatment. v1.0 registers a writeback-aware interceptor
    with a no-op return for writeback cells; v1.1 fills in the visual.
 4. Cell identity (CellId) for writeback cells is not minted in v1.0 because

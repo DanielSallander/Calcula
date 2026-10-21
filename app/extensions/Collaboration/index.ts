@@ -1,7 +1,8 @@
 // FILENAME: app/extensions/Collaboration/index.ts
 // PURPOSE: Collaboration extension entry point — .calp publish, subscribe, refresh, overrides.
-// CONTEXT: Registers task panes, dialogs, grid overlay badges, writeback guards
-// (Phase 9), and the conditional style interceptor. It also owns TWO top-level
+// CONTEXT: Registers task panes, dialogs, the writeback guards and the writeback
+// grid painters (a dashed region outline layer and unsent/rejected state
+// markers, registered only while regions exist). It also owns TWO top-level
 // menus — "Collaboration" (order 46) for the .calp application lifecycle and
 // "Writeback" (order 47) for the data-collection channel. They were one
 // "Distribution" submenu (this feature's name until 2026-09-25) under External
@@ -52,16 +53,44 @@ import {
 } from "./manifest";
 import { WritebackPane } from "./components/WritebackPane";
 import {
-  isWritebackCell,
-  rangeOverlapsWriteback,
   hasWritebackRegions,
-  refreshWritebackSnapshot,
+  refreshWriteback,
   resetWritebackSnapshot,
-  setActiveSheetIndex,
-  getActiveSheetIndex,
-  getWritebackCellState,
-  getRegionForCell,
+  startWritebackStore,
+  subscribeWritebackSnapshot,
+  getWritebackRegionList,
+  isWritebackSnapshotLoaded,
+  getActiveSheetId,
+  getActiveSheetRegions,
+  getActiveRegionAt,
+  getActiveCellState,
+  activeRangeOverlapsWriteback,
+  getRegionSummary,
+  regionApplicationName,
+  unsentDraftsOnSheet as unsentWritebackOnSheet,
+  writebackRegionListKey,
 } from "./lib/writebackStore";
+import { decideWritebackRangeGuard, coerceWritebackInput } from "./lib/writebackGuards";
+import { createWritebackDecoration } from "./lib/writebackDecorations";
+import { createWritebackOutlinePainter } from "./lib/writebackOutline";
+import {
+  handleWritebackSelectionChange,
+  syncWritebackTabToRegions,
+  resetWritebackTab,
+} from "./lib/writebackTab";
+import {
+  submitWritebackRegion,
+  submitButtonState,
+  resetWritebackTabModel,
+  valuesText,
+} from "./lib/writebackTabModel";
+import { columnToLetter } from "@api/types";
+
+import { onSelectionOwnershipChanged } from "@api/selectionOwner";
+import { rangeToCanvasRect } from "@api/gridLayers";
+import { getCanvasToneColors, getActiveGridTheme } from "@api/appearance";
+import { getGridStateSnapshot } from "@api/grid";
+import { parseNumber } from "@api/locale";
 import { openApplicationInspectorWindow } from "./lib/openApplicationInspectorWindow";
 import { designateWritebackRegion } from "./lib/designateWritebackRegion";
 import { installInspectorFormPreviewBridge } from "./lib/inspectorFormPreview";
@@ -79,7 +108,7 @@ import {
   detachSheet,
   resetSubscription,
   WRITEBACK_INDEX_CHANGED_EVENT,
-  type SubmissionValue,
+  ENVIRONMENTS_CHANGED_EVENT,
 } from "@api/collaboration";
 import { emitAppEvent } from "@api/events";
 import { confirmAsync, alertAsync } from "@api/dialogs";
@@ -102,6 +131,9 @@ import {
   invalidateSheetTabDecorations,
   sheetExtensions,
   unregisterMenu,
+  gridExtensions,
+  GridMenuGroups,
+  type GridMenuContext,
 } from "@api";
 import { CollaborationRoleStatusItem } from "./components/CollaborationRoleStatusItem";
 import { SUBSCRIBED_CHIP, WORKING_COPY_CHIP } from "./lib/roleChipColors";
@@ -117,6 +149,14 @@ import { announceSubscribedContentReplaced } from "./lib/refreshAftermath";
 
 /** Status-bar item id for the working-copy / subscriber role badge. */
 const ROLE_STATUS_ITEM_ID = "collaboration:roleBadge";
+
+/** Tags this extension's own WRITEBACK_INDEX_CHANGED_EVENT announcements. */
+const WRITEBACK_STORE_EVENT_SOURCE = "collaboration:writeback-store";
+
+/** A cell in A1 notation (zero-based row and column in). */
+function cellA1(row: number, col: number): string {
+  return `${columnToLetter(col)}${row + 1}`;
+}
 
 let isActivated = false;
 const cleanupFns: (() => void)[] = [];
@@ -340,12 +380,24 @@ function activate(context: ExtensionContext): void {
       // `confirmAsync`, never the `confirm` global — under Tauri that returns a
       // Promise, so `if (!confirm(m))` tests `!Promise`, which is always false
       // and the guard NEVER fires. Fails CLOSED.
+      // Detaching DELETES the unsent writeback values of the regions on the
+      // sheet (they can never be submitted once the sheet is no longer the
+      // application's). Say so, with the count, before the user agrees.
+      const unsent = ctx.sheetId ? unsentWritebackOnSheet(ctx.sheetId) : 0;
+      const unsentWarning =
+        unsent > 0
+          ? `\n\n${valuesText(unsent)} you typed into writeback cells on this sheet ` +
+            `${unsent === 1 ? "has" : "have"} not been sent and will be discarded. ` +
+            `Submit ${unsent === 1 ? "it" : "them"} first (Writeback > Submit) if the ` +
+            `publisher should have ${unsent === 1 ? "it" : "them"}.`
+          : "";
       const ok = await confirmAsync(
         `Detach "${ctx.sheet.name}" from the application "${app}"?\n\n` +
           `The sheet and everything in it stays. What stops is the connection: it ` +
           `will no longer be refreshed from the workspace, you lose the ability to ` +
           `revert its cells to the published version, and it becomes yours to ` +
-          `publish. This cannot be undone except by subscribing again.`,
+          `publish. This cannot be undone except by subscribing again.` +
+          unsentWarning,
         { title: "Detach sheet" },
       );
       if (!ok) return;
@@ -594,8 +646,9 @@ function activate(context: ExtensionContext): void {
         icon: IconWriteback,
         order: 10,
         action: () =>
-          designateWritebackRegion(context, currentSelection, () =>
-            getSheetIdForIndex(getActiveSheetIndex()),
+          designateWritebackRegion(context, currentSelection, async () =>
+            getActiveSheetId() ??
+            getSheetIdForIndex(getGridStateSnapshot()?.sheetContext?.activeSheetIndex ?? 0),
           ),
       },
       {
@@ -680,21 +733,12 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(() => context.ui.menus.unregisterItem("externalData", "externalData:refreshData"));
 
   // -----------------------------------------------------------------------
-  // Phase 9: Writeback readiness — guards, interceptor, event listeners
+  // Writeback, subscriber side: the shared snapshot, the guards, the grid
+  // outline and state markers, and the events that re-read it.
   // -----------------------------------------------------------------------
 
-  // Track active sheet index for guard evaluation
-  const unsubSheetChanged = context.events.on(
-    AppEvents.SHEET_CHANGED,
-    (_data: unknown) => {
-      // The event payload contains the new sheet index
-      const payload = _data as { sheetIndex?: number } | undefined;
-      if (payload && typeof payload.sheetIndex === "number") {
-        setActiveSheetIndex(payload.sheetIndex);
-      }
-    },
-  );
-  cleanupFns.push(unsubSheetChanged);
+  // The sheet-id map the active-sheet lookup reads (@api/reportPages).
+  cleanupFns.push(startWritebackStore());
 
   // Track grid selection for the writeback designation menu action
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {
@@ -709,85 +753,140 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(unsubSelection);
 
-  // Load writeback snapshot on file open / new
-  const unsubAfterOpen = context.events.on(AppEvents.AFTER_OPEN, () => {
-    refreshAndUpdateInterceptor();
+  // THE CONTEXTUAL "Writeback" RIBBON TAB (lib/writebackTab.ts): shown while
+  // Core's active cell is inside a subscribed writeback region on the active
+  // sheet. Re-derived when the cursor moves, when a selection owner's claim
+  // starts or ends (the tab stands aside for a floating grid's cell), when the
+  // active sheet changes, and on every snapshot change below (a subscribe
+  // bringing the first regions, a detach taking them away, a submit changing
+  // the badge) -- none of which moves Core's cursor.
+  cleanupFns.push(ExtensionRegistry.onSelectionChange(handleWritebackSelectionChange));
+  cleanupFns.push(onSelectionOwnershipChanged(() => syncWritebackTabToRegions()));
+  cleanupFns.push(
+    context.events.on(AppEvents.SHEET_CHANGED, () => {
+      syncWritebackTabToRegions();
+      // The grid publishes the new sheet's context in the same task that
+      // announced the switch; ask once more after it has.
+      setTimeout(syncWritebackTabToRegions, 0);
+    }),
+  );
+  cleanupFns.push(() => {
+    resetWritebackTab();
+    resetWritebackTabModel();
   });
-  cleanupFns.push(unsubAfterOpen);
 
-  const unsubAfterNew = context.events.on(AppEvents.AFTER_NEW, () => {
-    refreshAndUpdateInterceptor();
+  // RIGHT-CLICK SUBMIT on a writeback cell -- the same action as the tab's
+  // Submit hero (preview, confirm, send, re-read). Shown only on a cell of a
+  // region; greyed with the reason when nothing in the region is unsent.
+  const regionAtMenu = (ctx: GridMenuContext) => {
+    if (!hasWritebackRegions()) return null;
+    const cell =
+      ctx.clickedCell ??
+      (ctx.selection ? { row: ctx.selection.endRow, col: ctx.selection.endCol } : null);
+    return cell ? getActiveRegionAt(cell.row, cell.col) : null;
+  };
+  gridExtensions.registerContextMenuItem({
+    id: "collaboration:submitWritebackValues",
+    label: "Submit Writeback Values",
+    group: GridMenuGroups.DATA,
+    order: 95,
+    visible: (ctx) => regionAtMenu(ctx) !== null,
+    disabled: (ctx) => {
+      const region = regionAtMenu(ctx);
+      return region === null || submitButtonState(getRegionSummary(region.regionId)).disabled;
+    },
+    disabledReason: (ctx) => {
+      const region = regionAtMenu(ctx);
+      if (!region) return null;
+      const state = submitButtonState(getRegionSummary(region.regionId));
+      return state.disabled ? state.tooltip : null;
+    },
+    onClick: async (ctx) => {
+      const region = regionAtMenu(ctx);
+      if (!region) return;
+      await submitWritebackRegion(region.regionId);
+    },
   });
-  cleanupFns.push(unsubAfterNew);
+  cleanupFns.push(() =>
+    gridExtensions.unregisterContextMenuItem("collaboration:submitWritebackValues"),
+  );
 
-  // Edit guard: writeback cells ARE editable (subscriber fills them).
-  // No edit guard block needed — writeback cells allow editing.
-  // The commit guard (below) routes the value to the writeback draft layer.
+  // EVERY event after which the region index or the layer can differ re-reads
+  // it. Subscribing used to be missing from this list: the dialog announces
+  // PACKAGE_UPDATED, nothing here heard it, and a subscriber typed into a
+  // freshly subscribed form with no guard, no draft and no marker -- "I cannot
+  // see if it was written back". Requests in one task share one read
+  // (refreshWriteback coalesces).
+  const refreshOn = (eventName: string) =>
+    cleanupFns.push(context.events.on(eventName, () => void refreshWriteback()));
+  refreshOn(AppEvents.AFTER_OPEN);
+  refreshOn(AppEvents.AFTER_NEW);
+  // A pull (subscribe), a refresh or a tab-menu detach.
+  refreshOn(AppEvents.PACKAGE_UPDATED);
+  // A subscribed sheet deleted takes its regions with it.
+  refreshOn(AppEvents.SHEET_DELETED);
+  // An environment switch can change the version, and with it the regions.
+  refreshOn(ENVIRONMENTS_CHANGED_EVENT);
+  // SHEET_CHANGED with NO sheet index is the "content replaced" announcement
+  // (Detach All, reset aftermath, a data refresh). A tab click carries the index
+  // and needs no read: the snapshot is keyed by sheet id and resolved at paint
+  // time. Only a workbook that HAS regions re-reads -- the read reconciles with
+  // the workspace, and a workbook without writeback must not pay for it on every
+  // data refresh. (A subscribe that brings the first regions is PACKAGE_UPDATED.)
+  cleanupFns.push(
+    context.events.on(AppEvents.SHEET_CHANGED, (data: unknown) => {
+      const payload = data as { sheetIndex?: unknown } | undefined;
+      if (payload && typeof payload.sheetIndex === "number") return;
+      if (!hasWritebackRegions()) return;
+      void refreshWriteback();
+    }),
+  );
+  // The backend's own announcement (bridged by the Shell): the deferred HTTP
+  // half of an open landed. This extension announces the same event after each
+  // read for the script host's cached copy, tagged with its source -- those are
+  // ignored, or every read would trigger the next one.
+  cleanupFns.push(
+    context.events.on(WRITEBACK_INDEX_CHANGED_EVENT, (data: unknown) => {
+      const payload = data as { source?: unknown } | undefined;
+      if (payload && payload.source === WRITEBACK_STORE_EVENT_SOURCE) return;
+      void refreshWriteback();
+    }),
+  );
 
-  // Register range guard: refuse range operations that overlap writeback regions
+  // RANGE GUARD. A single-cell entry (keystroke, F2, double-click, formula
+  // bar -- operation "edit") is ALLOWED, so the commit guard below can save it
+  // as a draft; before this, the guard refused the 1x1 range the editor asks
+  // about and swallowed every keystroke on a writeback cell without a word.
+  // Paste (even of one cell, which never reaches the commit guard), fill,
+  // drag-move and structural operations over a region stay refused, with a
+  // message that says why.
   const unregRangeGuard = context.grid.rangeGuards.register(
-    (startRow: number, startCol: number, endRow: number, endCol: number) => {
+    (startRow, startCol, endRow, endCol, operation) => {
       if (!hasWritebackRegions()) return null;
-      const sheetIdx = getActiveSheetIndex();
-      if (rangeOverlapsWriteback(sheetIdx, startRow, startCol, endRow, endCol)) {
-        return {
-          blocked: true,
-          message: "Some cells in this range are reserved for input in a future version.",
-        };
-      }
-      return null;
+      return decideWritebackRangeGuard(
+        activeRangeOverlapsWriteback(startRow, startCol, endRow, endCol),
+        startRow,
+        startCol,
+        endRow,
+        endCol,
+        operation,
+      );
     },
   );
   cleanupFns.push(unregRangeGuard);
 
-  // Commit guard: when a writeback cell value is committed, save it as a draft.
-  // The normal cell update still proceeds (action = "allow"), so the cell displays
-  // the value. The writeback layer also stores it for later submission.
+  // COMMIT GUARD: a value typed into a writeback cell is saved as a draft. The
+  // normal cell update still proceeds (action = "allow"), so the cell shows it;
+  // the draft is what Submit later sends.
   const unregCommitGuard = registerCommitGuard(async (row, col, value) => {
     if (!hasWritebackRegions()) return null;
-    const sheetIdx = getActiveSheetIndex();
-    const region = getRegionForCell(sheetIdx, row, col);
+    const region = getActiveRegionAt(row, col);
     if (!region) return null;
 
-    // Coerce based on the region's DECLARED type, not the string's shape — so a
-    // product code "12345" or a numeric enum label typed into a TEXT region is
-    // sent as text, not silently sniffed into a number and rejected.
-    let submissionValue: SubmissionValue;
+    // By the region's DECLARED type, in the APP locale (sv-SE "1,5" is a
+    // number) -- see coerceWritebackInput.
+    const submissionValue = coerceWritebackInput(value, region.valueType, { parseNumber });
     const trimmed = value.trim();
-    const isBool = (s: string) => s.toLowerCase() === "true" || s.toLowerCase() === "false";
-    if (trimmed === "") {
-      submissionValue = { type: "empty" };
-    } else {
-      switch (region.valueType) {
-        case "number":
-        case "integer": {
-          const n = Number(trimmed);
-          submissionValue = isNaN(n)
-            ? { type: "text", value: trimmed } // backend will reject with a clear message
-            : { type: "number", value: n };
-          break;
-        }
-        case "boolean":
-          submissionValue = isBool(trimmed)
-            ? { type: "boolean", value: trimmed.toLowerCase() === "true" }
-            : { type: "text", value: trimmed };
-          break;
-        case "text":
-        case "date":
-        case "enum":
-          submissionValue = { type: "text", value: trimmed };
-          break;
-        default:
-          // No declared type (unschematized region): fall back to shape-sniffing.
-          if (!isNaN(Number(trimmed))) {
-            submissionValue = { type: "number", value: Number(trimmed) };
-          } else if (isBool(trimmed)) {
-            submissionValue = { type: "boolean", value: trimmed.toLowerCase() === "true" };
-          } else {
-            submissionValue = { type: "text", value: trimmed };
-          }
-      }
-    }
 
     // Advisory custom validator (distribution brick 3): a publisher-declared,
     // subscriber-side UX check layered on top of the authoritative built-in
@@ -804,98 +903,152 @@ function activate(context: ExtensionContext): void {
       }
     }
 
-    // Save as draft — if the backend rejects (schema validation, lifecycle
+    // Save as draft -- if the backend rejects (schema validation, lifecycle
     // deadline, one-shot/locked regions), keep the user in edit mode. Falling
     // through to "allow" on a rejection would display a value that was never
     // saved as a draft and will never be submitted.
+    let saved: Awaited<ReturnType<typeof saveWritebackDraft>>;
     try {
-      await saveWritebackDraft(region.regionId, region.sheetId, row, col, submissionValue);
-      // Refresh the writeback snapshot to update visual state
-      refreshAndUpdateInterceptor();
+      saved = await saveWritebackDraft(region.regionId, region.sheetId, row, col, submissionValue);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn("[Collaboration] Writeback draft rejected:", msg);
       context.ui.notifications.showToast(msg, { type: "warning", duration: 5000 });
       return { action: "retry" as const };
     }
+    // An `immediate` region SENDS on save: typing is submitting, and the
+    // subscriber is told at the point of entry -- there is no marker for a sent
+    // value, so without this the value would leave the machine unannounced. A
+    // failed send kept the value as an unsent draft (the marker shows it).
+    const application = regionApplicationName(region) || "the publisher";
+    if (saved?.sent) {
+      context.ui.notifications.showToast(
+        `${cellA1(row, col)} sent to ${application}. The publisher can now see it.`,
+        { type: "success", duration: 3000 },
+      );
+    } else if (saved?.sendError) {
+      context.ui.notifications.showToast(
+        `${cellA1(row, col)} was saved but not sent to ${application}: ${saved.sendError}. ` +
+          `It is kept as an unsent value; Writeback > Submit sends it.`,
+        { type: "warning", duration: 8000 },
+      );
+    }
+    // Re-read so the draft marker, the tab and the pane follow; the store
+    // repaints when the read lands.
+    void refreshWriteback();
 
     // Allow the normal commit to proceed so the cell displays the value
     return { action: "allow" as const };
   });
   cleanupFns.push(unregCommitGuard);
 
-  // Writeback style interceptor management.
-  // Only registered when writeback regions exist, so per-cell render cost
-  // is zero in the common case (no writeback applications).
-  let unregStyleInterceptor: (() => void) | null = null;
+  // GRID PAINTERS: one discreet dashed outline per region on the active sheet
+  // (a layer under the selection) and a small state marker on unsent and
+  // rejected cells (an over-selection decoration beside the note triangle).
+  // Registered only while regions exist, so a workbook without writeback pays
+  // nothing per frame. Colours are the theme's tone tokens, read per frame.
+  let unregOutline: (() => void) | null = null;
+  let unregMarkers: (() => void) | null = null;
 
-  function updateStyleInterceptor(): void {
-    if (hasWritebackRegions() && !unregStyleInterceptor) {
-      unregStyleInterceptor = context.grid.styleInterceptors.register(
-        "collaboration:writeback",
-        (_cellValue, _baseStyle, coords) => {
-          const sheetIdx = getActiveSheetIndex();
-          const state = getWritebackCellState(sheetIdx, coords.row, coords.col);
-          if (!state) return null;
+  const outlinePaint = createWritebackOutlinePainter({
+    regions: getActiveSheetRegions,
+    color: () => getCanvasToneColors().infoFg,
+    rectOf: rangeToCanvasRect,
+  });
+  const markerPaint = createWritebackDecoration({
+    cellState: getActiveCellState,
+    colors: () => {
+      const tones = getCanvasToneColors();
+      return {
+        warn: tones.warnFg,
+        danger: tones.dangerFg,
+        background: getActiveGridTheme().cellBackground,
+      };
+    },
+    pixelRatio: () => (typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1),
+  });
 
-          switch (state) {
-            case "empty":
-              // Fillable: subtle blue tint.
-              return { backgroundColor: "#f0f7ff" };
-            case "draft":
-              // Unsent local edit: amber.
-              return { backgroundColor: "#fff8e1" };
-            case "submitted":
-              // Sent, awaiting the publisher's decision: neutral blue.
-              return { backgroundColor: "#e3f2fd" };
-            case "approved":
-              // Accepted by the publisher: green.
-              return { backgroundColor: "#e6f4ea" };
-            case "rejected":
-              // Rejected — needs revision: red tint.
-              return { backgroundColor: "#fce8e6" };
-            default:
-              return null;
-          }
-        },
-        30, // priority: after tables (5) and conditional formatting (20+)
-      );
-    } else if (!hasWritebackRegions() && unregStyleInterceptor) {
-      unregStyleInterceptor();
-      unregStyleInterceptor = null;
+  function updateGridPainters(): void {
+    if (hasWritebackRegions()) {
+      if (!unregOutline) {
+        unregOutline = context.grid.layers.register({
+          id: "collaboration:writeback-outline",
+          anchor: "under-selection",
+          priority: 10,
+          paint: outlinePaint,
+        });
+      }
+      if (!unregMarkers) {
+        unregMarkers = context.grid.decorations.register(
+          "collaboration:writeback-marker",
+          markerPaint,
+          6, // just after the note triangle (5): the note stays on top
+          "over-selection",
+        );
+      }
+    } else {
+      if (unregOutline) {
+        unregOutline();
+        unregOutline = null;
+      }
+      if (unregMarkers) {
+        unregMarkers();
+        unregMarkers = null;
+      }
     }
   }
 
-  // Wrap snapshot refresh to also update interceptor registration
-  async function refreshAndUpdateInterceptor(): Promise<void> {
-    const regions = await refreshWritebackSnapshot();
-    updateStyleInterceptor();
-    // Publisher-shipped custom validators. The AUTHORITATIVE run is Rust-side
-    // at submit (same body, out of the Ed25519-verified manifest, in the
-    // embedded QuickJS realm) and it fails CLOSED without the user's consent —
-    // so this pass exists to (a) collect the consent the backend demands and
-    // (b) mount approved bodies for advisory as-you-type feedback. Never
-    // allowed to break the refresh: an unreachable backend must not stop the
-    // style interceptor or the index event.
-    void syncWritebackValidators(regions)
-      .catch((err) => {
-        console.warn("[Collaboration] writeback validator sync failed:", err);
-      })
-      .finally(() => {
-        emitAppEvent(WRITEBACK_VALIDATORS_CHANGED_EVENT, {});
+  // Every snapshot change re-decides the painters (the store requests the
+  // repaint itself, after its listeners ran). A NEW region list -- a read
+  // landed, not just a sheet-map change -- also re-syncs the publisher's
+  // validators and tells the script host's cached copy of the index.
+  // Compared by CONTENT, not identity: every read installs a new frozen array,
+  // so an identity check re-ran the validator sync (unmount + remount of every
+  // Worker realm) and re-announced the index on every draft commit.
+  let lastRegionKey: string | null = null;
+  cleanupFns.push(
+    subscribeWritebackSnapshot(() => {
+      updateGridPainters();
+      // The contextual tab and its badge follow the snapshot too.
+      syncWritebackTabToRegions();
+      const list = getWritebackRegionList();
+      if (!isWritebackSnapshotLoaded()) return;
+      const key = writebackRegionListKey(list);
+      if (key === lastRegionKey) return;
+      lastRegionKey = key;
+      // Publisher-shipped custom validators. The AUTHORITATIVE run is Rust-side
+      // at submit (same body, out of the Ed25519-verified manifest, in the
+      // embedded QuickJS realm) and it fails CLOSED without the user's consent
+      // -- so this pass exists to (a) collect the consent the backend demands
+      // and (b) mount approved bodies for advisory as-you-type feedback. Never
+      // allowed to break the refresh.
+      void syncWritebackValidators([...list])
+        .catch((err) => {
+          console.warn("[Collaboration] writeback validator sync failed:", err);
+        })
+        .finally(() => {
+          emitAppEvent(WRITEBACK_VALIDATORS_CHANGED_EVENT, {});
+        });
+      // The script host keeps its OWN copy of the region index, so a script
+      // grid write can be routed into the same validated draft path without
+      // one IPC per cell. (A stale copy fails CLOSED in Rust's
+      // ensure_writeback_draft_before_write.) Tagged so the listener above
+      // does not answer its own announcement.
+      emitAppEvent(WRITEBACK_INDEX_CHANGED_EVENT, {
+        regionCount: list.length,
+        source: WRITEBACK_STORE_EVENT_SOURCE,
       });
-    // The script host keeps its OWN copy of the region index, so a script grid
-    // write can be routed into the same validated draft path this extension's
-    // commit guard uses without paying one IPC per cell. Tell it the index
-    // moved. (Its copy is an optimization only: a stale one fails CLOSED, in
-    // Rust's ensure_writeback_draft_before_write.)
-    emitAppEvent(WRITEBACK_INDEX_CHANGED_EVENT, { regionCount: regions.length });
-  }
+    }),
+  );
 
   cleanupFns.push(() => {
-    if (unregStyleInterceptor) {
-      unregStyleInterceptor();
-      unregStyleInterceptor = null;
+    if (unregOutline) {
+      unregOutline();
+      unregOutline = null;
+    }
+    if (unregMarkers) {
+      unregMarkers();
+      unregMarkers = null;
     }
   });
 
@@ -909,7 +1062,7 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(installInspectorFormPreviewBridge());
 
   // Initial snapshot load (in case subscriptions already exist at startup)
-  refreshAndUpdateInterceptor();
+  void refreshWriteback();
 
   isActivated = true;
 }

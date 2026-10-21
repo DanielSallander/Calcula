@@ -243,6 +243,7 @@ export const THEME_TOKENS = {
   TAB_ACCENT_SPARKLINE: '--tab-accent-sparkline',
   TAB_ACCENT_REPORT: '--tab-accent-report',
   TAB_ACCENT_CANVAS: '--tab-accent-canvas',
+  TAB_ACCENT_WRITEBACK: '--tab-accent-writeback',
 
   // --- Calcula Clusters: sidebar activity bar + status bar ---
   ACTIVITY_BAR_BG: '--activity-bar-bg',

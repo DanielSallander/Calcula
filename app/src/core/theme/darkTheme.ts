@@ -242,6 +242,7 @@ export const darkTheme: Record<string, string> = {
   [THEME_TOKENS.TAB_ACCENT_SPARKLINE]: "#fb923c",
   [THEME_TOKENS.TAB_ACCENT_REPORT]: "#fbbf24",
   [THEME_TOKENS.TAB_ACCENT_CANVAS]: "#f472b6",
+  [THEME_TOKENS.TAB_ACCENT_WRITEBACK]: "#a5b4fc",
 
   // --- Calcula Clusters: sidebar activity bar + status bar ---
   [THEME_TOKENS.ACTIVITY_BAR_BG]: "#1b1b1c",
