@@ -179,6 +179,13 @@ pub struct PullResult {
     /// re-read instead would let a hostile transport answer that question
     /// about a different manifest than the one materialized.
     pub publisher_key: String,
+    /// The version's writeback region declarations, from the SAME verified
+    /// manifest, exactly as signed (selectors name the APPLICATION's sheet ids).
+    /// A subscribe ignores them here -- its index is rebuilt from the pinned
+    /// manifest -- but a CHECKOUT must hand them back to the author: they are
+    /// the author's designations, and a working copy without them would push
+    /// the application with its writeback regions silently removed.
+    pub writeback_regions: Vec<crate::writeback::WritebackRegionDeclaration>,
 }
 
 /// A generic custom object pulled from an application (distribution brick 4).
@@ -1121,6 +1128,7 @@ pub fn pull_with_options(
         other_scope_pins,
         publisher_name: ver_manifest.publisher_name.clone(),
         publisher_key: ver_manifest.publisher_key.clone(),
+        writeback_regions: ver_manifest.writeback_regions.clone().unwrap_or_default(),
     })
 }
 

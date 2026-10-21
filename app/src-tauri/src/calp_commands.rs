@@ -7113,6 +7113,27 @@ pub(crate) fn materialize_pull_result(
         }
         MaterializeMode::Checkout => {
             let _ = sub_objects;
+            // THE APPLICATION'S WRITEBACK REGIONS COME BACK AS THE AUTHOR'S OWN
+            // DESIGNATIONS. They are what a push publishes (`assemble_publish_
+            // workbook` reads `writeback_draft_regions`), and checkout used to
+            // drop them: the author opened the application for editing, saw no
+            // regions anywhere, and the next push would have published the
+            // application with its writeback regions silently removed. Checkout
+            // keeps the application's sheet ids (`SheetIdMode::PreserveApplication`),
+            // so the selectors name the working copy's sheets as signed. Additive
+            // like the rest of checkout: the author's own regions stay, and one
+            // with the same id is replaced by the application's.
+            if !result.writeback_regions.is_empty() {
+                let mut drafts =
+                    state.writeback_draft_regions.write(effect).map_err(|e| e.to_string())?;
+                for region in &result.writeback_regions {
+                    if let Some(existing) = drafts.iter_mut().find(|d| d.id == region.id) {
+                        *existing = region.clone();
+                    } else {
+                        drafts.push(region.clone());
+                    }
+                }
+            }
         }
     }
 
@@ -19694,6 +19715,23 @@ mod writeback_rebuild_tests {
             .unwrap_or_else(|e| e.into_inner())
     }
 
+    /// One rebuild that INSTALLED. `seq_guard` serializes only this module:
+    /// every other test that materializes a pull also rebuilds the index and
+    /// takes a ticket from the same process-global counter, and a rebuild
+    /// overtaken by one of those installs nothing BY DESIGN (it is superseded).
+    /// Asserting on that pass read as "the skip must be visible, not silent"
+    /// under a parallel run while passing alone. Re-run until a pass is the
+    /// newest ticket and installs; the logic under test is unchanged.
+    fn rebuild_until_installed(state: &AppState, include_http: bool) -> RebuildOutcome {
+        for _ in 0..100 {
+            let outcome = rebuild_writeback_index_inner(state, include_http, next_writeback_rebuild_seq());
+            if outcome.installed {
+                return outcome;
+            }
+        }
+        panic!("no rebuild installed in 100 attempts");
+    }
+
     fn subscription(package: &str, registry: &str) -> calp::manifest::Subscription {
         calp::manifest::Subscription {
             package_name: package.to_string(),
@@ -19732,7 +19770,7 @@ mod writeback_rebuild_tests {
             "https://registry.example.com/reg",
         )]);
 
-        let outcome = rebuild_writeback_index_inner(&state, false, next_writeback_rebuild_seq());
+        let outcome = rebuild_until_installed(&state, false);
 
         assert!(
             outcome.deferred_http,
@@ -19754,7 +19792,7 @@ mod writeback_rebuild_tests {
         let location = format!("file:///{}", dir.path().display().to_string().replace('\\', "/"));
         let state = state_with(vec![subscription("acme.local", &location)]);
 
-        let outcome = rebuild_writeback_index_inner(&state, false, next_writeback_rebuild_seq());
+        let outcome = rebuild_until_installed(&state, false);
 
         assert!(
             !outcome.deferred_http,
@@ -19779,7 +19817,7 @@ mod writeback_rebuild_tests {
             "file:///C:/definitely/not/a/registry/xyzzy",
         )]);
 
-        rebuild_writeback_index_inner(&state, true, next_writeback_rebuild_seq());
+        rebuild_until_installed(&state, true);
 
         let skips = state.writeback_rebuild_skips.lock().unwrap();
         assert_eq!(skips.len(), 1, "the skip must be visible, not silent");
@@ -19818,7 +19856,7 @@ mod writeback_rebuild_tests {
         dev.version_pin = "dev".to_string();
         let state = state_with(vec![dev]);
 
-        let outcome = rebuild_writeback_index_inner(&state, false, next_writeback_rebuild_seq());
+        let outcome = rebuild_until_installed(&state, false);
 
         assert!(!outcome.deferred_http);
         assert!(state.writeback_rebuild_skips.lock().unwrap().is_empty());

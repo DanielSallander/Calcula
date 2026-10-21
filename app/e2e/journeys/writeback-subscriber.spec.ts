@@ -11,7 +11,7 @@
  * WHAT THIS PROVES, in the running app:
  *   1. the pulled sheet's region is reported on the subscriber's LOCAL sheet id
  *      (D1: it used to keep the publisher's id and fall back to sheet index 0),
- *      the dashed outline is painted round B3:B5 and NOT round A3, and the
+ *      the "w" frame is painted round B3:B5 and NOT round A3, and the
  *      contextual "Writeback" tab is absent on A1 and present on B3;
  *   2. typing 1, 2, 3 with the KEYBOARD saves exactly three drafts in the
  *      backend, paints the top-right draft marker (against a non-writeback
@@ -23,7 +23,10 @@
  *   4. editing B3 again and Discard Drafts puts back the last SENT value 1 and
  *      clears the marker;
  *   5. after save + File > New + reopen the region is still on the LOCAL sheet
- *      id, the tab still follows the cursor, and typing still saves a draft.
+ *      id, the tab still follows the cursor, and typing still saves a draft;
+ *   6. Open Application for Editing (a working copy) gives the author the
+ *      application's region back, framed on the sheet with a "w" on its edge,
+ *      and the push diff names no removed region (checkout used to drop it).
  *
  * NEVER THE OWNER'S WORKSPACE. C:\writeback-test is COPIED to a temp folder
  * first; a submit writes `submissions/` into the workspace it was subscribed
@@ -64,7 +67,7 @@ import {
   dismissToasts,
   COLLAB,
 } from "../helpers/calp-harness";
-import { subscribe } from "../helpers/calp-collab";
+import { subscribe, checkout, pushDiff, describeDiff } from "../helpers/calp-collab";
 
 const SOURCE_WS = "C:\\writeback-test";
 const APP = "writeback-test";
@@ -93,6 +96,8 @@ const REGION_CELLS = [
 
 let subscribedSheetName = "";
 let subscribedSheetId = "";
+/** The owner's own submission files before the run (they test there too). */
+let ownerSubmissionsBefore: string[] = [];
 
 // ---------------------------------------------------------------------------
 // Plumbing
@@ -197,6 +202,13 @@ async function topEdgeClip(page: Page, grid: GridHelper, ref: string) {
   return { x: Math.round(b.left + 6), y: Math.round(b.top - 2), width: Math.round(b.right - b.left - 12), height: 4 };
 }
 
+/** A small square straddling the MIDDLE of a cell's LEFT edge (where a frame "w" sits). */
+async function leftEdgeMidClip(page: Page, grid: GridHelper, ref: string) {
+  const b = await cellBox(page, grid, ref);
+  const mid = (b.top + b.bottom) / 2;
+  return { x: Math.round(b.left - 4), y: Math.round(mid - 4), width: 8, height: 8 };
+}
+
 /** A strip straddling a cell's BOTTOM edge. */
 async function bottomEdgeClip(page: Page, grid: GridHelper, ref: string) {
   const b = await cellBox(page, grid, ref);
@@ -266,8 +278,14 @@ test.describe.serial("writeback subscriber: see what you typed, send it, and see
   test.beforeAll(() => {
     if (!fs.existsSync(SOURCE_WS)) throw new Error(`the owner's workspace ${SOURCE_WS} is not on this machine`);
     if (fs.existsSync(WORK)) fs.rmSync(WORK, { recursive: true, force: true });
+    ownerSubmissionsBefore = listFilesRecursive(path.join(SOURCE_WS, APP, VERSION, "submissions")).sort();
     copyDir(SOURCE_WS, WS);
-    // The copy must start without submissions, or "files appeared" proves nothing.
+    // The owner tests in their own workspace too, so it may already hold
+    // submissions and reviews. Drop them from the COPY (never the source): the
+    // copy must start without submissions, or "files appeared" proves nothing.
+    for (const sub of ["submissions", "reviews"]) {
+      fs.rmSync(path.join(WS, APP, VERSION, sub), { recursive: true, force: true });
+    }
     expect(fs.existsSync(SUBMISSIONS)).toBe(false);
     drainNativeDialogs();
   });
@@ -338,8 +356,8 @@ test.describe.serial("writeback subscriber: see what you typed, send it, and see
     const outlineBottom = diffCount(b5Bottom, b4Bottom);
     const noOutlineA = diffCount(a3Top, a4Top);
     console.log(`[writeback] outline diff B3top/B4top=${outlineTop} B5bottom/B3bottom=${outlineBottom} A3top/A4top=${noOutlineA}`);
-    expect(outlineTop, "no dashed outline on B3's top edge").toBeGreaterThan(10);
-    expect(outlineBottom, "no dashed outline on B5's bottom edge").toBeGreaterThan(10);
+    expect(outlineTop, "no frame on B3's top edge").toBeGreaterThan(10);
+    expect(outlineBottom, "no frame on B5's bottom edge").toBeGreaterThan(10);
     expect(noOutlineA, "an outline was painted round A3 (not a writeback cell)").toBeLessThanOrEqual(2);
   });
 
@@ -429,7 +447,10 @@ test.describe.serial("writeback subscriber: see what you typed, send it, and see
     const regionId = (await regions(page))[0].regionId;
     expect(text).toContain(regionId);
     // Never the owner's workspace.
-    expect(fs.existsSync(path.join(SOURCE_WS, APP, VERSION, "submissions"))).toBe(false);
+    expect(
+      listFilesRecursive(path.join(SOURCE_WS, APP, VERSION, "submissions")).sort(),
+      "the run wrote into the owner's workspace",
+    ).toEqual(ownerSubmissionsBefore);
 
     // THE TOAST.
     await expect
@@ -539,6 +560,58 @@ test.describe.serial("writeback subscriber: see what you typed, send it, and see
     await parkCursor(grid);
     const [b4, c4] = await samplePixelPatches(page, [await markerClip(page, grid, "B4"), await markerClip(page, grid, "C4")]);
     expect(diffCount(b4, c4), "no marker on the reopened sheet's draft").toBeGreaterThan(4);
+
+    await newFile(page);
+  });
+  test("Open Application for Editing: the author sees the region framed, and a push would keep it", async ({ appPage: page, grid }) => {
+    test.setTimeout(300_000);
+    await newFile(page);
+    const r = await checkout(page, WS, APP);
+    expect(r.version).toBe(VERSION);
+
+    // Checkout keeps the application's own sheet id.
+    const list = await sheets(page);
+    const sheet = list.sheets.find((s) => s.sheetId === PUBLISHER_SHEET_ID);
+    expect(sheet, `sheets after checkout: ${JSON.stringify(list.sheets)}`).toBeTruthy();
+    await activate(page, sheet!.name);
+
+    // THE AUTHOR'S REGION IS BACK: checkout used to drop it, so the owner saw
+    // none and the next push would have published the application without it.
+    const own = await eventually(
+      () => callModule<Array<{ id: string; selector: { sheetId: string; rowStart: number; rowEnd: number; colStart: number; colEnd: number } }>>(page, COLLAB, "getWritebackDraftRegions"),
+      (l) => l.length === 1,
+      "the working copy has no designated writeback region",
+      15_000,
+    );
+    const sel = own[0].selector;
+    expect(sel.sheetId).toBe(PUBLISHER_SHEET_ID);
+    expect([sel.rowStart, sel.rowEnd, sel.colStart, sel.colEnd]).toEqual([2, 4, 1, 1]);
+
+    // An author is not a subscriber: no index entry, so no tab and no markers.
+    expect((await regions(page)).length).toBe(0);
+    await grid.clickCell("B3");
+    await page.waitForTimeout(400);
+    expect(await writebackTabCount(page)).toBe(0);
+
+    // THE FRAME: the perimeter on B3's top edge (not on B4's internal one), and
+    // a "w" in the middle of B4's left edge (not on D4's plain gridline).
+    await parkCursor(grid);
+    const [b3Top, b4Top, b4Left, d4Left] = await samplePixelPatches(page, [
+      await topEdgeClip(page, grid, "B3"),
+      await topEdgeClip(page, grid, "B4"),
+      await leftEdgeMidClip(page, grid, "B4"),
+      await leftEdgeMidClip(page, grid, "D4"),
+    ]);
+    const frameTop = diffCount(b3Top, b4Top);
+    const glyph = diffCount(b4Left, d4Left);
+    console.log(`[writeback] working copy frame B3top/B4top=${frameTop} w B4left/D4left=${glyph}`);
+    expect(frameTop, "no frame on B3's top edge in the working copy").toBeGreaterThan(10);
+    expect(glyph, "no 'w' on B4's left edge in the working copy").toBeGreaterThan(4);
+
+    // A PUSH WOULD KEEP IT: the diff against the base names no removed region.
+    const d = await pushDiff(page, WS, APP);
+    const removed = d.objects.filter((o) => o.domain === "writebackRegion" && o.change === "removed");
+    expect(removed, `the push would drop the region: ${describeDiff(d)}`).toEqual([]);
 
     await newFile(page);
   });

@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 550 | Open: 66 | Triaged: 0 | Fixed: 484 | Other: 0
+Total: 551 | Open: 66 | Triaged: 0 | Fixed: 485 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -5706,4 +5706,14 @@ The Writeback pane's refresh caught and only logged a failure, leaving its regio
 calp_detach and detach-sheet left the detached regions' drafts in writeback_layer, where they could never be submitted and were re-saved into the .cala forever.
 
 **Repro:** Subscribe, type a draft into a writeback cell, detach the sheet (or the subscription), save: the draft is still in the saved layer with no region to submit it to.
+**Fix:** fixed
+
+## BUG-0551 `[fixed]`
+
+**Found:** 2026-10-21 (manual)
+**Oracle:** checkout-drops-writeback-regions
+
+Checkout (Collaboration > Open Application for Editing) never restored the application's writeback region declarations into the working copy's writeback_draft_regions: PullResult did not carry them and materialize_pull_result's Checkout arm ignored them. The author saw no designated regions, and because a push publishes exactly writeback_draft_regions (assemble_publish_workbook), the next push would have published the application WITHOUT its writeback regions, silently ending data collection for every subscriber.
+
+**Repro:** Designate B3:B5 as a writeback region, publish 'writeback-test'. File > New, Collaboration > Open Application for Editing > writeback-test: the Writeback pane lists no regions, calp_get_writeback_draft_regions is empty, and the push diff reports writebackRegion 'removed'.
 **Fix:** fixed

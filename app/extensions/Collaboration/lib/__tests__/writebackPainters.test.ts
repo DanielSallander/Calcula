@@ -1,8 +1,10 @@
 // FILENAME: app/extensions/Collaboration/lib/__tests__/writebackPainters.test.ts
 // PURPOSE: The writeback grid painters: the state marker sits inside-left of
 //          the note triangle and takes its colours from the theme tones; the
-//          region outline paints only the active sheet's regions, dashed, at
-//          70% alpha, skipping edges that continue off-screen.
+//          region frame paints only the active sheet's regions as a SOLID soft
+//          line broken by a tiny "w" at the middle of every whole outer cell
+//          edge, skipping edges that continue off-screen and walking only the
+//          visible rows/columns.
 
 import { describe, it, expect, vi } from "vitest";
 import {
@@ -14,7 +16,10 @@ import {
 } from "../writebackDecorations";
 import {
   createWritebackOutlinePainter,
-  OUTLINE_ALPHA,
+  visibleIndices,
+  FRAME_GLYPH,
+  FRAME_LINE_ALPHA,
+  FRAME_GLYPH_ALPHA,
   type OutlineRegion,
 } from "../writebackOutline";
 import type { GridLayerContext, RangeCanvasRect } from "@api/gridLayers";
@@ -22,7 +27,13 @@ import type { CellDecorationContext } from "@api/cellDecorations";
 
 /** A recording 2D context: what was filled/stroked, with which style. */
 function recorder() {
-  const calls: { op: string; args: unknown[]; fillStyle?: unknown; strokeStyle?: unknown }[] = [];
+  const calls: {
+    op: string;
+    args: unknown[];
+    fillStyle?: unknown;
+    strokeStyle?: unknown;
+    globalAlpha?: unknown;
+  }[] = [];
   const ctx: Record<string, unknown> = {
     fillStyle: "",
     strokeStyle: "",
@@ -31,10 +42,19 @@ function recorder() {
     _dash: [] as number[],
   };
   const rec = (op: string) => (...args: unknown[]) =>
-    calls.push({ op, args, fillStyle: ctx.fillStyle, strokeStyle: ctx.strokeStyle });
-  for (const op of ["save", "restore", "beginPath", "arc", "fill", "stroke", "fillRect", "moveTo", "lineTo"]) {
+    calls.push({
+      op,
+      args,
+      fillStyle: ctx.fillStyle,
+      strokeStyle: ctx.strokeStyle,
+      globalAlpha: ctx.globalAlpha,
+    });
+  for (const op of [
+    "save", "restore", "beginPath", "arc", "fill", "stroke", "fillRect", "moveTo", "lineTo", "fillText",
+  ]) {
     ctx[op] = rec(op);
   }
+  ctx.measureText = () => ({ width: 6 });
   ctx.setLineDash = (d: number[]) => {
     ctx._dash = d;
   };
@@ -133,67 +153,145 @@ describe("state marker", () => {
   });
 });
 
-describe("region outline layer", () => {
-  const layerContext = (ctx: CanvasRenderingContext2D) =>
-    ({ ctx, canvasWidth: 800, canvasHeight: 600 }) as unknown as GridLayerContext;
+describe("region frame layer", () => {
+  // B3:B5 on a sheet of 100px columns and 20px rows, B at x=100, row 2 at y=60.
+  const COL_W = 100;
+  const ROW_H = 20;
+  const xOf = (c: number) => (c - 1) * COL_W + 100;
+  const yOf = (r: number) => (r - 2) * ROW_H + 60;
 
-  function rect(over: Partial<RangeCanvasRect> = {}): RangeCanvasRect {
-    return {
-      x: 100,
-      y: 60,
-      width: 100,
-      height: 60,
-      clippedLeft: false,
-      clippedTop: false,
-      clippedRight: false,
-      clippedBottom: false,
-      ...over,
-    };
+  function layerContext(
+    ctx: CanvasRenderingContext2D,
+    viewport = { startRow: 0, startCol: 0, rowCount: 30, colCount: 10, scrollX: 0, scrollY: 0 },
+    freezeConfig: { freezeRow: number | null; freezeCol: number | null } | null = null,
+  ): GridLayerContext {
+    return { ctx, canvasWidth: 800, canvasHeight: 600, viewport, freezeConfig } as unknown as GridLayerContext;
   }
 
-  it("strokes only the active sheet's regions, dashed 3/2, info tone at 70%", () => {
+  /** Plain geometry: every range wholly on screen, unless `over` says otherwise. */
+  function geometry(
+    over: (sr: number, sc: number, er: number, ec: number) => Partial<RangeCanvasRect> = () => ({}),
+  ) {
+    return vi.fn(
+      (_c: GridLayerContext, sr: number, sc: number, er: number, ec: number): RangeCanvasRect | null => ({
+        x: xOf(sc),
+        y: yOf(sr),
+        width: (ec - sc + 1) * COL_W,
+        height: (er - sr + 1) * ROW_H,
+        clippedLeft: false,
+        clippedTop: false,
+        clippedRight: false,
+        clippedBottom: false,
+        ...over(sr, sc, er, ec),
+      }),
+    );
+  }
+
+  const B3_B5: OutlineRegion[] = [{ rowStart: 2, rowEnd: 4, colStart: 1, colEnd: 1 }];
+  const colors = () => ({ line: "LINE", glyph: "GLYPH" });
+
+  it("frames B3:B5 with a solid soft line and one 'w' at the middle of every outer cell edge", () => {
     const { ctx, calls } = recorder();
-    const active: OutlineRegion[] = [{ rowStart: 2, rowEnd: 4, colStart: 1, colEnd: 1 }];
-    const rectOf = vi.fn(() => rect());
-    const paint = createWritebackOutlinePainter({
-      regions: () => active,
-      color: () => "INFO",
-      rectOf,
-    });
+    const paint = createWritebackOutlinePainter({ regions: () => B3_B5, colors, rectOf: geometry() });
     paint(layerContext(ctx));
-    expect(rectOf).toHaveBeenCalledTimes(1);
-    expect(rectOf.mock.calls[0].slice(1)).toEqual([2, 1, 4, 1]);
-    expect((ctx as unknown as { _dash: number[] })._dash).toEqual([3, 2]);
-    expect((ctx as unknown as { globalAlpha: number }).globalAlpha).toBe(OUTLINE_ALPHA);
+
+    // Solid, never the copy marquee's dashes.
+    expect((ctx as unknown as { _dash: number[] })._dash).toEqual([]);
     const stroke = calls.find((c) => c.op === "stroke")!;
-    expect(stroke.strokeStyle).toBe("INFO");
-    // Four edges on the half-pixel grid.
-    expect(calls.filter((c) => c.op === "lineTo").length).toBe(4);
-    expect(calls.find((c) => c.op === "moveTo")!.args).toEqual([100.5, 60.5]);
+    expect(stroke.strokeStyle).toBe("LINE");
+    expect(stroke.globalAlpha).toBe(FRAME_LINE_ALPHA);
+
+    const glyphs = calls.filter((c) => c.op === "fillText");
+    expect(glyphs.every((g) => g.args[0] === FRAME_GLYPH)).toBe(true);
+    expect(glyphs.every((g) => g.fillStyle === "GLYPH" && g.globalAlpha === FRAME_GLYPH_ALPHA)).toBe(true);
+    const at = glyphs.map((g) => [g.args[1], g.args[2]]);
+    // Top and bottom: one cell wide, so one "w" each, centred on B.
+    expect(at).toContainEqual([150, 60.5 - 1]);
+    expect(at).toContainEqual([150, 119.5 - 1]);
+    // Left and right: one per row, centred on each row (y 70, 90, 110).
+    for (const y of [70, 90, 110]) {
+      expect(at).toContainEqual([100.5, y - 1]);
+      expect(at).toContainEqual([199.5, y - 1]);
+    }
+    expect(glyphs.length).toBe(8);
+  });
+
+  it("breaks the line around each 'w' and nowhere else", () => {
+    const { ctx, calls } = recorder();
+    const paint = createWritebackOutlinePainter({ regions: () => B3_B5, colors, rectOf: geometry() });
+    paint(layerContext(ctx));
+    // The left edge: x = 100.5, from 60.5 to 119.5, cut around y 70, 90, 110
+    // (glyph 9px high + 2px clear each side = 6.5 either side of the centre).
+    const pairs: Array<[unknown[], unknown[]]> = [];
+    for (let i = 0; i < calls.length; i++) {
+      if (calls[i].op === "moveTo" && calls[i + 1]?.op === "lineTo") pairs.push([calls[i].args, calls[i + 1].args]);
+    }
+    const left = pairs.filter(([a, b]) => a[0] === 100.5 && b[0] === 100.5).map(([a, b]) => [a[1], b[1]]);
+    expect(left).toEqual([
+      [60.5, 63.5],
+      [76.5, 83.5],
+      [96.5, 103.5],
+      [116.5, 119.5],
+    ]);
   });
 
   it("paints nothing when the active sheet has no regions (another sheet, a canvas page)", () => {
     const { ctx, calls } = recorder();
-    const rectOf = vi.fn(() => rect());
-    const paint = createWritebackOutlinePainter({ regions: () => [], color: () => "INFO", rectOf });
+    const rectOf = geometry();
+    const paint = createWritebackOutlinePainter({ regions: () => [], colors, rectOf });
     paint(layerContext(ctx));
     expect(rectOf).not.toHaveBeenCalled();
     expect(calls.length).toBe(0);
   });
 
-  it("skips edges that continue off-screen and regions not on screen", () => {
+  it("skips an edge that continues off-screen, and gives no 'w' to a half-visible cell", () => {
     const { ctx, calls } = recorder();
-    const regions: OutlineRegion[] = [
-      { rowStart: 0, rowEnd: 99, colStart: 0, colEnd: 0 },
-      { rowStart: 500, rowEnd: 501, colStart: 0, colEnd: 0 },
-    ];
-    let n = 0;
-    const paint = createWritebackOutlinePainter({
-      regions: () => regions,
-      color: () => "INFO",
-      rectOf: () => (n++ === 0 ? rect({ clippedBottom: true }) : null),
-    });
+    // The region runs off the bottom; its last visible row (4) is cut.
+    const rectOf = geometry((sr, _sc, er) =>
+      sr !== er ? { clippedBottom: true } : sr === 4 ? { clippedBottom: true } : {},
+    );
+    const paint = createWritebackOutlinePainter({ regions: () => B3_B5, colors, rectOf });
     paint(layerContext(ctx));
-    expect(calls.filter((c) => c.op === "lineTo").length).toBe(3);
+    const at = calls.filter((c) => c.op === "fillText").map((g) => [g.args[1], g.args[2]]);
+    expect(at).not.toContainEqual([150, 119.5 - 1]); // no bottom edge
+    expect(at).not.toContainEqual([100.5, 110 - 1]); // row 4 is cut: no centred "w"
+    expect(at).toContainEqual([100.5, 70 - 1]);
+    expect(at.length).toBe(1 + 2 + 2); // top + rows 2,3 on both sides
+  });
+
+  it("keeps a plain line on a cell too short for a 'w'", () => {
+    const { ctx, calls } = recorder();
+    const rectOf = vi.fn(
+      (_c: GridLayerContext, sr: number, sc: number, er: number, ec: number): RangeCanvasRect => ({
+        x: xOf(sc),
+        y: (sr - 2) * 10 + 60,
+        width: (ec - sc + 1) * COL_W,
+        height: (er - sr + 1) * 10,
+        clippedLeft: false,
+        clippedTop: false,
+        clippedRight: false,
+        clippedBottom: false,
+      }),
+    );
+    const paint = createWritebackOutlinePainter({ regions: () => B3_B5, colors, rectOf });
+    paint(layerContext(ctx));
+    const sides = calls.filter((c) => c.op === "fillText" && (c.args[1] === 100.5 || c.args[1] === 199.5));
+    expect(sides.length).toBe(0);
+    expect(calls.some((c) => c.op === "stroke")).toBe(true);
+  });
+
+  it("walks only the visible rows of a huge region", () => {
+    const { ctx } = recorder();
+    const rectOf = geometry();
+    const huge: OutlineRegion[] = [{ rowStart: 0, rowEnd: 999_999, colStart: 1, colEnd: 1 }];
+    const paint = createWritebackOutlinePainter({ regions: () => huge, colors, rectOf });
+    paint(layerContext(ctx, { startRow: 5000, startCol: 0, rowCount: 30, colCount: 10, scrollX: 0, scrollY: 0 }));
+    expect(rectOf.mock.calls.length).toBeLessThan(100);
+  });
+
+  it("visibleIndices: frozen ones first, then the scrolling window, clamped to the region", () => {
+    expect(visibleIndices(0, 100, 2, 50, 3)).toEqual([0, 1, 50, 51, 52, 53, 54]);
+    expect(visibleIndices(10, 12, null, 0, 30)).toEqual([10, 11, 12]);
+    expect(visibleIndices(10, 12, 3, 40, 5)).toEqual([]);
   });
 });

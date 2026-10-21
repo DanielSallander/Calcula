@@ -28,9 +28,14 @@ to ensure the necessary doors were left open.
 > into B3:B5) showed nothing that said whether the values were written back. The
 > causes and the new surface are in **UI** below: region ids are now the
 > subscriber's LOCAL sheet ids, a single-cell entry saves a draft, the full-cell
-> tints are replaced by one dashed outline per region plus a small marker on
+> tints are replaced by one "w" frame per region (first a dashed outline, which
+> read as the copy marquee) plus a small marker on
 > unsent and rejected cells, and a contextual **Writeback** ribbon tab carries
-> Submit, Submit All, Discard Drafts and Check Status.
+> Submit, Submit All, Discard Drafts and Check Status. A working copy (Open
+> Application for Editing) now keeps the application's regions -- checkout used to
+> drop them, so the author saw none and the next push would have published the
+> application WITHOUT its writeback regions -- and the author sees the frame on
+> their own designated regions too.
 
 ## Motivation
 
@@ -407,13 +412,21 @@ general capability, not a special case for `GATHER`.
 
 What a subscriber sees on a sheet that carries writeback regions:
 
-- **One outline per region.** A 1px dashed line (dash 3,2) round each region on
-  the ACTIVE sheet, in the theme's INFO tone at about 70% alpha. No fill: the
-  cells keep their gridlines and the publisher's formatting. It is a grid
-  LAYER under the selection (`collaboration:writeback-outline`,
-  `lib/writebackOutline.ts`), frozen-pane correct through
-  `@api/gridLayers` `rangeToCanvasRect`, and it is not painted on a canvas
-  page.
+- **One "w" frame per region** (the owner's design, 2026-10-21). A soft SOLID
+  1px line round each region on the ACTIVE sheet, broken at the middle of every
+  outer cell edge by a tiny "w" (9px). It replaced a dashed outline that read
+  as the copy marquee. The line is the grid's cell text colour at 30% alpha and
+  the "w" at 55%, so it follows every skin with no literal. No fill: the cells
+  keep their gridlines and the publisher's formatting. A "w" is placed only on
+  an edge cell wholly on screen along that edge and long enough to hold it;
+  only visible rows/columns are walked. It is a grid LAYER under the selection
+  (`collaboration:writeback-outline`, `lib/writebackOutline.ts`), frozen-pane
+  correct through `@api/gridLayers` `rangeToCanvasRect`, and it is not
+  painted on a canvas page.
+- **The author sees it too.** The frame also covers the regions this workbook
+  itself designated (`calp_get_writeback_draft_regions`, read by the same
+  store), in a fresh workbook and in a working copy. Those get no marker and no
+  tab: they hold no values.
 - **A marker on cells that need attention.** A ~3px disc at the cell's
   top-right, inset to sit just LEFT of the 6px note/comment triangle so both
   stay visible, ringed in the cell's background colour, with a tiny "!" from
@@ -426,8 +439,9 @@ What a subscriber sees on a sheet that carries writeback regions:
     tab's Status line, the success toast and the marker disappearing.
 - Colours come from the active skin's tone tokens
   (`@api/appearance` `getCanvasToneColors()`), never literals.
-- Both painters are registered only while the workbook HAS regions, so a
-  workbook without writeback pays nothing per frame.
+- Both painters are registered only while the workbook HAS regions (the frame
+  also while it has designated ones), so a workbook without writeback pays
+  nothing per frame.
 
 Locked cells (after a deadline, a one-shot region already sent) still have no
 look of their own; an edit there is refused by the backend with its message.

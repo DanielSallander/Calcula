@@ -25,7 +25,9 @@
 import {
   getWritebackRegions,
   getWritebackLayer,
+  getWritebackDraftRegions,
   reconcileWriteback,
+  type RegionSelector,
   type WritebackRegionEntry,
   type WritebackSubmission,
 } from "@api/collaboration";
@@ -105,6 +107,16 @@ let layer: readonly WritebackSubmission[] = EMPTY_LAYER;
 /** `regionId:row:col` -> the entry that decides the cell's state. */
 let entryByCell = new Map<string, WritebackSubmission>();
 let countsByRegion = new Map<string, RegionCounts>();
+/**
+ * The AUTHOR's own designated regions (the ones this workbook will publish --
+ * `calp_get_writeback_draft_regions`), by their sheet id. They are not in the
+ * subscriber index, carry no values and get no tab or marker, but they get the
+ * same frame: an author who designated B3:B5 sees it on the sheet, in a fresh
+ * workbook and in a working copy alike. Their selectors hold the workbook's own
+ * (local) sheet ids -- a working copy keeps the application's ids.
+ */
+let designatedBySheetId = new Map<string, RegionSelector[]>();
+let designatedCount = 0;
 let loaded = false;
 let lastError: string | null = null;
 /** Why the last read could not reconcile with the workspace, or null. */
@@ -174,6 +186,18 @@ function apply(nextRegions: WritebackRegionEntry[], nextLayer: WritebackSubmissi
   countsByRegion = counts;
 }
 
+function applyDesignated(selectors: readonly RegionSelector[]): void {
+  const bySheet = new Map<string, RegionSelector[]>();
+  for (const sel of selectors) {
+    if (!sel || !sel.sheetId) continue;
+    const list = bySheet.get(sel.sheetId);
+    if (list) list.push(sel);
+    else bySheet.set(sel.sheetId, [sel]);
+  }
+  designatedBySheetId = bySheet;
+  designatedCount = selectors.length;
+}
+
 function notify(): void {
   version++;
   for (const cb of Array.from(listeners)) {
@@ -203,11 +227,20 @@ function errorText(err: unknown): string {
 // ---------------------------------------------------------------------------
 
 async function read(stillCurrent: () => boolean): Promise<void> {
+  // The author's own regions are read beside the index. A failure keeps the
+  // previous set (null), never an empty one: a transient IPC error must not
+  // make a designated region look removed.
+  const designatedRead = getWritebackDraftRegions().catch((err) => {
+    console.warn("[writebackStore] could not read this workbook's own regions:", err);
+    return null;
+  });
   let nextRegions: WritebackRegionEntry[];
   try {
     nextRegions = await getWritebackRegions();
   } catch (err) {
+    const designated = await designatedRead;
     if (!stillCurrent()) return;
+    if (designated) applyDesignated(designated.map((d) => d.selector));
     lastError = `Could not read the writeback regions: ${errorText(err)}`;
     console.warn("[writebackStore]", lastError);
     notify();
@@ -232,8 +265,10 @@ async function read(stillCurrent: () => boolean): Promise<void> {
       layerError = `Could not read your writeback values: ${errorText(err)}`;
     }
   }
+  const designated = await designatedRead;
   if (!stillCurrent()) return;
   apply(nextRegions, nextLayer ?? [...layer]);
+  if (designated) applyDesignated(designated.map((d) => d.selector));
   loaded = true;
   lastError = layerError;
   lastReconcileError = reconcileError;
@@ -273,7 +308,7 @@ export function joinWritebackRefresh(): Promise<void> {
 export function startWritebackStore(): () => void {
   const stopPages = startReportPages();
   const offPages = onReportPagesChanged(() => {
-    if (regions.length === 0) return;
+    if (regions.length === 0 && designatedCount === 0) return;
     notify();
     requestRepaint();
   });
@@ -292,6 +327,8 @@ export function resetWritebackSnapshot(): void {
   layer = EMPTY_LAYER;
   entryByCell = new Map();
   countsByRegion = new Map();
+  designatedBySheetId = new Map();
+  designatedCount = 0;
   loaded = false;
   lastError = null;
   lastReconcileError = null;
@@ -401,6 +438,41 @@ export function getActiveSheetRegions(): readonly WritebackRegionEntry[] {
 }
 
 /** The region covering a cell of the ACTIVE sheet, or null. */
+/** A rectangle the region FRAME is drawn around. */
+export interface WritebackFrameRegion {
+  rowStart: number;
+  rowEnd: number;
+  colStart: number;
+  colEnd: number;
+}
+
+/** Whether anything gets a frame: a subscribed region or one this workbook designated. */
+export function hasWritebackFrames(): boolean {
+  return regions.length > 0 || designatedCount > 0;
+}
+
+/** How many regions this workbook itself designated (author side). */
+export function getDesignatedRegionCount(): number {
+  return designatedCount;
+}
+
+/**
+ * Every rectangle the frame is drawn around on the ACTIVE sheet: the subscribed
+ * regions there plus the ones this workbook designated there. Empty on a canvas
+ * page. The author's regions are matched only by sheet id (they are not in the
+ * index, so there is no index fallback for them).
+ */
+export function getActiveSheetFrameRegions(): readonly WritebackFrameRegion[] {
+  const subscribed = getActiveSheetRegions();
+  if (designatedCount === 0) return subscribed;
+  const state = getGridStateSnapshot();
+  if (!state || state.surface === "canvas") return subscribed;
+  const id = sheetIdAt(getReportPagesSnapshot(), state.sheetContext?.activeSheetIndex);
+  const own = id ? designatedBySheetId.get(id) : undefined;
+  if (!own || own.length === 0) return subscribed;
+  return [...subscribed, ...own];
+}
+
 export function getActiveRegionAt(row: number, col: number): WritebackRegionEntry | null {
   for (const r of getActiveSheetRegions()) {
     if (inRegion(r, row, col)) return r;

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 551,
+  "nextId": 552,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -15180,6 +15180,32 @@
         "status": "fixed",
         "date": "2026-10-21",
         "description": "app/src-tauri/src/calp_commands.rs: calp_detach clears the writeback_layer under the detach's own DocumentEffect with a WritebackInvalidated audit row; detach_sheet_inner drops layer entries only for regions no longer indexed after the rebuild (an unreachable workspace keeps its unsent work). Pinned by app/src-tauri/src/writeback_local_sheet_tests.rs."
+      }
+    },
+    {
+      "id": "BUG-0551",
+      "status": "fixed",
+      "discovered": "2026-10-21",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Owner live test 2026-10-21: Open Application for Editing on writeback-test"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "checkout-drops-writeback-regions",
+        "severity": "high",
+        "message": "Checkout (Collaboration > Open Application for Editing) never restored the application's writeback region declarations into the working copy's writeback_draft_regions: PullResult did not carry them and materialize_pull_result's Checkout arm ignored them. The author saw no designated regions, and because a push publishes exactly writeback_draft_regions (assemble_publish_workbook), the next push would have published the application WITHOUT its writeback regions, silently ending data collection for every subscriber.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Author-designated regions were never drawn on the grid (only listed in the Writeback pane), so their absence in a working copy was invisible; no checkout test used an application that declared writeback regions.",
+      "repro": {
+        "description": "Designate B3:B5 as a writeback region, publish 'writeback-test'. File > New, Collaboration > Open Application for Editing > writeback-test: the Writeback pane lists no regions, calp_get_writeback_draft_regions is empty, and the push diff reports writebackRegion 'removed'."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-21",
+        "description": "core/calp/src/pull.rs (PullResult.writeback_regions from the same verified manifest); app/src-tauri/src/calp_commands.rs (MaterializeMode::Checkout merges them into writeback_draft_regions by id, additive; checkout keeps the application's sheet ids so selectors are valid as signed). The grid now frames the author's own designated regions too (app/extensions/Collaboration/lib/writebackStore.ts getActiveSheetFrameRegions; lib/writebackOutline.ts). Pinned by calp_materialize_tests a_checkout_keeps_the_applications_writeback_regions_as_the_authors_own / a_subscribe_does_not_adopt_the_applications_writeback_regions, writebackStore.test.ts, and journey step 6 of app/e2e/journeys/writeback-subscriber.spec.ts (live 6/6; the 'w' check proved by sabotage: 28 -> 0)."
       }
     }
   ]

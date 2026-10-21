@@ -1,7 +1,7 @@
 // FILENAME: app/extensions/Collaboration/index.ts
 // PURPOSE: Collaboration extension entry point — .calp publish, subscribe, refresh, overrides.
 // CONTEXT: Registers task panes, dialogs, the writeback guards and the writeback
-// grid painters (a dashed region outline layer and unsent/rejected state
+// grid painters (a region frame layer -- a soft line with tiny "w"s -- and unsent/rejected state
 // markers, registered only while regions exist). It also owns TWO top-level
 // menus — "Collaboration" (order 46) for the .calp application lifecycle and
 // "Writeback" (order 47) for the data-collection channel. They were one
@@ -61,7 +61,9 @@ import {
   getWritebackRegionList,
   isWritebackSnapshotLoaded,
   getActiveSheetId,
-  getActiveSheetRegions,
+  getActiveSheetFrameRegions,
+  hasWritebackFrames,
+  getDesignatedRegionCount,
   getActiveRegionAt,
   getActiveCellState,
   activeRangeOverlapsWriteback,
@@ -73,6 +75,7 @@ import {
 import { decideWritebackRangeGuard, coerceWritebackInput } from "./lib/writebackGuards";
 import { createWritebackDecoration } from "./lib/writebackDecorations";
 import { createWritebackOutlinePainter } from "./lib/writebackOutline";
+import { WRITEBACK_REGIONS_CHANGED_EVENT } from "./components/DesignateWritebackDialog";
 import {
   handleWritebackSelectionChange,
   syncWritebackTabToRegions,
@@ -825,6 +828,25 @@ function activate(context: ExtensionContext): void {
   refreshOn(AppEvents.PACKAGE_UPDATED);
   // A subscribed sheet deleted takes its regions with it.
   refreshOn(AppEvents.SHEET_DELETED);
+  // The author designated, edited or removed one of this workbook's own
+  // regions (the frame shows them too).
+  refreshOn(WRITEBACK_REGIONS_CHANGED_EVENT);
+  // Inserting or deleting rows/columns moves the author's own regions in the
+  // backend (subscribed regions refuse structural edits). Only a workbook that
+  // designated some re-reads.
+  for (const structural of [
+    AppEvents.ROWS_INSERTED,
+    AppEvents.ROWS_DELETED,
+    AppEvents.COLUMNS_INSERTED,
+    AppEvents.COLUMNS_DELETED,
+  ]) {
+    cleanupFns.push(
+      context.events.on(structural, () => {
+        if (getDesignatedRegionCount() === 0) return;
+        void refreshWriteback();
+      }),
+    );
+  }
   // An environment switch can change the version, and with it the regions.
   refreshOn(ENVIRONMENTS_CHANGED_EVENT);
   // SHEET_CHANGED with NO sheet index is the "content replaced" announcement
@@ -942,17 +964,21 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(unregCommitGuard);
 
-  // GRID PAINTERS: one discreet dashed outline per region on the active sheet
+  // GRID PAINTERS: one discreet "w" frame per region on the active sheet
   // (a layer under the selection) and a small state marker on unsent and
   // rejected cells (an over-selection decoration beside the note triangle).
   // Registered only while regions exist, so a workbook without writeback pays
-  // nothing per frame. Colours are the theme's tone tokens, read per frame.
+  // nothing per frame. Colours come from the skin (the frame: the grid's cell
+  // text colour at low alpha; the markers: the tone tokens), read per frame.
   let unregOutline: (() => void) | null = null;
   let unregMarkers: (() => void) | null = null;
 
   const outlinePaint = createWritebackOutlinePainter({
-    regions: getActiveSheetRegions,
-    color: () => getCanvasToneColors().infoFg,
+    regions: getActiveSheetFrameRegions,
+    colors: () => {
+      const text = getActiveGridTheme().cellText;
+      return { line: text, glyph: text };
+    },
     rectOf: rangeToCanvasRect,
   });
   const markerPaint = createWritebackDecoration({
@@ -969,7 +995,10 @@ function activate(context: ExtensionContext): void {
   });
 
   function updateGridPainters(): void {
-    if (hasWritebackRegions()) {
+    // The FRAME is for every writeback region the author designated or a
+    // subscription brought in; the state MARKERS only for subscribed regions,
+    // the only ones that hold values.
+    if (hasWritebackFrames()) {
       if (!unregOutline) {
         unregOutline = context.grid.layers.register({
           id: "collaboration:writeback-outline",
@@ -978,6 +1007,11 @@ function activate(context: ExtensionContext): void {
           paint: outlinePaint,
         });
       }
+    } else if (unregOutline) {
+      unregOutline();
+      unregOutline = null;
+    }
+    if (hasWritebackRegions()) {
       if (!unregMarkers) {
         unregMarkers = context.grid.decorations.register(
           "collaboration:writeback-marker",
@@ -986,15 +1020,9 @@ function activate(context: ExtensionContext): void {
           "over-selection",
         );
       }
-    } else {
-      if (unregOutline) {
-        unregOutline();
-        unregOutline = null;
-      }
-      if (unregMarkers) {
-        unregMarkers();
-        unregMarkers = null;
-      }
+    } else if (unregMarkers) {
+      unregMarkers();
+      unregMarkers = null;
     }
   }
 

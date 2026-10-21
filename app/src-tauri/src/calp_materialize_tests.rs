@@ -3864,3 +3864,136 @@ fn an_untouched_checkout_push_republishes_navigator_targets_byte_for_byte() {
         "an untouched push changed the application's page targets"
     );
 }
+
+// ===========================================================================
+// A working copy keeps the application's writeback regions (2026-10-21).
+// ===========================================================================
+
+/// One writeback region over B3:B5 of `sheet`, as the designate dialog writes it.
+fn writeback_region_on(sheet: identity::SheetId, id: &str) -> calp::WritebackRegionDeclaration {
+    serde_json::from_value(serde_json::json!({
+        "id": id,
+        "selector": {
+            "sheetId": sheet.to_string(),
+            "rowStart": 2, "rowEnd": 4, "colStart": 1, "colEnd": 1
+        },
+        "mode": "per_subscriber",
+        "schema": { "valueType": "number", "required": false },
+        "visibility": "own_plus_aggregate",
+        "submissionPolicy": "on_submit"
+    }))
+    .expect("a valid declaration")
+}
+
+/// Publish sheet 0 of `wb` as "literals" v1.0.0 carrying `regions`.
+fn publish_with_writeback(
+    dir: &TempDir,
+    prof: &Path,
+    wb: &Workbook,
+    regions: Vec<calp::WritebackRegionDeclaration>,
+) {
+    let reg = calp::workspace::LocalWorkspace::open(dir.path()).unwrap();
+    let request = PublishRequest {
+        workbook: wb,
+        package_name: "literals".to_string(),
+        version: SemVer::new(1, 0, 0),
+        kind: "report".to_string(),
+        mode: PushMode::CreateNew,
+        change_summary: "first".to_string(),
+        sheet_indices: vec![0],
+        now: "2026-10-21T00:00:00Z".to_string(),
+        published_by: "author".to_string(),
+        writeback_regions: Some(regions),
+        model_writebacks: None,
+        object_scripts: None,
+        module_scripts: None,
+        notebooks: None,
+        data_sources: Vec::new(),
+        excluded_regions: Vec::new(),
+        custom_objects: Vec::new(),
+        include_comments: false,
+        min_app_version: String::new(),
+    };
+    publish::publish(&reg, &request, prof).expect("publish failed");
+}
+
+/// CHECKOUT hands the application's writeback regions back to the author as
+/// this workbook's own designations, on the working copy's sheet, next to any
+/// the author already had.
+///
+/// Before the fix checkout dropped them: the owner opened `writeback-test` for
+/// editing and "could not see the writeback regions I had designated", and --
+/// because a push publishes exactly `writeback_draft_regions` -- the next push
+/// would have published the application with its regions silently removed.
+///
+/// SABOTAGE: empty the `MaterializeMode::Checkout` arm's region merge in
+/// `materialize_pull_result`.
+#[test]
+fn a_checkout_keeps_the_applications_writeback_regions_as_the_authors_own() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let mut wb = Workbook::default();
+    wb.sheets = vec![Sheet::new("Form".to_string())];
+    let form = wb.sheets[0].id;
+    let app_region = "01a15d70-0000-7000-8000-00000000a001";
+    publish_with_writeback(&dir, prof.path(), &wb, vec![writeback_region_on(form, app_region)]);
+
+    let h = Harness::new();
+    // The author's own region on a sheet of their own, designated before the
+    // checkout. Additive checkout must keep it.
+    let own_sheet = new_sheet_id();
+    let own_region = "01a15d70-0000-7000-8000-00000000b002";
+    h.state
+        .writeback_draft_regions
+        .write(&test_effect())
+        .unwrap()
+        .push(writeback_region_on(own_sheet, own_region));
+
+    let pulled = checkout_pull(&dir, prof.path());
+    assert_eq!(pulled.writeback_regions.len(), 1, "the verified manifest's regions ride the pull");
+    h.materialize(pulled, MaterializeMode::Checkout);
+
+    let drafts = h.state.writeback_draft_regions.read().unwrap().clone();
+    let ids: Vec<&str> = drafts.iter().map(|d| d.id.as_str()).collect();
+    assert!(ids.contains(&own_region), "the author's own region survives the checkout: {ids:?}");
+    let restored = drafts
+        .iter()
+        .find(|d| d.id == app_region)
+        .unwrap_or_else(|| panic!("the application's region is the author's again: {ids:?}"));
+    assert_eq!(restored.selector.sheet_id, form, "on the application's own sheet id");
+    assert_eq!(
+        (restored.selector.row_start, restored.selector.row_end),
+        (2, 4),
+        "exactly as signed",
+    );
+    let sheet_ids = h.state.sheet_ids.read().unwrap().clone();
+    assert!(
+        sheet_ids.contains(&form),
+        "and that sheet IS in the working copy, so the frame and the push both find it",
+    );
+    assert_eq!(drafts.len(), 2, "nothing duplicated");
+}
+
+/// A SUBSCRIBE never makes the application's regions the subscriber's own
+/// designations -- they arrive through the index, and the subscriber's next
+/// publish of their own must not carry someone else's regions.
+#[test]
+fn a_subscribe_does_not_adopt_the_applications_writeback_regions() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let mut wb = Workbook::default();
+    wb.sheets = vec![Sheet::new("Form".to_string())];
+    let form = wb.sheets[0].id;
+    publish_with_writeback(
+        &dir,
+        prof.path(),
+        &wb,
+        vec![writeback_region_on(form, "01a15d70-0000-7000-8000-00000000c003")],
+    );
+    let h = Harness::new();
+    h.materialize(subscribe_pull(&dir, prof.path()), MaterializeMode::Subscribe);
+    assert!(
+        h.state.writeback_draft_regions.read().unwrap().is_empty(),
+        "a subscriber designated nothing",
+    );
+}

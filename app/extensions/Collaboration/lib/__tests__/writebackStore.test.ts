@@ -9,6 +9,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const h = vi.hoisted(() => ({
   getWritebackRegions: vi.fn(),
   getWritebackLayer: vi.fn(),
+  getWritebackDraftRegions: vi.fn(),
   reconcileWriteback: vi.fn(),
   emitAppEvent: vi.fn(),
   gridState: null as null | {
@@ -27,6 +28,7 @@ const h = vi.hoisted(() => ({
 vi.mock("@api/collaboration", () => ({
   getWritebackRegions: h.getWritebackRegions,
   getWritebackLayer: h.getWritebackLayer,
+  getWritebackDraftRegions: h.getWritebackDraftRegions,
   reconcileWriteback: h.reconcileWriteback,
 }));
 vi.mock("@api/grid", () => ({
@@ -70,6 +72,9 @@ import {
   getWritebackReconcileError,
   isWritebackSnapshotLoaded,
   regionRangeA1,
+  hasWritebackFrames,
+  getActiveSheetFrameRegions,
+  getDesignatedRegionCount,
 } from "../writebackStore";
 
 function region(over: Record<string, unknown> = {}) {
@@ -118,6 +123,8 @@ beforeEach(() => {
   h.getWritebackRegions.mockReset();
   h.getWritebackLayer.mockReset();
   h.reconcileWriteback.mockReset();
+  h.getWritebackDraftRegions.mockReset();
+  h.getWritebackDraftRegions.mockResolvedValue([]);
   h.emitAppEvent.mockReset();
   h.pages.sheetIdByIndex = new Map([
     [0, "local-sheet-1"],
@@ -337,5 +344,55 @@ describe("lifecycle", () => {
     resolve([region()]);
     await pending;
     expect(hasWritebackRegions()).toBe(false);
+  });
+});
+
+describe("the author's own designated regions (frame only)", () => {
+  function designated(sheetId: string, id = "d1") {
+    return { id, selector: { sheetId, rowStart: 2, rowEnd: 4, colStart: 1, colEnd: 1 } };
+  }
+
+  it("frames an author's region on the active sheet with no subscription at all", async () => {
+    h.getWritebackRegions.mockResolvedValue([]);
+    h.reconcileWriteback.mockResolvedValue({ formatVersion: 1, drafts: [] });
+    h.getWritebackDraftRegions.mockResolvedValue([designated("local-sheet-2")]);
+    await refreshWriteback();
+    expect(hasWritebackRegions()).toBe(false); // no tab, no markers, no guards
+    expect(hasWritebackFrames()).toBe(true);
+    expect(getDesignatedRegionCount()).toBe(1);
+    expect(getActiveSheetFrameRegions()).toEqual([
+      { sheetId: "local-sheet-2", rowStart: 2, rowEnd: 4, colStart: 1, colEnd: 1 },
+    ]);
+    activeSheet(0);
+    expect(getActiveSheetFrameRegions()).toEqual([]);
+    activeSheet(1, "canvas");
+    expect(getActiveSheetFrameRegions()).toEqual([]);
+  });
+
+  it("frames subscribed and designated regions side by side", async () => {
+    h.getWritebackRegions.mockResolvedValue([region()]);
+    h.reconcileWriteback.mockResolvedValue({ formatVersion: 1, drafts: [] });
+    h.getWritebackDraftRegions.mockResolvedValue([designated("local-sheet-2")]);
+    await refreshWriteback();
+    expect(getActiveSheetFrameRegions().length).toBe(2);
+  });
+
+  it("a failed read of the author's regions keeps the previous set", async () => {
+    h.getWritebackRegions.mockResolvedValue([]);
+    h.reconcileWriteback.mockResolvedValue({ formatVersion: 1, drafts: [] });
+    h.getWritebackDraftRegions.mockResolvedValue([designated("local-sheet-2")]);
+    await refreshWriteback();
+    h.getWritebackDraftRegions.mockRejectedValue(new Error("ipc down"));
+    await refreshWriteback();
+    expect(getDesignatedRegionCount()).toBe(1);
+  });
+
+  it("reset forgets them", async () => {
+    h.getWritebackRegions.mockResolvedValue([]);
+    h.reconcileWriteback.mockResolvedValue({ formatVersion: 1, drafts: [] });
+    h.getWritebackDraftRegions.mockResolvedValue([designated("local-sheet-2")]);
+    await refreshWriteback();
+    resetWritebackSnapshot();
+    expect(hasWritebackFrames()).toBe(false);
   });
 });
