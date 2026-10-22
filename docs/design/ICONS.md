@@ -2,11 +2,14 @@
 
 **Status:** shipped 2026-09-23 with the Calcula Clusters redesign (`docs/design/ribbon-design-system.md`).
 **Code:** the drawings live in `app/src/api/icons/` (`frame.tsx` + four groups: `home.tsx`,
-`chart.tsx`, `data.tsx`, `generic.tsx`); `app/src/api/ribbonIcons.tsx` aggregates them into the one
-`RibbonIcon` namespace every ribbon, rail, sidebar, launcher, menu and add-in token resolves against.
-**Guard:** `app/src/api/__tests__/ribbonIcons.test.tsx` (2,813 cases over 274 keys, 2026-10-17).
+`chart.tsx`, `data.tsx`, `generic.tsx`, and `marks.tsx`, the Visuals family's construction kit);
+`app/src/api/ribbonIcons.tsx` aggregates them into the one `RibbonIcon` namespace every ribbon, rail,
+sidebar, launcher, menu and add-in token resolves against.
+**Guard:** `app/src/api/__tests__/ribbonIcons.test.tsx` (2,817 cases over 274 keys, 2026-10-22).
 **Approved drawings:** the mockup artifact https://claude.ai/artifact/W2RwKUxBA79azM4Qznargi (the
-Icons board, rev 2).
+Icons board, rev 2); for the Visuals family (section 2.5), direction B "Geometric" of the
+three-way proposal https://claude.ai/artifact/XPeUP8i3JJ941EET2P5SPi, chosen by the owner on
+2026-10-22 (Grouped and the Table and Slicer refinements came later; section 2.5 says which).
 
 This file promotes to repo level the policy the Model Editor wrote first, in the header of
 `app/extensions/ModelEditor/components/navIcons.tsx`, and restates it for the set the whole app now
@@ -113,9 +116,10 @@ by default because the control that hosts them already carries the name.
 
 ### 2.3 Shape
 
-- **Filled shapes**, not outlines. Rect corners `rx >= 1.4`, with these exceptions: a 3px pixel-grid
+- **Filled shapes**, not outlines. Rect corners `rx >= 1.4` (the Visuals family has its own corner
+  rule instead: square or a full curve, section 2.5), with these exceptions: a 3px pixel-grid
   cell takes rx 0.75-1.0, because at 1.4 it paints as a plus sign (Merge & Center and Merge
-  Across's cell rows, Unmerge Cells' cut row, Waterfall, Keyboard, the Cells heroes' grid rows);
+  Across's cell rows, Unmerge Cells' cut row, Keyboard, the Cells heroes' grid rows);
   a 2.4-thick bar takes rx 1.2, a full pill; and a whole-pixel SQUARE MARK of 2 or 3 px takes rx 0
   (the Borders family's 2px dots and All Borders' 3px cells: any radius painted them as a plus sign at
   150%, and rx 0.6 left stray antialiased pixels at 100%). Every 2px square mark in the set is rx 0
@@ -142,10 +146,12 @@ by default because the control that hosts them already carries the name.
   grid paints off it). Scaled drawings are written out at their final size (Paste Link's chain is Link
   at 0.75, as coordinates). Both are test-enforced. A written-out copy is a second source of truth,
   so where one key draws another's part the test pins the relation, not the coordinates (2026-10-08):
-  Button's cursor must be Pointer at 0.66 about its tip, and Card's "123" must be Paste Values'
-  digits moved by whole pixels, so a redraw of Pointer or of the digits fails until the copy follows.
-  The same holds for Lock Objects' padlock body (Protect Sheet's outline) and Line and stacked
-  column's two columns (Stacked's), both pinned by the 2026-10-08 icon review.
+  Button's cursor must be Pointer at 0.66 about its tip, so a redraw of Pointer fails until the copy
+  follows. The same holds for Lock Objects' padlock body (Protect Sheet's outline) and Line and
+  stacked column's two columns (Stacked's), both pinned by the 2026-10-08 icon review, and since
+  2026-10-22 for Grouped's two columns (on Stacked's two slots). Until 2026-10-22 the Card's "123" was
+  Paste Values' digits moved by whole pixels; the Visuals family draws its own digits, and the pin
+  went with the copy.
   The 27 Canvas keys of 2026-10-08 use no transform at all (test-enforced). **Letters turn only by a quarter.** A 6px letter
   turned 45 degrees keeps two clean pixels of its hole: the first Orientation pictures painted "ab"
   as two rings, a "%" (at 100% and 150%). The 45-degree pictures stand the letters upright and STEP
@@ -207,6 +213,79 @@ The old ladder was 16 / 20 / 24 / 28. `RibbonIconProps.size` still defaults to 1
 new code always passes a ladder size. `CommandButton` outside the band, `Tile`, `Launcher` and the
 sidebar header re-fit a direct `<svg>` child to their slot, so one icon element can serve every
 surface a control appears on.
+
+### 2.5 The Visuals family: "Geometric" (2026-10-22)
+
+The owner found the Canvas tab's Visuals icons "blotchy" and asked for something more professional,
+sharp yet smooth, in the minimal theme and colours, after a reference sheet of geometric glyphs. Three
+directions were drawn for all 33 visuals and the hero (Crisp, Geometric, Line; the proposal canvas is
+linked at the top), and the owner chose **Geometric**. It covers the 18 chart types, Power BI's Canvas
+visuals (stacked bars and areas, line and stacked column, Card, Multi-row card, KPI, Gauge), Matrix,
+Table, Slicer, Timeline, the All Visuals hero, and Chart Design's Grouped | Stacked | 100% toggle
+(Stacked and Stacked100 are gallery tiles, so Grouped follows them). The rest of the set keeps the
+duotone rules above; the channels, the one accent and every per-key rule of section 5 still hold.
+
+**What was blotchy, measured at 20px:** the dark-green ACCENT is nearly as dark as the near-black
+ink in Light (2.5:1), so a green part one pixel from a black part painted as one lump (the Slicer's
+selected row, every stacked bar, the Matrix); the Slicer was a 50% grey slab holding dark pills;
+3-5 px parts with rx 1.6 painted as lumps; some pictures had up to nine parts. The project's contact
+check found green touching grey in eleven of these icons (Radar 31.2, Slicer 26.8, Pie 20.9 units of
+outline); after the redraw it finds none.
+
+The rules (`app/src/api/icons/marks.tsx` is the kit: its sizes everywhere, and its helpers for the
+columns, bars, stacked pairs, pills, D-marks, the plot's L and the cards' rule; the round pictures,
+the radar, treemap, histogram, Matrix and the hero are written out on the same sizes):
+
+- **One gap, 2.4** (two whole pixels at 20px): every cut between parts, every space between marks,
+  and the ACCENT's clearance from every SOFT or STRONG shape -- stricter than section 2.2's 1.2. The
+  30px hero draws the same gap in its own device pixels, 1.6. `npm run check:icon-contact` measures
+  the family at its gap (`VISUALS_FAMILY_GAPS` in the script, pinned to this family by the icon test)
+  and never allowlists a family key. Two recorded exceptions sit closer between parts of one ink:
+  the Card's digits (1.2 apart) and one box-plot whisker per plot (1.2 long).
+- **The corner rule.** Square (rx 0) where a part MEETS something: its root (columns stand on
+  y 21.6, bars grow from x 2.4), the cut to a neighbour, a cell of the lattice. A FULL curve where a
+  part ENDS freely: a value end is a semicircle of radius half the part's thickness (the D-mark), a
+  part free at both ends is a pill, a point is a circle, the free outer corner of a bent part is a
+  true quarter circle. Never an in-between radius; triangles and polygons stay sharp. Test-enforced
+  for the family's rects AND for every arc of a filled path ("keeps its corner rule": an arc smaller
+  than a mark must be a semicircle, a disc's large arc or a wedge on one of the path's own points).
+- **Sizes:** a mark is 4.8 (three marks and two gaps fill the 19.2 field: x 2.4 / 9.6 / 16.8), a
+  stacked pair 7.2 (the pair centred, its marks at 3.6 / 13.2), a rule 2.4, a series line 3.6 with
+  round caps and joins: no turn sharper than a right angle (every interior angle 90 degrees or more)
+  and no segment under 5.6, so the inside of every turn stays open.
+- **No axis under bars and columns**: their aligned square roots are the axis. The one exception is
+  the Histogram, whose adjacent bins make one block: it stands on a SOFT baseline. The x/y pictures
+  stand in one SOFT L (`PlotAxes`, square ends, a crisp corner); the cards stand on one SOFT rule on
+  the field's bottom edge (`CardRule`).
+- **Round pictures are cut with straight cuts of the gap**: rings are cut in place (Donut, Gauge),
+  pies are exploded (the ACCENT quarter moved out by the gap on both axes), and the Sunburst is the
+  exploded ring. Cuts at 12, 3, 6 and 9 o'clock keep the cut edges horizontal or vertical.
+- **Stacked pictures** are two pair marks, each a crisp STRONG root, the cut, and an ACCENT end of
+  the same length (one series); stacked pictures show two categories and clustered ones three whole
+  marks, and the 100% twins run every mark to the field's edge. The pair's ends differ by 4 px
+  (test-enforced at 4.8 units on the true ends, the caps' apexes; the duotone pictures held 6.0).
+- **Crispness:** every straight edge of a filled shape on the 1.2 grid (test-enforced: "every
+  straight edge of a filled shape on whole pixels"); columns, bars, the plot's L, the cards' rule and
+  the Card's 1 on the 2.4 grid (crisp at 150% and 30px too). A cut centred in the 24 box falls on
+  10.8 | 13.2, so the pie's, donut's and sunburst's cut edges and the centred stacked pairs are soft
+  at 150% and at 30px -- which includes Chart Design's 30px Pie quick tile, the one quick tile the
+  redraw made softer. The Card's 2 and 3 are 2.6 strokes that antialias like any curve, and the hero
+  sits on its own 0.8 grid.
+
+Decisions recorded with the drawings: the stacked BAR puts its long bar on top (with the short one on
+top it drew a stencil "B"); the Matrix's header is a row of three SOFT cells and its totals one ACCENT
+L whose arms are 12 and 19.2 (a full-height arm drew a "J"); the Donut has three segments (one cut-off
+quarter left a "C"); the Card's 1 has a slanted top (a plain bar read as "I23"); the KPI is a square
+turned 45 degrees and cut once, green up over dark down, on the cards' rule (a lens of two arcs read
+as an acorn); the Slicer's markers stay round dots, apart from the square ticks of PivotFields (the
+PivotTable Fields pane's icon). Three drawings are not the proposal's exactly: Grouped was drawn when
+the family was adopted (two whole columns on Stacked's two slots; the proposal had none), and the
+implementation review refined two for cues that survive grayscale and High contrast -- Table's header
+row is thinner than its rows (3.6 against 4.8), and the Slicer's unselected items are SOFT, dot and
+label, under one STRONG selected label. Adopting the family re-pinned three per-key tests (Card's
+digits are no longer Paste Values', the Matrix pin reads three SOFT header cells with square corners,
+the stacked pin reads the true ends at the 4 px difference) and added four (the corner rule, straight
+edges on whole pixels, Grouped on Stacked's slots, and the contact check's family list).
 
 ---
 
@@ -300,42 +379,51 @@ must be current). **Home** (`icons/home.tsx`, 104):
 
 **Chart** (`icons/chart.tsx`, 51):
 
-- *Chart types (18):* ChartColumn, ChartBar, ChartLine, ChartArea, ChartPie, ChartDonut,
-  ChartScatter, ChartWaterfall, ChartCombo, ChartRadar, ChartBubble, ChartHistogram, ChartFunnel,
-  ChartTreemap, ChartStock, ChartBoxPlot, ChartSunburst, ChartPareto
+- *Chart types (18), the Visuals family (section 2.5):* ChartColumn, ChartBar (three D-marks, the
+  tallest ACCENT, no axis), ChartLine, ChartArea, ChartScatter, ChartBubble (in the SOFT plot L),
+  ChartPie (the exploded quarter), ChartDonut (a ring cut into three), ChartWaterfall (a floating
+  ACCENT pill between two D-columns), ChartCombo (three short D-columns under an ACCENT wave),
+  ChartRadar (a SOFT hexagon web, an ACCENT series), ChartHistogram (one stepped ACCENT block with
+  quarter-circle shoulders), ChartFunnel (three centred pills), ChartTreemap (one block cut into four
+  tiles), ChartStock (bodies on wick pills), ChartBoxPlot (boxes cut at the median, pill caps),
+  ChartSunburst (the exploded ring round a centre dot), ChartPareto (three D-columns, an ACCENT arc)
 - *Furniture:* ChartTitle, Gridlines, Legend, AxisLabels, DataLabels
 - *Layout and marks:* Grouped, Stacked, Stacked100, SecondaryAxis, Trendline, MarkOptions,
-  LineStraight, LineSmooth, LineStep, Markers. **Stacked was redrawn on 2026-10-08**: its two
-  columns topped out 2px apart, so beside Stacked100 in the Visuals gallery the two read as one
-  picture; the left column now stops well short (Power BI's proportion).
+  LineStraight, LineSmooth, LineStep, Markers. Grouped, Stacked and Stacked100 are Chart Design's
+  layout toggle and are drawn in the Visuals family (2026-10-22) on the same two slots (x 3.6 and
+  13.2, 7.2 wide): two whole columns (Grouped: a STRONG and an ACCENT one side by side), two split
+  pairs (Stacked: totals 4 px apart) and two split pairs to the full height (Stacked100). The rest
+  are furniture.
 - *Style and data:* Palette, Series, Filter, SwitchRowCol
 - *Actions:* EditChart, SaveImage, FormatPoint, Code
-- *Power BI's Visualizations pane (2026-10-08, the Canvas tab's Visuals gallery):* drawn in Power
-  BI's compositions with Power BI's blue as ACCENT, its grey as SOFT and its outlined white marks
-  STRONG and filled; every one measures 0 accent contact. ChartBarStacked, ChartBarStacked100 (two
-  bars off ChartBar's axis, each a STRONG part and an ACCENT part; the 100% pair both reach the end),
-  ChartAreaStacked, ChartAreaStacked100 (a STRONG area with an ACCENT band riding on it; the 100%
-  band fills down from a flat top), ChartComboStacked (Stacked's two columns as STRONG bodies with
-  flush SOFT caps, the ACCENT line above -- Power BI's line crosses the columns, ours cannot keep its
-  gap if it does), ChartCard (an ACCENT "123", Paste Values' digits, over a SOFT rule, no frame:
-  KPI's "value over a rule"), ChartMultiRowCard (three records, each a STRONG value over a SOFT
-  label, the first record's card bar ACCENT), ChartKpi (an ACCENT up triangle interlocked with a
-  STRONG down triangle over a SOFT rule: Power BI's red triangle is STRONG, since ACCENT and DANGER
-  never meet), ChartGauge (a half ring, ACCENT from the minimum, SOFT beyond, the STRONG needle in
-  its own gap), AllVisuals (the gallery hero: columns, a pie with its ACCENT slice pulled out, an
-  area and a SOFT donut in a 2 x 2). The stacked pictures show two categories and the clustered
+- *Power BI's Visualizations pane (the Canvas tab's Visuals gallery):* first drawn on 2026-10-08 in
+  Power BI's compositions, redrawn on 2026-10-22 in the Visuals family (section 2.5), with Power
+  BI's blue as ACCENT, its grey as SOFT and its white marks STRONG and filled; every one measures 0
+  accent contact. ChartBarStacked, ChartBarStacked100 (two pair bars, each a STRONG root, the cut
+  and an ACCENT D end; the long bar on top; the 100% pair both reach the edge), ChartAreaStacked,
+  ChartAreaStacked100 (a STRONG area with an ACCENT band riding on it, a constant cut between; the
+  100% band fills down from a flat top), ChartComboStacked (Stacked's two columns cut short with SOFT
+  semicircle ends, the ACCENT wave above -- Power BI's line crosses the columns, ours cannot keep its
+  gap if it does), ChartCard (geometric ACCENT digits over the cards' SOFT rule, no frame),
+  ChartMultiRowCard (two records, each a value pill over a SOFT rule, the first ACCENT), ChartKpi (a
+  square turned 45 degrees and cut once: an ACCENT up triangle over a STRONG down one, on the cards'
+  rule -- Power BI's red triangle is STRONG, since ACCENT and DANGER never meet), ChartGauge (a half
+  ring on the cards' rule, ACCENT from the minimum, SOFT beyond, a STRONG hub-and-tip needle in its
+  own cuts), AllVisuals (the gallery hero in device pixels at 30px: D-columns, the exploded pie,
+  D-bars and a SOFT ring in a 2 x 2). The stacked pictures show two categories and the clustered
   ones (ChartColumn, ChartBar, ChartCombo) three, which is what tells them apart at 20px.
-  **AllVisuals is drawn for 30px only** (its column marks are on the 0.8 grid, whole pixels at 30
-  and half pixels at 20; test-enforced): use it for the All Visuals hero, never as a 20px button or a
-  24px gallery tile. **Reviewed 2026-10-08** (two reviews: Power BI fidelity; 20px legibility),
-  which redrew ChartComboStacked (three capped columns were ChartCombo with soft tops), ChartCard
-  (a framed card read as a monitor), ChartBarStacked (its short bar now ends 6.0 short, Stacked's
-  proportion), ChartAreaStacked (the lower series 1.2 lower, so the band reads first) and
-  AllVisuals (columns moved onto the 30px grid).
+  **AllVisuals is drawn for 30px only** (every point of its marks is on the 0.8 grid, whole pixels
+  at 30; test-enforced): use it for the All Visuals hero, never as a 20px button or a 24px gallery
+  tile.
 
 **Data, BI and page** (`icons/data.tsx`, 50):
 
-- *Objects:* Table, Pivot, Slicer, Timeline, Sparkline, Report, Connection
+- *Objects:* Table, Pivot, Slicer, Timeline, Sparkline, Report, Connection. Table, Slicer and
+  Timeline are Visuals gallery tiles and are drawn in the Visuals family (2026-10-22): Table is three
+  rows, each a pill cut into three cells, the ACCENT header row (3.6, thinner, so it is told apart
+  without its colour) over two STRONG rows (4.8); Slicer is three round radio dots with pill labels,
+  no panel: the selected item an ACCENT dot beside a STRONG label, the other two SOFT, dot and label;
+  Timeline is a label pill over one track pill cut once, the ACCENT selected span from the start
 - *Pivot:* PivotFields, CalcField, FilterPages, Fx, ChangeSource, Subtotals, GrandTotals,
   ReportLayout, BlankRows, Expand, Collapse, ClearFilter
 - *Sparkline types:* SparkLine, SparkColumn, SparkWinLoss (note `Sparkline` is the feature,
@@ -345,16 +433,18 @@ must be current). **Home** (`icons/home.tsx`, 104):
 - *Page layout:* Theme, Fonts, Colors, Effects, Margins, Orientation, PageSize, PrintArea, Breaks,
   Background
 - *Other:* Lightning
-- *The Canvas tab (2026-10-08):* Matrix (Power BI's matrix with its header and its totals each
-  MERGED -- a SOFT header bar over STRONG cells and one ACCENT L of last column and last row --
-  because Power BI's exact nine-cell picture is GrandTotals; the review of 2026-10-08 swapped the
-  header and cells to Power BI's grey-over-white, which also parted it from FloatingGrid), FloatingGrid
-  (one STRONG title bar over two rows of cells on the table figure's columns, the active cell ACCENT;
-  it was drawn with Table), NewPage (Report's page with More's ACCENT plus in a notch), PageNavigator
-  (three page tabs, the current one ACCENT, ABOVE a SOFT page; the first drawing had them under it
-  and was Legend), ClearSlicers (a SOFT slicer card with a STRONG funnel and Clear Filter's
-  DANGER X in a bite out of its corner; no ACCENT), the Page View rows FitToPage (ACCENT corner
-  brackets hugging a SOFT page), FitToWidth (an ACCENT double arrow in a SOFT window) and
+- *The Canvas tab (2026-10-08):* Matrix (Power BI's matrix with its totals MERGED -- since
+  2026-10-22 on the Visuals family's lattice: a row of three SOFT header cells over STRONG cells and
+  one ACCENT L of the total column and the total row, its free corner a quarter circle -- because
+  Power BI's exact nine-cell picture is GrandTotals; Power BI's grey-over-white also parts it from
+  FloatingGrid), FloatingGrid (one STRONG title bar over two rows of cells on the table figure's
+  columns, the active cell ACCENT; it was drawn with the 2026-10-08 Table), NewPage (Report's page
+  with More's ACCENT plus in a notch), PageNavigator (three page tabs, the current one ACCENT, ABOVE
+  a SOFT page; the first drawing had them under it and was Legend), ClearSlicers (a SOFT card -- the
+  panel the Slicer drew until 2026-10-22 -- with a STRONG funnel and Clear Filter's DANGER X in a
+  bite out of its corner; no ACCENT; a command, not a gallery tile, so it keeps the duotone
+  language), the Page View rows FitToPage (ACCENT corner brackets hugging a SOFT page), FitToWidth
+  (an ACCENT double arrow in a SOFT window) and
   ActualSize (STRONG "1:1" with an ACCENT colon through a SOFT page), and Wallpaper (an ACCENT
   surround round a STRONG page: the colour outside the page, where Background has it inside)
 
@@ -406,9 +496,14 @@ must be current). **Home** (`icons/home.tsx`, 104):
    as a PascalCase noun for **what it names**, not what it looks like (`SwitchRowCol`, not
    `TwoArrows`). The name is permanent the moment it ships.
 3. **Draw it** as a function component on `IconFrame`, painting only with `SOFT` / `STRONG` /
-   `ACCENT` / `DANGER` and `line()`, following section 2. A name that would shadow a browser global
-   gets an `Icon` suffix on the FUNCTION (`ErrorIcon`, `ImageIcon`, `TextIcon`, `LockIcon`) while the
-   KEY stays bare.
+   `ACCENT` / `DANGER` and `line()`, following section 2. A new chart type or report visual joins the
+   Visuals family: build it with `marks.tsx` (`dMark`, `column`, `bar`, `pill`, `PlotAxes`,
+   `CardRule`, the 2.4 gap) by section 2.5's corner rule, add it to the "Visuals gallery" family
+   if the gallery shows it, and add its key to `VISUALS_FAMILY_GAPS` in
+   `app/scripts/icon-accent-contact.mjs` (the icon test fails until the two lists agree; the contact
+   check then holds it to THE gap with no allowlist). A name that would shadow a browser global
+   gets an `Icon` suffix on the FUNCTION (`ErrorIcon`, `ImageIcon`, `TextIcon`, `LockIcon`) while
+   the KEY stays bare.
 4. **Add it to the group's export object** (additively — never reorder or rename the frozen block).
    If it is an alias, reference the existing component.
 5. **Run** `cd app && npx vitest run src/api/__tests__/ribbonIcons.test.tsx`. It checks, per key: a
@@ -494,3 +589,11 @@ those three:
   (Animation's film icon, the Command Palette, the script editors, the Search view…). They are not
   under the hex ban unless their file is. Migrating them is follow-up work, not a precedent: new code
   uses `RibbonIcon` or `@api/icons`.
+- **Two languages on one tab** (owner question, 2026-10-22). The Visuals family (section 2.5) is
+  drawn for visuals only: the Canvas tab's Visuals gallery and Chart Design's chart types and layout
+  toggle. Everything else on those tabs keeps the duotone language of sections 2.1-2.4 -- on the
+  Canvas tab Floating Grid, New Page, Page Navigator, Clear Slicers, the Page View rows, Wallpaper
+  and the interaction strips; on Chart Design the furniture -- so the two sit side by side, the
+  family's square-rooted, gap-cut marks beside the duotone set's softly rounded tools. That is
+  deliberate (a visual is a mark, a command is a tool), but whether the Canvas tab's own commands
+  should follow the family is the owner's call, recorded in `docs/design/open-items.md`.

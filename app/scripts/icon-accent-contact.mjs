@@ -22,6 +22,10 @@
 //   pass G: SOFT + STRONG black, ACCENT + DANGER white   -> the ground pixels that stay visible
 // "Contact" = accent boundary pixels with a ground pixel closer than 1.2 units (12 px), divided
 // by 10, i.e. the length of accent outline (in grid units) that sits on or beside grey.
+//
+// The Visuals family (VISUALS_FAMILY_GAPS below; ICONS.md 2.5, 2026-10-22) is measured at its own,
+// stricter gap -- 2.4 units, and 1.6 for the 30px All Visuals hero -- and is never allowlisted: a
+// family key in contact fails the check, in the report and in --write alike.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -33,6 +37,27 @@ const require = createRequire(path.join(APP, "package.json"));
 const ALLOWLIST = process.env.ICON_CONTACT_ALLOWLIST ?? path.join(APP, "scripts", "icon-accent-contact.allowlist.json");
 const GAP_UNITS = 1.2;
 const TOLERANCE = 1.0; // units of outline: edge-pixel noise between Chromium builds (software raster is repeatable run to run)
+
+/**
+ * The Visuals family (docs/design/ICONS.md 2.5, 2026-10-22) keeps a STRICTER clearance than the
+ * rest of the set: its ACCENT keeps THE gap, 2.4 units (two device pixels at 20px), from every SOFT or
+ * STRONG shape, and the 30px All Visuals hero its own 2 px, 1.6 units. A family key is measured at its
+ * gap and is never allowlisted: contact above the edge-pixel TOLERANCE fails the check outright.
+ * ribbonIcons.test.tsx pins this list to its "Visuals gallery" menu family plus Grouped.
+ */
+export const VISUALS_FAMILY_GAPS = Object.freeze({
+  ...Object.fromEntries(
+    [
+      "ChartBarStacked", "Stacked", "ChartBar", "ChartColumn", "ChartBarStacked100", "Stacked100",
+      "ChartLine", "ChartArea", "ChartAreaStacked", "ChartAreaStacked100", "ChartComboStacked", "ChartCombo",
+      "ChartWaterfall", "ChartFunnel", "ChartScatter", "ChartPie", "ChartDonut", "ChartTreemap", "ChartGauge",
+      "ChartCard", "ChartMultiRowCard", "ChartKpi", "Matrix", "Table", "Slicer", "Timeline",
+      "ChartRadar", "ChartBubble", "ChartHistogram", "ChartStock", "ChartBoxPlot", "ChartSunburst", "ChartPareto",
+      "Grouped",
+    ].map((key) => [key, 2.4]),
+  ),
+  AllVisuals: 1.6,
+});
 const args = process.argv.slice(2);
 const flag = (f) => args.includes(f);
 const opt = (f) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : null; };
@@ -100,10 +125,18 @@ async function main() {
   const { chromium } = require("playwright");
   const browser = await chromium.launch({ args: ["--disable-gpu", "--force-color-profile=srgb"] });
   const page = await browser.newPage();
-  const result = await page.evaluate(async ({ icons, GAP_UNITS }) => {
-    const S = 240, U = S / 24, R = GAP_UNITS * U;
-    const offsets = [];
-    for (let dy = -Math.ceil(R); dy <= Math.ceil(R); dy++) for (let dx = -Math.ceil(R); dx <= Math.ceil(R); dx++) if (dx * dx + dy * dy < R * R) offsets.push([dx, dy]);
+  const measured = await page.evaluate(async ({ icons, GAP_UNITS, FAMILY }) => {
+    const S = 240, U = S / 24;
+    // The disc of pixel offsets closer than a gap, per gap: 1.2 for the set, the family's own for its keys.
+    const discs = new Map();
+    const offsetsFor = (units) => {
+      if (!discs.has(units)) {
+        const R = units * U, list = [];
+        for (let dy = -Math.ceil(R); dy <= Math.ceil(R); dy++) for (let dx = -Math.ceil(R); dx <= Math.ceil(R); dx++) if (dx * dx + dy * dy < R * R) list.push([dx, dy]);
+        discs.set(units, list);
+      }
+      return discs.get(units);
+    };
     const paint = (body, map) => body
       .replaceAll("var(--icon-fill-soft)", map.soft).replaceAll("currentColor", map.strong)
       .replaceAll("var(--icon-accent)", map.accent).replaceAll("var(--icon-danger)", map.danger);
@@ -119,7 +152,9 @@ async function main() {
     };
     const out = [];
     for (const { name, body } of icons) {
-      if (!/var\(--icon-(accent|danger)\)/.test(body)) { out.push({ name, contact: 0, accent: false }); continue; }
+      const gap = FAMILY[name] ?? GAP_UNITS;
+      if (!/var\(--icon-(accent|danger)\)/.test(body)) { out.push({ name, gap, contact: 0, accent: false }); continue; }
+      const offsets = offsetsFor(gap);
       const A = await raster(paint(body, { soft: "#fff", strong: "#fff", accent: "#000", danger: "#000" }));
       const G = await raster(paint(body, { soft: "#000", strong: "#000", accent: "#fff", danger: "#fff" }));
       let n = 0, minD2 = Infinity;
@@ -136,16 +171,30 @@ async function main() {
         }
         if (hit) n++;
       }
-      out.push({ name, accent: true, contact: Math.round(n / U * 10) / 10, minGap: minD2 === Infinity ? null : Math.round(Math.sqrt(minD2) / U * 100) / 100 });
+      out.push({ name, gap, accent: true, contact: Math.round(n / U * 10) / 10, minGap: minD2 === Infinity ? null : Math.round(Math.sqrt(minD2) / U * 100) / 100 });
     }
     return out;
-  }, { icons, GAP_UNITS });
+  }, { icons, GAP_UNITS, FAMILY: VISUALS_FAMILY_GAPS });
   await browser.close();
 
+  // The Visuals family is held to its own gap and never allowlisted; the rest goes through the list.
+  const family = measured.filter((r) => Object.hasOwn(VISUALS_FAMILY_GAPS, r.name));
+  const familyFailures = family.filter((r) => r.contact > TOLERANCE);
+  const result = measured.filter((r) => !Object.hasOwn(VISUALS_FAMILY_GAPS, r.name));
   const allow = fs.existsSync(ALLOWLIST) ? JSON.parse(fs.readFileSync(ALLOWLIST, "utf8")).icons ?? {} : {};
-  const { measured, over, shrink, added, next } = planAllowlist(allow, result, { acceptGrowth: flag("--accept-growth") });
-  console.log(`[icon-contact] ${result.length} icons, ${result.filter((r) => r.accent).length} with ACCENT/DANGER, ${Object.keys(measured).length} in contact with SOFT/STRONG (total ${Object.values(measured).reduce((a, b) => a + b, 0).toFixed(1)} units of outline)`);
-  if (flag("--report")) for (const [n, v] of Object.entries(measured).sort((a, b) => b[1] - a[1])) console.log(`  ${n.padEnd(16)} ${v}`);
+  const { measured: inContact, over, shrink, added, next } = planAllowlist(allow, result, { acceptGrowth: flag("--accept-growth") });
+  console.log(`[icon-contact] ${measured.length} icons, ${measured.filter((r) => r.accent).length} with ACCENT/DANGER; outside the Visuals family ${Object.keys(inContact).length} in contact with SOFT/STRONG (total ${Object.values(inContact).reduce((a, b) => a + b, 0).toFixed(1)} units of outline)`);
+  console.log(`[icon-contact] Visuals family: ${family.length} icons held to THE gap (2.4; the hero 1.6), ${familyFailures.length} within it`);
+  if (flag("--report")) {
+    for (const [n, v] of Object.entries(inContact).sort((a, b) => b[1] - a[1])) console.log(`  ${n.padEnd(16)} ${v}`);
+    for (const r of family.filter((f) => f.contact > 0)) console.log(`  ${r.name.padEnd(16)} ${r.contact} (family, at ${r.gap})`);
+  }
+  if (familyFailures.length) {
+    console.log("[FAIL] the Visuals family's green (or red) comes within THE gap of grey or ink:");
+    for (const r of familyFailures) console.log(`  ${r.name} ${r.contact} units of outline within ${r.gap} (closest ${r.minGap})`);
+    console.log("  Keep the family's 2.4 (the 30px hero's 1.6) of background round the accent (docs/design/ICONS.md 2.5). Family keys are never allowlisted.");
+    process.exit(1);
+  }
   if (flag("--write")) {
     if ((over.length || added.length) && !flag("--accept-growth")) {
       console.log("[FAIL] refusing to write: the allowlist may only shrink.\n  grew: " + [...over, ...added].join(", "));

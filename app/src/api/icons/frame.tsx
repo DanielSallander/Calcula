@@ -22,7 +22,11 @@
 //          literal would be correct in exactly one of them.
 //
 //          The drawing rules the set is held to (the approved mockup, rev 2):
-//          filled shapes; rect corners rx >= 1.4; NOTHING THINNER THAN 3 UNITS
+//          filled shapes; rect corners rx >= 1.4 (the Visuals family -- chart
+//          types, report visuals, Table, Slicer, Timeline and Chart Design's
+//          Grouped toggle -- has its own corner rule instead: square or a full
+//          curve, see marks.tsx and ICONS.md section 2.5); NOTHING THINNER THAN
+//          3 UNITS
 //          (a stroke is at least 2.6 with round caps and joins, or exactly 2.4
 //          on a straight horizontal/vertical run centred on the pixel grid:
 //          PIXEL_STROKE, two whole pixels at 20px); no <text> and

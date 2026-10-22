@@ -2,16 +2,16 @@
 // PURPOSE: The data glyphs: tables and their style options, pivots and their
 //          layout options, slicers, timelines, sparklines, BI (Fx, sources,
 //          connections) and Page Layout (themes, margins, orientation...).
-// CONTEXT: None of these had a mockup drawing; they are drawn in the mockup's
+// CONTEXT: Most of these had no mockup drawing; they are drawn in the mockup's
 //          language (see ./frame.tsx). Two families are built from ONE shared
 //          figure so their members can only differ in the part they name:
 //
-//          - The TABLE family (Table, HeaderRow, TotalRow, FirstColumn,
-//            LastColumn, TableStyle, FilterButton, GrandTotals) is one 3 x 3
-//            grid of cells painted by a function of (row, column). HeaderRow
-//            and TotalRow therefore differ ONLY in which row is accent, which
-//            is exactly the difference between the two check boxes they sit
-//            next to in Table Design.
+//          - The TABLE family (HeaderRow, TotalRow, FirstColumn, LastColumn,
+//            TableStyle, FilterButton, GrandTotals) is one 3 x 3 grid of cells
+//            painted by a function of (row, column). HeaderRow and TotalRow
+//            therefore differ ONLY in which row is accent, which is exactly
+//            the difference between the two check boxes they sit next to in
+//            Table Design.
 //          - The SPARKLINE family (Sparkline, SparkLine, SparkColumn,
 //            SparkWinLoss) shares one soft cell, because a sparkline lives in a
 //            cell. `Sparkline` is the feature (insert / group); `SparkLine`
@@ -26,6 +26,12 @@
 //          Floating Grid (on the table figure's columns), and the report-page
 //          keys: New Page, Page Navigator, Clear All Slicers, the Page View
 //          rows and Wallpaper.
+//
+//          Four keys here are Visuals gallery tiles -- Table, Matrix, Slicer
+//          and Timeline -- and are drawn in the Visuals family's language
+//          (marks.tsx; 2026-10-22): square where a part meets something, a
+//          full curve where it ends freely, one 2.4 cut. Table is therefore
+//          no longer the table figure with a STRONG header row.
 
 import React from "react";
 import {
@@ -40,6 +46,7 @@ import {
 } from "./frame";
 import { FUNNEL } from "./chart";
 import { roundedPlus } from "./generic";
+import { dMark, pill } from "./marks";
 
 // ============================================================================
 // The table figure
@@ -75,11 +82,37 @@ function TableGrid({ paint }: { paint: CellPaint }): React.ReactElement {
   );
 }
 
-/** Table: the strong header row over a soft body. */
+/** One row of the Table visual: a pill `height` tall (a row has no axis, so it
+ *  is free at both ends) cut twice by THE gap into three cells, D | square |
+ *  D, on the lattice's columns x 2.4 / 9.6 / 16.8. */
+function tableRow(y: number, height: number, paint: string): React.ReactElement {
+  return (
+    <>
+      {dMark(2.4, y, 4.8, height, "left", paint)}
+      <rect x="9.6" y={y} width="4.8" height={height} fill={paint} />
+      {dMark(16.8, y, 4.8, height, "right", paint)}
+    </>
+  );
+}
+
+/** Table (the Visuals gallery's tile; also Table Design's panel icon and
+ *  Convert to Range, the Table JSON pane's 16px header and the Writeback
+ *  tab): three ROWS, each a pill cut into three cells (2026-10-22, the
+ *  Visuals family): an ACCENT header row 3.6 tall at y 2.4..6 over two STRONG
+ *  value rows 4.8 tall at 8.4..13.2 and 15.6..20.4. The header is THINNER
+ *  than the rows so it reads as a header by shape too: drawn as a third row of
+ *  the same height, it differed from the body by hue alone, which is lost in
+ *  grayscale (the disabled look, a colour-blind reader) and nearly lost in
+ *  Dark and High contrast (the implementation review of 2026-10-22). The
+ *  header stays three cells, not one bar: a bar over cells is Floating
+ *  Grid's silhouette on the same tab. The plain 3 x 3 grid of squares was the
+ *  competing "Crisp" direction's picture. */
 function Table({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <TableGrid paint={(row) => (row === 0 ? STRONG : SOFT)} />
+      {tableRow(2.4, 3.6, ACCENT)}
+      {tableRow(8.4, 4.8, STRONG)}
+      {tableRow(15.6, 4.8, STRONG)}
     </IconFrame>
   );
 }
@@ -116,8 +149,10 @@ function LastColumn({ size }: RibbonIconProps): React.ReactElement {
   );
 }
 
-/** Table styles: an accent header and a strong band — a table wearing a
- *  style, as opposed to Table's plain one. */
+/** Table styles: the table figure (the 3 x 3 grid the style options share)
+ *  wearing a style: an accent header row and a strong band in a soft body.
+ *  Table itself is the Visuals family's picture (pill rows, all STRONG under
+ *  its header), so the two differ by shape as well as by the soft body. */
 function TableStyle({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
@@ -339,29 +374,45 @@ function ClearFilter({ size }: RibbonIconProps): React.ReactElement {
 // Slicers, timelines, sparklines
 // ============================================================================
 
-/** Slicer: a soft panel of item buttons; the accent item is selected. Three
- *  3 px buttons with 1 px gaps are 11 px, which cannot centre in the 16 px
- *  panel, so they sit half a pixel low (3 px of panel above them, 2 px below),
- *  under the space a slicer's caption takes. */
+/** Slicer (2026-10-22, the Visuals family): no panel. Three items at y 2.4 /
+ *  9.6 / 16.8, each a round 4.8 radio dot and a 4.8 PILL label from x 9.6 (a
+ *  label has no axis, so both of its ends are full curves). The selected item
+ *  is an ACCENT dot and a STRONG label; the two unselected items are SOFT, dot
+ *  and label, as a slicer dims what is not picked. Unselected labels in STRONG
+ *  left the green dot as the only cue, which disappears in grayscale (the
+ *  disabled look, a colour-blind reader) and against High contrast's solid
+ *  grey (the implementation review of 2026-10-22). The old soft panel holding
+ *  three dark pills was the heaviest, muddiest picture of the strip, and its
+ *  green pill sat one pixel from the black ones. Keep the markers ROUND:
+ *  square ticks beside name bars are PivotFields', the PivotTable Fields
+ *  pane's icon, on screen whenever a pivot is selected; and keep the ACCENT
+ *  on the dot (a green middle pill would repeat ChartBar's "middle bar, green,
+ *  longest"). */
 function Slicer({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <rect x="2.4" y="2.4" width="19.2" height="19.2" rx="3.4" fill={SOFT} />
-      <rect x="6" y="6" width="12" height="3.6" rx="1.8" fill={ACCENT} />
-      <rect x="6" y="10.8" width="12" height="3.6" rx="1.8" fill={STRONG} />
-      <rect x="6" y="15.6" width="12" height="3.6" rx="1.8" fill={STRONG} />
+      <circle cx="4.8" cy="4.8" r="2.4" fill={SOFT} />
+      {pill(9.6, 2.4, 10.8, 4.8, SOFT)}
+      <circle cx="4.8" cy="12" r="2.4" fill={ACCENT} />
+      {pill(9.6, 9.6, 12, 4.8, STRONG)}
+      <circle cx="4.8" cy="19.2" r="2.4" fill={SOFT} />
+      {pill(9.6, 16.8, 8.4, 4.8, SOFT)}
     </IconFrame>
   );
 }
 
-/** Timeline: a strong caption over a soft track; the accent span is the
- *  selected period. */
+/** Timeline (2026-10-22, the Visuals family): a left-aligned STRONG label
+ *  pill (4.8 x 12) over ONE 7.2 track pill cut ONCE by THE gap at x 12..14.4:
+ *  the ACCENT selected span from the start of the track (9.6) and the SOFT
+ *  rest (7.2), each a D where the track ends freely. A strip, centred, every
+ *  straight edge on the 2.4 grid. Cut twice, the track's two semicircular
+ *  ends under the caption read as the wheels of a car. */
 function Timeline({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <rect x="2.4" y="4.8" width="9.6" height="3.6" rx="1.6" fill={STRONG} />
-      <rect x="2.4" y="12" width="19.2" height="7.2" rx="2.4" fill={SOFT} />
-      <rect x="9.6" y="12" width="7.2" height="7.2" rx="2.4" fill={ACCENT} />
+      {pill(2.4, 4.8, 12, 4.8, STRONG)}
+      {dMark(2.4, 12, 9.6, 7.2, "left", ACCENT)}
+      {dMark(14.4, 12, 7.2, 7.2, "right", SOFT)}
     </IconFrame>
   );
 }
@@ -661,43 +712,31 @@ function Breaks({ size }: RibbonIconProps): React.ReactElement {
 // filled -- and Power BI's page-view rows from memory where its ribbon shows
 // a checkbox or nothing. Until 2026-10-08 the Canvas tab drew Floating Grid
 // with Table, Fit to Window with Resize and Actual Size with Search. No
-// transform anywhere; every key measures 0 accent contact.
+// transform anywhere; every key measures 0 accent contact. The Matrix is a
+// Visuals gallery tile and was redrawn in the Visuals family on 2026-10-22.
 
 /** Matrix (the Visuals gallery's Matrix tile, a pivot table on the page):
  *  Power BI's matrix, a grid under a header with the totals -- the last
- *  column and the last row -- in blue. Power BI's exact picture is a 3 x 3
- *  grid with blue total cells, which is GrandTotals here (the pivot option),
- *  so the header and the totals are each MERGED instead: a SOFT header bar
- *  2.4..21.6 x 2.4..6 (rx 1.6; Power BI's grey header), a 2 x 2 STRONG body
- *  on the table figure's tracks (6 / 4.8 wide, rows 7.2..10.8 and 12..15.6;
- *  Power BI's white cells), and the ACCENT totals as ONE L-shaped path (the
- *  last column 15.6..21.6 x 7.2..21.6 with the last row 2.4..21.6 x
- *  16.8..21.6; outer corners r 1.6, inside corner r 1.2), 1.2 clear of the
- *  header and of every cell. Table is nine cells, Pivot an L of headers round
- *  an accent cell, GrandTotals nine cells with the totals apart; the merged L
- *  is the shape no other key has. A STRONG header L was Pivot's silhouette;
- *  stepped rows read as a list.
- *
- *  Until review 0 of 2026-10-08 the header was STRONG and the cells SOFT --
- *  the inverse of this family's own mapping (grey is SOFT, white cells are
- *  STRONG), and FloatingGrid's silhouette (a full-width STRONG bar over grey
- *  cells). The cells are 3 px pixel-grid cells, so they take ICONS.md 2.3's
- *  rx 1.0 (they were 1.2, a radius neither rule allows; review 1). The
- *  header keeps 1.6: it is a bar, 16 px long. Table draws the same inversion
- *  and is out of scope (an existing key; keys never change meaning, and a
- *  colour swap there is the owner's call). */
+ *  column and the last row -- in blue, on the Visuals family's 3 x 3 lattice
+ *  of MARK cells (4.8, THE gap apart): a SOFT header row of three cells
+ *  (Power BI's grey header; the total column has a header too), two STRONG
+ *  value cells (Power BI's white cells), and the ACCENT totals -- the total
+ *  column under the header and the total row -- as ONE L-shaped path whose
+ *  free outer corner is a true quarter circle (r 4.8, a cell's width). Its
+ *  arms are 12 and 19.2: with a full-height column arm the L drew a mirrored
+ *  capital "J". Power BI's exact picture is nine cells with blue totals,
+ *  which is GrandTotals here (the pivot option), so the totals MERGE into the
+ *  L, the shape no other key has; a STRONG header row would be Floating Grid's
+ *  silhouette (a bar over cells). */
 function Matrix({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <rect x="2.4" y="2.4" width="19.2" height="3.6" rx="1.6" fill={SOFT} />
-      <rect x="2.4" y="7.2" width="6" height="3.6" rx="1" fill={STRONG} />
-      <rect x="9.6" y="7.2" width="4.8" height="3.6" rx="1" fill={STRONG} />
-      <rect x="2.4" y="12" width="6" height="3.6" rx="1" fill={STRONG} />
-      <rect x="9.6" y="12" width="4.8" height="3.6" rx="1" fill={STRONG} />
-      <path
-        d="M17.2 7.2H20A1.6 1.6 0 0 1 21.6 8.8V20A1.6 1.6 0 0 1 20 21.6H4A1.6 1.6 0 0 1 2.4 20V18.4A1.6 1.6 0 0 1 4 16.8H14.4A1.2 1.2 0 0 0 15.6 15.6V8.8A1.6 1.6 0 0 1 17.2 7.2Z"
-        fill={ACCENT}
-      />
+      <rect x="2.4" y="2.4" width="4.8" height="4.8" fill={SOFT} />
+      <rect x="9.6" y="2.4" width="4.8" height="4.8" fill={SOFT} />
+      <rect x="16.8" y="2.4" width="4.8" height="4.8" fill={SOFT} />
+      <rect x="2.4" y="9.6" width="4.8" height="4.8" fill={STRONG} />
+      <rect x="9.6" y="9.6" width="4.8" height="4.8" fill={STRONG} />
+      <path d="M16.8 9.6H21.6V16.8A4.8 4.8 0 0 1 16.8 21.6H2.4V16.8H16.8Z" fill={ACCENT} />
     </IconFrame>
   );
 }
@@ -708,11 +747,11 @@ function Matrix({ size }: RibbonIconProps): React.ReactElement {
  *  of cells on the table figure's GRID columns (rows 8.4..14.4 and
  *  15.6..21.6, 5 px each, 1.2 gutters, rx 1.6), SOFT with the active cell
  *  ACCENT. Table, which drew this button until 2026-10-08 and is the Table
- *  visual's tile on the same tab, is a 3 x 3 lattice whose header is three
- *  STRONG cells (HeaderRow the same with ACCENT cells); the one bar over two
- *  rows is a different shape. A thinner title over three rows smeared into
- *  Table at 20px; a SOFT drop shadow beside SOFT cells was two greys of one
- *  tint. */
+ *  visual's tile on the same tab, is three rows cut into cells under an
+ *  ACCENT header row (HeaderRow is the table figure with ACCENT header cells);
+ *  the one bar over two rows is a different shape. A thinner title over three
+ *  rows smeared into the old Table at 20px; a SOFT drop shadow beside SOFT
+ *  cells was two greys of one tint. */
 function FloatingGrid({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
@@ -778,8 +817,9 @@ function PageNavigator({ size }: RibbonIconProps): React.ReactElement {
 }
 
 /** Clear All Slicers (the Buttons menu's row): Power BI's funnel with an
- *  eraser, said in Clear Filter's language -- a SOFT slicer CARD (Slicer's
- *  19.2 square, rx 3.4) carrying a STRONG funnel, with Clear Filter's DANGER
+ *  eraser, said in Clear Filter's language -- a SOFT card (19.2 square, rx
+ *  3.4: the panel the Slicer drew until 2026-10-22; the Slicer is now dots
+ *  and pills, ICONS.md 2.5) carrying a STRONG funnel, with Clear Filter's DANGER
  *  X (2.8 lines, arms 2.4 from (18, 18)) in a round bite out of the card's
  *  lower right: a circle r 6.094 about (18, 18), the X's reach plus its cap
  *  plus 1.3, meeting the edges at 13.083. The funnel is its own smaller
@@ -788,7 +828,7 @@ function PageNavigator({ size }: RibbonIconProps): React.ReactElement {
  *  (clear), and no ACCENT: DANGER is the verb. Clear Filter is a bare funnel
  *  with the X, so the menu shows the two by shape. The X's round caps reach
  *  21.8 (Clear Filter's reach 22.8). A larger funnel ran its stem into the
- *  bite; the card with Slicer's item bars read as a list. */
+ *  bite; the card with the old Slicer's item bars read as a list. */
 function ClearSlicers({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>

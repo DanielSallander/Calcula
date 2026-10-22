@@ -1,51 +1,57 @@
 //! FILENAME: app/src/api/icons/chart.tsx
-// PURPOSE: The chart glyphs: every chart TYPE, the chart FURNITURE (title,
-//          gridlines, legend, labels...) and the chart ACTIONS.
-// CONTEXT: The two families follow two halves of one rule, set by the approved
-//          mockup (Main.dc.html / Icons.dc.html):
+// PURPOSE: The chart glyphs: every chart TYPE and the Canvas tab's other
+//          visuals (cards, KPI, gauge), the chart FURNITURE (title, gridlines,
+//          legend, labels...) and the chart ACTIONS.
+// CONTEXT: Two languages live in this file, one per family.
 //
-//          - A chart-TYPE icon is monochrome duotone: soft axes as the ground,
-//            strong marks, and the ACCENT on exactly one series — the series
-//            the picture is about. Office's blue/orange/grey type icons were
-//            dropped on purpose: a categorical palette in chrome ignores the
-//            skin, and a Dark user saw light-theme blue on a dark tile. If the
-//            owner ever wants the categorical variant back it is a one-file
-//            swap here, not a change to any caller.
-//          - A FURNITURE icon is a soft chart body with the ACCENT on the
-//            element the icon names: the title bar, the gridlines, the legend
-//            keys, the axis labels. You find "Legend" by looking for the
-//            highlighted legend, not by reading the tooltip.
+//          - The VISUALS FAMILY: the 18 chart types, Power BI's visuals of the
+//            Canvas tab (stacked bars and areas, line and stacked column, Card,
+//            Multi-row card, KPI, Gauge), the All Visuals hero, and Chart
+//            Design's layout toggle Grouped | Stacked | 100% (Stacked and
+//            Stacked100 are also gallery tiles, so the toggle follows them).
+//            Redrawn on 2026-10-22 in the owner's chosen direction "Geometric"
+//            (ICONS.md section 2.5): every picture is cut from squares,
+//            circles, semicircles, quarter circles and sharp polygons, on the
+//            sizes of marks.tsx and with its helpers where they fit -- square
+//            where a part meets something, a full curve where it ends freely,
+//            never an in-between radius -- and its parts are held apart by ONE
+//            2.4 cut, which is also the ACCENT's clearance from everything
+//            else. Bars and columns are D-marks (square root, semicircle value
+//            end) with NO drawn axis: their aligned square roots are the axis
+//            (the Histogram, whose adjacent bins make one block, is the one
+//            picture that stands on a SOFT baseline). The x/y pictures stand in
+//            one SOFT L (PlotAxes), the cards on one SOFT rule (CardRule). The
+//            pictures stay monochrome with the ACCENT on exactly one thing (the
+//            series, the stacked series, the value, the selected segment): a
+//            categorical palette in chrome ignores the skin.
+//          - FURNITURE and ACTIONS keep the duotone language of the first
+//            redraw (the approved Main.dc.html / Icons.dc.html mockup): a soft
+//            chart body with the ACCENT on the element the icon names, rounded
+//            rects (rx >= 1.4) and the soft Baseline / Axes ground below. You
+//            find "Legend" by looking for the highlighted legend, not by
+//            reading the tooltip.
 //
-//          Column, Bar, Line, Area, Pie, Donut, Scatter, the furniture and the
-//          actions are the mockup's drawings. The remaining types
-//          (Waterfall ... Pareto), SecondaryAxis and the four line-style
-//          glyphs are drawn here in the same language. The Canvas tab's
-//          Visuals gallery (2026-10-08) added Power BI's chart variants and
-//          visuals -- stacked bars and areas, line and stacked column, Card,
-//          Multi-row card, KPI, Gauge -- and the All Visuals hero, in
-//          Power BI's compositions; their section says where each departs.
-//
-//          Pixel grid (2026-09-24 sharpen pass): every horizontal and vertical
-//          edge sits on a multiple of PIXEL_GRID (1.2 units, one device pixel
-//          at 20px), so straight edges paint crisp at 100% instead of as a
-//          half-covered grey pixel. That is why bars are 2.4 / 3.6 / 4.8 / 6
-//          wide with 1.2 or 2.4 gaps, why the soft axes are lines 2.4 (PIXEL_STROKE)
-//          thick, and why a column stops at 18, one clean pixel above the
-//          Baseline at 19.2. Where it cost nothing at 100%, an edge sits on a
-//          multiple of 2.4, which is also crisp at 150%. Only diagonals,
-//          curves and round caps still antialias.
+//          Pixel grid: every horizontal and vertical edge of a filled shape
+//          sits on a multiple of PIXEL_GRID (1.2 units, one device pixel at
+//          20px), so straight edges paint crisp at 100% instead of as a
+//          half-covered grey pixel. Where it costs nothing an edge sits on a
+//          multiple of 2.4, which is also crisp at 150% and at 30px. Only
+//          diagonals, curves, round caps and the Card's 2.6 digit strokes
+//          antialias; the All Visuals hero is drawn on its own 0.8 grid.
 //
 //          The HERO tiles of the Chart Design band draw at 30px (0.8 units per
 //          device pixel), where only a multiple of 2.4 is crisp: the six quick
 //          types (Column, Bar, Line, Area, Pie, Scatter), MarkOptions,
-//          SwitchRowCol, FormatPoint and Code. Those put every straight edge
-//          they can on the 2.4 grid (Column, Bar and FormatPoint therefore use
-//          2.4 gaps where their siblings use 1.2), so they are crisp at 20px
-//          AND at 30px. MarkOptions' middle rail is the exception: three evenly
-//          spaced 2.4 rails centred on 12 can never all land on the 2.4 grid.
-//          The gallery (24px) and the band's tall segments (28px) cannot
-//          be crisp on this grid: of the multiples of 1.2, only 6, 12 and 18
-//          are whole pixels there.
+//          SwitchRowCol, FormatPoint and Code. The Visuals family puts its
+//          columns, bars, plot L and areas on the 2.4 grid. A cut centred in
+//          the 24 box cannot be: a 2.4 cut there falls on 10.8 | 13.2, half
+//          pixels at 30px and at 150%. That costs the pie (the one quick tile
+//          that got softer at 30px), the donut, the sunburst, and the stacked
+//          pairs at 3.6 / 13.2. MarkOptions' middle rail is the other
+//          exception: three evenly spaced 2.4 rails centred on 12 can never all
+//          land on the 2.4 grid. The gallery (24px) and the band's tall
+//          segments (28px) cannot be crisp on this grid: of the multiples of
+//          1.2, only 6, 12 and 18 are whole pixels there.
 //
 //          EditChart and SaveImage are the generic Pencil and Download
 //          drawings under a chart key — the mockup draws them identically, and
@@ -62,37 +68,32 @@ import {
   line,
   type RibbonIconProps,
 } from "./frame";
+import { GAP, PAIR, SERIES, FLOOR, dMark, column, bar, pill, PlotAxes, CardRule } from "./marks";
 import { Pencil, Download } from "./generic";
 
 // ============================================================================
-// Shared ground
+// Shared ground of the furniture icons
 // ============================================================================
 
-/** The soft category axis under a column-family chart: 2.4..21.6 x
- *  19.2..21.6, a line PIXEL_STROKE thick (two whole pixels at 20px, three at
- *  30px, so it is crisp at 100% AND 150%; a 3.6 axis always has one edge on a
- *  half pixel at 150%). A column above it stops at 18, so one clean pixel of
- *  background separates the two (and the accent column keeps its 1.2 from
- *  the grey). */
+/** The soft category axis under a furniture icon's columns (DataLabels,
+ *  FormatPoint) and line styles: 2.4..21.6 x 19.2..21.6, a line PIXEL_STROKE
+ *  thick (two whole pixels at 20px, three at 30px, so it is crisp at 100% AND
+ *  150%; a 3.6 axis always has one edge on a half pixel at 150%). A column
+ *  above it stops at 18, so one clean pixel of background separates the two.
+ *  The Visuals family draws no axis under its marks (their square roots are
+ *  the axis; see marks.tsx), except the Histogram's square-ended baseline. */
 function Baseline(): React.ReactElement {
   return <rect x="2.4" y="19.2" width="19.2" height="2.4" rx="1.2" fill={SOFT} />;
 }
 
-/** The soft category axis of a bar-family chart, Baseline turned a quarter:
- *  2.4..4.8 x 2.4..21.6, PIXEL_STROKE wide. Bars start at x 7.2, one 2.4 gap
- *  to its right. Shared by ChartBar and the two stacked bar pictures, so the
- *  three bar tiles of the Visuals gallery stand on one axis. */
-function BarAxis(): React.ReactElement {
-  return <rect x="2.4" y="2.4" width="2.4" height="19.2" rx="1.2" fill={SOFT} />;
-}
-
-/** The soft L of an x/y chart (line, scatter, bubble, trendline), drawn as
- *  ONE path. It was two overlapping rects, and SOFT is translucent, so the
- *  corner painted twice: at the 50% tint that joint is a dark knot only 2.2:1
- *  from STRONG. Both arms are lines PIXEL_STROKE thick on the pixel grid, like
- *  the Baseline: the vertical arm is x 2.4..4.8 and rises to 2.4, the
- *  horizontal arm is y 19.2..21.6 and runs to 21.6, so each round end fills
- *  exactly one pixel row or column. */
+/** The soft L under Trendline, drawn as ONE path. It was two overlapping
+ *  rects, and SOFT is translucent, so the corner painted twice: at the 50%
+ *  tint that joint is a dark knot only 2.2:1 from STRONG. Both arms are lines
+ *  PIXEL_STROKE thick on the pixel grid, like the Baseline: the vertical arm
+ *  is x 2.4..4.8 and rises to 2.4, the horizontal arm is y 19.2..21.6 and runs
+ *  to 21.6, so each round end fills exactly one pixel row or column. The
+ *  Visuals family's x/y pictures use marks.tsx's PlotAxes instead (square
+ *  ends, a crisp corner). */
 function Axes(): React.ReactElement {
   return (
     <path
@@ -103,250 +104,352 @@ function Axes(): React.ReactElement {
 }
 
 // ============================================================================
-// Chart types
+// The Visuals family: chart types (2026-10-22, "Geometric")
 // ============================================================================
+//
+// Built on marks.tsx. The stacked pictures (Stacked, ChartBarStacked and their
+// 100% twins) share the helpers below: two PAIR marks (7.2) at 3.6 / 13.2, each
+// a crisp STRONG root, THE cut, then an ACCENT end segment. Line and stacked
+// column draws the same pair by hand, cut short, with a bare SOFT cap for its
+// end. Stacked pictures show TWO categories, clustered ones (ChartColumn,
+// ChartBar, ChartCombo) THREE whole marks: two split marks against three whole
+// ones is what tells them apart at 20px.
 
-/** Column (a 30px hero tile): three 4.8 columns with 2.4 gaps at
- *  2.4 / 9.6 / 16.8, tops 9.6 / 2.4 / 7.2, so every side and top is on the
- *  2.4 grid (crisp at 20px and 30px); only the bottoms at 18 sit on the 1.2
- *  grid, to keep one pixel above the Baseline. */
+/** A stacked mark's END segment: a 2.4 run (as long as THE cut) plus the
+ *  pair's 3.6 cap. Equal in every mark of a stacked picture (it is one
+ *  series), so only the roots vary. */
+const STACK_END = GAP + PAIR / 2;
+
+/** A stacked column on the floor: a crisp STRONG root `root` tall, THE cut,
+ *  then the ACCENT end segment as a D-mark. */
+function stackedColumn(x: number, root: number): React.ReactElement {
+  return (
+    <>
+      <rect x={coord(x)} y={coord(FLOOR - root)} width={coord(PAIR)} height={coord(root)} fill={STRONG} />
+      {dMark(x, FLOOR - root - GAP - STACK_END, PAIR, STACK_END, "top", ACCENT)}
+    </>
+  );
+}
+
+/** A stacked bar from the field's left edge: Stacked's column turned a
+ *  quarter. */
+function stackedBar(y: number, root: number): React.ReactElement {
+  return (
+    <>
+      <rect x="2.4" y={coord(y)} width={coord(root)} height={coord(PAIR)} fill={STRONG} />
+      {dMark(2.4 + root + GAP, y, STACK_END, PAIR, "right", ACCENT)}
+    </>
+  );
+}
+
+/** A 100% stacked column: the root, THE cut, and the ACCENT up to the
+ *  field's top (y 2.4) -- every total the same, the splits different. The
+ *  value end stays a D: square ends made the pair four tiles, close to the
+ *  Treemap. */
+function stackedColumn100(x: number, root: number): React.ReactElement {
+  return (
+    <>
+      <rect x={coord(x)} y={coord(FLOOR - root)} width={coord(PAIR)} height={coord(root)} fill={STRONG} />
+      {dMark(x, 2.4, PAIR, FLOOR - root - GAP - 2.4, "top", ACCENT)}
+    </>
+  );
+}
+
+/** A 100% stacked bar: stackedColumn100 turned a quarter (the ACCENT runs to
+ *  x 21.6). */
+function stackedBar100(y: number, root: number): React.ReactElement {
+  return (
+    <>
+      <rect x="2.4" y={coord(y)} width={coord(root)} height={coord(PAIR)} fill={STRONG} />
+      {dMark(2.4 + root + GAP, y, FLOOR - 2.4 - root - GAP, PAIR, "right", ACCENT)}
+    </>
+  );
+}
+
+/** Column (a 30px hero tile): three MARK D-columns at x 2.4 / 9.6 / 16.8,
+ *  tops 9.6 / 2.4 / 6 (heights 12, 19.2, 15.6), the tallest ACCENT. Their
+ *  square feet on y 21.6 are the baseline. Every straight edge is on the 2.4
+ *  grid, so the tile is crisp at 20px and at 30px. */
 function ChartColumn({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <Baseline />
-      <rect x="2.4" y="9.6" width="4.8" height="8.4" rx="1.6" fill={STRONG} />
-      <rect x="9.6" y="2.4" width="4.8" height="15.6" rx="1.6" fill={ACCENT} />
-      <rect x="16.8" y="7.2" width="4.8" height="10.8" rx="1.6" fill={STRONG} />
+      {column(2.4, 9.6, STRONG)}
+      {column(9.6, 2.4, ACCENT)}
+      {column(16.8, 6, STRONG)}
     </IconFrame>
   );
 }
 
-/** Bar (a 30px hero tile): a 2.4 soft axis at x 2.4..4.8, y 2.4..21.6, and
- *  three 4.8 bars with 2.4 gaps at y 2.4 / 9.6 / 16.8, starting at x 7.2
- *  (lengths 9.6 / 14.4 / 7.2). Every edge is on the 2.4 grid. */
+/** Bar (a 30px hero tile): ChartColumn turned a quarter. Three MARK D-bars at
+ *  y 2.4 / 9.6 / 16.8 growing from x 2.4 (lengths 12, 19.2, 15.6), the
+ *  longest ACCENT; their square roots are the axis. On the 2.4 grid like the
+ *  column. */
 function ChartBar({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <BarAxis />
-      <rect x="7.2" y="2.4" width="9.6" height="4.8" rx="1.6" fill={STRONG} />
-      <rect x="7.2" y="9.6" width="14.4" height="4.8" rx="1.6" fill={ACCENT} />
-      <rect x="7.2" y="16.8" width="7.2" height="4.8" rx="1.6" fill={STRONG} />
+      {bar(2.4, 12, STRONG)}
+      {bar(9.6, 19.2, ACCENT)}
+      {bar(16.8, 15.6, STRONG)}
     </IconFrame>
   );
 }
 
+/** Line (a 30px hero tile): the SOFT plot L and one SERIES (3.6) ACCENT
+ *  zigzag that turns at right angles: two parallel up-strokes round one
+ *  perpendicular down-stroke, every segment 6.46 long, THE gap clear of the L.
+ *  The series-line rule of the family: no turn sharper than a right angle
+ *  (every interior angle 90 degrees or more) and no segment shorter than 5.6,
+ *  so the background inside every turn stays open. The first drawing's
+ *  45-degree down-stroke (3.39 long, 79-degree turns) put the up-strokes 3.33
+ *  apart, less than the 3.6 stroke, and they merged into one kinked worm. */
 function ChartLine({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <Axes />
-      <path d="M7.5 14.5l4-5 4 3 5-6.5" {...line(ACCENT)} />
+      <PlotAxes />
+      <path d="M9 15L11.4 9L17.4 11.4L19.8 5.4" {...line(ACCENT, SERIES)} />
     </IconFrame>
   );
 }
 
-/** Area (a 30px hero tile): the area stands on the Baseline from x 4.8 to
- *  19.2, leaving an equal 2.4 foot of axis at each end; its bottom and both
- *  sides are on the 2.4 grid. */
+/** Area (a 30px hero tile): the plot L and one ACCENT area standing on y 16.8
+ *  (THE gap above the L) across the plot x 7.2..21.6. Its sharp top is the
+ *  rising zigzag (7.2,12) (12,6) (16.8,9.6) (21.6,3.6) on the stacked areas'
+ *  x rhythm, every turn wider than 90 degrees so its valley stays open: the
+ *  line's rhythm, filled. */
 function ChartArea({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <Baseline />
-      <path d="M4.8 19.2V13.8L8.7 9l4 3 5.3-6.5 1.2 0.9V19.2z" fill={SOFT} />
-      <path d="M4.8 13.8L8.7 9l4 3 5.3-6.5" {...line(ACCENT)} />
+      <PlotAxes />
+      <path d="M7.2 16.8V12L12 6L16.8 9.6L21.6 3.6V16.8Z" fill={ACCENT} />
     </IconFrame>
   );
 }
 
+/** Pie (a 30px hero tile): the EXPLODED quarter. A STRONG three-quarter disc
+ *  (R 8.4 on 10.8, 13.2) whose notch is a true right angle at its centre, and
+ *  its ACCENT quarter of the same radius moved out by THE gap on both axes,
+ *  so both cuts have horizontal and vertical edges (x and y 10.8 | 13.2,
+ *  whole pixels at 20px) and the pair spans the field (2R + GAP = 19.2).
+ *  Rings are CUT in place (Donut, Gauge) and pies EXPLODED, so the two differ
+ *  by silhouette as well as by the hole. */
 function ChartPie({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <circle cx="12" cy="12" r="9.5" fill={SOFT} />
-      <path d="M12 2.5A9.5 9.5 0 0 1 21.5 12H12z" fill={ACCENT} />
-      <path d="M12 12h9.5a9.5 9.5 0 0 1-5.9 8.8z" fill={STRONG} />
+      <path d="M19.2 13.2A8.4 8.4 0 1 1 10.8 4.8V13.2Z" fill={STRONG} />
+      <path d="M13.2 10.8V2.4A8.4 8.4 0 0 1 21.6 10.8Z" fill={ACCENT} />
     </IconFrame>
   );
 }
 
+/** Donut: a ring one MARK thick (R 9.6, r 4.8 on 12, 12) CUT in place by
+ *  three GAP-wide radial cuts at 12, 3 and 6 o'clock: the ACCENT quarter, a
+ *  STRONG quarter and a STRONG half. Each cut is a parallel-sided band, so
+ *  every cut edge is horizontal or vertical on x or y 10.8 | 13.2 (the end
+ *  points below are that construction to three decimals). With a single
+ *  cut-off quarter the STRONG three-quarter ring read as a "C". */
 function ChartDonut({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <path
-        d="M12 2.5a9.5 9.5 0 1 0 0 19 9.5 9.5 0 0 0 0-19zm0 5.8a3.7 3.7 0 1 1 0 7.4 3.7 3.7 0 0 1 0-7.4z"
-        fill={SOFT}
-      />
-      <path d="M12 2.5A9.5 9.5 0 0 1 21.5 12h-5.8A3.7 3.7 0 0 0 12 8.3z" fill={ACCENT} />
+      <path d="M13.2 2.475A9.6 9.6 0 0 1 21.525 10.8H16.648A4.8 4.8 0 0 0 13.2 7.352Z" fill={ACCENT} />
+      <path d="M21.525 13.2A9.6 9.6 0 0 1 13.2 21.525V16.648A4.8 4.8 0 0 0 16.648 13.2Z" fill={STRONG} />
+      <path d="M10.8 21.525A9.6 9.6 0 0 1 10.8 2.475V7.352A4.8 4.8 0 0 0 10.8 16.648Z" fill={STRONG} />
     </IconFrame>
   );
 }
 
+/** Scatter (a 30px hero tile): the plot L and four equal 4.8 dots (r 2.4,
+ *  centres on the 1.2 grid, THE gap apart and from the L) rising to the
+ *  right, the highest ACCENT. Equal dots are what tell it from ChartBubble's
+ *  sized ones. */
 function ChartScatter({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <Axes />
-      <circle cx="9" cy="14" r="2.8" fill={STRONG} />
-      <circle cx="14" cy="8.6" r="2.8" fill={ACCENT} />
-      <circle cx="18.6" cy="12.6" r="2.8" fill={STRONG} />
+      <PlotAxes />
+      <circle cx="9.6" cy="14.4" r="2.4" fill={STRONG} />
+      <circle cx="16.8" cy="13.2" r="2.4" fill={STRONG} />
+      <circle cx="12" cy="7.2" r="2.4" fill={STRONG} />
+      <circle cx="19.2" cy="4.8" r="2.4" fill={ACCENT} />
     </IconFrame>
   );
 }
 
-/** Waterfall: a start column, two floating increases climbing a staircase,
- *  and the total; the accent step is the change being explained. Four 3.6
- *  columns with 1.2 gaps: a 6-tall start, then two 4.8 steps (18 / 12 / 7.2
- *  / 2.4). rx is 1.0, not 1.4: on a 3px column 1.4 paints a short step as a
- *  plus sign (the MergeCells finding). */
+/** Waterfall: three MARK marks on the column lattice. A STRONG start
+ *  D-column 9.6 tall, the ACCENT step floating from its top (y 12) up to 2.4
+ *  as a PILL (both of its ends are values), and the STRONG total D-column
+ *  19.2 tall: start + step = total, and the step floats clear of the floor. */
 function ChartWaterfall({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <Baseline />
-      <rect x="2.4" y="12" width="3.6" height="6" rx="1" fill={STRONG} />
-      <rect x="7.2" y="7.2" width="3.6" height="4.8" rx="1" fill={STRONG} />
-      <rect x="12" y="2.4" width="3.6" height="4.8" rx="1" fill={ACCENT} />
-      <rect x="16.8" y="2.4" width="3.6" height="15.6" rx="1" fill={STRONG} />
+      {column(2.4, 12, STRONG)}
+      {pill(9.6, 2.4, 4.8, 9.6, ACCENT)}
+      {column(16.8, 2.4, STRONG)}
     </IconFrame>
   );
 }
 
-/** Combo: strong columns with the accent line series riding above them. The
- *  line zigzags like ChartLine's — a two-segment line over three columns
- *  read as a roof or a check mark, not as a second series. */
+/** Line and clustered column: three MARK D-columns cut short (heights 8.4 /
+ *  9.6 / 10.8, rising) under a SERIES ACCENT wave (4.2,7.8) (9.6,4.2)
+ *  (14.4,7.2) (19.8,4.2). Not ChartLine's zigzag but a flatter wave (interior
+ *  angles 114 and 119 degrees) that fits above the columns; the heights were
+ *  fitted by measurement so the wave's edge stays at least THE gap from every
+ *  dome (3.38 at the closest). */
 function ChartCombo({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <Baseline />
-      <rect x="3.6" y="12" width="4.8" height="6" rx="1.6" fill={STRONG} />
-      <rect x="9.6" y="10.8" width="4.8" height="7.2" rx="1.6" fill={STRONG} />
-      <rect x="15.6" y="10.8" width="4.8" height="7.2" rx="1.6" fill={STRONG} />
-      <path d="M3.8 9.6L9 5.2l5.8 3.4 5.4-5.2" {...line(ACCENT)} />
+      {column(2.4, 13.2, STRONG)}
+      {column(9.6, 12, STRONG)}
+      {column(16.8, 10.8, STRONG)}
+      <path d="M4.2 7.8L9.6 4.2L14.4 7.2L19.8 4.2" {...line(ACCENT, SERIES)} />
     </IconFrame>
   );
 }
 
-/** Radar: a soft pentagon web with the accent series polygon inside it. The
- *  pentagon's flat bottom edge sits on the pixel grid at y 20.4. */
+/** Radar: a SOFT 2.4 hexagon web that fills the field (its vertical sides
+ *  crisp on x 2.4 | 21.6, its tips on y 2.4 | 21.6; one path, the inner
+ *  hexagon wound the other way) and an irregular ACCENT series, one vertex per
+ *  axis, kept THE gap inside the web (each vertex reaches at most the hexagon
+ *  inset 4.8 from the web, measured per axis; three decimals). A regular
+ *  triangle or pentagon series read as a warning sign or a house at 20px. */
 function ChartRadar({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
       <path
-        d="M10.38 3.49Q12 2.31 13.62 3.49L19.89 8.04Q21.51 9.22 20.89 11.12L18.5 18.5Q17.88 20.4 15.88 20.4L8.12 20.4Q6.12 20.4 5.5 18.5L3.11 11.12Q2.49 9.22 4.11 8.04Z"
+        d="M12 2.4L21.6 7.2V16.8L12 21.6L2.4 16.8V7.2ZM4.8 8.683V15.317L12 18.917L19.2 15.317V8.683L12 5.083Z"
         fill={SOFT}
       />
-      <path
-        d="M11.17 5.38Q12 4.51 12.85 5.36L17.05 9.54Q17.9 10.39 17.65 11.56L16.48 16.96Q16.23 18.13 15.07 17.81L10.34 16.51Q9.18 16.19 8.64 15.12L6.83 11.53Q6.29 10.46 7.12 9.59Z"
-        fill={ACCENT}
-      />
+      <path d="M12 7.894L14.54 10.73L16.106 14.053L12 14.54L10.095 12.953L7.894 9.947Z" fill={ACCENT} />
     </IconFrame>
   );
 }
 
-/** Bubble: scatter with a third dimension; the accent bubble is the big one. */
+/** Bubble: the plot L, one big ACCENT bubble (r 4.2) above two STRONG dots
+ *  (r 2.4), THE gap between all of them and from the L: Scatter's dots with
+ *  one of them sized. */
 function ChartBubble({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <Axes />
-      <circle cx="8.8" cy="14.6" r="2.4" fill={STRONG} />
-      <circle cx="13.6" cy="8.6" r="4" fill={ACCENT} />
-      <circle cx="18" cy="14.4" r="2.8" fill={STRONG} />
+      <PlotAxes />
+      <circle cx="14.4" cy="6.6" r="4.2" fill={ACCENT} />
+      <circle cx="9.6" cy="14.4" r="2.4" fill={STRONG} />
+      <circle cx="19.2" cy="14.4" r="2.4" fill={STRONG} />
     </IconFrame>
   );
 }
 
-/** Histogram: adjacent bins in a bell; the accent bin is the mode. Five bins
- *  do not fit 3.6 wide with a clean gap, so each is 2.4 (two whole pixels)
- *  with a 1.2 gap: 3.6..20.4. Bins that touched merged into stepped blobs. */
+/** Histogram: four adjacent 4.8 bins (heights 4.8 / 9.6 / 14.4 / 7.2) as ONE
+ *  ACCENT stepped block -- adjacent bins have no gap, which is what makes it
+ *  a histogram -- standing THE gap above a SOFT baseline on the field's
+ *  bottom edge. The inner steps are crisp (each bin meets its neighbour); the
+ *  block's two FREE outer shoulders are quarter circles one bin wide, so the
+ *  outline is a skewed bell, not a stepped podium. */
 function ChartHistogram({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <Baseline />
-      <rect x="3.6" y="13.2" width="2.4" height="4.8" rx="1.2" fill={STRONG} />
-      <rect x="7.2" y="9.6" width="2.4" height="8.4" rx="1.2" fill={STRONG} />
-      <rect x="10.8" y="4.8" width="2.4" height="13.2" rx="1.2" fill={ACCENT} />
-      <rect x="14.4" y="8.4" width="2.4" height="9.6" rx="1.2" fill={STRONG} />
-      <rect x="18" y="12" width="2.4" height="6" rx="1.2" fill={STRONG} />
+      <rect x="2.4" y="19.2" width="19.2" height="2.4" fill={SOFT} />
+      <path d="M2.4 16.8A4.8 4.8 0 0 1 7.2 12V7.2H12V2.4H16.8V9.6A4.8 4.8 0 0 1 21.6 14.4V16.8Z" fill={ACCENT} />
     </IconFrame>
   );
 }
 
-/** Funnel: centred stages narrowing downward; the accent stage is the one
- *  being examined. */
+/** Funnel: three centred MARK pills at y 2.4 / 9.6 / 16.8, 19.2 / 13.2 / 7.2
+ *  wide (3.0 narrower on each side per stage), the middle stage ACCENT.
+ *  Centred and round at both ends, against ChartBar's left-rooted D-bars. */
 function ChartFunnel({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <rect x="2.4" y="3.6" width="19.2" height="3.6" rx="1.6" fill={STRONG} />
-      <rect x="4.8" y="8.4" width="14.4" height="3.6" rx="1.6" fill={STRONG} />
-      <rect x="7.2" y="13.2" width="9.6" height="3.6" rx="1.6" fill={ACCENT} />
-      <rect x="9.6" y="18" width="4.8" height="3.6" rx="1.6" fill={STRONG} />
+      {pill(2.4, 2.4, 19.2, 4.8, STRONG)}
+      {pill(5.4, 9.6, 13.2, 4.8, ACCENT)}
+      {pill(8.4, 16.8, 7.2, 4.8, STRONG)}
     </IconFrame>
   );
 }
 
-/** Treemap: nested rectangles by size; the accent tile is the named node. */
+/** Treemap: one 19.2 x 16.8 block (landscape, centred) cut by THE gap into
+ *  four crisp tiles that shrink in turn: STRONG 6 x 16.8, ACCENT 10.8 x 8.4,
+ *  STRONG 4.8 x 6, SOFT 3.6 x 6. The tiles meet each other, so every corner
+ *  is square. The densest picture of the set, so it takes more cuts rather
+ *  than more area. */
 function ChartTreemap({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <rect x="2.4" y="2.4" width="9.6" height="19.2" rx="2.4" fill={STRONG} />
-      <rect x="13.2" y="2.4" width="8.4" height="9.6" rx="2.4" fill={ACCENT} />
-      <rect x="13.2" y="13.2" width="3.6" height="8.4" rx="1.6" fill={SOFT} />
-      <rect x="18" y="13.2" width="3.6" height="8.4" rx="1.6" fill={SOFT} />
+      <rect x="2.4" y="3.6" width="6" height="16.8" fill={STRONG} />
+      <rect x="10.8" y="3.6" width="10.8" height="8.4" fill={ACCENT} />
+      <rect x="10.8" y="14.4" width="4.8" height="6" fill={STRONG} />
+      <rect x="18" y="14.4" width="3.6" height="6" fill={SOFT} />
     </IconFrame>
   );
 }
 
-/** Stock: three candlesticks, wick behind body; the accent candle is the one
- *  that closed up. The wicks are PIXEL_STROKE lines on the pixel grid
- *  (x 6 / 12 / 18), each centred in a 4.8-wide body. */
+/** Stock: three candlesticks on the column lattice (x 2.4 / 9.6 / 16.8),
+ *  each a crisp 4.8 body on a 2.4 wick PILL (a wick is free at both ends);
+ *  the candle that closed up is ACCENT. */
 function ChartStock({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <Baseline />
-      <path d="M6 4.6V16" {...line(STRONG, PIXEL_STROKE)} />
-      <rect x="3.6" y="7.2" width="4.8" height="6" rx="1.6" fill={STRONG} />
-      <path d="M12 3V12.6" {...line(ACCENT, PIXEL_STROKE)} />
-      <rect x="9.6" y="4.8" width="4.8" height="4.8" rx="1.6" fill={ACCENT} />
-      <path d="M18 7.6V16.4" {...line(STRONG, PIXEL_STROKE)} />
-      <rect x="15.6" y="9.6" width="4.8" height="4.8" rx="1.6" fill={STRONG} />
+      {pill(3.6, 4.8, 2.4, 14.4, STRONG)}
+      <rect x="2.4" y="7.2" width="4.8" height="9.6" fill={STRONG} />
+      {pill(10.8, 2.4, 2.4, 14.4, ACCENT)}
+      <rect x="9.6" y="4.8" width="4.8" height="9.6" fill={ACCENT} />
+      {pill(18, 7.2, 2.4, 14.4, STRONG)}
+      <rect x="16.8" y="9.6" width="4.8" height="9.6" fill={STRONG} />
     </IconFrame>
   );
 }
 
-/** Box plot: two boxes with capped whiskers — the caps are what tell it
- *  apart from Stock's candles at a glance. Whiskers and caps are
- *  PIXEL_STROKE lines on the pixel grid (x 7.2 / 16.8), each centred in a
- *  7.2-wide box. */
+/** Box and whisker: two plots on the pair's columns (x 3.6 / 13.2), each a
+ *  7.2 box cut at its MEDIAN by THE gap (3.6 | 4.8 and 4.8 | 3.6, so the two
+ *  medians differ and the plots read as two distributions), 2.4 whiskers and
+ *  4.8 x 2.4 PILL caps (a cap is free at both ends; the caps are what Stock's
+ *  candles lack). The second plot is ACCENT. One whisker of each plot is 1.2
+ *  long where the box needs the room. */
 function ChartBoxPlot({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <path d="M5.8 4.8h2.8M7.2 4.8v14.4M5.8 19.2h2.8" {...line(STRONG, PIXEL_STROKE)} />
-      <rect x="3.6" y="8.4" width="7.2" height="7.2" rx="1.6" fill={STRONG} />
-      <path d="M15.4 3.6h2.8M16.8 3.6v14.4M15.4 18h2.8" {...line(ACCENT, PIXEL_STROKE)} />
-      <rect x="13.2" y="7.2" width="7.2" height="7.2" rx="1.6" fill={ACCENT} />
+      {pill(4.8, 2.4, 4.8, 2.4, STRONG)}
+      <rect x="6" y="4.8" width="2.4" height="1.2" fill={STRONG} />
+      <rect x="3.6" y="6" width="7.2" height="3.6" fill={STRONG} />
+      <rect x="3.6" y="12" width="7.2" height="4.8" fill={STRONG} />
+      <rect x="6" y="16.8" width="2.4" height="2.4" fill={STRONG} />
+      {pill(4.8, 19.2, 4.8, 2.4, STRONG)}
+      {pill(14.4, 2.4, 4.8, 2.4, ACCENT)}
+      <rect x="15.6" y="4.8" width="2.4" height="2.4" fill={ACCENT} />
+      <rect x="13.2" y="7.2" width="7.2" height="4.8" fill={ACCENT} />
+      <rect x="13.2" y="14.4" width="7.2" height="3.6" fill={ACCENT} />
+      <rect x="15.6" y="18" width="2.4" height="1.2" fill={ACCENT} />
+      {pill(14.4, 19.2, 4.8, 2.4, ACCENT)}
     </IconFrame>
   );
 }
 
-/** Sunburst: a strong root, a soft ring of children, the accent child. */
+/** Sunburst: the EXPLODED RING. The pie's construction on a ring (R 8.4,
+ *  r 4.8 on the pie's own centre 10.8, 13.2) round a STRONG centre dot (r 2.4,
+ *  the root of the hierarchy): its ACCENT quarter moves out by THE gap on both
+ *  axes, as the pie's does, and the rest of the ring is cut once more at 9
+ *  o'clock into two STRONG segments. Every cut edge is horizontal or vertical
+ *  (three decimals where an edge meets a circle). With the donut cut in place,
+ *  pie, donut and sunburst read as one family that differs by shape. */
 function ChartSunburst({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <path
-        d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 4a6 6 0 1 1 0 12 6 6 0 0 1 0-12z"
-        fill={SOFT}
-      />
-      <path d="M12 2A10 10 0 0 1 20.66 17L17.2 15A6 6 0 0 0 12 6z" fill={ACCENT} />
-      <circle cx="12" cy="12" r="4.2" fill={STRONG} />
+      <circle cx="10.8" cy="13.2" r="2.4" fill={STRONG} />
+      <path d="M19.2 13.2A8.4 8.4 0 0 1 2.486 14.4H6.152A4.8 4.8 0 0 0 15.6 13.2Z" fill={STRONG} />
+      <path d="M2.486 12A8.4 8.4 0 0 1 10.8 4.8V8.4A4.8 4.8 0 0 0 6.152 12Z" fill={STRONG} />
+      <path d="M13.2 2.4A8.4 8.4 0 0 1 21.6 10.8H18A4.8 4.8 0 0 0 13.2 6Z" fill={ACCENT} />
     </IconFrame>
   );
 }
 
-/** Pareto: descending strong columns and the accent cumulative line. */
+/** Pareto: three descending MARK D-columns (heights 12 / 8.4 / 6) and a
+ *  SERIES ACCENT cumulative arc (R 10.8, concave down) that starts beside the
+ *  first column's top and rises to the field's top-right corner. Its start
+ *  was fitted by measurement to stay THE gap clear of every column. */
 function ChartPareto({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <Baseline />
-      <rect x="3.6" y="8.4" width="4.8" height="9.6" rx="1.6" fill={STRONG} />
-      <rect x="9.6" y="12" width="4.8" height="6" rx="1.6" fill={STRONG} />
-      <rect x="15.6" y="14.4" width="4.8" height="3.6" rx="1.6" fill={STRONG} />
-      <path d="M5.8 8C9.5 5.4 13 4.2 18.2 3.4" {...line(ACCENT)} />
+      {column(2.4, 9.6, STRONG)}
+      {column(9.6, 13.2, STRONG)}
+      {column(16.8, 15.6, STRONG)}
+      <path d="M10.8 9A10.8 10.8 0 0 1 19.8 4.2" {...line(ACCENT, SERIES)} />
     </IconFrame>
   );
 }
@@ -439,49 +542,53 @@ function SecondaryAxis({ size }: RibbonIconProps): React.ReactElement {
 // ============================================================================
 // Grouping and marks
 // ============================================================================
+//
+// Grouped, Stacked and Stacked100 are Chart Design's layout toggle, and Stacked
+// and Stacked100 are also Visuals gallery tiles, so all three are drawn in the
+// Visuals family (2026-10-22). Trendline and the mark and line-style pictures
+// below them are furniture and keep the duotone language.
 
+/** Grouped (the Chart Design toggle Grouped | Stacked | 100%): two WHOLE PAIR
+ *  columns on Stacked's two slots (x 3.6 and 13.2), a short STRONG one (top
+ *  9.6, shorter than Stacked's first column) and a tall ACCENT one (top 2.4),
+ *  side by side: two series beside each other, where Stacked splits each
+ *  column into a root and an end. Two whole pair columns, so it differs from
+ *  ChartColumn's three MARK columns by shape; four thinner columns in two
+ *  groups were tried first and read as a signal-strength meter beside the
+ *  toggle's bold pairs. Drawn on 2026-10-22 when the family was adopted (the
+ *  proposal showed no Grouped). */
 function Grouped({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <Baseline />
-      <rect x="2.4" y="8.4" width="3.6" height="9.6" rx="1.4" fill={STRONG} />
-      <rect x="7.2" y="12" width="3.6" height="6" rx="1.4" fill={ACCENT} />
-      <rect x="13.2" y="6" width="3.6" height="12" rx="1.4" fill={STRONG} />
-      <rect x="18" y="9.6" width="3.6" height="8.4" rx="1.4" fill={ACCENT} />
+      {column(3.6, 9.6, STRONG, PAIR)}
+      {column(13.2, 2.4, ACCENT, PAIR)}
     </IconFrame>
   );
 }
 
 /** Stacked (the Chart Design toggle Grouped | Stacked | 100%, and Power BI's
- *  "Stacked column" tile): two 6-wide columns, each a STRONG body under a
- *  1.2 gap and an ACCENT top segment, the stacked series. Redrawn 2026-10-08
- *  for the Visuals gallery, where it sits beside Stacked100: the left column
- *  topped out at 4.8 and the right at 2.4, 2 px apart at 20px, so the two
- *  tiles read as one picture. The left column now stops at 8.4 (STRONG
- *  14.4..18, ACCENT 8.4..13.2), Power BI's proportion: a short and a tall
- *  category, against Stacked100's two full-height ones. The right column is
- *  unchanged. The 6 width stays (a 4.8 pair on the 2.4 grid read as two thin
- *  "i"s); ribbonIcons.test.tsx holds the 4 px difference. */
+ *  "Stacked column" tile): two PAIR columns on the floor, each a crisp STRONG
+ *  root (6, then 10.8), THE cut, and the equal ACCENT end segment; the totals
+ *  14.4 and 19.2 rise left to right, 4 px apart at 20px. "The same end
+ *  segment on different totals", against Stacked100's "the same total, split
+ *  differently": the two differ by shape (ribbonIcons.test.tsx holds it). */
 function Stacked({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <Baseline />
-      <rect x="4.8" y="14.4" width="6" height="3.6" rx="1.6" fill={STRONG} />
-      <rect x="4.8" y="8.4" width="6" height="4.8" rx="1.6" fill={ACCENT} />
-      <rect x="13.2" y="8.4" width="6" height="9.6" rx="1.6" fill={STRONG} />
-      <rect x="13.2" y="2.4" width="6" height="4.8" rx="1.6" fill={ACCENT} />
+      {stackedColumn(3.6, 6)}
+      {stackedColumn(13.2, 10.8)}
     </IconFrame>
   );
 }
 
+/** 100% stacked column: Stacked's pair with both columns the full 19.2 --
+ *  STRONG roots 4.8 and 10.8, THE cut, ACCENT D tops 12 and 6. The second
+ *  column is Stacked's own tall column. */
 function Stacked100({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <Baseline />
-      <rect x="4.8" y="9.6" width="6" height="8.4" rx="1.6" fill={STRONG} />
-      <rect x="4.8" y="2.4" width="6" height="6" rx="1.6" fill={ACCENT} />
-      <rect x="13.2" y="7.2" width="6" height="10.8" rx="1.6" fill={STRONG} />
-      <rect x="13.2" y="2.4" width="6" height="3.6" rx="1.6" fill={ACCENT} />
+      {stackedColumn100(3.6, 4.8)}
+      {stackedColumn100(13.2, 10.8)}
     </IconFrame>
   );
 }
@@ -659,326 +766,211 @@ function Code({ size }: RibbonIconProps): React.ReactElement {
 }
 
 // ============================================================================
-// Power BI's Visualizations pane (2026-10-08, the Canvas tab's Visuals gallery)
+// Power BI's Visualizations pane (the Canvas tab's Visuals gallery)
 // ============================================================================
 //
 // The Canvas tab mirrors Power BI Desktop's report authoring, and its Visuals
 // gallery shows Power BI's pane: six pictures to a row, every one a small
-// chart. These keys borrow Power BI's COMPOSITIONS and paint them in this
-// set's channels: Power BI's blue is ACCENT (the one series or value the
-// picture is about), its grey is SOFT, its white-with-a-dark-outline marks are
-// STRONG (filled, never outlined). Two things Power BI does could not be
-// copied, and each drawing below says how it departs:
+// chart. First drawn on 2026-10-08 in Power BI's compositions; redrawn on
+// 2026-10-22 in the Visuals family's language (marks.tsx). Power BI's blue is
+// ACCENT (the one series or value the picture is about), its grey SOFT, its
+// white marks STRONG and filled. Two things Power BI does are not copied:
 //
-// - Power BI's coloured parts touch the grey ones; ours keep 1.2 of
-//   background between ACCENT and every grey (frame.tsx), so a line that
-//   CROSSES columns rides above them instead, and a gauge needle stands in
-//   its own gap.
+// - Power BI's coloured parts touch the grey ones; ours keep THE gap (2.4) of
+//   background between the ACCENT and everything else, so a line that CROSSES
+//   columns rides above them instead, and a gauge needle stands in its own
+//   cuts. `npm run check:icon-contact` measures it (2.4 for the family, 1.6
+//   for the 30px hero).
 // - Power BI's KPI is a green AND a red triangle. ACCENT and DANGER never
-//   share an icon (and red means "delete" here), so the red one is STRONG
+//   share an icon (and red means "delete" here), so the down half is STRONG
 //   (owner decision 2026-10-08).
-//
-// The family language is ChartColumn's and ChartBar's: column pictures stand
-// on the soft Baseline and stop at 18, bar pictures grow from BarAxis at 7.2,
-// marks are filled rx 1.6. A stacked mark is a STRONG first part, a 1.2 gap,
-// and an ACCENT last part (Stacked's idiom), so in every stacked picture the
-// accent is "the stacked series". Stacked pictures show TWO categories, the
-// clustered ones (ChartColumn, ChartBar) three whole marks: two split marks
-// against three whole ones is what tells the two apart at 20px. A 100%
-// picture differs from its stacked twin by SHAPE: every mark reaches the same
-// end (ribbonIcons.test.tsx measures it). Every key measures 0 accent contact.
 
-/** Stacked bar (Power BI's first tile): Stacked turned a quarter. Two bars
- *  off BarAxis, 6 thick (Stacked's column width) at y 4.8..10.8 and
- *  13.2..19.2, a 2.4 gap centred on 12. Top bar, the short category: STRONG
- *  7.2..10.8, ACCENT 12..15.6 -- it ends 6.0 short of the long bar, Stacked's
- *  own shortfall (the first drawing's ACCENT ran to 16.8, 4.8 short, and its
- *  whole difference from ChartBarStacked100 was one 4 x 5 px corner; review
- *  1 of 2026-10-08). The accent stays at the 3.6 part floor. Bottom bar:
- *  STRONG 7.2..15.6, ACCENT 16.8..21.6. Every edge is on the 1.2 grid; 10.8 /
- *  13.2 / 15.6 are half pixels at 30px, the price of Stacked's 6 width (a 7.2
- *  bar read as two heavy blocks and a 4.8 bar as pills). Power BI draws white
- *  outlined bodies with a grey second segment on one bar; both last segments
- *  are ACCENT here, as in Stacked. */
+/** Stacked bar (Power BI's first tile): two PAIR bars from x 2.4, the LONGER
+ *  on top: each a crisp STRONG root (10.8, then 6), THE cut, and the equal
+ *  ACCENT end segment; totals 19.2 and 14.4. With the short bar on top, the
+ *  left-aligned roots and the two D ends drew a stencil capital "B" (whose
+ *  smaller bowl is the upper one); longest first reads as two sorted bars.
+ *  The stacked COLUMN keeps its rising order. */
 function ChartBarStacked({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <BarAxis />
-      <rect x="7.2" y="4.8" width="3.6" height="6" rx="1.6" fill={STRONG} />
-      <rect x="12" y="4.8" width="3.6" height="6" rx="1.6" fill={ACCENT} />
-      <rect x="7.2" y="13.2" width="8.4" height="6" rx="1.6" fill={STRONG} />
-      <rect x="16.8" y="13.2" width="4.8" height="6" rx="1.6" fill={ACCENT} />
+      {stackedBar(3.6, 10.8)}
+      {stackedBar(13.2, 6)}
     </IconFrame>
   );
 }
 
-/** 100% stacked bar: both bars run the full length to 21.6, split at
- *  different points. Top: STRONG 7.2..10.8, ACCENT 12..21.6 (mostly the
- *  series); bottom: STRONG 7.2..16.8, ACCENT 18..21.6. The splits follow
- *  Power BI's picture (top mostly blue, bottom mostly white) rather than
- *  Stacked100 turned literally: the larger contrast between the two splits
- *  reads "same length, different shares" better at 20px. */
+/** 100% stacked bar: ChartBarStacked's pair with every bar the full 19.2:
+ *  STRONG roots 4.8 and 10.8, THE cut, ACCENT D ends 12 and 6. The same
+ *  total split differently, where its twin has the same end segment on
+ *  different totals. */
 function ChartBarStacked100({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <BarAxis />
-      <rect x="7.2" y="4.8" width="3.6" height="6" rx="1.6" fill={STRONG} />
-      <rect x="12" y="4.8" width="9.6" height="6" rx="1.6" fill={ACCENT} />
-      <rect x="7.2" y="13.2" width="9.6" height="6" rx="1.6" fill={STRONG} />
-      <rect x="18" y="13.2" width="3.6" height="6" rx="1.6" fill={ACCENT} />
+      {stackedBar100(3.6, 4.8)}
+      {stackedBar100(13.2, 10.8)}
     </IconFrame>
   );
 }
 
-/** Stacked area: a STRONG lower series, and the ACCENT series as a band
- *  riding on it (Power BI's blue zigzag band between two zigzags). The lower
- *  series' top is the zigzag (2.4,15.6) (7.2,12) (12,14.4) (16.8,10.8)
- *  (21.6,13.2), down the sides to 18 with r 1.2 bottom corners. The band's
- *  top is the same zigzag 7.8 higher; its bottom is that zigzag offset 1.8
- *  PERPENDICULAR (mitred, cut at x 2.4 and 21.6, written to two decimals).
- *  The lower series sat 1.2 higher until review 0 of 2026-10-08: in Power BI
- *  the lower series is the light one and the blue band is what you see
- *  first, and ours read as a dark mountain with a thin green ridge. Lowering
- *  the body (and the band's lower edge with it, so the cut is unchanged)
- *  made the band 1.2 deeper and the body 1.2 lighter; the band's top did not
- *  move, so the zigzag top still tells it from ChartAreaStacked100's flat
- *  one. The cut is 1.8, not the minimum 1.2: on a diagonal a
- *  1.2 gap paints as one row of half-covered pixels and the band smears into
- *  the body at 20px; 1.8 was the first width that stayed a clean line in
- *  Light and Dark at 100% and 150%. Power BI's lower area is white with an
- *  outline on an L axis; ours is a filled STRONG body on the Baseline. A SOFT
- *  body was rendered and refused: a soft area with a green top is ChartArea's
- *  picture, so the two would differ only by the band's thickness. */
+/** Stacked area: the plot L, a STRONG lower series whose top is the zigzag
+ *  (7.2,13.2) (12,10.8) (16.8,13.2) (21.6,9.6), and the ACCENT series as a
+ *  band riding on it. The band's top is that zigzag 7.2 higher; its lower
+ *  edge is the zigzag offset THE gap PERPENDICULAR (mitred and cut at x 7.2
+ *  and 21.6, written to three decimals), so the cut is a constant 2.4 (the
+ *  band thins from 4.0 to 3.4 on the steep last segment). The band has ONE
+ *  highest point, the top-right corner, which is what tells it from
+ *  ChartAreaStacked100's flat top. */
 function ChartAreaStacked({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <Baseline />
-      <path
-        d="M2.4 15.6L7.2 12L12 14.4L16.8 10.8L21.6 13.2V16.8A1.2 1.2 0 0 1 20.4 18H3.6A1.2 1.2 0 0 1 2.4 16.8Z"
-        fill={STRONG}
-      />
-      <path
-        d="M2.4 7.8L7.2 4.2L12 6.6L16.8 3L21.6 5.4L21.6 11.19L16.61 8.69L11.81 12.29L7.01 9.89L2.4 13.35Z"
-        fill={ACCENT}
-      />
+      <PlotAxes />
+      <path d="M7.2 16.8V13.2L12 10.8L16.8 13.2L21.6 9.6V16.8Z" fill={STRONG} />
+      <path d="M7.2 6L12 3.6L16.8 6L21.6 2.4V6.6L16.547 10.39L12 8.117L7.2 10.517Z" fill={ACCENT} />
     </IconFrame>
   );
 }
 
-/** 100% stacked area: the ACCENT series fills from the FLAT top of the plot
- *  (y 2.4, r 1.6 corners) down to a zigzag, the STRONG series fills below it
- *  -- Power BI's picture exactly. The flat top reaching the frame is what
- *  separates it from ChartAreaStacked. Lower zigzag (2.4,12) (7.2,8.4) (12,12)
- *  (16.8,7.2) (21.6,10.8) down to 18; the accent's bottom edge is that zigzag
- *  offset 1.8 perpendicular, as in ChartAreaStacked. The heaviest picture in
- *  the family (like Power BI's); the white zigzag cut is what it reads by. */
+/** 100% stacked area: ChartAreaStacked's lower series and cut unchanged, with
+ *  the ACCENT filling up to the plot's FLAT top at y 2.4. The flat top is the
+ *  whole difference from its twin, as the aligned ends are for the 100%
+ *  bars. */
 function ChartAreaStacked100({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <Baseline />
-      <path
-        d="M2.4 12L7.2 8.4L12 12L16.8 7.2L21.6 10.8V16.8A1.2 1.2 0 0 1 20.4 18H3.6A1.2 1.2 0 0 1 2.4 16.8Z"
-        fill={STRONG}
-      />
-      <path
-        d="M2.4 4A1.6 1.6 0 0 1 4 2.4H20A1.6 1.6 0 0 1 21.6 4L21.6 8.55L16.63 4.82L11.83 9.62L7.2 6.15L2.4 9.75Z"
-        fill={ACCENT}
-      />
+      <PlotAxes />
+      <path d="M7.2 16.8V13.2L12 10.8L16.8 13.2L21.6 9.6V16.8Z" fill={STRONG} />
+      <path d="M7.2 2.4H21.6V6.6L16.547 10.39L12 8.117L7.2 10.517Z" fill={ACCENT} />
     </IconFrame>
   );
 }
 
-/** One stacked column of ChartComboStacked: a `width`-wide STRONG body from
- *  `split` down to 18, rounded r 1.6 at the bottom only, with a SOFT cap from
- *  `top` to `split` laid FLUSH on it, rounded at the top only. Soft against
- *  strong needs no gap (the 1.2 rule is about ACCENT; STRONG is 3:1 above
- *  SOFT), and they abut, never overlap. */
-function stackedColumn(x: number, top: number, split: number, width: number): React.ReactElement {
-  return (
-    <>
-      <path
-        d={`M${coord(x)} ${coord(split)}H${coord(x + width)}V16.4A1.6 1.6 0 0 1 ${coord(x + width - 1.6)} 18H${coord(x + 1.6)}A1.6 1.6 0 0 1 ${coord(x)} 16.4Z`}
-        fill={STRONG}
-      />
-      <path
-        d={`M${coord(x)} ${coord(top + 1.6)}A1.6 1.6 0 0 1 ${coord(x + 1.6)} ${coord(top)}H${coord(x + width - 1.6)}A1.6 1.6 0 0 1 ${coord(x + width)} ${coord(top + 1.6)}V${coord(split)}H${coord(x)}Z`}
-        fill={SOFT}
-      />
-    </>
-  );
-}
-
-/** Line and stacked column: Stacked's TWO 6-wide columns (x 4.8..10.8 and
- *  13.2..19.2) under ChartCombo's line. Each column is a STRONG body with a
- *  SOFT cap (Power BI's grey upper segment): left cap 10.8..14.4 on a body
- *  14.4..18, right cap 9.6..13.2 on a body 13.2..18. The ACCENT line, a
- *  3-unit zigzag, rides above them, its top edge at 2.4 and at least 1.2
- *  clear of every cap. Until review 0 of 2026-10-08 this drew ChartCombo's
- *  THREE 4.8 columns with caps, and at 20px it was ChartCombo with soft tops:
- *  the family rule above (two split marks against three whole ones, Power
- *  BI's pane row 2, tiles 5 and 6) is what tells it apart now, and
- *  ribbonIcons.test.tsx pins the columns to Stacked's. Power BI's line
- *  CROSSES the columns; ours cannot (a crossing accent line needs 1.2 cut out
- *  of every column it crosses, and the crossing version with a STRONG line
- *  read as noise at 20px; Power BI's own colours -- green segments under a
- *  dark line -- read as a table). The caps sit flush because the line above
- *  leaves the columns 7.2..8.4 tall: with a 1.2 gap every column became the
- *  same two blocks and the picture read as a table. The two-tone, flat-capped
- *  columns survive high contrast (SOFT is a solid mid-grey there). */
+/** Line and stacked column: Stacked's two PAIR columns (x 3.6..10.8 and
+ *  13.2..20.4) cut short under a SERIES ACCENT wave (4.2,8.4) (8.4,4.2)
+ *  (13.2,7.2) (19.8,4.2): STRONG roots 3.6 and 4.8 tall, THE cut, and as end
+ *  segment the bare cap, a SOFT semicircle (Power BI's grey upper segment).
+ *  Two split columns against ChartCombo's three whole ones is what tells the
+ *  two apart (ribbonIcons.test.tsx pins the columns to Stacked's); the
+ *  heights were fitted by measurement so the wave keeps THE gap from both
+ *  caps. Power BI's line CROSSES the columns; ours rides above them, because
+ *  a crossing accent line would need a gap cut out of every column it
+ *  crosses. */
 function ChartComboStacked({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <Baseline />
-      {stackedColumn(4.8, 10.8, 14.4, 6)}
-      {stackedColumn(13.2, 9.6, 13.2, 6)}
-      <path d="M3.8 7.4L9 3.9l5.8 2.7 5.4-2.7" {...line(ACCENT)} />
+      <rect x="3.6" y="18" width="7.2" height="3.6" fill={STRONG} />
+      <path d="M3.6 15.6A3.6 3.6 0 0 1 10.8 15.6Z" fill={SOFT} />
+      <rect x="13.2" y="16.8" width="7.2" height="4.8" fill={STRONG} />
+      <path d="M13.2 14.4A3.6 3.6 0 0 1 20.4 14.4Z" fill={SOFT} />
+      <path d="M4.2 8.4L8.4 4.2L13.2 7.2L19.8 4.2" {...line(ACCENT, SERIES)} />
     </IconFrame>
   );
 }
 
-/** Card: Power BI's card, a large "123" over a grey caption rule (Power BI's
- *  lightning badge only means "new" and is dropped). The ACCENT digits are
- *  Paste Values' PASTE_DIGITS (home.tsx) moved by (-2.4, -7.2), written out
- *  because a PIXEL_STROKE path may not sit in a transform;
- *  ribbonIcons.test.tsx fails if the two drift. Their ink is 4.8..19.2 x
- *  4.8..14.4. Under them, 2.4 clear, the SOFT caption rule 4.8..19.2 x
- *  16.8..19.2: Power BI's grey, and the same SOFT rule KPI draws on the same
- *  gallery row. Ink 4.8..19.2 both ways, centred on 12.
- *
- *  No frame. The first Card held the digits in a hole cut in a SOFT card
- *  1.2..22.8 wide with the rule (STRONG, on the grey wall) in its bottom band;
- *  both reviews of 2026-10-08 read it as a monitor or calculator with a chin,
- *  it was among the heaviest pictures in the gallery (ink 211 against 115-150
- *  for its neighbours) and it broke the 2.4 margins. Review 0 kept a frame (a
- *  square card, the rule SOFT in the hole: ink 214, 40 half-covered pixels);
- *  review 1 dropped it (ink 90, 24 half-covered). Settled on the 20px pixel
- *  map (scratch icons-fix/cand-row1.png): the frameless value over a rule
- *  reads as the card and matches KPI, which draws no box for the same reason;
- *  the rule is SOFT, review 0's colour, because Power BI's rule is grey and
- *  on the background it no longer needs to be STRONG to show. It differs
- *  from Paste Values (a clipboard with the digits in its corner) by shape. */
+/** Card: Power BI's card, a big "123" over the cards' SOFT rule (Power BI's
+ *  lightning badge only means "new" and is dropped). Geometric ACCENT digits
+ *  stand THE gap above the rule, in y 4.8..16.8: the 1 is a filled 2.4 bar on
+ *  the 2.4 grid whose top is cut on a slant from (2.4, 8.4) up to (4.8, 4.8)
+ *  -- a flag drawn inside its own width, so the digits do not read as "I23"
+ *  -- and the 2 and the 3 are 2.6 strokes on bowls of one centre-line radius
+ *  (2.3), which antialias like any curve (the 2's foot has its top edge at
+ *  14.2). The digits sit 1.2 apart, closer than THE gap: they are one value.
+ *  No frame: a framed card read as a monitor with a chin (2026-10-08). Until
+ *  2026-10-22 the digits were Paste Values' pixel digits moved; the two no
+ *  longer share a drawing. */
 function ChartCard({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <path d="M6 6V13.2M9.6 6H12V9.6H9.6V13.2H12M15.6 6H18V13.2H15.6M15.6 9.6H18" {...line(ACCENT, PIXEL_STROKE)} />
-      <rect x="4.8" y="16.8" width="14.4" height="2.4" rx="1.2" fill={SOFT} />
+      <path d="M2.4 8.4L4.8 4.8V16.8H2.4Z" fill={ACCENT} />
+      <path d="M7.3 8.4A2.3 2.3 0 1 1 11.865 8.799L7.3 15.5H11.9" {...line(ACCENT, 2.6)} />
+      <path d="M16.008 7.35A2.3 2.3 0 1 1 18 10.8A2.3 2.3 0 1 1 16.008 14.25" {...line(ACCENT, 2.6)} />
+      <CardRule />
     </IconFrame>
   );
 }
 
-/** Multi-row card (older Power BI's; the current pane replaced it with the
- *  new Card, so the composition is the survey's): three records at y 2.4 /
- *  9.6 / 16.8, 4.8 tall with 2.4 gaps. Each is a 2.4 x 4.8 card bar on the left
- *  (Power BI's "accent bar" option, so the ACCENT names a real feature: the
- *  first record's bar; the others SOFT), a STRONG value bar 2.4 tall from 7.2
- *  (lengths 8.4 / 13.2 / 10.8) and, directly under it, a SOFT label bar to
- *  21.6 (strong and soft abut). The accent bar keeps 2.4 to its record. No
- *  enclosing card: an accent inside a soft card needs a hole with 2.4 walls,
- *  and three records do not fit 19.2 that way. It differs by shape from
- *  Slicer (three centred pills in a panel), PivotFields (square ticks with one
- *  bar each) and Table (a 3 x 3 grid). */
+/** Multi-row card: two records, each the cards' "value over a rule": a 3.6
+ *  value PILL (a value is free at both ends; the first record's ACCENT, the
+ *  second's STRONG), THE cut, and a SOFT 2.4 label rule, the second one on
+ *  the field's bottom edge like the Card's. It differs by shape from the
+ *  Slicer (dots and pills) and the Table (rows cut into cells). */
 function ChartMultiRowCard({ size }: RibbonIconProps): React.ReactElement {
-  const records = [
-    { y: 2.4, value: 8.4, bar: ACCENT },
-    { y: 9.6, value: 13.2, bar: SOFT },
-    { y: 16.8, value: 10.8, bar: SOFT },
-  ];
   return (
     <IconFrame size={size}>
-      {records.map(({ y, value, bar }) => (
-        <React.Fragment key={y}>
-          <rect x="2.4" y={y} width="2.4" height="4.8" rx="1.2" fill={bar} />
-          <rect x="7.2" y={y} width={value} height="2.4" rx="1.2" fill={STRONG} />
-          <rect x="7.2" y={coord(y + 2.4)} width="14.4" height="2.4" rx="1.2" fill={SOFT} />
-        </React.Fragment>
-      ))}
+      {pill(2.4, 2.4, 12, 3.6, ACCENT)}
+      <rect x="2.4" y="8.4" width="19.2" height="2.4" fill={SOFT} />
+      {pill(2.4, 13.2, 15.6, 3.6, STRONG)}
+      <CardRule />
     </IconFrame>
   );
 }
 
-/** KPI: Power BI's up and down triangles over a grey rule. Power BI's green
- *  up triangle is ACCENT and its red down triangle STRONG (owner decision
- *  2026-10-08; ACCENT and DANGER never share an icon). The ACCENT triangle
- *  (7.8,3.6) (13.2,15.6) (2.4,15.6) and the STRONG one (10.8,3.6) (21.6,3.6)
- *  (16.2,15.6), corners rounded r 1.0, INTERLOCK: their facing edges are
- *  parallel and 2.74 apart. Power BI's stand apart, but drawn that way they
- *  were 4-6 px marks lost in a 20px box; interlocked each is 9 x 10 px. The
- *  SOFT rule 2.4..21.6 x 18..20.4 sits 2.4 under the up triangle's base. No
- *  box: the pair over a rule is its own shape, and ChartCard beside it is the
- *  same "value over a SOFT rule" without one (ribbonIcons.test.tsx holds
- *  both). */
+/** KPI: Power BI's up and down indicator as a square turned 45 degrees,
+ *  widened to 19.2 x 14.4 and cut once across its middle by THE gap: the
+ *  ACCENT upper triangle points up (above target), the STRONG lower triangle
+ *  points down (Power BI's red one: ACCENT and DANGER never share an icon,
+ *  owner decision 2026-10-08), both cut edges on whole pixels (y 8.4 | 10.8).
+ *  It stands on the cards' SOFT rule, like the Card beside it. The first
+ *  "Geometric" drawing, a lens of two arcs cut the same way, read as an acorn
+ *  rather than as up and down; the 2026-10-08 drawing interlocked two
+ *  triangles side by side. */
 function ChartKpi({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <path
-        d="M6.89 5.63A1 1 0 0 1 8.71 5.63L12.57 14.19A1 1 0 0 1 11.65 15.6L3.95 15.6A1 1 0 0 1 3.03 14.19Z"
-        fill={ACCENT}
-      />
-      <path
-        d="M11.43 5.01A1 1 0 0 1 12.35 3.6L20.05 3.6A1 1 0 0 1 20.97 5.01L17.11 13.57A1 1 0 0 1 15.29 13.57Z"
-        fill={STRONG}
-      />
-      <rect x="2.4" y="18" width="19.2" height="2.4" rx="1.2" fill={SOFT} />
+      <path d="M12 2.4L20 8.4H4Z" fill={ACCENT} />
+      <path d="M4 10.8H20L12 16.8Z" fill={STRONG} />
+      <CardRule />
     </IconFrame>
   );
 }
 
-/** Gauge: Power BI's half ring with a coloured part and a dark needle from
- *  the base centre. The ring is a half annulus centred (12, 15.6), R 9.6 and r
- *  4.8, its feet flat on y 15.6. The STRONG needle is a 2.6 line at 60 degrees
- *  from the centre to radius 9, on a STRONG pivot dot r 2.4 (4.8 wide, above
- *  the 4.3 dot floor). The ring is CUT along two lines parallel to the needle,
- *  2.5 either side (half the needle's 2.6 plus the 1.2 rule), so the needle
- *  stands in a gap of constant width that touches neither colour: ACCENT from
- *  the left foot to the near cut (the value, filled from the minimum, the way
- *  the gauge mark paints it), SOFT from the far cut to the right foot. Power
- *  BI colours the right side of an outlined arc. A needle pointing into the
- *  soft part (the survey's sketch) painted needle, ring and soft part as one
- *  grey knot at 20px; a vertical PIXEL_STROKE needle at 50% was crisp but read
- *  as a split arch with a peg. Ink y 6..18: a gauge is a strip, centred. */
+/** Gauge: Power BI's half ring with a coloured part and a dark needle,
+ *  standing in the cards' value box over their SOFT rule. The ring is R 9.6,
+ *  r 4.8 (one MARK thick) on (12, 14.4), its feet cut flat 2.4 below the
+ *  centre at y 16.8: ACCENT from the left foot up to the needle (the value,
+ *  filled from the minimum, the way the gauge mark paints it), SOFT after it.
+ *  The STRONG needle is a hub (r 2.4) with a sharp tip at 1 o'clock, its
+ *  sides tangent to the hub; the ring is cut along lines parallel to each
+ *  side, THE gap away, so the needle touches neither colour (three decimals
+ *  from that construction). Power BI colours the right side of an outlined
+ *  arc. */
 function ChartGauge({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <path d="M18.8 8.82A9.6 9.6 0 0 1 21.6 15.6H16.8A4.8 4.8 0 0 0 16.21 13.3Z" fill={SOFT} />
-      <path d="M2.4 15.6A9.6 9.6 0 0 1 14.47 6.32L11.88 10.8A4.8 4.8 0 0 0 7.2 15.6Z" fill={ACCENT} />
-      <path d="M12 15.6L16.5 7.81" {...line(STRONG, 2.6)} />
-      <circle cx="12" cy="15.6" r="2.4" fill={STRONG} />
+      <path d="M2.705 16.8A9.6 9.6 0 0 1 14.56 5.148L8.634 10.978A4.8 4.8 0 0 0 7.843 16.8Z" fill={ACCENT} />
+      <path d="M18.733 7.557A9.6 9.6 0 0 1 21.295 16.8H16.157A4.8 4.8 0 0 0 16.646 15.605Z" fill={SOFT} />
+      <path d="M16.5 6.606L14.323 15.002A2.4 2.4 0 1 1 10.317 12.689Z" fill={STRONG} />
+      <CardRule />
     </IconFrame>
   );
 }
 
 /** All Visuals (the hero that opens the gallery): the gallery itself, four
- *  kinds of visual in a 2 x 2 -- two STRONG columns (top left), a STRONG
- *  three-quarter pie with its ACCENT quarter pulled out by (+1.2, -1.2) so
- *  both straight edges keep exactly 1.2 (top right), a STRONG area with a
- *  zigzag top (bottom left) and a SOFT donut, ring 2.4 (bottom right). It
- *  echoes More's 2 x 2 ("more of these") and differs from it by shape. A
- *  plain accent disc read as a dot, a mini line as a caret. Power BI has no
+ *  kinds of visual in a 2 x 2, drawn in the band's own DEVICE pixels at 30px,
+ *  where one pixel is 0.8 units: marks of 4 px (3.2), THE 2 px cut (1.6),
+ *  four 10 px tiles with 4 px gutters, every straight edge on the 0.8 grid.
+ *  Top left two D-columns (the tall one ACCENT); top right the exploded pie in
+ *  miniature (R 3.2); bottom left two D-bars; bottom right a SOFT ring (a 3 px
+ *  wall round a 4 px hole, the inner circle wound the other way). Each tile's
+ *  own cut is half its gutter, so the four group as four. It echoes More's
+ *  2 x 2 ("more of these") and differs from it by shape; Power BI has no
  *  picture for it (its "..." tile means "get more visuals").
  *
- *  HERO ONLY: drawn for 30px, where one pixel is 0.8 units, and NOT for 20 or
- *  24 (at 20px 4 parts in 19.2 are busy, and half its pixels are half
- *  covered). The columns are 3.2 wide at x 2.4..5.6 and 7.2..10.4, tops 6.4
- *  and 2.4, feet 10.4 (3..7 and 9..13 px wide, 3..13 px tall at 30px), and
- *  the area's right edge is on 10.4 with them; rx 1.0 because they are 4 px
- *  marks. Until review 1 of 2026-10-08 they were 3.6 wide on the 1.2 grid,
- *  whose 6.0 and 10.8 are 7.5 and 13.5 px at 30px: crisp at the size it is
- *  never shown at, soft at the one it is (ribbonIcons.test.tsx now holds the
- *  rects on the 0.8 grid). Two columns and a gap cannot all be 2.4 multiples
- *  (whole at both sizes) inside an 8.4 quadrant. */
+ *  HERO ONLY: drawn for 30px and NOT for 20 or 24 (the 2 px cut would be 1.3
+ *  px at 20px). At 2.4 units -- 3 px at 30px -- the 9 px pie collapsed into an
+ *  "L" plus a fleck and the tiles did not group. ribbonIcons.test.tsx holds
+ *  its points on the 0.8 grid. */
 function AllVisuals({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
-      <rect x="2.4" y="6.4" width="3.2" height="4" rx="1" fill={STRONG} />
-      <rect x="7.2" y="2.4" width="3.2" height="8" rx="1" fill={STRONG} />
-      <path d="M16.2 3.6A4.2 4.2 0 1 0 20.4 7.8H16.2Z" fill={STRONG} />
-      <path d="M17.4 2.4A4.2 4.2 0 0 1 21.6 6.6H17.4Z" fill={ACCENT} />
+      <path d="M2.4 10.4V7.2A1.6 1.6 0 0 1 5.6 7.2V10.4Z" fill={STRONG} />
+      <path d="M7.2 10.4V4A1.6 1.6 0 0 1 10.4 4V10.4Z" fill={ACCENT} />
+      <path d="M20 7.2A3.2 3.2 0 1 1 16.8 4V7.2Z" fill={STRONG} />
+      <path d="M18.4 5.6V2.4A3.2 3.2 0 0 1 21.6 5.6Z" fill={STRONG} />
+      <path d="M2.4 13.6H8.8A1.6 1.6 0 0 1 8.8 16.8H2.4Z" fill={STRONG} />
+      <path d="M2.4 18.4H5.6A1.6 1.6 0 0 1 5.6 21.6H2.4Z" fill={STRONG} />
       <path
-        d="M2.4 20.4V17.6L5.4 14.4L7.8 17L10.4 13.2V20.4A1.2 1.2 0 0 1 9.2 21.6H3.6A1.2 1.2 0 0 1 2.4 20.4Z"
-        fill={STRONG}
-      />
-      <path
-        d="M17.4 13.2a4.2 4.2 0 1 0 0 8.4a4.2 4.2 0 1 0 0-8.4zm0 2.4a1.8 1.8 0 1 1 0 3.6a1.8 1.8 0 1 1 0-3.6z"
+        d="M17.6 13.6A4 4 0 1 1 17.6 21.6A4 4 0 1 1 17.6 13.6ZM17.6 16A1.6 1.6 0 1 0 17.6 19.2A1.6 1.6 0 1 0 17.6 16Z"
         fill={SOFT}
       />
     </IconFrame>

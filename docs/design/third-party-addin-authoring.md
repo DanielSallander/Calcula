@@ -974,6 +974,27 @@ three per-visual choices it shows -- the target keeps only the selection, shows 
 selection emphasised, or ignores the source. Use them for those three meanings only; Filter remains
 the general "filter" verb.
 
+**Redrawn 2026-10-22** (the Visuals family, ICONS.md section 2.5): every chart type (ChartColumn ...
+ChartPareto), the report visuals (ChartBarStacked ... ChartGauge, Matrix, AllVisuals), Table, Slicer,
+Timeline, and Grouped, Stacked and Stacked100 were redrawn in one geometric style -- square where a
+part meets something, round where it ends, one 2-pixel cut between parts -- all with the same
+meaning and the same keys, so an add-in naming them keeps working and simply shows the new pictures.
+Most kept their composition; these changed it:
+
+- Table is three rows cut into cells, its green header row thinner than the two rows under it.
+- Slicer is a list of round radio dots with labels and no panel; only the selected item is dark
+  (a green dot beside a dark label), the others are grey.
+- ChartMultiRowCard shows two records, each a value over a grey rule, where it showed three.
+- ChartKpi is one diamond cut across its middle, a green up-triangle over a dark down-triangle,
+  where it showed two triangles side by side.
+- ChartHistogram is one stepped block, where it showed separate bars.
+- ChartArea is a solid green area inside the x/y axes, where it was a grey area under a green line.
+- AllVisuals's lower-left tile is bars, where it was an area; it is still drawn for a 30px hero
+  button only.
+
+ClearSlicers is a command, not a gallery tile, and was not redrawn: it still shows the panel the
+Slicer drew until 2026-10-22.
+
 ### 8.4 A trusted (built-in) extension, for comparison
 
 A built-in extension is not limited to descriptors: it registers a whole `PanelDefinition` through

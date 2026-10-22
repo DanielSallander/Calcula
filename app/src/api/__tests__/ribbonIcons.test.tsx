@@ -40,6 +40,7 @@ import {
   PIXEL_GRID,
 } from "../icons";
 import { findHardcodedColours } from "../layout/testing";
+import { VISUALS_FAMILY_GAPS } from "../../../scripts/icon-accent-contact.mjs";
 
 /** The 34 keys that existed before the duotone redraw. Typed out, not
  *  imported: the point is to fail if the SOURCE drops one. */
@@ -610,6 +611,121 @@ function pointsOf(d: string): Array<[number, number]> {
   return out;
 }
 
+type Pt = [number, number];
+/** One straight run or circular arc of a path. */
+interface Segment {
+  kind: "line" | "arc";
+  from: Pt;
+  to: Pt;
+  r?: number;
+  large?: boolean;
+  sweep?: boolean;
+}
+
+/** The straight runs and circular arcs of an M/L/H/V/A/Z path (absolute or
+ *  relative), in order; a closing Z is a run back to the subpath's start.
+ *  Anything else -- a curve, an elliptical arc -- throws, so a check built on
+ *  it can never pass by not seeing a shape. */
+function segmentsOf(d: string): Segment[] {
+  const t = d.match(/[A-Za-z]|-?(?:\d+\.?\d*|\.\d+)(?:e-?\d+)?/g) ?? [];
+  const out: Segment[] = [];
+  let i = 0;
+  let cmd = "";
+  let x = 0;
+  let y = 0;
+  let sx = 0;
+  let sy = 0;
+  const num = (): number => Number(t[i++]);
+  const lineTo = (nx: number, ny: number): void => {
+    out.push({ kind: "line", from: [x, y], to: [nx, ny] });
+    x = nx;
+    y = ny;
+  };
+  while (i < t.length) {
+    if (/[A-Za-z]/.test(t[i])) cmd = t[i++];
+    switch (cmd) {
+      case "M": x = sx = num(); y = sy = num(); cmd = "L"; break;
+      case "m": x = sx = x + num(); y = sy = y + num(); cmd = "l"; break;
+      case "L": { const nx = num(); lineTo(nx, num()); break; }
+      case "l": { const nx = x + num(); lineTo(nx, y + num()); break; }
+      case "H": lineTo(num(), y); break;
+      case "h": lineTo(x + num(), y); break;
+      case "V": lineTo(x, num()); break;
+      case "v": lineTo(x, y + num()); break;
+      case "A": case "a": {
+        const rx = num();
+        const ry = num();
+        i += 1; // the x-axis rotation, which a circle ignores
+        const large = num() === 1;
+        const sweep = num() === 1;
+        let nx = num();
+        let ny = num();
+        if (cmd === "a") { nx += x; ny += y; }
+        if (Math.abs(rx - ry) > 1e-9) throw new Error(`segmentsOf: elliptical arc in ${d}`);
+        out.push({ kind: "arc", from: [x, y], to: [nx, ny], r: rx, large, sweep });
+        x = nx;
+        y = ny;
+        break;
+      }
+      case "Z": case "z": lineTo(sx, sy); cmd = ""; break;
+      default: throw new Error(`segmentsOf: unsupported command ${cmd} in ${d}`);
+    }
+  }
+  return out;
+}
+
+/** A circular arc's centre, its radius as the renderer scales it, its start
+ *  angle and its signed sweep (SVG 1.1 F.6.5 with rx = ry and no rotation). */
+function arcGeometry(s: Segment): { c: Pt; r: number; a0: number; da: number } {
+  const [x1, y1] = s.from;
+  const [x2, y2] = s.to;
+  const hx = (x1 - x2) / 2;
+  const hy = (y1 - y2) / 2;
+  let r = s.r ?? 0;
+  const lambda = (hx * hx + hy * hy) / (r * r);
+  if (lambda > 1) r *= Math.sqrt(lambda);
+  const sign = s.large !== s.sweep ? 1 : -1;
+  const coef = sign * Math.sqrt(Math.max(0, (r * r - hx * hx - hy * hy) / (hx * hx + hy * hy)));
+  const c: Pt = [coef * hy + (x1 + x2) / 2, -coef * hx + (y1 + y2) / 2];
+  const a0 = Math.atan2(y1 - c[1], x1 - c[0]);
+  let da = Math.atan2(y2 - c[1], x2 - c[0]) - a0;
+  if (s.sweep && da < 0) da += 2 * Math.PI;
+  if (!s.sweep && da > 0) da -= 2 * Math.PI;
+  return { c, r, a0, da };
+}
+
+/** The points that bound an arc: its two ends, and every axis extreme of its
+ *  circle that the sweep passes (a bowl's bulge, a dome's apex). */
+function arcPoints(s: Segment): Pt[] {
+  const { c, r, a0, da } = arcGeometry(s);
+  const turn = (v: number): number => ((v % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+  const pts: Pt[] = [s.from, s.to];
+  for (const ang of [0, Math.PI / 2, Math.PI, (3 * Math.PI) / 2]) {
+    const along = da >= 0 ? turn(ang - a0) : turn(a0 - ang);
+    if (along <= Math.abs(da) + 1e-9) pts.push([c[0] + r * Math.cos(ang), c[1] + r * Math.sin(ang)]);
+  }
+  return pts;
+}
+
+/** The box the element's ink really covers: a rect's sides, a circle's
+ *  extremes, a path's runs and arc bulges, widened by half the stroke where
+ *  the element is a stroked line. Any other element throws. */
+function inkBox(el: Element): { minX: number; minY: number; maxX: number; maxY: number } {
+  const tag = el.tagName.toLowerCase();
+  const n = (a: string): number => Number(el.getAttribute(a));
+  let pts: Pt[];
+  if (tag === "rect") pts = [[n("x"), n("y")], [n("x") + n("width"), n("y") + n("height")]];
+  else if (tag === "circle") pts = [[n("cx") - n("r"), n("cy") - n("r")], [n("cx") + n("r"), n("cy") + n("r")]];
+  else if (tag === "path") pts = segmentsOf(el.getAttribute("d") ?? "").flatMap((s) => (s.kind === "arc" ? arcPoints(s) : [s.from, s.to]));
+  else throw new Error(`inkBox: cannot measure <${tag}>`);
+  if (pts.length === 0) throw new Error(`inkBox: <${tag}> has no points`);
+  const stroke = el.getAttribute("stroke");
+  const half = stroke && stroke !== "none" && el.getAttribute("fill") !== stroke ? n("stroke-width") / 2 : 0;
+  const xs = pts.map((p) => p[0]);
+  const ys = pts.map((p) => p[1]);
+  return { minX: Math.min(...xs) - half, minY: Math.min(...ys) - half, maxX: Math.max(...xs) + half, maxY: Math.max(...ys) + half };
+}
+
 /** The numbers of `rect` elements painted with `fill`. */
 function rectBoxes(key: keyof typeof RibbonIcon): Array<{ x: number; y: number; w: number; h: number; fill: string | null }> {
   return Array.from(renderIcon(key, { size: 20 }).querySelectorAll("rect")).map((r) => ({
@@ -656,9 +772,9 @@ describe("Power BI's report authoring on the Canvas tab (2026-10-08)", () => {
   });
 
   it("draws every new picture in the frame's own coordinates (no transform at all)", () => {
-    // The designers wrote every scaled or moved part out as coordinates
-    // (the Card's digits, the Button's cursor), so the pixel-grid checks read
-    // what actually paints.
+    // The designers wrote every scaled or moved part out as coordinates (the
+    // Button's cursor; until 2026-10-22 also the Card's digits), so the
+    // pixel-grid checks read what actually paints.
     const turned = CANVAS_KEYS.filter((key) => renderIcon(key, { size: 20 }).querySelector("[transform]"));
     expect(turned).toEqual([]);
   });
@@ -695,33 +811,39 @@ describe("Power BI's report authoring on the Canvas tab (2026-10-08)", () => {
     }
   });
 
-  it("a stacked picture's two categories end at least 5 px apart; a 100% picture's end together", () => {
+  it("a stacked picture's two categories end at least 4 px apart; a 100% picture's end together", () => {
     // Before 2026-10-08 Stacked's columns topped out 2 px apart and read as
     // Stacked100 at 20px; in a gallery that shows both side by side the
-    // difference of shape is the only thing that tells them apart. The floor
-    // is Stacked's own 6.0 (5 px): the first Canvas review found the stacked
-    // BAR ending only 4.8 short, its difference from the 100% bar one 4 x 5 px
-    // corner, so both stacked pictures now keep the same proportion.
-    const columnTops = (key: keyof typeof RibbonIcon): number[] => {
-      const marks = rectBoxes(key).filter((r) => r.w < 19.2);
-      const byX = new Map<number, number>();
-      for (const r of marks) byX.set(r.x, Math.min(byX.get(r.x) ?? Infinity, r.y));
-      return Array.from(byX.values());
-    };
-    const barEnds = (key: keyof typeof RibbonIcon): number[] => {
-      const marks = rectBoxes(key).filter((r) => r.h < 19.2);
-      const byRow = new Map<number, number>();
-      for (const r of marks) byRow.set(r.y, Math.max(byRow.get(r.y) ?? -Infinity, r.x + r.w));
-      return Array.from(byRow.values());
+    // difference of shape is the only thing that tells them apart. Since
+    // 2026-10-22 (the Visuals family, ICONS.md 2.5) every mark is a crisp
+    // STRONG root, THE cut and an ACCENT D end of the SAME length, so the
+    // ends differ by the roots: 4.8 (4 px), against Stacked100's 0. The floor
+    // of 2026-10-08 was 6.0; in this construction that needs a 4.8 root under
+    // a 6.0 end, a mushroom the designers rendered and declined.
+    /** Each mark's value end: the picture's shapes grouped by their
+     *  cross-axis span (a column's x-range, a bar's y-range), the end being
+     *  the far side of the group's real ink (inkBox: a D end's semicircle
+     *  counts to its apex, so a square end or a smaller cap measures true). */
+    const markEnds = (key: keyof typeof RibbonIcon, axis: "column" | "bar"): number[] => {
+      const ends = new Map<string, number>();
+      for (const el of shapesOf(renderIcon(key, { size: 20 }))) {
+        const box = inkBox(el);
+        const span = axis === "column" ? `${box.minX.toFixed(3)}..${box.maxX.toFixed(3)}` : `${box.minY.toFixed(3)}..${box.maxY.toFixed(3)}`;
+        const end = axis === "column" ? box.minY : box.maxX;
+        const was = ends.get(span);
+        ends.set(span, was === undefined ? end : axis === "column" ? Math.min(was, end) : Math.max(was, end));
+      }
+      return Array.from(ends.values());
     };
     const apart = (ends: number[]): number => Math.max(...ends) - Math.min(...ends);
-    expect(columnTops("Stacked").length).toBe(2);
-    expect(apart(columnTops("Stacked"))).toBeGreaterThanOrEqual(6 - 1e-9);
-    expect(apart(columnTops("Stacked100"))).toBeCloseTo(0);
-    expect(barEnds("ChartBarStacked").length).toBe(2);
-    expect(apart(barEnds("ChartBarStacked"))).toBeGreaterThanOrEqual(6 - 1e-9);
-    expect(barEnds("ChartBarStacked100").length).toBe(2);
-    expect(apart(barEnds("ChartBarStacked100"))).toBeCloseTo(0);
+    expect(markEnds("Stacked", "column").length).toBe(2);
+    expect(apart(markEnds("Stacked", "column"))).toBeGreaterThanOrEqual(4.8 - 1e-6);
+    expect(markEnds("Stacked100", "column").length).toBe(2);
+    expect(apart(markEnds("Stacked100", "column"))).toBeCloseTo(0);
+    expect(markEnds("ChartBarStacked", "bar").length).toBe(2);
+    expect(apart(markEnds("ChartBarStacked", "bar"))).toBeGreaterThanOrEqual(4.8 - 1e-6);
+    expect(markEnds("ChartBarStacked100", "bar").length).toBe(2);
+    expect(apart(markEnds("ChartBarStacked100", "bar"))).toBeCloseTo(0);
     // The areas: the 100% accent fills down from a FLAT top across the plot;
     // the stacked accent is a band whose top is the zigzag.
     const accentTopRun = (key: keyof typeof RibbonIcon): number => {
@@ -733,35 +855,6 @@ describe("Power BI's report authoring on the Canvas tab (2026-10-08)", () => {
     };
     expect(accentTopRun("ChartAreaStacked100")).toBeGreaterThanOrEqual(14.4);
     expect(accentTopRun("ChartAreaStacked")).toBeLessThan(4.8);
-  });
-
-  it("Card's 123 is Paste Values' digits moved by whole pixels, not redrawn", () => {
-    // One glyph for "a number" across the set: if Paste Values' digits are
-    // redrawn, the Card must follow, and the move must keep every run on the
-    // pixel grid (PIXEL_STROKE may not sit inside a transform, so the digits
-    // are written out at their new place).
-    const digits = (key: keyof typeof RibbonIcon): string => {
-      const el = shapesOf(renderIcon(key, { size: 20 })).find(
-        (s) => s.getAttribute("stroke") === ACCENT && Number(s.getAttribute("stroke-width")) === PIXEL_STROKE,
-      );
-      if (!el) throw new Error(`${key} draws no PIXEL_STROKE accent digits`);
-      return el.getAttribute("d") ?? "";
-    };
-    const card = digits("ChartCard");
-    const paste = digits("PasteValues");
-    // Same commands in the same order...
-    expect(card.replace(/[\d.\s-]+/g, " ")).toBe(paste.replace(/[\d.\s-]+/g, " "));
-    // ...and every point moved by one offset that is a whole number of pixels.
-    const a = pointsOf(card);
-    const b = pointsOf(paste);
-    expect(a.length).toBe(b.length);
-    const dx = a[0][0] - b[0][0];
-    const dy = a[0][1] - b[0][1];
-    for (let i = 0; i < a.length; i++) {
-      expect(a[i][0] - b[i][0]).toBeCloseTo(dx, 9);
-      expect(a[i][1] - b[i][1]).toBeCloseTo(dy, 9);
-    }
-    expect(onPixelGrid(dx) && onPixelGrid(dy), `offset ${dx}, ${dy}`).toBe(true);
   });
 
   it("Button's cursor is the Pointer at two-thirds size, written out", () => {
@@ -830,12 +923,36 @@ describe("Power BI's report authoring on the Canvas tab (2026-10-08)", () => {
     }
   });
 
+  it("Grouped draws two WHOLE columns on Stacked's two slots: one STRONG, one ACCENT", () => {
+    // Chart Design's layout toggle shows Grouped | Stacked | 100% side by
+    // side. Since 2026-10-22 the three are one picture three ways: the same
+    // two PAIR slots filled whole (two series beside each other), split, or
+    // split to the full height. Grouped's columns stand on Stacked's slots,
+    // so a Stacked redraw must carry over (their heights are Grouped's own);
+    // and it is not ChartColumn's three MARK columns.
+    const shapes = shapesOf(renderIcon("Grouped", { size: 20 }));
+    const strong = shapes.filter((el) => el.getAttribute("fill") === STRONG).map(xExtent);
+    const accent = shapes.filter((el) => el.getAttribute("fill") === ACCENT).map(xExtent);
+    expect(shapes.length).toBe(2);
+    expect(strong.length).toBe(1);
+    expect(accent.length).toBe(1);
+    const stacked = shapesOf(renderIcon("Stacked", { size: 20 }))
+      .filter((el) => el.getAttribute("fill") === STRONG)
+      .map(xExtent)
+      .sort((a, b) => a[0] - b[0]);
+    expect(strong[0][0]).toBeCloseTo(stacked[0][0], 9);
+    expect(strong[0][1]).toBeCloseTo(stacked[0][1], 9);
+    expect(accent[0][0]).toBeCloseTo(stacked[1][0], 9);
+    expect(accent[0][1]).toBeCloseTo(stacked[1][1], 9);
+  });
+
   it("Card and KPI are each a value over a SOFT rule, with no frame round them", () => {
     // Power BI's card is a large "123" with a grey caption rule under it; the
     // first ChartCard put the rule in a soft frame's bottom wall, and at 20px
     // it read as a monitor with a chin, heavier than any visual beside it and
-    // wider than the set's 2.4 margins. KPI on the same row already draws its
-    // value over a SOFT rule and no box: the two cards now say it one way.
+    // wider than the set's 2.4 margins. KPI on the same row draws its value
+    // over the same SOFT rule and no box: the two cards say it one way. Since
+    // 2026-10-22 the rule is marks.tsx's CardRule, on the field's bottom edge.
     for (const key of ["ChartCard", "ChartKpi"] as const) {
       const shapes = shapesOf(renderIcon(key, { size: 20 }));
       const soft = shapes.filter((el) => el.getAttribute("fill") === SOFT);
@@ -846,38 +963,43 @@ describe("Power BI's report authoring on the Canvas tab (2026-10-08)", () => {
       const ruleTop = Number(rule.getAttribute("y"));
       for (const el of shapes) {
         if (el === rule) continue;
-        const ys = el.tagName.toLowerCase() === "rect"
-          ? [Number(el.getAttribute("y")) + Number(el.getAttribute("height"))]
-          : pointsOf(el.getAttribute("d") ?? "").map((p) => p[1]);
-        expect(Math.max(...ys), `${key}: everything else stands above the rule`).toBeLessThan(ruleTop);
+        // Real ink: a stroke counts to its edge and an arc to its bulge, and
+        // an element inkBox cannot measure fails instead of passing unseen.
+        expect(inkBox(el).maxY, `${key}: everything else stands above the rule`).toBeLessThan(ruleTop);
       }
     }
-    // The card's digits keep the set's 2.4 margins (their round caps reach 1.2
-    // past the centre line).
-    const digits = shapesOf(renderIcon("ChartCard", { size: 20 })).find((el) => el.getAttribute("stroke") === ACCENT);
-    const pts = pointsOf(digits?.getAttribute("d") ?? "");
-    expect(Math.min(...pts.map((p) => p[0])) - 1.2).toBeGreaterThanOrEqual(2.4 - 1e-9);
-    expect(Math.max(...pts.map((p) => p[0])) + 1.2).toBeLessThanOrEqual(21.6 + 1e-9);
+    // The card's digits keep the set's 2.4 margins: every ACCENT part's real
+    // ink (the 3's bowls reach the right margin exactly).
+    const digits = shapesOf(renderIcon("ChartCard", { size: 20 })).filter(
+      (el) => el.getAttribute("fill") === ACCENT || el.getAttribute("stroke") === ACCENT,
+    );
+    expect(digits.length).toBe(3);
+    for (const el of digits) {
+      const box = inkBox(el);
+      expect(box.minX, el.getAttribute("d") ?? "").toBeGreaterThanOrEqual(2.4 - 1e-6);
+      expect(box.maxX, el.getAttribute("d") ?? "").toBeLessThanOrEqual(21.6 + 1e-6);
+    }
   });
 
-  it("Matrix paints Power BI's colours: a SOFT header over STRONG cells, so it is not Floating Grid's outline", () => {
+  it("Matrix paints Power BI's colours: SOFT header cells over STRONG cells, so it is not Floating Grid's outline", () => {
     // data.tsx maps Power BI's grey to SOFT and its white cells to STRONG.
     // The first Matrix had a STRONG header over SOFT cells -- the inverse, and
     // Floating Grid's silhouette (a full-width STRONG bar over grey cells).
-    // Its cells are 3 px pixel-grid cells, so they take ICONS.md 2.3's rx
-    // 0.75-1.0 (at 1.4 a 3 px cell paints as a plus sign).
+    // Since 2026-10-22 its cells are the Visuals family's 3 x 3 lattice (4.8
+    // cells, THE 2.4 gap; ICONS.md 2.5): the header is a ROW of three SOFT
+    // cells, and cells meet the lattice, so their corners are square.
     const rects = rectBoxes("Matrix");
-    const header = rects.find((r) => r.w === 19.2);
-    expect(header?.fill).toBe(SOFT);
-    const cells = Array.from(renderIcon("Matrix", { size: 20 }).querySelectorAll("rect")).filter(
-      (r) => Number(r.getAttribute("width")) < 19.2,
+    const header = rects.filter((r) => r.fill === SOFT);
+    const cells = rects.filter((r) => r.fill === STRONG);
+    expect(header.length).toBe(3);
+    expect(cells.length).toBe(2);
+    for (const r of header) expect(r.y).toBe(2.4);
+    for (const r of [...header, ...cells]) expect([r.w, r.h]).toEqual([4.8, 4.8]);
+    for (const r of cells) expect(r.y).toBeGreaterThan(Math.max(...header.map((h) => h.y + h.h)));
+    const rounded = Array.from(renderIcon("Matrix", { size: 20 }).querySelectorAll("rect")).filter(
+      (r) => Number(r.getAttribute("rx") ?? 0) !== 0,
     );
-    expect(cells.length).toBe(4);
-    for (const cell of cells) {
-      expect(cell.getAttribute("fill")).toBe(STRONG);
-      const rx = Number(cell.getAttribute("rx"));
-      expect(rx >= 0.75 && rx <= 1.0, `cell rx ${rx}`).toBe(true);
-    }
+    expect(rounded).toEqual([]);
     expect(rectBoxes("FloatingGrid").find((r) => r.w === 19.2)?.fill).toBe(STRONG);
   });
 
@@ -918,16 +1040,109 @@ describe("Power BI's report authoring on the Canvas tab (2026-10-08)", () => {
     expect(outline("LockObjects")).toBe(outline("ProtectSheet"));
   });
 
-  it("All Visuals (the 30px hero) has its column marks on whole pixels at 30px", () => {
+  it("All Visuals (the 30px hero) has every point of its marks on whole pixels at 30px", () => {
     // AllVisuals is drawn for its 30px hero, where one pixel is 0.8 units; the
     // first drawing's 3.6 columns at x 6.0 and 10.8 fell on 7.5 and 13.5 px.
-    // (A 1.2-grid edge is whole only at 20px, a 2.4 one at both, but two
-    // columns and a gap cannot all be 2.4 multiples in an 8.4 quadrant.)
+    // (A 1.2-grid edge is whole only at 20px, a 2.4 one at both; the hero's
+    // four 10 px tiles cannot all sit on the 2.4 grid.) Since 2026-10-22 the
+    // hero is drawn in paths (D-marks, the exploded pie, a ring), so every rect
+    // edge, every path end point and every circle's extremes are read, and an
+    // element the check cannot read fails it.
     const onThirty = (v: number): boolean => Math.abs(v / 0.8 - Math.round(v / 0.8)) < 1e-6;
-    const off = rectBoxes("AllVisuals")
-      .flatMap((r) => [r.x, r.x + r.w, r.y, r.y + r.h])
-      .filter((v) => !onThirty(v));
-    expect(off).toEqual([]);
+    const values = shapesOf(renderIcon("AllVisuals", { size: 30 })).flatMap((el) => {
+      const tag = el.tagName.toLowerCase();
+      const n = (a: string): number => Number(el.getAttribute(a));
+      if (tag === "rect") return [n("x"), n("y"), n("x") + n("width"), n("y") + n("height")];
+      if (tag === "circle") return [n("cx") - n("r"), n("cx") + n("r"), n("cy") - n("r"), n("cy") + n("r")];
+      if (tag === "path") return pointsOf(el.getAttribute("d") ?? "").flat();
+      throw new Error(`AllVisuals draws a <${tag}> this check cannot read`);
+    });
+    expect(values.length).toBeGreaterThan(20);
+    expect(values.filter((v) => !onThirty(v))).toEqual([]);
+  });
+
+  /** The Visuals family (ICONS.md 2.5): the gallery's 34 pictures and Chart
+   *  Design's Grouped, which sits beside two of them in one toggle. */
+  const VISUALS_FAMILY: ReadonlyArray<keyof typeof RibbonIcon> = [...MENU_FAMILIES["Visuals gallery"], "Grouped"];
+
+  it("the Visuals family keeps its corner rule: square or a full curve, never an in-between radius", () => {
+    // ICONS.md 2.5 (2026-10-22): square where a part meets something, a full
+    // curve where it ends freely -- the rx 1.6 on 3-5 px parts that made the
+    // first Visuals icons paint as lumps. A rect's radius (rx, or ry alone)
+    // must be 0 or half its short side. In a FILLED path every arc smaller
+    // than a mark (r < 4.8) must be a full curve: a semicircle (a D end, a
+    // pill end, half a ring), a large arc (a disc's body: the gauge's hub, a
+    // three-quarter pie), or a wedge centred on one of the path's own points
+    // (a pie's quarter). A rounded corner fits none of the three. Arcs of a
+    // mark's radius or more are the round pictures' rings and the quarter
+    // circles of the Matrix and the Histogram. Stroked lines (series, digits)
+    // have round caps and are held by the stroke rules instead.
+    const offenders: string[] = [];
+    for (const key of VISUALS_FAMILY) {
+      const svg = renderIcon(key, { size: 20 });
+      for (const r of Array.from(svg.querySelectorAll("rect"))) {
+        const rx = Number(r.getAttribute("rx") ?? r.getAttribute("ry") ?? 0);
+        const half = Math.min(Number(r.getAttribute("width")), Number(r.getAttribute("height"))) / 2;
+        if (rx !== 0 && Math.abs(rx - half) > 1e-9) offenders.push(`${key}: rx ${rx} on a rect whose half short side is ${half}`);
+      }
+      for (const p of Array.from(svg.querySelectorAll("path"))) {
+        const fill = p.getAttribute("fill");
+        if (!fill || fill === "none") continue;
+        const segs = segmentsOf(p.getAttribute("d") ?? "");
+        const vertices = segs.flatMap((s) => [s.from, s.to]);
+        for (const s of segs) {
+          if (s.kind !== "arc" || (s.r ?? 0) >= 4.8 - 1e-9) continue;
+          const chord = Math.hypot(s.to[0] - s.from[0], s.to[1] - s.from[1]);
+          const semicircle = Math.abs(chord - 2 * (s.r ?? 0)) < 1e-3;
+          const { c } = arcGeometry(s);
+          const wedge = vertices.some((v) => Math.hypot(v[0] - c[0], v[1] - c[1]) < 1e-3);
+          if (!semicircle && !s.large && !wedge) offenders.push(`${key}: an r ${s.r} corner in ${p.getAttribute("d")}`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("the Visuals family puts every straight edge of a filled shape on whole pixels at 20px", () => {
+    // ICONS.md 2.3 and 2.5: a horizontal or vertical edge off the 1.2 grid
+    // paints a half-covered grey row. Read: a square rect's four sides, a
+    // pill's two long sides (its ends are curves), and every horizontal or
+    // vertical run of a filled path (a closing Z included). Curves, diagonals
+    // and stroked lines antialias anyway. The 30px hero has its own grid test.
+    const offenders: string[] = [];
+    for (const key of VISUALS_FAMILY.filter((k) => k !== "AllVisuals")) {
+      for (const el of shapesOf(renderIcon(key, { size: 20 }))) {
+        const fill = el.getAttribute("fill");
+        if (!fill || fill === "none") continue;
+        const tag = el.tagName.toLowerCase();
+        const n = (a: string): number => Number(el.getAttribute(a));
+        const edges: number[] = [];
+        if (tag === "rect") {
+          const rx = Number(el.getAttribute("rx") ?? el.getAttribute("ry") ?? 0);
+          const [x, y, w, h] = [n("x"), n("y"), n("width"), n("height")];
+          if (rx === 0 || w > h) edges.push(y, y + h);
+          if (rx === 0 || h > w) edges.push(x, x + w);
+        } else if (tag === "path") {
+          for (const s of segmentsOf(el.getAttribute("d") ?? "")) {
+            if (s.kind !== "line" || Math.hypot(s.to[0] - s.from[0], s.to[1] - s.from[1]) < 1e-9) continue;
+            if (Math.abs(s.to[1] - s.from[1]) < 1e-9) edges.push(s.from[1]);
+            else if (Math.abs(s.to[0] - s.from[0]) < 1e-9) edges.push(s.from[0]);
+          }
+        } else if (tag !== "circle") {
+          throw new Error(`${key} draws a <${tag}> this check cannot read`);
+        }
+        for (const v of edges) if (!onPixelGrid(v)) offenders.push(`${key}: <${tag}> edge at ${v}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("the Visuals family is the one the contact check holds to THE gap", () => {
+    // `npm run check:icon-contact` measures the family's ACCENT at 2.4 (the
+    // 30px hero at its own 1.6) and never allowlists a family key; its list
+    // must be this family, or a new visual would slip to the set's 1.2.
+    expect(Object.keys(VISUALS_FAMILY_GAPS).sort()).toEqual([...VISUALS_FAMILY].sort());
+    for (const key of VISUALS_FAMILY) expect(VISUALS_FAMILY_GAPS[key], key).toBe(key === "AllVisuals" ? 1.6 : 2.4);
   });
 });
 
@@ -1270,8 +1485,9 @@ describe("src/api/icons source", () => {
     .map((f) => ({ name: f, text: fs.readFileSync(path.join(ICONS_DIR, f), "utf8") }));
 
   it("finds the icon modules", () => {
+    // marks.tsx (2026-10-22) is the Visuals family's construction kit.
     expect(files.map((f) => f.name).sort()).toEqual(
-      ["chart.tsx", "data.tsx", "frame.tsx", "generic.tsx", "home.tsx", "index.ts"].sort(),
+      ["chart.tsx", "data.tsx", "frame.tsx", "generic.tsx", "home.tsx", "index.ts", "marks.tsx"].sort(),
     );
   });
 
