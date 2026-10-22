@@ -78,6 +78,15 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 # embeds IO_COUNTERS and windows-rs gates the struct on that feature.
 windows = { version = "0.61", features = [
     "Win32_Security_Credentials",
+    # Identity phase 1 (submitter_identity.rs): the account SID and names.
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Authentication_Identity",
+    # Identity phase 1, read side (identity_verification.rs): who WROTE an
+    # answer file (owner SID), what storage it is on, and whether it is a
+    # Dropbox/OneDrive (cloud files) sync root.
+    "Win32_Storage_FileSystem",
+    "Win32_Storage_CloudFilters",
     "Win32_Globalization",
     "Win32_Foundation",
     "Win32_System_JobObjects",

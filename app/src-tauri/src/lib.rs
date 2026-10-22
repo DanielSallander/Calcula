@@ -157,6 +157,12 @@ mod profile_dir;
 /// Approvals of distributed code, sealed to this computer: the key, the sealed
 /// writer (`record_script_consent`) and the verified reader every gate uses.
 pub mod consent_seal;
+// Identity phase 1 (2026-10-22): who sends writeback answers, and the key
+// that signs them.
+pub mod submitter_identity;
+// Identity phase 1, read side: what storage a workspace is on and who WROTE
+// each answer file -- the facts behind Verified / not confirmed / not verified.
+pub mod identity_verification;
 pub mod calp_commands;
 pub mod calp_push_scope;
 /// Checkout refuses an application whose macro, notebook or defined name has the
@@ -167,6 +173,11 @@ pub mod calp_merge;
 pub mod calp_environments;
 pub mod calp_publishers;
 pub mod calp_inspector;
+// Where a writeback region's answers are COLLECTED, for the publisher's side
+// (Collected Responses, exports, review, rollup, roster): the author's own
+// designated regions through the working-copy link, subscribed ones through
+// their subscription. BUG-0553.
+pub mod calp_collection;
 pub mod library_commands;
 pub mod extension_install;
 pub mod extension_audit;
@@ -329,6 +340,15 @@ mod subscribed_sheet_tests;
 
 #[cfg(test)]
 mod writeback_local_sheet_tests;
+
+#[cfg(test)]
+mod calp_collection_tests;
+
+#[cfg(test)]
+mod submitter_identity_tests;
+
+#[cfg(test)]
+mod identity_surface_tests;
 
 #[cfg(test)]
 mod calp_environments_tests;
@@ -6189,6 +6209,10 @@ pub fn run() {
             calp_commands::calp_export_application_html,
             calp_commands::calp_set_submission_state,
             calp_commands::calp_load_region_submissions,
+            calp_collection::calp_list_collection_regions,
+            // Writeback > Collect From: which streams the workbook's own
+            // regions collect (one command, op get/set; async).
+            calp_collection::calp_collection_streams,
             calp_commands::calp_refresh_data,
             calp_commands::calp_save_data_source_config,
             calp_commands::calp_get_data_sources,

@@ -49,7 +49,10 @@ vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
     if (cmd === "calp_get_writeback_regions" || cmd === "get_all_conditional_formats" || cmd === "get_all_styles") {
       return [];
     }
-    if (cmd === "calp_reconcile_writeback" || cmd === "calp_get_writeback_layer") {
+    if (cmd === "calp_reconcile_writeback") {
+      return { layer: { formatVersion: 1, drafts: [] }, cellsWritten: 0, undoHistoryEnded: false, replacedCells: [], unreadable: [] };
+    }
+    if (cmd === "calp_get_writeback_layer") {
       return { formatVersion: 1, drafts: [] };
     }
     return null;

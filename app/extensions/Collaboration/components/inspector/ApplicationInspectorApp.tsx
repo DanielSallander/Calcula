@@ -109,6 +109,40 @@ const contentStyle: React.CSSProperties = {
   padding: 16,
 };
 
+/**
+ * What the content area says while no application is loaded. It names the
+ * NEXT step for the state the window is actually in: the fixed "Browse … then
+ * Inspect" line was shown even after the user had browsed, so it read as if
+ * the workspace were empty (BUG-0552).
+ */
+function placeholderText(s: {
+  busy: boolean;
+  packages: ApplicationInfo[] | null;
+  packageName: string;
+}): string {
+  if (s.busy) return "Verifying signature and reading the application…";
+  if (s.packages && s.packages.length > 0) {
+    if (!s.packageName) {
+      const count =
+        s.packages.length === 1
+          ? "One application is"
+          : `${s.packages.length} applications are`;
+      return `${count} in this workspace. Choose one in the application list above to inspect it.`;
+    }
+    return `Press Inspect to read ${s.packageName}.`;
+  }
+  return (
+    "Browse to a workspace's workspace.calcula file — or type the path of an " +
+    "application or version folder inside one. Everything is read directly from " +
+    "the workspace; nothing is subscribed or changed."
+  );
+}
+
+/** What every way of picking a workspace says when it holds no application. */
+export const NO_APPLICATIONS_TEXT =
+  "No applications found here. If this is the right workspace, nothing has been " +
+  "published to it yet. Otherwise use Browse to pick its workspace.calcula file.";
+
 export function ApplicationInspectorApp(): React.ReactElement {
   const [saved, setSaved] = useState<SavedWorkspace[]>([]);
   const [registryPath, setRegistryPath] = useState("");
@@ -128,11 +162,22 @@ export function ApplicationInspectorApp(): React.ReactElement {
     listWorkspaces().then(setSaved).catch(() => setSaved([]));
   }, []);
 
-  const listPackagesAt = useCallback(async (path: string): Promise<ApplicationInfo[]> => {
-    const found = await listApplicationsInWorkspace(path);
-    setPackages(found);
-    return found;
-  }, []);
+  // The listing does NOT set state itself: the caller does, after checking
+  // that its pick is still the latest one (see `pickSeq`).
+  const listPackagesAt = useCallback(
+    (path: string): Promise<ApplicationInfo[]> => listApplicationsInWorkspace(path),
+    [],
+  );
+
+  // PICK token. Choosing a workspace (Browse, a typed path, a Saved one, a
+  // handover from the main window) runs a resolve and a listing before any
+  // overview load, and `loadSeq` guards only that last step: a slow share
+  // picked first and a fast one picked second could finish in the wrong
+  // order, and the slow one then overwrote the path field and the application
+  // list -- and, starting its own load, dropped the fast one's -- leaving the
+  // fast workspace's overview on screen under the slow one's listing. Every
+  // pick takes a token, and every await checks it before touching state.
+  const pickSeq = useRef(0);
 
   // Staleness token: two loads can be in flight at once (Inspect click +
   // cross-window handover) — only the LATEST may commit state.
@@ -160,6 +205,47 @@ export function ApplicationInspectorApp(): React.ReactElement {
     [],
   );
 
+  // A newly chosen workspace must not keep showing the PREVIOUS workspace's
+  // application underneath its own listing, and a load still in flight for
+  // that previous one must not land after the switch (bumping the token makes
+  // it stale).
+  const clearLoaded = useCallback(() => {
+    loadSeq.current++;
+    setBusy(false);
+    setOverview(null);
+    setCtx(null);
+  }, []);
+
+  // WHICH APPLICATION TO OPEN once a workspace has been listed, and opening it.
+  //
+  // The application the location itself named (an application or version
+  // folder, or a handover from the main window) wins when it is listed;
+  // otherwise a workspace holding exactly ONE application opens that one.
+  // Picking a workspace is the whole gesture: the pointer file — the only thing
+  // Browse can return, and the common case — names no application, and a
+  // listing that stopped there left every section on the "Browse … then
+  // Inspect" hint the user had just followed, so each tab read as empty
+  // (BUG-0552). With two or more applications nothing is guessed; the content
+  // area says to choose one in the list.
+  const selectAndLoad = useCallback(
+    (
+      path: string,
+      found: readonly { name: string }[],
+      preferred: string | null,
+      preferredPin: string | null,
+    ): boolean => {
+      const named = preferred && found.some((p) => p.name === preferred) ? preferred : null;
+      const name = named ?? (found.length === 1 ? found[0].name : null);
+      if (!name) return false;
+      const pin = named && preferredPin ? preferredPin : "latest";
+      setPackageName(name);
+      setVersionPin(pin);
+      void loadOverview(path, name, pin);
+      return true;
+    },
+    [loadOverview],
+  );
+
   // One entry point for every user-typed/browsed location: users naturally
   // pick the application or version FOLDER itself, not the workspace root — the
   // backend walks up and tells us what was actually picked, so we can list
@@ -167,58 +253,100 @@ export function ApplicationInspectorApp(): React.ReactElement {
   // workspace must say so — silently rendering nothing reads as a dead button.
   const resolveAndLoad = useCallback(
     async (rawPath: string) => {
+      const seq = ++pickSeq.current;
       setError(null);
       setPackages(null);
       setPackageName("");
+      clearLoaded();
       try {
         const resolved = await inspectorResolveLocation(rawPath);
+        if (pickSeq.current !== seq) return;
         setRegistryPath(resolved.registryPath);
         const found = await listPackagesAt(resolved.registryPath);
+        if (pickSeq.current !== seq) return;
+        setPackages(found);
         if (found.length === 0) {
           // Two different situations end here, and the message has to serve
           // both: a real workspace nothing has been published to yet (often
           // reached through Browse, so "pick the pointer file" would send the
           // user round in a circle), and a typed path that is not a workspace.
-          setError(
-            "No applications found here. If this is the right workspace, nothing has been " +
-              "published to it yet. Otherwise use Browse to pick its workspace.calcula file.",
-          );
+          setError(NO_APPLICATIONS_TEXT);
           return;
         }
-        if (
-          resolved.packageName &&
-          found.some((p) => p.name === resolved.packageName)
-        ) {
-          setPackageName(resolved.packageName);
-          const pin = resolved.version ?? "latest";
-          setVersionPin(pin);
-          void loadOverview(resolved.registryPath, resolved.packageName, pin);
-        }
+        selectAndLoad(resolved.registryPath, found, resolved.packageName, resolved.version);
       } catch (err: unknown) {
+        if (pickSeq.current !== seq) return;
         setError(String(err));
       }
     },
-    [listPackagesAt, loadOverview],
+    [listPackagesAt, selectAndLoad, clearLoaded],
   );
 
   // Keep the latest loader reachable from the (once-registered) event
   // listener without re-subscribing per render.
-  const loadRef = useRef({ listPackagesAt, loadOverview });
-  loadRef.current = { listPackagesAt, loadOverview };
+  const loadRef = useRef({ listPackagesAt, selectAndLoad, clearLoaded });
+  loadRef.current = { listPackagesAt, selectAndLoad, clearLoaded };
 
   // Cross-window bridge: register the listener FIRST, then announce
   // readiness so the main window can hand over the initial application.
   useEffect(() => {
     const openPromise = onOpenPackage((payload: InspectorOpenPayload) => {
       if (!payload.registryPath) return; // empty payload = just focus
-      setRegistryPath(payload.registryPath);
-      void loadRef.current.listPackagesAt(payload.registryPath).catch(() => setPackages(null));
+      const path = payload.registryPath;
+      // A handover is a pick like any other: it takes the token, so a pick
+      // still resolving in this window cannot land after it.
+      const seq = ++pickSeq.current;
+      setRegistryPath(path);
+      setError(null);
+      setPackages(null);
+      setPackageName("");
+      loadRef.current.clearLoaded();
       if (payload.packageName) {
-        setPackageName(payload.packageName);
-        const pin = payload.versionPin || "latest";
-        setVersionPin(pin);
-        void loadRef.current.loadOverview(payload.registryPath, payload.packageName, pin);
+        // The sender named the application: open it at once; the listing only
+        // fills the pickers, so it runs alongside. Its failure does not block
+        // the overview, but it is SAID: without the listing the application
+        // and version pickers are not shown, and another version cannot be
+        // chosen.
+        void loadRef.current
+          .listPackagesAt(path)
+          .then((found) => {
+            if (pickSeq.current === seq) setPackages(found);
+          })
+          .catch((err: unknown) => {
+            if (pickSeq.current !== seq) return;
+            setPackages(null);
+            setError(`Could not list the workspace's applications: ${String(err)}`);
+          });
+        loadRef.current.selectAndLoad(
+          path,
+          [{ name: payload.packageName }],
+          payload.packageName,
+          payload.versionPin || null,
+        );
+        return;
       }
+      // A workspace and no application: the listing is AWAITED, because the
+      // only application it holds can be known only once the listing is in.
+      void (async () => {
+        let found: ApplicationInfo[];
+        try {
+          found = await loadRef.current.listPackagesAt(path);
+        } catch (err: unknown) {
+          if (pickSeq.current !== seq) return;
+          setPackages(null);
+          setError(String(err));
+          return;
+        }
+        if (pickSeq.current !== seq) return;
+        setPackages(found);
+        // The same sentence a Browse to an empty workspace gives, not the
+        // generic Browse hint.
+        if (found.length === 0) {
+          setError(NO_APPLICATIONS_TEXT);
+          return;
+        }
+        loadRef.current.selectAndLoad(path, found, null, null);
+      })();
     });
     void openPromise.then(() => emitInspectorReady());
     return () => {
@@ -308,8 +436,19 @@ export function ApplicationInspectorApp(): React.ReactElement {
               style={inputStyle}
               value={packageName}
               onChange={(e) => {
-                setPackageName(e.target.value);
+                // Choosing an application OPENS it (at its latest version), the
+                // way a workspace browser does; Inspect stays for reading a
+                // different version of the one already chosen. The read is
+                // verify-and-read only, so opening on choice changes nothing.
+                const name = e.target.value;
+                setPackageName(name);
                 setVersionPin("latest");
+                setError(null);
+                if (!name) {
+                  clearLoaded();
+                  return;
+                }
+                void loadOverview(registryPath.trim(), name, "latest");
               }}
             >
               <option value="">Select application…</option>
@@ -399,12 +538,11 @@ export function ApplicationInspectorApp(): React.ReactElement {
         </div>
         <div style={contentStyle}>
           {!overview || !ctx ? (
-            <div style={{ ...mutedStyle, padding: 24, fontSize: 13 }}>
-              {busy
-                ? "Verifying signature and reading the application…"
-                : "Browse to a workspace's workspace.calcula file — or type the path of an " +
-                  "application or version folder inside one — then Inspect. Everything is " +
-                  "read directly from the workspace; nothing is subscribed or changed."}
+            <div
+              data-testid="inspector-placeholder"
+              style={{ ...mutedStyle, padding: 24, fontSize: 13 }}
+            >
+              {placeholderText({ busy, packages, packageName })}
             </div>
           ) : (
             <>

@@ -286,6 +286,33 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
     "calp_detach",
     "calp_detach_sheet",
     "calp_forget_developer_anchor",
+    // THE SIGNING DOORS (identity phase 1, 2026-10-22). Every writeback answer
+    // and every approve/reject decision is now SIGNED -- an answer with this
+    // user's own key (Windows Credential Manager), a decision with the
+    // publisher's key -- and every reader trusts the signature. A non-trusted
+    // extension that could reach these would SEND AS THE USER (a signed answer
+    // the publisher reads as theirs) or DECIDE AS THE PUBLISHER. Scripts send
+    // only through the consent-gated broker (`script_writeback`, the
+    // distribution.writeback capability), and their answers are signed with
+    // origin "script". calp_save_writeback_draft is here because an
+    // `immediate` region SENDS on save; bi_writeback_set_value because a
+    // subscribed model column's entry is a signed submission.
+    // calp_get_subscriber_identity names the account's SID and principal --
+    // and so does every door that returns this user's DRAFTS or what a submit
+    // would send (each draft carries the full sender identity: the
+    // `win-<SID>-...` id, the principal and the scope): the writeback layer,
+    // the reconcile that returns it, and the submit preview. Listing only the
+    // first would have claimed a protection the other three gave away.
+    "calp_submit_region",
+    "calp_submit_all_regions",
+    "calp_save_writeback_draft",
+    "bi_writeback_set_value",
+    "calp_set_submission_state",
+    "calp_set_model_submission_state",
+    "calp_get_subscriber_identity",
+    "calp_get_writeback_layer",
+    "calp_reconcile_writeback",
+    "calp_preview_region_submission",
   ],
 };
 

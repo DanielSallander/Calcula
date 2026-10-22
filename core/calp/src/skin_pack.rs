@@ -277,6 +277,8 @@ pub fn skin_publish(
         locked_cells: Vec::new(),
         writeback_regions: None,
         model_writebacks: None,
+        identity_policy: None,
+        signed_answers: false,
         object_scripts: Vec::new(),
         module_scripts: Vec::new(),
         notebooks: Vec::new(),

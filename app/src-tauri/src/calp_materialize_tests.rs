@@ -96,6 +96,7 @@ fn publish_and_pull_sheets(
         excluded_regions: Vec::new(),
         custom_objects: Vec::new(),
         include_comments: false,
+        identity_policy: None,
         min_app_version: String::new(),
     };
     publish::publish(&reg, &request, prof).expect("publish failed");
@@ -617,6 +618,7 @@ fn publish_sheets(dir: &TempDir, prof: &Path, wb: &Workbook, sheet_indices: Vec<
         excluded_regions: Vec::new(),
         custom_objects: Vec::new(),
         include_comments: false,
+        identity_policy: None,
         min_app_version: String::new(),
     };
     publish::publish(&reg, &request, prof).expect("publish failed");
@@ -1515,6 +1517,7 @@ fn publish_as(
         excluded_regions: Vec::new(),
         custom_objects: Vec::new(),
         include_comments: false,
+        identity_policy: None,
         min_app_version: String::new(),
     };
     publish::publish(&reg, &request, prof).expect("publish failed");
@@ -3912,6 +3915,7 @@ fn publish_with_writeback(
         excluded_regions: Vec::new(),
         custom_objects: Vec::new(),
         include_comments: false,
+        identity_policy: None,
         min_app_version: String::new(),
     };
     publish::publish(&reg, &request, prof).expect("publish failed");

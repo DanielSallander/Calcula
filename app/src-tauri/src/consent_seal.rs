@@ -87,7 +87,31 @@ pub(crate) const CONSENT_SEAL_KEY_FILE: &str = "consent-seal.key";
 /// processes starting their first approval at once end with ONE key.
 pub(crate) const CONSENT_SEAL_LOCK_FILE: &str = "consent-seal.lock";
 
-const KEY_LEN: usize = 32;
+pub(crate) const KEY_LEN: usize = 32;
+
+/// What a 32-byte key kept by a [`SealKeyStore`] is FOR, in the words its
+/// messages use. The approvals key ([`APPROVALS_KEY`]) and the writeback
+/// signing key (`submitter_identity::SUBMITTER_KEY`) share the store and the
+/// mint, and differ only here.
+pub(crate) struct KeyPurpose {
+    /// "approvals key" -- the noun after "this computer's".
+    pub noun: &'static str,
+    /// The OS lock file (in the store's lock folder) held while minting.
+    pub lock_file: &'static str,
+    /// What a damaged key stops, after "cannot be read (...), ".
+    pub while_damaged: &'static str,
+    /// What happens once the user deletes it, after "To repair it, delete ...; ".
+    pub after_repair: &'static str,
+}
+
+/// The approvals key's purpose. The sentences are the ones this module always
+/// spoke.
+pub(crate) const APPROVALS_KEY: KeyPurpose = KeyPurpose {
+    noun: "approvals key",
+    lock_file: CONSENT_SEAL_LOCK_FILE,
+    while_damaged: "so nothing can be approved and no earlier approval counts",
+    after_repair: "every application will then ask for approval again",
+};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -203,6 +227,12 @@ pub struct ScriptConsentList {
 pub(crate) struct SealKey(Zeroizing<[u8; KEY_LEN]>);
 
 impl SealKey {
+    /// The key's bytes, for a caller that derives a signing key from it
+    /// (`submitter_identity`). Never logged, never sent over IPC.
+    pub(crate) fn bytes(&self) -> &[u8; KEY_LEN] {
+        &self.0
+    }
+
     fn from_bytes(bytes: &[u8]) -> Option<SealKey> {
         let array: [u8; KEY_LEN] = bytes.try_into().ok()?;
         Some(SealKey(Zeroizing::new(array)))
@@ -251,16 +281,22 @@ pub(crate) trait SealKeyStore: Sync {
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct FileKeyStore {
     dir: PathBuf,
+    file_name: &'static str,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
 impl FileKeyStore {
     pub(crate) fn new(dir: &Path) -> FileKeyStore {
-        FileKeyStore { dir: dir.to_path_buf() }
+        FileKeyStore { dir: dir.to_path_buf(), file_name: CONSENT_SEAL_KEY_FILE }
+    }
+
+    /// A test-build store for another key, under its own file name.
+    pub(crate) fn with_file(dir: &Path, file_name: &'static str) -> FileKeyStore {
+        FileKeyStore { dir: dir.to_path_buf(), file_name }
     }
 
     fn path(&self) -> PathBuf {
-        self.dir.join(CONSENT_SEAL_KEY_FILE)
+        self.dir.join(self.file_name)
     }
 }
 
@@ -287,7 +323,7 @@ impl SealKeyStore for FileKeyStore {
         // (half of one reads as damaged, which fails closed and asks for repair).
         let temp = self.dir.join(format!(
             "{}.{}-{:?}.tmp",
-            CONSENT_SEAL_KEY_FILE,
+            self.file_name,
             std::process::id(),
             std::thread::current().id()
         ));
@@ -313,11 +349,29 @@ impl SealKeyStore for FileKeyStore {
 pub(crate) struct CredentialKeyStore {
     target: String,
     lock_dir: PathBuf,
+    user: &'static str,
+    comment: &'static str,
 }
+
+/// The approvals credential's user name and the comment Credential Manager shows.
+const APPROVALS_CREDENTIAL_USER: &str = "calcula-consent-seal";
+const APPROVALS_CREDENTIAL_COMMENT: &str =
+    "Calcula approvals key for this computer. Deleting it makes every workbook ask for approval again.";
 
 impl CredentialKeyStore {
     pub(crate) fn new(target: &str, lock_dir: &Path) -> CredentialKeyStore {
-        CredentialKeyStore { target: target.to_string(), lock_dir: lock_dir.to_path_buf() }
+        CredentialKeyStore::with_labels(target, APPROVALS_CREDENTIAL_USER, APPROVALS_CREDENTIAL_COMMENT, lock_dir)
+    }
+
+    /// A store for another key: its own target, user name and the comment the
+    /// Credential Manager shows beside it.
+    pub(crate) fn with_labels(
+        target: &str,
+        user: &'static str,
+        comment: &'static str,
+        lock_dir: &Path,
+    ) -> CredentialKeyStore {
+        CredentialKeyStore { target: target.to_string(), lock_dir: lock_dir.to_path_buf(), user, comment }
     }
 
     /// The Credential Manager target the key is kept under.
@@ -381,10 +435,8 @@ impl SealKeyStore for CredentialKeyStore {
             CredWriteW, CREDENTIALW, CRED_FLAGS, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
         };
         let mut target = to_wide(&self.target);
-        let mut user = to_wide("calcula-consent-seal");
-        let mut comment = to_wide(
-            "Calcula approvals key for this computer. Deleting it makes every workbook ask for approval again.",
-        );
+        let mut user = to_wide(self.user);
+        let mut comment = to_wide(self.comment);
         let cred = CREDENTIALW {
             Flags: CRED_FLAGS(0),
             Type: CRED_TYPE_GENERIC,
@@ -486,31 +538,33 @@ struct MintGuard {
     _process: MutexGuard<'static, ()>,
 }
 
-fn lock_for_minting(dir: &Path) -> Result<MintGuard, String> {
+fn lock_for_minting(dir: &Path, purpose: &KeyPurpose) -> Result<MintGuard, String> {
     // The guarded data is `()`: a poisoned lock protects nothing half-written.
     let process = MINT_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let label = purpose.noun.trim_end_matches(" key");
     std::fs::create_dir_all(dir)
-        .map_err(|e| format!("the approvals lock folder cannot be created: {}", e))?;
+        .map_err(|e| format!("the {} lock folder cannot be created: {}", label, e))?;
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .open(dir.join(CONSENT_SEAL_LOCK_FILE))
-        .map_err(|e| format!("the approvals lock file cannot be opened: {}", e))?;
+        .open(dir.join(purpose.lock_file))
+        .map_err(|e| format!("the {} lock file cannot be opened: {}", label, e))?;
     // Blocks until no other process holds it. Released when `file` closes.
     file.lock()
-        .map_err(|e| format!("the approvals lock file cannot be locked: {}", e))?;
+        .map_err(|e| format!("the {} lock file cannot be locked: {}", label, e))?;
     Ok(MintGuard { _file: file, _process: process })
 }
 
-fn damaged_key_message(why: &str, store: &dyn SealKeyStore) -> String {
+fn damaged_key_message(why: &str, store: &dyn SealKeyStore, purpose: &KeyPurpose) -> String {
     format!(
-        "this computer's approvals key cannot be read ({}), so nothing can be approved and no \
-         earlier approval counts. To repair it, delete {}; every application will then ask for \
-         approval again",
+        "this computer's {} cannot be read ({}), {}. To repair it, delete {}; {}",
+        purpose.noun,
         why,
-        store.repair_hint()
+        purpose.while_damaged,
+        store.repair_hint(),
+        purpose.after_repair
     )
 }
 
@@ -519,32 +573,40 @@ fn damaged_key_message(why: &str, store: &dyn SealKeyStore) -> String {
 /// threads or two processes end with ONE key. A key that exists but cannot be
 /// read is an error, never a reason to mint.
 pub(crate) fn get_or_mint_key(store: &dyn SealKeyStore) -> Result<SealKey, String> {
+    get_or_mint_key_for(store, &APPROVALS_KEY)
+}
+
+/// [`get_or_mint_key`] for any key a [`SealKeyStore`] keeps, worded for
+/// `purpose`.
+pub(crate) fn get_or_mint_key_for(store: &dyn SealKeyStore, purpose: &KeyPurpose) -> Result<SealKey, String> {
     match store.read() {
         KeyLookup::Present(key) => return Ok(key),
-        KeyLookup::Damaged(why) => return Err(damaged_key_message(&why, store)),
+        KeyLookup::Damaged(why) => return Err(damaged_key_message(&why, store, purpose)),
         KeyLookup::Absent => {}
     }
-    let _guard = lock_for_minting(&store.lock_dir())?;
+    let _guard = lock_for_minting(&store.lock_dir(), purpose)?;
     match store.read() {
         KeyLookup::Present(key) => return Ok(key),
-        KeyLookup::Damaged(why) => return Err(damaged_key_message(&why, store)),
+        KeyLookup::Damaged(why) => return Err(damaged_key_message(&why, store, purpose)),
         KeyLookup::Absent => {}
     }
     let mut minted = Zeroizing::new([0u8; KEY_LEN]);
     OsRng
         .try_fill_bytes(&mut minted[..])
-        .map_err(|e| format!("no randomness for this computer's approvals key: {}", e))?;
+        .map_err(|e| format!("no randomness for this computer's {}: {}", purpose.noun, e))?;
     store.write(&minted)?;
     // Read back what is actually stored: the key every later read will see.
     match store.read() {
         KeyLookup::Present(key) if key.same_bytes(&minted[..]) => Ok(key),
-        KeyLookup::Present(_) => Err(
-            "this computer's approvals key changed while it was being created; try again".to_string(),
-        ),
-        KeyLookup::Absent => Err(
-            "this computer's approvals key was stored but cannot be read back".to_string(),
-        ),
-        KeyLookup::Damaged(why) => Err(damaged_key_message(&why, store)),
+        KeyLookup::Present(_) => Err(format!(
+            "this computer's {} changed while it was being created; try again",
+            purpose.noun
+        )),
+        KeyLookup::Absent => Err(format!(
+            "this computer's {} was stored but cannot be read back",
+            purpose.noun
+        )),
+        KeyLookup::Damaged(why) => Err(damaged_key_message(&why, store, purpose)),
     }
 }
 

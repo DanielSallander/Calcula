@@ -520,7 +520,7 @@ fn require_publish_identity(
     let Some(latest) = versions.iter().max() else {
         return Ok(());
     };
-    calp_cmds::require_publisher(registry, package_name, &latest.to_string()).map_err(|_| {
+    calp_cmds::require_publisher(registry, package_name, &latest.to_string(), None).map_err(|_| {
         format!(
             "NotThePublisher: '{}' already exists in this registry and was signed with a different \
              publisher key. Publishing a new version of it would break every subscriber's trust \

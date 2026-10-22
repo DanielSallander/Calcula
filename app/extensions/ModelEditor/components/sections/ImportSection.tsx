@@ -383,8 +383,10 @@ export function ImportSection({
           <div style={{ ...styles.hint, marginBottom: 8 }}>
             Collected writeback submissions as model tables (one row per submission) — query them,
             pivot them, build relationships to them. Publishers see every submission with review
-            state; subscribers see their governed view. Data refreshes automatically after
-            submit/approve/pull.
+            state; subscribers see their governed view. This workbook's own regions collect the
+            streams chosen in Writeback &gt; Collect From (default: the pipeline&apos;s last
+            environment) and carry an environment column. Data refreshes automatically after
+            submit/approve/pull, and within a minute of answers arriving from other computers.
           </div>
           <div
             style={{
@@ -438,6 +440,13 @@ export function ImportSection({
                   }}
                 >
                   {w.audience === "publisher" ? "Publisher — all submissions" : "My governed view"}
+                </span>
+                <span
+                  data-testid="model-import-writeback-streams"
+                  title={w.note || "The streams this table collects."}
+                  style={{ ...styles.muted, fontSize: 11, whiteSpace: "nowrap" }}
+                >
+                  from {w.streams}
                 </span>
                 <span style={{ ...styles.muted, fontSize: 11, whiteSpace: "nowrap" }}>
                   {w.rowCount} row{w.rowCount === 1 ? "" : "s"}

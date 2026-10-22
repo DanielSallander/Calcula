@@ -25,3 +25,8 @@ export const DESIGNATE_WRITEBACK_DIALOG_ID = "collaboration:designateWritebackDi
 /** Emitted after one of this workbook's own (author-side) writeback regions is
  *  added, updated or removed, so everything listing or framing them re-reads. */
 export const WRITEBACK_REGIONS_CHANGED_EVENT = "collaboration:writebackRegionsChanged";
+
+/** Emitted after Writeback > Collect From changed which streams this workbook
+ *  collects, so Collected Responses (and anything else showing the choice)
+ *  re-reads. */
+export const WRITEBACK_COLLECTION_STREAMS_CHANGED_EVENT = "collaboration:writebackCollectionStreamsChanged";

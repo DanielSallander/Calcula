@@ -41,6 +41,7 @@ import {
 } from "@api/reportPages";
 import { createCoalescedRefresh } from "@api/coalescedRefresh";
 import { emitAppEvent, AppEvents } from "@api/events";
+import { showToast } from "@api/notifications";
 import { columnToLetter } from "@api/types";
 
 /** Cell writeback status: not-yet-filled, local unsent edit, sent & awaiting
@@ -121,6 +122,15 @@ let loaded = false;
 let lastError: string | null = null;
 /** Why the last read could not reconcile with the workspace, or null. */
 let lastReconcileError: string | null = null;
+/**
+ * Whether the next read reconciles with the WORKSPACE. Set by
+ * {@link refreshWriteback}; {@link refreshWritebackLocal} leaves it alone, so
+ * a read that only follows a local change (a draft just saved) costs no
+ * workspace I/O -- a reconcile reads every subscribed application's
+ * workspace, which on a slow share made every keystroke into a writeback cell
+ * pay for it. Requests that coalesce take the stronger of the two.
+ */
+let reconcileRequested = true;
 let version = 0;
 
 const listeners = new Set<() => void>();
@@ -250,16 +260,38 @@ async function read(stillCurrent: () => boolean): Promise<void> {
   }
   let nextLayer: WritebackSubmission[] | null = null;
   let layerError: string | null = null;
-  let reconcileError: string | null = null;
-  try {
-    // Reconcile first so cell states reflect the publisher's approve/reject
-    // decisions (the return leg). An offline workspace is normal, so a failed
-    // reconcile falls back to the local layer without a READ error -- but the
-    // reason is kept, so Check Status can say it could not reach the
-    // workspace without asking it a second time.
-    nextLayer = (await reconcileWriteback()).drafts;
-  } catch (err) {
-    reconcileError = errorText(err);
+  // undefined = this read did not reconcile (keep the last answer).
+  let reconcileError: string | null | undefined = undefined;
+  let historyNotice: string | null = null;
+  const reconcile = reconcileRequested;
+  reconcileRequested = false;
+  if (reconcile) {
+    try {
+      // Reconcile first so cell states reflect the publisher's approve/reject
+      // decisions (the return leg). An offline workspace is normal, so a region
+      // it could not read keeps its local state without a READ error -- but the
+      // reason is kept, so Check Status can say it could not reach the
+      // workspace without asking it a second time. The backend REPORTS such
+      // regions (it never throws for them), so they are read from the report.
+      const report = await reconcileWriteback();
+      nextLayer = report.layer.drafts;
+      reconcileError =
+        report.unreadable.length === 0
+          ? null
+          : `Could not reach the workspace for ${report.unreadable.length} writeback region${
+              report.unreadable.length === 1 ? "" : "s"
+            }: ${[...new Set(report.unreadable.map((u) => u.reason))].join("; ")}`;
+      if (report.undoHistoryEnded) {
+        const cells = report.replacedCells.join(", ");
+        historyNotice =
+          `${cells} now ${report.replacedCells.length === 1 ? "shows" : "show"} the newer value you sent from ` +
+          `another workbook. Undo history was cleared.`;
+      }
+    } catch (err) {
+      reconcileError = errorText(err);
+    }
+  }
+  if (nextLayer === null) {
     try {
       nextLayer = (await getWritebackLayer()).drafts;
     } catch (err) {
@@ -272,7 +304,9 @@ async function read(stillCurrent: () => boolean): Promise<void> {
   if (designated) applyDesignated(designated);
   loaded = true;
   lastError = layerError;
-  lastReconcileError = reconcileError;
+  if (reconcileError !== undefined) lastReconcileError = reconcileError;
+  // A background read ended the user's undo history: never in silence.
+  if (historyNotice) showToast(historyNotice, { type: "info", duration: 8000 });
   if (layerError) console.warn("[writebackStore]", layerError);
   notify();
   requestRepaint();
@@ -288,12 +322,25 @@ const refresher = createCoalescedRefresh(read);
  * discard, reconcile, subscribe, refresh, detach or reset.
  */
 export function refreshWriteback(): Promise<void> {
+  reconcileRequested = true;
+  return refresher.request();
+}
+
+/**
+ * Re-read the region index and the LOCAL writeback layer without asking the
+ * workspace -- for a change that is purely local (a draft just saved by the
+ * commit guard), where a reconcile would only re-read what was just written.
+ * Same guarantees as {@link refreshWriteback}; coalesced with it (a pending
+ * full refresh still reconciles).
+ */
+export function refreshWritebackLocal(): Promise<void> {
   return refresher.request();
 }
 
 /** Await the refresh already answering for a change the caller just made, or
  *  start one. Same guarantees as {@link refreshWriteback}. */
 export function joinWritebackRefresh(): Promise<void> {
+  reconcileRequested = true;
   return refresher.join();
 }
 
@@ -333,6 +380,7 @@ export function resetWritebackSnapshot(): void {
   loaded = false;
   lastError = null;
   lastReconcileError = null;
+  reconcileRequested = true;
   notify();
 }
 

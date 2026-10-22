@@ -701,7 +701,7 @@ fn only_checkout_push_and_list_edits_may_record_a_developer_anchor() {
             .collect::<Vec<_>>()
             .join("\n")
     }
-    let files: [(&str, &str, usize); 8] = [
+    let files: [(&str, &str, usize); 9] = [
         ("core/calp/src/checkout.rs", include_str!("../../../core/calp/src/checkout.rs"), 1),
         // anchor_after_push only -- after core publish accepted the version
         // (calp_publish and calp_publish_model share it). The pre-assembly
@@ -709,6 +709,9 @@ fn only_checkout_push_and_list_edits_may_record_a_developer_anchor() {
         ("calp_commands.rs", include_str!("calp_commands.rs"), 1),
         ("calp_publishers.rs", include_str!("calp_publishers.rs"), 1),
         ("calp_inspector.rs", include_str!("calp_inspector.rs"), 0),
+        // The author's Collected Responses reads through the authorised
+        // reader (CheckOnly): reading one's own answers records nothing.
+        ("calp_collection.rs", include_str!("calp_collection.rs"), 0),
         ("calp_merge.rs", include_str!("calp_merge.rs"), 0),
         ("held_button_code.rs", include_str!("held_button_code.rs"), 0),
         ("button_cells.rs", include_str!("button_cells.rs"), 0),

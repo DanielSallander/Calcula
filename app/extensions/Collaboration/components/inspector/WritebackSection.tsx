@@ -11,6 +11,7 @@ import {
   type InspectorWriteback,
 } from "@api/collaboration";
 import type { InspectorContext } from "./ApplicationInspectorApp";
+import { identityCountsText } from "../../lib/senderLabel";
 import {
   Badge,
   OK_GREEN,
@@ -150,6 +151,18 @@ export function WritebackSection({
                 <div style={{ fontSize: 12, marginBottom: 6 }}>
                   {data.totalSubmissions} submissions · {data.reviewEventCount} review decisions
                 </div>
+                {/* WHO SENT THEM (identity phase 1), as this computer concludes. */}
+                <div style={{ fontSize: 12, marginBottom: 6 }} data-testid="inspector-writeback-identity">
+                  Senders: {identityCountsText(data.identityCounts)}
+                  {data.requireVerified && (
+                    <span style={mutedStyle}> — this version counts only verified senders</span>
+                  )}
+                </div>
+                {data.storageWarning && (
+                  <div style={{ fontSize: 12, marginBottom: 6 }} data-testid="inspector-writeback-storage-warning">
+                    {data.storageWarning}
+                  </div>
+                )}
                 {data.regionStats.length > 0 && (
                   <table style={tableStyle}>
                     <thead>
@@ -161,6 +174,7 @@ export function WritebackSection({
                         <th style={thStyle}>Approved</th>
                         <th style={thStyle}>Rejected</th>
                         <th style={thStyle}>Pending</th>
+                        <th style={thStyle}>Senders</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -182,6 +196,7 @@ export function WritebackSection({
                           <td style={tdStyle}>{s.approved}</td>
                           <td style={tdStyle}>{s.rejected}</td>
                           <td style={tdStyle}>{s.pending}</td>
+                          <td style={{ ...tdStyle, fontSize: 11 }}>{identityCountsText(s.identity)}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -213,6 +228,7 @@ export function WritebackSection({
                 <thead>
                   <tr>
                     <th style={thStyle}>Submitter</th>
+                    <th style={thStyle}>Identity</th>
                     <th style={thStyle}>Environment</th>
                     <th style={thStyle}>Where</th>
                     <th style={thStyle}>Value</th>
@@ -225,6 +241,9 @@ export function WritebackSection({
                   {data.submissions.map((s, i) => (
                     <tr key={i}>
                       <td style={tdStyle}>{s.submitterName}</td>
+                      <td style={{ ...tdStyle, fontSize: 11 }} data-identity={s.identity}>
+                        {s.identityLabel}
+                      </td>
                       <td style={tdStyle}>
                         {s.environment || (
                           <span style={mutedStyle}>development line</span>

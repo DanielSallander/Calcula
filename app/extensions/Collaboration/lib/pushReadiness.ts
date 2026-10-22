@@ -108,6 +108,19 @@ export interface PushReadinessInput {
 }
 
 /**
+ * WHAT THE DIALOG SENDS AS `requireVerifiedIdentity` (identity phase 1): the
+ * author's choice ONLY when they moved the checkbox. Otherwise nothing, so Rust
+ * decides -- a new application gets no rule, and a push keeps its VERIFIED
+ * base's rule, refused (`CALP_PUSH_IDENTITY_RULE_UNKNOWN`) when that cannot be
+ * read. The box starts unticked until the preview reports the base's rule, so
+ * always sending it would switch a base's rule OFF in silence whenever the
+ * preview could not read it, or before it returned.
+ */
+export function identityRuleToSend(touched: boolean, checked: boolean): boolean | undefined {
+  return touched ? checked : undefined;
+}
+
+/**
  * `null` when the dialog is ready to push, otherwise one sentence naming the
  * field that is not.
  *

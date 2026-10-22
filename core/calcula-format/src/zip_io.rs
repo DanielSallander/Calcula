@@ -1742,6 +1742,35 @@ mod tests {
     }
 
     #[test]
+    fn a_collect_from_choice_never_raises_the_format_version() {
+        // Writeback > Collect From (2026-10-22) rides inside the working-copy
+        // link, a user file. The lie-vs-loss test: an older build ignores the
+        // field (and round-trips it through the link's `extra`), so its
+        // Collected Responses shows every stream with each row labelled by its
+        // stream -- visible, not misleading -- and it has no author BI tables
+        // at all, so no model table can claim a choice it does not honour.
+        // No link in the format-version chain; this fails if one is added in
+        // passing.
+        let link = |choice: &str| {
+            format!(
+                "{{\"formatVersion\":1,\"registryUrl\":\"C:/ws\",\"packageName\":\"app\",\
+                 \"baseVersion\":\"1.0.0\",\"checkedOutAt\":\"t\"{choice}}}"
+            )
+            .into_bytes()
+        };
+        let mut plain = make_test_workbook();
+        plain.user_files.insert("working_copy_link.json".to_string(), link(""));
+        let mut chosen = make_test_workbook();
+        chosen
+            .user_files
+            .insert("working_copy_link.json".to_string(), link(",\"collectStreams\":{\"only\":[\"\",\"prod\"]}"));
+        let plain_v = read_calcula_manifest(&write_calcula_bytes(&plain).unwrap()).unwrap().format_version;
+        let chosen_v = read_calcula_manifest(&write_calcula_bytes(&chosen).unwrap()).unwrap().format_version;
+        assert_eq!(chosen_v, plain_v);
+        assert_eq!(chosen_v, CALA_BASE_FORMAT_VERSION);
+    }
+
+    #[test]
     fn script_authoring_declares_a_feature_id_but_never_raises_the_format_version() {
         // Modeled on the media test above, and for the same reason: an older
         // reader that drops `script_authoring.json` loses a LOG. It is not made

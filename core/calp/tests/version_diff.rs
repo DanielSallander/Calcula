@@ -84,6 +84,7 @@ fn publish_version(
         excluded_regions: Vec::new(),
         custom_objects: Vec::new(),
         include_comments: false,
+        identity_policy: None,
         min_app_version: String::new(),
     };
     publish::publish(reg, &request, prof).expect("publish failed");
@@ -311,6 +312,7 @@ fn an_added_sheet_is_reported_as_added() {
         excluded_regions: Vec::new(),
         custom_objects: Vec::new(),
         include_comments: false,
+        identity_policy: None,
         min_app_version: String::new(),
     };
     publish::publish(&f.reg, &request, f._prof.path()).unwrap();

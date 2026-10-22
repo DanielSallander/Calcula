@@ -116,8 +116,56 @@ pub struct WorkingCopyLink {
     /// from before the field, whose push the host refuses).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_custom_function_names: Option<Vec<String>>,
+    /// WHICH STREAMS this working copy's publisher-side reads collect for the
+    /// application's writeback regions (Writeback > Collect From, 2026-10-22):
+    /// Collected Responses, its exports, the roster, review, the submission
+    /// watch, scripts and the author's BI writeback tables all read through it.
+    ///
+    /// `None` is the DEFAULT, decided by the owner: the LAST environment of the
+    /// application's pipeline (production, as a rule) when it has environments,
+    /// and every stream -- which is then just the development line -- when it
+    /// has none. Test answers must never reach a production model table merely
+    /// because nobody chose; a person who wants them ticks them.
+    ///
+    /// A view of the application's answers that belongs to THIS workbook: user
+    /// files never reach a package, so a subscriber never sees it, and it
+    /// changes nothing anyone else reads. Read it through
+    /// [`WorkingCopyLink::collect_choice`], which drops what a hand-edited file
+    /// could smuggle in (an empty set, a name no environment may carry).
+    ///
+    /// LENIENT on read: a value of the wrong shape reads as no choice instead
+    /// of failing the whole link -- which would open the workbook as
+    /// standalone and lose what it is a working copy OF.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "lenient_collect_streams")]
+    pub collect_streams: Option<CollectStreams>,
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
+}
+
+/// `collect_streams` from whatever a `.cala` holds: the stored shape, or no
+/// choice (the default) for anything else.
+fn lenient_collect_streams<'de, D>(deserializer: D) -> Result<Option<CollectStreams>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw.and_then(|v| serde_json::from_value::<CollectStreams>(v).ok()))
+}
+
+/// The publisher's explicit choice of streams to collect from. The absence of a
+/// choice (`WorkingCopyLink::collect_streams == None`) is the default, the last
+/// environment of the pipeline -- see that field.
+///
+/// Serialised as `"all"` or `{"only": ["", "prod"]}`: a unit and a newtype
+/// variant, never a struct variant (whose fields `rename_all` would not touch).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CollectStreams {
+    /// Every stream, including environments defined after the choice.
+    All,
+    /// Exactly these streams; `""` is the development line. An environment
+    /// defined later is NOT collected until it is ticked.
+    Only(std::collections::BTreeSet<String>),
 }
 
 /// What the base version carried, beyond its sheets: the record every push
@@ -176,7 +224,49 @@ impl WorkingCopyLink {
             base_named_range_keys: Vec::new(),
             base_pane_control_ids: None,
             base_custom_function_names: None,
+            // The default (the last environment), until the publisher chooses.
+            collect_streams: None,
             extra: HashMap::new(),
+        }
+    }
+
+    /// The stored Collect From choice, NORMALISED: names no environment may
+    /// carry are dropped, and an empty set reads as no choice (the default).
+    ///
+    /// The setter refuses both, but the value is also restored from a `.cala`
+    /// that anyone may have hand-edited, and an empty or misspelled set there
+    /// would make every publisher-side read report "No submissions yet" with
+    /// no error anywhere.
+    pub fn collect_choice(&self) -> Option<CollectStreams> {
+        match &self.collect_streams {
+            None => None,
+            Some(CollectStreams::All) => Some(CollectStreams::All),
+            Some(CollectStreams::Only(set)) => {
+                let kept: std::collections::BTreeSet<String> = set
+                    .iter()
+                    .filter(|s| s.is_empty() || crate::environments::validate_environment_name(s).is_ok())
+                    .cloned()
+                    .collect();
+                if kept.is_empty() {
+                    None
+                } else {
+                    Some(CollectStreams::Only(kept))
+                }
+            }
+        }
+    }
+
+    /// Carry the Collect From choice over from the link this one REPLACES, when
+    /// both name the same application in the same workspace (checkout of the
+    /// application this workbook was already linked to). Without it, opening
+    /// the same application for editing again would silently widen or move
+    /// what the author's model tables collect. A different application starts
+    /// from the default.
+    pub fn carry_collect_choice_from(&mut self, replaced: Option<&WorkingCopyLink>) {
+        if let Some(old) = replaced {
+            if old.targets(&self.registry_url, &self.package_name) {
+                self.collect_streams = old.collect_streams.clone();
+            }
         }
     }
 
@@ -358,6 +448,94 @@ mod tests {
         assert_eq!(old.base_pane_control_ids, None);
         assert_eq!(old.base_custom_function_names, None);
         assert!(!old.content_recorded(), "an old link's push is refused, not guessed");
+    }
+
+    /// The Collect From choice survives a save in both shapes, a link without
+    /// it reads as the default, and the wire shape is `"all"` /
+    /// `{"only": [...]}` under the camelCase key.
+    ///
+    /// SABOTAGE: mark `collect_streams` `#[serde(skip_serializing)]` -- the
+    /// choice is lost on every save and the round trip fails.
+    #[test]
+    fn the_collect_choice_round_trips_and_defaults_to_none() {
+        let mut l = link();
+        assert_eq!(l.collect_streams, None, "a fresh link uses the default");
+        let plain = serde_json::to_string(&l).unwrap();
+        assert!(!plain.contains("collectStreams"), "no choice, no key: {plain}");
+
+        l.collect_streams = Some(CollectStreams::Only(["".to_string(), "prod".to_string()].into_iter().collect()));
+        let json = serde_json::to_string(&l).unwrap();
+        assert!(json.contains("\"collectStreams\":{\"only\":[\"\",\"prod\"]}"), "{json}");
+        let back: WorkingCopyLink = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, l);
+
+        l.collect_streams = Some(CollectStreams::All);
+        let json = serde_json::to_string(&l).unwrap();
+        assert!(json.contains("\"collectStreams\":\"all\""), "{json}");
+        let back: WorkingCopyLink = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.collect_streams, Some(CollectStreams::All));
+
+        let old: WorkingCopyLink = serde_json::from_str(&plain).unwrap();
+        assert_eq!(old.collect_streams, None);
+    }
+
+    /// A hand-edited or corrupted `.cala` cannot make the publisher collect
+    /// nothing in silence: an empty set, or a set of names no environment may
+    /// carry, reads as the default; a valid name beside a bad one is kept.
+    ///
+    /// SABOTAGE: return `self.collect_streams.clone()` from `collect_choice`.
+    #[test]
+    fn a_stored_choice_is_normalised_on_read() {
+        let mut l = link();
+        l.collect_streams = Some(CollectStreams::Only(Default::default()));
+        assert_eq!(l.collect_choice(), None, "an empty set is no choice");
+        l.collect_streams = Some(CollectStreams::Only(["Prod".to_string(), "../x".to_string()].into_iter().collect()));
+        assert_eq!(l.collect_choice(), None, "names no environment may carry are dropped");
+        l.collect_streams = Some(CollectStreams::Only(["Prod".to_string(), "prod".to_string(), "".to_string()].into_iter().collect()));
+        assert_eq!(
+            l.collect_choice(),
+            Some(CollectStreams::Only(["".to_string(), "prod".to_string()].into_iter().collect()))
+        );
+        l.collect_streams = Some(CollectStreams::All);
+        assert_eq!(l.collect_choice(), Some(CollectStreams::All));
+
+        // A value of the wrong SHAPE reads as no choice -- and, above all,
+        // does not fail the whole link (which would reopen the workbook as
+        // standalone, forgetting what it is a working copy of).
+        let plain = serde_json::to_value(link()).unwrap();
+        for bogus in [serde_json::json!("everything"), serde_json::json!({ "only": 5 }), serde_json::json!(7)] {
+            let mut v = plain.clone();
+            v["collectStreams"] = bogus.clone();
+            let back: WorkingCopyLink = serde_json::from_value(v).unwrap_or_else(|e| panic!("{bogus}: {e}"));
+            assert_eq!(back.collect_streams, None, "{bogus}");
+            assert_eq!(back.package_name, "sales");
+        }
+    }
+
+    /// Checkout of the SAME application keeps the choice; another application
+    /// (or another workspace) starts from the default.
+    ///
+    /// SABOTAGE: make `carry_collect_choice_from` a no-op.
+    #[test]
+    fn checkout_of_the_same_application_keeps_the_choice_and_another_resets_it() {
+        let mut old = link();
+        old.collect_streams = Some(CollectStreams::Only(["prod".to_string()].into_iter().collect()));
+
+        let mut same = WorkingCopyLink::new(r"\\SERVER\reports\", "sales", "report", "1.3.0", "t", Vec::new());
+        same.carry_collect_choice_from(Some(&old));
+        assert_eq!(same.collect_streams, old.collect_streams, "same application: the choice is kept");
+
+        let mut other = WorkingCopyLink::new(r"\\server\reports", "budget", "report", "1.0.0", "t", Vec::new());
+        other.carry_collect_choice_from(Some(&old));
+        assert_eq!(other.collect_streams, None, "another application starts at the default");
+
+        let mut elsewhere = WorkingCopyLink::new(r"\\server\other", "sales", "report", "1.0.0", "t", Vec::new());
+        elsewhere.carry_collect_choice_from(Some(&old));
+        assert_eq!(elsewhere.collect_streams, None, "another workspace starts at the default");
+
+        let mut first = WorkingCopyLink::new(r"\\server\reports", "sales", "report", "1.0.0", "t", Vec::new());
+        first.carry_collect_choice_from(None);
+        assert_eq!(first.collect_streams, None);
     }
 
     #[test]

@@ -112,7 +112,7 @@ impl PublisherKeypair {
     /// Load the publisher keypair from the profile directory, or create one if
     /// none exists. Key material is generated with the OS CSPRNG (OsRng), NOT
     /// the codebase's non-crypto UUID PRNG. The profile directory is created
-    /// if needed. Mirrors identity_provider::load_or_create.
+    /// if needed.
     /// Load an EXISTING publisher keypair from the profile directory, or
     /// `Ok(None)` if this profile has never published (no publisher-key.json).
     /// Unlike `load_or_create`, this NEVER creates a keypair — it is a
@@ -165,6 +165,15 @@ impl PublisherKeypair {
             signing_key,
             display_name,
         })
+    }
+
+    /// A keypair from a known 32-byte seed. For tests and tools that need a
+    /// fixed key; the app always loads the profile's key ([`Self::load_existing`]).
+    pub fn from_seed(seed: &[u8; 32], display_name: &str) -> PublisherKeypair {
+        PublisherKeypair {
+            signing_key: SigningKey::from_bytes(seed),
+            display_name: display_name.to_string(),
+        }
     }
 
     /// Lowercase hex of the 32-byte public (verifying) key.

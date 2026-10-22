@@ -324,7 +324,7 @@ const SESSION_SCOPED: &[(&str, &str)] = &[
     // -- Machine identity and transient control flags -------------------------
     (
         "AppState.subscriber_identity",
-        "the WHO of writeback submissions: loaded from (or created in) the Calcula profile directory by `get_subscriber_identity` and cached here. It identifies the person at the machine, not the open document, and re-reading it per document would only re-do the same disk read",
+        "the WHO of writeback submissions: the Windows account bound to this computer's signing key (identity phase 1, `submitter_identity::current_identity`), read by `get_subscriber_identity` and cached here. It identifies the person at the machine, not the open document, and re-reading it per document would only re-ask the OS and the Credential Manager the same question",
     ),
     (
         "AppState.calc_cancel",

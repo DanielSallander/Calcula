@@ -155,9 +155,37 @@ fn parse_value(
     }
 }
 
+/// WHETHER A RECEIVED ENTRY COUNTS for a writeback column (the read side of the
+/// masterData editor gate). A history column takes every entry. A masterData
+/// column takes only SIGNED entries; never one Windows positively reports
+/// another account wrote (Not verified), whoever it claims to be; and, with an
+/// allowlist, only an entry matched by what the READER PROVED
+/// (`calp::identity_check::answer_matches`: the recorded writer for a
+/// Verified entry, and no name at all when it claims another account) -- never
+/// by a refuted claim. Called after the reader's verdicts are attached.
+pub(crate) fn entry_may_edit(
+    kind: &str,
+    allowed_editors: &[String],
+    s: &calp::writeback::WritebackSubmission,
+) -> bool {
+    if kind != "masterData" {
+        return true;
+    }
+    if s.sender != calp::SenderCheck::Signed {
+        return false;
+    }
+    if s.identity.status == calp::IdentityStatus::NotVerified {
+        return false;
+    }
+    allowed_editors.is_empty() || allowed_editors.iter().any(|e| calp::identity_check::answer_matches(e, s))
+}
+
 /// MasterData editor gate: when an allowlist is present, the identity must
-/// match one entry (case-insensitively on id or display name, with the same
-/// substring fallback as expected-respondents matching).
+/// match one entry -- through THE ONE MATCHER
+/// (`calp::identity_provider::principal_matches`, identity phase 1): exactly
+/// and case-insensitively on the principal name (`MACHINE\user` /
+/// `DOMAIN\user`) or the id, never the display name, never a substring. The
+/// identity here is this computer's own, which signs what it sends.
 fn check_editor_allowed(
     wb: &bi_engine::WritebackColumn,
     identity: &calp::SubmitterIdentity,
@@ -167,12 +195,10 @@ fn check_editor_allowed(
     {
         return Ok(());
     }
-    let id = identity.id.to_lowercase();
-    let name = identity.display_name.to_lowercase();
-    let allowed = wb.allowed_editors().iter().any(|e| {
-        let e = e.trim().to_lowercase();
-        !e.is_empty() && (id == e || name == e || name.contains(&e) || e.contains(&name))
-    });
+    let allowed = wb
+        .allowed_editors()
+        .iter()
+        .any(|e| calp::identity_provider::principal_matches(e, identity, true));
     if allowed {
         Ok(())
     } else {
@@ -382,10 +408,31 @@ pub(crate) fn collect_distributed_writeback_entries(
         // measures — the one place where a wrong number is hardest to trace back
         // to its source.
         let environment = sub.environment.clone().unwrap_or_default();
+        // Only decisions the publisher (or a co-publisher) SIGNED count: a
+        // masterData column's "newest approved wins" can no longer be won by a
+        // hand-written approval.
+        let authority = crate::calp_commands::review_authority(
+            registry.as_ref(),
+            &sub.package_name,
+            &manifest.publisher_key,
+            Some(&scope),
+        );
         if let Ok(all) = registry
-            .load_current_submissions(&sub.package_name, &sub.resolved_version)
+            .load_current_submissions(&sub.package_name, &sub.resolved_version, &authority)
             .map(|all| calp::writeback::visible_in(all, Some(&environment)))
         {
+            // The reader's identity verdicts, then the application's rule: a
+            // writeback column feeds measures, so it counts exactly what GATHER
+            // counts.
+            let all = calp::identity_check::admit(
+                crate::identity_verification::attested(
+                    registry.as_ref(),
+                    &sub.package_name,
+                    &sub.resolved_version,
+                    all,
+                ),
+                &manifest.identity_policy.unwrap_or_default(),
+            );
             for s in all {
                 if s.model_key.is_some() {
                     by_region.entry(s.region_id.clone()).or_default().push(s);
@@ -419,17 +466,13 @@ pub(crate) fn collect_distributed_writeback_entries(
             if result.contains_key(&decl.id) {
                 continue; // first subscription wins
             }
-            let editor_allowed = |submitter: &calp::SubmitterIdentity| -> bool {
-                if decl.kind != "masterData" || decl.allowed_editors.is_empty() {
-                    return true;
-                }
-                let id = submitter.id.to_lowercase();
-                let name = submitter.display_name.to_lowercase();
-                decl.allowed_editors.iter().any(|e| {
-                    let e = e.trim().to_lowercase();
-                    !e.is_empty() && (id == e || name == e || name.contains(&e) || e.contains(&name))
-                })
-            };
+            // MASTER DATA COUNTS ONLY SIGNED ENTRIES (identity phase 1): an
+            // entry sent before sign-in names nobody anybody vouched for, so it
+            // never edits master data; and an allowlist matches the SIGNED
+            // principal or the id through THE ONE MATCHER -- never the display
+            // name, never a substring.
+            let editor_allowed =
+                |s: &calp::writeback::WritebackSubmission| entry_may_edit(&decl.kind, &decl.allowed_editors, s);
 
             let mut entries: Vec<ModelWritebackEntry> = Vec::new();
             // Baseline first (pre-distribution history, oldest layer).
@@ -463,7 +506,7 @@ pub(crate) fn collect_distributed_writeback_entries(
                 }
                 // READ-SIDE EDITOR GATE: a masterData column only counts
                 // entries from its designated editors.
-                if !editor_allowed(&s.submitter) {
+                if !editor_allowed(&s) {
                     continue;
                 }
                 entries.push(ModelWritebackEntry {
@@ -831,6 +874,9 @@ mod tests {
         let identity = calp::SubmitterIdentity {
             display_name: "Alice (North)".into(),
             id: "id-alice".into(),
+            principal_name: "CORP\\alice".into(),
+            provider: calp::IdentityProviderKind::Windows,
+            scope: calp::AccountScope::Domain,
             extra: std::collections::HashMap::new(),
         };
         // History columns and MasterData without an allowlist: open.
@@ -838,11 +884,67 @@ mod tests {
         let open_md = wb(bi_engine::DataType::Float64)
             .with_kind(bi_engine::WritebackColumnKind::MasterData);
         assert!(check_editor_allowed(&open_md, &identity).is_ok());
-        // Allowlist: substring/case-insensitive match on name or id.
-        let gated = open_md.clone().with_allowed_editors(vec!["alice".into()]);
+        // Allowlist: EXACT, case-insensitive match on the principal or the id
+        // (identity phase 1) -- never a substring, never the display name.
+        let gated = open_md.clone().with_allowed_editors(vec!["corp\\ALICE".into()]);
         assert!(check_editor_allowed(&gated, &identity).is_ok());
+        let by_id = open_md.clone().with_allowed_editors(vec!["id-alice".into()]);
+        assert!(check_editor_allowed(&by_id, &identity).is_ok());
+        // The id matches EXACTLY (a case variant is another sender).
+        let shouted = open_md.clone().with_allowed_editors(vec!["ID-ALICE".into()]);
+        assert!(check_editor_allowed(&shouted, &identity).is_err());
+        let substring = open_md.clone().with_allowed_editors(vec!["alice".into()]);
+        assert!(
+            check_editor_allowed(&substring, &identity).is_err(),
+            "a fragment of the name is not the person (the old substring fallback)"
+        );
+        let display = open_md.clone().with_allowed_editors(vec!["Alice (North)".into()]);
+        assert!(check_editor_allowed(&display, &identity).is_err(), "the display name is not a principal");
         let denied = open_md.with_allowed_editors(vec!["Bob".into()]);
         assert!(check_editor_allowed(&denied, &identity).is_err());
+    }
+
+    /// THE READ SIDE OF THE GATE NEVER MATCHES A REFUTED NAME. Mallory signs
+    /// with his own key under his own SID but CLAIMS to be CORP\\alice; the
+    /// file is his, so the reader verifies him -- as CORP\\mallory. He must not
+    /// edit a column whose allowlist names Alice, even under "count only
+    /// verified senders". A Not-verified entry never edits master data.
+    ///
+    /// SABOTAGE: match `principal_matches(e, &s.submitter, true)` in
+    /// `entry_may_edit` again.
+    #[test]
+    fn a_verified_entry_claiming_an_allowed_editor_it_is_not_is_refused() {
+        let alice_only = vec!["CORP\\alice".to_string()];
+        let mut s: calp::writeback::WritebackSubmission = serde_json::from_value(serde_json::json!({
+            "id": "e1", "regionId": "wb-1", "cellRow": 0, "cellCol": 0,
+            "submitter": {
+                "displayName": "Alice", "id": "win-S-1-5-21-9-9-9-1105-00000000000000000000000000000000",
+                "principalName": "CORP\\alice", "provider": "windows", "scope": "domain"
+            },
+            "value": { "type": "number", "value": 1.0 },
+            "state": "submitted", "createdAt": "2026-10-22T10:00:00Z", "updatedAt": "2026-10-22T10:00:00Z"
+        }))
+        .unwrap();
+        s.sender = calp::SenderCheck::Signed;
+        s.identity = calp::IdentityVerdict {
+            status: calp::IdentityStatus::Verified,
+            reason: calp::IdentityReason::OwnerMatches,
+            written_by: "CORP\\mallory".to_string(),
+        };
+        assert!(!entry_may_edit("masterData", &alice_only, &s), "Mallory verified as himself, claiming Alice");
+        // The same entry, really Alice: allowed.
+        s.identity.written_by = "CORP\\alice".to_string();
+        assert!(entry_may_edit("masterData", &alice_only, &s));
+        // Windows reports another writer: never, allowlist or not.
+        s.identity = calp::IdentityVerdict {
+            status: calp::IdentityStatus::NotVerified,
+            reason: calp::IdentityReason::OwnerMismatch,
+            written_by: "CORP\\bob".to_string(),
+        };
+        assert!(!entry_may_edit("masterData", &alice_only, &s));
+        assert!(!entry_may_edit("masterData", &[], &s));
+        // A history column takes it.
+        assert!(entry_may_edit("history", &alice_only, &s));
     }
 
     #[test]

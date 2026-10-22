@@ -68,6 +68,14 @@ pub struct PublishParams {
     /// it; the scripted publish never forwards one.
     #[serde(default)]
     pub include_in_application: Vec<crate::calp_push_scope::IncludedItem>,
+    /// THE APPLICATION'S IDENTITY RULE ("count only answers from verified
+    /// senders", identity phase 1). `Some` = the author's choice in the publish
+    /// dialog; absent = a new application counts every answer, and a push keeps
+    /// its base version's rule (read from the VERIFIED base -- a push whose base
+    /// rule cannot be read is refused rather than silently changing it). Written
+    /// into the signed manifest (`VersionManifest::identity_policy`).
+    #[serde(default)]
+    pub require_verified_identity: Option<bool>,
 }
 
 /// A custom object contributed by a FRONTEND provider for publishing
@@ -1796,6 +1804,7 @@ pub(crate) fn publish_into_for_preview(
         excluded_regions,
         custom_objects,
         include_comments,
+        identity_policy: None,
         min_app_version: String::new(),
     };
     // THE SAME STAMP THE PUSH APPLIES. Without it every canvas, floating-range
@@ -1806,6 +1815,52 @@ pub(crate) fn publish_into_for_preview(
     calp::publish::publish(registry, &request, &calcula_profile_dir())
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+/// The identity rule a publish writes (identity phase 1): the author's
+/// explicit choice; otherwise none for a new application (count every answer,
+/// the owner's default for Windows-account applications) and the BASE
+/// version's rule for a push, read by `base_rule` from the verified base. A
+/// push whose base rule cannot be read is REFUSED -- guessing either way would
+/// silently switch which answers every total counts.
+pub(crate) fn resolve_identity_policy(
+    choice: Option<bool>,
+    mode: &calp::PushMode,
+    base_rule: impl FnOnce() -> Result<Option<calp::IdentityPolicy>, String>,
+) -> Result<Option<calp::IdentityPolicy>, String> {
+    match (choice, mode) {
+        (Some(true), _) => Ok(Some(calp::IdentityPolicy { require_verified: true })),
+        (Some(false), _) => Ok(None),
+        (None, calp::PushMode::CreateNew) => Ok(None),
+        (None, calp::PushMode::Update { expected_base }) => base_rule().map_err(|e| {
+            format!(
+                "CALP_PUSH_IDENTITY_RULE_UNKNOWN: Could not read which answers version {expected_base} \
+                 counts (its identity rule): {e}. Nothing was pushed. Choose the rule in the push \
+                 dialog and push again."
+            )
+        }),
+    }
+}
+
+/// A push preview keeps the base version's identity rule: the rule is not
+/// content, and the push dialog shows (and sends) it itself.
+pub(crate) fn carry_base_identity_rule(working: &mut calp::VersionManifest, base: &calp::VersionManifest) {
+    working.identity_policy = base.identity_policy;
+}
+
+/// The publish-time warning for an application with writeback regions whose
+/// workspace can never verify its senders (a Dropbox/OneDrive folder, FAT):
+/// warn and label, never refuse (owner decision 2026-10-22).
+pub(crate) fn writeback_storage_warning(
+    regions: Option<&Vec<calp::WritebackRegionDeclaration>>,
+    registry_path: &str,
+) -> Option<String> {
+    if !regions.is_some_and(|r| !r.is_empty()) || registry_path.trim().is_empty() {
+        return None;
+    }
+    crate::identity_verification::publish_storage_warning(crate::identity_verification::workspace_storage(
+        registry_path,
+    ))
 }
 
 /// Declare THIS app's version as the application's minimum when it carries
@@ -1834,6 +1889,19 @@ pub(crate) fn stamp_min_app_version(request: &mut calp::publish::PublishRequest)
         // app without distributable-object providers would pull "successfully"
         // and never materialize them.
         || !request.custom_objects.is_empty()
+        // WRITEBACK REGIONS (identity phase 1, 2026-10-22): every answer and
+        // every approve/reject decision is now SIGNED, and readers ignore what
+        // is not. An older app would send unsigned answers under its random id
+        // and write unsigned decisions -- and show "sent" / "approved" while
+        // every current reader counts neither. That is a lie, not a loss, so
+        // the application names this app as its minimum.
+        || request
+            .writeback_regions
+            .as_ref()
+            .is_some_and(|r| !r.is_empty())
+        // THE IDENTITY RULE: an older app ignores it and counts every answer
+        // in its totals -- a lie, so the application names this app.
+        || request.identity_policy.is_some_and(|p| p.require_verified)
     {
         request.min_app_version = env!("CARGO_PKG_VERSION").to_string();
     }
@@ -2258,6 +2326,24 @@ pub fn calp_publish(
         params.custom_objects,
     );
 
+    // THE IDENTITY RULE (identity phase 1): the dialog's choice, or the base
+    // version's -- read from the VERIFIED base, never the unsigned listing.
+    let identity_policy = resolve_identity_policy(params.require_verified_identity, &push_mode, || {
+        let calp::PushMode::Update { expected_base } = &push_mode else {
+            return Ok(None);
+        };
+        crate::calp_inspector::open_authorized_content(
+            &params.registry_path,
+            &params.package_name,
+            &format!("={expected_base}"),
+            false,
+            None,
+        )
+        .map(|(_registry, _version, manifest)| manifest.identity_policy)
+    })?;
+    // WARN, NEVER REFUSE: a workspace where senders can never be verified.
+    let storage_warning = writeback_storage_warning(writeback_regions.as_ref(), &params.registry_path);
+
     let mut request = calp::publish::PublishRequest {
         workbook: &workbook,
         package_name: params.package_name,
@@ -2288,6 +2374,7 @@ pub fn calp_publish(
         excluded_regions,
         custom_objects,
         include_comments: params.include_comments,
+        identity_policy,
         min_app_version: String::new(),
     };
     // Compatibility stamp -- the ONE helper the push preview applies too, so the
@@ -2353,6 +2440,10 @@ pub fn calp_publish(
             }
         }
     }
+    // A push or a first publish changes which version the author's own
+    // regions are read from (and a first publish creates the link): the
+    // author's BI writeback tables follow.
+    crate::bi::writeback_source::invalidate_writeback_bi();
 
     // THE APPLICATION'S CREATOR is remembered now that the workspace has
     // accepted this computer's version (a new application's, or the first push
@@ -2424,6 +2515,7 @@ pub fn calp_publish(
                 &unpublished_pivots,
             ))
             .chain(anchor_warnings)
+            .chain(storage_warning)
             .collect(),
     })
 }
@@ -2691,6 +2783,7 @@ pub fn calp_publish_model(
         excluded_regions: Vec::new(),
         custom_objects: Vec::new(),
         include_comments: false, // dataset application: no sheets, no comments
+        identity_policy: None,
         // Model-only application: no Wave A/B artifacts, so no minimum — it stays
         // pullable by older apps. Writeback columns are the exception: a
         // pre-v21 engine refuses the model, so gate honestly.
@@ -2813,6 +2906,10 @@ pub struct PublishPreviewResponse {
     /// plain dry-run the Application Explorer's "Preview publish" button runs).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gates: Option<PushGateStatus>,
+    /// The identity rule the push would keep (the VERIFIED base version's
+    /// "count only verified senders"); absent for a new application or when
+    /// the base cannot be read. The publish dialog's control starts from it.
+    pub base_requires_verified: Option<bool>,
     /// Every sheet the author may choose from, with its TRUE workbook index and
     /// its provenance.
     ///
@@ -2975,6 +3072,12 @@ pub fn calp_publish_preview(
         &sheet_indices,
         &unpublished_pivots,
     ));
+    // A workspace where this application's senders can never be verified
+    // (a Dropbox/OneDrive folder): said BEFORE publishing, never refused.
+    warnings.extend(writeback_storage_warning(
+        assembly.writeback_regions.as_ref(),
+        params.registry_path.as_deref().unwrap_or(&link_target.0),
+    ));
     let sheet_names = sheet_indices
         .iter()
         .filter_map(|&i| assembly.workbook.sheets.get(i).map(|s| s.name.clone()))
@@ -2988,10 +3091,43 @@ pub fn calp_publish_preview(
     };
 
     let sheets = publish_preview_sheet_list(&state, &selection)?;
+    // The rule the push would keep: the VERIFIED base's (the dialog's control
+    // starts from it). Absent without a base. When the base cannot be read the
+    // preview SAYS SO -- never a silent "off": the dialog then sends no choice,
+    // and the push itself re-reads the base and is refused
+    // (CALP_PUSH_IDENTITY_RULE_UNKNOWN) if it still cannot.
+    let base_requires_verified = match gates
+        .as_ref()
+        .map(|g| g.expected_base.clone())
+        .filter(|b| !b.trim().is_empty())
+        .zip(params.registry_path.as_deref().zip(params.package_name.as_deref()))
+    {
+        None => None,
+        Some((base, (registry_path, package_name))) => {
+            match crate::calp_inspector::open_authorized_content(
+                registry_path,
+                package_name,
+                &format!("={base}"),
+                false,
+                None,
+            ) {
+                Ok((_r, _v, m)) => Some(m.identity_policy.is_some_and(|p| p.require_verified)),
+                Err(e) => {
+                    warnings.push(format!(
+                        "Could not read whether version {base} counts only answers from verified senders: {e}. \
+                         The push keeps that version's rule unless you set it below, and is refused if the rule \
+                         still cannot be read."
+                    ));
+                    None
+                }
+            }
+        }
+    };
     Ok(PublishPreviewResponse {
         sheet_names,
         report,
         warnings,
+        base_requires_verified,
         gates,
         sheets,
         default_sheet_indices: selection.indices.clone(),
@@ -7707,8 +7843,15 @@ pub fn calp_checkout(
         // and without this record a push published every one — a private module
         // with an API token included.
         fresh.record_content(base_content);
+        // WHICH STREAMS IT COLLECTS (Writeback > Collect From) survive opening
+        // the SAME application for editing again; another application starts
+        // from the default. Without this a re-checkout silently moved what the
+        // author's model tables report.
+        fresh.carry_collect_choice_from(link.as_ref());
         *link = Some(fresh);
     }
+    // The author's BI writeback tables are read through the link just written.
+    crate::bi::writeback_source::invalidate_writeback_bi();
 
     // THE FILE PATH IS LEFT ALONE. It used to be cleared, because a checkout
     // replaced the document and the resulting working copy genuinely had no file
@@ -12139,7 +12282,7 @@ pub(crate) fn record_audit_event_with_extra(
     }
 }
 
-fn audit_user(state: &AppState) -> String {
+pub(crate) fn audit_user(state: &AppState) -> String {
     state
         .subscriber_identity
         .lock()
@@ -14255,7 +14398,10 @@ pub fn calp_update_writeback_region(
 // Phase 14: Writeback Submission
 // ============================================================================
 
-/// Get the cached subscriber identity, loading/creating it on first use.
+/// Who this computer sends writeback answers as -- the Windows account the app
+/// runs as, bound to this computer's signing key (identity phase 1,
+/// `crate::submitter_identity`). Read once per session and cached; the old
+/// random-id file (`subscriber-identity.json`) is no longer read.
 pub(crate) fn get_subscriber_identity(state: &AppState) -> Result<calp::SubmitterIdentity, String> {
     {
         let cached = state.subscriber_identity.lock().map_err(|e| e.to_string())?;
@@ -14263,11 +14409,126 @@ pub(crate) fn get_subscriber_identity(state: &AppState) -> Result<calp::Submitte
             return Ok(id.clone());
         }
     }
-    let profile_dir = calcula_profile_dir();
-    let id = calp::identity_provider::load_or_create(&profile_dir)?;
+    let id = crate::submitter_identity::current_identity()?;
     let mut cached = state.subscriber_identity.lock().map_err(|e| e.to_string())?;
     *cached = Some(id.clone());
     Ok(id)
+}
+
+/// WHOSE REVIEW DECISIONS COUNT for `package` when this computer reads its
+/// answers: the publisher key of a manifest the caller ALREADY verified, plus
+/// the root-signed co-publishers (`calp::publishers::review_keys`, the same set
+/// [`require_publisher_key`] accepts). The co-publisher list is checked
+/// against a root THIS COMPUTER trusts for the application in `scope`: the key
+/// it PINNED (a subscriber), else the root its DEVELOPER ANCHOR remembers (an
+/// author; the guard a share-writer cannot forge against a planted first
+/// version, docs/design/calp-workspace-collaboration.md §2.5) -- never the
+/// unsigned version list, which a share-writer can extend with a planted
+/// `0.0.1` naming their own key. With neither (the first-contact window every
+/// door has) the first version as the workspace lists it decides. A list that
+/// cannot be verified leaves the verified key alone -- fewer reviewers, never
+/// more -- and is logged.
+pub(crate) fn review_authority(
+    registry: &dyn calp::WorkspaceTransport,
+    package: &str,
+    verified_publisher_key: &str,
+    scope: Option<&calp::WorkspaceScope>,
+) -> calp::ReviewAuthority {
+    let (trusted_root, min_revision) = trusted_review_root(package, scope);
+    review_authority_rooted_at(registry, package, verified_publisher_key, trusted_root.as_deref(), min_revision)
+}
+
+/// THE ONE ROOT the co-publisher list is checked against, for every reader
+/// (`review_authority`) AND for the reviewer's own gate
+/// (`require_publisher_key`), so a decision is written only where it will
+/// count: the key this computer PINNED for the application in `scope` (a
+/// subscriber), else the root its DEVELOPER ANCHOR remembers (an author) --
+/// with the highest list revision that anchor has seen, so a rolled-back list
+/// that would re-authorise a removed co-publisher is refused. `(None, None)`
+/// with neither: the first-contact window, where the first version as the
+/// workspace lists it decides (`calp::publishers::root_key_of`, which at least
+/// verifies that manifest's signature).
+pub(crate) fn trusted_review_root(
+    package: &str,
+    scope: Option<&calp::WorkspaceScope>,
+) -> (Option<String>, Option<u64>) {
+    let Some(scope) = scope else {
+        return (None, None);
+    };
+    let profile = calcula_profile_dir();
+    if let Some(pinned) = calp::signing::pinned_publisher_key(&profile, scope, package).ok().flatten() {
+        // A subscriber keeps no revision mark yet (open-items 2.am).
+        return (Some(pinned), None);
+    }
+    match calp::developer_anchor::list_anchors(&profile)
+        .ok()
+        .and_then(|anchors| {
+            anchors
+                .into_iter()
+                .find(|a| a.scope == scope.id && a.application.eq_ignore_ascii_case(package))
+        }) {
+        Some(anchor) => (Some(anchor.root_key), Some(anchor.publishers_revision)),
+        None => (None, None),
+    }
+}
+
+/// [`review_authority`] with the co-publisher list's root given directly --
+/// the author's DEVELOPER ANCHOR (`RegionCollection::review_authority`), or the
+/// pin. `None` falls back to the application's first version as the workspace
+/// lists it (the first-contact window).
+pub(crate) fn review_authority_rooted(
+    registry: &dyn calp::WorkspaceTransport,
+    package: &str,
+    verified_publisher_key: &str,
+    trusted_root: Option<&str>,
+) -> calp::ReviewAuthority {
+    review_authority_rooted_at(registry, package, verified_publisher_key, trusted_root, None)
+}
+
+/// [`review_authority_rooted`] refusing a co-publisher list below
+/// `min_revision` (the developer anchor's high-water mark): a rolled-back list
+/// leaves only the verified key, and is logged.
+pub(crate) fn review_authority_rooted_at(
+    registry: &dyn calp::WorkspaceTransport,
+    package: &str,
+    verified_publisher_key: &str,
+    trusted_root: Option<&str>,
+    min_revision: Option<u64>,
+) -> calp::ReviewAuthority {
+    match calp::publishers::review_keys(registry, package, verified_publisher_key, trusted_root, min_revision) {
+        Ok(keys) => calp::ReviewAuthority::from_keys(keys),
+        Err(e) => {
+            crate::log_warn!(
+                "CALP",
+                "writeback: the co-publisher list of '{}' could not be verified ({}); only the publisher's own decisions count",
+                package,
+                e
+            );
+            calp::ReviewAuthority::from_keys([verified_publisher_key])
+        }
+    }
+}
+
+/// Sign a review decision with THIS computer's publisher key -- the key the
+/// publisher gate just proved this profile holds (the publisher's, or an
+/// authorised co-publisher's). Owner decision 2026-10-22: an unsigned decision
+/// is ignored by every reader, so a review that cannot be signed is not written.
+///
+/// `origin`: `Interactive` when the publisher pressed Approve/Reject, `Script`
+/// when the script gateway decided -- inside the signature, so a script's
+/// approval never reads as a person's.
+pub(crate) fn sign_review(
+    review: &mut calp::writeback::ReviewEvent,
+    target: &calp::writeback::WritebackSubmission,
+    package: &str,
+    version: &str,
+    origin: calp::SubmissionOrigin,
+) -> Result<(), String> {
+    let keypair = calp::signing::PublisherKeypair::load_existing(&calcula_profile_dir())
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "This computer holds no publisher key, so it cannot sign a review decision.".to_string())?;
+    calp::submission_seal::seal_review_with_origin(review, target, package, version, &keypair, origin);
+    Ok(())
 }
 
 /// Resolve the subscription that declares the given writeback region.
@@ -14289,9 +14550,24 @@ pub(crate) struct OwningSubscription {
     /// The environment this subscription follows, `""` for the development
     /// line. This IS the submission's tag and the filter every reader applies.
     pub environment: String,
+    /// The publisher key the PINNED (verified) manifest of `resolved_version`
+    /// asserts. The publisher gate checks possession of this key, never one
+    /// re-read unverified from the share after the verification.
+    pub publisher_key: String,
+    /// The region as that same pinned manifest declares it -- what an older
+    /// version's answers must still be compatible with to be carried forward.
+    pub declaration: calp::WritebackRegionDeclaration,
+    /// The application's identity rule from that same pinned manifest.
+    pub identity_policy: calp::IdentityPolicy,
 }
 
-fn owning_subscription_for_region(
+///
+/// SUBSCRIBER-SIDE ONLY. The publisher-side commands (Collected Responses, its
+/// exports, review, the rollup, the roster) resolve through
+/// `calp_collection::collection_for_region`, which also finds the AUTHOR's own
+/// designated regions -- a workbook that never subscribes to its own
+/// application (BUG-0553).
+pub(crate) fn owning_subscription_for_region(
     state: &AppState,
     region_id: &str,
 ) -> Result<OwningSubscription, String> {
@@ -14323,12 +14599,15 @@ fn owning_subscription_for_region(
             continue;
         };
         if let Some(ref regions) = manifest.writeback_regions {
-            if regions.iter().any(|r| r.id == region_id) {
+            if let Some(declaration) = regions.iter().find(|r| r.id == region_id) {
                 return Ok(OwningSubscription {
                     package_name: sub.package_name.clone(),
                     resolved_version: sub.resolved_version.clone(),
                     registry_path,
                     environment: sub.environment.clone().unwrap_or_default(),
+                    publisher_key: manifest.publisher_key.clone(),
+                    declaration: declaration.clone(),
+                    identity_policy: manifest.identity_policy.unwrap_or_default(),
                 });
             }
         }
@@ -14406,15 +14685,16 @@ fn registry_has_own_submission(state: &AppState, region_id: &str, row: u32, col:
     let Ok(owner) = owning_subscription_for_region(state, region_id) else {
         return false;
     };
-    let OwningSubscription { package_name, resolved_version, registry_path, environment } = owner;
+    let OwningSubscription { package_name, resolved_version, registry_path, environment, publisher_key, .. } = owner;
     let Ok(own) = get_subscriber_identity(state) else {
         return false;
     };
-    let Ok((registry, _scope)) =
+    let Ok((registry, scope)) =
         crate::calp_registry::open_workspace_scoped(&registry_path)
     else {
         return false;
     };
+    let authority = review_authority(registry.as_ref(), &package_name, &publisher_key, Some(&scope));
     let mut versions = vec![resolved_version.clone()];
     versions.extend(carry_forward_versions(
         &registry,
@@ -14424,14 +14704,15 @@ fn registry_has_own_submission(state: &AppState, region_id: &str, row: u32, col:
     ));
     versions.into_iter().any(|version| {
         registry
-            .load_current_submissions_by(&package_name, &version, &own.id)
+            .load_current_submissions_by(&package_name, &version, &own.id, &authority)
             // A one-shot region must not be re-armed by a promotion, nor
             // considered spent because the SAME person answered it in a
             // different environment. Both are the same filter.
             .map(|subs| calp::writeback::visible_in(subs, Some(&environment)))
             .map(|subs| {
                 subs.iter().any(|s| {
-                    s.region_id == region_id
+                    calp::submission_seal::is_mine(Some(&own), s)
+                        && s.region_id == region_id
                         && s.cell_row == row
                         && s.cell_col == col
                         && matches!(
@@ -14551,6 +14832,34 @@ pub fn calp_save_writeback_draft(
     col: u32,
     value: calp::writeback::SubmissionValue,
     window: tauri::Window,
+) -> Result<SaveWritebackDraftResult, String> {
+    save_writeback_draft_with_origin(
+        state,
+        file_state,
+        region_id,
+        sheet_id,
+        row,
+        col,
+        value,
+        window,
+        calp::SubmissionOrigin::Immediate,
+    )
+}
+
+/// [`calp_save_writeback_draft`] with the ORIGIN an `immediate` region's send
+/// is signed with: `Immediate` when the user typed it, `Script` when the
+/// script gateway saved it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn save_writeback_draft_with_origin(
+    state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
+    region_id: String,
+    sheet_id: String,
+    row: u32,
+    col: u32,
+    value: calp::writeback::SubmissionValue,
+    window: tauri::Window,
+    immediate_origin: calp::SubmissionOrigin,
 ) -> Result<SaveWritebackDraftResult, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let sid = SheetId::parse(&sheet_id)
@@ -14710,6 +15019,9 @@ pub fn calp_save_writeback_draft(
         submitted_at: None,
         review_reason: None,
         reviewed_by: None,
+        seal: None,
+        sender: Default::default(),
+        identity: Default::default(),
         extra: std::collections::HashMap::new(),
     };
 
@@ -14728,7 +15040,7 @@ pub fn calp_save_writeback_draft(
     // `immediate` regions go straight to the workspace — saving IS submitting.
     // A failed send keeps the draft (see the doc comment): reported, not raised.
     if auto_submit {
-        return Ok(match submit_region_internal(&state, &effect, &region_id, window_app_handle(&window)) {
+        return Ok(match submit_region_internal(&state, &effect, &region_id, window_app_handle(&window), immediate_origin) {
             Ok(_) => SaveWritebackDraftResult { sent: true, send_error: None },
             Err(e) => {
                 crate::log_warn!(
@@ -14756,200 +15068,788 @@ pub fn calp_get_writeback_layer(
     Ok(layer.clone())
 }
 
-/// This subscriber's OWN current workspace record for every cell of one
-/// region: the newest by timestamp across the subscription's resolved version
-/// and the versions it may carry forward from, filtered to the environment it
-/// follows. Shared by reconcile (what became of what I sent?) and discard
-/// (what did I last send for this cell?), so both read the same answer.
+/// This subscriber's OWN current records in one subscription, EVERY region at
+/// once: the newest by timestamp per (region, cell) across `versions`, filtered
+/// to the environment the subscription follows. Each version is read ONCE
+/// (`load_current_submissions_by` returns every region's records for one
+/// submitter), so a reconcile over N regions of one application costs one read
+/// per version, not N.
+///
+/// The second value lists the versions that could not be read; a version with
+/// no submissions is not one (the workspace answers `Ok(empty)` for a missing
+/// submissions directory).
+pub(crate) fn own_records_by_region_in(
+    registry: &dyn calp::WorkspaceTransport,
+    package_name: &str,
+    versions: &[String],
+    environment: &str,
+    own: &calp::SubmitterIdentity,
+    authority: &calp::ReviewAuthority,
+) -> (
+    std::collections::HashMap<String, std::collections::HashMap<(u32, u32), calp::writeback::WritebackSubmission>>,
+    Vec<String>,
+) {
+    let mut by_region: std::collections::HashMap<
+        String,
+        std::collections::HashMap<(u32, u32), calp::writeback::WritebackSubmission>,
+    > = std::collections::HashMap::new();
+    let mut unread: Vec<String> = Vec::new();
+    for version in versions {
+        let subs = match registry
+            .load_current_submissions_by(package_name, version, &own.id, authority)
+            // Adopting a state recorded against a different environment
+            // would tell a contributor their prod entry was approved when
+            // what was approved was their test one.
+            .map(|subs| calp::writeback::visible_in(subs, Some(environment)))
+            // ONLY WHAT I SIGNED IS MINE (open-items 2.am, identity phase 1). A
+            // record planted under my id without my key never seeds a cell as
+            // "what you last sent": the fold already refuses it as forged, and
+            // `is_mine` is the one predicate every "mine" question asks.
+            .map(|subs| {
+                subs.into_iter()
+                    .filter(|s| calp::submission_seal::is_mine(Some(own), s))
+                    .collect::<Vec<_>>()
+            })
+        {
+            Ok(subs) => subs,
+            Err(e) => {
+                unread.push(format!("could not read your submissions for version {} of '{}': {}", version, package_name, e));
+                continue;
+            }
+        };
+        // THE NEWEST RECORD ACROSS VERSIONS, by timestamp. First-seen-wins
+        // assumed the version list ran newest-first, which stopped being true
+        // when this switched to `carry_forward_versions`: after a rollback the
+        // list is the pointer's version followed by HIGHER ones it held, so the
+        // head is the lowest. The contributor then kept seeing a stale state
+        // while the dashboard, on the same data, showed the current one.
+        for s in subs {
+            let records = by_region.entry(s.region_id.clone()).or_default();
+            let key = (s.cell_row, s.cell_col);
+            let newer = records.get(&key).is_none_or(|cur| {
+                calp::fold::cmp_timestamps(&s.updated_at, &cur.updated_at)
+                    .then_with(|| s.id.cmp(&cur.id))
+                    .is_gt()
+            });
+            if newer {
+                records.insert(key, s);
+            }
+        }
+    }
+    (by_region, unread)
+}
+
+/// The versions a subscription's own records are read from: the resolved
+/// version, then the ones it carries forward from, newest first. See
+/// `rebuild_gather_cache`: an environment carries forward over what it has
+/// HELD. Under the semver rule a review decision recorded against the version
+/// an environment was rolled back FROM never reached the contributor who made
+/// the submission.
+fn own_record_versions(
+    registry: &dyn calp::WorkspaceTransport,
+    package_name: &str,
+    resolved_version: &str,
+    environment: &str,
+) -> Vec<String> {
+    let mut older = carry_forward_versions(registry, package_name, resolved_version, environment);
+    older.sort_by(|a, b| match (calp::SemVer::parse(b), calp::SemVer::parse(a)) {
+        (Ok(bv), Ok(av)) => bv.cmp(&av),
+        _ => b.cmp(a),
+    });
+    let mut versions = vec![resolved_version.to_string()];
+    versions.extend(older);
+    versions
+}
+
+/// This subscriber's OWN current workspace record for every cell of ONE
+/// region -- the discard's question (what did I last send for this cell?).
 ///
 /// `Err` when the region's owning subscription or its workspace cannot be
 /// reached -- "I could not look" is never reported as "nothing was sent".
 ///
-/// `strict` decides what an unreadable VERSION means. Reconcile is lenient
-/// (`false`): a version it cannot read just keeps the local state, which is
-/// harmless. Discard is strict (`true`): it ACTS on the answer -- a cell with
-/// no sent record is blanked -- so a read that failed for one version must
-/// refuse the discard rather than look like "nothing was ever sent". A version
-/// with no submissions is not a failure: the workspace answers `Ok(empty)` for
-/// a missing submissions directory, so only a real read error reaches here.
+/// `strict` decides what an unreadable VERSION means. Discard is strict
+/// (`true`): it ACTS on the answer -- a cell with no sent record is blanked --
+/// so a read that failed for one version must refuse the discard rather than
+/// look like "nothing was ever sent". Reconcile reads every region at once
+/// through [`own_sent_records_by_region`] instead.
 fn own_current_records_for_region(
     state: &AppState,
     region_id: &str,
     own: &calp::SubmitterIdentity,
     strict: bool,
 ) -> Result<std::collections::HashMap<(u32, u32), calp::writeback::WritebackSubmission>, String> {
-    let OwningSubscription { package_name, resolved_version, registry_path, environment } =
+    let OwningSubscription { package_name, resolved_version, registry_path, environment, publisher_key, .. } =
         owning_subscription_for_region(state, region_id)?;
-    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&registry_path)
+    let (registry, scope) = crate::calp_registry::open_workspace_scoped(&registry_path)
         .map_err(|e| e.to_string())?;
-    // Newest version first: resolved, then older versions sorted descending.
-    // See `rebuild_gather_cache`: an environment carries forward over what
-    // it has HELD. Under the semver rule a review decision recorded against
-    // the version an environment was rolled back FROM never reached the
-    // contributor who made the submission.
-    let mut older =
-        carry_forward_versions(&registry, &package_name, &resolved_version, &environment);
-    older.sort_by(|a, b| match (calp::SemVer::parse(b), calp::SemVer::parse(a)) {
-        (Ok(bv), Ok(av)) => bv.cmp(&av),
-        _ => b.cmp(a),
-    });
-    let mut versions = vec![resolved_version.clone()];
-    versions.extend(older);
+    let authority = review_authority(registry.as_ref(), &package_name, &publisher_key, Some(&scope));
+    let versions = own_record_versions(registry.as_ref(), &package_name, &resolved_version, &environment);
+    let (mut by_region, unread) =
+        own_records_by_region_in(registry.as_ref(), &package_name, &versions, &environment, own, &authority);
+    if strict {
+        if let Some(first) = unread.into_iter().next() {
+            return Err(first);
+        }
+    }
+    Ok(by_region.remove(region_id).unwrap_or_default())
+}
 
-    // THE NEWEST RECORD ACROSS VERSIONS, by timestamp. First-seen-wins
-    // assumed the version list ran newest-first, which stopped being true
-    // when this switched to `carry_forward_versions`: after a rollback the
-    // list is the pointer's version followed by HIGHER ones it held, so the
-    // head is the lowest. The contributor then kept seeing a stale state
-    // while the dashboard, on the same data, showed the current one.
-    let mut by_cell: std::collections::HashMap<(u32, u32), calp::writeback::WritebackSubmission> =
+/// What this subscriber last SENT for each region of the workbook, for ONE
+/// reconcile pass: every subscription resolved and its workspace opened ONCE,
+/// every version read ONCE, the result split by region.
+///
+/// - An HTTP workspace is never opened: it holds no submissions
+///   (`HttpWorkspace::load_current_submissions_by` always answers empty), so
+///   its regions read as "nothing sent" without blocking the reconcile on a
+///   30-second network timeout. A development-mode subscription likewise.
+/// - A subscription whose workspace or pinned manifest cannot be read gives
+///   each of ITS regions (by the index's package name) that error, so the
+///   reconcile can say it could not reach the workspace.
+/// - A version that cannot be read marks the answer partial (`complete:
+///   false`); the read is never repeated.
+///
+/// A region no subscription accounts for is absent from the map.
+fn own_sent_records_by_region(
+    state: &AppState,
+) -> Result<std::collections::HashMap<String, Result<OwnSentRecords, String>>, String> {
+    let own = get_subscriber_identity(state)?;
+    let index_packages: Vec<(String, Option<String>)> = writeback_region_entries(state)?
+        .into_iter()
+        .map(|e| (e.region_id, e.package_name))
+        .collect();
+    let subscriptions: Vec<calp::manifest::Subscription> = state
+        .subscriptions
+        .read()
+        .map_err(|e| e.to_string())?
+        .subscriptions
+        .clone();
+    let mut out: std::collections::HashMap<String, Result<OwnSentRecords, String>> =
         std::collections::HashMap::new();
-    for version in &versions {
-        let subs = match registry
-            .load_current_submissions_by(&package_name, version, &own.id)
-            // Adopting a state recorded against a different environment
-            // would tell a contributor their prod entry was approved when
-            // what was approved was their test one.
-            .map(|subs| calp::writeback::visible_in(subs, Some(&environment)))
-        {
-            Ok(subs) => subs,
-            Err(e) if strict => {
-                return Err(format!(
-                    "could not read your submissions for version {} of '{}': {}",
-                    version, package_name, e
-                ));
+    let regions_of_package = |package: &str| -> Vec<String> {
+        index_packages
+            .iter()
+            .filter(|(_, p)| p.as_deref() == Some(package))
+            .map(|(r, _)| r.clone())
+            .collect()
+    };
+    for sub in &subscriptions {
+        let registry_path = subscription_registry_path(sub).to_string();
+        if calp::dev_mode::is_dev_subscription(sub) || crate::calp_registry::is_http_location(&registry_path) {
+            for region_id in regions_of_package(&sub.package_name) {
+                out.entry(region_id).or_insert_with(|| {
+                    Ok(OwnSentRecords { by_cell: std::collections::HashMap::new(), complete: true })
+                });
             }
-            Err(_) => continue,
-        };
-        for s in subs {
-            if s.region_id != region_id {
+            continue;
+        }
+        let opened = crate::calp_registry::open_workspace_scoped(&registry_path)
+            .map_err(|e| e.to_string())
+            .and_then(|(registry, scope)| {
+                calp::integrity::load_pinned_manifest_via(
+                    registry.as_ref(),
+                    &sub.package_name,
+                    &sub.resolved_version,
+                    &scope,
+                    &calcula_profile_dir(),
+                )
+                .map(|manifest| (registry, manifest, scope))
+                .map_err(|e| e.to_string())
+            });
+        let (registry, manifest, scope) = match opened {
+            Ok(opened) => opened,
+            Err(e) => {
+                let reason = format!("could not read '{}' in the workspace {}: {}", sub.package_name, registry_path, e);
+                for region_id in regions_of_package(&sub.package_name) {
+                    out.entry(region_id).or_insert_with(|| Err(reason.clone()));
+                }
                 continue;
             }
-            let key = (s.cell_row, s.cell_col);
-            let newer = by_cell.get(&key).is_none_or(|cur| {
-                calp::fold::cmp_timestamps(&s.updated_at, &cur.updated_at)
-                    .then_with(|| s.id.cmp(&cur.id))
-                    .is_gt()
-            });
-            if newer {
-                by_cell.insert(key, s);
+        };
+        let environment = sub.environment.clone().unwrap_or_default();
+        let versions = own_record_versions(registry.as_ref(), &sub.package_name, &sub.resolved_version, &environment);
+        let authority = review_authority(registry.as_ref(), &sub.package_name, &manifest.publisher_key, Some(&scope));
+        let (mut by_region, unread) =
+            own_records_by_region_in(registry.as_ref(), &sub.package_name, &versions, &environment, &own, &authority);
+        if !unread.is_empty() {
+            crate::log_debug!("CALP", "writeback: a partial read of what was sent: {}", unread.join("; "));
+        }
+        for declared in manifest.writeback_regions.unwrap_or_default() {
+            // A region is answered by the FIRST subscription that declares it,
+            // as `owning_subscription_for_region` decides.
+            if out.get(&declared.id).is_some_and(|r| r.is_ok()) {
+                continue;
+            }
+            out.insert(
+                declared.id.clone(),
+                Ok(OwnSentRecords {
+                    by_cell: by_region.remove(&declared.id).unwrap_or_default(),
+                    complete: unread.is_empty(),
+                }),
+            );
+        }
+    }
+    Ok(out)
+}
+
+/// What this subscriber last SENT for each cell of one region, as the
+/// workspace counts it, and whether that answer is whole.
+///
+/// `complete` is false when some version of the subscriber's submissions could
+/// not be read. A partial answer may still fill a cell the workbook shows
+/// nothing for -- something you sent beats a blank -- but it never REPLACES a
+/// sent value the workbook holds: the unreadable version may be exactly where
+/// that value lives.
+#[derive(Clone)]
+pub(crate) struct OwnSentRecords {
+    pub by_cell: std::collections::HashMap<(u32, u32), calp::writeback::WritebackSubmission>,
+    pub complete: bool,
+}
+
+/// What one [`adopt_own_sent_values_inner`] pass did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct AdoptOutcome {
+    /// Grid cells that now show a value taken from the workspace.
+    pub cells_written: usize,
+    /// Writeback-layer entries added, replaced or given a new review state.
+    pub entries_changed: usize,
+    /// A replaced value ended the WHOLE undo history (see the adopt's doc):
+    /// the caller tells the user, because nothing they did caused it.
+    pub undo_history_ended: bool,
+    /// The cells whose value was REPLACED by a newer one sent elsewhere, as
+    /// "Sheet!B3" -- what the notice names.
+    pub replaced_cells: Vec<String>,
+    /// (region id, reason) for each region whose workspace could not be read.
+    /// Skipped, never an error: offline is normal and the layer stays as it
+    /// was -- but the reason is returned, so Check Status can say "could not
+    /// reach the workspace" instead of "Status updated".
+    pub unreadable: Vec<(String, String)>,
+}
+
+/// One cell the adopt pass will take from the workspace.
+enum AdoptChange {
+    /// The workbook has no entry for the cell: the sent record goes in.
+    Adopt(calp::writeback::WritebackSubmission),
+    /// The workbook holds a DIFFERENT sent record than the one the workspace
+    /// counts as current (it was sent later, from another workbook): the whole
+    /// entry is replaced -- value, id and state.
+    Replace(calp::writeback::WritebackSubmission),
+    /// The same submission; only its review state / reason / reviewer moved.
+    ReviewState(calp::writeback::WritebackSubmission),
+}
+
+/// SHOW THIS SUBSCRIBER WHAT THEY LAST SENT, on every region of the workbook
+/// that a subscription owns -- the read path behind subscribe, reopen, refresh
+/// and an environment switch (BUG-0554).
+///
+/// Who "this subscriber" is: the Windows account the app runs as, bound to this
+/// computer's writeback signing key (identity phase 1,
+/// `crate::submitter_identity`; see `docs/design/calp-writeback.md`). So a NEW
+/// workbook that subscribes to the same application, on the same computer,
+/// finds the values sent from an earlier workbook. ONLY A RECORD THAT IS MINE --
+/// my id AND signed by my key (`calp::submission_seal::is_mine`) -- is ever
+/// adopted: a record planted under my id never shows as "what you last sent"
+/// (open-items 2.am). `own_records_by_region_in` already reads only those;
+/// this pass asks again, so a reader that forgets cannot reopen the hole.
+///
+/// Per cell, against the workspace's current record for this subscriber
+/// (`sent_records`; newest across the versions the subscription carries
+/// forward from, filtered to the environment it follows):
+///
+/// - an UNSENT DRAFT in the layer always wins: nothing is touched;
+/// - no layer entry: the record is ADOPTED and the cell shows its value;
+/// - the same submission: only its review state is copied (the return leg:
+///   approved / rejected, with the reason and the reviewer);
+/// - a different submission: the workspace's current one REPLACES the entry
+///   whole. Copying only the state of the newest record onto an older local
+///   one showed "1 approved" when what was approved was the 4 sent later;
+/// - a record the CURRENT declaration refuses (a cell outside the region, a
+///   value its type check rejects -- carried forward from a version whose type
+///   changed) is never adopted.
+///
+/// A region whose workspace cannot be read is skipped: offline is normal, and
+/// the layer the workbook already holds stays as it is.
+///
+/// TAKES `&FileState`, NOT A READY-MADE `DocumentEffect`, ON PURPOSE. This runs
+/// on every workbook load, and `DocumentEffect::mutates` dirties at
+/// construction: building it up front marked EVERY opened workbook as unsaved
+/// before the user touched anything. The effect is constructed under the
+/// layer's pending lock, only once something will change.
+///
+/// The grid is written in PHASE A with every value the layer took (keeping the
+/// cell's style; a cell the publisher made a FORMULA is left alone, like
+/// `reproject_writeback_layer_onto_grids`), then every guard is dropped and
+/// the dependents recalculate in PHASE B. A REPLACED value ends the undo
+/// history (the step that typed the old value would otherwise redo it into a
+/// cell whose layer entry says otherwise). Every value taken is an audit row.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn adopt_own_sent_values_inner(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    sent_records: impl Fn(&AppState, &str) -> Result<OwnSentRecords, String>,
+) -> Result<AdoptOutcome, String> {
+    use calp::writeback::SubmissionState;
+
+    // THE REGIONS: every region of the index on a sheet of this workbook. The
+    // index is built from SUBSCRIPTIONS only (an author's own designated
+    // regions are `writeback_draft_regions`, never here), keyed by the LOCAL
+    // sheet id. Each store is read alone and released before the next.
+    let sheet_ids: Vec<SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
+    let regions: Vec<(String, SheetId, calp::writeback::PositionalRange)> = {
+        let index = state.writeback_index.lock().map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for sid in &sheet_ids {
+            for rid in index.region_ids_on_sheet(*sid) {
+                if let Some((located, range)) = index.region_location(&rid) {
+                    out.push((rid, located, range));
+                }
+            }
+        }
+        out
+    };
+    if regions.is_empty() {
+        return Ok(AdoptOutcome::default());
+    }
+    let schemas: std::collections::HashMap<String, Option<calp::writeback::ValueSchema>> = {
+        let decls = state.writeback_declarations.lock().map_err(|e| e.to_string())?;
+        regions
+            .iter()
+            .map(|(rid, _, _)| {
+                let schema = decls.iter().find(|d| d.id == *rid).and_then(|d| d.schema.clone());
+                (rid.clone(), schema)
+            })
+            .collect()
+    };
+
+    // THE READ: workspace I/O, holding no lock. Each record is filtered
+    // against the CURRENT declaration before it can reach the layer.
+    struct RegionRead {
+        region_id: String,
+        sheet_id: SheetId,
+        records: Vec<calp::writeback::WritebackSubmission>,
+        complete: bool,
+    }
+    let mut reads: Vec<RegionRead> = Vec::new();
+    let mut unreadable: Vec<(String, String)> = Vec::new();
+    // Who "mine" is. An identity that cannot be read adopts nothing.
+    let own = get_subscriber_identity(state).ok();
+    for (region_id, sheet_id, range) in &regions {
+        let sent = match sent_records(state, region_id) {
+            Ok(sent) => sent,
+            Err(e) => {
+                crate::log_debug!(
+                    "CALP",
+                    "writeback: could not read what was sent for region '{}' (kept as is): {}",
+                    region_id,
+                    e
+                );
+                unreadable.push((region_id.clone(), e));
+                continue;
+            }
+        };
+        let schema = schemas.get(region_id).cloned().flatten();
+        let mut records: Vec<calp::writeback::WritebackSubmission> = sent
+            .by_cell
+            .into_values()
+            .filter(|rec| {
+                calp::submission_seal::is_mine(own.as_ref(), rec)
+                    && rec.region_id == *region_id
+                    && rec.model_key.is_none()
+                    && rec.state != SubmissionState::Draft
+                    && range.contains(rec.cell_row, rec.cell_col)
+                    && schema.as_ref().is_none_or(|s| s.validate(&rec.value).is_ok())
+            })
+            .collect();
+        if records.is_empty() {
+            continue;
+        }
+        records.sort_by_key(|r| (r.cell_row, r.cell_col));
+        reads.push(RegionRead {
+            region_id: region_id.clone(),
+            sheet_id: *sheet_id,
+            records,
+            complete: sent.complete,
+        });
+    }
+    if reads.is_empty() {
+        return Ok(AdoptOutcome { unreadable, ..AdoptOutcome::default() });
+    }
+
+    // THE LAYER, gate and mutation in ONE critical section: what the workbook
+    // holds is re-read under the lock (a draft typed while the workspace was
+    // being read must still win), and the effect exists only once something
+    // will change -- a reconcile that finds nothing new leaves the document
+    // exactly as clean as it was.
+    let mut to_show: Vec<(SheetId, String, u32, u32, calp::writeback::SubmissionValue)> = Vec::new();
+    // The cells whose VALUE a replace changes (sheet, row, col).
+    let mut replaced: Vec<(SheetId, u32, u32)> = Vec::new();
+    let (effect, entries_changed) = {
+        let pending = state.writeback_layer.lock_pending().map_err(|e| e.to_string())?;
+        let mut plan: Vec<(SheetId, AdoptChange)> = Vec::new();
+        for read in &reads {
+            for rec in &read.records {
+                let held: Vec<&calp::writeback::WritebackSubmission> = pending
+                    .drafts
+                    .iter()
+                    .filter(|d| {
+                        d.region_id == read.region_id
+                            && d.cell_row == rec.cell_row
+                            && d.cell_col == rec.cell_col
+                    })
+                    .collect();
+                // An unsent draft is what the subscriber typed last: it wins.
+                // EXCEPT the draft the workspace already holds: a submit keeps
+                // the draft's id (and every edit mints a new one), so a Draft
+                // with the record's own id and value WAS sent -- the workbook
+                // was saved before the submit and closed without saving after.
+                // Left as "unsent", its marker and the tab badge stayed for
+                // ever and Submit sent it again.
+                let unsent_edit = held
+                    .iter()
+                    .any(|d| d.state == SubmissionState::Draft && (d.id != rec.id || d.value != rec.value));
+                if unsent_edit {
+                    continue;
+                }
+                match held.iter().find(|d| d.id == rec.id) {
+                    Some(same) => {
+                        if same.state != rec.state
+                            || same.review_reason != rec.review_reason
+                            || same.reviewed_by != rec.reviewed_by
+                        {
+                            plan.push((read.sheet_id, AdoptChange::ReviewState(rec.clone())));
+                        }
+                    }
+                    None if held.is_empty() => {
+                        plan.push((read.sheet_id, AdoptChange::Adopt(rec.clone())));
+                    }
+                    None if read.complete => {
+                        if held.iter().any(|d| d.value != rec.value) {
+                            replaced.push((read.sheet_id, rec.cell_row, rec.cell_col));
+                        }
+                        plan.push((read.sheet_id, AdoptChange::Replace(rec.clone())));
+                    }
+                    // A partial read never replaces a sent value: the version
+                    // it could not read may be where that value lives.
+                    None => {}
+                }
+            }
+        }
+        if plan.is_empty() {
+            return Ok(AdoptOutcome { unreadable, ..AdoptOutcome::default() });
+        }
+        // Every gate has passed and something WILL change.
+        let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+        let mut layer = pending.authorize(&effect);
+        let entries_changed = plan.len();
+        for (sheet_id, change) in plan {
+            match change {
+                AdoptChange::Adopt(rec) => {
+                    to_show.push((sheet_id, rec.region_id.clone(), rec.cell_row, rec.cell_col, rec.value.clone()));
+                    layer.set_draft(rec);
+                }
+                AdoptChange::Replace(rec) => {
+                    to_show.push((sheet_id, rec.region_id.clone(), rec.cell_row, rec.cell_col, rec.value.clone()));
+                    layer.remove_draft(&rec.region_id, rec.cell_row, rec.cell_col);
+                    layer.drafts.push(rec);
+                }
+                AdoptChange::ReviewState(rec) => {
+                    if let Some(entry) = layer
+                        .drafts
+                        .iter_mut()
+                        .find(|d| d.id == rec.id && d.region_id == rec.region_id)
+                    {
+                        entry.state = rec.state;
+                        entry.review_reason = rec.review_reason;
+                        entry.reviewed_by = rec.reviewed_by;
+                        // A draft the workspace already held becomes the sent
+                        // record it is: its submit time and its stream too.
+                        if entry.submitted_at.is_none() {
+                            entry.submitted_at = rec.submitted_at;
+                        }
+                        entry.environment = rec.environment;
+                    }
+                }
+            }
+        }
+        (effect, entries_changed)
+    };
+    if to_show.is_empty() {
+        return Ok(AdoptOutcome { entries_changed, unreadable, ..AdoptOutcome::default() });
+    }
+
+    // PHASE A: the grid. The sheet is resolved AGAIN (a sheet operation may
+    // have run while the workspace was read). The active sheet lives in BOTH
+    // `grid` and `grids[active]`. CANONICAL LOCK ORDER: `grid` before `grids`.
+    let sheet_ids: Vec<SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
+    let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
+    let mut written: Vec<(usize, String, u32, u32)> = Vec::new();
+    {
+        let mut active_grid = state.grid.write(&effect).map_err(|e| e.to_string())?;
+        let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
+        for (sheet_id, region_id, row, col, value) in &to_show {
+            let Some(idx) = sheet_ids.iter().position(|s| s == sheet_id) else {
+                continue;
+            };
+            let Some(target) = grids.get_mut(idx) else {
+                continue;
+            };
+            let previous = target.get_cell(*row, *col).cloned();
+            // The publisher put a FORMULA here: the cell is not an input any
+            // more (and may be a spill origin). The layer entry stays; the next
+            // version that frees the cell shows it.
+            if previous.as_ref().is_some_and(|c| c.has_formula()) {
+                continue;
+            }
+            match writeback_display_cell(previous.as_ref(), value) {
+                Some(cell) => {
+                    if idx == active_sheet {
+                        active_grid.set_cell(*row, *col, cell.clone());
+                    }
+                    target.set_cell(*row, *col, cell);
+                }
+                None => {
+                    if idx == active_sheet {
+                        active_grid.clear_cell(*row, *col);
+                    }
+                    target.clear_cell(*row, *col);
+                }
+            }
+            written.push((idx, region_id.clone(), *row, *col));
+        }
+    }
+    // Every guard above is dropped here: the recalculation takes the same
+    // grid / dependency mutexes and std mutexes are not reentrant.
+
+    // PHASE B: dependents, through the ONE shared cascade.
+    let active_seeds: Vec<(u32, u32)> = written
+        .iter()
+        .filter(|(idx, _, _, _)| *idx == active_sheet)
+        .map(|(_, _, row, col)| (*row, *col))
+        .collect();
+    let mut off_sheets: Vec<usize> = written
+        .iter()
+        .map(|(idx, _, _, _)| *idx)
+        .filter(|idx| *idx != active_sheet)
+        .collect();
+    off_sheets.sort_unstable();
+    off_sheets.dedup();
+    if !active_seeds.is_empty() {
+        let mut recalculated = Vec::new();
+        crate::commands::data::recalc_after_active_sheet_bulk_rewrite(
+            state,
+            user_files_state,
+            pane_control_state,
+            ribbon_filter_state,
+            &active_seeds,
+            &mut recalculated,
+        );
+    }
+    if !off_sheets.is_empty() {
+        crate::commands::data::recalc_after_off_sheet_write(
+            state,
+            user_files_state,
+            pivot_state,
+            pane_control_state,
+            ribbon_filter_state,
+            &off_sheets,
+        );
+    }
+
+    // A REPLACED value ends the undo history: the step that typed the old one
+    // is still on it, and Ctrl+Z then Ctrl+Y would put that value back into a
+    // cell whose layer entry now says something else.
+    // Which written cells had their VALUE replaced -- the notice names them,
+    // because the history ends with no keystroke of the user's behind it.
+    let names_now: Vec<String> = state.sheet_names.read().map(|n| n.clone()).unwrap_or_default();
+    let replaced_cells: Vec<String> = written
+        .iter()
+        .filter(|(idx, _, row, col)| {
+            replaced.iter().any(|(sid, r, c)| sheet_ids.get(*idx) == Some(sid) && r == row && c == col)
+        })
+        .map(|(idx, _, row, col)| {
+            format!(
+                "{}!{}{}",
+                names_now.get(*idx).cloned().unwrap_or_default(),
+                crate::pivot::utils::col_index_to_letter(*col),
+                row + 1
+            )
+        })
+        .collect();
+    let undo_history_ended = !replaced_cells.is_empty();
+    if undo_history_ended {
+        end_undo_history_after_writeback_rewrite(state, "Showing a newer value you sent");
+    }
+
+    // THE AUDIT ROW, one per region: the cell content changed with no
+    // keystroke, so the trail says where it came from.
+    if !written.is_empty() {
+        let names: Vec<String> = state.sheet_names.read().map(|n| n.clone()).unwrap_or_default();
+        let mut by_region: std::collections::BTreeMap<(usize, String), Vec<String>> =
+            std::collections::BTreeMap::new();
+        for (idx, region_id, row, col) in &written {
+            by_region
+                .entry((*idx, region_id.clone()))
+                .or_default()
+                .push(format!("{}{}", crate::pivot::utils::col_index_to_letter(*col), row + 1));
+        }
+        let user = audit_user(state);
+        let now = chrono::Utc::now().to_rfc3339();
+        for ((idx, region_id), cells) in by_region {
+            let application = sheet_ids
+                .get(idx)
+                .and_then(|sid| {
+                    state.subscriptions.read().ok().and_then(|subs| {
+                        subs.subscribed_sheet(*sid).map(|(sub, _)| sub.package_name.clone())
+                    })
+                })
+                .unwrap_or_default();
+            // WORDED FOR WHAT IS KNOWN: the record is filed in the workspace
+            // under this computer's submitter id, which is self-asserted and
+            // unverified (open-items 2.am) -- not proof that "you" sent it.
+            let description = format!(
+                "Showed {} writeback value{} recorded in the workspace under your submitter id for '{}' (region '{}' on sheet '{}'): {}",
+                cells.len(),
+                if cells.len() == 1 { "" } else { "s" },
+                application,
+                region_id,
+                names.get(idx).cloned().unwrap_or_default(),
+                cells.join(", "),
+            );
+            if let Ok(mut audit) = state.audit_log.write(
+                &crate::document_effect::DocumentEffect::deliberately_clean(
+                    crate::document_effect::CleanReason::AuditTrail,
+                ),
+            ) {
+                audit.record(calp::audit::AuditEvent::WritebackRestored, &description, &user, &now);
             }
         }
     }
-    Ok(by_cell)
+
+    Ok(AdoptOutcome {
+        cells_written: written.len(),
+        entries_changed,
+        undo_history_ended,
+        replaced_cells,
+        unreadable,
+    })
 }
 
-/// Reconcile the local writeback layer's submission STATES from the workspace —
-/// the return leg of the writeback loop (P0). After a subscriber submits, the
-/// publisher may approve or reject the value in the workspace; without this the
-/// local layer (which drives the WritebackPane and the grid cell styling) would
-/// stay "submitted" forever and a rejected contributor would never be told.
+/// Reconcile the writeback layer with the workspace -- the return leg of the
+/// writeback loop. A thin wrapper over [`adopt_own_sent_values_inner`] with the
+/// production reader: this subscriber's own current records for EVERY region,
+/// read ONCE per pass ([`own_sent_records_by_region`]: one workspace open and
+/// one manifest verification per subscription, one read per version, HTTP and
+/// development-mode workspaces never opened), environment-filtered with the
+/// same carry-forward the discard uses.
 ///
-/// For each locally-submitted (non-Draft) entry, adopt the state of the
-/// subscriber's OWN current workspace record for that (region, cell) slot —
-/// newest across the resolved version and older ones (lenient carry-forward).
-/// Unsent drafts (Draft state) are left untouched.
-/// Reconcile local submission states from the workspace.
-///
-/// TAKES `&FileState`, NOT A READY-MADE `DocumentEffect`, ON PURPOSE. This runs on
-/// every workbook load (the Collaboration extension calls `calp_reconcile_writeback`
-/// during bootstrap), and `DocumentEffect::mutates` dirties AT CONSTRUCTION. Building
-/// the effect up front therefore marked EVERY opened workbook as unsaved before the
-/// user touched anything — the close prompt fired on a document that had merely been
-/// looked at, which is precisely the "prompt stops meaning anything" failure the
-/// `Navigation` and `AuditTrail` clean arms exist to prevent. So the effect is
-/// constructed only once we know the workspace actually disagrees with what we hold.
+/// A version that could not be read marks the answer incomplete, so an
+/// unreadable version can still let a sent value fill a blank cell but never
+/// replace one the workbook holds. The read is never repeated.
 fn reconcile_writeback_layer_internal(
     state: &AppState,
     file_state: &crate::persistence::FileState,
-) -> Result<(), String> {
-    // Which regions have a submitted entry whose status we should re-check?
-    let region_ids: Vec<String> = {
-        let layer = state.writeback_layer.read().map_err(|e| e.to_string())?;
-        let mut set = std::collections::BTreeSet::new();
-        for d in &layer.drafts {
-            if !matches!(d.state, calp::writeback::SubmissionState::Draft) {
-                set.insert(d.region_id.clone());
+    user_files_state: &crate::persistence::UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+) -> Result<AdoptOutcome, String> {
+    // Read lazily: a workbook with no subscribed region never asks.
+    let pass = std::cell::OnceCell::new();
+    adopt_own_sent_values_inner(
+        state,
+        file_state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        |state, region_id| {
+            match pass.get_or_init(|| own_sent_records_by_region(state)) {
+                Ok(by_region) => by_region.get(region_id).cloned().unwrap_or_else(|| {
+                    Err(format!("no subscription of this workbook declares writeback region '{region_id}'"))
+                }),
+                Err(e) => Err(e.clone()),
             }
-        }
-        set.into_iter().collect()
-    };
-    if region_ids.is_empty() {
-        return Ok(());
-    }
-
-    let own = get_subscriber_identity(state)?;
-
-    // Build (region, row, col) -> current workspace record for our OWN slots.
-    let mut by_slot: std::collections::HashMap<
-        (String, u32, u32),
-        calp::writeback::WritebackSubmission,
-    > = std::collections::HashMap::new();
-    for region_id in &region_ids {
-        let Ok(records) = own_current_records_for_region(state, region_id, &own, false) else {
-            continue;
-        };
-        for ((row, col), s) in records {
-            by_slot.insert((region_id.clone(), row, col), s);
-        }
-    }
-
-    // Would adopting the workspace actually CHANGE anything? Decided before any
-    // effect exists, so a reconcile that finds nothing new leaves the document
-    // exactly as clean as it was.
-    let has_changes = {
-        let layer = state.writeback_layer.read().map_err(|e| e.to_string())?;
-        layer.drafts.iter().any(|d| {
-            if matches!(d.state, calp::writeback::SubmissionState::Draft) {
-                return false;
-            }
-            match by_slot.get(&(d.region_id.clone(), d.cell_row, d.cell_col)) {
-                Some(reg) => {
-                    d.state != reg.state
-                        || d.review_reason != reg.review_reason
-                        || d.reviewed_by != reg.reviewed_by
-                }
-                None => false,
-            }
-        })
-    };
-    if !has_changes {
-        return Ok(());
-    }
-
-    // Adopt the workspace state + review feedback onto local non-Draft entries.
-    {
-        let effect = crate::document_effect::DocumentEffect::mutates(file_state);
-        let mut layer = state.writeback_layer.write(&effect).map_err(|e| e.to_string())?;
-        for d in layer.drafts.iter_mut() {
-            if matches!(d.state, calp::writeback::SubmissionState::Draft) {
-                continue;
-            }
-            if let Some(reg) = by_slot.get(&(d.region_id.clone(), d.cell_row, d.cell_col)) {
-                d.state = reg.state.clone();
-                d.review_reason = reg.review_reason.clone();
-                d.reviewed_by = reg.reviewed_by.clone();
-            }
-        }
-    }
-    Ok(())
+        },
+    )
 }
 
-/// Reconcile local submission states from the workspace (approved/rejected
-/// read-back) and return the updated writeback layer. This is what the
-/// subscriber's UI calls to learn the fate of what they submitted.
+/// What [`calp_reconcile_writeback`] returns: the layer, and what the pass did
+/// that the user must be told about.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WritebackReconcileReport {
+    pub layer: calp::writeback::WritebackLayer,
+    /// Grid cells that now show a value taken from the workspace.
+    pub cells_written: usize,
+    /// A value sent later from another workbook REPLACED one this workbook
+    /// showed, and that ended the whole undo history. Never silent: the
+    /// frontend says so.
+    pub undo_history_ended: bool,
+    /// The replaced cells, as "Sheet!B3".
+    pub replaced_cells: Vec<String>,
+    /// Regions whose workspace could not be read this pass (kept as they were).
+    pub unreadable: Vec<UnreadableWritebackRegion>,
+}
+
+/// One region the reconcile could not read, and why.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnreadableWritebackRegion {
+    pub region_id: String,
+    pub reason: String,
+}
+
+/// Reconcile the writeback layer with the workspace and return it: the review
+/// states of what was sent (approved / rejected read-back), and -- on a fresh
+/// subscribe, a reopen without saving, a refresh or an environment switch --
+/// the values this subscriber last sent, shown in their cells again.
+///
+/// When cells were written, the backend `grid:refresh` event is emitted (the
+/// shell bridges it to the window event the grid re-fetches on): the frontend's
+/// own repaint only repaints cached cells. A region whose workspace could not
+/// be read is reported in `unreadable` (never an `Err`: what could be read was
+/// applied), so Check Status can say it could not reach the workspace.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn calp_reconcile_writeback(
     state: State<AppState>,
     file_state: State<'_, crate::persistence::FileState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     window: tauri::Window,
-) -> Result<calp::writeback::WritebackLayer, String> {
+) -> Result<WritebackReconcileReport, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    // Reconciling only dirties when the workspace actually moved a submission on --
-    // see `reconcile_writeback_layer_internal`; this runs on every workbook load.
-    reconcile_writeback_layer_internal(&state, &file_state)?;
-    let layer = state.writeback_layer.read().map_err(|e| e.to_string())?;
-    Ok(layer.clone())
+    // Only dirties when the workspace actually changed what this workbook
+    // holds -- see `adopt_own_sent_values_inner`; this runs on every load.
+    let outcome = reconcile_writeback_layer_internal(
+        &state,
+        &file_state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+    )?;
+    if outcome.cells_written > 0 {
+        use tauri::Emitter;
+        let _ = window_app_handle(&window).emit("grid:refresh", ());
+    }
+    let layer = state.writeback_layer.read().map_err(|e| e.to_string())?.clone();
+    Ok(WritebackReconcileReport {
+        layer,
+        cells_written: outcome.cells_written,
+        undo_history_ended: outcome.undo_history_ended,
+        replaced_cells: outcome.replaced_cells,
+        unreadable: outcome
+            .unreadable
+            .into_iter()
+            .map(|(region_id, reason)| UnreadableWritebackRegion { region_id, reason })
+            .collect(),
+    })
 }
 
 // ============================================================================
@@ -15201,16 +16101,19 @@ pub(crate) fn reproject_writeback_layer_onto_grids(
     written
 }
 
-/// End the undo history after a discard changed something. See
-/// [`calp_discard_writeback_drafts`]: the step that typed a discarded value is
-/// still on the history, and Ctrl+Z then Ctrl+Y would put the value back with
-/// no draft behind it. Excel ends the history for an action it cannot undo;
-/// this does the same. Called with no other state lock held.
-fn end_undo_history_after_discard(state: &AppState) {
+/// End the undo history after a writeback value was rewritten outside the undo
+/// graph: a discard (see [`calp_discard_writeback_drafts`]) or a newer sent
+/// value shown in place of an older one ([`adopt_own_sent_values_inner`]). The
+/// step that typed the old value is still on the history, and Ctrl+Z then
+/// Ctrl+Y would put it back into a cell whose writeback entry says otherwise.
+/// Excel ends the history for an action it cannot undo; this does the same.
+/// `what` names the action in the log. Called with no other state lock held.
+fn end_undo_history_after_writeback_rewrite(state: &AppState, what: &str) {
     let Ok(mut undo) = state.undo_stack.lock() else {
         crate::log_error!(
             "CALP",
-            "discard writeback drafts: the undo history lock is poisoned; history NOT cleared"
+            "{}: the undo history lock is poisoned; history NOT cleared",
+            what
         );
         return;
     };
@@ -15221,7 +16124,8 @@ fn end_undo_history_after_discard(state: &AppState) {
     if discarded > 0 {
         crate::log_info!(
             "CALP",
-            "Discarding writeback drafts ended the undo history: {} transaction(s) discarded",
+            "{} ended the undo history: {} transaction(s) discarded",
+            what,
             discarded
         );
     }
@@ -15489,7 +16393,7 @@ pub(crate) fn discard_writeback_drafts_inner(
     // END THE UNDO HISTORY (see the command's doc): the step that typed a
     // discarded value must not be redoable into a cell with no draft behind
     // it. Taken with no other lock held, like the sheet-structure clear.
-    end_undo_history_after_discard(state);
+    end_undo_history_after_writeback_rewrite(state, "Discarding writeback drafts");
 
     // THE AUDIT ROW. Discard is not undoable, so the trail is the only record
     // that the subscriber's unsent input was thrown away.
@@ -16374,9 +17278,47 @@ mod writeback_validator_tests {
     /// validated". Adding such a parameter breaks this coercion.
     #[test]
     fn the_submit_path_accepts_no_caller_supplied_verdict() {
-        let _: fn(&AppState, &crate::document_effect::DocumentEffect, &str, &tauri::AppHandle) -> Result<usize, String> =
-            submit_region_internal;
+        // The ORIGIN (identity phase 1) is not a verdict: it is signed into
+        // every answer and shown beside it, and each caller states its own.
+        let _: fn(
+            &AppState,
+            &crate::document_effect::DocumentEffect,
+            &str,
+            &tauri::AppHandle,
+            calp::SubmissionOrigin,
+        ) -> Result<usize, String> = submit_region_internal;
     }
+}
+
+/// The OWNERSHIP refusal of the submit path: the first draft not attributed to
+/// THIS computer's identity, as the sentence the user reads. A draft typed
+/// before sign-in (an old-format id) gets its own sentence, with the way out;
+/// it is never re-stamped (identity phase 1).
+pub(crate) fn foreign_draft_refusal(
+    own: &calp::SubmitterIdentity,
+    drafts: &[calp::writeback::WritebackSubmission],
+) -> Option<String> {
+    let bad = drafts.iter().find(|s| s.submitter.id != own.id)?;
+    if !calp::identity_provider::is_signed_id(&bad.submitter.id) {
+        return Some(format!(
+            "Refusing to submit: some values in this region were typed before Calcula signed your \
+             answers (as '{}'), so they cannot be sent as you ({}). Use Writeback > Discard Drafts \
+             and type them again.",
+            bad.submitter.display_name, own.principal_name
+        ));
+    }
+    // ANOTHER COMPUTER IS ANOTHER SENDER (calp-writeback.md "Who sends an
+    // answer"): a workbook saved on a laptop and opened on a desktop carries the
+    // laptop's drafts, which only the laptop's key can send. Said in words, with
+    // the way out -- never as two raw ids.
+    let typed_as = [bad.submitter.principal_name.trim(), bad.submitter.display_name.trim()]
+        .into_iter()
+        .find(|n| !n.is_empty())
+        .unwrap_or("another sender");
+    Some(format!(
+        "Refusing to submit: some values in this region were typed as {typed_as} on another computer, \
+         and only that computer can send them. Use Writeback > Discard Drafts and type them again here."
+    ))
 }
 
 /// Submit all drafts for a region to the workspace of the subscription that
@@ -16391,11 +17333,12 @@ fn submit_region_internal(
     effect: &crate::document_effect::DocumentEffect,
     region_id: &str,
     app: &tauri::AppHandle,
+    origin: calp::SubmissionOrigin,
 ) -> Result<usize, String> {
     let now = chrono::Utc::now().to_rfc3339();
 
     // Resolve the OWNING subscription for this region (not subscriptions[0]).
-    let OwningSubscription { package_name, resolved_version, registry_path, environment } =
+    let OwningSubscription { package_name, resolved_version, registry_path, environment, .. } =
         owning_subscription_for_region(state, region_id)?;
 
     // Snapshot the drafts to submit, as they would look once submitted.
@@ -16427,12 +17370,14 @@ fn submit_region_internal(
     // but the writeback layer is persisted in the .cala — opening a crafted file
     // could seed a draft attributed to a victim, which would otherwise be written
     // into the victim's workspace slot. Refuse rather than impersonate.
+    //
+    // IDENTITY PHASE 1: a draft typed BEFORE sign-in carries the old random id
+    // and is refused the same way -- never re-stamped to the current identity,
+    // which would let a crafted workbook seed answers that are then signed as
+    // the user who presses Submit All (critique of the identity design).
     let own = get_subscriber_identity(state)?;
-    if let Some(bad) = to_submit.iter().find(|s| s.submitter.id != own.id) {
-        return Err(format!(
-            "Refusing to submit: a draft is attributed to '{}', not this installation ('{}').",
-            bad.submitter.id, own.id
-        ));
+    if let Some(refusal) = foreign_draft_refusal(&own, &to_submit) {
+        return Err(refusal);
     }
 
     // Write to workspace BEFORE mutating local state.
@@ -16544,14 +17489,24 @@ fn submit_region_internal(
         &to_submit,
     )?;
 
+    // THE STAMP AND THE SEAL, applied at the one point where a value leaves this
+    // machine -- every answer of the batch is stamped and SIGNED before any is
+    // written, so a signing failure sends nothing. The environment tag: every
+    // reader filters on it; a submission that reached the workspace untagged
+    // would be a development-line submission forever, because nothing
+    // downstream can tell where it came from. The signature (identity phase 1):
+    // this computer's key over the whole answer, the sender's whole identity,
+    // the application, version and environment, and the ORIGIN -- so nobody
+    // can change it, re-file it, or send one as this user.
+    let mut outgoing: Vec<calp::writeback::WritebackSubmission> = Vec::with_capacity(to_submit.len());
     for sub in &to_submit {
-        // THE STAMP, applied at the one point where a value leaves this machine.
-        // Every reader filters on it; a submission that reached the workspace
-        // untagged would be a development-line submission forever, because
-        // nothing downstream can tell where it came from.
         let mut sub = sub.clone();
         sub.environment = environment.clone();
-        registry.save_submission(&package_name, &resolved_version, &sub)
+        crate::submitter_identity::seal_outgoing(&mut sub, &package_name, &resolved_version, origin)?;
+        outgoing.push(sub);
+    }
+    for sub in &outgoing {
+        registry.save_submission(&package_name, &resolved_version, sub)
             .map_err(|e| e.to_string())?;
     }
     // (The Parquet rollup is regenerated PUBLISHER-side only — on review
@@ -16561,7 +17516,20 @@ fn submit_region_internal(
     // All writes succeeded — advance the local drafts.
     {
         let mut wb_layer = state.writeback_layer.write(effect).map_err(|e| e.to_string())?;
-        wb_layer.submit_region(region_id, &now);
+        let advanced: std::collections::HashSet<String> =
+            wb_layer.submit_region(region_id, &now).into_iter().map(|d| d.id).collect();
+        // THE LOCAL ENTRY CARRIES THE SAME STAMP as the record it became. Only
+        // the clone sent to the workspace was stamped before, so a sent entry
+        // read "" (the development line) here while an entry reconcile ADOPTED
+        // carried its record's stream -- and nothing could tell which entries
+        // belong to which stream after an environment switch.
+        for entry in wb_layer
+            .drafts
+            .iter_mut()
+            .filter(|d| d.region_id == region_id && advanced.contains(&d.id))
+        {
+            entry.environment = environment.clone();
+        }
     }
     invalidate_gather_cache(state);
 
@@ -16595,9 +17563,22 @@ pub fn calp_submit_region(
     window: tauri::Window,
 ) -> Result<usize, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    submit_region_with_origin(&state, &file_state, &region_id, &window, calp::SubmissionOrigin::Interactive)
+}
+
+/// [`calp_submit_region`] for a caller that states where the send came from --
+/// the script gateway passes `Script`, so the signed answer says so.
+pub(crate) fn submit_region_with_origin(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    region_id: &str,
+    window: &tauri::Window,
+    origin: calp::SubmissionOrigin,
+) -> Result<usize, String> {
+    crate::security::window_guard::require_label(window, crate::security::window_guard::MAIN)?;
     // Submitting/reconciling advances the persisted writeback layer.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    submit_region_internal(&state, &effect, &region_id, window_app_handle(&window))
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    submit_region_internal(state, &effect, region_id, window_app_handle(window), origin)
 }
 
 /// Submit the drafts of EVERY writeback region that has any — the "I'm done /
@@ -16632,7 +17613,7 @@ pub fn calp_submit_all_regions(
     let mut total = 0usize;
     let mut submitted_regions = 0usize;
     for region_id in region_ids {
-        match submit_region_internal(&state, &effect, &region_id, window_app_handle(&window)) {
+        match submit_region_internal(&state, &effect, &region_id, window_app_handle(&window), calp::SubmissionOrigin::Interactive) {
             Ok(n) => {
                 total += n;
                 if n > 0 {
@@ -16678,6 +17659,9 @@ pub struct OutboundSubmissionPreview {
     pub registry_path: String,
     pub submitter_id: String,
     pub submitter_name: String,
+    /// The account the answers will be SIGNED as (`MACHINE\user` /
+    /// `DOMAIN\user`), so the confirmation names who sends them.
+    pub submitter_principal: String,
     pub values: Vec<OutboundValue>,
     /// The publisher-shipped custom validator that WILL judge this submission,
     /// when the region declares one. Absent when it declares none. This is the
@@ -16806,6 +17790,7 @@ pub fn calp_preview_region_submission(
         registry_path,
         submitter_id: identity.id,
         submitter_name: identity.display_name,
+        submitter_principal: identity.principal_name,
         values,
         validator,
         validator_error,
@@ -16863,17 +17848,53 @@ pub(crate) fn require_publisher(
     registry: &dyn calp::WorkspaceTransport,
     package_name: &str,
     version: &str,
+    scope: Option<&calp::WorkspaceScope>,
 ) -> Result<(), String> {
     let manifest = registry
         .get_version_manifest(package_name, version)
         .map_err(|e| e.to_string())?;
+    require_publisher_key(registry, package_name, &manifest.publisher_key, scope)
+        .map_err(PublisherGateRefusal::into_message)
+}
+
+/// Why [`require_publisher_key`] refused -- TYPED, so a caller that must tell
+/// "not the publisher" from "could not ask" (the Collected Responses listing)
+/// never classifies by matching the sentence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PublisherGateRefusal {
+    /// This computer holds no key that may read the application's answers.
+    NotPublisher(String),
+    /// The question could not be answered: the profile key or the co-publisher
+    /// list could not be read.
+    Failed(String),
+}
+
+impl PublisherGateRefusal {
+    pub(crate) fn into_message(self) -> String {
+        match self {
+            PublisherGateRefusal::NotPublisher(m) | PublisherGateRefusal::Failed(m) => m,
+        }
+    }
+}
+
+/// The publisher gate against a key the caller ALREADY VERIFIED -- the author
+/// route of Collected Responses carries the `publisher_key` of the manifest
+/// `open_authorized_content` verified, and a subscriber route the one its
+/// pinned manifest asserts. [`require_publisher`] re-reads the manifest for
+/// callers that hold only a version; a manifest swapped on the share between a
+/// verification and that re-read would otherwise have its key trusted unverified.
+pub(crate) fn require_publisher_key(
+    registry: &dyn calp::WorkspaceTransport,
+    package_name: &str,
+    publisher_key: &str,
+    scope: Option<&calp::WorkspaceScope>,
+) -> Result<(), PublisherGateRefusal> {
+    let failed = |e: String| PublisherGateRefusal::Failed(e);
     let profile = calcula_profile_dir();
 
     // The publisher of record for THIS version — the ordinary case, and the
     // only one before co-publishing existed.
-    if calp::signing::profile_holds_publisher_key(&profile, &manifest.publisher_key)
-        .map_err(|e| e.to_string())?
-    {
+    if calp::signing::profile_holds_publisher_key(&profile, publisher_key).map_err(|e| failed(e.to_string()))? {
         return Ok(());
     }
 
@@ -16882,39 +17903,43 @@ pub(crate) fn require_publisher(
     // through whoever happened to create the application would reinstate the
     // release-manager bottleneck one step to the left. Authorization is the
     // same root-signed list the push gate consults, so there is one answer to
-    // "who is behind this application", not two.
-    if let Some(root_key) =
-        calp::publishers::root_key_of(registry, package_name).map_err(|e| e.to_string())?
+    // "who is behind this application", not two -- and it is
+    // `calp::publishers::review_keys`, the very set every reader's fold accepts
+    // review SIGNATURES from (`review_authority`), ROOTED THE SAME WAY
+    // (`trusted_review_root`: the pin, else the developer anchor and its
+    // revision mark) -- so a co-publisher's decision is written only where it
+    // will count, and a planted first version plus a planter-signed list buys
+    // the planter no inbox here either.
+    let (trusted_root, min_revision) = trusted_review_root(package_name, scope);
+    for key in calp::publishers::review_keys(
+        registry,
+        package_name,
+        publisher_key,
+        trusted_root.as_deref(),
+        min_revision,
+    )
+    .map_err(|e| failed(e.to_string()))?
     {
-        if let Some(list) = calp::publishers::load_verified(registry, package_name, &root_key)
-            .map_err(|e| e.to_string())?
-        {
-            for key in list.allowed_keys() {
-                if calp::signing::profile_holds_publisher_key(&profile, &key)
-                    .map_err(|e| e.to_string())?
-                {
-                    return Ok(());
-                }
-            }
+        if calp::signing::profile_holds_publisher_key(&profile, &key).map_err(|e| failed(e.to_string()))? {
+            return Ok(());
         }
     }
 
-    Err(format!(
+    Err(PublisherGateRefusal::NotPublisher(format!(
         "Only the publisher of '{}' — or a co-publisher they authorized — can view \
          or manage its writeback submissions.",
         package_name
-    ))
+    )))
 }
 
-/// Resolve a grid writeback region's owning subscription and assert the caller
-/// is that application's publisher. Shared by the dashboard load and both exports,
-/// so all three enforce identically.
+/// Resolve where a grid writeback region's answers are collected -- the
+/// workbook's OWN designated region through the application it published or was
+/// opened for editing from, or a subscribed one through its subscription
+/// (`calp_collection::collection_for_region`) -- and assert the caller is that
+/// application's publisher. The script gateway's gate; the commands themselves
+/// gate through `calp_collection::publisher_collection`, the same two steps.
 pub(crate) fn require_region_publisher(state: &AppState, region_id: &str) -> Result<(), String> {
-    let OwningSubscription { package_name, resolved_version, registry_path, .. } =
-        owning_subscription_for_region(state, region_id)?;
-    let (registry, _scope) =
-        crate::calp_registry::open_workspace_scoped(&registry_path).map_err(|e| e.to_string())?;
-    require_publisher(&*registry, &package_name, &resolved_version)
+    crate::calp_collection::publisher_collection(state, region_id).map(|_| ())
 }
 
 /// The MODEL-writeback twin of `require_region_publisher`: resolve the
@@ -16929,11 +17954,11 @@ pub(crate) fn require_model_writeback_publisher(
     state: &AppState,
     writeback_id: &str,
 ) -> Result<(), String> {
-    let (package_name, resolved_version, registry_path, _env, _) =
+    let (package_name, resolved_version, registry_path, _env, _, _) =
         owning_subscription_for_model_writeback(state, writeback_id)?;
-    let (registry, _scope) =
+    let (registry, scope) =
         crate::calp_registry::open_workspace_scoped(&registry_path).map_err(|e| e.to_string())?;
-    require_publisher(&*registry, &package_name, &resolved_version)
+    require_publisher(&*registry, &package_name, &resolved_version, Some(&scope))
 }
 
 // ============================================================================
@@ -17545,6 +18570,9 @@ mod writeback_claim_tests {
             submitter: calp::SubmitterIdentity {
                 display_name: "Tester".to_string(),
                 id: "tester".to_string(),
+                principal_name: String::new(),
+                provider: Default::default(),
+                scope: Default::default(),
                 extra: HashMap::new(),
             },
             value: SubmissionValue::Number { value: 1.0 },
@@ -17554,6 +18582,9 @@ mod writeback_claim_tests {
             submitted_at: None,
             review_reason: None,
             reviewed_by: None,
+            seal: None,
+            sender: Default::default(),
+            identity: Default::default(),
             extra: HashMap::new(),
         }
     }
@@ -17790,7 +18821,7 @@ fn owning_subscription_for_model_writeback(
     state: &AppState,
     writeback_id: &str,
 ) -> Result<
-    (String, String, String, String, calp::writeback::ModelWritebackDeclaration),
+    (String, String, String, String, calp::writeback::ModelWritebackDeclaration, String),
     String,
 > {
     let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
@@ -17830,6 +18861,9 @@ fn owning_subscription_for_model_writeback(
                 // environments existed.
                 sub.environment.clone().unwrap_or_default(),
                 decl.clone(),
+                // The publisher key the PINNED manifest asserts: the anchor of
+                // whose review decisions count when this column is read.
+                manifest.publisher_key.clone(),
             ));
         }
     }
@@ -17855,7 +18889,7 @@ pub(crate) fn submit_model_writeback(
     value: calp::writeback::SubmissionValue,
     identity: &calp::SubmitterIdentity,
 ) -> Result<(), String> {
-    let (package_name, resolved_version, registry_path, environment, decl) =
+    let (package_name, resolved_version, registry_path, environment, decl, _publisher_key) =
         owning_subscription_for_model_writeback(state, wb.id())?;
 
     if key.len() != decl.key_columns.len() {
@@ -17876,12 +18910,13 @@ pub(crate) fn submit_model_writeback(
         }
     }
     if decl.kind == "masterData" && !decl.allowed_editors.is_empty() {
-        let id = identity.id.to_lowercase();
-        let name = identity.display_name.to_lowercase();
-        let allowed = decl.allowed_editors.iter().any(|e| {
-            let e = e.trim().to_lowercase();
-            !e.is_empty() && (id == e || name == e || name.contains(&e) || e.contains(&name))
-        });
+        // THE ONE MATCHER (identity phase 1): exact, case-insensitive, on the
+        // signed principal or the id -- never the display name, never a
+        // substring. The sender here is this computer's own signed identity.
+        let allowed = decl
+            .allowed_editors
+            .iter()
+            .any(|e| calp::identity_provider::principal_matches(e, identity, true));
         if !allowed {
             return Err(format!(
                 "'{}' is a master data column — only its designated editors can change it",
@@ -17909,8 +18944,20 @@ pub(crate) fn submit_model_writeback(
         reviewed_by: None,
         environment,
         model_key: Some(key),
+        seal: None,
+        sender: Default::default(),
+        identity: Default::default(),
         extra: Default::default(),
     };
+    // SIGNED like every grid answer (identity phase 1). A model entry is typed
+    // into the model's table by the user, so its origin is Interactive.
+    let mut submission = submission;
+    crate::submitter_identity::seal_outgoing(
+        &mut submission,
+        &package_name,
+        &resolved_version,
+        calp::SubmissionOrigin::Interactive,
+    )?;
 
     let (registry, _scope) =
         crate::calp_registry::open_workspace_scoped(&registry_path).map_err(|e| e.to_string())?;
@@ -17941,6 +18988,31 @@ pub(crate) fn submit_model_writeback(
     Ok(())
 }
 
+/// The identity rule of the application that declares model writeback column
+/// `writeback_id`, from its PINNED manifest. FAILS CLOSED: a manifest that
+/// cannot be read here counts only verified senders.
+pub(crate) fn model_writeback_identity_policy(state: &AppState, writeback_id: &str) -> calp::IdentityPolicy {
+    let Ok((package_name, resolved_version, registry_path, _, _, _)) =
+        owning_subscription_for_model_writeback(state, writeback_id)
+    else {
+        return calp::IdentityPolicy { require_verified: true };
+    };
+    crate::calp_registry::open_workspace_scoped(&registry_path)
+        .ok()
+        .and_then(|(registry, scope)| {
+            calp::integrity::load_pinned_manifest_via(
+                registry.as_ref(),
+                &package_name,
+                &resolved_version,
+                &scope,
+                &calcula_profile_dir(),
+            )
+            .ok()
+        })
+        .map(|m| m.identity_policy.unwrap_or_default())
+        .unwrap_or(calp::IdentityPolicy { require_verified: true })
+}
+
 /// List a model writeback column's workspace submissions (publisher review).
 /// PUBLISHER-GATED, matching `calp_set_model_submission_state`: this returns
 /// every submitter's raw values and identity for the column.
@@ -17951,31 +19023,34 @@ pub fn calp_list_model_submissions(
     window: tauri::Window,
 ) -> Result<Vec<calp::writeback::WritebackSubmission>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let (package_name, resolved_version, registry_path, environment, _) =
+    let (package_name, resolved_version, registry_path, environment, _, publisher_key) =
         owning_subscription_for_model_writeback(&state, &writeback_id)?;
-    let (registry, _scope) =
+    let (registry, scope) =
         crate::calp_registry::open_workspace_scoped(&registry_path).map_err(|e| e.to_string())?;
     // AUTHORIZATION (parity with calp_set_model_submission_state): this returns
     // EVERY submitter's raw values and identity for the column. Publisher only.
-    require_publisher(&*registry, &package_name, &resolved_version)?;
+    require_publisher(&*registry, &package_name, &resolved_version, Some(&scope))?;
+    let authority = review_authority(registry.as_ref(), &package_name, &publisher_key, Some(&scope));
     // ONE STREAM, like every region read. Unfiltered, a `distribution.writeback`
     // script listing a MODEL column saw every environment's submissions —
     // contradicting the rule the gateway enforces for regions one branch over,
     // and disclosing values from a stream the workbook does not follow.
     let mut subs: Vec<calp::writeback::WritebackSubmission> = calp::writeback::visible_in(
         registry
-            .load_current_submissions(&package_name, &resolved_version)
+            .load_current_submissions(&package_name, &resolved_version, &authority)
             .map_err(|e| e.to_string())?,
         Some(&environment),
     )
     .into_iter()
     .filter(|s| s.region_id == writeback_id && s.model_key.is_some())
     .collect();
+    // Each row carries the reader's identity verdict (`identity` in the JSON).
+    crate::identity_verification::attest(registry.as_ref(), &package_name, &resolved_version, &mut subs);
     subs.sort_by(|a, b| a.submitted_at.cmp(&b.submitted_at).then_with(|| a.id.cmp(&b.id)));
     // Publisher-side, best-effort rollup freshness: submissions arrive while
     // the publisher only reads, so the review-pane load keeps the parquet
     // current without any subscriber ever writing it.
-    refresh_rollup_if_publisher(&registry, &package_name, &resolved_version);
+    refresh_rollup_if_publisher(&registry, &package_name, &resolved_version, Some(&scope));
     Ok(subs)
 }
 
@@ -17994,6 +19069,28 @@ pub fn calp_set_model_submission_state(
     reason: Option<String>,
     window: tauri::Window,
 ) -> Result<(), String> {
+    set_model_submission_state_with_origin(
+        state,
+        writeback_id,
+        submission_id,
+        new_state,
+        reason,
+        window,
+        calp::SubmissionOrigin::Interactive,
+    )
+}
+
+/// [`calp_set_model_submission_state`] naming who decided (`Script` from the
+/// script gateway), inside the review's signature.
+pub(crate) fn set_model_submission_state_with_origin(
+    state: State<AppState>,
+    writeback_id: String,
+    submission_id: String,
+    new_state: String,
+    reason: Option<String>,
+    window: tauri::Window,
+    origin: calp::SubmissionOrigin,
+) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let target_state = match new_state.as_str() {
         "approved" => calp::writeback::SubmissionState::Approved,
@@ -18007,20 +19104,21 @@ pub fn calp_set_model_submission_state(
         }
     };
 
-    let (package_name, resolved_version, registry_path, environment, _) =
+    let (package_name, resolved_version, registry_path, environment, _, publisher_key) =
         owning_subscription_for_model_writeback(&state, &writeback_id)?;
-    let (registry, _scope) =
+    let (registry, scope) =
         crate::calp_registry::open_workspace_scoped(&registry_path).map_err(|e| e.to_string())?;
 
     // AUTHORIZATION (P0 parity): approve/reject is publisher-only — without
     // this any subscriber could self-approve a masterData value.
-    require_publisher(&registry, &package_name, &resolved_version)?;
+    require_publisher(&registry, &package_name, &resolved_version, Some(&scope))?;
+    let authority = review_authority(registry.as_ref(), &package_name, &publisher_key, Some(&scope));
 
     // See `calp_list_model_submissions`: a review must target a submission in
     // the stream this workbook actually follows.
     let submission = calp::writeback::visible_in(
         registry
-            .load_current_submissions(&package_name, &resolved_version)
+            .load_current_submissions(&package_name, &resolved_version, &authority)
             .map_err(|e| e.to_string())?,
         Some(&environment),
     )
@@ -18049,12 +19147,16 @@ pub fn calp_set_model_submission_state(
             .filter(|r| !r.is_empty()),
         reviewed_by: reviewer,
         reviewed_at: now.clone(),
+        target_digest: String::new(),
+        seal: None,
         extra: Default::default(),
     };
+    let mut review = review;
+    sign_review(&mut review, &submission, &package_name, &resolved_version, origin)?;
     registry
         .save_review(&package_name, &resolved_version, &review)
         .map_err(|e| e.to_string())?;
-    refresh_rollup_if_publisher(&registry, &package_name, &resolved_version);
+    refresh_rollup_if_publisher(&registry, &package_name, &resolved_version, Some(&scope));
 
     {
         let user = audit_user(&state);
@@ -18094,12 +19196,71 @@ pub fn calp_set_submission_state(
     new_state: String,
     reason: Option<String>,
     submission_id: Option<String>,
-    // Review a stream OTHER than the one this workbook follows, matching the
-    // dashboard's environment picker. `None` is the workbook's own.
+    // The reviewed ROW's own stream (the dashboard passes it). It must be one
+    // this workbook collects -- Writeback > Collect From for its own region,
+    // the subscription's stream for a subscribed one -- or the review is
+    // refused. `None` is the collection's own choice.
     environment: Option<String>,
     window: tauri::Window,
 ) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    set_submission_state_core(
+        &state,
+        region_id,
+        submitter_id,
+        cell_row,
+        cell_col,
+        new_state,
+        reason,
+        submission_id,
+        environment,
+    )
+}
+
+/// The body of [`calp_set_submission_state`], without the window (so a test
+/// can drive the author's review end to end). An interactive decision.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn set_submission_state_core(
+    state: &AppState,
+    region_id: String,
+    submitter_id: String,
+    cell_row: u32,
+    cell_col: u32,
+    new_state: String,
+    reason: Option<String>,
+    submission_id: Option<String>,
+    environment: Option<String>,
+) -> Result<(), String> {
+    set_submission_state_with_origin(
+        state,
+        region_id,
+        submitter_id,
+        cell_row,
+        cell_col,
+        new_state,
+        reason,
+        submission_id,
+        environment,
+        calp::SubmissionOrigin::Interactive,
+    )
+}
+
+/// [`set_submission_state_core`] naming who decided: `Script` from the script
+/// gateway, inside the review's signature (every reader then shows the
+/// reviewer as "(by a script)").
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn set_submission_state_with_origin(
+    state: &AppState,
+    region_id: String,
+    submitter_id: String,
+    cell_row: u32,
+    cell_col: u32,
+    new_state: String,
+    reason: Option<String>,
+    submission_id: Option<String>,
+    environment: Option<String>,
+    origin: calp::SubmissionOrigin,
+) -> Result<(), String> {
     let environment_override = environment;
     let target_state = match new_state.as_str() {
         "approved" => calp::writeback::SubmissionState::Approved,
@@ -18113,93 +19274,176 @@ pub fn calp_set_submission_state(
         }
     };
 
-    let OwningSubscription { package_name, resolved_version, registry_path, environment } =
-        owning_subscription_for_region(&state, &region_id)?;
-    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&registry_path)
-        .map_err(|e| e.to_string())?;
-
     // AUTHORIZATION (P0): approve/reject is publisher-only. Without this, any
     // subscriber could self-approve an out-of-policy value into an on_approval
-    // aggregate, or reject a rival's so GATHER drops it.
-    require_publisher(&registry, &package_name, &resolved_version)?;
+    // aggregate, or reject a rival's so GATHER drops it. Resolved through the
+    // ONE publisher-side resolver, so the author's own designated region is
+    // reviewable from the workbook that published it (BUG-0553).
+    let (collection, registry) = crate::calp_collection::publisher_collection(&state, &region_id)?;
+    let package_name = collection.package_name.clone();
+    // The candidates are read with the review authority every reader uses, so
+    // the record decided here carries the state the dashboard showed.
+    let authority = collection.review_authority(registry.as_ref());
 
-    // WHICH STREAM IS BEING REVIEWED. The dashboard can be pointed at another
-    // environment, and this command used to filter only by the workbook's own —
-    // so approving a row shown "in test" answered "No submission found", or, if
-    // the submitter had also answered in prod, the misleading "superseded by a
-    // newer one". It failed closed, but the button on screen could not work.
-    // The override is the publisher's own deliberate choice, and it is audited.
-    let reviewing = environment_override
-        .as_deref()
-        .unwrap_or(environment.as_str())
-        .to_string();
+    // WHICH STREAMS ARE REVIEWED. The dashboard passes the ROW's own stream; a
+    // script passes none, which is the collection's own filter: for the
+    // author's region the workbook's Collect From choice, for a subscribed
+    // region the stream its subscription follows. A stream the collection
+    // does not collect is REFUSED (Writeback > Collect From) -- no IPC path
+    // reviews outside what this workbook collects.
+    let reviewing: calp::writeback::StreamFilter = collection.filter(environment_override.as_deref())?;
+    let collecting: calp::writeback::StreamFilter = collection.filter(None)?;
+    let cell_a1 = format!("{}{}", crate::pivot::utils::col_index_to_letter(cell_col), cell_row + 1);
 
-    // Search the resolved version first, then older ones: lenient regions
-    // carry submissions forward across version bumps, and those records live
-    // in the version directory they were submitted against — the review event
-    // must be appended in the version whose fold holds the record.
-    let mut versions = vec![resolved_version.clone()];
-    versions.extend(carry_forward_versions(
-        &registry,
-        &package_name,
-        &resolved_version,
-        &reviewing,
-    ));
+    // WHICH VERSIONS ARE SEARCHED. With the submission id the dashboard (or a
+    // script) displayed, the id names the record: the collection's OWN walk is
+    // searched -- the very set the list was built from -- so the list a row
+    // was picked from and this review can never walk different versions (a
+    // row listed from an older version used to answer "No submission found"
+    // when its own stream's promotion log did not verify). Without an id, the
+    // reviewed streams decide. Either way through `collected_versions`, so a
+    // version whose answers the list does not carry forward (BUG-0555) is not
+    // searched either.
+    let search: &calp::writeback::StreamFilter = if submission_id.is_some() { &collecting } else { &reviewing };
+    // Search the read version first, then the ones these streams carry
+    // forward from: lenient regions carry submissions forward across version
+    // bumps, and those records live in the version directory they were
+    // submitted against — the review event must be appended in the version
+    // whose fold holds the record.
+    let walked = crate::calp_collection::collected_versions(registry.as_ref(), &collection, search);
+    let versions = walked.versions.clone();
 
-    // THE NEWEST RECORD ACROSS VERSIONS, not the first version that has one.
-    // `versions` is version-ordered and descending after a rollback, so breaking
-    // on the first hit targeted the OLDER record and Approve landed on a value
-    // the publisher was not looking at — while the dashboard, built on the same
-    // arbitration, now shows the newer one.
-    let mut found: Option<(String, calp::writeback::WritebackSubmission)> = None;
+    // Every current record for this (submitter, cell), per version. The fold
+    // keeps one slot per (ENVIRONMENT, submitter, cell), so one version can
+    // hold a `test` and a `prod` record for the same person and cell: the
+    // candidates are kept whole and arbitrated below, never `find`-first.
+    let mut candidates: Vec<(String, calp::writeback::WritebackSubmission)> = Vec::new();
+    let mut read_errors: Vec<String> = Vec::new();
     for version in &versions {
-        let Ok(submissions) = registry
-            .load_current_submissions_by(&package_name, version, &submitter_id)
-            .map(|subs| calp::writeback::visible_in(subs, Some(&reviewing)))
-        else {
-            continue;
-        };
-        if let Some(s) = submissions.into_iter().find(|s| {
-            s.region_id == region_id && s.cell_row == cell_row && s.cell_col == cell_col
-        }) {
-            // THE CRATE'S OWN ORDERING, not a string compare. `cmp_timestamps`
-            // PARSES the RFC3339 values and only falls back to bytes when a
-            // parse fails, which is what makes `2026-01-01T10:00:00+02:00`
-            // (08:00Z) correctly older than `2026-01-01T09:00:00Z` — a raw
-            // string compare calls it newer. These values arrive from other
-            // machines and other builds, so their spelling is not this process's
-            // to assume. Using a different rule here would recreate exactly the
-            // defect this arbitration was added to fix: two surfaces disagreeing
-            // about which submission is current.
-            let newer = found.as_ref().is_none_or(|(_, cur)| {
-                calp::fold::cmp_timestamps(&s.updated_at, &cur.updated_at)
-                    .then_with(|| s.id.cmp(&cur.id))
-                    .is_gt()
-            });
-            if newer {
-                found = Some((version.clone(), s));
+        match registry
+            .load_current_submissions_by(&package_name, version, &submitter_id, &authority)
+            .map(|subs| calp::writeback::visible_in_streams(subs, &walked.filter_for(version, search)))
+        {
+            Ok(submissions) => candidates.extend(
+                submissions
+                    .into_iter()
+                    .filter(|s| s.region_id == region_id && s.cell_row == cell_row && s.cell_col == cell_col)
+                    .map(|s| (version.clone(), s)),
+            ),
+            // A read that failed is never "no submission": the record may be
+            // exactly in the version that could not be read.
+            Err(e) => read_errors.push(format!("v{version}: {e}")),
+        }
+    }
+    let read_failure = || {
+        format!(
+            "Could not read {}'s submissions for {} in region '{}': {}",
+            submitter_id,
+            cell_a1,
+            region_id,
+            read_errors.join("; ")
+        )
+    };
+
+    // THE NEWEST RECORD OF ONE STREAM, across versions, not the first version
+    // that has one. `versions` is version-ordered and descending after a
+    // rollback, so breaking on the first hit targeted the OLDER record and
+    // Approve landed on a value the publisher was not looking at — while the
+    // dashboard, built on the same arbitration, showed the newer one.
+    //
+    // THE CRATE'S OWN ORDERING, not a string compare. `cmp_timestamps` PARSES
+    // the RFC3339 values and only falls back to bytes when a parse fails, which
+    // is what makes `2026-01-01T10:00:00+02:00` (08:00Z) correctly older than
+    // `2026-01-01T09:00:00Z` — a raw string compare calls it newer. These values
+    // arrive from other machines and other builds, so their spelling is not this
+    // process's to assume. Using a different rule here would recreate exactly
+    // the defect this arbitration was added to fix: two surfaces disagreeing
+    // about which submission is current.
+    let newest_in = |environment: &str| {
+        candidates
+            .iter()
+            .filter(|(_, s)| s.environment == environment)
+            .max_by(|(_, a), (_, b)| {
+                calp::fold::cmp_timestamps(&a.updated_at, &b.updated_at).then_with(|| a.id.cmp(&b.id))
+            })
+            .cloned()
+    };
+
+    let (version, submission) = match submission_id.as_deref() {
+        // EXACT-TARGET REVIEW: the id the caller displayed names the record
+        // and, with it, its stream. A newer record in THAT stream means the
+        // contributor re-submitted since the list loaded: refuse to review
+        // blind -- the approve-vs-resubmit race made visible instead of
+        // silently deciding on a value the publisher never saw.
+        Some(expected) => {
+            let Some((_, named)) = candidates.iter().find(|(_, s)| s.id == expected) else {
+                if !read_errors.is_empty() {
+                    return Err(read_failure());
+                }
+                if candidates.is_empty() {
+                    return Err(format!(
+                        "No submission found for region '{}' cell {} by submitter '{}'",
+                        region_id, cell_a1, submitter_id
+                    ));
+                }
+                return Err(
+                    "This submission was superseded by a newer one — refresh the dashboard and review the current value."
+                        .to_string(),
+                );
+            };
+            if !reviewing.admits(&named.environment) {
+                return Err(format!(
+                    "That submission was made in {}, not in {}. Refresh the dashboard and review it in its own stream.",
+                    crate::calp_collection::stream_label(Some(&named.environment)),
+                    reviewing.label(),
+                ));
+            }
+            let current = newest_in(&named.environment).expect("the named record is a candidate");
+            if current.1.id != expected {
+                return Err(
+                    "This submission was superseded by a newer one — refresh the dashboard and review the current value."
+                        .to_string(),
+                );
+            }
+            current
+        }
+        // NO ID: the stream decides. Across EVERY stream (a script on the
+        // author's own region names none) one person can hold a record per
+        // environment for the same cell, and deciding on "whichever came
+        // first" would approve a value nobody chose: refuse and ask for the
+        // stream instead.
+        None => {
+            let mut streams: Vec<String> = candidates.iter().map(|(_, s)| s.environment.clone()).collect();
+            streams.sort();
+            streams.dedup();
+            match streams.as_slice() {
+                [] => {
+                    if !read_errors.is_empty() {
+                        return Err(read_failure());
+                    }
+                    return Err(format!(
+                        "No submission found for region '{}' cell {} by submitter '{}'",
+                        region_id, cell_a1, submitter_id
+                    ));
+                }
+                [only] => newest_in(only).expect("a stream with a candidate"),
+                several => {
+                    return Err(format!(
+                        "{} answered {} in more than one stream ({}). Name the stream to review, or pass the submission id.",
+                        submitter_id,
+                        cell_a1,
+                        several
+                            .iter()
+                            .map(|e| crate::calp_collection::stream_label(Some(e)))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ));
+                }
             }
         }
-    }
-    let (version, submission) = found.ok_or_else(|| {
-        format!(
-            "No submission found for region '{}' cell ({}, {}) by submitter '{}'",
-            region_id, cell_row, cell_col, submitter_id
-        )
-    })?;
-
-    // EXACT-TARGET REVIEW: when the dashboard passes the submission id it
-    // displayed, refuse to review blind if a newer submission has arrived in
-    // the meantime — the approve-vs-resubmit race made visible instead of
-    // silently deciding on a value the publisher never saw.
-    if let Some(expected) = submission_id.as_deref() {
-        if expected != submission.id {
-            return Err(
-                "This submission was superseded by a newer one — refresh the dashboard and review the current value."
-                    .to_string(),
-            );
-        }
-    }
+    };
+    // The stream of the record ACTUALLY decided -- never "every stream".
+    let reviewed_stream = submission.environment.clone();
 
     let now = chrono::Utc::now().to_rfc3339();
     let reviewer = get_subscriber_identity(&state).ok().map(|i| i.display_name);
@@ -18220,12 +19464,21 @@ pub fn calp_set_submission_state(
             .filter(|r| !r.is_empty()),
         reviewed_by: reviewer,
         reviewed_at: now.clone(),
+        target_digest: String::new(),
+        seal: None,
         extra: Default::default(),
     };
+    let mut review = review;
+    sign_review(&mut review, &submission, &package_name, &version, origin)?;
     registry
         .save_review(&package_name, &version, &review)
         .map_err(|e| e.to_string())?;
-    refresh_rollup_if_publisher(&registry, &package_name, &version);
+    refresh_rollup_if_publisher(
+        registry.as_ref(),
+        &package_name,
+        &version,
+        calp::workspace_scope(&collection.registry_path).ok().as_ref(),
+    );
     invalidate_gather_cache(&state);
 
     // Audit the publisher decision — the provenance of the return leg, so a
@@ -18247,13 +19500,12 @@ pub fn calp_set_submission_state(
             // say which decision was made, and the trail stops answering the
             // question it exists for.
             &format!(
-                "{} {}'s submission for region {} cell ({}, {}) in {}",
+                "{} {}'s submission for region {} cell {} in {}",
                 new_state,
                 submitter_id,
                 region_id,
-                cell_row,
-                cell_col,
-                if reviewing.is_empty() { "the development line" } else { reviewing.as_str() },
+                cell_a1,
+                crate::calp_collection::stream_label(Some(&reviewed_stream)),
             ),
             &user,
             &now,
@@ -18263,7 +19515,7 @@ pub fn calp_set_submission_state(
 }
 
 /// A submission row for the publisher data-collection dashboard (D5).
-#[derive(serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RegionSubmissionInfo {
     /// The submission EVENT id the row shows — the dashboard passes it back
@@ -18276,6 +19528,28 @@ pub struct RegionSubmissionInfo {
     pub cell_col: u32,
     pub submitter_id: String,
     pub submitter_name: String,
+    /// The account the sender's SIGNED answer names (`MACHINE\user` /
+    /// `DOMAIN\user`); empty for an answer sent before sign-in. The sender's
+    /// own claim, bound to their key -- phase 1 does not prove it against a
+    /// directory (docs/design/calp-writeback.md, "Who sends an answer").
+    pub submitter_principal: String,
+    /// What every reader concluded about the sender, computed by the fold
+    /// from the signature alone: `signed` or `beforeSignIn`.
+    pub sender: calp::SenderCheck,
+    /// How a signed answer left the sender's computer (typed and submitted,
+    /// sent on save, or sent by a script). Absent for an unsigned answer.
+    pub origin: Option<calp::SubmissionOrigin>,
+    /// The READER's verdict on the sender (identity phase 1, read side):
+    /// verified / signed but unconfirmed / not verified / sent before sign-in,
+    /// with the reason (`calp::identity_check`). Computed on this computer
+    /// after the fold; never stored.
+    pub identity: calp::IdentityVerdict,
+    /// The Identity column's plain sentence for `identity`.
+    pub identity_label: String,
+    /// Whether the application's identity rule COUNTS this answer (totals,
+    /// roster, BI tables, scripts). False only under "count only verified
+    /// senders" for an answer that is not Verified; the inbox still shows it.
+    pub counted: bool,
     pub value_display: String,
     pub value_kind: String,
     pub state: String,
@@ -18298,55 +19572,114 @@ pub struct RegionSubmissionInfo {
 pub fn calp_load_region_submissions(
     state: State<AppState>,
     region_id: String,
-    // `environment`: look at a stream other than the one this workbook follows.
-    // `None` is the publisher's own, and the pane names whichever it is showing.
-    environment: Option<String>,
+    // No stream argument (Writeback > Collect From, 2026-10-22): the reads
+    // follow the ONE choice the workbook holds -- the Collect From choice for
+    // its own region, the subscription's stream for a subscribed one -- so the
+    // pane, the watch, a script and the model tables cannot disagree.
     window: tauri::Window,
 ) -> Result<Vec<RegionSubmissionInfo>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    load_region_submissions_core(&state, &region_id)
+}
+
+/// The body of [`calp_load_region_submissions`], without the window.
+pub(crate) fn load_region_submissions_core(
+    state: &AppState,
+    region_id: &str,
+) -> Result<Vec<RegionSubmissionInfo>, String> {
+    let region_id = region_id.to_string();
     // AUTHORIZATION: this is the cross-submitter "see all" view — publisher
     // only, matching approve/reject. Gate BEFORE reading anything.
-    require_region_publisher(&state, &region_id)?;
-    let infos = load_region_submission_infos(&state, &region_id, environment.as_deref())?;
+    let (collection, registry) = crate::calp_collection::publisher_collection(state, &region_id)?;
+    // THE APP LOCALE for the values shown: the inbox is a display surface, so
+    // 1.5 reads "1,5" in an sv-SE app exactly as the cell it came from does.
+    let locale = state.locale.lock().map(|g| g.clone()).unwrap_or_else(|e| e.into_inner().clone());
+    // EVERY row the region holds, each with the reader's identity verdict:
+    // the inbox SHOWS what the application's rule does not count, marked as
+    // such, never drops it in silence.
+    let current = load_region_collected_rows(&collection, registry.as_ref(), &region_id, &collection.streams)?;
+    // THE AUTHOR'S MODEL TABLES FOLLOW WHAT ARRIVES. Answers are appended to
+    // the workspace from OTHER computers, so no mutation in this process tells
+    // the BI datasets they are stale; this read (the pane, the submission
+    // watch, a script) does, whenever the rows it saw changed.
+    if collection.role == crate::calp_collection::CollectionRole::Author {
+        let counted = calp::identity_check::admit(current.clone(), &collection.identity_policy);
+        crate::bi::writeback_source::note_author_rows_seen(&collection, &region_id, &counted);
+    }
+    let infos = region_submission_infos(current, Some(&locale), &collection.identity_policy);
     // Publisher-side, best-effort rollup freshness: submissions arrive while
     // the publisher only reads, so the inbox load keeps the parquet current
     // without any subscriber ever writing the shared `_rollup.parquet` path.
-    if let Ok(OwningSubscription { package_name, resolved_version, registry_path, .. }) =
-        owning_subscription_for_region(&state, &region_id)
-    {
-        if let Ok((registry, _scope)) = crate::calp_registry::open_workspace_scoped(&registry_path) {
-            refresh_rollup_if_publisher(&registry, &package_name, &resolved_version);
-        }
-    }
+    refresh_rollup_if_publisher(
+        registry.as_ref(),
+        &collection.package_name,
+        &collection.read_version,
+        calp::workspace_scope(&collection.registry_path).ok().as_ref(),
+    );
     Ok(infos)
 }
 
-/// The current raw record per (submitter, cell) slot for a region, across the
-/// resolved version and older ones (lenient carry-forward), sorted by submitter
-/// then cell. Shared by the dashboard projection, the CSV export, and the
-/// Parquet export so all three see exactly the same set.
-/// `environment_override`: `None` means "this workbook's own stream", which is
-/// the only correct answer for anything that feeds a value. The publisher
-/// DASHBOARD passes `Some` so a publisher can look at what testers submitted
-/// without switching their own subscription — a deliberate act with the answer
-/// named on screen, never a silent mixing.
-fn load_region_current_submissions(
-    state: &AppState,
+/// The current raw record per (stream, submitter, cell) slot for a region,
+/// across the read version and the older versions whose answers still belong
+/// to it, sorted by submitter then cell. THE ONE ROW SOURCE of the dashboard,
+/// the CSV export, the Parquet export, the submission watch, scripts AND the
+/// author's BI writeback tables (`bi::writeback_source`), so all of them see
+/// exactly the same set.
+///
+/// `reading`: the streams admitted -- `collection.streams` (the workbook's
+/// Collect From choice for its own region, the subscription's one stream for
+/// a subscribed region), never wider.
+///
+/// WHICH VERSIONS: `calp_collection::collected_versions` -- each stream's own
+/// carry-forward, then the compatibility rule GATHER uses. Until BUG-0555 every
+/// older version was carried forward with no compatibility check at all.
+///
+/// THE SLOT INCLUDES THE STREAM. Across several streams the same person may
+/// have answered the same cell in `test` and in `prod`; keyed without the
+/// stream, the newer of the two silently hid the other. Within one stream the
+/// key is unchanged.
+///
+/// WHICH ANSWERS: only those the application's identity rule COUNTS
+/// (`collection.identity_policy`, `calp::identity_check::admit`) -- every one
+/// when the application counts every answer, only Verified ones under "count
+/// only verified senders". The publisher's inbox and exports read
+/// [`load_region_collected_rows`] instead, which keeps the others, labelled.
+pub(crate) fn load_region_current_submissions(
+    collection: &crate::calp_collection::RegionCollection,
+    registry: &dyn calp::WorkspaceTransport,
     region_id: &str,
-    environment_override: Option<&str>,
+    reading: &calp::writeback::StreamFilter,
 ) -> Result<Vec<calp::writeback::WritebackSubmission>, String> {
-    let OwningSubscription { package_name, resolved_version, registry_path, environment } =
-        owning_subscription_for_region(state, region_id)?;
-    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&registry_path)
-        .map_err(|e| e.to_string())?;
+    Ok(calp::identity_check::admit(
+        load_region_collected_rows(collection, registry, region_id, reading)?,
+        &collection.identity_policy,
+    ))
+}
 
-    let mut versions = vec![resolved_version.clone()];
-    versions.extend(carry_forward_versions(
-        &registry,
-        &package_name,
-        &resolved_version,
-        environment_override.unwrap_or(&environment),
-    ));
+/// Every current record of a region (see [`load_region_current_submissions`]
+/// for which versions and slots), EACH WITH THE READER'S IDENTITY VERDICT
+/// attached (`identity_verification::attest`), whether or not the
+/// application's rule counts it. For the surfaces that SHOW answers to the
+/// publisher (the inbox, the exports); every surface that COUNTS them goes
+/// through `load_region_current_submissions`.
+pub(crate) fn load_region_collected_rows(
+    collection: &crate::calp_collection::RegionCollection,
+    registry: &dyn calp::WorkspaceTransport,
+    region_id: &str,
+    reading: &calp::writeback::StreamFilter,
+) -> Result<Vec<calp::writeback::WritebackSubmission>, String> {
+    let package_name = collection.package_name.as_str();
+    let walked = crate::calp_collection::collected_versions(registry, collection, reading);
+    if !walked.excluded.is_empty() {
+        crate::log_warn!(
+            "CALP",
+            "writeback region '{}': answers in these versions are not carried forward: {}",
+            region_id,
+            walked.excluded.join("; ")
+        );
+    }
+    let versions = walked.versions.clone();
+    let authority = collection.review_authority(registry);
 
     // Across versions, the NEWEST RECORD WINS — by timestamp, not by version
     // order. The list is version-ordered and `versions_held_by` sorts descending,
@@ -18356,13 +19689,47 @@ fn load_region_current_submissions(
     // this list, the exports and the review command for the same slot.
     // Each version's load is already collapsed by the workspace fold, so this
     // only arbitrates ACROSS versions.
-    let mut by_slot: std::collections::HashMap<(String, u32, u32), calp::writeback::WritebackSubmission> =
-        std::collections::HashMap::new();
-    let reading = environment_override.unwrap_or(&environment);
+    let mut by_slot: std::collections::HashMap<
+        (String, String, u32, u32),
+        calp::writeback::WritebackSubmission,
+    > = std::collections::HashMap::new();
+    // A version whose submissions cannot be read is NEVER "no submissions":
+    // when every version failed the inbox says it could not read the workspace
+    // instead of "No submissions yet for this region." with answers waiting
+    // there. A partial failure keeps what was read and is logged.
+    let mut read_errors: Vec<String> = Vec::new();
     for version in &versions {
-        if let Ok(subs) = registry.load_current_region_submissions(&package_name, version, region_id) {
-            for s in calp::writeback::visible_in(subs, Some(reading)) {
-                match by_slot.entry((s.submitter.id.clone(), s.cell_row, s.cell_col)) {
+        // THE WHOLE FOLD, so what it refused is at least LOGGED on every
+        // publisher read (the pane does not show it yet: open-items 2.am).
+        let subs = match registry.load_submission_fold(package_name, version, &authority) {
+            Ok(fold) => {
+                let forged = fold.forged.iter().filter(|f| f.event.region_id == region_id).count();
+                let ignored = fold.ignored_reviews.iter().filter(|r| r.review.region_id == region_id).count();
+                if forged > 0 || ignored > 0 {
+                    crate::log_warn!(
+                        "CALP",
+                        "writeback region '{}' v{}: {} forged answer(s) and {} unsigned or unauthorised review decision(s) were ignored",
+                        region_id,
+                        version,
+                        forged,
+                        ignored
+                    );
+                }
+                let subs: Vec<_> = fold.current.into_iter().filter(|s| s.region_id == region_id).collect();
+                // The reader's verdict, per VERSION (the answer's file lives there).
+                crate::identity_verification::attested(registry, package_name, version, subs)
+            }
+            Err(e) => {
+                read_errors.push(format!("v{version}: {e}"));
+                continue;
+            }
+        };
+        {
+            // EACH VERSION UNDER ITS OWN STREAMS: a stream carried forward from
+            // its own base (prod behind the development line) reads only the
+            // versions it held (`CollectedVersions::filter_for`).
+            for s in calp::writeback::visible_in_streams(subs, &walked.filter_for(version, reading)) {
+                match by_slot.entry((s.environment.clone(), s.submitter.id.clone(), s.cell_row, s.cell_col)) {
                     std::collections::hash_map::Entry::Vacant(v) => {
                         v.insert(s);
                     }
@@ -18382,6 +19749,21 @@ fn load_region_current_submissions(
         }
     }
 
+    if !read_errors.is_empty() {
+        if read_errors.len() == versions.len() {
+            return Err(format!(
+                "Could not read the submissions for this region in the workspace {}: {}",
+                collection.registry_path,
+                read_errors.join("; ")
+            ));
+        }
+        crate::log_warn!(
+            "CALP",
+            "writeback region '{}': some versions' submissions could not be read (shown without them): {}",
+            region_id,
+            read_errors.join("; ")
+        );
+    }
     let mut out: Vec<_> = by_slot.into_values().collect();
     out.sort_by(|a, b| {
         a.submitter
@@ -18389,8 +19771,20 @@ fn load_region_current_submissions(
             .cmp(&b.submitter.display_name)
             .then(a.cell_row.cmp(&b.cell_row))
             .then(a.cell_col.cmp(&b.cell_col))
+            .then(a.environment.cmp(&b.environment))
     });
     Ok(out)
+}
+
+/// The camelCase name of an identity verdict's status (the export columns).
+pub(crate) fn identity_status_str(status: calp::IdentityStatus) -> &'static str {
+    match status {
+        calp::IdentityStatus::NotChecked => "notChecked",
+        calp::IdentityStatus::Verified => "verified",
+        calp::IdentityStatus::SignedUnconfirmed => "signedUnconfirmed",
+        calp::IdentityStatus::NotVerified => "notVerified",
+        calp::IdentityStatus::BeforeSignIn => "beforeSignIn",
+    }
 }
 
 /// The string label for a submission state.
@@ -18404,20 +19798,29 @@ pub(crate) fn submission_state_str(s: &calp::writeback::SubmissionState) -> &'st
     }
 }
 
-/// Shared loader behind `calp_load_region_submissions` and the CSV export: the
-/// current record per (submitter, cell) slot, projected for the dashboard.
-fn load_region_submission_infos(
-    state: &AppState,
-    region_id: &str,
-    environment_override: Option<&str>,
-) -> Result<Vec<RegionSubmissionInfo>, String> {
+/// Shared projection behind `calp_load_region_submissions` and the CSV export:
+/// the current record per (stream, submitter, cell) slot, for the dashboard.
+///
+/// `locale`: the APP locale for the dashboard's DISPLAY text (a number reads
+/// as the cells show it); `None` for the CSV export, which stays invariant
+/// because other programs parse it.
+fn region_submission_infos(
+    current: Vec<calp::writeback::WritebackSubmission>,
+    locale: Option<&engine::LocaleSettings>,
+    policy: &calp::IdentityPolicy,
+) -> Vec<RegionSubmissionInfo> {
     use calp::writeback::SubmissionValue;
-    let out: Vec<RegionSubmissionInfo> =
-        load_region_current_submissions(state, region_id, environment_override)?
+    current
         .into_iter()
         .map(|s| {
             let (value_display, value_kind) = match &s.value {
-                SubmissionValue::Number { value } => (value.to_string(), "number"),
+                SubmissionValue::Number { value } => (
+                    match locale {
+                        Some(locale) => crate::format_cell_value_display(&engine::CellValue::Number(*value), locale),
+                        None => value.to_string(),
+                    },
+                    "number",
+                ),
                 SubmissionValue::Text { value } => (value.clone(), "text"),
                 SubmissionValue::Boolean { value } => {
                     ((if *value { "TRUE" } else { "FALSE" }).to_string(), "boolean")
@@ -18435,6 +19838,16 @@ fn load_region_submission_infos(
                 cell_col: s.cell_col,
                 submitter_id: s.submitter.id,
                 submitter_name: s.submitter.display_name,
+                submitter_principal: if s.sender == calp::SenderCheck::Signed {
+                    s.submitter.principal_name
+                } else {
+                    String::new()
+                },
+                sender: s.sender,
+                origin: s.seal.as_ref().filter(|_| s.sender == calp::SenderCheck::Signed).map(|seal| seal.origin),
+                identity_label: s.identity.label(),
+                counted: policy.counts(&s.identity),
+                identity: s.identity,
                 value_display,
                 value_kind: value_kind.to_string(),
                 state: submission_state_str(&s.state).to_string(),
@@ -18444,8 +19857,7 @@ fn load_region_submission_infos(
                 reviewed_by: s.reviewed_by,
             }
         })
-        .collect();
-    Ok(out)
+        .collect()
 }
 
 /// Quote a CSV field if it contains a comma, quote, or newline (RFC 4180).
@@ -18466,23 +19878,39 @@ fn csv_escape(s: &str) -> String {
 pub fn calp_export_region_submissions_csv(
     state: State<AppState>,
     region_id: String,
-    // The stream the dashboard is SHOWING. Without it a publisher following
-    // prod who viewed test read a respondent count for prod under a list of
-    // test rows, and exported prod's values under a filename naming test.
-    environment: Option<String>,
+    // No stream argument: the export holds exactly what the dashboard shows,
+    // the workbook's ONE choice (Writeback > Collect From), every row
+    // carrying its stream in the `environment` column.
     window: tauri::Window,
 ) -> Result<String, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    export_region_submissions_csv_core(&state, &region_id)
+}
+
+/// The body of [`calp_export_region_submissions_csv`], without the window.
+pub(crate) fn export_region_submissions_csv_core(
+    state: &AppState,
+    region_id: &str,
+) -> Result<String, String> {
     // AUTHORIZATION: an export is the same disclosure as the dashboard, in a
     // form that leaves the app. Publisher only.
-    require_region_publisher(&state, &region_id)?;
-    let rows = load_region_submission_infos(&state, &region_id, environment.as_deref())?;
+    let (collection, registry) = crate::calp_collection::publisher_collection(state, region_id)?;
+    // INVARIANT text, on purpose: a CSV is read by other programs, and a
+    // locale's decimal comma would collide with the field separator.
+    // EVERY row, like the inbox, with the reader's identity verdict and
+    // whether the application's rule counts it: a file that leaves the app
+    // must not present an uncounted answer as part of the total.
+    let rows = region_submission_infos(
+        load_region_collected_rows(&collection, registry.as_ref(), region_id, &collection.streams)?,
+        None,
+        &collection.identity_policy,
+    );
     // THE ENVIRONMENT IS A COLUMN, as it is in the Parquet export and the
     // rollup. Without it the file is a set of numbers with no record of which
     // stream produced them, which is exactly how a test total gets read as a
     // production one after it leaves the app.
     let mut out =
-        String::from("submitter,submitterId,environment,cell,value,type,state,submittedAt,updatedAt,reviewedBy,reviewReason\n");
+        String::from("submitter,submitterId,environment,cell,value,type,state,submittedAt,updatedAt,reviewedBy,reviewReason,identity,writtenBy,counted\n");
     for r in &rows {
         let cell = format!("R{}C{}", r.cell_row + 1, r.cell_col + 1);
         let environment_label =
@@ -18499,6 +19927,9 @@ pub fn calp_export_region_submissions_csv(
             r.updated_at.as_str(),
             r.reviewed_by.as_deref().unwrap_or(""),
             r.review_reason.as_deref().unwrap_or(""),
+            r.identity_label.as_str(),
+            r.identity.written_by.as_str(),
+            if r.counted { "yes" } else { "no" },
         ];
         out.push_str(
             &fields
@@ -18533,6 +19964,7 @@ fn a1(row: u32, col: u32) -> String {
 /// per-slot JSON or guessing types from a CSV.
 fn encode_submissions_parquet(
     subs: &[calp::writeback::WritebackSubmission],
+    policy: &calp::IdentityPolicy,
 ) -> Result<Vec<u8>, String> {
     use arrow::array::{ArrayRef, BooleanBuilder, Float64Builder, StringBuilder, UInt32Builder};
     use arrow::datatypes::{DataType, Field, Schema};
@@ -18557,6 +19989,14 @@ fn encode_submissions_parquet(
     let mut updated_at = StringBuilder::new();
     let mut reviewed_by = StringBuilder::new();
     let mut review_reason = StringBuilder::new();
+    // WHO SENT IT, as the reader concluded (identity phase 1), and whether the
+    // application's rule counts it -- so a database total can match the app's.
+    let mut identity = StringBuilder::new();
+    // WHO WINDOWS RECORDED AS THE WRITER (Verified / Not verified), beside the
+    // sender's own claim in submitter_name: a file that leaves the app must not
+    // present a claimed name as the proven one.
+    let mut written_by = StringBuilder::new();
+    let mut counted = BooleanBuilder::new();
 
     for s in subs {
         submission_id.append_value(&s.id);
@@ -18603,6 +20043,13 @@ fn encode_submissions_parquet(
         updated_at.append_value(&s.updated_at);
         reviewed_by.append_option(s.reviewed_by.as_deref());
         review_reason.append_option(s.review_reason.as_deref());
+        identity.append_value(identity_status_str(s.identity.status));
+        if s.identity.written_by.trim().is_empty() {
+            written_by.append_null();
+        } else {
+            written_by.append_value(s.identity.written_by.trim());
+        }
+        counted.append_value(policy.counts(&s.identity));
     }
 
     let schema = Arc::new(Schema::new(vec![
@@ -18623,6 +20070,9 @@ fn encode_submissions_parquet(
         Field::new("updated_at", DataType::Utf8, false),
         Field::new("reviewed_by", DataType::Utf8, true),
         Field::new("review_reason", DataType::Utf8, true),
+        Field::new("identity", DataType::Utf8, false),
+        Field::new("written_by", DataType::Utf8, true),
+        Field::new("counted", DataType::Boolean, false),
     ]));
 
     let columns: Vec<ArrayRef> = vec![
@@ -18643,6 +20093,9 @@ fn encode_submissions_parquet(
         Arc::new(updated_at.finish()),
         Arc::new(reviewed_by.finish()),
         Arc::new(review_reason.finish()),
+        Arc::new(identity.finish()),
+        Arc::new(written_by.finish()),
+        Arc::new(counted.finish()),
     ];
 
     let batch = RecordBatch::try_new(schema.clone(), columns).map_err(|e| e.to_string())?;
@@ -18665,17 +20118,15 @@ fn encode_submissions_parquet(
 pub fn calp_export_region_submissions_parquet(
     state: State<AppState>,
     region_id: String,
-    // The stream the dashboard is SHOWING. Without it a publisher following
-    // prod who viewed test read a respondent count for prod under a list of
-    // test rows, and exported prod's values under a filename naming test.
-    environment: Option<String>,
+    // No stream argument: the workbook's ONE choice, as the CSV export.
     window: tauri::Window,
 ) -> Result<Vec<u8>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     // AUTHORIZATION: same disclosure as the CSV export. Publisher only.
-    require_region_publisher(&state, &region_id)?;
-    let subs = load_region_current_submissions(&state, &region_id, environment.as_deref())?;
-    encode_submissions_parquet(&subs)
+    let (collection, registry) = crate::calp_collection::publisher_collection(&state, &region_id)?;
+    // Every row, labelled and marked counted or not -- as the CSV export.
+    let subs = load_region_collected_rows(&collection, registry.as_ref(), &region_id, &collection.streams)?;
+    encode_submissions_parquet(&subs, &collection.identity_policy)
 }
 
 /// Best-effort: (re)materialize the per-version Parquet rollup of the CURRENT
@@ -18686,19 +20137,44 @@ pub fn calp_export_region_submissions_parquet(
 /// walk) so it never trips pull, and it is a non-`.json` file so it is ignored
 /// by submission loading. Failures are logged, not surfaced — the JSON events
 /// remain the source of truth and the next refresh self-heals the rollup.
+///
+/// DELIBERATELY UNFILTERED BY Writeback > Collect From: the rollup is the
+/// workspace's per-version raw record, read by other tools and other people,
+/// and it already carries an `environment` column. A choice that belongs to ONE
+/// workbook must not rewrite a shared artifact (docs/design/calp-writeback.md).
 fn materialize_submissions_parquet(
     registry: &dyn calp::WorkspaceTransport,
     package: &str,
     version: &str,
+    scope: Option<&calp::WorkspaceScope>,
 ) {
-    let subs = match registry.load_current_submissions(package, version) {
-        Ok(s) => s,
+    // WHOSE DECISIONS the rollup folds in: the version's publisher key, and
+    // only when THIS profile holds it (the rollup is written by the publisher's
+    // machine alone -- `refresh_rollup_if_publisher` and the publisher-gated
+    // switch). Possession is what makes that unsigned manifest read
+    // trustworthy; without it no decision counts here.
+    let (key, policy) = registry
+        .get_version_manifest(package, version)
+        .map(|m| (m.publisher_key, m.identity_policy.unwrap_or_default()))
+        .unwrap_or_default();
+    let holds = calp::signing::profile_holds_publisher_key(&calcula_profile_dir(), &key).unwrap_or(false);
+    // The rule counts only when THIS profile holds the key that signed it;
+    // otherwise the unsigned read is not trusted to say anything.
+    let policy = if holds { policy } else { calp::IdentityPolicy::default() };
+    let authority = if holds {
+        review_authority(registry, package, &key, scope)
+    } else {
+        calp::ReviewAuthority::none()
+    };
+    let subs = match registry.load_current_submissions(package, version, &authority) {
+        // Labelled with this (the publisher's) computer's verdicts.
+        Ok(s) => crate::identity_verification::attested(registry, package, version, s),
         Err(e) => {
             crate::log_warn!("CALP", "writeback rollup: load_current_submissions failed: {}", e);
             return;
         }
     };
-    let bytes = match encode_submissions_parquet(&subs) {
+    let bytes = match encode_submissions_parquet(&subs, &policy) {
         Ok(b) => b,
         Err(e) => {
             crate::log_warn!("CALP", "writeback rollup: parquet encode failed: {}", e);
@@ -18721,6 +20197,7 @@ fn refresh_rollup_if_publisher(
     registry: &dyn calp::WorkspaceTransport,
     package: &str,
     version: &str,
+    scope: Option<&calp::WorkspaceScope>,
 ) {
     if !rollup_enabled(registry, package) {
         return;
@@ -18734,7 +20211,7 @@ fn refresh_rollup_if_publisher(
         })
         .unwrap_or(false);
     if is_publisher {
-        materialize_submissions_parquet(registry, package, version);
+        materialize_submissions_parquet(registry, package, version, scope);
     }
 }
 
@@ -18759,11 +20236,10 @@ pub fn calp_get_writeback_rollup(
     window: tauri::Window,
 ) -> Result<bool, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let OwningSubscription { package_name, registry_path, .. } =
-        owning_subscription_for_region(&state, &region_id)?;
-    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&registry_path)
+    let collection = crate::calp_collection::collection_for_region(&state, &region_id)?;
+    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&collection.registry_path)
         .map_err(|e| e.to_string())?;
-    Ok(rollup_enabled(&registry, &package_name))
+    Ok(rollup_enabled(registry.as_ref(), &collection.package_name))
 }
 
 /// Publisher-only: enable/disable the auto-materialized Parquet rollup for the
@@ -18777,11 +20253,9 @@ pub fn calp_set_writeback_rollup(
     window: tauri::Window,
 ) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let OwningSubscription { package_name, resolved_version, registry_path, .. } =
-        owning_subscription_for_region(&state, &region_id)?;
-    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&registry_path)
-        .map_err(|e| e.to_string())?;
-    require_publisher(&registry, &package_name, &resolved_version)?;
+    let (collection, registry) = crate::calp_collection::publisher_collection(&state, &region_id)?;
+    let package_name = collection.package_name.clone();
+    let resolved_version = collection.read_version.clone();
 
     // The application-manifest read-modify-write is the ONE mutable-file update on
     // this path — guard it with the workspace's publish lock so a concurrent
@@ -18804,7 +20278,8 @@ pub fn calp_set_writeback_rollup(
     drop(_manifest_guard);
 
     if enabled {
-        materialize_submissions_parquet(&registry, &package_name, &resolved_version);
+        let scope = calp::workspace_scope(&collection.registry_path).ok();
+        materialize_submissions_parquet(registry.as_ref(), &package_name, &resolved_version, scope.as_ref());
     }
     Ok(())
 }
@@ -18820,100 +20295,149 @@ pub struct RegionResponseStatus {
     pub responded: Vec<String>,
     /// Expected identifiers with no matching submission yet.
     pub missing: Vec<String>,
+    /// Respondents whose answers were all sent BEFORE sign-in (the old random
+    /// id, unsigned): shown, labelled, and never matched by name.
+    pub before_sign_in: Vec<String>,
+    /// Senders whose answers the application's rule does NOT count ("count
+    /// only verified senders" and their identity is not verified): they are
+    /// not in `responded`, and an expected respondent they would have matched
+    /// stays `missing`. Empty when the application counts every answer.
+    pub not_counted: Vec<String>,
+    /// Whether the application counts only verified senders.
+    pub require_verified: bool,
 }
 
 /// Compute who has responded vs. who is still expected for a region — the
 /// publisher's "7 of 12 submitted / chase the rest" view. Matches each declared
-/// expected respondent case-insensitively against any submitter's display name
-/// or id (with a substring fallback so "Alice" matches "Alice (North)").
+/// expected respondent exactly and case-insensitively against a sender's SIGNED
+/// principal name (`MACHINE\user` / `DOMAIN\user`) or id -- never the display
+/// name, never a substring (identity phase 1).
 /// PUBLISHER-GATED: `responded` names every contributor, so this is the same
 /// cross-submitter disclosure as the inbox, merely aggregated.
 #[tauri::command]
 pub fn calp_region_response_status(
     state: State<AppState>,
     region_id: String,
-    // The stream the dashboard is SHOWING. Without it a publisher following
-    // prod who viewed test read a respondent count for prod under a list of
-    // test rows, and exported prod's values under a filename naming test.
-    environment: Option<String>,
+    // No stream argument: the roster counts exactly the streams the dashboard
+    // lists, the workbook's ONE choice (Writeback > Collect From).
     window: tauri::Window,
 ) -> Result<RegionResponseStatus, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let OwningSubscription {
-        package_name,
-        resolved_version,
-        registry_path,
-        environment: environment_of_sub,
-    } = owning_subscription_for_region(&state, &region_id)?;
-    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&registry_path)
-        .map_err(|e| e.to_string())?;
+    region_response_status_core(&state, &region_id)
+}
+
+/// The body of [`calp_region_response_status`], without the window.
+pub(crate) fn region_response_status_core(
+    state: &AppState,
+    region_id: &str,
+) -> Result<RegionResponseStatus, String> {
+    let region_id = region_id.to_string();
     // AUTHORIZATION: `responded` names every contributor across all submitters
     // — the same cross-submitter disclosure as the inbox, just aggregated.
     // Publisher only.
-    require_publisher(&*registry, &package_name, &resolved_version)?;
-
-    let expected: Vec<String> = registry
-        .get_version_manifest(&package_name, &resolved_version)
-        .ok()
-        .and_then(|m| m.writeback_regions)
-        .and_then(|regions| regions.into_iter().find(|r| r.id == region_id))
-        .map(|d| d.expected_respondents)
-        .unwrap_or_default();
+    let (collection, registry) = crate::calp_collection::publisher_collection(state, &region_id)?;
+    // From the VERIFIED declaration the region was resolved through, not a
+    // re-read of the unsigned manifest.
+    let expected: Vec<String> = collection.declaration.expected_respondents.clone();
 
     // Distinct submitters (id -> display name) with a non-empty submission,
-    // across the resolved version and the ones this stream ran before it.
-    // The stream being asked about: the picker's, or this workbook's own.
-    let counting = environment.as_deref().unwrap_or(environment_of_sub.as_str()).to_string();
-    let mut versions = vec![resolved_version.clone()];
-    versions.extend(carry_forward_versions(
-        &registry,
-        &package_name,
-        &resolved_version,
-        &counting,
-    ));
-    let mut respondents: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for version in &versions {
-        if let Ok(subs) = registry.load_current_region_submissions(&package_name, version, &region_id) {
-            for s in calp::writeback::visible_in(subs, Some(&counting)) {
-                if matches!(s.value, calp::writeback::SubmissionValue::Empty) {
-                    continue;
+    // across the read version and the older versions whose answers still
+    // belong to the region, in the streams this workbook collects.
+    // THE SAME ROWS the inbox lists (one row source), each with the reader's
+    // identity verdict; the roster counts only what the application's rule
+    // counts and NAMES the senders it does not.
+    let rows = load_region_collected_rows(&collection, registry.as_ref(), &region_id, &collection.streams)?;
+    let policy = collection.identity_policy;
+    let mut respondents: std::collections::HashMap<String, Respondent> = std::collections::HashMap::new();
+    let mut not_counted: Vec<String> = Vec::new();
+    for s in rows {
+        if matches!(s.value, calp::writeback::SubmissionValue::Empty) {
+            continue;
+        }
+        if !policy.counts(&s.identity) {
+            not_counted.push(calp::identity_check::shown_name(&s));
+            continue;
+        }
+        let signed = s.sender == calp::SenderCheck::Signed;
+        // WHAT THE READER PROVED, NEVER A REFUTED CLAIM
+        // (`calp::identity_check::matching_identity`): a Verified sender is
+        // matched by the account Windows recorded -- and by no name when they
+        // claimed another; a Not-verified one (Windows names another writer)
+        // by no name at all, whatever the rule. And they are LISTED with the
+        // recorded writer when that is not who they claim to be.
+        let mut who = calp::identity_check::matching_identity(&s);
+        who.display_name = calp::identity_check::shown_name(&s);
+        match respondents.entry(s.submitter.id.clone()) {
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(Respondent { who, signed });
+            }
+            std::collections::hash_map::Entry::Occupied(mut o) => {
+                let entry = o.get_mut();
+                entry.signed |= signed;
+                // Another answer of the same sender that names a matchable
+                // account keeps it (one proven answer is enough).
+                if entry.who.principal_name.trim().is_empty() && !who.principal_name.trim().is_empty() {
+                    entry.who.principal_name = who.principal_name;
                 }
-                respondents
-                    .entry(s.submitter.id.clone())
-                    .or_insert(s.submitter.display_name.clone());
             }
         }
     }
 
-    Ok(compute_response_status(expected, &respondents))
+    let mut status = compute_response_status(expected, &respondents);
+    // A sender with one counted and one uncounted answer HAS responded.
+    let responded: std::collections::HashSet<String> = status.responded.iter().cloned().collect();
+    not_counted.retain(|n| !responded.contains(n));
+    not_counted.sort();
+    not_counted.dedup();
+    status.not_counted = not_counted;
+    status.require_verified = policy.require_verified;
+    Ok(status)
+}
+
+/// One sender with a non-empty answer, and whether any of their answers is
+/// signed (identity phase 1). Only a signed sender can be matched by NAME.
+#[derive(Debug, Clone)]
+pub(crate) struct Respondent {
+    pub who: calp::SubmitterIdentity,
+    pub signed: bool,
 }
 
 /// Pure completion-tracking computation (extracted for unit testing): given the
-/// declared expected respondents and `respondents` (id -> display name of
-/// everyone with a non-empty submission), return who responded and who's
-/// missing. An expected entry matches case-insensitively on a submitter's id or
-/// display name, with a substring fallback either way ("Alice" ⇄ "Alice (North)").
+/// declared expected respondents and `respondents` (id -> everyone with a
+/// non-empty submission), return who responded and who's missing.
+///
+/// THE ONE MATCHER (`calp::identity_provider::principal_matches`, identity
+/// phase 1): an expected entry matches a sender's SIGNED principal name
+/// (`MACHINE\user` / `DOMAIN\user`) or their id, exactly and
+/// case-insensitively. Never the display name and never a substring -- the old
+/// fallback let "Al" answer for "Alice" and "Alan" -- and a sender whose answers
+/// were all sent before sign-in matches by id only.
 fn compute_response_status(
     expected: Vec<String>,
-    respondents: &std::collections::HashMap<String, String>,
+    respondents: &std::collections::HashMap<String, Respondent>,
 ) -> RegionResponseStatus {
-    let mut responded: Vec<String> = respondents.values().cloned().collect();
+    let mut responded: Vec<String> = respondents.values().map(|r| r.who.display_name.clone()).collect();
     responded.sort();
     responded.dedup();
+    let mut before_sign_in: Vec<String> = respondents
+        .values()
+        .filter(|r| !r.signed)
+        .map(|r| r.who.display_name.clone())
+        .collect();
+    before_sign_in.sort();
+    before_sign_in.dedup();
 
     let matched = |exp: &str| -> bool {
-        let e = exp.trim().to_lowercase();
-        if e.is_empty() {
+        if exp.trim().is_empty() {
             return true; // a blank expected entry isn't "missing"
         }
-        respondents.iter().any(|(id, name)| {
-            let n = name.to_lowercase();
-            id.to_lowercase() == e || n == e || n.contains(&e) || e.contains(&n)
-        })
+        respondents
+            .values()
+            .any(|r| calp::identity_provider::principal_matches(exp, &r.who, r.signed))
     };
     let missing: Vec<String> = expected.iter().filter(|e| !matched(e)).cloned().collect();
 
-    RegionResponseStatus { expected, responded, missing }
+    RegionResponseStatus { expected, responded, missing, before_sign_in, not_counted: Vec::new(), require_verified: false }
 }
 
 /// Apply a region's GATHER governance to its submissions: approval gating,
@@ -18923,11 +20447,19 @@ fn compute_response_status(
 /// for what reaches an aggregate, so it must never silently change.
 /// `pub(crate)`: also the mandatory filter for subscriber-audience writeback
 /// dataset tables (bi::writeback_source) — one governance path, never two.
+///
+/// `identity_policy`: the application's identity rule (identity phase 1). With
+/// "count only verified senders" an answer whose READER verdict is not
+/// Verified never reaches a total -- including one nobody attested (fail
+/// closed); callers attach the verdicts first (`identity_verification::attest`).
 pub(crate) fn apply_gather_governance(
-    mut submissions: Vec<calp::writeback::WritebackSubmission>,
+    submissions: Vec<calp::writeback::WritebackSubmission>,
     region: &calp::WritebackRegionDeclaration,
     own_identity: Option<&calp::SubmitterIdentity>,
+    identity_policy: &calp::IdentityPolicy,
 ) -> Vec<calp::writeback::WritebackSubmission> {
+    // WHICH ANSWERS COUNT AT ALL, before anything else looks at them.
+    let mut submissions = calp::identity_check::admit(submissions, identity_policy);
     // PRIVACY FAIL-CLOSED (C2b): "is this submission the reader's own?" must
     // treat a BLANK/whitespace reader id as NO identity. A corrupt or
     // hand-written subscriber-identity.json with "id":"" would otherwise make
@@ -18937,11 +20469,12 @@ pub(crate) fn apply_gather_governance(
     // own_plus_aggregate anonymizes EVERYONE (the safe direction). A real minted
     // identity always carries a non-blank UUID, so legitimate views are
     // unaffected. See also the load-time guard in calp::identity_provider.
-    fn is_own(own: Option<&calp::SubmitterIdentity>, submission_id: &str) -> bool {
-        match own {
-            Some(o) if !o.id.trim().is_empty() => o.id == submission_id,
-            _ => false,
-        }
+    //
+    // IDENTITY PHASE 1: "own" is `calp::submission_seal::is_mine` -- my id AND
+    // signed by my key -- the same predicate that decides which records seed my
+    // cells. A record planted under my id never reads as mine.
+    fn is_own(own: Option<&calp::SubmitterIdentity>, submission: &calp::writeback::WritebackSubmission) -> bool {
+        calp::submission_seal::is_mine(own, submission)
     }
 
     // Approval gating: rejected submissions never count; under
@@ -19001,7 +20534,7 @@ pub(crate) fn apply_gather_governance(
     // every gatherer is a subscriber, so the policy applies to all.
     match region.visibility {
         Some(calp::writeback::VisibilityPolicy::OwnOnly) => {
-            submissions.retain(|s| is_own(own_identity, &s.submitter.id));
+            submissions.retain(|s| is_own(own_identity, s));
         }
         Some(calp::writeback::VisibilityPolicy::OwnPlusAggregate) => {
             // Values flow (aggregates need them) but other submitters'
@@ -19013,13 +20546,13 @@ pub(crate) fn apply_gather_governance(
                 std::collections::HashMap::new();
             let mut next: usize = 1;
             for s in submissions.iter() {
-                if !is_own(own_identity, &s.submitter.id) && !token_for.contains_key(&s.submitter.id) {
+                if !is_own(own_identity, s) && !token_for.contains_key(&s.submitter.id) {
                     token_for.insert(s.submitter.id.clone(), format!("Submitter {next}"));
                     next += 1;
                 }
             }
             for s in submissions.iter_mut() {
-                if !is_own(own_identity, &s.submitter.id) {
+                if !is_own(own_identity, s) {
                     s.submitter.display_name = token_for
                         .get(&s.submitter.id)
                         .cloned()
@@ -19032,6 +20565,42 @@ pub(crate) fn apply_gather_governance(
     }
 
     submissions
+}
+
+/// THE ONE CARRY-FORWARD RULE: may answers sent against an OLDER version, whose
+/// (verified) manifest declares `old_regions`, still count for `region` as the
+/// current version declares it?
+///
+/// * `Strict` version binding on the current region: never.
+/// * The region absent in that version: nothing to carry.
+/// * GEOMETRY: the old selector's cells must still address the same thing
+///   (`preserves_cell_meaning_of`) -- answers are keyed by ABSOLUTE cell, so a
+///   region that slid down two rows would file last quarter's answers against
+///   the wrong rows and the aggregate would look plausible.
+/// * SCHEMA: both present -> compatible; either absent -> compatible.
+///
+/// Used by GATHER and the BI datasets (through `merge_lenient_submissions`)
+/// AND by every publisher read (`load_region_current_submissions`, review, the
+/// roster), which until BUG-0555 carried every older version's answers forward
+/// with no check at all.
+pub(crate) fn carries_forward_from(
+    region: &calp::WritebackRegionDeclaration,
+    old_regions: &[calp::WritebackRegionDeclaration],
+) -> bool {
+    if matches!(region.version_binding, Some(calp::writeback::VersionBinding::Strict)) {
+        return false;
+    }
+    match old_regions.iter().find(|r| r.id == region.id) {
+        None => false,
+        Some(old_r) => {
+            // Geometry first, exactly as check_region_compatibility orders it.
+            region.selector.preserves_cell_meaning_of(&old_r.selector)
+                && match (&old_r.schema, &region.schema) {
+                    (Some(old_s), Some(new_s)) => old_s.is_compatible_with(new_s),
+                    _ => true,
+                }
+        }
+    }
 }
 
 /// Lenient version-binding carry-forward, extracted (behavior-preserving) from
@@ -19052,8 +20621,13 @@ pub(crate) fn apply_gather_governance(
 /// * SCHEMA — both present → compare; either absent → compatible.
 /// * Region absent in that version → nothing to carry.
 ///
-/// Newest `updated_at` wins per (submitter, cell) slot. A `Strict` version
-/// binding disables carry-forward entirely.
+/// Newest `updated_at` wins per (stream, submitter, cell) slot. A `Strict`
+/// version binding disables carry-forward entirely.
+///
+/// The decision itself is [`carries_forward_from`], shared with the
+/// publisher's reads (`load_region_current_submissions`), so GATHER, the BI
+/// datasets and Collected Responses can never disagree about which older
+/// answers still belong to the region.
 pub(crate) fn merge_lenient_submissions(
     mut submissions: Vec<calp::writeback::WritebackSubmission>,
     older: &[(
@@ -19062,32 +20636,21 @@ pub(crate) fn merge_lenient_submissions(
     )],
     region: &calp::WritebackRegionDeclaration,
 ) -> Vec<calp::writeback::WritebackSubmission> {
-    let lenient = !matches!(
-        region.version_binding,
-        Some(calp::writeback::VersionBinding::Strict)
-    );
-    if !lenient || older.is_empty() {
+    if older.is_empty() {
         return submissions;
     }
 
-    let mut slots: std::collections::HashMap<(String, u32, u32), usize> = submissions
+    // THE SLOT INCLUDES THE STREAM. A single-stream reader (every subscriber
+    // path) is unchanged by it; a publisher reader that admits several streams
+    // (Writeback > Collect From) would otherwise let a person's prod answer
+    // silently hide their test answer for the same cell, or the reverse.
+    let mut slots: std::collections::HashMap<(String, String, u32, u32), usize> = submissions
         .iter()
         .enumerate()
-        .map(|(i, s)| ((s.submitter.id.clone(), s.cell_row, s.cell_col), i))
+        .map(|(i, s)| ((s.environment.clone(), s.submitter.id.clone(), s.cell_row, s.cell_col), i))
         .collect();
     for (old_regions, old_by_region) in older {
-        let compatible = match old_regions.iter().find(|r| r.id == region.id) {
-            None => false,
-            Some(old_r) => {
-                // Geometry first, exactly as check_region_compatibility orders it.
-                region.selector.preserves_cell_meaning_of(&old_r.selector)
-                    && match (&old_r.schema, &region.schema) {
-                        (Some(old_s), Some(new_s)) => old_s.is_compatible_with(new_s),
-                        _ => true,
-                    }
-            }
-        };
-        if !compatible {
+        if !carries_forward_from(region, old_regions) {
             continue;
         }
         let Some(older_subs) = old_by_region.get(&region.id) else {
@@ -19095,6 +20658,7 @@ pub(crate) fn merge_lenient_submissions(
         };
         for candidate in older_subs.iter().cloned() {
             let key = (
+                candidate.environment.clone(),
                 candidate.submitter.id.clone(),
                 candidate.cell_row,
                 candidate.cell_col,
@@ -19442,11 +21006,22 @@ pub(crate) fn rebuild_gather_cache(state: &AppState) -> std::collections::HashMa
         // this system can be wrong: the cell shows a plausible total and
         // nothing anywhere says where it came from.
         let environment = sub.environment.clone().unwrap_or_default();
+        // Whose decisions count: the pinned manifest's key and its co-publishers.
+        // An `on_approval` total therefore counts only approvals the publisher
+        // SIGNED (owner decision 2026-10-22).
+        let authority = review_authority(registry.as_ref(), &sub.package_name, &ver_manifest.publisher_key, Some(&scope));
         match registry
-            .load_current_submissions(&sub.package_name, &sub.resolved_version)
+            .load_current_submissions(&sub.package_name, &sub.resolved_version, &authority)
             .map(|all| calp::writeback::visible_in(all, Some(&environment)))
         {
             Ok(all) => {
+                // The reader's identity verdicts, before the rule is applied.
+                let all = crate::identity_verification::attested(
+                    registry.as_ref(),
+                    &sub.package_name,
+                    &sub.resolved_version,
+                    all,
+                );
                 for s in all {
                     current_by_region.entry(s.region_id.clone()).or_default().push(s);
                 }
@@ -19478,9 +21053,14 @@ pub(crate) fn rebuild_gather_cache(state: &AppState) -> std::collections::HashMa
                     .ok()?;
                     let mut by_region: std::collections::HashMap<String, Vec<calp::writeback::WritebackSubmission>> =
                         std::collections::HashMap::new();
-                    for s in calp::writeback::visible_in(
-                        registry.load_current_submissions(&sub.package_name, version).ok()?,
-                        Some(&environment),
+                    for s in crate::identity_verification::attested(
+                        registry.as_ref(),
+                        &sub.package_name,
+                        version,
+                        calp::writeback::visible_in(
+                            registry.load_current_submissions(&sub.package_name, version, &authority).ok()?,
+                            Some(&environment),
+                        ),
                     ) {
                         by_region.entry(s.region_id.clone()).or_default().push(s);
                     }
@@ -19500,7 +21080,14 @@ pub(crate) fn rebuild_gather_cache(state: &AppState) -> std::collections::HashMa
             // silently dropped on every version bump.
             let submissions = merge_lenient_submissions(submissions, &older, region);
 
-            let submissions = apply_gather_governance(submissions, region, own_identity.as_ref());
+            // The application's identity rule, from the same PINNED manifest
+            // the regions come from.
+            let submissions = apply_gather_governance(
+                submissions,
+                region,
+                own_identity.as_ref(),
+                &ver_manifest.identity_policy.unwrap_or_default(),
+            );
 
             let gather_subs: Vec<engine::GatherSubmission> = submissions.iter().filter_map(|s| {
                 let value = match &s.value {
@@ -19971,6 +21558,9 @@ mod gather_governance_tests {
         SubmitterIdentity {
             display_name: name.to_string(),
             id: id.to_string(),
+            principal_name: String::new(),
+            provider: Default::default(),
+            scope: Default::default(),
             extra: HashMap::new(),
         }
     }
@@ -20000,6 +21590,11 @@ mod gather_governance_tests {
             submitted_at: None,
             review_reason: None,
             reviewed_by: None,
+            seal: None,
+            // What the fold concludes about an answer its sender signed: these
+            // fixtures stand for folded records (identity phase 1).
+            sender: calp::SenderCheck::Signed,
+            identity: Default::default(),
             extra: HashMap::new(),
         }
     }
@@ -20044,7 +21639,7 @@ mod gather_governance_tests {
             make_submission("alice", "Alice", SubmissionState::Submitted, num(10.0)),
             make_submission("bob", "Bob", SubmissionState::Approved, num(20.0)),
         ];
-        let out = apply_gather_governance(subs, &region, None);
+        let out = apply_gather_governance(subs, &region, None, &calp::IdentityPolicy::default());
         assert_eq!(out.len(), 1, "only the Approved submission survives on_approval");
         assert_eq!(out[0].submitter.id, "bob");
         assert!(matches!(out[0].value, SubmissionValue::Number { value } if value == 20.0));
@@ -20065,7 +21660,7 @@ mod gather_governance_tests {
                 SubmissionState::Submitted,
                 num(10.0),
             )];
-            let out = apply_gather_governance(subs, &region, None);
+            let out = apply_gather_governance(subs, &region, None, &calp::IdentityPolicy::default());
             assert_eq!(
                 out.len(),
                 1,
@@ -20088,7 +21683,7 @@ mod gather_governance_tests {
                 make_submission("a", "A", SubmissionState::Rejected, num(1.0)),
                 make_submission("b", "B", SubmissionState::Draft, num(2.0)),
             ];
-            let out = apply_gather_governance(subs, &region, None);
+            let out = apply_gather_governance(subs, &region, None, &calp::IdentityPolicy::default());
             assert!(
                 out.is_empty(),
                 "Rejected + Draft must both be dropped under policy {policy:?}"
@@ -20104,7 +21699,7 @@ mod gather_governance_tests {
             make_submission("a", "A", SubmissionState::Submitted, SubmissionValue::Empty),
             make_submission("b", "B", SubmissionState::Submitted, num(5.0)),
         ];
-        let out = apply_gather_governance(subs, &region, None);
+        let out = apply_gather_governance(subs, &region, None, &calp::IdentityPolicy::default());
         assert_eq!(out.len(), 1, "the Empty submission is dropped");
         assert_eq!(out[0].submitter.id, "b");
     }
@@ -20118,10 +21713,37 @@ mod gather_governance_tests {
             make_submission("id-alice", "Alice", SubmissionState::Submitted, num(10.0)),
             make_submission("id-bob", "Bob", SubmissionState::Submitted, num(20.0)),
         ];
-        let out = apply_gather_governance(subs, &region, Some(&alice));
+        let out = apply_gather_governance(subs, &region, Some(&alice), &calp::IdentityPolicy::default());
         assert_eq!(out.len(), 1, "only Alice's own submission remains");
         assert_eq!(out[0].submitter.id, "id-alice");
         assert_eq!(out[0].submitter.display_name, "Alice");
+    }
+
+    // 5b. IDENTITY PHASE 1: a record filed under MY id that my key did not sign
+    //     (sent before sign-in, or planted) is never "mine" -- own_only hides
+    //     it and own_plus_aggregate anonymizes it like anybody else's.
+    //
+    //     SABOTAGE: make `is_own` compare ids only (the pre-phase-1 rule).
+    #[test]
+    fn a_record_under_my_id_that_i_did_not_sign_is_not_mine() {
+        let alice = make_identity("id-alice", "Alice");
+        let mut planted = make_submission("id-alice", "Alice", SubmissionState::Submitted, num(99.0));
+        planted.sender = calp::SenderCheck::BeforeSignIn;
+        let own_only = apply_gather_governance(
+            vec![planted.clone()],
+            &make_region(Some(VisibilityPolicy::OwnOnly), None),
+            Some(&alice),
+            &calp::IdentityPolicy::default(),
+        );
+        assert!(own_only.is_empty(), "an unsigned record under my id is not mine");
+        let anon = apply_gather_governance(
+            vec![planted],
+            &make_region(Some(VisibilityPolicy::OwnPlusAggregate), None),
+            Some(&alice),
+            &calp::IdentityPolicy::default(),
+        );
+        assert_eq!(anon.len(), 1, "the value still counts in the aggregate");
+        assert_eq!(anon[0].submitter.id, "", "but it is anonymized, not shown as mine");
     }
 
     // 6. OwnPlusAggregate: Bob's value REMAINS but his identity is anonymized;
@@ -20134,7 +21756,7 @@ mod gather_governance_tests {
             make_submission("id-alice", "Alice", SubmissionState::Submitted, num(10.0)),
             make_submission("id-bob", "Bob", SubmissionState::Submitted, num(20.0)),
         ];
-        let out = apply_gather_governance(subs, &region, Some(&alice));
+        let out = apply_gather_governance(subs, &region, Some(&alice), &calp::IdentityPolicy::default());
         assert_eq!(out.len(), 2, "both values flow into the aggregate");
 
         let own = out.iter().find(|s| s.submitter.id == "id-alice").expect("own row present");
@@ -20162,7 +21784,7 @@ mod gather_governance_tests {
                 make_submission("id-alice", "Alice", SubmissionState::Submitted, num(10.0)),
                 make_submission("id-bob", "Bob", SubmissionState::Submitted, num(20.0)),
             ];
-            let out = apply_gather_governance(subs, &region, Some(&alice));
+            let out = apply_gather_governance(subs, &region, Some(&alice), &calp::IdentityPolicy::default());
             assert_eq!(out.len(), 2, "all submissions remain under {visibility:?}");
             let bob = out.iter().find(|s| s.submitter.id == "id-bob").expect("Bob present");
             assert_eq!(bob.submitter.display_name, "Bob", "Bob's real name kept under {visibility:?}");
@@ -20178,7 +21800,7 @@ mod gather_governance_tests {
             make_submission("id-alice", "Alice", SubmissionState::Submitted, num(10.0)),
             make_submission("id-bob", "Bob", SubmissionState::Submitted, num(20.0)),
         ];
-        let out = apply_gather_governance(subs, &region, None);
+        let out = apply_gather_governance(subs, &region, None, &calp::IdentityPolicy::default());
         assert!(
             out.is_empty(),
             "without an own identity, own_only fails closed and reveals nothing"
@@ -20198,7 +21820,7 @@ mod gather_governance_tests {
             // itself produces) — must NOT be revealed to a blank reader.
             make_submission("", "(anonymized)", SubmissionState::Submitted, num(99.0)),
         ];
-        let out = apply_gather_governance(subs, &region, Some(&ghost));
+        let out = apply_gather_governance(subs, &region, Some(&ghost), &calp::IdentityPolicy::default());
         assert!(
             out.is_empty(),
             "a blank reader id reveals nothing, even the empty-id record"
@@ -20220,7 +21842,7 @@ mod gather_governance_tests {
             make_submission("id-alice", "Alice", SubmissionState::Submitted, num(10.0)),
             make_submission("", "Planted", SubmissionState::Submitted, num(99.0)),
         ];
-        let out = apply_gather_governance(subs, &region, Some(&ghost));
+        let out = apply_gather_governance(subs, &region, Some(&ghost), &calp::IdentityPolicy::default());
         assert_eq!(out.len(), 2, "values still flow for the aggregate");
         for s in &out {
             assert_eq!(s.submitter.id, "", "every id is cleared under a blank reader");
@@ -20283,7 +21905,7 @@ mod gather_governance_tests {
                 SubmissionValue::Text { value: "oops".to_string() },
             ),
         ];
-        let out = apply_gather_governance(subs, &region, None);
+        let out = apply_gather_governance(subs, &region, None, &calp::IdentityPolicy::default());
         assert_eq!(out.len(), 1, "only the in-range numeric value survives");
         assert_eq!(out[0].submitter.id, "ok");
     }
@@ -20303,7 +21925,7 @@ mod gather_governance_tests {
             make_submission_at("late", SubmissionState::Submitted, num(2.0), Some("2026-06-15T15:00:00Z")),
             make_submission_at("untimed", SubmissionState::Submitted, num(3.0), None),
         ];
-        let out = apply_gather_governance(subs, &region, None);
+        let out = apply_gather_governance(subs, &region, None, &calp::IdentityPolicy::default());
         let ids: Vec<String> = out.iter().map(|s| s.submitter.id.clone()).collect();
         assert!(ids.contains(&"early".to_string()), "before-deadline submission kept");
         assert!(!ids.contains(&"late".to_string()), "after-deadline submission dropped");
@@ -20311,26 +21933,48 @@ mod gather_governance_tests {
         assert_eq!(out.len(), 2);
     }
 
-    // 11. Completion tracking: expected respondents are matched (case-insensitive,
-    //     with a substring fallback either way) against who actually submitted;
-    //     the rest are reported as missing; a blank expected entry is ignored.
+    // 11. Completion tracking (identity phase 1): expected respondents are
+    //     matched EXACTLY and case-insensitively on a SIGNED sender's principal
+    //     name, or on any sender's id -- never on the display name and never by
+    //     substring; the rest are reported as missing; a blank expected entry
+    //     is ignored; senders whose answers were all sent before sign-in are
+    //     listed and match by id only.
+    //
+    //     SABOTAGE: restore the substring fallback in `principal_matches` --
+    //     "Alice" then answers for "CORP\\alice-north".
     #[test]
     fn response_status_matches_and_lists_missing() {
+        let who = |id: &str, display: &str, principal: &str| calp::SubmitterIdentity {
+            id: id.to_string(),
+            display_name: display.to_string(),
+            principal_name: principal.to_string(),
+            provider: calp::IdentityProviderKind::Windows,
+            ..Default::default()
+        };
         let mut respondents = HashMap::new();
-        respondents.insert("id-north".to_string(), "Alice (North)".to_string());
-        respondents.insert("id-south".to_string(), "Bob".to_string());
+        respondents.insert(
+            "id-north".to_string(),
+            super::Respondent { who: who("id-north", "Alice (North)", "CORP\\alice-north"), signed: true },
+        );
+        respondents.insert("id-south".to_string(), super::Respondent { who: who("id-south", "Bob", "CORP\\bob"), signed: true });
+        // An unsigned sender CLAIMING Carol's principal: it never answers for her.
+        respondents.insert(
+            "old-uuid".to_string(),
+            super::Respondent { who: who("old-uuid", "Carol?", "CORP\\carol"), signed: false },
+        );
         let st = super::compute_response_status(
             vec![
-                "Alice".into(),      // substring of "Alice (North)"
-                "bob".into(),        // case-insensitive match of "Bob"
-                "id-south".into(),   // match by id
-                "Carol".into(),      // nobody -> missing
-                "  ".into(),         // blank -> ignored
+                "corp\\ALICE-north".into(), // case-insensitive, exact principal
+                "Alice".into(),             // display-name fragment -> NOT a match any more
+                "id-south".into(),          // match by id
+                "CORP\\carol".into(),       // claimed only by an unsigned sender -> missing
+                "  ".into(),                // blank -> ignored
             ],
             &respondents,
         );
-        assert_eq!(st.missing, vec!["Carol".to_string()]);
-        assert_eq!(st.responded, vec!["Alice (North)".to_string(), "Bob".to_string()]);
+        assert_eq!(st.missing, vec!["Alice".to_string(), "CORP\\carol".to_string()]);
+        assert_eq!(st.responded, vec!["Alice (North)".to_string(), "Bob".to_string(), "Carol?".to_string()]);
+        assert_eq!(st.before_sign_in, vec!["Carol?".to_string()]);
     }
 }
 
@@ -20470,6 +22114,9 @@ mod merge_lenient_tests {
             submitter: SubmitterIdentity {
                 display_name: submitter_id.to_string(),
                 id: submitter_id.to_string(),
+                principal_name: String::new(),
+                provider: Default::default(),
+                scope: Default::default(),
                 extra: HashMap::new(),
             },
             value: SubmissionValue::Number { value },
@@ -20479,6 +22126,9 @@ mod merge_lenient_tests {
             submitted_at: Some(updated_at.to_string()),
             review_reason: None,
             reviewed_by: None,
+            seal: None,
+            sender: Default::default(),
+            identity: Default::default(),
             extra: HashMap::new(),
         }
     }
@@ -20645,6 +22295,9 @@ mod writeback_export_tests {
             submitter: SubmitterIdentity {
                 display_name: "Alice".into(),
                 id: "id-alice".into(),
+                principal_name: String::new(),
+                provider: Default::default(),
+                scope: Default::default(),
                 extra: HashMap::new(),
             },
             value,
@@ -20654,6 +22307,9 @@ mod writeback_export_tests {
             submitted_at: Some("2026-06-15T00:00:00Z".into()),
             review_reason: None,
             reviewed_by: None,
+            seal: None,
+            sender: Default::default(),
+            identity: Default::default(),
             extra: HashMap::new(),
         }
     }
@@ -20674,7 +22330,7 @@ mod writeback_export_tests {
             sub(3, 1, SubmissionValue::Boolean { value: true }),
             sub(4, 1, SubmissionValue::Empty),
         ];
-        let bytes = encode_submissions_parquet(&subs).unwrap();
+        let bytes = encode_submissions_parquet(&subs, &calp::IdentityPolicy::default()).unwrap();
         // A well-formed Parquet file is framed by the "PAR1" magic at both ends;
         // ArrowWriter + RecordBatch::try_new also validate schema/column shape.
         assert!(bytes.len() > 8);
@@ -20682,9 +22338,48 @@ mod writeback_export_tests {
         assert_eq!(&bytes[bytes.len() - 4..], b"PAR1", "parquet footer magic");
     }
 
+    /// The exports say WHO sent each answer (the reader's verdict) and whether
+    /// the application's identity rule counts it, so a database total can
+    /// match the app's.
+    ///
+    /// SABOTAGE: append `true` instead of `policy.counts(..)` to the counted
+    /// column -- the second row reads as counted and this fails.
+    #[test]
+    fn parquet_carries_the_identity_verdict_and_whether_it_counts() {
+        use arrow::array::{Array, BooleanArray, StringArray};
+        let mut verified = sub(1, 1, SubmissionValue::Number { value: 1.0 });
+        verified.identity = calp::IdentityVerdict::new(calp::IdentityStatus::Verified, calp::IdentityReason::OwnerMatches);
+        verified.identity.written_by = "CORP\\alice".to_string();
+        let mut unconfirmed = sub(2, 1, SubmissionValue::Number { value: 2.0 });
+        unconfirmed.identity =
+            calp::IdentityVerdict::new(calp::IdentityStatus::SignedUnconfirmed, calp::IdentityReason::SyncFolder);
+        let bytes = encode_submissions_parquet(
+            &[verified, unconfirmed],
+            &calp::IdentityPolicy { require_verified: true },
+        )
+        .unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("x.parquet");
+        std::fs::write(&path, &bytes).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+        let batch = reader.into_iter().next().unwrap().unwrap();
+        let identity = batch.column_by_name("identity").unwrap().as_any().downcast_ref::<StringArray>().unwrap();
+        let counted = batch.column_by_name("counted").unwrap().as_any().downcast_ref::<BooleanArray>().unwrap();
+        assert_eq!(identity.len(), 2);
+        assert_eq!((identity.value(0), identity.value(1)), ("verified", "signedUnconfirmed"));
+        assert_eq!((counted.value(0), counted.value(1)), (true, false));
+        let written = batch.column_by_name("written_by").unwrap().as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(written.value(0), "CORP\\alice");
+        assert!(written.is_null(1), "no recorded writer, no value");
+    }
+
     #[test]
     fn parquet_handles_empty_input() {
-        let bytes = encode_submissions_parquet(&[]).unwrap();
+        let bytes = encode_submissions_parquet(&[], &calp::IdentityPolicy::default()).unwrap();
         assert_eq!(&bytes[0..4], b"PAR1");
         assert_eq!(&bytes[bytes.len() - 4..], b"PAR1");
     }
@@ -20714,7 +22409,7 @@ mod writeback_export_tests {
         corrected.updated_at = "2026-06-15T01:00:00Z".into();
         reg.save_submission("pkg", "1.0.0", &corrected).unwrap();
 
-        super::materialize_submissions_parquet(&reg, "pkg", "1.0.0");
+        super::materialize_submissions_parquet(&reg, "pkg", "1.0.0", None);
 
         // The rollup exists under submissions/ and reads back as Parquet.
         let path = reg
@@ -20742,7 +22437,7 @@ mod writeback_export_tests {
         assert!(!arts.iter().any(|a| a.contains("_rollup")), "rollup excluded from artifacts");
         // ...and ignored by submission loading: three raw events, two current.
         assert_eq!(reg.load_submission_events("pkg", "1.0.0").unwrap().len(), 3);
-        assert_eq!(reg.load_current_submissions("pkg", "1.0.0").unwrap().len(), 2);
+        assert_eq!(reg.load_current_submissions("pkg", "1.0.0", &calp::ReviewAuthority::none()).unwrap().len(), 2);
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -24795,11 +26490,14 @@ mod tofu_pin_policy_guard_tests {
     /// `the_raw_pin_write_has_exactly_two_production_callers` below.
     #[test]
     fn only_subscribe_and_install_may_create_a_calp_pin() {
-        let files: [(&str, &str, usize); 6] = [
+        let files: [(&str, &str, usize); 7] = [
             // calp_pull, and nothing else: the two arms that choose between
             // `PinOnFirstUse` and its conflict-accepting sibling.
             ("calp_commands.rs", include_str!("calp_commands.rs"), 2),
             ("calp_inspector.rs", include_str!("calp_inspector.rs"), 0),
+            // The publisher-side resolver READS (an author's own application
+            // through the authorised reader, a subscribed one through its pin).
+            ("calp_collection.rs", include_str!("calp_collection.rs"), 0),
             // library_resolve's `confirm` mapping (1), the per-request
             // conflict-acceptance upgrade in `resolve_libraries` (3) and the
             // install-expectations gate next to it (2), plus the three arms of
@@ -24919,6 +26617,7 @@ mod tofu_pin_policy_guard_tests {
         for (name, src) in [
             ("calp_commands.rs", include_str!("calp_commands.rs")),
             ("calp_inspector.rs", include_str!("calp_inspector.rs")),
+            ("calp_collection.rs", include_str!("calp_collection.rs")),
             ("library_commands.rs", include_str!("library_commands.rs")),
             ("managed_policy.rs", include_str!("managed_policy.rs")),
             ("bi/writeback.rs", include_str!("bi/writeback.rs")),
@@ -24959,6 +26658,7 @@ mod tofu_pin_policy_guard_tests {
         for (name, src) in [
             ("calp_commands.rs", include_str!("calp_commands.rs")),
             ("calp_inspector.rs", include_str!("calp_inspector.rs")),
+            ("calp_collection.rs", include_str!("calp_collection.rs")),
             ("calp_registry.rs", include_str!("calp_registry.rs")),
             ("library_commands.rs", include_str!("library_commands.rs")),
             ("managed_policy.rs", include_str!("managed_policy.rs")),
@@ -25008,6 +26708,7 @@ mod tofu_pin_policy_guard_tests {
         for (name, src) in [
             ("calp_commands.rs", include_str!("calp_commands.rs")),
             ("calp_inspector.rs", include_str!("calp_inspector.rs")),
+            ("calp_collection.rs", include_str!("calp_collection.rs")),
             ("bi/writeback.rs", include_str!("bi/writeback.rs")),
             ("bi/writeback_source.rs", include_str!("bi/writeback_source.rs")),
         ] {

@@ -715,6 +715,7 @@ fn the_shared_stamp_declares_a_minimum_exactly_for_what_older_apps_drop() {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         }
     }

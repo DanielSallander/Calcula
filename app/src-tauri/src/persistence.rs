@@ -3127,6 +3127,19 @@ fn restore_collaboration_user_files(
             .ok(),
         None => None,
     };
+    // A Collect From choice that a hand-edited file emptied or misspelled is
+    // READ as the default (`WorkingCopyLink::collect_choice`) -- said here, so
+    // "my model table shows prod only" has a findable cause.
+    if let Some(link) = workspace_link.as_ref() {
+        if link.collect_streams.is_some() && link.collect_choice() != link.collect_streams {
+            crate::log_warn!(
+                "CALP",
+                "working_copy_link.json: the Collect From choice {:?} is not usable as stored and reads as {:?} (Writeback > Collect From)",
+                link.collect_streams,
+                link.collect_choice()
+            );
+        }
+    }
     *state.working_copy_link.write(&load).map_err(|e| e.to_string())? = workspace_link;
 
     let overrides = match workbook.user_files.remove("overrides.json") {
@@ -6341,6 +6354,9 @@ mod collaboration_user_file_restore_tests {
                 submitter: calp::SubmitterIdentity {
                     display_name: "A".to_string(),
                     id: "a".to_string(),
+                    principal_name: String::new(),
+                    provider: Default::default(),
+                    scope: Default::default(),
                     extra: Default::default(),
                 },
                 value: calp::writeback::SubmissionValue::Number { value: 1.0 },
@@ -6351,6 +6367,9 @@ mod collaboration_user_file_restore_tests {
                 review_reason: None,
                 reviewed_by: None,
                 model_key: None,
+                seal: None,
+                sender: Default::default(),
+                identity: Default::default(),
                 extra: Default::default(),
             });
         state
@@ -6448,6 +6467,42 @@ mod collaboration_user_file_restore_tests {
             Some(link),
             "a saved working copy must reopen knowing what it is a working copy OF"
         );
+    }
+
+    /// Writeback > Collect From is saved with the workbook: the choice rides in
+    /// `working_copy_link.json` through the real save projection and restore,
+    /// and a link saved without one reopens with the default.
+    ///
+    /// SABOTAGE: mark `WorkingCopyLink::collect_streams` `#[serde(skip_serializing)]`.
+    #[test]
+    fn the_collect_from_choice_round_trips_through_save_and_restore() {
+        let mut link = a_workspace_link("sales-report");
+        link.collect_streams = Some(calp::CollectStreams::Only(
+            ["".to_string(), "prod".to_string()].into_iter().collect(),
+        ));
+        let mut wb = Workbook::new();
+        wb.user_files.insert("working_copy_link.json".to_string(), serde_json::to_vec_pretty(&link).unwrap());
+        let fresh = crate::create_app_state();
+        restore_collaboration_user_files(&fresh, &mut wb).expect("restore succeeds");
+        let restored = fresh.working_copy_link.read().unwrap().clone().expect("the link");
+        assert_eq!(restored.collect_streams, link.collect_streams);
+
+        // A hand-emptied choice reads as the default, and the link survives.
+        let mut emptied = a_workspace_link("sales-report");
+        emptied.collect_streams = Some(calp::CollectStreams::Only(Default::default()));
+        let mut wb = Workbook::new();
+        wb.user_files.insert("working_copy_link.json".to_string(), serde_json::to_vec_pretty(&emptied).unwrap());
+        let fresh = crate::create_app_state();
+        restore_collaboration_user_files(&fresh, &mut wb).expect("restore succeeds");
+        let restored = fresh.working_copy_link.read().unwrap().clone().expect("the link survives");
+        assert_eq!(restored.collect_choice(), None, "an empty choice is the default, never 'collect nothing'");
+
+        let plain = a_workspace_link("sales-report");
+        let mut wb = Workbook::new();
+        wb.user_files.insert("working_copy_link.json".to_string(), serde_json::to_vec_pretty(&plain).unwrap());
+        let fresh = crate::create_app_state();
+        restore_collaboration_user_files(&fresh, &mut wb).expect("restore succeeds");
+        assert_eq!(fresh.working_copy_link.read().unwrap().clone().unwrap().collect_streams, None);
     }
 
     #[test]

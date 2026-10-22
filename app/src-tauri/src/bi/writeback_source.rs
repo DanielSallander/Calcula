@@ -72,6 +72,18 @@ impl WritebackAudience {
     }
 }
 
+/// Where a dataset's region comes from, from this workbook's point of view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatasetOrigin {
+    /// One of this workbook's OWN regions (it published the application, or
+    /// is a working copy of it): read through Writeback > Collect From, which
+    /// may admit several streams, so the table carries an `environment` column.
+    Author,
+    /// A region of a SUBSCRIBED application: the subscription's one stream,
+    /// with the schema it always had.
+    Subscription,
+}
+
 /// One buildable dataset: a writeback region within a subscribed package,
 /// with its submissions already merged (version carry-forward) and filtered
 /// for this workbook's audience.
@@ -80,11 +92,43 @@ pub struct WritebackDataset {
     pub package_version: String,
     pub region: calp::WritebackRegionDeclaration,
     pub audience: WritebackAudience,
+    pub origin: DatasetOrigin,
+    /// Which streams the rows come from, for the import list ("prod",
+    /// "every stream", "the development line, test").
+    pub streams: String,
+    /// A caveat the model table cannot show itself (newer versions whose
+    /// answers could not be verified here). Empty when none.
+    pub note: String,
     /// Suggested model-table name: `WB {package} {Sheet}!{A1:B4}`.
     pub display_name: String,
     pub sheet_name: String,
     pub range_ref: String,
     pub rows: Vec<calp::writeback::WritebackSubmission>,
+    /// A SUBSCRIPTION view of a region the author pass ALSO serves (a publisher
+    /// who subscribes to their own application from the same workbook). Never
+    /// listed for import -- a new import gets the author table -- but kept so
+    /// a model table imported BEFORE the author pass existed, with the
+    /// subscription's columns, keeps reading the subscription's one stream
+    /// with its own schema (`served_key`).
+    pub shadow: bool,
+}
+
+/// The connector key a shadow (subscription) dataset is served under, beside
+/// the author dataset that owns the region id.
+pub(crate) const SUBSCRIPTION_VARIANT_SUFFIX: &str = "#subscription";
+
+/// WHICH DATASET A BOUND MODEL TABLE READS. A region served by both passes is
+/// keyed by its id for the AUTHOR dataset (the import default) and by
+/// `{id}#subscription` for the subscription's. A table whose columns have no
+/// `environment` column was imported with the subscription's schema: it keeps
+/// the subscription's stream and columns, rather than silently switching to
+/// the Collect From choice with a column it was never imported with.
+pub(crate) fn served_key(region_id: &str, table_has_environment: bool, has_shadow: bool) -> String {
+    if has_shadow && !table_has_environment {
+        format!("{region_id}{SUBSCRIPTION_VARIANT_SUFFIX}")
+    } else {
+        region_id.to_string()
+    }
 }
 
 /// Strip what the engine's identifier validation forbids (`"[]';\/`, control
@@ -108,6 +152,32 @@ fn sanitize_table_name(name: &str) -> String {
         "WB dataset".to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+/// The MODEL name an imported writeback table gets: letters, digits and `_`
+/// only (`WB_writeback_test_Sheet1_2_B3_B5`). A measure names its table as a
+/// bare identifier -- `SUM(WB_writeback_test_Sheet1_2_B3_B5[value_number])` --
+/// and the measure language has no quoting, so the readable name
+/// (`WB writeback-test Sheet1 (2)!B3:B5`, legal for the model's own validator)
+/// could be imported but never referenced: no measure, so no pivot value, no
+/// `bi_query` and no CUBE formula could read the table (BUG-0585). The
+/// readable text stays the table's DISPLAY name. `.` is left out as well: a
+/// dotted name reads as `schema.table` to the field-key splitter.
+fn model_table_name(display: &str) -> String {
+    let mut out = String::with_capacity(display.len());
+    for c in display.chars() {
+        if c.is_alphanumeric() || c == '_' {
+            out.push(c);
+        } else if !out.is_empty() && !out.ends_with('_') {
+            out.push('_');
+        }
+    }
+    let trimmed = out.trim_end_matches('_');
+    match trimmed.chars().next() {
+        None => "WB_dataset".to_string(),
+        Some(first) if first.is_numeric() => format!("WB_{trimmed}"),
+        Some(_) => trimmed.to_string(),
     }
 }
 
@@ -145,6 +215,13 @@ pub fn collect_writeback_datasets(state: &AppState) -> Vec<WritebackDataset> {
     let mut result: Vec<WritebackDataset> = Vec::new();
     let mut seen_regions: HashSet<String> = HashSet::new();
 
+    // THE AUTHOR'S OWN REGIONS FIRST (open-items 2.am item 7), matching the
+    // Collected Responses listing.
+    collect_author_datasets(state, &mut result, &mut seen_regions);
+
+    // The regions the author pass serves: a subscription that declares one of
+    // them still builds its own view, as a SHADOW (`WritebackDataset::shadow`).
+    let author_regions: HashSet<String> = seen_regions.clone();
     let subs = match state.subscriptions.read() {
         Ok(s) => s,
         Err(_) => return result,
@@ -208,11 +285,25 @@ pub fn collect_writeback_datasets(state: &AppState) -> Vec<WritebackDataset> {
         // See `bi/writeback.rs`: a dataset table built across environments puts
         // test values into production measures.
         let environment = sub.environment.clone().unwrap_or_default();
+        // Only signed decisions count (identity phase 1), exactly as GATHER.
+        let authority = crate::calp_commands::review_authority(
+            registry.as_ref(),
+            &sub.package_name,
+            &ver_manifest.publisher_key,
+            Some(&scope),
+        );
         match registry
-            .load_current_submissions(&sub.package_name, &sub.resolved_version)
+            .load_current_submissions(&sub.package_name, &sub.resolved_version, &authority)
             .map(|all| calp::writeback::visible_in(all, Some(&environment)))
         {
             Ok(all) => {
+                // The reader's identity verdicts, exactly as GATHER attaches them.
+                let all = crate::identity_verification::attested(
+                    registry.as_ref(),
+                    &sub.package_name,
+                    &sub.resolved_version,
+                    all,
+                );
                 for s in all {
                     current_by_region
                         .entry(s.region_id.clone())
@@ -251,11 +342,16 @@ pub fn collect_writeback_datasets(state: &AppState) -> Vec<WritebackDataset> {
                 .ok()?;
                 let mut by_region: HashMap<String, Vec<calp::writeback::WritebackSubmission>> =
                     HashMap::new();
-                for s in calp::writeback::visible_in(
-                    registry
-                        .load_current_submissions(&sub.package_name, version)
-                        .ok()?,
-                    Some(&environment),
+                for s in crate::identity_verification::attested(
+                    registry.as_ref(),
+                    &sub.package_name,
+                    version,
+                    calp::writeback::visible_in(
+                        registry
+                            .load_current_submissions(&sub.package_name, version, &authority)
+                            .ok()?,
+                        Some(&environment),
+                    ),
                 ) {
                     by_region.entry(s.region_id.clone()).or_default().push(s);
                 }
@@ -265,24 +361,34 @@ pub fn collect_writeback_datasets(state: &AppState) -> Vec<WritebackDataset> {
 
         for region in regions {
             // First subscription declaring a region wins, matching the submit
-            // path and build_gather_data.
-            if !seen_regions.insert(region.id.clone()) {
+            // path and build_gather_data. A region the author pass already
+            // serves is built as a shadow.
+            let shadow = author_regions.contains(&region.id);
+            if !shadow && !seen_regions.insert(region.id.clone()) {
+                continue;
+            }
+            if shadow && !seen_regions.insert(format!("{}{SUBSCRIPTION_VARIANT_SUFFIX}", region.id)) {
                 continue;
             }
 
             let submissions = current_by_region.remove(&region.id).unwrap_or_default();
             let submissions = merge_lenient_submissions(submissions, &older, &region);
 
+            // The application's identity rule, from the same pinned manifest:
+            // a model table counts exactly what GATHER counts.
+            let identity_policy = ver_manifest.identity_policy.unwrap_or_default();
             let mut rows = match audience {
                 // Subscriber rows pass the SAME governance boundary as GATHER:
-                // approval gating, Draft/Rejected/Empty drops, read-side schema
-                // + deadline integrity, visibility masking/anonymization.
+                // the identity rule, approval gating, Draft/Rejected/Empty
+                // drops, read-side schema + deadline integrity, visibility
+                // masking/anonymization.
                 WritebackAudience::Subscriber => {
-                    apply_gather_governance(submissions, &region, own_identity.as_ref())
+                    apply_gather_governance(submissions, &region, own_identity.as_ref(), &identity_policy)
                 }
                 // Publisher sees everything (including Rejected — review
-                // analytics); their registry, their data.
-                WritebackAudience::Publisher => submissions,
+                // analytics); their registry, their data -- but only the
+                // answers the application's identity rule COUNTS.
+                WritebackAudience::Publisher => calp::identity_check::admit(submissions, &identity_policy),
             };
             // Deterministic row order for both audiences (governance already
             // sorts, but the publisher path must be stable too).
@@ -308,15 +414,102 @@ pub fn collect_writeback_datasets(state: &AppState) -> Vec<WritebackDataset> {
                 package_version: sub.resolved_version.clone(),
                 region,
                 audience,
+                origin: DatasetOrigin::Subscription,
+                streams: calp::writeback::stream_label(&environment),
+                note: String::new(),
                 display_name,
                 sheet_name,
                 range_ref,
                 rows,
+                shadow,
             });
         }
     }
 
     result
+}
+
+/// THE AUTHOR PASS: every one of this workbook's own regions that Collected
+/// Responses lists as READY (resolved through the linked application AND past
+/// the publisher gate) becomes a PUBLISHER dataset, built from THE SAME ROWS
+/// the pane, the exports and scripts read (`load_region_current_submissions`
+/// through the workbook's Collect From choice, compatibility rule included).
+/// So a model table and Collected Responses can never disagree, and a model
+/// table never collects a stream the publisher did not choose: the default is
+/// the pipeline's LAST environment, never "every stream" (owner, 2026-10-22).
+///
+/// Never built for a computer that is not a publisher of the application: an
+/// author region has no governed subscriber view, so it is simply absent.
+fn collect_author_datasets(
+    state: &AppState,
+    result: &mut Vec<WritebackDataset>,
+    seen_regions: &mut HashSet<String>,
+) {
+    // ONE workspace walk and one gate per key for every own region (the
+    // listing's author half, not its subscriber half), the rows read through
+    // the walk's opened workspace -- this runs from the import list and the
+    // freshness poll, and used to re-walk the whole workspace per region.
+    let (walk, ready) = match crate::calp_collection::ready_author_collections(state) {
+        Ok(Some(found)) => found,
+        Ok(None) => return,
+        Err(e) => {
+            eprintln!("[writeback-bi] the author's regions could not be listed: {e}");
+            return;
+        }
+    };
+    let Some(registry) = walk.registry() else {
+        return;
+    };
+    for (collection, sheet_name) in ready {
+        let region_id = collection.declaration.id.clone();
+        let submissions = match crate::calp_commands::load_region_current_submissions(
+            &collection,
+            registry,
+            &region_id,
+            &collection.streams,
+        ) {
+            Ok(s) => s,
+            // Every version unreadable: no dataset, so a bound table lands in
+            // `stale_bindings` (the existing failure surface) instead of
+            // reporting an empty region.
+            Err(e) => {
+                eprintln!("[writeback-bi] author region '{}' could not be read: {e}", region_id);
+                continue;
+            }
+        };
+        if !seen_regions.insert(region_id.clone()) {
+            continue;
+        }
+        let mut rows = submissions;
+        rows.sort_by(|a, b| {
+            a.cell_row
+                .cmp(&b.cell_row)
+                .then(a.cell_col.cmp(&b.cell_col))
+                .then(a.environment.cmp(&b.environment))
+                .then(a.submitter.id.cmp(&b.submitter.id))
+        });
+        let sheet_name = sheet_name.unwrap_or_else(|| "Sheet".to_string());
+        let range_ref = selector_range_ref(&collection.declaration.selector);
+        let display_name =
+            sanitize_table_name(&format!("WB {} {}!{}", collection.package_name, sheet_name, range_ref));
+        if !collection.note.is_empty() {
+            eprintln!("[writeback-bi] author region '{}': {}", region_id, collection.note);
+        }
+        result.push(WritebackDataset {
+            package_name: collection.package_name.clone(),
+            package_version: collection.read_version.clone(),
+            region: collection.declaration.clone(),
+            audience: WritebackAudience::Publisher,
+            origin: DatasetOrigin::Author,
+            streams: collection.streams.label(),
+            note: collection.note.clone(),
+            display_name,
+            sheet_name,
+            range_ref,
+            rows,
+            shadow: false,
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -327,13 +520,28 @@ pub fn collect_writeback_datasets(state: &AppState) -> Vec<WritebackDataset> {
 /// publisher-audience tables — a subscriber table must not even have the
 /// columns (empty values would still invite "why is it blank" questions, and a
 /// carelessly widened batch would then fail the schema instead of leaking).
-fn dataset_columns(audience: WritebackAudience) -> Vec<bi_engine::Column> {
+///
+/// The `environment` column exists only on AUTHOR tables (the workbook's own
+/// regions, read through Writeback > Collect From, which may admit several
+/// streams): a measure slices by it. A subscribed region's table is one stream
+/// and keeps the schema it always had, so a table imported before this column
+/// existed still refreshes.
+fn dataset_columns(audience: WritebackAudience, origin: DatasetOrigin) -> Vec<bi_engine::Column> {
     use bi_engine::{Column, DataType};
     let mut cols = vec![
         Column::new("submission_id", DataType::String),
         Column::new("package_name", DataType::String),
         Column::new("package_version", DataType::String),
         Column::new("region_id", DataType::String),
+    ];
+    if origin == DatasetOrigin::Author {
+        cols.push(Column::new("environment", DataType::String).with_description(
+            "The stream each answer was sent in: empty = the development line, otherwise the \
+             environment. Which streams this table collects is chosen in Writeback > Collect From \
+             (default: the pipeline's last environment).",
+        ));
+    }
+    cols.extend([
         Column::new("submitter_id", DataType::String),
         Column::new("submitter_name", DataType::String),
         Column::new("cell_row", DataType::Int64),
@@ -345,7 +553,7 @@ fn dataset_columns(audience: WritebackAudience) -> Vec<bi_engine::Column> {
         Column::new("state", DataType::String),
         Column::new("submitted_at", DataType::String),
         Column::new("updated_at", DataType::String),
-    ];
+    ]);
     if audience == WritebackAudience::Publisher {
         cols.push(Column::new("reviewed_by", DataType::String));
         cols.push(Column::new("review_reason", DataType::String));
@@ -411,6 +619,21 @@ fn dataset_batch(ds: &WritebackDataset) -> Result<RecordBatch, String> {
         Field::new("package_name", ArrowDataType::Utf8, true),
         Field::new("package_version", ArrowDataType::Utf8, true),
         Field::new("region_id", ArrowDataType::Utf8, true),
+    ];
+    let mut arrays: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from(submission_id)),
+        Arc::new(StringArray::from(vec![ds.package_name.clone(); n])),
+        Arc::new(StringArray::from(vec![ds.package_version.clone(); n])),
+        Arc::new(StringArray::from(vec![ds.region.id.clone(); n])),
+    ];
+    if ds.origin == DatasetOrigin::Author {
+        // Mirrors `dataset_columns`: only the author's tables carry the stream.
+        fields.push(Field::new("environment", ArrowDataType::Utf8, true));
+        arrays.push(Arc::new(StringArray::from(
+            ds.rows.iter().map(|s| s.environment.clone()).collect::<Vec<String>>(),
+        )));
+    }
+    fields.extend([
         Field::new("submitter_id", ArrowDataType::Utf8, true),
         Field::new("submitter_name", ArrowDataType::Utf8, true),
         Field::new("cell_row", ArrowDataType::Int64, true),
@@ -422,12 +645,8 @@ fn dataset_batch(ds: &WritebackDataset) -> Result<RecordBatch, String> {
         Field::new("state", ArrowDataType::Utf8, true),
         Field::new("submitted_at", ArrowDataType::Utf8, true),
         Field::new("updated_at", ArrowDataType::Utf8, true),
-    ];
-    let mut arrays: Vec<ArrayRef> = vec![
-        Arc::new(StringArray::from(submission_id)),
-        Arc::new(StringArray::from(vec![ds.package_name.clone(); n])),
-        Arc::new(StringArray::from(vec![ds.package_version.clone(); n])),
-        Arc::new(StringArray::from(vec![ds.region.id.clone(); n])),
+    ]);
+    arrays.extend::<[ArrayRef; 11]>([
         Arc::new(StringArray::from(submitter_id)),
         Arc::new(StringArray::from(submitter_name)),
         Arc::new(Int64Array::from(cell_row)),
@@ -439,7 +658,7 @@ fn dataset_batch(ds: &WritebackDataset) -> Result<RecordBatch, String> {
         Arc::new(StringArray::from(state)),
         Arc::new(StringArray::from(submitted_at)),
         Arc::new(StringArray::from(updated_at)),
-    ];
+    ]);
     if ds.audience == WritebackAudience::Publisher {
         fields.push(Field::new("reviewed_by", ArrowDataType::Utf8, true));
         fields.push(Field::new("review_reason", ArrowDataType::Utf8, true));
@@ -486,10 +705,16 @@ pub async fn ensure_writeback_source(
     }
 
     let mut connector = bi_engine::InMemoryConnector::new();
+    let shadowed: HashSet<String> = datasets.iter().filter(|d| d.shadow).map(|d| d.region.id.clone()).collect();
     for ds in datasets {
+        let key = if ds.shadow {
+            format!("{}{SUBSCRIPTION_VARIANT_SUFFIX}", ds.region.id)
+        } else {
+            ds.region.id.clone()
+        };
         match dataset_batch(ds) {
             Ok(batch) => {
-                connector = connector.with_table(WRITEBACK_SCHEMA, ds.region.id.clone(), batch);
+                connector = connector.with_table(WRITEBACK_SCHEMA, key, batch);
             }
             Err(e) => {
                 report
@@ -505,22 +730,30 @@ pub async fn ensure_writeback_source(
 
     // Re-bind + refresh every model table served by this source. Collect
     // first: the loop below needs &mut engine.
-    let bound: Vec<(String, String)> = engine
+    let bound: Vec<(String, String, bool)> = engine
         .model()
         .tables()
         .iter()
         .filter_map(|t| {
-            t.source_binding()
-                .filter(|b| b.source_id == WRITEBACK_SOURCE_ID)
-                .map(|b| (t.name().to_string(), b.table.clone()))
+            t.source_binding().filter(|b| b.source_id == WRITEBACK_SOURCE_ID).map(|b| {
+                let has_environment = t.columns().iter().any(|c| c.name() == "environment");
+                (t.name().to_string(), b.table.clone(), has_environment)
+            })
         })
         .collect();
 
-    for (table_name, region_id) in bound {
+    for (table_name, region_id, has_environment) in bound {
+        let key = served_key(&region_id, has_environment, shadowed.contains(&region_id));
+        if key != region_id {
+            eprintln!(
+                "[writeback-bi] '{table_name}' was imported from the subscription (no environment column): \
+                 it keeps reading the subscription's stream; import the region again for the Collect From choice"
+            );
+        }
         engine.registry_mut().bind(
             table_name.clone(),
             idx,
-            bi_engine::SourceBinding::new(WRITEBACK_SCHEMA, &region_id),
+            bi_engine::SourceBinding::new(WRITEBACK_SCHEMA, &key),
         );
         match engine.refresh_table(&table_name).await {
             Ok(()) => report.refreshed_tables.push(table_name),
@@ -576,6 +809,10 @@ pub async fn refresh_writeback_sources(
     }
 
     let datasets = collect_writeback_datasets(state);
+    // What this rebuild serves is what the freshness poll compares against: an
+    // invalidation-driven rebuild records it too, so the next poll does not
+    // rebuild the very same rows again.
+    datasets_changed_since_last_poll(&datasets);
     let mut reports = Vec::new();
     for engine in &engines {
         let mut guard = engine.lock().await;
@@ -597,9 +834,138 @@ static REFRESH_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 static REFRESH_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Install the app handle for `invalidate_writeback_bi`. Called once from
-/// `run()` right after the Tauri app is built.
+/// `run()` right after the Tauri app is built. Also starts the freshness poll
+/// ([`WRITEBACK_BI_POLL`]).
 pub fn set_app_handle(app: tauri::AppHandle) {
-    let _ = WRITEBACK_BI_APP.set(app);
+    if WRITEBACK_BI_APP.set(app.clone()).is_ok() {
+        start_writeback_bi_poll(app);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Freshness: answers arrive from OTHER computers
+// ---------------------------------------------------------------------------
+//
+// `invalidate_writeback_bi` fires on THIS process's mutations (submit, review,
+// pull, open, Collect From). A subscriber submits by appending to the
+// workspace from their own machine, which no event here sees -- so without
+// the two triggers below, an author's model table showed the answers it had
+// when it was last rebuilt, while Collected Responses showed the new ones.
+//
+// 1. A publisher read (the pane, the submission watch, a script) that sees an
+//    author region's rows CHANGE invalidates at once (`note_author_rows_seen`).
+// 2. While some open model carries writeback tables, a background thread
+//    re-reads the datasets every `WRITEBACK_BI_POLL` and rebuilds only when
+//    they changed (`datasets_changed_since_last_poll`).
+
+/// How often the freshness poll re-reads the datasets while some open model
+/// carries writeback tables (and only then).
+pub const WRITEBACK_BI_POLL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// region key -> fingerprint of the rows a publisher read last saw.
+static AUTHOR_ROWS_SEEN: std::sync::OnceLock<std::sync::Mutex<HashMap<String, u64>>> = std::sync::OnceLock::new();
+/// Fingerprint of the datasets the last poll saw.
+static LAST_POLLED_DATASETS: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
+
+/// A fingerprint of a set of rows: which records, in which state, as of when,
+/// under which stream choice. Order-independent.
+pub(crate) fn rows_fingerprint(streams: &str, rows: &[calp::writeback::WritebackSubmission]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut keys: Vec<(&str, &str, &str, u32, u32, &str, &str)> = rows
+        .iter()
+        .map(|s| {
+            (
+                s.environment.as_str(),
+                s.submitter.id.as_str(),
+                s.id.as_str(),
+                s.cell_row,
+                s.cell_col,
+                submission_state_str(&s.state),
+                s.updated_at.as_str(),
+            )
+        })
+        .collect();
+    keys.sort();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    streams.hash(&mut h);
+    keys.hash(&mut h);
+    h.finish()
+}
+
+/// A publisher read saw `rows` for one of the author's regions: when they
+/// differ from what the last read saw (new answers from another computer, a
+/// review, another stream choice), rebuild the BI datasets. Returns whether it
+/// did.
+pub(crate) fn note_author_rows_seen(
+    collection: &crate::calp_collection::RegionCollection,
+    region_id: &str,
+    rows: &[calp::writeback::WritebackSubmission],
+) -> bool {
+    let key = format!("{}|{}|{}", collection.registry_path, collection.package_name, region_id);
+    let fingerprint = rows_fingerprint(&collection.streams.label(), rows);
+    let changed = match AUTHOR_ROWS_SEEN.get_or_init(Default::default).lock() {
+        Ok(mut seen) => seen.insert(key, fingerprint) != Some(fingerprint),
+        Err(_) => true,
+    };
+    if changed {
+        invalidate_writeback_bi();
+    }
+    changed
+}
+
+/// Whether `datasets` differ from what the previous poll saw (the first poll
+/// always differs). Records them as seen.
+pub(crate) fn datasets_changed_since_last_poll(datasets: &[WritebackDataset]) -> bool {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for ds in datasets {
+        ds.region.id.hash(&mut h);
+        ds.package_version.hash(&mut h);
+        rows_fingerprint(&ds.streams, &ds.rows).hash(&mut h);
+    }
+    let fingerprint = h.finish();
+    match LAST_POLLED_DATASETS.lock() {
+        Ok(mut last) => last.replace(fingerprint) != Some(fingerprint),
+        Err(_) => true,
+    }
+}
+
+/// Whether some open model carries the writeback source. An engine busy with a
+/// query counts as carrying it (the poll then reads; it never waits on one).
+fn any_engine_wired(bi_state: &BiState) -> bool {
+    let engines: Vec<Arc<tokio::sync::Mutex<bi_engine::Engine>>> = match bi_state.connections.lock() {
+        Ok(conns) => conns.values().filter_map(|c| c.engine.clone()).collect(),
+        Err(_) => return false,
+    };
+    engines.iter().any(|engine| match engine.try_lock() {
+        Ok(guard) => guard.model().source(WRITEBACK_SOURCE_ID).is_some(),
+        Err(_) => true,
+    })
+}
+
+/// The freshness poll's thread. A plain thread, not a runtime task: it reads
+/// the workspace synchronously and must never hold an async worker.
+fn start_writeback_bi_poll(app: tauri::AppHandle) {
+    let spawned = std::thread::Builder::new().name("writeback-bi-poll".to_string()).spawn(move || loop {
+        std::thread::sleep(WRITEBACK_BI_POLL);
+        let wired = {
+            let bi_state = app.state::<BiState>();
+            any_engine_wired(&bi_state)
+        };
+        if !wired {
+            continue;
+        }
+        let datasets = {
+            let state = app.state::<AppState>();
+            collect_writeback_datasets(&state)
+        };
+        if datasets_changed_since_last_poll(&datasets) {
+            invalidate_writeback_bi();
+        }
+    });
+    if let Err(e) = spawned {
+        eprintln!("[writeback-bi] the freshness poll could not start: {e}");
+    }
 }
 
 /// The app handle installed at startup, for sibling writeback modules that
@@ -673,17 +1039,26 @@ pub struct WritebackTableInfo {
     pub row_count: usize,
     pub sheet_name: String,
     pub range_ref: String,
+    /// Which streams the table collects ("prod", "every stream", ...): for
+    /// the workbook's own regions the Writeback > Collect From choice, for a
+    /// subscribed region its subscription's stream.
+    pub streams: String,
+    /// A caveat the table cannot show (newer versions whose answers could not
+    /// be verified here). Empty when none.
+    pub note: String,
     /// Whether the given connection's model already has a table bound to this
     /// region (false when no connection was passed).
     pub already_imported: bool,
 }
 
 /// List every writeback dataset this workbook can import. Pure registry I/O;
-/// no engine mutation.
-#[tauri::command]
+/// no engine mutation. ASYNC: it reads the workspace (every subscribed
+/// application and the linked one), and a slow or unreachable share must never
+/// freeze the window.
+#[tauri::command(async)]
 pub fn bi_list_writeback_tables(
-    state: State<AppState>,
-    bi_state: State<BiState>,
+    state: State<'_, AppState>,
+    bi_state: State<'_, BiState>,
     connection_id: Option<ConnectionId>,
     window: tauri::Window,
 ) -> Result<Vec<WritebackTableInfo>, String> {
@@ -716,6 +1091,8 @@ pub fn bi_list_writeback_tables(
 
     Ok(collect_writeback_datasets(&state)
         .into_iter()
+        // A shadow is never offered: a new import gets the author table.
+        .filter(|ds| !ds.shadow)
         .map(|ds| WritebackTableInfo {
             already_imported: imported.contains(&ds.region.id),
             region_id: ds.region.id,
@@ -726,6 +1103,8 @@ pub fn bi_list_writeback_tables(
             row_count: ds.rows.len(),
             sheet_name: ds.sheet_name,
             range_ref: ds.range_ref,
+            streams: ds.streams,
+            note: ds.note,
         })
         .collect())
 }
@@ -758,19 +1137,21 @@ pub async fn bi_import_writeback_tables(
         region_id: String,
         base_name: String,
         audience: WritebackAudience,
+        origin: DatasetOrigin,
     }
     let defs: Vec<ImportDef> = region_ids
         .iter()
         .map(|rid| {
             datasets
                 .iter()
-                .find(|d| &d.region.id == rid)
+                .find(|d| &d.region.id == rid && !d.shadow)
                 .map(|d| ImportDef {
                     region_id: d.region.id.clone(),
                     base_name: d.display_name.clone(),
                     audience: d.audience,
+                    origin: d.origin,
                 })
-                .ok_or_else(|| format!("Writeback region '{rid}' not found in any subscription"))
+                .ok_or_else(|| format!("Writeback region '{rid}' not found among this workbook's writeback regions"))
         })
         .collect::<Result<_, String>>()?;
 
@@ -799,15 +1180,17 @@ pub async fn bi_import_writeback_tables(
             if already {
                 continue;
             }
-            // Dedupe the display-derived table name; the region UUID in the
-            // binding is the real key.
-            let mut name = def.base_name.clone();
+            // Dedupe the table's model name (one a measure can reference);
+            // the region UUID in the binding is the real key, and the
+            // readable dataset name is the display name.
+            let base_name = model_table_name(&def.base_name);
+            let mut name = base_name.clone();
             let mut i = 2;
-            while tables.iter().any(|t| t.name() == name) {
-                name = format!("{} ({})", def.base_name, i);
+            while tables.iter().any(|t| t.name().eq_ignore_ascii_case(&name)) {
+                name = format!("{base_name}_{i}");
                 i += 1;
             }
-            let table = bi_engine::Table::new(name, dataset_columns(def.audience))
+            let mut table = bi_engine::Table::new(name, dataset_columns(def.audience, def.origin))
                 .map_err(|e| format!("{}", e))?
                 .with_storage_mode(bi_engine::StorageMode::InMemory)
                 .with_source_binding(bi_engine::TableSourceBinding::new(
@@ -815,6 +1198,7 @@ pub async fn bi_import_writeback_tables(
                     WRITEBACK_SCHEMA,
                     &def.region_id,
                 ));
+            table.set_display_name(Some(def.base_name.clone()));
             tables.push(table);
         }
 
@@ -923,6 +1307,9 @@ mod tests {
             submitter: SubmitterIdentity {
                 display_name: submitter.to_string(),
                 id: format!("id-{submitter}"),
+                principal_name: String::new(),
+                provider: Default::default(),
+                scope: Default::default(),
                 extra: std::collections::HashMap::new(),
             },
             value,
@@ -932,6 +1319,9 @@ mod tests {
             submitted_at: Some("2026-07-01T10:00:00Z".to_string()),
             review_reason: Some("too high".to_string()),
             reviewed_by: Some("Publisher".to_string()),
+            seal: None,
+            sender: Default::default(),
+            identity: Default::default(),
             extra: std::collections::HashMap::new(),
         }
     }
@@ -942,19 +1332,43 @@ mod tests {
             package_version: "1.2.0".to_string(),
             region: region("r1"),
             audience,
+            origin: DatasetOrigin::Subscription,
+            streams: "the development line".to_string(),
+            note: String::new(),
             display_name: "WB budget-2026 Sheet1!B2:D10".to_string(),
             sheet_name: "Sheet1".to_string(),
             range_ref: "B2:D10".to_string(),
             rows,
+            shadow: false,
         }
+    }
+
+    /// A TABLE IMPORTED FROM THE SUBSCRIPTION KEEPS ITS STREAM AND SCHEMA when
+    /// the author pass also serves its region: it is served the subscription's
+    /// dataset (no `environment` column) under the shadow key, never the
+    /// author's batch with a column it was not imported with. A table imported
+    /// with the author's columns, or a region with no shadow, reads the
+    /// region id.
+    ///
+    /// SABOTAGE: make `served_key` always return the region id.
+    #[test]
+    fn a_table_imported_from_the_subscription_keeps_reading_it() {
+        assert_eq!(served_key("r1", false, true), format!("r1{SUBSCRIPTION_VARIANT_SUFFIX}"));
+        assert_eq!(served_key("r1", true, true), "r1");
+        assert_eq!(served_key("r1", false, false), "r1");
+        // The two schemas really differ by that column.
+        let author = dataset_columns(WritebackAudience::Publisher, DatasetOrigin::Author);
+        let subscription = dataset_columns(WritebackAudience::Publisher, DatasetOrigin::Subscription);
+        assert!(author.iter().any(|c| c.name() == "environment"));
+        assert!(!subscription.iter().any(|c| c.name() == "environment"));
     }
 
     // Publisher tables carry the review columns; subscriber tables must not
     // even have them (review free-text can identify people).
     #[test]
     fn audience_column_sets() {
-        let publisher = dataset_columns(WritebackAudience::Publisher);
-        let subscriber = dataset_columns(WritebackAudience::Subscriber);
+        let publisher = dataset_columns(WritebackAudience::Publisher, DatasetOrigin::Subscription);
+        let subscriber = dataset_columns(WritebackAudience::Subscriber, DatasetOrigin::Subscription);
         assert_eq!(publisher.len(), subscriber.len() + 2);
         assert!(publisher.iter().any(|c| c.name() == "reviewed_by"));
         assert!(publisher.iter().any(|c| c.name() == "review_reason"));
@@ -962,34 +1376,86 @@ mod tests {
         assert!(!subscriber.iter().any(|c| c.name() == "review_reason"));
     }
 
+    /// THE AUTHOR'S TABLE CARRIES THE STREAM; a subscribed region's does not.
+    ///
+    /// The author's table follows Writeback > Collect From, which may admit
+    /// several streams, so a measure must be able to slice by stream. A
+    /// subscribed region's table is one stream and keeps the schema it always
+    /// had -- widening it would make every table imported before this change
+    /// fail its refresh.
+    ///
+    /// SABOTAGE: push the `environment` column for every origin.
+    #[test]
+    fn only_the_authors_table_carries_the_environment_column() {
+        let author = dataset_columns(WritebackAudience::Publisher, DatasetOrigin::Author);
+        let subscribed = dataset_columns(WritebackAudience::Publisher, DatasetOrigin::Subscription);
+        assert!(author.iter().any(|c| c.name() == "environment"));
+        assert!(!subscribed.iter().any(|c| c.name() == "environment"));
+        assert_eq!(author.len(), subscribed.len() + 1);
+
+        let mut prod = submission("alice", 1, 1, SubmissionState::Submitted, SubmissionValue::Number { value: 1.0 });
+        prod.environment = "prod".to_string();
+        let line = submission("bob", 1, 2, SubmissionState::Submitted, SubmissionValue::Number { value: 2.0 });
+        let mut ds = dataset(WritebackAudience::Publisher, vec![prod, line]);
+        ds.origin = DatasetOrigin::Author;
+        let batch = dataset_batch(&ds).unwrap();
+        let env = batch.column_by_name("environment").expect("the stream column").clone();
+        let env = env.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!((env.value(0), env.value(1)), ("prod", ""));
+    }
+
     // The Arrow batch's column names must mirror the engine table definition
-    // exactly, for BOTH audiences — a drift here is a fetch-time schema error.
+    // exactly, for BOTH audiences and BOTH origins — a drift here is a
+    // fetch-time schema error.
     #[test]
     fn batch_schema_mirrors_table_columns() {
         for audience in [WritebackAudience::Publisher, WritebackAudience::Subscriber] {
-            let ds = dataset(
-                audience,
-                vec![submission(
-                    "alice",
-                    1,
-                    1,
-                    SubmissionState::Submitted,
-                    SubmissionValue::Number { value: 1.0 },
-                )],
-            );
-            let batch = dataset_batch(&ds).unwrap();
-            let batch_names: Vec<String> = batch
-                .schema()
-                .fields()
-                .iter()
-                .map(|f| f.name().clone())
-                .collect();
-            let col_names: Vec<String> = dataset_columns(audience)
-                .iter()
-                .map(|c| c.name().to_string())
-                .collect();
-            assert_eq!(batch_names, col_names);
+            for origin in [DatasetOrigin::Author, DatasetOrigin::Subscription] {
+                let mut ds = dataset(
+                    audience,
+                    vec![submission(
+                        "alice",
+                        1,
+                        1,
+                        SubmissionState::Submitted,
+                        SubmissionValue::Number { value: 1.0 },
+                    )],
+                );
+                ds.origin = origin;
+                let batch = dataset_batch(&ds).unwrap();
+                let batch_names: Vec<String> = batch
+                    .schema()
+                    .fields()
+                    .iter()
+                    .map(|f| f.name().clone())
+                    .collect();
+                let col_names: Vec<String> = dataset_columns(audience, origin)
+                    .iter()
+                    .map(|c| c.name().to_string())
+                    .collect();
+                assert_eq!(batch_names, col_names);
+            }
         }
+    }
+
+    /// The freshness triggers rebuild only when the rows CHANGED: a new answer
+    /// (from any computer), a review, or another stream choice. Re-reading the
+    /// same rows is not a change.
+    ///
+    /// SABOTAGE: make `rows_fingerprint` ignore `updated_at` and `state` -- a
+    /// review is no longer seen as a change.
+    #[test]
+    fn the_freshness_fingerprint_sees_new_answers_reviews_and_choices() {
+        let a = submission("alice", 1, 1, SubmissionState::Submitted, SubmissionValue::Number { value: 1.0 });
+        let b = submission("bob", 1, 2, SubmissionState::Submitted, SubmissionValue::Number { value: 2.0 });
+        let base = rows_fingerprint("prod", &[a.clone(), b.clone()]);
+        assert_eq!(base, rows_fingerprint("prod", &[b.clone(), a.clone()]), "order does not matter");
+        assert_ne!(base, rows_fingerprint("prod", &[a.clone()]), "a new answer is a change");
+        let mut reviewed = a.clone();
+        reviewed.state = SubmissionState::Approved;
+        reviewed.updated_at = "2026-07-02T10:00:00Z".to_string();
+        assert_ne!(base, rows_fingerprint("prod", &[reviewed, b.clone()]), "a review is a change");
+        assert_ne!(base, rows_fingerprint("every stream", &[a, b]), "another choice is a change");
     }
 
     // Value encoding matrix: number fills value_number + rendered text;
@@ -1057,6 +1523,39 @@ mod tests {
         assert_eq!(sanitize_table_name("  \u{7} "), "WB dataset");
     }
 
+    /// BUG-0585 (found live 2026-10-22): an imported writeback table must be a
+    /// table a MEASURE can name. Its readable name -- spaces, '-', '!', ':',
+    /// '(' -- parsed as anything but a table, so no measure, pivot value,
+    /// `bi_query` or CUBE formula could ever read the table it imported.
+    ///
+    /// SABOTAGE: make `model_table_name` return `display.to_string()`.
+    #[test]
+    fn an_imported_writeback_table_is_named_so_a_measure_can_reference_it() {
+        let cases = [
+            ("WB writeback-test Sheet1 (2)!B3:B5", "WB_writeback_test_Sheet1_2_B3_B5"),
+            ("WB pkg Q1-Q2!B2:D10", "WB_pkg_Q1_Q2_B2_D10"),
+            ("WB budget.2026 Försäljning!A1", "WB_budget_2026_Försäljning_A1"),
+            ("  !! ", "WB_dataset"),
+            ("2026 plan", "WB_2026_plan"),
+        ];
+        for (display, model) in cases {
+            let name = model_table_name(display);
+            assert_eq!(name, model, "{display}");
+            let formula = format!("SUM({name}[value_number])");
+            let parsed = bi_engine::parse_measure_expression(&formula);
+            assert!(parsed.is_ok(), "a measure cannot name the table {name}: {:?}", parsed.err());
+            let text = format!("{:?}", parsed.unwrap());
+            assert!(text.contains(&format!("\"{name}\"")), "the measure does not reference the table {name}: {text}");
+        }
+        // Why: the readable name is not a table reference in the measure language.
+        let readable = format!("SUM({}[value_number])", "WB writeback-test Sheet1 (2)!B3:B5");
+        let parsed = bi_engine::parse_measure_expression(&readable);
+        assert!(
+            parsed.as_ref().map_or(true, |e| !format!("{e:?}").contains("WB writeback-test")),
+            "the measure language now reads a readable table name; this name rule may be relaxed: {parsed:?}"
+        );
+    }
+
     // End-to-end provisioning: a model carrying the catalog entry + a bound
     // table gets its connector wired, table re-bound, and data fetched; a
     // vanished region fails closed into the stale report; a model WITHOUT the
@@ -1073,7 +1572,7 @@ mod tests {
 
         let table = bi_engine::Table::new(
             ds.display_name.clone(),
-            dataset_columns(WritebackAudience::Subscriber),
+            dataset_columns(WritebackAudience::Subscriber, DatasetOrigin::Subscription),
         )
         .unwrap()
         .with_storage_mode(bi_engine::StorageMode::InMemory)

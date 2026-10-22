@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 551 | Open: 66 | Triaged: 0 | Fixed: 485 | Other: 0
+Total: 585 | Open: 66 | Triaged: 0 | Fixed: 519 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -5716,4 +5716,344 @@ calp_detach and detach-sheet left the detached regions' drafts in writeback_laye
 Checkout (Collaboration > Open Application for Editing) never restored the application's writeback region declarations into the working copy's writeback_draft_regions: PullResult did not carry them and materialize_pull_result's Checkout arm ignored them. The author saw no designated regions, and because a push publishes exactly writeback_draft_regions (assemble_publish_workbook), the next push would have published the application WITHOUT its writeback regions, silently ending data collection for every subscriber.
 
 **Repro:** Designate B3:B5 as a writeback region, publish 'writeback-test'. File > New, Collaboration > Open Application for Editing > writeback-test: the Writeback pane lists no regions, calp_get_writeback_draft_regions is empty, and the push diff reports writebackRegion 'removed'.
+**Fix:** fixed
+
+## BUG-0552 `[fixed]`
+
+**Found:** 2026-10-21 (manual)
+**Oracle:** inspector-workspace-pick-loads-nothing
+
+Picking a workspace in the Application Inspector (Browse to workspace.calcula, a typed workspace folder, a saved workspace, or a handover naming no application) listed its applications but never loaded one: calp_inspector_resolve_location rightly returns packageName None for a workspace root, and resolveAndLoad only called loadOverview when a packageName came back. The application list stayed on 'Select application...' and every one of the eight sections showed the 'Browse ... then Inspect' hint the user had just followed, so the window read as empty tabs.
+
+**Repro:** Collaboration > Application Inspector..., Browse..., pick C:\writeback-test\workspace.calcula (one application, writeback-test). Every tab shows the 'Browse to a workspace's workspace.calcula file ... then Inspect' hint; no calp_inspector_overview call is made until the user notices the application list at the right of the top bar, picks the application and presses Inspect.
+**Fix:** fixed
+
+## BUG-0553 `[fixed]`
+
+**Found:** 2026-10-21 (manual)
+**Oracle:** collected-responses-ignores-authors-own-regions
+
+Collected Responses found writeback regions only through the workbook's SUBSCRIPTIONS. The pane listed calp_get_writeback_regions (the subscriber index) and every command behind it (calp_load_region_submissions, calp_set_submission_state, both exports, the rollup get/set, calp_region_response_status, the script gateway's require_region_publisher) resolved through owning_subscription_for_region, which walks state.subscriptions only. The AUTHOR's own designated regions (writeback_draft_regions) are never subscriptions -- a working copy may not even subscribe to its own application -- so the person who designated B3:B5 and published it read 'No writeback regions in this workbook.' with answers waiting in the workspace, and the submission watch never polled the region (no 'submission received' event). The pane only worked for a publisher who also subscribed to their own application from the same workbook.
+
+**Repro:** Designate B3:B5, publish 'writeback-test' to C:\writeback-test. In another workbook subscribe and Submit All. Back in the publishing workbook (or a working copy via Open Application for Editing): Writeback > Collected Responses shows 'No writeback regions in this workbook.' and no responses.
+**Fix:** fixed
+
+## BUG-0554 `[fixed]`
+
+**Found:** 2026-10-21 (manual)
+**Oracle:** resubscribe-never-shows-own-sent-values
+
+A workbook that did not already hold a subscriber's sent writeback values never showed them: subscribe (calp_pull -> materialize_pull_result) never touched writeback_layer, and reconcile_writeback_layer_internal returned early on an empty layer and only ever updated entries it already held, so a new workbook (or one closed without saving) that subscribed again showed blank cells although the workspace held the same subscriber's submissions (identity is per Windows user per computer). Reconcile also copied only the STATE of the newest workspace record onto an older local entry with a different id, so a value sent later from another workbook showed the OLD value marked approved.
+
+**Repro:** Subscribe to writeback-test in a new workbook, type 1, 2, 3 into B3:B5, Submit All, close without saving. File > New, subscribe again: B3:B5 are blank and the layer is empty, although submissions/{your id}/ holds the three values.
+**Fix:** fixed
+
+## BUG-0555 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** publisher-reads-carry-forward-without-compatibility
+
+load_region_current_submissions (the one row source of Collected Responses, its CSV/Parquet exports, the roster, review and the submission watch) carried answers forward from EVERY older version with no Strict-binding check and no geometry/schema compatibility check, unlike merge_lenient_submissions (GATHER and the BI datasets). A region whose selector moved or shrank between versions showed last quarter's answers filed against the wrong rows, and a Strict region showed answers from versions it had refused; once the author's BI writeback tables read the same rows, a model table would have aggregated them -- a plausible but wrong total.
+
+**Repro:** Publish v1.0.0 with a writeback region on B3:B5 and collect an answer in B3. Publish v1.1.0 with the same region id moved to B5:B7 (or with version binding Strict). Open Collected Responses on the author's workbook: the v1.0.0 answer for B3 is listed and exported, although B3 is no longer in the region (GATHER on a subscriber correctly drops it).
+**Fix:** fixed
+
+## BUG-0556 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** writeback-identity-copyable
+
+A writeback submitter was a random UUID read from %LOCALAPPDATA%\Calcula\subscriber-identity.json (calp::identity_provider::load_or_create). The id is a folder name every workspace reader can see, and the only check (the file's submitter.id equals its folder) is consistency, not authentication: anybody who could write the workspace could file answers under anybody's id, and a person who copied a colleague's id could send as that colleague.
+
+**Repro:** Copy any submissions/<id>/ folder name into a hand-written event file under submissions/<id>/ in the workspace: the publisher's inbox, GATHER and the BI tables count it as that person's answer.
+**Fix:** fixed
+
+## BUG-0557 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** writeback-reviews-unsigned
+
+Publisher approve / reject / re-open decisions (ReviewEvent under {version}/reviews/) were unsigned, and the fold applied ANY review event targeting a submission id. Anybody who could write the workspace could approve their own answers into an on_approval GATHER total or a masterData column (newest approved wins), or reject a rival's.
+
+**Repro:** Write {application}/{version}/reviews/x.json with newState 'approved' targeting any submission id: the inbox shows it approved and an on_approval GATHER counts it.
+**Fix:** fixed
+
+## BUG-0558 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** writeback-fold-dedup-by-event-id
+
+fold_submissions deduplicated events by event id ALONE before any slot existed: a file planted in another sender's folder that reused a real answer's event id with a newer updated_at replaced it, and a review targeting that id applied to the clone too.
+
+**Repro:** Copy alice's event into submissions/bob/x_<alice-event-id>.json with a newer updatedAt and another value: the fold's step 1 kept the clone and dropped alice's answer.
+**Fix:** fixed
+
+## BUG-0559 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** writeback-planted-record-adopted
+
+Reconcile (adopt_own_sent_values_inner) adopted -- and could REPLACE -- cell values from any well-formed record filed under this subscriber's self-asserted id, so a record planted in the workspace was shown in the subscriber's cell as 'what you last sent', recalculated, and on a replace ended their undo history (open-items 2.am).
+
+**Repro:** Write a record into submissions/<victim-id>/ for a cell of a subscribed region; on the victim's next reconcile the cell shows the planted value.
+**Fix:** fixed
+
+## BUG-0560 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** writeback-substring-principal-match
+
+Expected respondents (compute_response_status) and masterData allowed editors (bi/writeback.rs editor_allowed / check_editor_allowed, calp_commands.rs submit_model_writeback) matched case-insensitively with a SUBSTRING fallback either way on the display name: 'Al' answered for 'Alice' and 'Alan', and any display name containing an allowed editor's name could edit master data.
+
+**Repro:** allowedEditors ['alice']; a sender whose display name is 'Malice' passes the master data gate.
+**Fix:** fixed
+
+## BUG-0561 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** writeback-signing-doors-feature-open
+
+calp_submit_region, calp_submit_all_regions, calp_save_writeback_draft (an immediate region sends on save), bi_writeback_set_value, calp_set_submission_state, calp_set_model_submission_state and calp_get_subscriber_identity were FEATURE-OPEN: a non-trusted extension's governed backend door could send answers as the user and, on the publisher's machine, approve or reject as the publisher.
+
+**Repro:** assertExtensionMayInvoke('calp_submit_region', { trusted: false }) did not throw.
+**Fix:** fixed
+
+## BUG-0562 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** writeback-forged-name-indistinguishable
+
+After identity phase 1 every answer is signed, but a colleague can mint a key of their own and sign an answer that CLAIMS another person's Windows SID and principal (a valid signature under a different id). Collected Responses showed it as 'Signed as CORPalice', the roster matched it to the expected respondent CORPalice, and GATHER totals, the BI tables and scripts counted it -- with nothing anywhere distinguishing it from Alice's own answer, and no way for a publisher to count only answers whose sender could be confirmed.
+
+**Repro:** Workspace on an NTFS share. Bob signs, with his own key, an answer whose identity names Alice's SID and CORPalice, and saves it from his account. Publisher opens Collected Responses: the row reads 'Signed as CORPalice'; the roster shows CORPalice responded; =GATHER totals include Bob's value.
+**Fix:** fixed
+
+## BUG-0563 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** writeback-prod-answers-dropped-when-line-ahead
+
+With the development line ahead of prod (prod -> 1.0.0, unpromoted head 1.1.0 that moved the region or made it Strict), the author's DEFAULT (prod) view dropped every prod answer: collected_versions judged prod's 1.0.0 answers against the HEAD's declaration, so Collected Responses, the roster, the exports, review ('No submission found') and the author's BI table showed nothing for the live stream -- only a log line recorded it. A prod subscriber's GATHER, which judges against prod's own version, still counted them.
+
+**Repro:** Pipeline [prod]; promote prod to 1.0.0; a prod answer in 1.0.0; push 1.1.0 moving the region two rows down; open Collected Responses with the default choice: empty.
+**Fix:** fixed
+
+## BUG-0564 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** writeback-case-variant-sender-folder-drops-answers
+
+load_submission_events_by dropped every file whose sender id was not byte-equal to its folder name. On Windows storage WIN-<id> and win-<id> are one folder, sender ids are public and stable, so a share-writer could create submissions/WIN-<Alice's id>/ before Alice answered: her later answers landed there and the publisher's scan skipped them in silence (she saw them as sent). An unsigned plant under the case-variant id read as 'sent before sign-in' (is_signed_id was case-sensitive), and principal_matches compared ids case-insensitively, so the plant could satisfy an expected-respondent entry naming Alice's id.
+
+**Repro:** Create submissions/WIN-<alice id>/ in a version Alice has not answered; Alice submits; the publisher's inbox does not list her answer.
+**Fix:** fixed
+
+## BUG-0565 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** writeback-verified-by-moved-file-owner
+
+'Verified' rested on the NTFS owner of an answer file alone. The owner records who CREATED a file, and NTFS/SMB keep it when a file is moved within a volume or overwritten by another account, so on a share with the common inherited Modify right Mallory could move a file Alice created into his own forged-id folder, overwrite it with his signed answer, and have it read 'Verified', written by CORP\alice, counted under 'count only verified senders' and matched as Alice.
+
+**Repro:** On a share where Authenticated Users have Modify: sign an answer under win-<Alice SID>-<own key>, move an old file of Alice's into that folder, overwrite its content. The inbox reads Verified.
+**Fix:** fixed
+
+## BUG-0566 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** publish-dialog-switches-identity-rule-off
+
+The Publish/Push dialog always sent requireVerifiedIdentity, starting from an unticked box and adopting the base's rule only when the preview reported it. The preview swallowed a failed base read (.ok()), and Push could be pressed before the preview returned, so a push silently wrote NO rule into the signed manifest -- switching 'count only verified senders' off around Rust's CALP_PUSH_IDENTITY_RULE_UNKNOWN refusal, which only fires when no choice is sent.
+
+**Repro:** Base version with the rule on; make the base unreadable to the preview (or press Push immediately); push: the new version counts every answer.
+**Fix:** fixed
+
+## BUG-0567 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** writeback-refuted-name-matched-and-shown
+
+A sender's self-claimed principal and display name kept deciding matches and display after the reader had disproved them: a Verified Mallory claiming 'CORP\alice' edited a masterData column whose allowlist named Alice (requireVerified on), a Not-verified answer ('written by CORP\bob') still made Alice 'responded' in the roster when the rule was off (the roster half of BUG-0562), and Collected Responses showed a green 'Signed as CORP\alice' above a red 'Not verified: written by CORP\bob'.
+
+**Repro:** Rule off; Bob signs an answer claiming CORP\alice; the roster lists CORP\alice as responded and the row reads 'Signed as CORP\alice'.
+**Fix:** fixed
+
+## BUG-0568 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** writeback-cellguard-signed-as-typed
+
+A script's setCellValue into a claimed cell (the gateway's cellGuard action) went through the typed-by-the-user command, so an immediate region's send was SIGNED with origin Immediate ('the user typed it') -- a permanent wrong label inside the signature.
+
+**Repro:** A script with distribution.writeback writes into an immediate region's cell: the publisher reads 'sent on save'.
+**Fix:** fixed
+
+## BUG-0569 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** writeback-unsigned-answers-accepted-in-signed-versions
+
+check_submission accepted any unsigned answer under a non-win-/entra- id as 'sent before sign-in' in EVERY version, so anyone who can write the share could add unlimited unsigned respondents (any display name) to versions only signing apps can open; with the rule off they reached GATHER, BI tables, scripts and the roster.
+
+**Repro:** Publish a version from this app; drop an unsigned answer file under a random id: it is listed, counted and named in the roster.
+**Fix:** fixed
+
+## BUG-0570 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** collect-from-default-follows-unauthorised-pipeline
+
+The author's default stream (the pipeline's last environment) ignored unauthorized_pointer: a Pipeline record signed by a key the application no longer authorises (a removed co-publisher, or a share-writer's self-signed record) retargeted the publisher's inbox, roster and BI tables, while the subscriber side refused the same state.
+
+**Repro:** A co-publisher redefines the pipeline and is then removed: Collected Responses follows their last environment.
+**Fix:** fixed
+
+## BUG-0571 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** collect-from-quick-ticks-lose-toggles
+
+In the stay-open Collect From menu each click sent an absolute set computed from the menu's last render; a second tick made while the first was on its way to Rust was computed from the old view and overwrote the first (untick test, quickly tick dev: test came back).
+
+**Repro:** From {prod,test}: untick test and immediately tick dev -> {prod,test,dev}.
+**Fix:** fixed
+
+## BUG-0572 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** collect-from-stale-after-first-publish
+
+After a first publish the Collect From control stayed disabled ('Publish first') until a region changed or the file was reopened, and a pipeline edit or promotion left the hero's default and the pane's lists stale: the store refreshed only on open/new/region events, and a publish, pipeline edit or promotion announces only ENVIRONMENTS_CHANGED_EVENT.
+
+**Repro:** Designate a region in a new workbook, publish it: the Collect From hero stays disabled.
+**Fix:** fixed
+
+## BUG-0573 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** writeback-author-pass-takes-over-subscription-table
+
+When a publisher also subscribes to their own application from the same workbook, the new author BI pass claimed the region and the subscription loop skipped it: a model table imported earlier with the subscription's columns silently switched to the Collect From stream and received a batch with an environment column it was not imported with.
+
+**Repro:** Subscribe to your own application, import its region as a model table, then designate the region in the workbook and refresh.
+**Fix:** fixed
+
+## BUG-0574 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** collected-responses-header-counts-uncounted
+
+Under 'count only verified senders' the Collected Responses header (respondents, pending, approved, rejected) counted every row, right beside a strip saying the uncounted answers are 'left out of every total' and a roster line counting only counted rows.
+
+**Repro:** Rule on, one verified and two unverified senders: '3 respondents' next to '1 of 3 expected responded'.
+**Fix:** fixed
+
+## BUG-0575 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** publish-no-warning-for-unverifiable-storage
+
+No publish warning for storage where 'count only verified senders' can count nothing (an HTTP or unreadable workspace classifies Unknown, which got no warning), the sync-folder warning and the checkbox promised verification on any network share (wrong for local accounts on a workgroup/NAS share), and the warning box said warnings 'only degrade for subscribers' although this one is about the publisher's own counts.
+
+**Repro:** Publish into an HTTP workspace with writeback regions: no warning; every answer later reads unconfirmed.
+**Fix:** fixed
+
+## BUG-0576 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** writeback-submit-signs-crafted-draft-claims
+
+Submit checked only a draft's id against this computer's identity and then signed the draft's own principal, display name and scope -- read from the workbook -- so a crafted .cala could have this user's key sign 'CORP\ceo' or a scope that switches the owner check off, while the confirmation showed the OS identity.
+
+**Repro:** Edit writeback_drafts.json: keep your id, set principalName to CORP\ceo; Submit All: the signed record claims CORP\ceo.
+**Fix:** fixed
+
+## BUG-0577 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** writeback-publisher-gate-unverified-root
+
+require_publisher_key took its co-publisher root from the application's first version read WITHOUT a signature check (review_keys with no trusted root), unlike every reader's review authority (pin or developer anchor): a planted first version plus a planter-signed list passed the gate; and root_key_of trusted an edited first manifest's publisher_key.
+
+**Repro:** As a subscriber who pinned the real publisher, plant 0.0.1 signed with your key and a list naming you: the publisher gate admits your profile.
+**Fix:** fixed
+
+## BUG-0578 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** writeback-review-authority-rollback
+
+Review authority accepted any root-signed publishers.json without the revision high-water mark the developer doors enforce, so restoring an older list made a removed co-publisher's signed approvals count again in every reader's fold, the author's included.
+
+**Repro:** Author anchored at list revision 3; restore revision 2 naming a removed co-publisher: their decisions count.
+**Fix:** fixed
+
+## BUG-0579 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** writeback-review-decision-no-origin
+
+Review decisions carried no origin, so an approved script on a publisher's computer approving answers produced decisions indistinguishable from the publisher's own.
+
+**Repro:** A script calls setSubmissionState(approved): the inbox shows 'Reviewed by <publisher>'.
+**Fix:** fixed
+
+## BUG-0580 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** writeback-identity-disclosed-by-feature-open-commands
+
+calp_get_subscriber_identity was denylisted for naming the account's SID and principal, but calp_get_writeback_layer, calp_reconcile_writeback and calp_preview_region_submission -- feature-open -- return drafts and previews carrying the same identity.
+
+**Repro:** From a non-trusted extension, invoke calp_get_writeback_layer: every draft carries the sender's win-<SID> id and principal.
+**Fix:** fixed
+
+## BUG-0581 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** writeback-foreign-draft-raw-ids
+
+A draft typed on another computer (an ordinary laptop/desktop path) was refused with two raw win-S-1-5-21-... ids and no way out.
+
+**Repro:** Save a workbook with drafts on one computer, open it on another, Submit.
+**Fix:** fixed
+
+## BUG-0582 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** collect-from-read-failure-shown-as-publish-first
+
+A failed Collect From read was kept as an error nobody showed: the hero read 'Publish this workbook's application first' for a published application, and a failed re-read kept a stale view with no sign of the failure.
+
+**Repro:** Make the workspace unreachable, open the Writeback tab: 'Publish first'.
+**Fix:** fixed
+
+## BUG-0583 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** writeback-bi-author-pass-rewalks-on-main-thread
+
+The BI author pass re-listed every region (subscribed applications included) and opened a NEW workspace walk per region, from bi_list_writeback_tables -- a sync command on the main thread -- and from the 60-second poll; an invalidation-driven rebuild did not record its fingerprint, so the next poll rebuilt again; and Collect From's Set read every version's answers for stream tags twice more.
+
+**Repro:** A workbook with several own regions on a slow share: opening the model import list freezes the window.
+**Fix:** fixed
+
+## BUG-0584 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** identity-owner-lookup-beyond-max-path
+
+The reader's identity check asked Windows for an answer file's owner with the PLAIN path (identity_verification::plain_path). Calcula is not long-path aware, so GetNamedSecurityInfoW fails with ERROR_INVALID_NAME (123) for any path beyond MAX_PATH (260). An answer's file sits ~170 characters below its workspace ({app}\{version}\submissions\win-<SID>-<32 hex>\<region>_<row>_<col>_<id>.json), so in ANY workspace deeper than ~90 characters every answer read 'Signed, identity not confirmed (cannot be checked here: Windows did not say who wrote the file)' -- the owner's own answers in a %TEMP% copy of C:\writeback-test included. Under 'count only verified senders' that would have counted NOTHING. The failure was not logged anywhere.
+
+**Repro:** Submit an answer into a workspace at %TEMP%\calcula-writeback-subscriber\workspace; Open Application for Editing; Collected Responses: Identity reads 'cannot be checked here: Windows did not say who wrote the file' although Get-Acl names the owner (Danne\Salle). App log (after adding the warning): 'error 123'.
+**Fix:** fixed
+
+## BUG-0585 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** writeback-model-table-name-unreferenceable
+
+bi_import_writeback_tables named the imported table after its readable dataset name ('WB writeback-test Sheet1 (2)!B3:B5'). The model's validator accepts that, but the measure language reads a table only as a bare identifier ([A-Za-z0-9_] plus '.') and has no quoting, so no measure could reference the table: SUM('...'[value_number]) fails with "unexpected character: '''" and the bare spelling at '!'. With no measure there is no pivot value, no bi_query ("at least one measure is required"), no CUBE formula and no value list -- the imported writeback table could be listed but never read.
+
+**Repro:** In a working copy with a writeback region: bi_model_create_blank, bi_import_writeback_tables([region]), then bi_model_upsert_measure with SUM('WB writeback-test Sheet1 (2)!B3:B5'[value_number]) -> parse error; bi_query with no measure -> 'at least one measure is required'.
 **Fix:** fixed

@@ -80,6 +80,14 @@ mod test_profile {
                 // choosing a profile shares this one "computer".
                 crate::consent_seal::get_or_mint_key(&crate::consent_seal::FileKeyStore::new(&dir))
                     .expect("mint the test process's approvals key");
+                // The writeback signing key (crate::submitter_identity), for the
+                // same reason: every test that sends an answer without choosing a
+                // profile sends as this one "computer".
+                crate::consent_seal::get_or_mint_key_for(
+                    &crate::consent_seal::FileKeyStore::with_file(&dir, crate::submitter_identity::SUBMITTER_KEY_FILE),
+                    &crate::submitter_identity::SUBMITTER_KEY,
+                )
+                .expect("mint the test process's writeback signing key");
                 dir
             })
             .clone()

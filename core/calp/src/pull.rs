@@ -1315,6 +1315,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         publish::publish(reg, &request, prof).unwrap();
@@ -1387,6 +1388,7 @@ mod tests {
                 ]),
             }],
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         publish::publish(&reg, &request, prof.path()).unwrap();
@@ -1448,6 +1450,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         publish::publish(&reg, &publish_req, prof.path()).unwrap();
@@ -1512,6 +1515,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         let pub_result = publish::publish(&reg, &publish_req, prof.path()).unwrap();
@@ -1606,6 +1610,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         publish::publish(&reg, &publish_req, prof.path()).unwrap();
@@ -1696,6 +1701,7 @@ mod tests {
                 excluded_regions: Vec::new(),
                 custom_objects: Vec::new(),
                 include_comments: false,
+                identity_policy: None,
                 min_app_version: String::new(),
             };
             publish::publish(&reg, &req, prof.path()).unwrap();
@@ -1805,6 +1811,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         let pub_result = publish::publish(&reg, &publish_req, prof.path()).unwrap();
@@ -1887,6 +1894,7 @@ mod tests {
                 excluded_regions: Vec::new(),
                 custom_objects: Vec::new(),
                 include_comments: false,
+                identity_policy: None,
                 min_app_version: String::new(),
             };
             publish::publish(&reg, &publish_req, prof.path()).unwrap();
@@ -1993,6 +2001,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         let pub_result = publish::publish(&reg, &publish_req, prof.path()).unwrap();
@@ -2109,6 +2118,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         }
     }
@@ -2441,6 +2451,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         assert!(
@@ -2467,6 +2478,73 @@ mod tests {
         publish::publish(&reg, &plain_req, prof.path()).unwrap();
         let v2 = reg.get_version_manifest("min-app-pkg", "1.0.1").unwrap();
         assert_eq!(v2.min_app_version, "2.5.0", "publish writes the stamp verbatim");
+    }
+
+    /// The identity rule (identity phase 1) is written into the SIGNED
+    /// manifest verbatim, a pull still verifies, an absent rule is absent from
+    /// the JSON, and switching it is a reported governance change.
+    #[test]
+    fn the_identity_rule_is_written_into_the_signed_manifest() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+        let wb = make_test_workbook();
+        let mut req = PublishRequest {
+            model_writebacks: None,
+            workbook: &wb,
+            package_name: "id-rule".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
+            sheet_indices: vec![0],
+            now: "2026-10-22T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
+            include_comments: false,
+            identity_policy: None,
+            min_app_version: String::new(),
+        };
+        publish::publish(&reg, &req, prof.path()).unwrap();
+        let raw = std::fs::read_to_string(dir.path().join("id-rule/1.0.0/version-manifest.json")).unwrap();
+        let v1 = reg.get_version_manifest("id-rule", "1.0.0").unwrap();
+        assert!(v1.identity_policy.is_none());
+        assert!(!raw.contains("identityPolicy"), "an absent rule is not written: {raw}");
+
+        req.version = SemVer::new(1, 0, 1);
+        req.mode = PushMode::Update { expected_base: SemVer::new(1, 0, 0) };
+        req.change_summary = "count only verified senders".to_string();
+        req.identity_policy = Some(crate::identity_check::IdentityPolicy { require_verified: true });
+        publish::publish(&reg, &req, prof.path()).unwrap();
+        let v2 = reg.get_version_manifest("id-rule", "1.0.1").unwrap();
+        assert_eq!(v2.identity_policy, Some(crate::identity_check::IdentityPolicy { require_verified: true }));
+        // Pulling 1.0.1 verifies the signature over the manifest that carries it.
+        let pull_req = PullRequest {
+            package_name: "id-rule".to_string(),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 1))),
+            now: "2026-10-22T01:00:00Z".to_string(),
+        };
+        pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse)
+            .expect("the signed manifest carrying the rule verifies on pull");
+
+        let diff = crate::diff::diff_sides(
+            &crate::diff::DiffSide::Published { transport: &reg, package: "id-rule", version: "1.0.0", manifest: &v1 },
+            &crate::diff::DiffSide::Published { transport: &reg, package: "id-rule", version: "1.0.1", manifest: &v2 },
+            &Default::default(),
+        )
+        .unwrap();
+        let change = diff.manifest_changes.iter().find(|c| c.field == "identityPolicy");
+        assert!(
+            change.is_some_and(|c| c.before == "count every answer" && c.after == "count only verified senders"),
+            "{:?}",
+            diff.manifest_changes
+        );
     }
 
     #[test]
@@ -2498,6 +2576,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         assert!(
@@ -2556,6 +2635,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         assert!(
@@ -2641,6 +2721,7 @@ mod tests {
                 excluded_regions: Vec::new(),
                 custom_objects: Vec::new(),
                 include_comments: false,
+                identity_policy: None,
                 min_app_version: String::new(),
             };
             publish::publish(&reg, &req, prof.path()).unwrap();
@@ -2702,6 +2783,7 @@ mod tests {
                 excluded_regions: Vec::new(),
                 custom_objects: Vec::new(),
                 include_comments: false,
+                identity_policy: None,
                 min_app_version: String::new(),
             };
             publish::publish(&reg, &req, prof.path()).unwrap();
@@ -2788,6 +2870,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         publish::publish(&reg, &req, prof.path()).unwrap();
@@ -2862,6 +2945,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         let pub_result = publish::publish(&reg, &publish_req, prof.path()).unwrap();
@@ -2931,6 +3015,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         let pub_result = publish::publish(&reg, &publish_req, prof.path()).unwrap();
@@ -2985,6 +3070,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         publish::publish(&reg, &publish_req, prof.path()).unwrap();
@@ -3038,6 +3124,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         let pub_result = publish::publish(&reg, &publish_req, prof.path()).unwrap();
@@ -3154,6 +3241,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         let pub_result = publish::publish(&reg, &publish_req, prof.path()).unwrap();
@@ -3227,6 +3315,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         publish::publish(&reg, &publish_req, prof.path()).unwrap();
@@ -3319,6 +3408,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments,
+            identity_policy: None,
             min_app_version: String::new(),
         }
     }
@@ -3543,6 +3633,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         publish::publish(&reg, &publish_req, prof.path()).unwrap();
@@ -3614,6 +3705,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         publish::publish(&reg, &publish_req, prof.path()).unwrap();
@@ -3686,6 +3778,7 @@ mod tests {
                 excluded_regions: Vec::new(),
                 custom_objects: Vec::new(),
                 include_comments: false,
+                identity_policy: None,
                 min_app_version: String::new(),
             };
             publish::publish(&reg, &request, prof.path()).unwrap();
@@ -3879,6 +3972,9 @@ mod tests {
             submitter: crate::identity_provider::SubmitterIdentity {
                 display_name: "alice".to_string(),
                 id: "id-alice".to_string(),
+                principal_name: String::new(),
+                provider: Default::default(),
+                scope: Default::default(),
                 extra: HashMap::new(),
             },
             value: crate::writeback::SubmissionValue::Number { value: 42.0 },
@@ -3888,6 +3984,9 @@ mod tests {
             submitted_at: Some("2026-05-18T02:00:00Z".to_string()),
             review_reason: None,
             reviewed_by: None,
+            seal: None,
+            sender: Default::default(),
+            identity: Default::default(),
             extra: HashMap::new(),
         };
         reg.save_submission("test-pkg", "1.0.0", &submission).unwrap();
@@ -3903,6 +4002,8 @@ mod tests {
                 review_reason: None,
                 reviewed_by: Some("Publisher".to_string()),
                 reviewed_at: "2026-05-18T03:00:00Z".to_string(),
+                target_digest: String::new(),
+                seal: None,
                 extra: HashMap::new(),
             },
         )
@@ -3991,6 +4092,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         publish::publish(&reg, &request, prof.path()).unwrap();
@@ -4082,6 +4184,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         let pub_result = publish::publish(&reg, &request, prof.path()).unwrap();
@@ -4203,6 +4306,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         publish::publish(&reg, &request, prof.path()).unwrap();

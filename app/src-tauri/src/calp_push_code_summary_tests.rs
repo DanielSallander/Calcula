@@ -65,6 +65,7 @@ fn request(wb: &persistence::Workbook, version: SemVer, mode: PushMode) -> Publi
         excluded_regions: Vec::new(),
         custom_objects: Vec::new(),
         include_comments: false,
+        identity_policy: None,
         min_app_version: String::new(),
     }
 }

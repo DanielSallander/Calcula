@@ -84,6 +84,8 @@ const MUST_READ_STATE_LOCALE: &[(&str, &str)] = &[
     ("bi/commands.rs", "bi_insert_result"),
     ("bi/commands.rs", "bi_refresh_connection"),
     ("insights/commands.rs", "insights_for_series"),
+    // Collected Responses shows each answer as the cells show it (2026-10-21).
+    ("calp_commands.rs", "load_region_submissions_core"),
 ];
 
 fn src_dir() -> PathBuf {

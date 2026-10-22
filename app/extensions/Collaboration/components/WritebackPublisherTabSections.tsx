@@ -1,7 +1,8 @@
 // FILENAME: app/extensions/Collaboration/components/WritebackPublisherTabSections.tsx
 // PURPOSE: The contextual "Writeback" ribbon tab as the PUBLISHER sees it: three
-//          clusters -- Region, Status, Responses -- for the writeback region this
-//          workbook designated under Core's active cell.
+//          clusters -- Region, Status, Responses (Collect From, Collected
+//          Responses, Writeback Pane) -- for the writeback region this workbook
+//          designated under Core's active cell.
 // CONTEXT: The same tab (id `writeback-tab`, label "Writeback") as the
 //          subscriber's (WritebackTabSections.tsx); lib/writebackTab.ts registers
 //          this section list instead when the cursor is in one of the workbook's
@@ -49,6 +50,7 @@ import {
   openWritebackPane,
   type WritebackStatusLine,
 } from "../lib/writebackTabModel";
+import { CollectFromMenuButton } from "./CollectFromMenuButton";
 
 interface PublisherTabView {
   region: WritebackRegionDeclaration | null;
@@ -150,8 +152,13 @@ export function WritebackPublisherStatusSection(_props: PanelSectionProps): Reac
 // ============================================================================
 
 export function WritebackPublisherResponsesSection(_props: PanelSectionProps): React.ReactElement {
+  // [Collect From v][Collected Responses][Writeback Pane]: ONE tall row of
+  // heroes, so the section stays "inline". Collect From chooses which streams
+  // (development line, environments) the answers are collected from -- the
+  // same control, over the same store, as the one in Collected Responses.
   return (
     <ActionRow gap={GAP_XS}>
+      <CollectFromMenuButton testId="writeback-tab-collect-from" />
       <CommandButton
         icon={<RibbonIcon.Table size={HERO_ICON_SIZE} />}
         label="Collected Responses"

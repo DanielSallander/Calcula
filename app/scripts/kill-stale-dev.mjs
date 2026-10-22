@@ -11,7 +11,12 @@
  * beforeDevCommand is `npm run dev`). Run it on its own with `yarn dev:kill`.
  *
  * Safety: only processes that are (a) LISTENING on the Vite port, or
- * (b) executables inside THIS repo's src-tauri/target directory are killed.
+ * (b) executables inside a Calcula cargo target directory -- this repo's
+ * src-tauri/target, the CARGO_TARGET_DIR this shell exports, or the
+ * out-of-repo default %LOCALAPPDATA%calcula-target that CLAUDE.md requires
+ * and e2e/launch-with-cdp.ps1 uses -- are killed. (Until 2026-10-22 only the
+ * in-repo directory was matched, so the app every E2E launch builds was never
+ * found: the script killed Vite, reported success and left app.exe running.)
  * An unrelated `app.exe` elsewhere on the machine (e.g. "ollama app.exe") is
  * never touched. Set CALCULA_SKIP_KILL=1 to disable entirely.
  */
@@ -22,7 +27,13 @@ import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP_DIR = path.resolve(__dirname, "..");
-const TARGET_DIR = path.join(APP_DIR, "src-tauri", "target").toLowerCase();
+const TARGET_DIRS = [
+  path.join(APP_DIR, "src-tauri", "target"),
+  process.env.CARGO_TARGET_DIR,
+  process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "calcula-target") : undefined,
+]
+  .filter((d) => typeof d === "string" && d.length > 0)
+  .map((d) => path.resolve(d).toLowerCase() + path.sep);
 const VITE_PORT = Number(process.env.VITE_PORT ?? 5173);
 const PORT_FREE_TIMEOUT_MS = 10_000;
 
@@ -90,7 +101,10 @@ function pidsOfStaleApp() {
 
   return rows
     .filter((r) => typeof r?.ExecutablePath === "string")
-    .filter((r) => r.ExecutablePath.toLowerCase().startsWith(TARGET_DIR))
+    .filter((r) => {
+      const exe = path.resolve(r.ExecutablePath).toLowerCase();
+      return TARGET_DIRS.some((dir) => exe.startsWith(dir));
+    })
     .map((r) => Number(r.ProcessId))
     .filter((pid) => Number.isInteger(pid) && pid > 0 && pid !== process.pid);
 }

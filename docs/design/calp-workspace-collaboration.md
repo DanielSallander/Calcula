@@ -98,6 +98,36 @@ hand-roll its own directory picker, which is how it came to offer a folder
 gesture only. The typed field remains everywhere, because an `https://` workspace
 is reached by URL and never by a picker at all.
 
+**Picking a workspace in the Inspector OPENS an application** (2026-10-21,
+BUG-0552). The 2026-09-25 move to the file picker had a consequence nobody
+followed through: the folder picker had let a user aim at an APPLICATION folder,
+which the resolver recognises and pre-selects, while the pointer file — the only
+thing the file picker can return — names a workspace and no application, as it
+should. The window listed that workspace's applications and stopped: the
+application list sat on "Select application…", no overview was ever requested,
+and every one of the eight sections showed the "Browse … then Inspect" hint the
+user had just followed, which the owner read as "all I see is empty tabs". Now
+`ApplicationInspectorApp.tsx` (`selectAndLoad`) opens the application the location
+named, when it named one; otherwise a workspace holding exactly ONE application
+opens that one at `latest`; with two or more nothing is guessed and the content
+area says to choose one in the list. Choosing an application in that list opens
+it at once (a read: verify and read, nothing changes), so Inspect is needed only
+to read a different version of the one already chosen. The same rule serves
+Browse, a typed or saved location, and a handover from the main window that
+names a workspace but no application. A newly picked workspace also drops the
+previous one's application from the screen instead of leaving it under the new
+listing, and every pick (Browse, a typed or saved location, a handover) takes a
+token that each of its awaits checks, so a slow workspace picked first cannot
+land its path, its application list or its load over a fast one picked after
+it. A handover to an empty workspace says "No applications found here..." as
+Browse does, and a handover whose listing fails keeps the overview and says why
+the pickers are missing. Pinned by
+`extensions/Collaboration/__tests__/inspectorWorkspaceAutoLoad.test.tsx`. The C6
+positive control in `app/e2e/journeys/fixall-calp.spec.ts` goes through the pointer
+file and asserts the Overview title and the Writeback section's content (for its
+region-less application, the section's own empty-state line); it is written but
+has NOT yet run live (2026-10-21), so it is not yet a pin.
+
 ### 2.1 The source-of-truth inversion
 
 Today the `.cala` is primary and the `.calp` is an export of it. In the workspace
@@ -456,6 +486,84 @@ last week; under a "strictly older" rule the subscriber's own submissions agains
 that newer version would stop counting the moment their environment was rolled
 back, and re-appear if it were rolled forward again. A line subscription keeps
 the semver rule it always had.
+
+**The publisher chooses which streams it collects** (Writeback > Collect From,
+owner decision 2026-10-22; `docs/design/calp-writeback.md`, "Which streams the
+publisher collects"). ONE choice per application, held in the working copy's
+`WorkingCopyLink.collect_streams` -- never published (user files never reach a
+package), so subscribers never see it. Default: the pipeline's LAST environment
+(every stream when there are none); "All streams" includes environments defined
+later; an explicit set does not, and a new environment arrives unticked with a
+"not collected" note. Collected Responses, exports, roster, review, the
+submission watch, scripts and the author's BI writeback tables all read it; the
+Parquet rollup and the Inspector deliberately do not. Only a computer holding
+the publisher key (or a co-publisher's) may change it; every change is an
+always-recorded `CollectionStreamsChanged` audit row; checkout of the SAME
+application carries it over. A set of streams carries forward over each
+stream's HELD versions (never the semver rule), and every publisher read applies
+GATHER's carry-forward compatibility rule (BUG-0555).
+An author's model can READ those tables: an imported writeback table is named
+so a measure can reference it (`WB_<application>_<sheet>_<range>`, the readable
+name as its display name; BUG-0585), and proved live 2026-10-22: a SUM over
+`value_number` by `environment` answers prod only by default and prod + test
+once test is ticked (`app/e2e/journeys/writeback-collect-streams.spec.ts`).
+
+#### Who sends an answer, and who decides (identity phase 1, 2026-10-22)
+
+Every answer under `{application}/{version}/submissions/{sender}/` now carries a
+`seal` (the sender's Ed25519 signature, its public key and the origin), and the
+sender folder is `win-<SID>-<commitment to that key>`; every decision under
+`reviews/` carries a `seal` by the publisher's key or a co-publisher's, plus the
+digest of the answer it decided. The workspace layout is otherwise unchanged --
+no new folders, no certificates, no locking -- and the single-writer rule holds:
+a sender writes only their own folder, the publisher (or a co-publisher) only
+`reviews/`. Readers ignore FORGED answers (unsigned under a signed id, signed
+by another key, edited, copied -- and, in a version whose signed manifest says
+its answers are signed, any unsigned answer) and unsigned or unauthorised
+decisions; answers sent BEFORE sign-in, in versions published before answers
+were signed, are labelled and still count unless the application counts only
+verified senders. The fold computes the lists of what it dropped
+(`FoldOutcome`); nothing shows them yet, and each publisher read logs the counts
+(open-items 2.am). A sender folder is read up to ASCII case (Windows storage
+treats `WIN-<id>` and `win-<id>` as one folder; the content's sealed id decides
+who sent it). The review authority -- and the reviewer's own publisher gate --
+is anchored exactly as promotion is (§2.5 threat model): the subscriber's PIN or
+the author's DEVELOPER ANCHOR (with its co-publisher-list revision mark, so a
+rolled-back list re-authorises nobody), never the unsigned version list. Details, limits
+and what phase 1 does not prove: `docs/design/calp-writeback.md`, "Who sends an
+answer (identity, phase 1)".
+
+**Where the workspace lives now matters to who can be VERIFIED** (read side,
+2026-10-22). A signature proves the holder of a key sent the answer; whether that
+key belongs to the Windows account the id names is checked by each READER, after
+the fold, against the account Windows recorded as the WRITER of the answer's file
+(`app/src-tauri/src/identity_verification.rs`). That record is meaningful on an
+NTFS network share for domain and Entra-joined accounts and on a computer's own
+disk -- and only for a file NO OTHER ACCOUNT can change: the owner records who
+CREATED a file and survives a move or an overwrite by someone else, so the
+reader also reads the file's DACL and the sender folder's owner. It is
+meaningless in a Dropbox / OneDrive folder (the sync program writes every file),
+for a computer's own account on a share (the server records its own account),
+on FAT/exFAT, and on a share where users hold the common inherited Modify right
+-- there the answer reads "Signed, identity not confirmed (cannot be checked
+here ...)", never a false "not verified". An
+application may count only VERIFIED senders (`identityPolicy.requireVerified` in
+the signed version manifest, the Publish/Push dialog's checkbox; default off for
+Windows-account applications): GATHER, the roster, the BI tables and scripts then
+count nothing else, while Collected Responses and the exports show every answer
+marked. Publishing writeback regions into a sync folder, onto a FAT drive or
+into a workspace whose storage cannot be identified WARNS (never refuses), and
+the Application Inspector says it. Share hardening that verification REQUIRES
+(without it nothing is Verified): per-sender folders under `submissions/` with
+creator-owner full control and read for everyone else, and domain accounts. Details: `calp-writeback.md`, "Who sent it,
+as THIS reader sees it".
+The check works at ANY workspace depth (the owner is read through the verbatim
+`\\?\` path; BUG-0584 read every answer in a workspace deeper than about 90
+characters as "cannot be checked here"). Proved live 2026-10-22 on a temp copy
+of the owner's workspace (`writeback-subscriber.spec.ts` steps 10-11): own
+answers Verified, a validly signed claim of another account "Not verified:
+written by <this account>", an edited answer forged and never seeded, an
+unsigned decision ignored.
 
 ## 3. Invariants
 

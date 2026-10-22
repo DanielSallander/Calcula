@@ -448,9 +448,12 @@ fn diff_working_copy_against_base(
         &[],
     )?;
     let working_str = working_version.to_string();
-    let working_manifest = memory
+    let mut working_manifest = memory
         .get_version_manifest(&ctx.package_name, &working_str)
         .map_err(|e| e.to_string())?;
+    // The identity rule is the base's unless the push dialog changes it (see
+    // `carry_base_identity_rule`): never a piece "you" touched.
+    crate::calp_commands::carry_base_identity_rule(&mut working_manifest, &base_manifest);
     let artifacts = memory.artifacts_of(&ctx.package_name, &working_str);
 
     let mut diff = calp::diff::diff_sides(

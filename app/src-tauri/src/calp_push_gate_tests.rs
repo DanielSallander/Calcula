@@ -25,7 +25,29 @@ fn params(mode: Option<&str>, base: Option<&str>, summary: &str) -> PublishParam
         change_summary: summary.to_string(),
         acknowledged_button_code: Vec::new(),
         include_in_application: Vec::new(),
+        require_verified_identity: None,
     }
+}
+
+/// THE IDENTITY RULE A PUSH WRITES (identity phase 1): the dialog's explicit
+/// choice; otherwise none for a new application and the VERIFIED base's rule
+/// for a push -- and a push whose base rule cannot be read is refused rather
+/// than silently switching which answers every total counts.
+///
+/// SABOTAGE: make the `(None, Update)` arm return `Ok(None)` -- the
+/// "keeps the base's rule" and "refused" assertions fail.
+#[test]
+fn a_push_keeps_its_bases_identity_rule_unless_the_author_changes_it() {
+    use crate::calp_commands::resolve_identity_policy;
+    let on = Some(calp::IdentityPolicy { require_verified: true });
+    let update = calp::PushMode::Update { expected_base: calp::SemVer::new(1, 0, 0) };
+    let unread = || -> Result<Option<calp::IdentityPolicy>, String> { panic!("the base must not be read") };
+    assert_eq!(resolve_identity_policy(Some(true), &calp::PushMode::CreateNew, unread), Ok(on));
+    assert_eq!(resolve_identity_policy(Some(false), &update, unread), Ok(None));
+    assert_eq!(resolve_identity_policy(None, &calp::PushMode::CreateNew, unread), Ok(None));
+    assert_eq!(resolve_identity_policy(None, &update, || Ok(on)), Ok(on), "a push keeps the base's rule");
+    let refused = resolve_identity_policy(None, &update, || Err("unreadable".to_string())).unwrap_err();
+    assert!(refused.starts_with("CALP_PUSH_IDENTITY_RULE_UNKNOWN"), "{refused}");
 }
 
 #[test]
@@ -173,6 +195,7 @@ fn publish_with(
         excluded_regions: Vec::new(),
         custom_objects,
         include_comments: false,
+        identity_policy: None,
         min_app_version: String::new(),
     };
     crate::calp_commands::stamp_min_app_version(&mut request);

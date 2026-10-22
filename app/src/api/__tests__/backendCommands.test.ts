@@ -180,6 +180,30 @@ describe("backend command capability model (A3)", () => {
       expect(backendCommandNames().has(c), c).toBe(true);
       expect(() => assertExtensionMayInvoke(c, { trusted: false }), c).toThrow(BackendCapabilityError);
     }
+    // THE SIGNING DOORS (identity phase 1): sending an answer signs it with the
+    // user's key, a decision with the publisher's -- so a non-trusted extension
+    // must reach neither, nor read the account's SID -- directly or through a
+    // draft or a submit preview, which carry the full sender identity. Scripts
+    // go through the broker (`script_writeback`). SABOTAGE: drop
+    // "calp_submit_region" (or "calp_get_writeback_layer") from the
+    // collaborationTrust list -> red.
+    for (const c of [
+      "calp_submit_region",
+      "calp_submit_all_regions",
+      "calp_save_writeback_draft",
+      "bi_writeback_set_value",
+      "calp_set_submission_state",
+      "calp_set_model_submission_state",
+      "calp_get_subscriber_identity",
+      "calp_get_writeback_layer",
+      "calp_reconcile_writeback",
+      "calp_preview_region_submission",
+    ]) {
+      expect(commandCapability(c), c).toBe("collaborationTrust");
+      expect(backendCommandNames().has(c), c).toBe(true);
+      expect(() => assertExtensionMayInvoke(c, { trusted: false }), c).toThrow(BackendCapabilityError);
+      expect(() => assertExtensionMayInvoke(c, { trusted: true }), c).not.toThrow();
+    }
     // A normal data/feature command is open.
     expect(isPrivilegedCommand("get_charts")).toBe(false);
     expect(commandCapability("delete_columns")).toBeNull(); // grid op, not privileged

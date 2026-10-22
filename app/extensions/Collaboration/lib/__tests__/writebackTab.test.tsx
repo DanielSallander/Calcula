@@ -66,6 +66,7 @@ const h = vi.hoisted(() => ({
   }>,
   removeWritebackRegion: vi.fn(),
   showDialog: vi.fn(),
+  getSubscriberIdentity: vi.fn(),
 }));
 
 vi.mock("@api/ui", async (importOriginal) => ({
@@ -95,6 +96,7 @@ vi.mock("@api/collaboration", async (importOriginal) => ({
   discardWritebackDrafts: (...a: unknown[]) => h.discardWritebackDrafts(...a),
   reconcileWriteback: (...a: unknown[]) => h.reconcileWriteback(...a),
   removeWritebackRegion: (...a: unknown[]) => h.removeWritebackRegion(...a),
+  getSubscriberIdentity: () => h.getSubscriberIdentity(),
 }));
 vi.mock("@api/dialogs", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@api/dialogs")>()),
@@ -174,7 +176,12 @@ import {
   WRITEBACK_MENU_ID,
   WRITEBACK_PANE_ID,
 } from "../../manifest";
-import { WritebackSubmitSection, WritebackDraftsSection } from "../../components/WritebackTabSections";
+import {
+  WritebackSubmitSection,
+  WritebackDraftsSection,
+  WritebackStatusSection,
+} from "../../components/WritebackTabSections";
+import { refreshWhoAmI, resetWhoAmIForTests } from "../whoAmIStore";
 
 const REGION: Region = {
   regionId: "r1",
@@ -755,5 +762,45 @@ describe("the publisher's Writeback tab", () => {
     expect(h.emitAppEvent).toHaveBeenCalledWith("collaboration:writebackRegionsChanged", {});
     expect(h.refreshWriteback).toHaveBeenCalled();
     expect(String(h.showToast.mock.calls.at(-1)?.[0])).toContain("D8:D10 removed");
+  });
+});
+
+// ===========================================================================
+// Who you send as (identity phase 1, owner decision 2026-10-22)
+// ===========================================================================
+
+describe("the Status cluster says who you send as", () => {
+  beforeEach(() => resetWhoAmIForTests());
+
+  /**
+   * SABOTAGE: drop the two WhoAmILine children from WritebackStatusSection --
+   * the sentence is gone and this fails.
+   */
+  it("names the Windows account, in a region and outside one", async () => {
+    h.getSubscriberIdentity.mockResolvedValue({
+      displayName: "Salle",
+      id: "win-S-1-5-21-1-2-3-1001-0123456789abcdef0123456789abcdef",
+      principalName: "Danne\Salle",
+      provider: "windows",
+      scope: "localMachine",
+    });
+    await refreshWhoAmI();
+    setWritebackTabRegionId("r1");
+    const html = renderToStaticMarkup(<WritebackStatusSection {...({} as never)} />);
+    expect(html).toContain("You are signed in as Salle (Windows account)");
+    expect(html).toContain("Danne\Salle, this computer&#x27;s own account");
+    expect(html).toContain("writeback-tab-status-who");
+    // Outside a region the Status still says who you are.
+    setWritebackTabRegionId(null);
+    const outside = renderToStaticMarkup(<WritebackStatusSection {...({} as never)} />);
+    expect(outside).toContain("You are signed in as Salle (Windows account)");
+  });
+
+  it("a failed read is said as a failure, never shown as an identity", async () => {
+    h.getSubscriberIdentity.mockRejectedValue(new Error("the writeback signing key is damaged"));
+    await refreshWhoAmI();
+    const html = renderToStaticMarkup(<WritebackStatusSection {...({} as never)} />);
+    expect(html).toContain("Who you are could not be read");
+    expect(html).not.toContain("signed in as");
   });
 });

@@ -12,6 +12,7 @@ const h = vi.hoisted(() => ({
   getWritebackDraftRegions: vi.fn(),
   reconcileWriteback: vi.fn(),
   emitAppEvent: vi.fn(),
+  showToast: vi.fn(),
   gridState: null as null | {
     sheetContext: { activeSheetIndex: number; activeSheetName: string };
     surface: string;
@@ -46,13 +47,30 @@ vi.mock("@api/reportPages", () => ({
   reportPageById: (snap: { pages: { sheetId: string; name: string }[] }, id: string) =>
     snap.pages.find((p) => p.sheetId === id) ?? null,
 }));
+vi.mock("@api/notifications", () => ({
+  showToast: h.showToast,
+}));
 vi.mock("@api/events", () => ({
   emitAppEvent: h.emitAppEvent,
   AppEvents: { GRID_REFRESH: "app:grid-refresh" },
 }));
 
+/** What the backend's reconcile returns: the layer and what the pass did. */
+function report(
+  layer: { formatVersion: number; drafts: unknown[] },
+  extra: Partial<{
+    cellsWritten: number;
+    undoHistoryEnded: boolean;
+    replacedCells: string[];
+    unreadable: { regionId: string; reason: string }[];
+  }> = {},
+) {
+  return { layer, cellsWritten: 0, undoHistoryEnded: false, replacedCells: [], unreadable: [], ...extra };
+}
+
 import {
   refreshWriteback,
+  refreshWritebackLocal,
   resetWritebackSnapshot,
   startWritebackStore,
   subscribeWritebackSnapshot,
@@ -126,6 +144,7 @@ beforeEach(() => {
   h.getWritebackDraftRegions.mockReset();
   h.getWritebackDraftRegions.mockResolvedValue([]);
   h.emitAppEvent.mockReset();
+  h.showToast.mockReset();
   h.pages.sheetIdByIndex = new Map([
     [0, "local-sheet-1"],
     [1, "local-sheet-2"],
@@ -137,7 +156,7 @@ beforeEach(() => {
 describe("refresh", () => {
   it("loads regions and layer, notifies subscribers and requests a repaint", async () => {
     h.getWritebackRegions.mockResolvedValue([region()]);
-    h.reconcileWriteback.mockResolvedValue({ formatVersion: 1, drafts: [entry(2, "draft")] });
+    h.reconcileWriteback.mockResolvedValue(report({ formatVersion: 1, drafts: [entry(2, "draft")] }));
     const cb = vi.fn();
     const off = subscribeWritebackSnapshot(cb);
     const before = getWritebackSnapshotVersion();
@@ -160,7 +179,7 @@ describe("refresh", () => {
     // ...but WHY it could not reconcile is kept for Check Status, which must
     // not ask the workspace a second time.
     expect(getWritebackReconcileError()).toContain("offline");
-    h.reconcileWriteback.mockResolvedValue({ formatVersion: 1, drafts: [] });
+    h.reconcileWriteback.mockResolvedValue(report({ formatVersion: 1, drafts: [] }));
     await refreshWriteback();
     expect(getWritebackReconcileError()).toBeNull();
     expect(h.reconcileWriteback).toHaveBeenCalledTimes(2);
@@ -168,7 +187,7 @@ describe("refresh", () => {
 
   it("a failed region read keeps the previous snapshot and reports the error", async () => {
     h.getWritebackRegions.mockResolvedValueOnce([region()]);
-    h.reconcileWriteback.mockResolvedValue({ formatVersion: 1, drafts: [] });
+    h.reconcileWriteback.mockResolvedValue(report({ formatVersion: 1, drafts: [] }));
     await refreshWriteback();
     h.getWritebackRegions.mockRejectedValueOnce(new Error("ipc down"));
     await refreshWriteback();
@@ -180,9 +199,61 @@ describe("refresh", () => {
     expect(getWritebackRefreshError()).toBeNull();
   });
 
+  it("a region the reconcile could not read is REPORTED, so Check Status can say so", async () => {
+    // The backend applies what it could read and reports the rest -- it no
+    // longer throws for an unreachable workspace, so the error must come from
+    // the report or Check Status says "Status updated" with the share offline.
+    h.getWritebackRegions.mockResolvedValue([region()]);
+    h.reconcileWriteback.mockResolvedValue(
+      report(
+        { formatVersion: 1, drafts: [entry(2, "submitted")] },
+        { unreadable: [{ regionId: "r1", reason: "could not read 'app' in the workspace \\\\share: offline" }] },
+      ),
+    );
+    await refreshWriteback();
+    expect(getWritebackRefreshError()).toBeNull();
+    expect(getActiveCellState(2, 1)).toBe("submitted");
+    expect(getWritebackReconcileError()).toContain("Could not reach the workspace for 1 writeback region");
+    expect(getWritebackReconcileError()).toContain("offline");
+  });
+
+  it("a background read that ended the undo history says so, naming the cells", async () => {
+    h.getWritebackRegions.mockResolvedValue([region()]);
+    h.reconcileWriteback.mockResolvedValue(
+      report(
+        { formatVersion: 1, drafts: [entry(2, "approved")] },
+        { cellsWritten: 1, undoHistoryEnded: true, replacedCells: ["Form!B3"] },
+      ),
+    );
+    await refreshWriteback();
+    expect(h.showToast).toHaveBeenCalledTimes(1);
+    const [text] = h.showToast.mock.calls[0];
+    expect(text).toContain("Form!B3");
+    expect(text).toContain("Undo history was cleared");
+  });
+
+  it("a LOCAL refresh (a draft just saved) never asks the workspace", async () => {
+    h.getWritebackRegions.mockResolvedValue([region()]);
+    h.reconcileWriteback.mockResolvedValue(
+      report({ formatVersion: 1, drafts: [] }, { unreadable: [{ regionId: "r1", reason: "offline" }] }),
+    );
+    await refreshWriteback();
+    const reason = getWritebackReconcileError();
+    expect(reason).not.toBeNull();
+    h.getWritebackLayer.mockResolvedValue({ formatVersion: 1, drafts: [entry(3, "draft")] });
+    await refreshWritebackLocal();
+    expect(h.reconcileWriteback).toHaveBeenCalledTimes(1);
+    expect(getActiveCellState(3, 1)).toBe("draft");
+    // The last reconcile's answer is kept: a local read did not ask again.
+    expect(getWritebackReconcileError()).toBe(reason);
+    // ...and a full refresh asks again.
+    await refreshWriteback();
+    expect(h.reconcileWriteback).toHaveBeenCalledTimes(2);
+  });
+
   it("requests made together share one read", async () => {
     h.getWritebackRegions.mockResolvedValue([region()]);
-    h.reconcileWriteback.mockResolvedValue({ formatVersion: 1, drafts: [] });
+    h.reconcileWriteback.mockResolvedValue(report({ formatVersion: 1, drafts: [] }));
     await Promise.all([refreshWriteback(), refreshWriteback(), refreshWriteback()]);
     expect(h.getWritebackRegions).toHaveBeenCalledTimes(1);
   });
@@ -191,10 +262,10 @@ describe("refresh", () => {
 describe("keyed by LOCAL sheet id, resolved against the ACTIVE sheet", () => {
   beforeEach(async () => {
     h.getWritebackRegions.mockResolvedValue([region()]);
-    h.reconcileWriteback.mockResolvedValue({
+    h.reconcileWriteback.mockResolvedValue(report({
       formatVersion: 1,
       drafts: [entry(2, "draft"), entry(3, "submitted"), entry(4, "rejected")],
-    });
+    }));
     await refreshWriteback();
   });
 
@@ -246,13 +317,13 @@ describe("keyed by LOCAL sheet id, resolved against the ACTIVE sheet", () => {
   });
 
   it("an unsent draft decides a cell over an older submitted entry", async () => {
-    h.reconcileWriteback.mockResolvedValue({
+    h.reconcileWriteback.mockResolvedValue(report({
       formatVersion: 1,
       drafts: [
         entry(2, "submitted", { updatedAt: "2026-10-21T02:00:00Z" }),
         entry(2, "draft", { updatedAt: "2026-10-21T01:00:00Z" }),
       ],
-    });
+    }));
     await refreshWriteback();
     expect(getActiveCellState(2, 1)).toBe("draft");
   });
@@ -269,7 +340,7 @@ describe("summaries", () => {
       region(),
       region({ regionId: "r2", rowStart: 10, rowEnd: 11, colStart: 3, colEnd: 3, sheetName: "" }),
     ]);
-    h.reconcileWriteback.mockResolvedValue({
+    h.reconcileWriteback.mockResolvedValue(report({
       formatVersion: 1,
       drafts: [
         entry(2, "draft"),
@@ -279,7 +350,7 @@ describe("summaries", () => {
         // An orphan (its region is gone) is not counted anywhere.
         entry(2, "draft", { regionId: "gone" }),
       ],
-    });
+    }));
     await refreshWriteback();
     const s = getRegionSummary("r1")!;
     expect(s).toMatchObject({
@@ -304,7 +375,7 @@ describe("summaries", () => {
 
   it("follows a sheet rename without a re-read (the live page name wins)", async () => {
     h.getWritebackRegions.mockResolvedValue([region()]);
-    h.reconcileWriteback.mockResolvedValue({ formatVersion: 1, drafts: [] });
+    h.reconcileWriteback.mockResolvedValue(report({ formatVersion: 1, drafts: [] }));
     await refreshWriteback();
     expect(getRegionSummary("r1")!.sheetName).toBe("Report");
     h.pages.pages = [{ sheetId: "local-sheet-2", name: "Answers" }];
@@ -321,7 +392,7 @@ describe("lifecycle", () => {
   it("a sheet-map change re-derives consumers and repaints while regions exist", async () => {
     const stop = startWritebackStore();
     h.getWritebackRegions.mockResolvedValue([region()]);
-    h.reconcileWriteback.mockResolvedValue({ formatVersion: 1, drafts: [] });
+    h.reconcileWriteback.mockResolvedValue(report({ formatVersion: 1, drafts: [] }));
     await refreshWriteback();
     h.emitAppEvent.mockClear();
     const cb = vi.fn();
@@ -337,7 +408,7 @@ describe("lifecycle", () => {
   it("reset empties the snapshot and abandons a read in flight", async () => {
     let resolve!: (v: unknown) => void;
     h.getWritebackRegions.mockReturnValue(new Promise((r) => (resolve = r)));
-    h.reconcileWriteback.mockResolvedValue({ formatVersion: 1, drafts: [] });
+    h.reconcileWriteback.mockResolvedValue(report({ formatVersion: 1, drafts: [] }));
     const pending = refreshWriteback();
     await Promise.resolve();
     resetWritebackSnapshot();
@@ -354,7 +425,7 @@ describe("the author's own designated regions (frame only)", () => {
 
   it("frames an author's region on the active sheet with no subscription at all", async () => {
     h.getWritebackRegions.mockResolvedValue([]);
-    h.reconcileWriteback.mockResolvedValue({ formatVersion: 1, drafts: [] });
+    h.reconcileWriteback.mockResolvedValue(report({ formatVersion: 1, drafts: [] }));
     h.getWritebackDraftRegions.mockResolvedValue([designated("local-sheet-2")]);
     await refreshWriteback();
     expect(hasWritebackRegions()).toBe(false); // no tab, no markers, no guards
@@ -371,7 +442,7 @@ describe("the author's own designated regions (frame only)", () => {
 
   it("frames subscribed and designated regions side by side", async () => {
     h.getWritebackRegions.mockResolvedValue([region()]);
-    h.reconcileWriteback.mockResolvedValue({ formatVersion: 1, drafts: [] });
+    h.reconcileWriteback.mockResolvedValue(report({ formatVersion: 1, drafts: [] }));
     h.getWritebackDraftRegions.mockResolvedValue([designated("local-sheet-2")]);
     await refreshWriteback();
     expect(getActiveSheetFrameRegions().length).toBe(2);
@@ -379,7 +450,7 @@ describe("the author's own designated regions (frame only)", () => {
 
   it("a failed read of the author's regions keeps the previous set", async () => {
     h.getWritebackRegions.mockResolvedValue([]);
-    h.reconcileWriteback.mockResolvedValue({ formatVersion: 1, drafts: [] });
+    h.reconcileWriteback.mockResolvedValue(report({ formatVersion: 1, drafts: [] }));
     h.getWritebackDraftRegions.mockResolvedValue([designated("local-sheet-2")]);
     await refreshWriteback();
     h.getWritebackDraftRegions.mockRejectedValue(new Error("ipc down"));
@@ -389,7 +460,7 @@ describe("the author's own designated regions (frame only)", () => {
 
   it("reset forgets them", async () => {
     h.getWritebackRegions.mockResolvedValue([]);
-    h.reconcileWriteback.mockResolvedValue({ formatVersion: 1, drafts: [] });
+    h.reconcileWriteback.mockResolvedValue(report({ formatVersion: 1, drafts: [] }));
     h.getWritebackDraftRegions.mockResolvedValue([designated("local-sheet-2")]);
     await refreshWriteback();
     resetWritebackSnapshot();

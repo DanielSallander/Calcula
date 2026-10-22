@@ -16,6 +16,7 @@ pub mod environments;
 pub mod error;
 pub mod fold;
 pub mod html_export;
+pub mod identity_check;
 pub mod identity_provider;
 pub mod integrity;
 pub mod manifest;
@@ -34,13 +35,16 @@ pub mod publish;
 pub mod publishers;
 pub mod pull;
 pub mod sheet_renames;
+pub mod submission_seal;
 pub mod working_copy;
 pub mod writeback;
 
 pub use compat::{check_min_app_version, host_app_version, set_host_app_version};
 pub use error::CalpError;
 pub use html_export::{render_application_html, HtmlExportMode, HtmlExportOptions};
-pub use identity_provider::SubmitterIdentity;
+pub use identity_check::{IdentityCounts, IdentityPolicy, IdentityReason, IdentityStatus, IdentityVerdict, StorageKind};
+pub use identity_provider::{AccountScope, IdentityProviderKind, SubmitterIdentity};
+pub use submission_seal::{ReviewAuthority, SenderCheck, SubmissionOrigin};
 pub mod data_refresh;
 
 pub use manifest::{
@@ -56,13 +60,13 @@ pub use memory_workspace::MemoryWorkspace;
 pub use merge::{analyze as analyze_merge, Collision, MergeAnalysis, MergeVerdict, PieceKey};
 pub use publishers::{AuthorizedKey, AuthorizedSigner, PublisherList, SignerRole};
 pub use pull::SheetIdMode;
-pub use working_copy::{WorkingCopyContent, WorkingCopyLink, WorkingCopySheetRef};
+pub use working_copy::{CollectStreams, WorkingCopyContent, WorkingCopyLink, WorkingCopySheetRef};
 pub use overrides::{OverrideLayer, CellOverride, OverrideValue, OverridePatch};
 pub use workspace::LocalWorkspace;
 pub use workspace_id::{same_workspace, workspace_scope, WorkspaceScope};
 pub use transport::WorkspaceTransport;
 pub use version::{VersionPin, SemVer};
-pub use fold::fold_submissions;
+pub use fold::{fold_detailed, fold_submissions, FoldContext, FoldOutcome};
 pub use writeback::{
     ModelWritebackDeclaration, ReviewEvent, WritebackIndex, WritebackRegionDeclaration,
     WritebackRegionEntry,

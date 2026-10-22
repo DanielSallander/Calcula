@@ -84,6 +84,7 @@ fn publish_as(dir: &TempDir, prof: &Path, wb: &persistence::Workbook, version: (
         excluded_regions: Vec::new(),
         custom_objects: Vec::new(),
         include_comments: false,
+        identity_policy: None,
         min_app_version: String::new(),
     };
     publish::publish(&reg, &request, prof).expect("publish failed");
@@ -293,6 +294,7 @@ fn a_published_list_source_travels_as_its_application_position() {
         excluded_regions: Vec::new(),
         custom_objects: Vec::new(),
         include_comments: false,
+        identity_policy: None,
         min_app_version: String::new(),
     };
     publish::publish(&reg, &request, prof.path()).expect("publish failed");

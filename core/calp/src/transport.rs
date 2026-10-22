@@ -179,6 +179,25 @@ pub trait WorkspaceTransport {
         Ok(None)
     }
 
+    /// The workspace's folder on THIS computer, when it is one (`None` for an
+    /// HTTP workspace or one held in memory). What the reader's identity check
+    /// classifies (local disk, network share, sync folder; `crate::identity_check`).
+    fn local_root(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+
+    /// The files that hold one answer, when this workspace is a folder on this
+    /// computer (`None` otherwise): who WROTE them is what the reader's
+    /// identity check asks Windows (`crate::identity_check`).
+    fn local_submission_files(
+        &self,
+        _package_name: &str,
+        _version: &str,
+        _submission: &WritebackSubmission,
+    ) -> Result<Option<Vec<std::path::PathBuf>>, CalpError> {
+        Ok(None)
+    }
+
     // -----------------------------------------------------------------------
     // Submissions (writeback) — a separate trust domain from publisher
     // artifacts, stored as an APPEND-ONLY event log: submission events under
@@ -216,12 +235,14 @@ pub trait WorkspaceTransport {
         version: &str,
     ) -> Result<Vec<ReviewEvent>, CalpError>;
 
-    /// Current (folded) submissions by one submitter.
+    /// Current (folded) submissions by one submitter. `authority`: whose
+    /// review decisions count (see `LocalWorkspace::load_current_submissions`).
     fn load_current_submissions_by(
         &self,
         package_name: &str,
         version: &str,
         submitter_id: &str,
+        authority: &crate::submission_seal::ReviewAuthority,
     ) -> Result<Vec<WritebackSubmission>, CalpError>;
 
     /// Current (folded) submissions for one region across all submitters.
@@ -230,6 +251,7 @@ pub trait WorkspaceTransport {
         package_name: &str,
         version: &str,
         region_id: &str,
+        authority: &crate::submission_seal::ReviewAuthority,
     ) -> Result<Vec<WritebackSubmission>, CalpError>;
 
     /// Current (folded) submissions for a whole version in one tree scan.
@@ -237,7 +259,23 @@ pub trait WorkspaceTransport {
         &self,
         package_name: &str,
         version: &str,
+        authority: &crate::submission_seal::ReviewAuthority,
     ) -> Result<Vec<WritebackSubmission>, CalpError>;
+
+    /// The whole fold for a version, including what it refused (forged
+    /// answers, ignored reviews). A transport that holds no events reports
+    /// none.
+    fn load_submission_fold(
+        &self,
+        package_name: &str,
+        version: &str,
+        authority: &crate::submission_seal::ReviewAuthority,
+    ) -> Result<crate::fold::FoldOutcome, CalpError> {
+        Ok(crate::fold::FoldOutcome {
+            current: self.load_current_submissions(package_name, version, authority)?,
+            ..Default::default()
+        })
+    }
 
     // -----------------------------------------------------------------------
     // Lock
@@ -347,6 +385,17 @@ impl WorkspaceTransport for Box<dyn WorkspaceTransport> {
     ) -> Result<(), CalpError> {
         (**self).save_submission(package_name, version, submission)
     }
+    fn local_root(&self) -> Option<std::path::PathBuf> {
+        (**self).local_root()
+    }
+    fn local_submission_files(
+        &self,
+        package_name: &str,
+        version: &str,
+        submission: &WritebackSubmission,
+    ) -> Result<Option<Vec<std::path::PathBuf>>, CalpError> {
+        (**self).local_submission_files(package_name, version, submission)
+    }
     fn save_review(
         &self,
         package_name: &str,
@@ -367,23 +416,34 @@ impl WorkspaceTransport for Box<dyn WorkspaceTransport> {
         package_name: &str,
         version: &str,
         submitter_id: &str,
+        authority: &crate::submission_seal::ReviewAuthority,
     ) -> Result<Vec<WritebackSubmission>, CalpError> {
-        (**self).load_current_submissions_by(package_name, version, submitter_id)
+        (**self).load_current_submissions_by(package_name, version, submitter_id, authority)
     }
     fn load_current_region_submissions(
         &self,
         package_name: &str,
         version: &str,
         region_id: &str,
+        authority: &crate::submission_seal::ReviewAuthority,
     ) -> Result<Vec<WritebackSubmission>, CalpError> {
-        (**self).load_current_region_submissions(package_name, version, region_id)
+        (**self).load_current_region_submissions(package_name, version, region_id, authority)
     }
     fn load_current_submissions(
         &self,
         package_name: &str,
         version: &str,
+        authority: &crate::submission_seal::ReviewAuthority,
     ) -> Result<Vec<WritebackSubmission>, CalpError> {
-        (**self).load_current_submissions(package_name, version)
+        (**self).load_current_submissions(package_name, version, authority)
+    }
+    fn load_submission_fold(
+        &self,
+        package_name: &str,
+        version: &str,
+        authority: &crate::submission_seal::ReviewAuthority,
+    ) -> Result<crate::fold::FoldOutcome, CalpError> {
+        (**self).load_submission_fold(package_name, version, authority)
     }
     fn read_application_artifact(
         &self,

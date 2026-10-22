@@ -39,6 +39,13 @@ const EVENT_META: Record<string, { label: string; category: Category }> = {
   writeback_submitted: { label: "Writeback submitted", category: "writeback" },
   writeback_invalidated: { label: "Writeback invalidated", category: "writeback" },
   writeback_reviewed: { label: "Writeback reviewed", category: "writeback" },
+  // Always recorded: values you sent earlier were put back in their cells from
+  // the workspace (a new workbook that subscribed again, a reopen without saving).
+  writeback_restored: { label: "Writeback values restored", category: "writeback" },
+  // Always recorded: the publisher changed which streams (development line,
+  // environments) this workbook collects answers from (Writeback > Collect
+  // From) -- it changes what the author's model tables and exports report.
+  collection_streams_changed: { label: "Collect From changed", category: "writeback" },
   published: { label: "Published", category: "publish" },
   checked_out: { label: "Opened for editing", category: "publish" },
   // Always recorded: the refusal names ids somebody else shipped, and a

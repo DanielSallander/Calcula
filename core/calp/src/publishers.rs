@@ -131,9 +131,16 @@ impl PublisherList {
 /// The application's ROOT key: whoever signed its earliest published version.
 ///
 /// Reads the version manifest rather than the application manifest's `versions`
-/// entry, because the version manifest is SIGNED and the list entry is not.
-/// Returns `None` for an application with no versions, or one whose first version
-/// predates signing.
+/// entry, because the version manifest is SIGNED and the list entry is not --
+/// and VERIFIES it: a first manifest whose `publisher_key` was edited on the
+/// share (without the key that would re-sign it) is an error, never a root.
+/// Returns `None` for an application with no versions, or one whose first
+/// version predates signing (no key at all).
+///
+/// What this cannot stop: a share-writer who PLANTS a lower version signed with
+/// their own key. That is why every reader that has a better root -- the key
+/// this computer PINNED, or the root its DEVELOPER ANCHOR remembers -- passes it
+/// as `trusted_root` to [`review_keys`] instead of asking this function.
 pub fn root_key_of(
     registry: &dyn WorkspaceTransport,
     package: &str,
@@ -144,11 +151,13 @@ pub fn root_key_of(
     let Some(first) = versions.first() else {
         return Ok(None);
     };
-    let first_manifest = registry.get_version_manifest(package, &first.to_string())?;
+    let first = first.to_string();
+    let first_manifest = registry.get_version_manifest(package, &first)?;
     if first_manifest.publisher_key.is_empty() {
         return Ok(None);
     }
-    Ok(Some(first_manifest.publisher_key))
+    let signed = crate::integrity::load_signed_manifest_via(registry, package, &first)?;
+    Ok(Some(signed.manifest.publisher_key))
 }
 
 /// Load the co-publisher list, verified against `root_key`.
@@ -216,6 +225,63 @@ pub fn load_verified(
     }
 
     Ok(Some(list))
+}
+
+/// THE ONE ANSWER to "whose decisions about this application's answers count?"
+/// -- the keys allowed to review (approve / reject / re-open) answers, and the
+/// keys `require_publisher_key` (app) lets read them. One function, so the
+/// reader's review authority and the reviewer's own gate can never disagree.
+///
+/// * `verified_publisher_key`: the publisher key of a manifest the caller has
+///   ALREADY verified (a subscription's pinned manifest, the author's manifest
+///   verified through the developer door). Always included.
+/// * Plus every key of the co-publisher list, verified against `trusted_root`
+///   -- the key this computer PINNED for the application, or the root its
+///   developer anchor remembers -- or else against the root key read from the
+///   first version ([`root_key_of`]). A list that exists but does not verify
+///   is an error, never "no co-publishers": the caller decides how to fail
+///   closed.
+/// * `min_revision`: the highest `publishers.json` revision this computer has
+///   seen for the application (the developer anchor's high-water mark), when
+///   it keeps one. A list BELOW it is a ROLLBACK -- someone restored an older,
+///   still validly signed list to re-authorise a removed co-publisher -- and is
+///   refused (`PublisherListRolledBack`), so the caller falls back to the
+///   verified key alone. (A subscriber keeps no mark yet: open-items 2.am.)
+pub fn review_keys(
+    registry: &dyn WorkspaceTransport,
+    package: &str,
+    verified_publisher_key: &str,
+    trusted_root: Option<&str>,
+    min_revision: Option<u64>,
+) -> Result<Vec<String>, CalpError> {
+    let mut keys: Vec<String> = Vec::new();
+    if !verified_publisher_key.trim().is_empty() {
+        keys.push(verified_publisher_key.trim().to_lowercase());
+    }
+    let root = match trusted_root.filter(|r| !r.trim().is_empty()) {
+        Some(root) => Some(root.trim().to_string()),
+        None => root_key_of(registry, package)?,
+    };
+    if let Some(root) = root {
+        if let Some(list) = load_verified(registry, package, &root)? {
+            if let Some(seen) = min_revision {
+                if list.revision < seen {
+                    return Err(CalpError::PublisherListRolledBack {
+                        package: package.to_string(),
+                        seen,
+                        found: list.revision,
+                    });
+                }
+            }
+            for key in list.allowed_keys() {
+                let key = key.trim().to_lowercase();
+                if !key.is_empty() && !keys.contains(&key) {
+                    keys.push(key);
+                }
+            }
+        }
+    }
+    Ok(keys)
 }
 
 /// Write the co-publisher list, signed by the ROOT keypair.
@@ -696,5 +762,33 @@ mod tests {
 
         let err = load_verified(&reg, "pkg", &root.public_key_hex()).unwrap_err();
         assert!(matches!(err, CalpError::PublisherListInvalid { .. }), "got {err:?}");
+    }
+    /// REVIEW AUTHORITY REFUSES A ROLLED-BACK LIST. Approvals decide what is
+    /// approved by signature alone, so restoring an older root-signed list
+    /// would make a removed co-publisher's decisions count again. With this
+    /// computer's high-water mark the older list is refused; without one (a
+    /// subscriber, today) it still verifies.
+    ///
+    /// SABOTAGE: drop the `min_revision` compare in `review_keys`.
+    #[test]
+    fn review_keys_refuse_a_list_below_the_seen_revision() {
+        let (_d, reg, _p, root) = setup();
+        let delegate_dir = TempDir::new().unwrap();
+        let removed = keypair(&delegate_dir).public_key_hex();
+        let mut old = PublisherList::new("pkg", &root.public_key_hex(), "2026-08-29T00:00:00Z");
+        old.revision = 2;
+        old.authorized_keys.push(AuthorizedKey {
+            key: removed.clone(),
+            name: "Removed".to_string(),
+            added_at: "2026-08-29T00:00:00Z".to_string(),
+        });
+        write_signed(&reg, &old, &root).unwrap();
+        let rk = root.public_key_hex();
+        let keys = review_keys(&reg, "pkg", &rk, Some(&rk), None).unwrap();
+        assert!(keys.contains(&removed), "no mark: the list verifies");
+        let keys = review_keys(&reg, "pkg", &rk, Some(&rk), Some(2)).unwrap();
+        assert!(keys.contains(&removed), "an equal revision is not a rollback");
+        let err = review_keys(&reg, "pkg", &rk, Some(&rk), Some(3)).unwrap_err();
+        assert!(matches!(err, CalpError::PublisherListRolledBack { seen: 3, found: 2, .. }), "got {err:?}");
     }
 }

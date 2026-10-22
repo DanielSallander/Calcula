@@ -55,6 +55,42 @@ export async function installAppImport(page: Page): Promise<void> {
   });
 }
 
+/**
+ * Destroy the Application Inspector window, FROM THE MAIN WINDOW, and wait
+ * until its page is gone. Returns how many were open.
+ *
+ * Why not the inspector's own `getCurrentWindow().close()`: its capability
+ * (`src-tauri/capabilities/package-inspector.json`) grants `core:default`,
+ * whose window set is read-only -- no `allow-close` -- so that call is refused,
+ * and a `.catch(() => undefined)` turned the refusal into silence. The window
+ * then outlived the spec, the next run's menu click only FOCUSED it, and that
+ * run exercised the module the window had loaded earlier, with the state it
+ * was left in (found live 2026-10-22: a source sabotage of the inspector did
+ * not fail its journey, because the window never loaded the sabotaged module).
+ * The main window's capability grants `core:window:allow-destroy`.
+ */
+export async function destroyInspectorWindows(page: Page): Promise<number> {
+  const n = await bounded(
+    "destroy the Application Inspector window",
+    page.evaluate(async () => {
+      const w = window as unknown as {
+        __TAURI__: { window: { Window: { getByLabel: (l: string) => Promise<{ destroy: () => Promise<void> } | null> } } };
+      };
+      const win = await w.__TAURI__.window.Window.getByLabel("package-inspector");
+      if (!win) return 0;
+      await win.destroy();
+      return 1;
+    }),
+    20_000,
+  );
+  const deadline = Date.now() + 15_000;
+  while (page.context().pages().some((p) => /packageInspector/.test(p.url()))) {
+    if (Date.now() > deadline) throw new Error("the Application Inspector window is still open after destroy()");
+    await page.waitForTimeout(200);
+  }
+  return n;
+}
+
 /** `page.evaluate` has no timeout of its own: never let one hang a test. */
 export async function bounded<T>(label: string, p: Promise<T>, ms = 60_000): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;

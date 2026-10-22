@@ -25,11 +25,36 @@
  *      clears the marker;
  *   5. after save + File > New + reopen the region is still on the LOCAL sheet
  *      id, the tab still follows the cursor, and typing still saves a draft;
- *   6. Open Application for Editing (a working copy) gives the author the
+ *   6. a NEW workbook that subscribes again shows, in B3:B5, the values this
+ *      subscriber last SENT, as submitted, on the canvas too (BUG-0554: nothing
+ *      copied sent values into a workbook that did not already hold them);
+ *   7. Open Application for Editing (a working copy) gives the author the
  *      application's region back, framed on the sheet with its edit icon, the
  *      Writeback tab shows the PUBLISHER's commands there (Collected Responses,
  *      no Submit), and the push diff names no removed region (checkout used to
- *      drop it).
+ *      drop it);
+ *   8. in that working copy, Collected Responses lists the author's OWN region
+ *      and shows the three answers the earlier steps sent (BUG-0553: it read
+ *      "No writeback regions in this workbook." -- the pane listed only the
+ *      SUBSCRIBER index, where an author's region never is);
+ *   9. the Application Inspector, pointed at the workspace's pointer file,
+ *      OPENS the one application by itself: Overview names it and its version,
+ *      Sheets & Data lists its sheet, and Writeback lists the B3:B5 region and
+ *      the three answers sent (BUG-0552: a workspace location names no
+ *      application, nothing was loaded, and every tab was the Browse hint);
+ *  10. WHO SENT IT (identity phase 1, 2026-10-22): each sent answer is signed
+ *      as THIS machine's Windows account (read from the OS here, never from
+ *      the app), the Writeback tab's Status names that account, and the
+ *      author's Collected Responses reads every answer "Verified: written by
+ *      <that account>" (BUG-0584: in a workspace this deep the owner lookup
+ *      failed and every answer read "cannot be checked here");
+ *  11. in a COPY of the workspace: an answer validly signed by another key
+ *      that CLAIMS a neighbour's account reads "Not verified: written by
+ *      <this account>"; one of this subscriber's own answers with its NAME
+ *      (and value) edited is forged -- listed nowhere and never seeded into a
+ *      new subscriber's cells; and an UNSIGNED "rejected" decision dropped
+ *      into reviews/ is ignored, while a decision the publisher really makes
+ *      (positive control, the same file shape plus a seal) counts.
  *
  * NEVER THE OWNER'S WORKSPACE. C:\writeback-test is COPIED to a temp folder
  * first; a submit writes `submissions/` into the workspace it was subscribed
@@ -49,13 +74,14 @@
  */
 import type { Locator, Page } from "@playwright/test";
 import { execFileSync } from "node:child_process";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, expect } from "../fixtures";
 import { parseCellRef, readGridGeometry, type GridHelper } from "../helpers/grid";
-import { diffCount, samplePixelPatches } from "../viewportSample";
+import { diffCount, samplePixelGrids, samplePixelPatches } from "../viewportSample";
 import {
   activate,
   callModule,
@@ -68,9 +94,11 @@ import {
   sheets,
   toastTexts,
   dismissToasts,
+  destroyInspectorWindows,
   COLLAB,
 } from "../helpers/calp-harness";
 import { subscribe, checkout, pushDiff, describeDiff } from "../helpers/calp-collab";
+import { closeTaskPanes } from "../helpers/object-pane";
 
 const SOURCE_WS = "C:\\writeback-test";
 const APP = "writeback-test";
@@ -82,6 +110,8 @@ const WORK = path.join(os.tmpdir(), "calcula-writeback-subscriber");
 const WS = path.join(WORK, "workspace");
 const SAVED = path.join(WORK, "subscriber.cala");
 const SUBMISSIONS = path.join(WS, APP, VERSION, "submissions");
+/** Step 11's copy of the workspace, where answers and a decision are planted. */
+const WS_PLANTED = path.join(WORK, "planted-workspace");
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DIALOG_DRIVER = path.join(HERE, "..", "answer-native-dialog.ps1");
@@ -101,6 +131,8 @@ let subscribedSheetName = "";
 let subscribedSheetId = "";
 /** The owner's own submission files before the run (they test there too). */
 let ownerSubmissionsBefore: string[] = [];
+/** This machine's Windows account, from the OS. */
+let ME: MachineAccount = { principal: "", sid: "" };
 
 // ---------------------------------------------------------------------------
 // Plumbing
@@ -127,6 +159,29 @@ interface LayerEntry {
   cellCol: number;
   value: { type: string; value?: number | string | boolean };
   state: "draft" | "submitted" | "approved" | "rejected";
+}
+
+/** One Collected Responses row (`@api/collaboration` RegionSubmission). */
+interface InboxRow {
+  submissionId: string;
+  submitterId: string;
+  submitterName: string;
+  submitterPrincipal: string;
+  cellRow: number;
+  cellCol: number;
+  valueDisplay: string;
+  state: string;
+  sender: string;
+  identity?: { status: string; reason: string; writtenBy: string };
+  identityLabel?: string;
+  counted?: boolean;
+}
+
+/** The Identity line of each row of the open Collected Responses pane. */
+async function identityLines(page: Page): Promise<Array<{ status: string; text: string }>> {
+  return page.locator('[data-testid="publisher-dashboard-identity"]').evaluateAll((els) =>
+    els.map((e) => ({ status: e.getAttribute("data-identity") ?? "", text: (e.textContent ?? "").trim() })),
+  );
 }
 
 async function regions(page: Page): Promise<RegionEntry[]> {
@@ -267,6 +322,152 @@ function drainNativeDialogs(): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Identity: this machine's account (from the OS), and the answer seal
+// ---------------------------------------------------------------------------
+
+interface MachineAccount {
+  /** `DOMAIN\user` or `COMPUTER\user`, as whoami spells it (lower case). */
+  principal: string;
+  sid: string;
+}
+
+/** This machine's Windows account, read from the OS (whoami) -- never from the app under test. */
+function machineAccount(): MachineAccount {
+  const whoami = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "whoami.exe");
+  const out = execFileSync(whoami, ["/user", "/fo", "csv", "/nh"], { encoding: "utf-8" }).trim();
+  const m = /^"([^"]+)","([^"]+)"$/.exec(out);
+  if (!m) throw new Error(`whoami /user said: ${out}`);
+  return { principal: m[1], sid: m[2] };
+}
+
+const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
+
+/** An answer as it lies in `{app}/{version}/submissions/{sender}/` (core/calp/src/writeback.rs). */
+interface AnswerFile {
+  id: string;
+  regionId: string;
+  cellRow: number;
+  cellCol: number;
+  cellId?: string;
+  submitter: { displayName: string; id: string; principalName?: string; provider?: string; scope?: string };
+  value: { type: string; value?: number | string | boolean };
+  state: string;
+  createdAt: string;
+  updatedAt: string;
+  submittedAt?: string;
+  environment?: string;
+  modelKey?: string[];
+  seal?: { publicKey: string; origin: string; signature: string };
+}
+
+/**
+ * The bytes an answer's signature covers -- a COPY of
+ * `core/calp/src/submission_seal.rs::event_payload`, so this spec can plant a
+ * validly signed answer. The copy is checked against Rust on every run: each
+ * answer the app really sent must verify with it (the "harness" assertion in
+ * step 11), so a drift fails loudly instead of planting garbage that would be
+ * "ignored" for the wrong reason.
+ */
+function eventPayload(app: string, version: string, s: AnswerFile, publicKey: string, origin: string): Buffer {
+  const parts: Buffer[] = [Buffer.from("calcula-writeback-event-v1\0", "utf8")];
+  const put = (text: string) => {
+    const bytes = Buffer.from(text, "utf8");
+    const len = Buffer.alloc(8);
+    len.writeBigUInt64LE(BigInt(bytes.length));
+    parts.push(len, bytes);
+  };
+  const putOpt = (text: string | undefined | null) => {
+    if (text == null) put("0");
+    else {
+      put("1");
+      put(text);
+    }
+  };
+  const valueText = (): string => {
+    switch (s.value.type) {
+      case "number": {
+        const bits = Buffer.alloc(8);
+        bits.writeDoubleBE(Number(s.value.value));
+        return `n:${bits.toString("hex")}`;
+      }
+      case "text":
+        return `t:${String(s.value.value)}`;
+      case "boolean":
+        return `b:${s.value.value ? 1 : 0}`;
+      default:
+        return "e:";
+    }
+  };
+  put(app);
+  put(version);
+  put(s.environment ?? "");
+  put(s.id);
+  put(s.regionId);
+  put(String(s.cellRow));
+  put(String(s.cellCol));
+  putOpt(s.cellId);
+  if (s.modelKey == null) put("-");
+  else {
+    put(String(s.modelKey.length));
+    for (const k of s.modelKey) put(k);
+  }
+  put(valueText());
+  put(s.createdAt);
+  put(s.updatedAt);
+  putOpt(s.submittedAt);
+  put(s.submitter.id);
+  put(s.submitter.displayName);
+  put(s.submitter.principalName ?? "");
+  put(s.submitter.provider ?? "legacy");
+  put(s.submitter.scope ?? "unknown");
+  put(publicKey.trim().toLowerCase());
+  put(origin);
+  return Buffer.concat(parts);
+}
+
+const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+
+/** Whether `s` carries a valid signature by the key in its seal. */
+function sealVerifies(s: AnswerFile): boolean {
+  if (!s.seal) return false;
+  const key = crypto.createPublicKey({ key: Buffer.concat([ED25519_SPKI_PREFIX, Buffer.from(s.seal.publicKey, "hex")]), format: "der", type: "spki" });
+  return crypto.verify(null, eventPayload(APP, VERSION, s, s.seal.publicKey, s.seal.origin), key, Buffer.from(s.seal.signature, "hex"));
+}
+
+/** `identity_provider::key_commitment`: 32 hex of SHA-256 of the hex public key. */
+function keyCommitment(publicKeyHex: string): string {
+  return crypto.createHash("sha256").update(publicKeyHex.trim().toLowerCase(), "utf8").digest("hex").slice(0, 32);
+}
+
+function rawPublicKeyHex(key: crypto.KeyObject): string {
+  const jwk = key.export({ format: "jwk" }) as { x?: string };
+  return Buffer.from(jwk.x ?? "", "base64url").toString("hex");
+}
+
+/** `submission_seal::event_digest`: what a review decision binds to. */
+function eventDigest(s: AnswerFile): string {
+  return crypto.createHash("sha256").update(eventPayload(APP, VERSION, s, s.seal?.publicKey ?? "", s.seal?.origin ?? "")).digest("hex");
+}
+
+/** The answers this subscriber sent into `workspace`: its own `win-<SID>-...` folder. */
+function sentAnswers(workspace: string, sid: string): Array<{ file: string; s: AnswerFile }> {
+  const root = path.join(workspace, APP, VERSION, "submissions");
+  const out: Array<{ file: string; s: AnswerFile }> = [];
+  for (const file of listFilesRecursive(root)) {
+    if (!file.endsWith(".json")) continue;
+    if (!path.basename(path.dirname(file)).startsWith(`win-${sid}-`)) continue;
+    out.push({ file, s: JSON.parse(fs.readFileSync(file, "utf-8")) as AnswerFile });
+  }
+  return out;
+}
+
+/** A UUID-v7-shaped id (a submission/review id: alphanumerics and '-'). */
+function newEventId(): string {
+  const hex = crypto.randomBytes(16).toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-7${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
 /** Activate the contextual tab (a click on its strip button) and wait for its band. */
 async function openWritebackTab(page: Page): Promise<void> {
   await ribbonTab(page, "Writeback").click();
@@ -290,6 +491,8 @@ test.describe.serial("writeback subscriber: see what you typed, send it, and see
       fs.rmSync(path.join(WS, APP, VERSION, sub), { recursive: true, force: true });
     }
     expect(fs.existsSync(SUBMISSIONS)).toBe(false);
+    ME = machineAccount();
+    expect(ME.sid).toMatch(/^S-1-5-21-/);
     drainNativeDialogs();
   });
 
@@ -466,6 +669,26 @@ test.describe.serial("writeback subscriber: see what you typed, send it, and see
     console.log(`[writeback] status after submit: ${status}`);
     expect(status).toMatch(/^Sent/);
 
+    // WHO SENT THEM (identity phase 1): each answer lies in this ACCOUNT's
+    // folder, names it, and is signed by the key its id commits to -- checked
+    // here against the OS's account (whoami) and with node's own Ed25519.
+    const signed = sentAnswers(WS, ME.sid);
+    expect(signed.length, `answers under win-${ME.sid}-...: ${files.map((f) => path.relative(WS, f)).join(", ")}`).toBe(3);
+    for (const { file, s } of signed) {
+      expect(path.basename(path.dirname(file)), "the sender folder is the sender id").toBe(s.submitter.id);
+      expect(s.submitter.provider).toBe("windows");
+      expect(same(s.submitter.principalName ?? "", ME.principal), `${s.submitter.principalName} is not ${ME.principal}`).toBe(true);
+      expect(s.seal, "an answer left this computer unsigned").toBeTruthy();
+      expect(s.submitter.id).toBe(`win-${ME.sid}-${keyCommitment(s.seal!.publicKey)}`);
+      expect(sealVerifies(s), `the signature on ${path.basename(file)} does not verify`).toBe(true);
+    }
+    // ...and the tab's Status says so, in words.
+    const who = ((await page.locator('[data-testid="writeback-tab-status-who"]').textContent()) ?? "").trim();
+    const account = ((await page.locator('[data-testid="writeback-tab-status-account"]').textContent()) ?? "").trim();
+    console.log(`[writeback] status who: ${who} | ${account}`);
+    expect(who).toBe(`You are signed in as ${signed[0].s.submitter.displayName} (Windows account)`);
+    expect(account.toLowerCase(), "Status does not name this machine's Windows account").toContain(ME.principal.toLowerCase());
+
     // MARKERS gone: the typed cells' corners now match a plain cell's.
     await parkCursor(grid);
     const patches = await samplePixelPatches(page, [
@@ -566,6 +789,69 @@ test.describe.serial("writeback subscriber: see what you typed, send it, and see
 
     await newFile(page);
   });
+
+  test("a NEW workbook that subscribes again shows the values this subscriber last sent", async ({ appPage: page, grid }) => {
+    test.setTimeout(240_000);
+    // File > New and subscribe again: nothing in this workbook has ever held
+    // the values. The identity is this computer's, so the workspace knows them
+    // (BUG-0554: the cells stayed blank -- nothing copied sent values into a
+    // workbook that did not already hold them).
+    await newFile(page);
+    expect((await layer(page)).length, "a new workbook starts with no writeback values").toBe(0);
+    const before = await sheets(page);
+    const r = await subscribe(page, WS, APP);
+    expect(r.packageName).toBe(APP);
+    const after = await sheets(page);
+    const known = new Set(before.sheets.map((s) => s.sheetId));
+    const pulled = after.sheets.filter((s) => !known.has(s.sheetId));
+    expect(pulled.length, `pulled sheets: ${JSON.stringify(after.sheets)}`).toBe(1);
+    const idx = await activate(page, pulled[0].name);
+
+    // THE BACKEND: the layer holds what was SENT (B3 = 1 after the discard,
+    // B4 = 2, B5 = 3; step 5's B4 = 4 was a draft in a workbook closed without
+    // saving, never sent), each as submitted -- and no draft.
+    const shown = await eventually(
+      () => layer(page),
+      (l) => l.length === 3 && l.every((e) => e.state === "submitted"),
+      "the new workbook never took the values this subscriber sent",
+      20_000,
+    );
+    expect(shown.map((e) => `${e.cellRow}:${e.cellCol}=${String(e.value.value)}`).sort()).toEqual(["2:1=1", "3:1=2", "4:1=3"]);
+    for (const [ref, want] of [["B3", "1"], ["B4", "2"], ["B5", "3"]] as const) {
+      await eventually(() => readCell(page, idx, ref), (c) => c.display === want, `${ref} does not show the sent ${want}`);
+    }
+
+    // THE CANVAS: B3's interior now carries a digit (it differs from the empty
+    // C3 beside it); the control pair D3/D4 does not differ. The inset keeps
+    // the region frame out of the sample; the control pair is D, not C,
+    // because the frame's right-edge icon sits on the B4/C4 border and reaches
+    // a few pixels into C4 (measured live 2026-10-22: C3/C4 differ by 8).
+    const interior = async (ref: string) => {
+      const b = await cellBox(page, grid, ref);
+      return { x: Math.round(b.left + 3), y: Math.round(b.top + 6), width: Math.round(b.right - b.left - 6), height: Math.max(4, Math.round(b.bottom - b.top - 11)) };
+    };
+    await parkCursor(grid);
+    await expect
+      .poll(
+        async () => {
+          const [b3, c3] = await samplePixelPatches(page, [await interior("B3"), await interior("C3")]);
+          return diffCount(b3, c3);
+        },
+        { timeout: 10_000, message: "B3 is painted blank although the backend holds 1" },
+      )
+      .toBeGreaterThan(4);
+    const [d3, d4] = await samplePixelPatches(page, [await interior("D3"), await interior("D4")]);
+    expect(diffCount(d3, d4), "control pair").toBeLessThanOrEqual(1);
+
+    // Nothing unsent: no badge on the tab.
+    await grid.clickCell("B3");
+    await expect.poll(() => writebackTabCount(page), { timeout: 5000 }).toBe(1);
+    await expect.poll(() => tabBadge(page), { timeout: 5000 }).toBe(null);
+    await grid.clickCell("A1");
+
+    await newFile(page);
+  });
+
   test("Open Application for Editing: the author sees the region framed, and a push would keep it", async ({ appPage: page, grid }) => {
     test.setTimeout(300_000);
     await newFile(page);
@@ -610,7 +896,7 @@ test.describe.serial("writeback subscriber: see what you typed, send it, and see
     // and not on B3's left edge, which carries the same frame LINE but no icon
     // (so the line alone cannot pass this).
     await parkCursor(grid);
-    const [b3Top, b4Top, b4Left, b3Left] = await samplePixelPatches(page, [
+    const [b3Top, b4Top, b4Left, b3Left] = await samplePixelGrids(page, [
       await topEdgeClip(page, grid, "B3"),
       await topEdgeClip(page, grid, "B4"),
       await leftEdgeMidClip(page, grid, "B4"),
@@ -618,17 +904,357 @@ test.describe.serial("writeback subscriber: see what you typed, send it, and see
     ]);
     const frameTop = diffCount(b3Top, b4Top);
     const glyph = diffCount(b4Left, b3Left);
-    console.log(`[writeback] working copy frame B3top/B4top=${frameTop} icon B4left/B3left=${glyph}`);
+    // As a SHARE of the patch: the count is in DEVICE pixels, so the same icon
+    // counts four times as many pixels at DPR 2 as at DPR 1.
+    const glyphShare = glyph / (b4Left.width * b4Left.height);
+    console.log(
+      `[writeback] working copy frame B3top/B4top=${frameTop} icon B4left/B3left=${glyph} of ${b4Left.width}x${b4Left.height} (dpr ${b4Left.scale})`,
+    );
     expect(frameTop, "no frame on B3's top edge in the working copy").toBeGreaterThan(10);
-    // Measured live 2026-10-21: 159 with the icon, 32 with the icon switched
-    // off (the line still breaks where the icon sits). 80 separates them.
-    expect(glyph, "no edit icon on the frame's left edge in the working copy").toBeGreaterThan(80);
+    // Measured live: at DPR 2 (2026-10-21) 159 of 256 with the icon and 32 of
+    // 256 with it switched off (the line still breaks where the icon sits); at
+    // DPR 1 (2026-10-22) 36 of 64 with the icon, which the old absolute floor
+    // of 80 failed. A share of 0.31 separates them at either ratio.
+    expect(glyphShare, "no edit icon on the frame's left edge in the working copy").toBeGreaterThan(0.31);
+
+    // COLLECTED RESPONSES, FOR THE AUTHOR (BUG-0553). The backend first: the
+    // publisher-side list names the author's own region as READY, and its
+    // inbox holds the three values steps 3-4 sent (B3 = 1 after the discard,
+    // B4 = 2, B5 = 3; the B4 = 4 of step 5 was a draft, never sent).
+    const regionId = own[0].id;
+    const listed = await callModule<Array<{ regionId: string; role: string; status: string; detail: string; version: string | null }>>(
+      page, COLLAB, "listCollectionRegions",
+    );
+    console.log(`[writeback] collection regions in the working copy: ${JSON.stringify(listed)}`);
+    const mine = listed.find((r) => r.regionId === regionId);
+    expect(mine, "Collected Responses does not list the author's own region").toBeTruthy();
+    expect(mine!.role).toBe("author");
+    expect(mine!.status, mine!.detail).toBe("ready");
+    expect(mine!.version).toBe(VERSION);
+    const inbox = await callModule<InboxRow[]>(page, COLLAB, "loadRegionSubmissions", [regionId]);
+    expect(inbox.map((r) => `${r.cellRow}:${r.cellCol}=${r.valueDisplay}:${r.state}`).sort()).toEqual([
+      "2:1=1:submitted",
+      "3:1=2:submitted",
+      "4:1=3:submitted",
+    ]);
+    // WHO SENT THEM, as this reader sees it: signed, and VERIFIED -- Windows
+    // recorded this machine's account (whoami's) as the writer of each file.
+    // BUG-0584: this workspace is deep enough that the files lie beyond
+    // MAX_PATH, and every answer read "cannot be checked here: Windows did
+    // not say who wrote the file".
+    for (const r of inbox) {
+      console.log(`[writeback] identity ${r.cellRow}:${r.cellCol}: ${r.sender} / ${r.identity?.status} / ${r.identityLabel}`);
+      expect(r.sender).toBe("signed");
+      expect(r.identity?.status, r.identityLabel).toBe("verified");
+      expect(same(r.identity?.writtenBy ?? "", ME.principal), `written by ${r.identity?.writtenBy}, not ${ME.principal}`).toBe(true);
+      expect(r.identityLabel).toBe(`Verified: written by ${r.identity!.writtenBy} (Windows account)`);
+      expect(r.counted).toBe(true);
+    }
+
+    // ...and the PANE, opened from the tab the author sees on B3.
+    await grid.clickCell("B3");
+    await expect.poll(() => writebackTabCount(page), { timeout: 5000 }).toBe(1);
+    await ribbonTab(page, "Writeback").click();
+    const collected = page.locator('[data-testid="writeback-tab-collected-responses"]');
+    await collected.waitFor({ state: "visible", timeout: 8000 });
+    await collected.click();
+    const pane = page.locator('[data-testid="publisher-dashboard"]');
+    await pane.waitFor({ state: "visible", timeout: 10_000 });
+    await expect(page.locator('[data-testid="publisher-dashboard-empty"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="publisher-dashboard-region"]')).toContainText("B3:B5");
+    await expect(page.locator('[data-testid="publisher-dashboard-row"]')).toHaveCount(3, { timeout: 15_000 });
+    await expect(page.locator('[data-testid="publisher-dashboard-not-ready"]')).toHaveCount(0);
+    const paneText = (await pane.textContent()) ?? "";
+    console.log(`[writeback] Collected Responses: ${paneText.replace(/\s+/g, " ").slice(0, 300)}`);
+    expect(paneText).not.toContain("No writeback regions");
+    // THE IDENTITY COLUMN: one line per answer, each Verified and naming this
+    // machine's account.
+    const identities = await identityLines(page);
+    console.log(`[writeback] Collected Responses identity lines: ${JSON.stringify(identities)}`);
+    expect(identities.length).toBe(3);
+    for (const line of identities) {
+      expect(line.status).toBe("verified");
+      expect(line.text.toLowerCase()).toBe(`identity: verified: written by ${ME.principal.toLowerCase()} (windows account)`);
+    }
+    const closed = await closeTaskPanes(page);
+    expect(closed.isOpen, "the Responses pane must not leak into later specs").toBe(false);
+    await grid.clickCell("A1");
 
     // A PUSH WOULD KEEP IT: the diff against the base names no removed region.
     const d = await pushDiff(page, WS, APP);
     const removed = d.objects.filter((o) => o.domain === "writebackRegion" && o.change === "removed");
     expect(removed, `the push would drop the region: ${describeDiff(d)}`).toEqual([]);
 
+    await newFile(page);
+  });
+
+  test("Application Inspector on the workspace: it opens the application and every tab shows it", async ({ appPage: page }) => {
+    test.setTimeout(240_000);
+    const context = page.context();
+    // A FRESH window: one left open by an earlier run would only be focused,
+    // and would run the module it loaded then, in the state it was left in.
+    await destroyInspectorWindows(page);
+    await page.locator("button").filter({ hasText: /^Collaboration$/ }).first().click();
+    await page.getByText("Application Inspector...", { exact: true }).first().click();
+    // Matched by URL (the window is destroyed above, so this is the new one).
+    const found = await eventually(
+      async () => context.pages().find((p) => /packageInspector/.test(p.url())) ?? null,
+      (p) => !!p,
+      "the Application Inspector window never appeared",
+      30_000,
+    );
+    const inspector = found!;
+    try {
+      const box = inspector.locator('input[placeholder^="Workspace, application"]');
+      await box.waitFor({ state: "visible", timeout: 30_000 });
+      const bodyText = () => inspector.evaluate(() => document.body.innerText);
+      const BROWSE_HINT = /Browse to a workspace's workspace\.calcula file/;
+
+      // THE POINTER FILE -- the only thing Browse returns. It names no
+      // application; the workspace holds exactly one, so the window opens it at
+      // latest with no further gesture (BUG-0552: nothing was loaded and all
+      // eight tabs showed the Browse hint).
+      await box.fill(path.join(WS, "workspace.calcula"));
+      await box.press("Enter");
+      const title = await eventually(
+        () => inspector.evaluate(() => document.querySelector("h2")?.textContent ?? ""),
+        (t) => t.includes(APP) && t.includes(`v${VERSION}`),
+        "the Overview never named the application and its version (the BUG-0552 empty-tabs state)",
+        30_000,
+      );
+      console.log(`[writeback] inspector overview title: ${title}`);
+      expect(await bodyText(), "the Browse hint is gone once the application is open").not.toMatch(BROWSE_HINT);
+
+      // THE BACKEND, read from the inspector window itself (the same commands
+      // its sections call): the application's sheet, its one region at B3:B5,
+      // and the three answers this journey sent (this computer published it,
+      // so it holds the key and sees them).
+      const reads = await inspector.evaluate(
+        async ({ ws, app, version }) => {
+          const w = window as unknown as { __TAURI__: { core: { invoke: (c: string, a: Record<string, unknown>) => Promise<unknown> } } };
+          const args = { registryPath: ws, packageName: app, versionPin: version };
+          const ov = (await w.__TAURI__.core.invoke("calp_inspector_overview", args)) as {
+            resolvedVersion: string;
+            sheets: Array<{ sheetId: string; name: string }>;
+          };
+          const wb = (await w.__TAURI__.core.invoke("calp_inspector_writeback", args)) as {
+            regions: Array<{ id: string; sheetName: string; range: string }>;
+            isPublisher: boolean;
+            totalSubmissions: number;
+          };
+          return { ov, wb };
+        },
+        { ws: WS, app: APP, version: VERSION },
+      );
+      console.log(`[writeback] inspector reads: ${JSON.stringify({ sheets: reads.ov.sheets, wb: { regions: reads.wb.regions, isPublisher: reads.wb.isPublisher, total: reads.wb.totalSubmissions } })}`);
+      expect(reads.ov.resolvedVersion).toBe(VERSION);
+      expect(reads.ov.sheets.map((s) => s.sheetId)).toEqual([PUBLISHER_SHEET_ID]);
+      const sheetName = reads.ov.sheets[0].name;
+      expect(reads.wb.regions.map((r) => `${r.sheetName} ${r.range}`)).toEqual([`${sheetName} B3:B5`]);
+      expect(reads.wb.isPublisher, "this computer published writeback-test, so it holds the key").toBe(true);
+      expect(reads.wb.totalSubmissions, "the three answers step 3 sent").toBe(3);
+
+      // SHEETS & DATA: the section lists the application's sheet, not the hint.
+      await inspector.locator("div").filter({ hasText: /^Sheets & Data$/ }).first().click();
+      await eventually(
+        bodyText,
+        (t) => t.includes("Sheets & Data") && t.includes(sheetName) && !BROWSE_HINT.test(t),
+        `the Sheets & Data tab never listed the sheet ${sheetName}`,
+        20_000,
+      );
+
+      // WRITEBACK: the region row and the publisher's response count.
+      await inspector.locator("div").filter({ hasText: /^Writeback$/ }).first().click();
+      const wbText = await eventually(
+        bodyText,
+        (t) => t.includes("Grid input regions (1)") && t.includes(`${sheetName} B3:B5`) && /3 submissions/.test(t),
+        "the Writeback tab never showed the B3:B5 region and the three answers",
+        20_000,
+      );
+      expect(wbText).toContain("Responses collected so far");
+      expect(wbText).not.toMatch(BROWSE_HINT);
+    } finally {
+      // From the MAIN window: the inspector may not close itself (see the helper).
+      expect(await destroyInspectorWindows(page), "the inspector window this test opened").toBe(1);
+    }
+  });
+
+  test("in a copy of the workspace: a claimed neighbour reads Not verified, an edited answer is forged and never seeds, an unsigned decision is ignored", async ({ appPage: page, grid }) => {
+    test.setTimeout(300_000);
+    // A COPY of the workspace the earlier steps sent into (never the owner's).
+    fs.rmSync(WS_PLANTED, { recursive: true, force: true });
+    copyDir(WS, WS_PLANTED);
+    const mine = sentAnswers(WS_PLANTED, ME.sid);
+    expect(mine.length).toBe(3);
+    // THE HARNESS: this spec's copy of the signed payload is Rust's -- every
+    // answer the app really sent verifies with it -- so what it plants is
+    // signed (or broken) exactly as intended.
+    for (const { s } of mine) expect(sealVerifies(s), "the spec's event payload no longer matches core/calp/src/submission_seal.rs").toBe(true);
+    const byRow = (row: number) => mine.find((m) => m.s.cellRow === row)!;
+    const [b3, b4, b5] = [byRow(2), byRow(3), byRow(4)];
+    const regionId = b3.s.regionId;
+    const later = new Date(Date.parse(b5.s.updatedAt) + 60_000).toISOString();
+
+    // PLANT 1 -- a CLAIM: an answer for B3 validly signed by a key this spec
+    // made, naming a NEIGHBOUR's account on this computer. The id commits to
+    // that key, so the fold keeps it as signed; but Windows recorded THIS
+    // account as the file's writer.
+    const keys = crypto.generateKeyPairSync("ed25519");
+    const neighbourKey = rawPublicKeyHex(keys.publicKey);
+    const neighbourSid = ME.sid.replace(/-\d+$/, "-4242");
+    const claim: AnswerFile = {
+      ...structuredClone(b3.s),
+      id: newEventId(),
+      submitter: {
+        displayName: "Neighbour",
+        id: `win-${neighbourSid}-${keyCommitment(neighbourKey)}`,
+        principalName: `${process.env.COMPUTERNAME ?? ME.principal.split("\\")[0]}\\neighbour`,
+        provider: "windows",
+        scope: "localMachine",
+      },
+      value: { type: "number", value: 555 },
+      createdAt: later,
+      updatedAt: later,
+      submittedAt: later,
+    };
+    const payload = eventPayload(APP, VERSION, claim, neighbourKey, "interactive");
+    claim.seal = { publicKey: neighbourKey, origin: "interactive", signature: crypto.sign(null, payload, keys.privateKey).toString("hex") };
+    expect(sealVerifies(claim), "the planted claim is validly signed").toBe(true);
+    const claimDir = path.join(WS_PLANTED, APP, VERSION, "submissions", claim.submitter.id);
+    fs.mkdirSync(claimDir, { recursive: true });
+    fs.writeFileSync(path.join(claimDir, `${regionId}_2_1_${claim.id}.json`), JSON.stringify(claim, null, 2));
+
+    // PLANT 2 -- an EDIT: this subscriber's own B5 answer file, its NAME
+    // edited to the neighbour's (and its value to 777), in place. Its seal no
+    // longer covers what it says.
+    const edited: AnswerFile = structuredClone(b5.s);
+    edited.submitter.displayName = "Neighbour";
+    edited.submitter.principalName = claim.submitter.principalName;
+    edited.value = { type: "number", value: 777 };
+    expect(sealVerifies(edited), "the edited answer's seal is broken").toBe(false);
+    fs.writeFileSync(b5.file, JSON.stringify(edited, null, 2));
+
+    // PLANT 3 -- an UNSIGNED decision rejecting this subscriber's B3 answer:
+    // the shape the app writes (checked below against a real one), no seal.
+    const reviewsDir = path.join(WS_PLANTED, APP, VERSION, "reviews");
+    fs.mkdirSync(reviewsDir, { recursive: true });
+    const unsigned = {
+      id: newEventId(),
+      targetSubmissionId: b3.s.id,
+      regionId,
+      submitterId: b3.s.submitter.id,
+      newState: "rejected",
+      reviewReason: "planted",
+      reviewedBy: "Mallory",
+      reviewedAt: later,
+      targetDigest: eventDigest(b3.s),
+    };
+    fs.writeFileSync(path.join(reviewsDir, `${unsigned.id}.json`), JSON.stringify(unsigned, null, 2));
+
+    /** A NEW workbook subscribed to the planted copy: what it takes back as this account's own. */
+    const subscribeAndRead = async (want: number) => {
+      await newFile(page);
+      const before = await sheets(page);
+      await subscribe(page, WS_PLANTED, APP);
+      const pulled = (await sheets(page)).sheets.filter((s) => !before.sheets.some((b) => b.sheetId === s.sheetId));
+      expect(pulled.length).toBe(1);
+      const idx = await activate(page, pulled[0].name);
+      await eventually(
+        () => layer(page),
+        (l) => l.length >= want,
+        `the new workbook took back fewer than the ${want} answers this account signed`,
+        20_000,
+      );
+      // Settled, then read once more: the caller compares the whole layer, so
+      // a seeded extra (the edited 777) shows in the diff.
+      await page.waitForTimeout(500);
+      const shown = await layer(page);
+      console.log(`[writeback] planted subscriber layer: ${JSON.stringify(shown.map((e) => `${e.cellRow}:${e.cellCol}=${String(e.value.value)}:${e.state}`))}`);
+      return { idx, shown };
+    };
+
+    // ---- THE SUBSCRIBER FIRST: a new workbook subscribed to the planted copy
+    // takes back only what this account really signed -- B3 = 1, B4 = 2 --
+    // never the edited 777, and B5 stays blank (its only answer there is the
+    // forged one); the unsigned rejection of B3 does not reach it.
+    const first = await subscribeAndRead(2);
+    expect(first.shown.map((e) => `${e.cellRow}:${e.cellCol}=${String(e.value.value)}`).sort()).toEqual(["2:1=1", "3:1=2"]);
+    expect(first.shown.find((e) => e.cellRow === 2)?.state, "the unsigned rejection reached the subscriber").toBe("submitted");
+    for (const [ref, want] of [["B3", "1"], ["B4", "2"], ["B5", ""]] as const) {
+      await eventually(() => readCell(page, first.idx, ref), (c) => c.display === want, `${ref} does not show "${want}"`);
+    }
+
+    // ---- THE PUBLISHER: a working copy of the planted workspace.
+    await newFile(page);
+    await checkout(page, WS_PLANTED, APP);
+    await eventually(
+      () => callModule<Array<{ id: string }>>(page, COLLAB, "getWritebackDraftRegions"),
+      (l) => l.length === 1 && l[0].id === regionId,
+      "the planted copy's working copy has no designated region",
+      15_000,
+    );
+    const inbox = await eventually(
+      () => callModule<InboxRow[]>(page, COLLAB, "loadRegionSubmissions", [regionId]),
+      (l) => l.length > 0,
+      "Collected Responses read nothing from the planted copy",
+      15_000,
+    );
+    console.log(`[writeback] planted inbox: ${JSON.stringify(inbox.map((r) => ({ cell: `${r.cellRow}:${r.cellCol}`, v: r.valueDisplay, state: r.state, who: r.submitterPrincipal, sender: r.sender, identity: r.identityLabel })))}`);
+    // The edited B5 is FORGED: listed nowhere (neither 777 nor the 3 it replaced).
+    expect(inbox.map((r) => `${r.cellRow}:${r.cellCol}=${r.valueDisplay}`).sort()).toEqual(["2:1=1", "2:1=555", "3:1=2"]);
+    const claimRow = inbox.find((r) => r.submitterId === claim.submitter.id);
+    expect(claimRow, "the validly signed claim is listed").toBeTruthy();
+    expect(claimRow!.sender).toBe("signed");
+    expect(claimRow!.identity?.status, claimRow!.identityLabel).toBe("notVerified");
+    expect(same(claimRow!.identity?.writtenBy ?? "", ME.principal), `written by ${claimRow!.identity?.writtenBy}`).toBe(true);
+    expect(claimRow!.identityLabel).toBe(`Not verified: written by ${claimRow!.identity!.writtenBy}`);
+    const myB3 = inbox.find((r) => r.submitterId === b3.s.submitter.id && r.cellRow === 2)!;
+    expect(myB3.identity?.status).toBe("verified");
+    // The unsigned decision is IGNORED: B3 is still waiting for a decision.
+    expect(myB3.state, "an unsigned 'rejected' decision was applied").toBe("submitted");
+
+    // THE PANE says the same.
+    await activate(page, (await sheets(page)).sheets.find((s) => s.sheetId === PUBLISHER_SHEET_ID)!.name);
+    await grid.clickCell("B3");
+    await expect.poll(() => writebackTabCount(page), { timeout: 5000 }).toBe(1);
+    await ribbonTab(page, "Writeback").click();
+    const collected = page.locator('[data-testid="writeback-tab-collected-responses"]');
+    await collected.waitFor({ state: "visible", timeout: 8000 });
+    await collected.click();
+    await page.locator('[data-testid="publisher-dashboard"]').waitFor({ state: "visible", timeout: 10_000 });
+    await expect(page.locator('[data-testid="publisher-dashboard-row"]')).toHaveCount(3, { timeout: 15_000 });
+    const lines = await identityLines(page);
+    console.log(`[writeback] planted identity lines: ${JSON.stringify(lines)}`);
+    expect(lines.map((l) => l.status).sort()).toEqual(["notVerified", "verified", "verified"]);
+    expect(lines.find((l) => l.status === "notVerified")!.text.toLowerCase()).toBe(`identity: not verified: written by ${ME.principal.toLowerCase()}`);
+
+    // POSITIVE CONTROL for the ignored decision: the publisher APPROVES B4
+    // here, and that one counts. Its file has the planted one's shape plus a
+    // seal -- so the plant was ignored for being unsigned, not for its shape.
+    const myB4 = inbox.find((r) => r.submitterId === b4.s.submitter.id && r.cellRow === 3)!;
+    const reviewsBefore = new Set(fs.readdirSync(reviewsDir));
+    await callModule(page, COLLAB, "setSubmissionState", [regionId, myB4.submitterId, 3, 1, "approved", null, myB4.submissionId]);
+    const after = await eventually(
+      () => callModule<InboxRow[]>(page, COLLAB, "loadRegionSubmissions", [regionId]),
+      (l) => l.some((r) => r.submissionId === myB4.submissionId && r.state === "approved"),
+      "the publisher's own approval of B4 did not count",
+      15_000,
+    );
+    expect(after.find((r) => r.submissionId === myB3.submissionId)?.state, "B3 after an unrelated approval").toBe("submitted");
+    const realReviewFile = fs.readdirSync(reviewsDir).find((f) => !reviewsBefore.has(f));
+    expect(realReviewFile, "the approval wrote no review file").toBeTruthy();
+    const realReview = JSON.parse(fs.readFileSync(path.join(reviewsDir, realReviewFile!), "utf-8")) as Record<string, unknown>;
+    expect(Object.keys(realReview).filter((k) => !(k in unsigned)).sort(), "the planted decision differs from a real one by more than its seal").toEqual(["seal"]);
+    const closed = await closeTaskPanes(page);
+    expect(closed.isOpen, "the Responses pane must not leak into later specs").toBe(false);
+    await grid.clickCell("A1");
+
+    // ---- THE SUBSCRIBER AGAIN: the signed approval reaches it (POSITIVE
+    // CONTROL for the subscriber side); the unsigned rejection still does not.
+    const again = await subscribeAndRead(2);
+    expect(again.shown.map((e) => `${e.cellRow}:${e.cellCol}=${String(e.value.value)}`).sort()).toEqual(["2:1=1", "3:1=2"]);
+    expect(again.shown.find((e) => e.cellRow === 2)?.state, "the unsigned rejection reached the subscriber").toBe("submitted");
+    expect(again.shown.find((e) => e.cellRow === 3)?.state, "POSITIVE CONTROL: the publisher's signed approval").toBe("approved");
     await newFile(page);
   });
 });

@@ -1662,6 +1662,7 @@ fn a_pruned_pivot_is_named_with_the_sheet_that_kept_it_home() {
         excluded_regions: Vec::new(),
         custom_objects: Vec::new(),
         include_comments: false,
+        identity_policy: None,
         min_app_version: String::new(),
     };
     let result = calp::publish::publish(&memory, &request, prof.path()).unwrap();

@@ -564,30 +564,17 @@ impl LocalWorkspace {
             )));
         }
 
-        let file_name = match submission.model_key.as_deref() {
-            None => format!(
-                "{}_{}_{}_{}.json",
-                submission.region_id, submission.cell_row, submission.cell_col, submission.id
-            ),
-            Some(key) => {
-                // Stable 16-hex digest of the canonical key tuple.
-                use std::hash::{Hash, Hasher};
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                for part in key {
-                    part.hash(&mut hasher);
-                    0x1fu8.hash(&mut hasher); // unit separator: ["ab","c"] != ["a","bc"]
-                }
-                format!(
-                    "{}_{:016x}_{}.json",
-                    submission.region_id,
-                    hasher.finish(),
-                    submission.id
-                )
-            }
-        };
+        let file_name = submission_file_name(submission);
 
         let sub_dir = self.submissions_dir(package_name, version, &submission.submitter.id)?;
-        let content = serde_json::to_string_pretty(submission)?;
+        // A file never carries a verdict about itself: the fold re-derives it
+        // on every read (`sender` is never deserialized either).
+        let mut on_disk = submission.clone();
+        on_disk.sender = crate::submission_seal::SenderCheck::Unchecked;
+        on_disk.extra.remove("sender");
+        on_disk.identity = Default::default();
+        on_disk.extra.remove("identity");
+        let content = serde_json::to_string_pretty(&on_disk)?;
         atomic_write(&sub_dir.join(file_name), content.as_bytes())
     }
 
@@ -613,6 +600,47 @@ impl LocalWorkspace {
             .join(format!("{}.json", review.id));
         let content = serde_json::to_string_pretty(review)?;
         atomic_write(&path, content.as_bytes())
+    }
+
+    /// The files under `submissions/{sender}/` that hold `submission`: its
+    /// canonical file first (`submission_file_name`), then any other
+    /// `*_{id}.json` (a sync client's renamed duplicate) whose content carries
+    /// the SAME signature. What the reader's identity check asks Windows about
+    /// (`crate::identity_check`): who wrote the file that holds this answer.
+    pub fn submission_files(
+        &self,
+        package_name: &str,
+        version: &str,
+        submission: &crate::writeback::WritebackSubmission,
+    ) -> Result<Vec<PathBuf>, CalpError> {
+        let dir = self.submissions_dir(package_name, version, &submission.submitter.id)?;
+        let mut out = Vec::new();
+        let canonical = dir.join(submission_file_name(submission));
+        if canonical.is_file() {
+            out.push(canonical.clone());
+        }
+        let signature = submission.seal.as_ref().map(|s| s.signature.clone());
+        if !dir.exists() {
+            return Ok(out);
+        }
+        let suffix = format!("_{}", submission.id);
+        for entry in fs::read_dir(&dir)? {
+            let Ok(entry) = entry else { continue };
+            let path = entry.path();
+            if path == canonical || !path.extension().is_some_and(|e| e == "json") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+            if stem.starts_with('.') || !stem.ends_with(&suffix) {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(&path) else { continue };
+            let Ok(other) = serde_json::from_str::<WritebackSubmission>(&content) else { continue };
+            if other.id == submission.id && other.seal.as_ref().map(|s| s.signature.clone()) == signature {
+                out.push(path);
+            }
+        }
+        Ok(out)
     }
 
     /// Load the RAW submission events written by one submitter, hygiene
@@ -658,7 +686,16 @@ impl LocalWorkspace {
             if sub.id.is_empty() || !stem.ends_with(&format!("_{}", sub.id)) {
                 continue;
             }
-            if sub.submitter.id != submitter_id {
+            // THE FOLDER NAME IS NOT AUTHORITY. On Windows storage (NTFS, SMB,
+            // Dropbox) `WIN-<id>` and `win-<id>` are ONE folder, and whoever
+            // creates it first chooses its spelling: a share-writer who makes
+            // `WIN-<Alice's id>` before Alice answers would otherwise have every
+            // later answer of hers skipped here in silence (she would still see
+            // them as sent). So the folder only has to name the file's sender
+            // up to ASCII case; WHO the answer is from is the content's id,
+            // which the fold holds to its seal (an id whose prefix is a case
+            // variant can never carry one: `is_signed_id`).
+            if !sub.submitter.id.eq_ignore_ascii_case(submitter_id) {
                 continue;
             }
             events.push(sub);
@@ -741,14 +778,74 @@ impl LocalWorkspace {
     /// from review events — see the fold's doc for the exact rules). Callers
     /// that need several regions should use this and bucket by region_id —
     /// the region variant rescans the whole tree each time.
+    ///
+    /// `authority`: the keys whose review decisions count -- the application's
+    /// VERIFIED publisher key and its root-signed co-publishers
+    /// (`crate::publishers::review_keys`). Every caller must decide it; there is
+    /// no default, because a default would be either "nobody" (silently
+    /// dropping every approval) or "anybody" (the hole this closes).
     pub fn load_current_submissions(
         &self,
         package_name: &str,
         version: &str,
+        authority: &crate::submission_seal::ReviewAuthority,
     ) -> Result<Vec<WritebackSubmission>, CalpError> {
+        Ok(self.load_submission_fold(package_name, version, authority)?.current)
+    }
+
+    /// The whole fold for a version: current records AND what it refused
+    /// (forged answers, ignored reviews), for a reader that shows them.
+    pub fn load_submission_fold(
+        &self,
+        package_name: &str,
+        version: &str,
+        authority: &crate::submission_seal::ReviewAuthority,
+    ) -> Result<crate::fold::FoldOutcome, CalpError> {
         let events = self.load_submission_events(package_name, version)?;
         let reviews = self.load_review_events(package_name, version)?;
-        Ok(crate::fold::fold_submissions(events, &reviews))
+        let unsigned_is_forged = self.answers_must_be_signed(package_name, version, authority);
+        Ok(crate::fold::fold_detailed(
+            events,
+            &reviews,
+            &crate::fold::FoldContext { package: package_name, version, authority, unsigned_is_forged },
+        ))
+    }
+
+    /// WHETHER EVERY ANSWER IN THIS VERSION MUST BE SIGNED -- so an unsigned
+    /// one is a forgery, not an answer "sent before sign-in" (identity phase 1).
+    ///
+    /// Decided from the version's SIGNED manifest (`VersionManifest::signed_answers`,
+    /// written by every app publish whose answers are signed), the same bytes
+    /// for every reader, so the fold stays deterministic:
+    ///
+    /// * no manifest, or one with no publisher key (a pre-signing test or
+    ///   legacy layout): not required -- old answers stay "sent before sign-in";
+    /// * a manifest that names a key but does not verify against it (edited,
+    ///   or its signature removed to strip the flag): REQUIRED -- fail closed;
+    /// * a manifest signed by a key the reader's `authority` does not admit (a
+    ///   share-writer re-signed it with their own key to strip the flag):
+    ///   REQUIRED;
+    /// * otherwise the manifest's own flag.
+    pub fn answers_must_be_signed(
+        &self,
+        package_name: &str,
+        version: &str,
+        authority: &crate::submission_seal::ReviewAuthority,
+    ) -> bool {
+        let unsigned_view = match self.get_version_manifest(package_name, version) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        if unsigned_view.publisher_key.trim().is_empty() {
+            return false;
+        }
+        match crate::integrity::load_signed_manifest_via(self, package_name, version) {
+            Ok(signed) => {
+                signed.manifest.signed_answers
+                    || (!authority.is_empty() && !authority.admits_key(&signed.manifest.publisher_key))
+            }
+            Err(_) => true,
+        }
     }
 
     /// Current submissions by one submitter (the fold scoped to their events;
@@ -758,10 +855,16 @@ impl LocalWorkspace {
         package_name: &str,
         version: &str,
         submitter_id: &str,
+        authority: &crate::submission_seal::ReviewAuthority,
     ) -> Result<Vec<WritebackSubmission>, CalpError> {
         let events = self.load_submission_events_by(package_name, version, submitter_id)?;
         let reviews = self.load_review_events(package_name, version)?;
-        Ok(crate::fold::fold_submissions(events, &reviews))
+        let unsigned_is_forged = self.answers_must_be_signed(package_name, version, authority);
+        Ok(crate::fold::fold_submissions(
+            events,
+            &reviews,
+            &crate::fold::FoldContext { package: package_name, version, authority, unsigned_is_forged },
+        ))
     }
 
     /// Current submissions for one region across all submitters.
@@ -770,9 +873,10 @@ impl LocalWorkspace {
         package_name: &str,
         version: &str,
         region_id: &str,
+        authority: &crate::submission_seal::ReviewAuthority,
     ) -> Result<Vec<WritebackSubmission>, CalpError> {
         Ok(self
-            .load_current_submissions(package_name, version)?
+            .load_current_submissions(package_name, version, authority)?
             .into_iter()
             .filter(|s| s.region_id == region_id)
             .collect())
@@ -1021,6 +1125,28 @@ impl LocalWorkspace {
     }
 }
 
+/// The file name an answer is saved under in its sender's folder. Grid
+/// events: `{region}_{row}_{col}_{id}.json`; model-keyed events:
+/// `{region}_{key-hash16}_{id}.json`.
+pub fn submission_file_name(submission: &crate::writeback::WritebackSubmission) -> String {
+    match submission.model_key.as_deref() {
+        None => format!(
+            "{}_{}_{}_{}.json",
+            submission.region_id, submission.cell_row, submission.cell_col, submission.id
+        ),
+        Some(key) => {
+            // Stable 16-hex digest of the canonical key tuple.
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            for part in key {
+                part.hash(&mut hasher);
+                0x1fu8.hash(&mut hasher); // unit separator: ["ab","c"] != ["a","bc"]
+            }
+            format!("{}_{:016x}_{}.json", submission.region_id, hasher.finish(), submission.id)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // D8 — LocalWorkspace is one WorkspaceTransport implementation behind the seam.
 // Every method delegates to the inherent fs implementation above; an HTTP
@@ -1030,6 +1156,19 @@ impl LocalWorkspace {
 impl WorkspaceTransport for LocalWorkspace {
     fn list_applications(&self) -> Result<Vec<String>, CalpError> {
         LocalWorkspace::list_applications(self)
+    }
+
+    fn local_root(&self) -> Option<PathBuf> {
+        Some(self.root().to_path_buf())
+    }
+
+    fn local_submission_files(
+        &self,
+        package_name: &str,
+        version: &str,
+        submission: &crate::writeback::WritebackSubmission,
+    ) -> Result<Option<Vec<PathBuf>>, CalpError> {
+        self.submission_files(package_name, version, submission).map(Some)
     }
 
     fn read_application_artifact(
@@ -1195,8 +1334,9 @@ impl WorkspaceTransport for LocalWorkspace {
         package_name: &str,
         version: &str,
         submitter_id: &str,
+        authority: &crate::submission_seal::ReviewAuthority,
     ) -> Result<Vec<WritebackSubmission>, CalpError> {
-        LocalWorkspace::load_current_submissions_by(self, package_name, version, submitter_id)
+        LocalWorkspace::load_current_submissions_by(self, package_name, version, submitter_id, authority)
     }
 
     fn load_current_region_submissions(
@@ -1204,16 +1344,27 @@ impl WorkspaceTransport for LocalWorkspace {
         package_name: &str,
         version: &str,
         region_id: &str,
+        authority: &crate::submission_seal::ReviewAuthority,
     ) -> Result<Vec<WritebackSubmission>, CalpError> {
-        LocalWorkspace::load_current_region_submissions(self, package_name, version, region_id)
+        LocalWorkspace::load_current_region_submissions(self, package_name, version, region_id, authority)
     }
 
     fn load_current_submissions(
         &self,
         package_name: &str,
         version: &str,
+        authority: &crate::submission_seal::ReviewAuthority,
     ) -> Result<Vec<WritebackSubmission>, CalpError> {
-        LocalWorkspace::load_current_submissions(self, package_name, version)
+        LocalWorkspace::load_current_submissions(self, package_name, version, authority)
+    }
+
+    fn load_submission_fold(
+        &self,
+        package_name: &str,
+        version: &str,
+        authority: &crate::submission_seal::ReviewAuthority,
+    ) -> Result<crate::fold::FoldOutcome, CalpError> {
+        LocalWorkspace::load_submission_fold(self, package_name, version, authority)
     }
 
     fn lock(&self) -> Result<Box<dyn std::any::Any>, CalpError> {
@@ -1285,6 +1436,8 @@ mod tests {
         let sheet_id = identity::SheetId::from_bytes(identity::generate_uuid_v7());
         let ver_manifest = VersionManifest {
             model_writebacks: None,
+            identity_policy: None,
+            signed_answers: false,
             format_version: 1,
             package_name: "pkg".to_string(),
             version: "1.0.0".to_string(),
@@ -1372,6 +1525,8 @@ mod tests {
 
         let ver_manifest = VersionManifest {
             model_writebacks: None,
+            identity_policy: None,
+            signed_answers: false,
             format_version: 1,
             package_name: "pkg".to_string(),
             version: "1.0.0".to_string(),
@@ -1416,6 +1571,9 @@ mod tests {
             submitter: crate::identity_provider::SubmitterIdentity {
                 display_name: submitter_name.to_string(),
                 id: format!("id-{}", submitter_name),
+                principal_name: String::new(),
+                provider: Default::default(),
+                scope: Default::default(),
                 extra: std::collections::HashMap::new(),
             },
             value: crate::writeback::SubmissionValue::Number { value: 42.0 },
@@ -1425,8 +1583,35 @@ mod tests {
             submitted_at: Some("2026-01-01T00:00:00Z".to_string()),
             review_reason: None,
             reviewed_by: None,
+            seal: None,
+            sender: Default::default(),
+            identity: Default::default(),
             extra: std::collections::HashMap::new(),
         }
+    }
+
+    const TEST_PUBLISHER_SEED: [u8; 32] = [77u8; 32];
+
+    /// The test publisher's review authority.
+    fn test_authority() -> crate::submission_seal::ReviewAuthority {
+        crate::submission_seal::ReviewAuthority::from_keys([
+            crate::signing::PublisherKeypair::from_seed(&TEST_PUBLISHER_SEED, "Publisher").public_key_hex(),
+        ])
+    }
+
+    /// Sign a review the way the publisher's app does, over `target` exactly.
+    fn signed(
+        mut review: crate::writeback::ReviewEvent,
+        target: &crate::writeback::WritebackSubmission,
+    ) -> crate::writeback::ReviewEvent {
+        crate::submission_seal::seal_review(
+            &mut review,
+            target,
+            "pkg",
+            "1.0.0",
+            &crate::signing::PublisherKeypair::from_seed(&TEST_PUBLISHER_SEED, "Publisher"),
+        );
+        review
     }
 
     fn make_test_review(
@@ -1444,6 +1629,8 @@ mod tests {
             review_reason: Some("reason".to_string()),
             reviewed_by: Some("Publisher".to_string()),
             reviewed_at: reviewed_at.to_string(),
+            target_digest: String::new(),
+            seal: None,
             extra: std::collections::HashMap::new(),
         }
     }
@@ -1467,7 +1654,7 @@ mod tests {
 
         reg.save_submission("pkg", "1.0.0", &first).unwrap();
         reg.save_submission("pkg", "1.0.0", &second).unwrap();
-        let loaded = reg.load_current_submissions("pkg", "1.0.0").unwrap();
+        let loaded = reg.load_current_submissions("pkg", "1.0.0", &test_authority()).unwrap();
         assert_eq!(loaded.len(), 2, "same-key saves must both stay current");
 
         // Approval = a review event targeting sub-2; the submission files are
@@ -1475,15 +1662,18 @@ mod tests {
         reg.save_review(
             "pkg",
             "1.0.0",
-            &make_test_review(
-                "rev-1",
-                "sub-2",
-                crate::writeback::SubmissionState::Approved,
-                "2026-01-02T00:00:00Z",
+            &signed(
+                make_test_review(
+                    "rev-1",
+                    "sub-2",
+                    crate::writeback::SubmissionState::Approved,
+                    "2026-01-02T00:00:00Z",
+                ),
+                &second,
             ),
         )
         .unwrap();
-        let loaded = reg.load_current_submissions("pkg", "1.0.0").unwrap();
+        let loaded = reg.load_current_submissions("pkg", "1.0.0", &test_authority()).unwrap();
         assert_eq!(loaded.len(), 2);
         assert!(loaded.iter().any(|s| s.id == "sub-2"
             && matches!(s.state, crate::writeback::SubmissionState::Approved)));
@@ -1536,6 +1726,8 @@ mod tests {
         // Create a version directory
         let ver_manifest = VersionManifest {
             model_writebacks: None,
+            identity_policy: None,
+            signed_answers: false,
             format_version: 1,
             package_name: "pkg".to_string(),
             version: "1.0.0".to_string(),
@@ -1566,7 +1758,7 @@ mod tests {
         let sub = make_test_submission("region-1", "alice");
         reg.save_submission("pkg", "1.0.0", &sub).unwrap();
 
-        let loaded = reg.load_current_submissions_by("pkg", "1.0.0", "id-alice").unwrap();
+        let loaded = reg.load_current_submissions_by("pkg", "1.0.0", "id-alice", &test_authority()).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id, sub.id);
         assert_eq!(loaded[0].submitter.display_name, "alice");
@@ -1575,7 +1767,7 @@ mod tests {
     #[test]
     fn load_submissions_empty_when_none() {
         let (_dir, reg) = create_test_registry();
-        let result = reg.load_current_submissions_by("pkg", "1.0.0", "nobody").unwrap();
+        let result = reg.load_current_submissions_by("pkg", "1.0.0", "nobody", &test_authority()).unwrap();
         assert!(result.is_empty());
     }
 
@@ -1585,6 +1777,8 @@ mod tests {
         create_test_package(&reg, "pkg");
         let ver_manifest = VersionManifest {
             model_writebacks: None,
+            identity_policy: None,
+            signed_answers: false,
             format_version: 1,
             package_name: "pkg".to_string(),
             version: "1.0.0".to_string(),
@@ -1616,10 +1810,10 @@ mod tests {
         reg.save_submission("pkg", "1.0.0", &make_test_submission("r1", "bob")).unwrap();
         reg.save_submission("pkg", "1.0.0", &make_test_submission("r2", "alice")).unwrap();
 
-        let r1_subs = reg.load_current_region_submissions("pkg", "1.0.0", "r1").unwrap();
+        let r1_subs = reg.load_current_region_submissions("pkg", "1.0.0", "r1", &test_authority()).unwrap();
         assert_eq!(r1_subs.len(), 2);
 
-        let r2_subs = reg.load_current_region_submissions("pkg", "1.0.0", "r2").unwrap();
+        let r2_subs = reg.load_current_region_submissions("pkg", "1.0.0", "r2", &test_authority()).unwrap();
         assert_eq!(r2_subs.len(), 1);
     }
 
@@ -1647,7 +1841,7 @@ mod tests {
 
         // ...but the folded view collapses the slot to the newest event, so
         // GATHER aggregation never double-counts.
-        let subs = reg.load_current_region_submissions("pkg", "1.0.0", "r1").unwrap();
+        let subs = reg.load_current_region_submissions("pkg", "1.0.0", "r1", &test_authority()).unwrap();
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].id, "sub-rev-2");
         assert!(matches!(
@@ -1660,6 +1854,216 @@ mod tests {
     // sync-client "conflicted copy" renames, torn JSON, tmp debris, foreign
     // attribution, byte-duplicated events — is skipped, never an error, and
     // never double-counts.
+    /// A saved file never carries a verdict about itself, and a verdict a file
+    /// claims is never believed: `sender` is cleared on save, ignored on load,
+    /// and re-derived by the fold.
+    #[test]
+    fn a_file_cannot_claim_to_be_signed() {
+        let (dir, reg) = create_test_registry();
+        create_test_package(&reg, "pkg");
+        let mut sub = make_test_submission("r1", "alice");
+        sub.sender = crate::submission_seal::SenderCheck::Signed;
+        reg.save_submission("pkg", "1.0.0", &sub).unwrap();
+        let file = dir
+            .path()
+            .join("pkg/1.0.0/submissions/id-alice")
+            .join(format!("r1_0_0_{}.json", sub.id));
+        let raw = std::fs::read_to_string(&file).unwrap();
+        assert!(!raw.contains("\"sender\""), "save wrote a verdict: {raw}");
+
+        // A hand-edited file claiming "signed" is folded as what it is.
+        let forged = raw.replacen('{', "{\n  \"sender\": \"signed\",", 1);
+        std::fs::write(&file, forged).unwrap();
+        let loaded = reg.load_current_submissions("pkg", "1.0.0", &test_authority()).unwrap();
+        assert_eq!(loaded[0].sender, crate::submission_seal::SenderCheck::BeforeSignIn);
+        assert!(!loaded[0].extra.contains_key("sender"));
+    }
+
+    /// Nor can a file claim the READER's identity verdict: `identity` is
+    /// cleared on save, never deserialized, and stripped from `extra`.
+    ///
+    /// SABOTAGE: drop `event.extra.remove("identity")` from the fold -- the
+    /// smuggled key then survives in `extra` and this fails.
+    #[test]
+    fn a_file_cannot_claim_to_be_verified() {
+        let (dir, reg) = create_test_registry();
+        create_test_package(&reg, "pkg");
+        let mut sub = make_test_submission("r1", "alice");
+        sub.identity = crate::identity_check::IdentityVerdict::new(
+            crate::identity_check::IdentityStatus::Verified,
+            crate::identity_check::IdentityReason::OwnerMatches,
+        );
+        reg.save_submission("pkg", "1.0.0", &sub).unwrap();
+        let file = dir
+            .path()
+            .join("pkg/1.0.0/submissions/id-alice")
+            .join(format!("r1_0_0_{}.json", sub.id));
+        let raw = std::fs::read_to_string(&file).unwrap();
+        assert!(!raw.contains("\"identity\""), "save wrote a verdict: {raw}");
+        let forged = raw.replacen('{', "{\n  \"identity\": {\"status\": \"verified\", \"reason\": \"ownerMatches\"},", 1);
+        std::fs::write(&file, forged).unwrap();
+        let loaded = reg.load_current_submissions("pkg", "1.0.0", &test_authority()).unwrap();
+        assert_eq!(loaded[0].identity.status, crate::identity_check::IdentityStatus::NotChecked);
+        assert!(!loaded[0].extra.contains_key("identity"));
+    }
+
+    /// The files the identity check asks Windows about: the canonical one, and
+    /// a sync client's renamed copy ONLY when it carries the same signature.
+    #[test]
+    fn submission_files_finds_the_answers_file_and_its_signed_copies_only() {
+        let (dir, reg) = create_test_registry();
+        create_test_package(&reg, "pkg");
+        let mut sub = make_test_submission("r1", "alice");
+        sub.seal = Some(crate::submission_seal::SubmissionSeal {
+            public_key: "aa".repeat(32),
+            origin: crate::submission_seal::SubmissionOrigin::Interactive,
+            signature: "bb".repeat(64),
+        });
+        reg.save_submission("pkg", "1.0.0", &sub).unwrap();
+        let folder = dir.path().join("pkg/1.0.0/submissions/id-alice");
+        let canonical = folder.join(format!("r1_0_0_{}.json", sub.id));
+        assert_eq!(super::submission_file_name(&sub), format!("r1_0_0_{}.json", sub.id));
+        let raw = std::fs::read_to_string(&canonical).unwrap();
+        // A renamed duplicate with the same content: included.
+        let copy = folder.join(format!("r1_0_0 (conflicted)_{}.json", sub.id));
+        std::fs::write(&copy, &raw).unwrap();
+        // A file with the same id but ANOTHER signature: not this answer's file.
+        let other = folder.join(format!("x_{}.json", sub.id));
+        std::fs::write(&other, raw.replace(&"bb".repeat(64), &"cc".repeat(64))).unwrap();
+        let files = reg.submission_files("pkg", "1.0.0", &sub).unwrap();
+        assert_eq!(files.first(), Some(&canonical), "the canonical file comes first");
+        assert!(files.contains(&copy));
+        assert!(!files.contains(&other), "{files:?}");
+        // Through the transport seam too; a memory workspace has none.
+        let t: &dyn WorkspaceTransport = &reg;
+        assert_eq!(t.local_submission_files("pkg", "1.0.0", &sub).unwrap().map(|f| f.len()), Some(2));
+        assert_eq!(t.local_root().as_deref(), Some(dir.path()));
+        let mem = crate::memory_workspace::MemoryWorkspace::new();
+        let m: &dyn WorkspaceTransport = &mem;
+        assert!(m.local_submission_files("pkg", "1.0.0", &sub).unwrap().is_none());
+        assert!(m.local_root().is_none());
+    }
+
+    /// The fold through the workspace reports what it refused: an unsigned file
+    /// planted under a signed sender's folder and an unsigned review.
+    #[test]
+    fn the_workspace_fold_reports_forged_answers_and_ignored_reviews() {
+        let (_dir, reg) = create_test_registry();
+        create_test_package(&reg, "pkg");
+        let seed = [5u8; 32];
+        let who = crate::identity_provider::identity_for(
+            crate::identity_provider::IdentityProviderKind::Windows,
+            &crate::identity_provider::AccountFacts {
+                subject: "S-1-5-21-1-2-3-1001".into(),
+                principal_name: "CORP\\alice".into(),
+                display_name: "Alice".into(),
+                scope: crate::identity_provider::AccountScope::Domain,
+            },
+            &crate::submission_seal::public_key_of_seed(&seed),
+        )
+        .unwrap();
+        let mut real = make_test_submission("r1", "alice");
+        real.submitter = who.clone();
+        crate::submission_seal::seal_submission(
+            &mut real,
+            "pkg",
+            "1.0.0",
+            &seed,
+            crate::submission_seal::SubmissionOrigin::Interactive,
+        )
+        .unwrap();
+        reg.save_submission("pkg", "1.0.0", &real).unwrap();
+        let mut plant = real.clone();
+        plant.id = "planted".into();
+        plant.updated_at = "2030-01-01T00:00:00Z".into();
+        plant.seal = None;
+        reg.save_submission("pkg", "1.0.0", &plant).unwrap();
+        reg.save_review(
+            "pkg",
+            "1.0.0",
+            &make_test_review("rev-u", &real.id, crate::writeback::SubmissionState::Approved, "2026-01-02T00:00:00Z"),
+        )
+        .unwrap();
+
+        let fold = reg.load_submission_fold("pkg", "1.0.0", &test_authority()).unwrap();
+        assert_eq!(fold.current.len(), 1, "{:?}", fold.current.iter().map(|s| &s.id).collect::<Vec<_>>());
+        assert_eq!(fold.current[0].id, real.id);
+        assert_eq!(fold.current[0].sender, crate::submission_seal::SenderCheck::Signed);
+        assert_eq!(fold.current[0].state, crate::writeback::SubmissionState::Submitted);
+        assert_eq!(fold.forged.len(), 1);
+        assert_eq!(fold.forged[0].event.id, "planted");
+        assert_eq!(fold.ignored_reviews.len(), 1);
+        // The boxed transport forwards the detailed fold (not the default that
+        // would lose the refusals).
+        let boxed: Box<dyn WorkspaceTransport> = Box::new(LocalWorkspace::open(reg.root()).unwrap());
+        assert_eq!(boxed.load_submission_fold("pkg", "1.0.0", &test_authority()).unwrap().forged.len(), 1);
+    }
+
+    /// A FOLDER MADE IN ADVANCE IN ANOTHER CASE CANNOT SWALLOW A SENDER'S
+    /// ANSWERS. Sender ids are public and stable, and Windows storage treats
+    /// `WIN-<id>` and `win-<id>` as one folder, so a share-writer can create
+    /// `submissions/WIN-<Alice's id>/` before Alice answers; her save then lands
+    /// in it. The publisher's scan must still read her answer, and an unsigned
+    /// plant in that folder under the case-variant id is FORGED, never "sent
+    /// before sign-in".
+    ///
+    /// SABOTAGE: compare the folder name and the content id with `!=` again --
+    /// on Windows Alice's answer is skipped in silence and this fails.
+    #[test]
+    fn a_differently_cased_folder_made_in_advance_drops_no_answer() {
+        let (dir, reg) = create_test_registry();
+        create_test_package(&reg, "pkg");
+        let seed = [6u8; 32];
+        let who = crate::identity_provider::identity_for(
+            crate::identity_provider::IdentityProviderKind::Windows,
+            &crate::identity_provider::AccountFacts {
+                subject: "S-1-5-21-1-2-3-1001".into(),
+                principal_name: "CORP\\alice".into(),
+                display_name: "Alice".into(),
+                scope: crate::identity_provider::AccountScope::Domain,
+            },
+            &crate::submission_seal::public_key_of_seed(&seed),
+        )
+        .unwrap();
+        let shouted = who.id.replacen("win-", "WIN-", 1);
+        // Mallory, first: the folder in another case, and an unsigned plant in it.
+        let mut plant = make_test_submission("r1", "mallory");
+        plant.id = "planted-shouted".into();
+        plant.submitter = who.clone();
+        plant.submitter.id = shouted.clone();
+        reg.save_submission("pkg", "1.0.0", &plant).unwrap();
+        let folders: Vec<String> = std::fs::read_dir(dir.path().join("pkg/1.0.0/submissions"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(folders, vec![shouted.clone()], "the plant's folder exists first, in its spelling");
+        // Then Alice answers, signed, under her real id.
+        let mut real = make_test_submission("r1", "alice");
+        real.id = "alice-real".into();
+        real.cell_row = 1;
+        real.submitter = who.clone();
+        crate::submission_seal::seal_submission(
+            &mut real,
+            "pkg",
+            "1.0.0",
+            &seed,
+            crate::submission_seal::SubmissionOrigin::Interactive,
+        )
+        .unwrap();
+        reg.save_submission("pkg", "1.0.0", &real).unwrap();
+
+        let fold = reg.load_submission_fold("pkg", "1.0.0", &test_authority()).unwrap();
+        let current: Vec<&str> = fold.current.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(current, vec!["alice-real"], "Alice's answer is read; the plant is not current");
+        assert_eq!(fold.current[0].sender, crate::submission_seal::SenderCheck::Signed);
+        assert_eq!(fold.forged.len(), 1, "the case-variant plant is forged");
+        assert_eq!(fold.forged[0].event.id, "planted-shouted");
+        assert_eq!(fold.forged[0].reason, crate::submission_seal::ForgeryReason::Unsigned);
+        // Her own reconcile reads by her own id and sees the same.
+        let mine = reg.load_current_submissions_by("pkg", "1.0.0", &who.id, &test_authority()).unwrap();
+        assert_eq!(mine.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["alice-real"]);
+    }
+
     #[test]
     fn loaders_skip_junk_and_survive_torn_files() {
         let (_dir, reg) = create_test_registry();
@@ -1712,7 +2116,7 @@ mod tests {
         )
         .unwrap();
 
-        let current = reg.load_current_submissions("pkg", "1.0.0").unwrap();
+        let current = reg.load_current_submissions("pkg", "1.0.0", &test_authority()).unwrap();
         assert_eq!(current.len(), 1, "exactly the one real event survives");
         assert_eq!(current[0].id, "sub-real");
     }
@@ -1743,7 +2147,7 @@ mod tests {
         reg.save_submission("pkg", "1.0.0", &make_test_submission("r2", "alice")).unwrap();
         reg.save_submission("pkg", "1.0.0", &make_test_submission("r1", "bob")).unwrap();
 
-        let all = reg.load_current_submissions("pkg", "1.0.0").unwrap();
+        let all = reg.load_current_submissions("pkg", "1.0.0", &test_authority()).unwrap();
         assert_eq!(all.len(), 3);
         assert_eq!(all.iter().filter(|s| s.region_id == "r1").count(), 2);
         assert_eq!(all.iter().filter(|s| s.region_id == "r2").count(), 1);

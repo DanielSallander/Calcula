@@ -70,7 +70,7 @@ import {
   dialogWidth,
 } from "@api/dialogLayout";
 import { pickWorkspaceFile, pickWorkspaceFolder } from "../lib/pickWorkspace";
-import { pushBlockingReason } from "../lib/pushReadiness";
+import { pushBlockingReason, identityRuleToSend } from "../lib/pushReadiness";
 import { listedIndices } from "../lib/listedSheets";
 import { describePushLanding } from "../lib/environments";
 import { PublishReportView } from "./ApplicationExplorerPanel";
@@ -164,6 +164,17 @@ export function PublishDialog({ onClose, data }: DialogProps) {
   const [changeSummary, setChangeSummary] = useState("");
   const [includeComments, setIncludeComments] = useState(false);
   /**
+   * THE APPLICATION'S IDENTITY RULE (identity phase 1): count only answers
+   * from VERIFIED senders. Shows what the push would keep -- the verified base
+   * version's rule, which the preview reports -- until the author moves it;
+   * off for a new application (the owner's default for Windows-account
+   * applications). SENT ONLY WHEN THE AUTHOR MOVED IT (`identityRuleToSend`):
+   * otherwise Rust keeps the verified base's rule itself, and refuses the push
+   * when it cannot read it -- never a silent switch.
+   */
+  const [requireVerified, setRequireVerified] = useState(false);
+  const requireVerifiedTouchedRef = React.useRef(false);
+  /**
    * Cells the author unticked in the diff, as `cellKeyOf` strings.
    *
    * AN EXCLUSION SET. The diff rows are a bounded sample, so a changed cell may
@@ -199,6 +210,8 @@ export function PublishDialog({ onClose, data }: DialogProps) {
     // left to untick it from, blocking every push until the dialog unmounted.
     setIncludeState(EMPTY_INCLUDE_STATE);
     setIncludeFor(null);
+    setRequireVerified(false);
+    requireVerifiedTouchedRef.current = false;
     setAdded([]);
     setUnshippedLinks([]);
     setReportIncludeFor(null);
@@ -369,6 +382,9 @@ export function PublishDialog({ onClose, data }: DialogProps) {
         setButtonCodeFor(sheetsSignature(asked));
         setReportLabel(`${label} ${result.sheetNames.join(", ")}`);
         setWarnings(result.warnings);
+        if (!requireVerifiedTouchedRef.current && typeof result.baseRequiresVerified === "boolean") {
+          setRequireVerified(result.baseRequiresVerified);
+        }
         setGates(result.gates ?? null);
         if (result.sheets) setAvailableSheets(result.sheets);
         if (result.defaultSheetIndices) {
@@ -413,6 +429,9 @@ export function PublishDialog({ onClose, data }: DialogProps) {
         setUnshippedLinks(result.report.unshippedMacroLinks ?? []);
         setIncludeFor(JSON.stringify(including));
         setButtonCode(result.report.buttonCode ?? null);
+        if (!requireVerifiedTouchedRef.current && typeof result.baseRequiresVerified === "boolean") {
+          setRequireVerified(result.baseRequiresVerified);
+        }
         if (result.sheets) setAvailableSheets(result.sheets);
         if (result.defaultSheetIndices) {
           setDefaultIndices(result.defaultSheetIndices);
@@ -749,6 +768,8 @@ export function PublishDialog({ onClose, data }: DialogProps) {
         // Only items whose code the dialog SHOWED, each with the hash Rust
         // computed of it (M4).
         includeInApplication: includeList(includeState),
+        // The identity rule: only the author's own change (see `requireVerified`).
+        requireVerifiedIdentity: identityRuleToSend(requireVerifiedTouchedRef.current, requireVerified),
       });
       // WHERE THE RELEASE NOW STANDS. "Pushed v1.5.0" answers where the bytes
       // went, not who receives them, and the whole point of environments is
@@ -1491,6 +1512,37 @@ export function PublishDialog({ onClose, data }: DialogProps) {
           </div>
         )}
 
+        {mode !== "loading" && (
+          <div
+            style={{ ...fieldStyle, flexDirection: "row", alignItems: "flex-start", gap: "6px" }}
+            title={
+              "Writeback answers are always signed and labelled. With this on, totals (GATHER), the " +
+              "respondent list, model tables and scripts count only answers whose sender Windows could " +
+              "verify; the rest are shown in Collected Responses and counted nowhere. " +
+              (mode === "push"
+                ? "Unless you change it, the push keeps the rule of the version it is based on."
+                : "")
+            }
+          >
+            <input
+              id="publish-require-verified"
+              data-testid="publish-require-verified"
+              type="checkbox"
+              checked={requireVerified}
+              onChange={(e) => {
+                requireVerifiedTouchedRef.current = true;
+                setRequireVerified(e.target.checked);
+              }}
+            />
+            <label htmlFor="publish-require-verified" style={{ cursor: "pointer" }}>
+              Writeback: count only answers from verified senders (a sender is verified when Windows records
+              their account as the writer and nobody else can change the answer: on a network file share
+              with domain accounts and per-sender folders, or this computer&apos;s disk; never on Dropbox or
+              OneDrive)
+            </label>
+          </div>
+        )}
+
         {/*
           The error and the status used to be rendered HERE, inside the
           scrolling body of a dialog tall enough to need scrolling. Press Push
@@ -1726,7 +1778,7 @@ export function PublishDialog({ onClose, data }: DialogProps) {
             }}
           >
             <strong>Warnings ({warnings.length})</strong> — the application
-            publishes as-is; these only degrade for subscribers.
+            publishes as-is.
             {warnings.map((w, i) => (
               <div key={i} style={{ marginLeft: 8, marginTop: 4 }}>
                 {w}

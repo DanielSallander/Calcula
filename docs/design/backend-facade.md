@@ -9,15 +9,64 @@ Design spike for the architecture audit's deepest seam: the Rust backend is a
 Re-audited against source. The **design is intact and shipped**; the counts had drifted and one
 resolved-asymmetry paragraph named two symbols that no longer exist.
 
-| Figure | 2026-08-16 | 08-27 | 08-29 | 09-01 | 09-03 | 09-05 | 09-07 | 09-10 | 09-25 | 09-30 | 09-30 (anchor) | 09-30 (M6 seal) | 10-01 (M6 door) | 10-01 (owner B trail) | 10-01 (owner B all-or-nothing) | 10-01 (review of M6b) | 10-01 (M8 command allowlist) | 10-04/05 (Home tab) | 10-08 (Canvas = Power BI) | 10-15 (WP-D bindings) | 10-15 (WP-C S7) | 10-16 (round 2 P3) | 10-17 (round 2 P4) | Recounted (2026-10-21, writeback subscriber UX) | How counted |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| Commands in `generate_handler!` | 761 | 773 | 783 | 788 | 787 | 792 | 800 | 806 | 809 | 812 | 813 | 815 | 817 | 819 | 821 | 821 | 822 | 829 | 829 | 830 | 831 | 832 | 833 | **834** | bracket-matched parse of `lib.rs`, comments stripped LINE-WISE (all unique) |
-| `#[tauri::command]` attributes | 798 | 815 | 822 | 827 | 826 | 831 | 839 | 845 | 849 | 853 | 854 | 856 | 858 | 860 | 862 | 862 | 863 | 871 | 872 | 873 | 874 | 875 | 877 | **878** | `#[tauri::command]` occurrences under `app/src-tauri/src` |
-| Privileged (denylisted) commands | ~30 | 94 | 100 | 101 | 101 | 101 | 102 | 108 | 107 | 107 | 108 | 109 | 111 | 111 | 111 | 114 | 115 | 115 | 115 | 115 | 115 | 115 | 115 | **115** | unique quoted names inside `PRIVILEGED_BACKEND_COMMANDS` (`app/src/api/backendCommands.ts`), comments stripped line-wise |
-| Feature-open commands | 667 | 673 | 683 | 687 | 686 | 691 | 698 | 698 | 702 | 705 | 705 | 706 | 706 | 708 | 710 | 707 | 707 | 714 | 714 | 715 | 716 | 717 | 718 | **719** | 834 − 115 |
-| Typed wrappers in `backend.ts` | ~229 | 327 | 338 | 338 | 338 | 338 | 339 | 339 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | **340** | exported functions/consts in `backend.ts` (lines starting `export async function` / `export function` / `export const`) |
+| Figure | 2026-08-16 | 08-27 | 08-29 | 09-01 | 09-03 | 09-05 | 09-07 | 09-10 | 09-25 | 09-30 | 09-30 (anchor) | 09-30 (M6 seal) | 10-01 (M6 door) | 10-01 (owner B trail) | 10-01 (owner B all-or-nothing) | 10-01 (review of M6b) | 10-01 (M8 command allowlist) | 10-04/05 (Home tab) | 10-08 (Canvas = Power BI) | 10-15 (WP-D bindings) | 10-15 (WP-C S7) | 10-16 (round 2 P3) | 10-17 (round 2 P4) | 10-21 (writeback subscriber UX) | 10-21 (Collected Responses for the author) | 10-22 (Writeback > Collect From) | 10-22 (identity phase 1) | Recounted (2026-10-22, fixer round) | How counted |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| Commands in `generate_handler!` | 761 | 773 | 783 | 788 | 787 | 792 | 800 | 806 | 809 | 812 | 813 | 815 | 817 | 819 | 821 | 821 | 822 | 829 | 829 | 830 | 831 | 832 | 833 | 834 | 835 | 836 | 836 | **836** | bracket-matched parse of `lib.rs`, comments stripped LINE-WISE (all unique) |
+| `#[tauri::command]` attributes | 798 | 815 | 822 | 827 | 826 | 831 | 839 | 845 | 849 | 853 | 854 | 856 | 858 | 860 | 862 | 862 | 863 | 871 | 872 | 873 | 874 | 875 | 877 | 878 | 879 | 879 | 879 | **878** | `#[tauri::command]` occurrences under `app/src-tauri/src` |
+| Privileged (denylisted) commands | ~30 | 94 | 100 | 101 | 101 | 101 | 102 | 108 | 107 | 107 | 108 | 109 | 111 | 111 | 111 | 114 | 115 | 115 | 115 | 115 | 115 | 115 | 115 | 115 | 115 | 115 | 122 | **125** | unique quoted names inside `PRIVILEGED_BACKEND_COMMANDS` (`app/src/api/backendCommands.ts`), comments stripped line-wise |
+| Feature-open commands | 667 | 673 | 683 | 687 | 686 | 691 | 698 | 698 | 702 | 705 | 705 | 706 | 706 | 708 | 710 | 707 | 707 | 714 | 714 | 715 | 716 | 717 | 718 | 719 | 720 | 721 | 714 | **711** | 836 − 125 |
+| Typed wrappers in `backend.ts` | ~229 | 327 | 338 | 338 | 338 | 338 | 339 | 339 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | 340 | **340** | exported functions/consts in `backend.ts` (lines starting `export async function` / `export function` / `export const`) |
 
-The "Recounted (2026-10-21, writeback subscriber UX)" column is the subscriber-side writeback work (the owner's
+The "Recounted (2026-10-22, fixer round)" column is the fixer round on the envs and identity phase 1 work
+(BUG-0563..BUG-0583). It added NO command. It moved THREE feature-open commands onto the denylist, under
+`collaborationTrust`, because each returns the same identity `calp_get_subscriber_identity` was denylisted for
+(BUG-0580): `calp_get_writeback_layer` and `calp_reconcile_writeback` return this user's drafts, each carrying the full
+sender identity (the `win-<SID>-...` id, the principal and the scope), and `calp_preview_region_submission` names the
+sender a submit would send as. Built-in callers are trusted and unaffected; `writebackValidators.ts` reaches the preview
+through `@api`. And `bi::writeback_source::bi_list_writeback_tables` became `#[tauri::command(async)]` (it walks the
+workspace; BUG-0583), so the exact-text attribute count drops by one (879 -> 878) and the bare attribute lines read 832 --
+the same effect the two async commands in `calculation.rs` and `calp_collection_streams` have. All five figures were
+re-run together, line-wise, the same parse as the column before: 836 / 878 / 125 / 711 / 340, all 836 unique and every
+entry a valid path.
+
+The "10-22 (identity phase 1)" column (recounted then) is the signing of writeback answers and of approve/reject
+decisions (owner decision 2026-10-22; `docs/design/calp-writeback.md`, "Who sends an answer"). It added NO command; it
+moved SEVEN feature-open commands onto the denylist, under `collaborationTrust`, because each is now a SIGNING DOOR:
+`calp_submit_region`, `calp_submit_all_regions`, `calp_save_writeback_draft` (an `immediate` region sends on save) and
+`bi_writeback_set_value` (a subscribed model column's entry is a submission) sign an answer with the user's own key;
+`calp_set_submission_state` and `calp_set_model_submission_state` sign a decision with the publisher's key; and
+`calp_get_subscriber_identity` names the account's SID and principal. A non-trusted extension that reached them would
+send as the user or decide as the publisher; scripts keep their consent-gated broker route (`script_writeback`), whose
+answers are signed with origin "script". All five figures were re-run together, line-wise, the same parse as the column
+before: 836 / 879 / 122 / 714 / 340, all 836 unique and every entry a valid path; 833 of the 879 attribute occurrences
+are bare attribute lines, unchanged.
+
+The "10-22 (Writeback > Collect From)" column (recounted then) is the publisher's choice of which STREAMS (the development
+line, each environment) the workbook's own writeback regions collect from (owner decision 2026-10-22;
+`docs/design/calp-writeback.md`, "Which streams the publisher collects"). It added exactly ONE command,
+`calp_collection::calp_collection_streams` -- one command with an op (`get` / `set`), the `object_bindings` precedent, so the
+dispatch frame grows by one entry -- FEATURE-OPEN beside `calp_list_collection_regions` (it is not in
+`PRIVILEGED_BACKEND_COMMANDS`; `set` is gated in Rust on the application's publisher key, the same proof as reading the
+answers). It is declared `#[tauri::command(async)]` because it reads the workspace (the pipeline, the gate, the stream
+tags), so the exact-text attribute count stays at 879, as it does for the two async commands in `calculation.rs`. Its
+frontend doors are `getCollectionStreams` / `setCollectionStreams` in `app/src/api/collaboration.ts`, not typed wrappers in
+`backend.ts`, which stays at 340. All five figures were re-run together, line-wise, the same parse as the column before:
+836 / 879 / 115 / 721 / 340, all 836 unique and every entry a valid path; 833 of the 879 attribute occurrences are bare
+attribute lines, unchanged.
+
+The "10-21 (Collected Responses for the author)" column is the fix for BUG-0553 (the owner, 2026-10-21:
+"I have a writeback designated range ... Collected Responses says: No writeback regions in this workbook";
+`docs/design/calp-writeback.md`). It added exactly ONE command, `calp_collection::calp_list_collection_regions`,
+FEATURE-OPEN beside `calp_load_region_submissions` / `calp_get_writeback_regions` (a read of this workbook's own
+regions and where their answers are collected; every answer behind it stays behind the publisher-gated inbox; it is not
+in `PRIVILEGED_BACKEND_COMMANDS`): the publisher-side list of regions whose answers Collected Responses can show, the
+workbook's OWN designated regions first (resolved through the application it published or was opened for editing from),
+then subscribed ones, each with a status and a sentence for every state but `ready`. Its frontend door is
+`listCollectionRegions` in `app/src/api/collaboration.ts`, not a typed wrapper in `backend.ts`, which stays at 340.
+All five figures were re-run together, line-wise, the same parse as the column before: 835 / 879 / 115 / 720 / 340,
+all 835 unique and every entry a valid path; 833 of the 879 attribute occurrences are bare attribute lines (832 + 1).
+
+The "10-21 (writeback subscriber UX)" column (recounted then) is the subscriber-side writeback work (the owner's
 "cannot see if it was written back", 2026-10-21; `docs/design/calp-writeback.md`). It added exactly ONE command,
 `calp_commands::calp_discard_writeback_drafts`, FEATURE-OPEN beside `calp_submit_region` / `calp_save_writeback_draft`
 (a subscriber's own unsent drafts, nothing privileged; it is not in `PRIVILEGED_BACKEND_COMMANDS`): it throws away a

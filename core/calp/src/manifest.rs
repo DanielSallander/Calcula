@@ -167,6 +167,27 @@ pub struct VersionManifest {
     /// apps ignore it (they only consult `writeback_regions`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_writebacks: Option<Vec<crate::writeback::ModelWritebackDeclaration>>,
+    /// WHICH ANSWERS COUNT (identity phase 1, owner decision 2026-10-22): with
+    /// `require_verified`, totals (GATHER), the respondent roster, the BI tables
+    /// and scripts count only answers whose sender the READER could verify
+    /// (`crate::identity_check`). Absent = count every answer, each labelled.
+    /// Inside the Ed25519 signature: a share-writer cannot switch it off. An
+    /// application that sets it carries writeback regions, so the host's
+    /// `minAppVersion` stamp already keeps older apps (which would ignore it
+    /// and count everything -- a lie) from opening it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_policy: Option<crate::identity_check::IdentityPolicy>,
+    /// EVERY ANSWER TO THIS VERSION IS SIGNED (identity phase 1): readers treat
+    /// an unsigned answer here as FORGED, never "sent before sign-in"
+    /// (`LocalWorkspace::answers_must_be_signed`). Written by every publish
+    /// whose application declares writeback regions or columns AND names a
+    /// minimum app version -- the app stamps its own version exactly because
+    /// its answers are signed (`stamp_min_app_version`), so no app that could
+    /// send an unsigned answer can open such a version. Inside the Ed25519
+    /// signature: a share-writer cannot clear it. Absent (false) on versions
+    /// published before answers were signed, whose old answers keep counting.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub signed_answers: bool,
     /// Object scripts bundled with the application. Scripts travel with the application
     /// and are loaded on the subscriber side. Subscribers cannot edit these
     /// scripts but can add their own script layers on top.

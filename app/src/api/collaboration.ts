@@ -71,6 +71,14 @@ export interface PublishParams {
    * that hash refuses the push by name (`CALP_PUSH_INCLUDED_CHANGED`).
    */
   includeInApplication?: IncludedItem[];
+  /**
+   * The application's identity rule: count only answers from VERIFIED senders
+   * in totals (GATHER), the respondent roster, the BI tables and scripts.
+   * Omitted = a new application counts every answer (the default for
+   * Windows-account applications) and a push keeps its base version's rule.
+   * Written into the signed manifest. Mirrors Rust `PublishParams::require_verified_identity`.
+   */
+  requireVerifiedIdentity?: boolean;
 }
 
 export interface PublishResponse {
@@ -282,6 +290,10 @@ export interface PublishPreviewResponse {
   /** Where a push to the previewed target stands against each gate. Present
    * only when the preview was given a target application. */
   gates?: PushGateStatus;
+  /** The identity rule the push would keep: whether the VERIFIED base version
+   *  counts only verified senders. Null for a new application or an unreadable
+   *  base. The publish dialog's control starts from it. */
+  baseRequiresVerified?: boolean | null;
   /**
    * Every sheet the author may choose from, with its TRUE workbook index.
    *
@@ -2767,6 +2779,163 @@ export function getWritebackRegions(): Promise<WritebackRegionEntry[]> {
 }
 
 /**
+ * Whether a region listed for Collected Responses can be read on this computer.
+ * Mirrors `CollectionStatus` in app/src-tauri/src/calp_collection.rs.
+ *
+ * - `ready`: resolved, and this computer is a publisher of the application.
+ * - `notPublished`: one of this workbook's own designated regions, but the
+ *   workbook is not linked to a published application (publish it first).
+ * - `notInPushedVersion`: designated after the last push (push first).
+ * - `notPublisher`: this computer holds no key that may read its answers.
+ * - `unreachable`: the workspace, or a version, could not be read.
+ */
+export type CollectionStatus =
+  | "ready"
+  | "notPublished"
+  | "notInPushedVersion"
+  | "notPublisher"
+  | "unreachable";
+
+/**
+ * One region the publisher's Collected Responses pane can show. Mirrors
+ * `CollectionRegionInfo` in app/src-tauri/src/calp_collection.rs.
+ *
+ * NOT the subscriber index (`getWritebackRegions`): this list starts with the
+ * workbook's OWN designated regions -- the author's, resolved through the
+ * application the workbook published or was opened for editing from -- and
+ * then the subscribed ones. The author's regions are never in the subscriber
+ * index, which is why Collected Responses read "No writeback regions in this
+ * workbook." to the person who designated them (BUG-0553).
+ */
+export interface CollectionRegion {
+  regionId: string;
+  /** "author": this workbook's own designation; "subscriber": a subscribed region. */
+  role: "author" | "subscriber";
+  /** The sheet the cells are on in THIS workbook. */
+  sheetId: string;
+  /** null when that sheet is no longer in the workbook. */
+  sheetIndex: number | null;
+  sheetName: string | null;
+  rowStart: number;
+  rowEnd: number;
+  colStart: number;
+  colEnd: number;
+  packageName: string | null;
+  registryUrl: string | null;
+  /** The version the answers are read from, when resolved. */
+  version: string | null;
+  /** The application's environments with a version behind them (row labels). */
+  environments: string[];
+  /**
+   * What every read of this region collects, RESOLVED: null = every stream;
+   * otherwise the streams in order ("" = the development line). An author
+   * region follows the workbook's Writeback > Collect From choice (default:
+   * the pipeline's last environment); a subscribed region its subscription's
+   * one stream. The submission watch re-baselines a region whose value
+   * changes, so a newly collected stream's old answers are never announced.
+   */
+  collecting: string[] | null;
+  /**
+   * Whether this workbook still designates the region. False for a region the
+   * working copy no longer designates that a published version still
+   * declares (still collecting answers, still listed). Always true for a
+   * subscribed region.
+   */
+  designated: boolean;
+  status: CollectionStatus;
+  /** A user-facing sentence for every status but "ready". */
+  detail: string;
+  /**
+   * A caveat on a "ready" row, empty when there is none: newer versions whose
+   * answers could not be verified on this computer, or a region no longer
+   * designated here.
+   */
+  note: string;
+}
+
+/** Every region whose answers Collected Responses can show, own regions first. */
+export function listCollectionRegions(): Promise<CollectionRegion[]> {
+  return invokeBackend("calp_list_collection_regions");
+}
+
+// ============================================================================
+// Writeback > Collect From: which streams the workbook's own regions collect
+// ============================================================================
+
+/** What a Collect From row is. Mirrors `StreamChoiceKind` (calp_collection.rs). */
+export type StreamChoiceKind = "developmentLine" | "environment" | "removed";
+
+/**
+ * Which kind of choice the workbook holds. "default" = the pipeline's LAST
+ * environment (every stream when there are none); "all" = every stream,
+ * including environments defined later; "only" = exactly the chosen ones.
+ */
+export type CollectMode = "default" | "all" | "only";
+
+/** The stored choice: "all", or exactly these streams ("" = the development line). */
+export type CollectStreamsChoice = "all" | { only: string[] };
+
+/** One row of the Collect From menu. Mirrors `StreamChoice`. */
+export interface StreamChoice {
+  /** "" = the development line. */
+  stream: string;
+  label: string;
+  kind: StreamChoiceKind;
+  /** Collected under the current choice. */
+  included: boolean;
+  /** The version an environment points at, if any. */
+  version: string | null;
+  /** "v1.2.0 · the default" | "not collected" | "not in the pipeline" ... */
+  hint: string;
+}
+
+/**
+ * Everything the Collect From control shows. Mirrors `CollectionStreamsView`
+ * in app/src-tauri/src/calp_collection.rs (the calp IPC types live beside
+ * their command and are mirrored here, the documented exception in
+ * docs/design/calp-writeback.md).
+ */
+export interface CollectionStreamsView {
+  /** False = no working-copy link: nothing to choose (publish first). */
+  linked: boolean;
+  packageName: string | null;
+  registryUrl: string | null;
+  mode: CollectMode;
+  /** The explicit set when mode is "only". */
+  selection: string[] | null;
+  /** What is collected now, resolved (null = every stream, or undecidable). */
+  collecting: string[] | null;
+  /** What the default means today: the pipeline's last environment. */
+  defaultStream: string | null;
+  /** Line first, then the pipeline in order, then removed names. */
+  choices: StreamChoice[];
+  /** Environments an explicit choice does NOT collect (e.g. a new one). */
+  notCollected: string[];
+  environmentsError: string | null;
+  /** "prod (the last environment)" | "All streams" | "Development line, test" */
+  summary: string;
+  /** Whether THIS computer may change it (holds the publisher key). */
+  canChange: boolean;
+  changeRefusal: string | null;
+}
+
+/** Read the workbook's Collect From choice (reads the workspace; async in Rust). */
+export function getCollectionStreams(): Promise<CollectionStreamsView> {
+  return invokeBackend("calp_collection_streams", { request: { op: "get" } });
+}
+
+/**
+ * Change the workbook's Collect From choice: "all", `{ only: [...] }`, or null
+ * for the default (the pipeline's last environment). Refused unless this
+ * computer holds the application's publisher key; an empty set is refused.
+ * Marks the workbook unsaved, is always audited, and rebuilds the author's BI
+ * writeback tables. Scripts have no route to this.
+ */
+export function setCollectionStreams(choice: CollectStreamsChoice | null): Promise<CollectionStreamsView> {
+  return invokeBackend("calp_collection_streams", { request: { op: "set", choice } });
+}
+
+/**
  * Why one subscription's writeback regions are NOT installed in the index.
  *
  * Mirrors `WritebackRebuildSkip` in app/src-tauri/src/calp_commands.rs.
@@ -2839,13 +3008,93 @@ export function getApplicationConnectionSkips(): Promise<ApplicationConnectionRe
   return invokeBackend("calp_get_application_connection_skips");
 }
 
-/** Subscriber identity attached to writeback submissions. */
+/** Which provider vouches for a sender (identity phase 1, 2026-10-22). Mirrors
+ *  Rust `calp::identity_provider::IdentityProviderKind`. `legacy` = an answer
+ *  sent before sign-in (the old random id); `entra` is the phase-2 seam (later) and is
+ *  not selectable today. */
+export type IdentityProviderKind = "legacy" | "windows" | "entra";
+
+/** Where the sender's account lives. Mirrors Rust `calp::identity_provider::AccountScope`. */
+export type AccountScope = "unknown" | "localMachine" | "domain" | "entraJoined";
+
+/** The sender of writeback answers. Mirrors Rust
+ *  `calp::identity_provider::SubmitterIdentity`. `displayName` and
+ *  `principalName` are what the sender's own Windows reported: signed with
+ *  every answer (nobody else can change them) but not proven against a
+ *  directory in phase 1 -- never match a person by `displayName`. */
 export interface SubmitterIdentity {
   displayName: string;
+  /** `win-<SID>-<key commitment>` for a signed identity; an old random UUID for one sent before sign-in. */
   id: string;
+  /** `MACHINE\user` (a local account) or `DOMAIN\user`; empty before sign-in. */
+  principalName: string;
+  provider: IdentityProviderKind;
+  scope: AccountScope;
 }
 
-/** Get the current subscriber identity (creates one on first call). */
+/** What every reader concludes about an answer from its signature alone.
+ *  Mirrors Rust `calp::submission_seal::SenderCheck`. */
+export type SenderCheck = "unchecked" | "signed" | "beforeSignIn";
+
+/** The READER's verdict on who sent an answer (identity phase 1, read side).
+ *  Mirrors Rust `calp::identity_check::IdentityStatus`. Computed on this
+ *  computer after the fold; never stored. */
+export type IdentityStatus = "notChecked" | "verified" | "signedUnconfirmed" | "notVerified" | "beforeSignIn";
+
+/** Why. Mirrors Rust `calp::identity_check::IdentityReason`. */
+export type IdentityReason =
+  | "notChecked"
+  | "ownerMatches"
+  | "syncFolder"
+  | "localAccountOnShare"
+  | "anotherComputersAccount"
+  | "noOwnerRecords"
+  | "unknownStorage"
+  | "unknownAccountKind"
+  | "writtenByAdministrator"
+  | "ownerUnreadable"
+  | "fileNotFound"
+  | "providerNotChecked"
+  | "ownerMismatch"
+  | "beforeSignIn";
+
+/** The reader's verdict on one answer. Mirrors Rust `calp::identity_check::IdentityVerdict`. */
+export interface IdentityVerdict {
+  status: IdentityStatus;
+  reason: IdentityReason;
+  /** The account Windows recorded as the answer file's writer, when the
+   *  verdict rests on it (`CORP\bob`); empty otherwise. */
+  writtenBy: string;
+}
+
+/** Counts of verdicts. Mirrors Rust `calp::identity_check::IdentityCounts`. */
+export interface IdentityCounts {
+  verified: number;
+  signedUnconfirmed: number;
+  notVerified: number;
+  beforeSignIn: number;
+  notChecked: number;
+}
+
+/** What storage this computer sees a workspace on. Mirrors Rust `calp::identity_check::StorageKind`. */
+export type StorageKind = "unknown" | "localDisk" | "networkShare" | "syncFolder" | "noOwnerRecords";
+
+/** How a signed answer left the sender's computer: the user pressed Submit,
+ *  the region sends on save, or a script sent it. Mirrors Rust
+ *  `calp::submission_seal::SubmissionOrigin`. */
+export type SubmissionOrigin = "interactive" | "immediate" | "script";
+
+/** The sender's signature on an answer. Mirrors Rust `calp::submission_seal::SubmissionSeal`. */
+export interface SubmissionSeal {
+  publicKey: string;
+  origin: SubmissionOrigin;
+  signature: string;
+}
+
+/** Who this computer sends writeback answers as: the Windows account, bound to
+ *  this computer's signing key (minted on first use; the key itself never
+ *  leaves Rust). Human-UI only: the command is denylisted for non-trusted
+ *  extensions, because it names the account's SID and principal. */
 export function getSubscriberIdentity(): Promise<SubmitterIdentity> {
   return invokeBackend("calp_get_subscriber_identity");
 }
@@ -2960,6 +3209,12 @@ export interface WritebackSubmission {
   reviewReason?: string | null;
   /** Publisher who decided, adopted on reconcile. */
   reviewedBy?: string | null;
+  /** The sender's signature; absent on a draft and on an answer sent before sign-in. */
+  seal?: SubmissionSeal | null;
+  /** What the fold concluded (only on records read from the workspace). */
+  sender?: SenderCheck;
+  /** The reader's identity verdict (only on records a publisher read labelled). */
+  identity?: IdentityVerdict;
 }
 
 export interface WritebackLayer {
@@ -2995,11 +3250,37 @@ export function getWritebackLayer(): Promise<WritebackLayer> {
   return invokeBackend("calp_get_writeback_layer");
 }
 
+/** One region the reconcile could not read this pass, and why. Mirrors
+ * `UnreadableWritebackRegion` in app/src-tauri/src/calp_commands.rs. */
+export interface UnreadableWritebackRegion {
+  regionId: string;
+  reason: string;
+}
+
+/** What one reconcile did. Mirrors `WritebackReconcileReport` in
+ * app/src-tauri/src/calp_commands.rs. */
+export interface WritebackReconcileReport {
+  /** The layer after the reconcile. */
+  layer: WritebackLayer;
+  /** Grid cells that now show a value taken from the workspace. */
+  cellsWritten: number;
+  /** A value sent later from another workbook replaced one this workbook
+   *  showed, and that ENDED THE WHOLE UNDO HISTORY. Tell the user. */
+  undoHistoryEnded: boolean;
+  /** The replaced cells, as "Sheet!B3". */
+  replacedCells: string[];
+  /** Regions whose workspace could not be read (kept as they were). Never an
+   *  error: what could be read was applied. */
+  unreadable: UnreadableWritebackRegion[];
+}
+
 /** Reconcile local submission states from the workspace (the approved/rejected
- * read-back — the return leg of the writeback loop) and return the updated
- * layer. Submitted entries adopt their current workspace state; unsent drafts
- * are untouched. This is how a subscriber learns the fate of what they sent. */
-export function reconcileWriteback(): Promise<WritebackLayer> {
+ * read-back — the return leg of the writeback loop): submitted entries adopt
+ * their current workspace state, the values this subscriber last sent are
+ * shown again in a workbook that does not hold them, unsent drafts are
+ * untouched. Returns the layer and what the pass did -- including the regions
+ * it could NOT read, which are reported rather than thrown. */
+export function reconcileWriteback(): Promise<WritebackReconcileReport> {
   return invokeBackend("calp_reconcile_writeback");
 }
 
@@ -3080,6 +3361,8 @@ export interface OutboundSubmissionPreview {
   registryPath: string;
   submitterId: string;
   submitterName: string;
+  /** The account the answers will be SIGNED as (`MACHINE\user` / `DOMAIN\user`). */
+  submitterPrincipal: string;
   values: OutboundValue[];
   /** The publisher-shipped custom validator that WILL judge this submission,
    *  when the region declares one. The body is read from the Ed25519-verified
@@ -3138,12 +3421,10 @@ export function setSubmissionState(
   reason?: string | null,
   submissionId?: string | null,
   /**
-   * Review a row from a stream other than the one this workbook follows,
-   * matching the dashboard's environment picker.
-   *
-   * Without it, approving a row shown "in test" answered "No submission found",
-   * because the command filtered by the workbook's OWN environment while the
-   * list it was reviewing did not.
+   * The reviewed ROW's own stream. It must be one this workbook collects
+   * (Writeback > Collect From for its own region, the subscription's stream
+   * for a subscribed one) or the review is refused; omitted = the
+   * collection's own choice.
    */
   environment?: string | null,
 ): Promise<void> {
@@ -3175,6 +3456,24 @@ export interface RegionSubmission {
   cellCol: number;
   submitterId: string;
   submitterName: string;
+  /** The account the sender's SIGNED answer names (`MACHINE\user` /
+   *  `DOMAIN\user`); empty for an answer sent before sign-in. The sender's own
+   *  claim, bound to their key -- not proven against a directory in phase 1. */
+  submitterPrincipal: string;
+  /** `signed` or `beforeSignIn`, from the signature alone (forged answers never
+   *  reach this list). */
+  sender: SenderCheck;
+  /** How a signed answer was sent; null for an unsigned one. */
+  origin: SubmissionOrigin | null;
+  /** The READER's verdict on the sender (identity phase 1): verified, signed
+   *  but not confirmed, not verified, or sent before sign-in -- with the reason. */
+  identity: IdentityVerdict;
+  /** The Identity column's plain sentence (Rust words it). */
+  identityLabel: string;
+  /** Whether the application's identity rule counts this answer. False only
+   *  under "count only verified senders" for an answer that is not verified:
+   *  shown here, never in a total, the roster, a BI table or a script. */
+  counted: boolean;
   valueDisplay: string;
   valueKind: "number" | "text" | "boolean" | "empty";
   state: "draft" | "submitted" | "approved" | "rejected";
@@ -3191,35 +3490,27 @@ export interface RegionSubmission {
 /**
  * Every submitter's current record for one region — the publisher inbox.
  *
- * `environment` looks at a stream OTHER than the one this workbook follows.
- * Omit it for the workbook's own, which is the only correct answer for
- * anything that feeds a value; the dashboard passes it so a publisher can
- * check what testers submitted without switching their own subscription.
+ * No stream argument: the read follows the ONE choice the workbook holds —
+ * Writeback > Collect From for its own region (default: the pipeline's last
+ * environment), the subscription's stream for a subscribed one — so the pane,
+ * the watch, a script and the author's model tables cannot disagree.
  */
-export function loadRegionSubmissions(
-  regionId: string,
-  environment?: string | null,
-): Promise<RegionSubmission[]> {
-  return invokeBackend("calp_load_region_submissions", { regionId, environment });
+export function loadRegionSubmissions(regionId: string): Promise<RegionSubmission[]> {
+  return invokeBackend("calp_load_region_submissions", { regionId });
 }
 
 /** Export every submission for a region as CSV text (publisher data-collection
- * output). The caller saves the returned string as a .csv file. */
-export function exportRegionSubmissionsCsv(
-  regionId: string,
-  environment?: string | null,
-): Promise<string> {
-  return invokeBackend("calp_export_region_submissions_csv", { regionId, environment });
+ * output): exactly what the inbox shows, each row naming its stream. The
+ * caller saves the returned string as a .csv file. */
+export function exportRegionSubmissionsCsv(regionId: string): Promise<string> {
+  return invokeBackend("calp_export_region_submissions_csv", { regionId });
 }
 
 /** Export every submission for a region as Parquet bytes (typed, columnar —
- * directly readable by DuckDB / Snowflake / Spark / pandas / Polars). The caller
- * saves the returned bytes as a .parquet file. */
-export function exportRegionSubmissionsParquet(
-  regionId: string,
-  environment?: string | null,
-): Promise<number[]> {
-  return invokeBackend("calp_export_region_submissions_parquet", { regionId, environment });
+ * directly readable by DuckDB / Snowflake / Spark / pandas / Polars): exactly
+ * what the inbox shows. The caller saves the returned bytes as a .parquet file. */
+export function exportRegionSubmissionsParquet(regionId: string): Promise<number[]> {
+  return invokeBackend("calp_export_region_submissions_parquet", { regionId });
 }
 
 /** Whether the auto-materialized Parquet rollup is enabled for the application
@@ -3240,14 +3531,20 @@ export interface RegionResponseStatus {
   expected: string[];
   responded: string[];
   missing: string[];
+  /** Respondents whose answers were all sent BEFORE sign-in: shown, labelled,
+   *  never matched by name (identity phase 1). */
+  beforeSignIn: string[];
+  /** Senders whose answers the application's identity rule does not count
+   *  (not verified); they are not in `responded`. Empty when every answer counts. */
+  notCounted: string[];
+  /** Whether the application counts only verified senders. */
+  requireVerified: boolean;
 }
 
-/** Who has responded vs. who is still expected for a region. */
-export function regionResponseStatus(
-  regionId: string,
-  environment?: string | null,
-): Promise<RegionResponseStatus> {
-  return invokeBackend("calp_region_response_status", { regionId, environment });
+/** Who has responded vs. who is still expected for a region, counted over the
+ * streams the inbox lists (the workbook's one choice). */
+export function regionResponseStatus(regionId: string): Promise<RegionResponseStatus> {
+  return invokeBackend("calp_region_response_status", { regionId });
 }
 
 // ============================================================================
@@ -3318,9 +3615,29 @@ let watchTimer: ReturnType<typeof setInterval> | null = null;
 /** The pass currently running, so two never overlap (a slow pass makes the next
  *  tick a no-op rather than stacking a second walk of the workspace). */
 let inFlightPass: Promise<void> | null = null;
-/** regionId -> submission ids already reported (replaced each pass, so this is
- *  bounded by the region's live slot count rather than by history). */
-const seenSubmissionIds = new Map<string, Set<string>>();
+/**
+ * regionId -> what the last pass saw: the region's RESOLVED stream choice
+ * (`CollectionRegion.collecting`, as a signature) and the submission ids
+ * already reported (replaced each pass, so this is bounded by the region's
+ * live slot count rather than by history).
+ *
+ * WHY THE CHOICE IS KEPT. Ticking a stream in Writeback > Collect From makes
+ * its OLD answers appear in the inbox for the first time; they did not just
+ * arrive. A region whose choice differs from the last pass is therefore
+ * re-baselined (first seen: nothing announced) -- whatever changed it: the
+ * menu, the pane, reopening a file with another choice, a checkout, another
+ * window. And a row whose stream the pass's own listing did not collect (the
+ * choice changed between the listing and the read) is recorded, never
+ * announced. Basing this on the DATA rather than on the setter is what makes
+ * it race-free: a pass in flight when the choice changes cannot announce the
+ * newly collected stream's history.
+ */
+const seenSubmissionIds = new Map<string, { signature: string; ids: Set<string> }>();
+
+/** The signature of a region's resolved stream choice. */
+function collectingSignature(collecting: string[] | null | undefined): string {
+  return collecting == null ? "*" : JSON.stringify([...collecting].sort());
+}
 /** Regions whose inbox this machine may not read (not the publisher). */
 const nonPublisherRegions = new Set<string>();
 let lastPollAt: string | null = null;
@@ -3350,9 +3667,24 @@ async function doSubmissionPass(announce: boolean): Promise<void> {
   // other region succeeds — which is exactly the case worth reporting.
   let passError: string | null = null;
   try {
-    const regions = await getWritebackRegions();
+    // THE PUBLISHER-SIDE LIST, not the subscriber index: the author's own
+    // designated regions are never in the index, so a watch over
+    // getWritebackRegions() never polled them and no "submission received"
+    // fired for the person who collects them (BUG-0553). Only READY regions are
+    // read; one this computer may not read (notPublisher) is skipped for the
+    // session like a refused read, and one that is not published yet is simply
+    // not watched.
+    const listed = await listCollectionRegions();
     calls += 1;
-    const liveRegionIds = new Set(regions.map((r) => r.regionId));
+    for (const r of listed) {
+      if (r.status === "notPublisher") nonPublisherRegions.add(r.regionId);
+      // A region whose workspace cannot be reached is not "nothing new": it
+      // is a failing poll, and a failing poll must be visible, not silent.
+      // It is listed again (and so retried) on the next pass.
+      if (r.status === "unreachable") passError = r.detail || `The workspace for region ${r.regionId} could not be read.`;
+    }
+    const regions = listed.filter((r) => r.status === "ready");
+    const liveRegionIds = new Set(listed.map((r) => r.regionId));
     // Forget state for regions that no longer exist (unsubscribed application).
     for (const id of [...seenSubmissionIds.keys()]) {
       if (!liveRegionIds.has(id)) seenSubmissionIds.delete(id);
@@ -3387,11 +3719,16 @@ async function doSubmissionPass(announce: boolean): Promise<void> {
       // would tell a publisher their own click was an incoming answer.
       const current = new Set<string>();
       const fresh: WritebackSubmissionNotice[] = [];
-      const previous = seenSubmissionIds.get(regionId);
+      const signature = collectingSignature(region.collecting);
+      const seen = seenSubmissionIds.get(regionId);
+      // A different stream choice than last pass: first seen, nothing new.
+      const previous = seen && seen.signature === signature ? seen.ids : undefined;
+      const collected = (environment: string): boolean =>
+        region.collecting == null || region.collecting.includes(environment);
       for (const row of rows) {
         if (row.state !== "submitted") continue;
         current.add(row.submissionId);
-        if (announce && previous && !previous.has(row.submissionId)) {
+        if (announce && previous && collected(row.environment) && !previous.has(row.submissionId)) {
           fresh.push({
             submissionId: row.submissionId,
             submitterId: row.submitterId,
@@ -3403,7 +3740,7 @@ async function doSubmissionPass(announce: boolean): Promise<void> {
         }
       }
       // Replacing (not merging) keeps this bounded by the live slot count.
-      seenSubmissionIds.set(regionId, current);
+      seenSubmissionIds.set(regionId, { signature, ids: current });
 
       if (fresh.length > 0) {
         const payload: WritebackSubmissionReceivedPayload = {
@@ -3971,6 +4308,8 @@ export interface InspectorRegionStats {
   approved: number;
   rejected: number;
   pending: number;
+  /** Who sent them, as this computer concludes (identity phase 1). */
+  identity: IdentityCounts;
 }
 
 export interface InspectorSubmissionDetail {
@@ -3988,6 +4327,9 @@ export interface InspectorSubmissionDetail {
   /** Publisher's approve/reject feedback, when a decision exists. */
   reviewReason: string | null;
   reviewedBy: string | null;
+  /** The reader's identity verdict on the sender, and its plain sentence. */
+  identity: IdentityStatus;
+  identityLabel: string;
 }
 
 export interface InspectorWriteback {
@@ -4004,6 +4346,14 @@ export interface InspectorWriteback {
   /** Derived Parquet rollup at submissions/_rollup.parquet (publisher-only). */
   rollupPresent: boolean;
   rollupSizeBytes: number | null;
+  /** Verdict counts over every answer of this version (publisher-only). */
+  identityCounts: IdentityCounts;
+  /** The version's signed identity rule: count only verified senders. */
+  requireVerified: boolean;
+  /** What storage this computer sees the workspace on, and the warning when
+   *  senders can never be verified there (a Dropbox/OneDrive folder). */
+  storage: StorageKind;
+  storageWarning: string | null;
 }
 
 export interface InspectorArtifact {

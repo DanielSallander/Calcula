@@ -412,9 +412,14 @@ pub fn calp_diff_working_copy(
         &params.include_in_application,
     )?;
     let working_version_str = working_version.to_string();
-    let working_manifest = memory
+    let mut working_manifest = memory
         .get_version_manifest(&package_name, &working_version_str)
         .map_err(|e| e.to_string())?;
+    // THE IDENTITY RULE IS NOT CONTENT: the push keeps the base version's
+    // rule unless the push dialog changes it, and the dialog shows that control
+    // itself -- so the preview carries the base's and never reports a change
+    // it cannot know about.
+    crate::calp_commands::carry_base_identity_rule(&mut working_manifest, &base_manifest);
     let artifacts: BTreeMap<String, Vec<u8>> =
         memory.artifacts_of(&package_name, &working_version_str);
 

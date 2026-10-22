@@ -11,7 +11,9 @@
 //          FIELD, and a ready dialog is not refused.
 
 import { describe, it, expect } from "vitest";
-import { pushBlockingReason, type PushReadinessInput } from "../pushReadiness";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { pushBlockingReason, identityRuleToSend, type PushReadinessInput } from "../pushReadiness";
 
 const ready: PushReadinessInput = {
   mode: "push",
@@ -182,5 +184,32 @@ describe("a name that is already taken is knowable before the click", () => {
       nameAlreadyTaken: true,
     });
     expect(reason).toMatch(/already exists/i);
+  });
+});
+
+/**
+ * THE IDENTITY RULE IS SENT ONLY WHEN THE AUTHOR MOVED IT. The checkbox starts
+ * unticked until the preview reports the base version's rule; sending that
+ * unseeded `false` on every push switched a base's "count only verified
+ * senders" OFF in silence whenever the preview could not read it (or had not
+ * returned yet), around Rust's CALP_PUSH_IDENTITY_RULE_UNKNOWN refusal.
+ *
+ * SABOTAGE: make `identityRuleToSend` return `checked` whatever `touched` is.
+ */
+describe("identityRuleToSend (the Publish/Push dialog's identity rule)", () => {
+  it("sends nothing until the author changes the box, then exactly their choice", () => {
+    expect(identityRuleToSend(false, false)).toBeUndefined();
+    expect(identityRuleToSend(false, true)).toBeUndefined();
+    expect(identityRuleToSend(true, false)).toBe(false);
+    expect(identityRuleToSend(true, true)).toBe(true);
+  });
+
+  it("is what the dialog sends -- never the raw checkbox state", () => {
+    const source = readFileSync(
+      resolve(__dirname, "../../components/PublishDialog.tsx"),
+      "utf8",
+    );
+    expect(source).toContain("requireVerifiedIdentity: identityRuleToSend(requireVerifiedTouchedRef.current, requireVerified)");
+    expect(source).not.toMatch(/requireVerifiedIdentity:\s*requireVerified\s*,/);
   });
 });

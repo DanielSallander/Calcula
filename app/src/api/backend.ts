@@ -5812,6 +5812,15 @@ export interface WritebackTableInfo {
   rowCount: number;
   sheetName: string;
   rangeRef: string;
+  /**
+   * Which streams the table collects ("prod", "every stream", "the
+   * development line, test"): for this workbook's own regions the Writeback >
+   * Collect From choice (default: the pipeline's last environment), for a
+   * subscribed region its subscription's stream.
+   */
+  streams: string;
+  /** A caveat the table cannot show (newer versions not verifiable here). */
+  note: string;
   /** Whether the queried connection's model already has this region's table. */
   alreadyImported: boolean;
 }

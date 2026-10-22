@@ -135,6 +135,7 @@ fn publish_as(
         excluded_regions: Vec::new(),
         custom_objects: objects,
         include_comments: false,
+        identity_policy: None,
         min_app_version: String::new(),
     };
     publish::publish(&reg, &request, prof).expect("publish failed");

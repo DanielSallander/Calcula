@@ -389,6 +389,7 @@ impl WorkspaceTransport for HttpWorkspace {
         _package_name: &str,
         _version: &str,
         _submitter_id: &str,
+        _authority: &calp::submission_seal::ReviewAuthority,
     ) -> Result<Vec<WritebackSubmission>, CalpError> {
         Ok(Vec::new())
     }
@@ -398,6 +399,7 @@ impl WorkspaceTransport for HttpWorkspace {
         _package_name: &str,
         _version: &str,
         _region_id: &str,
+        _authority: &calp::submission_seal::ReviewAuthority,
     ) -> Result<Vec<WritebackSubmission>, CalpError> {
         Ok(Vec::new())
     }
@@ -406,6 +408,7 @@ impl WorkspaceTransport for HttpWorkspace {
         &self,
         _package_name: &str,
         _version: &str,
+        _authority: &calp::submission_seal::ReviewAuthority,
     ) -> Result<Vec<WritebackSubmission>, CalpError> {
         Ok(Vec::new())
     }
@@ -623,13 +626,15 @@ mod tests {
                     review_reason: None,
                     reviewed_by: None,
                     reviewed_at: "2026-01-01T00:00:00Z".to_string(),
+                    target_digest: String::new(),
+                    seal: None,
                     extra: Default::default(),
                 },
             )
             .is_err());
         // Loading submissions from a read-only workspace yields nothing.
         assert!(reg
-            .load_current_submissions("pkg", "1.0.0")
+            .load_current_submissions("pkg", "1.0.0", &calp::ReviewAuthority::none())
             .unwrap()
             .is_empty());
         assert!(reg.load_review_events("pkg", "1.0.0").unwrap().is_empty());

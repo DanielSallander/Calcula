@@ -273,6 +273,7 @@ impl WorkspaceTransport for MemoryWorkspace {
         _package_name: &str,
         _version: &str,
         _submitter_id: &str,
+        _authority: &crate::submission_seal::ReviewAuthority,
     ) -> Result<Vec<WritebackSubmission>, CalpError> {
         Ok(Vec::new())
     }
@@ -282,6 +283,7 @@ impl WorkspaceTransport for MemoryWorkspace {
         _package_name: &str,
         _version: &str,
         _region_id: &str,
+        _authority: &crate::submission_seal::ReviewAuthority,
     ) -> Result<Vec<WritebackSubmission>, CalpError> {
         Ok(Vec::new())
     }
@@ -290,6 +292,7 @@ impl WorkspaceTransport for MemoryWorkspace {
         &self,
         _package_name: &str,
         _version: &str,
+        _authority: &crate::submission_seal::ReviewAuthority,
     ) -> Result<Vec<WritebackSubmission>, CalpError> {
         Ok(Vec::new())
     }
@@ -342,6 +345,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         publish::publish(reg, &request, prof).map(|_| ())

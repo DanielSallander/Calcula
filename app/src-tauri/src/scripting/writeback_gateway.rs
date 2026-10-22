@@ -621,7 +621,9 @@ fn dispatch(
             let row: u32 = field(p, "row")?;
             let col: u32 = field(p, "col")?;
             let value: calp::writeback::SubmissionValue = field(p, "value")?;
-            let saved = calp_cmds::calp_save_writeback_draft(
+            // A SCRIPT's save: if the region sends on save, the answer is
+            // signed with origin Script, so the publisher sees a script sent it.
+            let saved = calp_cmds::save_writeback_draft_with_origin(
                 state.clone(),
                 file_state.clone(),
                 region_id,
@@ -630,6 +632,7 @@ fn dispatch(
                 col,
                 value,
                 window.clone(),
+                calp::SubmissionOrigin::Script,
             )?;
             // An `immediate` region sends on save; a failed send keeps the
             // draft and is reported here rather than raised.
@@ -637,8 +640,15 @@ fn dispatch(
         }
         Action::SubmitRegion => {
             let region_id: String = field(p, "regionId")?;
-            let submitted =
-                calp_cmds::calp_submit_region(state.clone(), file_state.clone(), region_id, window.clone())?;
+            // Signed with origin Script: the signature proves this user's
+            // Calcula sent it and says a script did (identity phase 1).
+            let submitted = calp_cmds::submit_region_with_origin(
+                state,
+                file_state,
+                &region_id,
+                window,
+                calp::SubmissionOrigin::Script,
+            )?;
             Ok(json!({ "submitted": submitted }))
         }
         Action::PreviewSubmission => {
@@ -652,24 +662,36 @@ fn dispatch(
         }
         Action::ListSubmissions => match target {
             Some(PublisherTarget::Region(region_id)) => {
-                let rows = calp_cmds::calp_load_region_submissions(
-                    state.clone(),
-                    region_id,
-                    // A SCRIPT READS ITS OWN WORKBOOK'S STREAM, always. Letting a
-                    // distributed script name an environment would let it read
-                    // submissions from a stream the workbook it runs in does not
-                    // follow — a disclosure the consent screen never mentioned.
-                    None,
-                    window.clone(),
-                )?;
+                // A SCRIPT READS ITS OWN WORKBOOK'S STREAMS, always: the command
+                // takes no stream at all. Letting a distributed script name an
+                // environment would let it read submissions from a stream the
+                // workbook it runs in does not collect -- a disclosure the
+                // consent screen never mentioned. What it reads is the
+                // resolver's (`calp_collection::collection_for_region`): a
+                // subscribed region's own stream; for the AUTHOR's own region
+                // exactly the streams the publisher chose in Writeback > Collect
+                // From (default: the pipeline's last environment). A script can
+                // read that choice through these rows' `environment`, and has no
+                // action to change it: the choice changes what model tables
+                // report, so it is the publisher's, behind the publisher key.
+                let rows = calp_cmds::calp_load_region_submissions(state.clone(), region_id, window.clone())?;
+                // A SCRIPT COUNTS: it reads only the answers the application's
+                // identity rule counts (identity phase 1) -- under "count only
+                // verified senders", never one whose sender is not verified.
+                // Each row still carries its `identity` verdict. The publisher's
+                // own inbox shows the others, marked "not counted".
+                let rows: Vec<_> = rows.into_iter().filter(|r| r.counted).collect();
                 serde_json::to_value(rows).map_err(|e| e.to_string())
             }
             Some(PublisherTarget::ModelColumn(writeback_id)) => {
+                let policy = calp_cmds::model_writeback_identity_policy(state, &writeback_id);
                 let rows = calp_cmds::calp_list_model_submissions(
                     state.clone(),
                     writeback_id,
                     window.clone(),
                 )?;
+                // The same identity rule as a region: a script counts.
+                let rows = calp::identity_check::admit(rows, &policy);
                 serde_json::to_value(rows).map_err(|e| e.to_string())
             }
             None => Err("Internal: publisher target not resolved".to_string()),
@@ -683,8 +705,14 @@ fn dispatch(
                     let cell_row: u32 = field(p, "cellRow")?;
                     let cell_col: u32 = field(p, "cellCol")?;
                     let submission_id: Option<String> = field(p, "submissionId")?;
-                    calp_cmds::calp_set_submission_state(
-                        state.clone(),
+                    // Signed with origin Script: every reader shows the
+                    // decision as a script's, never as the publisher's own.
+                    crate::security::window_guard::require_label(
+                        &window,
+                        crate::security::window_guard::MAIN,
+                    )?;
+                    calp_cmds::set_submission_state_with_origin(
+                        &state,
                         region_id,
                         submitter_id,
                         cell_row,
@@ -692,22 +720,27 @@ fn dispatch(
                         new_state,
                         reason,
                         submission_id,
-                        // A SCRIPT REVIEWS ITS OWN WORKBOOK'S STREAM, always —
-                        // the same rule the region reads follow.
+                        // A SCRIPT REVIEWS ITS OWN WORKBOOK'S STREAMS, always —
+                        // the same rule the region reads follow (`None` = the
+                        // collection's own choice; a record outside it is
+                        // refused). Without a submission id a person who
+                        // answered the cell in more than one COLLECTED stream
+                        // is refused rather than decided on arbitrarily.
                         None,
-                        window.clone(),
+                        calp::SubmissionOrigin::Script,
                     )?;
                     Ok(json!({ "reviewed": true }))
                 }
                 Some(PublisherTarget::ModelColumn(writeback_id)) => {
                     let submission_id: String = field(p, "submissionId")?;
-                    calp_cmds::calp_set_model_submission_state(
+                    calp_cmds::set_model_submission_state_with_origin(
                         state.clone(),
                         writeback_id,
                         submission_id,
                         new_state,
                         reason,
                         window.clone(),
+                        calp::SubmissionOrigin::Script,
                     )?;
                     Ok(json!({ "reviewed": true }))
                 }
@@ -732,8 +765,11 @@ fn dispatch(
             // The SAME authoritative draft gate the interactive editor uses:
             // schema validation, lifecycle policy, ownership, auto-submit for
             // `immediate` regions. A rejection propagates verbatim so the
-            // script sees the real reason.
-            calp_cmds::calp_save_writeback_draft(
+            // script sees the real reason. A SCRIPT wrote the cell, so an
+            // `immediate` region's send is signed with origin Script -- never
+            // "the user typed it" (the origin is inside the signature, so a
+            // wrong label would be permanent).
+            calp_cmds::save_writeback_draft_with_origin(
                 state.clone(),
                 file_state.clone(),
                 region_id.clone(),
@@ -742,6 +778,7 @@ fn dispatch(
                 col,
                 submission_value,
                 window.clone(),
+                calp::SubmissionOrigin::Script,
             )?;
 
             serde_json::to_value(WritebackCellGuard {

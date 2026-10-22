@@ -28,6 +28,7 @@ fn body_of(src: &str, signature: &str) -> String {
 
 const ENV_SRC: &str = include_str!("calp_environments.rs");
 const CALP_SRC: &str = include_str!("calp_commands.rs");
+const COLLECTION_SRC: &str = include_str!("calp_collection.rs");
 const GATEWAY_SRC: &str = include_str!("scripting/collaboration_gateway.rs");
 
 fn at(hay: &str, needle: &str, what: &str) -> usize {
@@ -422,32 +423,107 @@ fn every_value_feeding_reader_filters_by_environment() {
 /// cannot give the real answer — or the reverse, where a promotion re-arms a
 /// question that was supposed to be asked once.
 ///
+/// The PUBLISHER-side readers (the inbox loader, review, the roster) fold
+/// their versions through ONE walk, `calp_collection::collected_versions`
+/// (`stream_versions`, then the carry-forward compatibility rule, BUG-0555).
+/// `stream_versions` routes a SET of streams -- the author's Collect From
+/// choice, or a subscriber's one stream -- through `carry_forward_versions`
+/// per stream, and uses the lower-semver rule only for EVERY stream (an
+/// environment can only point at a version that exists, so "every stream" is
+/// every version at or below the one the region is read from). The author's
+/// union is clipped at the read version; the subscriber's is not (a rolled-
+/// back environment still counts the newer version it ran).
+///
 /// SABOTAGE: delete the `visible_in(` from `registry_has_own_submission`.
 #[test]
 fn the_grid_readers_and_the_lifecycle_filter_too() {
+    // The roster reads THE ONE ROW SOURCE (identity phase 1: it must see each
+    // row's identity verdict to count only what the application's rule
+    // counts), so it inherits the walk instead of repeating it.
+    let roster = body_of(CALP_SRC, "pub(crate) fn region_response_status_core(");
+    assert!(roster.contains("load_region_collected_rows("), "the roster reads the one row source");
+    assert!(
+        !roster.contains("carry_forward_versions(") && !roster.contains("older_package_versions("),
+        "the roster hand-copies the version walk again",
+    );
     for signature in [
-        "fn registry_has_own_submission(",
-        "fn load_region_current_submissions(",
-        // Reconcile and discard both read through this one helper.
-        "fn own_current_records_for_region(",
+        "pub(crate) fn load_region_collected_rows(",
+        "pub(crate) fn set_submission_state_with_origin(",
     ] {
         let body = body_of(CALP_SRC, signature);
+        assert!(body.contains("visible_in_streams("), "{signature} must filter submissions by stream");
         assert!(
-            body.contains("visible_in("),
-            "{signature} must filter submissions by environment",
+            body.contains("calp_collection::collected_versions("),
+            "{signature} must fold its versions through the one stream walk",
         );
         assert!(
-            body.contains("carry_forward_versions("),
-            "{signature} must carry forward over the environment's held versions",
+            !body.contains("carry_forward_versions(") && !body.contains("older_package_versions("),
+            "{signature} hand-copies the version walk again",
         );
+    }
+    let walk = body_of(COLLECTION_SRC, "pub(crate) fn stream_versions(");
+    let every = at(&walk, "StreamFilter::All =>", "the every-stream arm");
+    let semver = at(&walk, "older_package_versions(", "the semver rule");
+    let named = at(&walk, "StreamFilter::Only(streams) =>", "the named-streams arm");
+    let carry = at(&walk, "carry_forward_versions(", "the carry-forward");
+    assert!(
+        every < semver && semver < named && named < carry,
+        "a NAMED stream must carry forward over its held versions, never the semver rule",
+    );
+    assert!(
+        walk.contains("collection.role == CollectionRole::Author") && walk.contains("x > *c"),
+        "the author's union is clipped at the read version",
+    );
+    let collected = body_of(COLLECTION_SRC, "pub(crate) fn collected_versions(");
+    assert!(collected.contains("stream_versions("), "collected_versions starts from the stream walk");
+    assert!(
+        collected.contains("carries_forward_from("),
+        "collected_versions applies the ONE carry-forward compatibility rule",
+    );
+    assert!(
+        body_of(CALP_SRC, "pub(crate) fn merge_lenient_submissions(").contains("carries_forward_from("),
+        "GATHER and the BI datasets use the same rule",
+    );
+    // Checkout carries the Collect From choice over for the SAME application.
+    assert!(
+        body_of(CALP_SRC, "pub fn calp_checkout(").contains("carry_collect_choice_from("),
+        "re-opening the same application for editing must keep what it collects",
+    );
+    for signature in [
+        "fn registry_has_own_submission(",
+        // Reconcile and discard both read through these two helpers: one picks
+        // the versions, the other filters what each holds.
+        "fn own_record_versions(",
+        "fn own_records_by_region_in(",
+    ] {
+        let body = body_of(CALP_SRC, signature);
+        if signature != "fn own_record_versions(" {
+            assert!(
+                body.contains("visible_in("),
+                "{signature} must filter submissions by environment",
+            );
+        }
+        if signature != "fn own_records_by_region_in(" {
+            assert!(
+                body.contains("carry_forward_versions("),
+                "{signature} must carry forward over the environment's held versions",
+            );
+        }
         assert!(
             !body.contains("older_package_versions("),
             "{signature} must not use the strictly-lower-semver rule",
         );
     }
+    for signature in ["fn own_current_records_for_region(", "fn own_sent_records_by_region("] {
+        let body = body_of(CALP_SRC, signature);
+        assert!(
+            body.contains("own_record_versions(") && body.contains("own_records_by_region_in("),
+            "{signature} must read through the shared, environment-filtered helpers",
+        );
+    }
     assert!(
         body_of(CALP_SRC, "fn reconcile_writeback_layer_internal(")
-            .contains("own_current_records_for_region("),
+            .contains("own_sent_records_by_region("),
         "reconcile must read the environment-filtered records through the shared helper",
     );
 }
@@ -585,8 +661,8 @@ fn the_follow_line_gate_refuses_when_it_cannot_read_the_pipeline() {
 #[test]
 fn cross_version_arbitration_uses_the_crates_own_ordering() {
     for signature in [
-        "pub fn calp_set_submission_state(",
-        "fn load_region_current_submissions(",
+        "pub(crate) fn set_submission_state_with_origin(",
+        "pub(crate) fn load_region_collected_rows(",
     ] {
         let body = body_of(CALP_SRC, signature);
         assert!(
@@ -811,6 +887,7 @@ fn promotion_code_fixture() -> (tempfile::TempDir, tempfile::TempDir) {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         publish::publish(&reg, &request, alice.path()).expect("publish failed");
@@ -1036,8 +1113,13 @@ fn the_writeback_report_reads_signed_manifests_and_says_when_it_cannot() {
         let report = impact(&dir, "test", "1.1.0").writeback_report;
         assert!(!report.is_empty(), "an edited pointer manifest made the promotion read as 'nothing affected'");
         assert!(report.contains("is not known"), "{report}");
+        // 1.0.0 is also the application's FIRST version, whose signed manifest
+        // names the root key (`calp::publishers::root_key_of` verifies it): the
+        // edit is caught already when the pipeline is read, and the sentence
+        // names that version either way -- never "nothing affected".
         assert!(
-            report.contains("v1.0.0, the version test holds, cannot be read"),
+            report.contains("v1.0.0, the version test holds, cannot be read")
+                || (report.contains("cannot be read") && report.contains("@1.0.0")),
             "the report must name the held version it could not read: {report}"
         );
     }
@@ -1130,6 +1212,7 @@ fn the_writeback_sentences_leave_the_period_to_their_consumers_and_carry_no_runs
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         publish::publish(&reg, &request, alice.path()).expect("publish failed");

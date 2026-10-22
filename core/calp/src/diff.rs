@@ -1222,6 +1222,16 @@ fn diff_manifest_fields(before: &VersionManifest, after: &VersionManifest) -> Ve
     };
     push("kind", &before.kind, &after.kind);
     push("minAppVersion", &before.min_app_version, &after.min_app_version);
+    // Governance, like the writeback declarations: switching it changes which
+    // answers every total, roster and BI table counts.
+    let identity_rule = |m: &VersionManifest| {
+        if m.identity_policy.is_some_and(|p| p.require_verified) {
+            "count only verified senders"
+        } else {
+            "count every answer"
+        }
+    };
+    push("identityPolicy", identity_rule(before), identity_rule(after));
     push("publishedBy", &before.published_by, &after.published_by);
     // Loud: under one TOFU pin this should be impossible, and a subscriber
     // whose pin no longer matches is exactly the "application hijack" signal.

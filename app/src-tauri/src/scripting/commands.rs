@@ -3293,6 +3293,9 @@ mod script_apply_tests {
             submitter: calp::SubmitterIdentity {
                 display_name: "Tester".to_string(),
                 id: "tester-1".to_string(),
+                principal_name: String::new(),
+                provider: Default::default(),
+                scope: Default::default(),
                 extra: Default::default(),
             },
             value: calp::writeback::SubmissionValue::Number { value: 42.0 },
@@ -3303,6 +3306,9 @@ mod script_apply_tests {
             review_reason: None,
             reviewed_by: None,
             model_key: None,
+            seal: None,
+            sender: Default::default(),
+            identity: Default::default(),
             extra: Default::default(),
         }
     }

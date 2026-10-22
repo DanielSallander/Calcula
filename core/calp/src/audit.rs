@@ -151,6 +151,15 @@ pub enum AuditEvent {
     WritebackInvalidated,
     /// Publisher approved or rejected a submitted writeback value.
     WritebackReviewed,
+    /// Values this subscriber SENT earlier were put back in their cells from
+    /// the workspace -- a new workbook that subscribed again, a reopen without
+    /// saving, or a newer value sent from another workbook. The cell content
+    /// changed with no keystroke, so the trail says where it came from.
+    WritebackRestored,
+    /// The publisher changed which STREAMS this workbook collects writeback
+    /// answers from (Writeback > Collect From). `extra` names the application,
+    /// the workspace, and the choice before and after.
+    CollectionStreamsChanged,
     /// A sandboxed script (run_script / notebook cell / MCP tool) mutated grid cells.
     ScriptExecuted,
     /// A sandboxed script/extension used a broker-mediated capability (net.fetch,
@@ -212,6 +221,13 @@ impl AuditEvent {
                 | AuditEvent::WritebackSubmitted
                 | AuditEvent::WritebackReviewed
                 | AuditEvent::WritebackInvalidated
+                | AuditEvent::WritebackRestored
+                // Which streams are collected decides what the author's model
+                // tables, exports and scripts REPORT: ticking `test` puts test
+                // answers into a production total. Whatever changes what a
+                // model table says must be findable without anyone having
+                // opted in first.
+                | AuditEvent::CollectionStreamsChanged
                 | AuditEvent::Published
                 // Protection changes are a security boundary moving; recording
                 // them only when collaboration auditing happens to be on would
@@ -392,17 +408,20 @@ mod tests {
             AuditEvent::WritebackSubmitted,
             AuditEvent::WritebackReviewed,
             AuditEvent::WritebackInvalidated,
+            AuditEvent::WritebackRestored,
+            // SABOTAGE: drop `CollectionStreamsChanged` from `is_always_recorded`.
+            AuditEvent::CollectionStreamsChanged,
         ] {
             log.record(ev, "wb", "user", "2026-01-01T00:00:00Z");
         }
         assert_eq!(
             log.entry_count(),
-            3,
-            "writeback egress/review/invalidation must not depend on the opt-in flag"
+            5,
+            "writeback egress/review/invalidation/collection choice must not depend on the opt-in flag"
         );
         // Collaboration bookkeeping stays opt-in.
         log.record(AuditEvent::Refresh, "r", "user", "2026-01-01T00:00:00Z");
-        assert_eq!(log.entry_count(), 3);
+        assert_eq!(log.entry_count(), 5);
     }
 
     /// A refused checkout names ids somebody else shipped; recorded only when

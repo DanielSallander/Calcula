@@ -137,6 +137,7 @@ fn publish_version(
         excluded_regions: Vec::new(),
         custom_objects: Vec::new(),
         include_comments: false,
+        identity_policy: None,
         min_app_version: String::new(),
     };
     publish::publish(reg, &request, prof).unwrap();
@@ -180,6 +181,9 @@ fn make_submission(
         submitter: calp::SubmitterIdentity {
             display_name: submitter_name.to_string(),
             id: submitter_id.to_string(),
+            principal_name: String::new(),
+            provider: Default::default(),
+            scope: Default::default(),
             extra: HashMap::new(),
         },
         value: SubmissionValue::Number { value },
@@ -189,6 +193,9 @@ fn make_submission(
         submitted_at: Some(updated_at.to_string()),
         review_reason: None,
         reviewed_by: None,
+        seal: None,
+        sender: Default::default(),
+        identity: Default::default(),
         extra: HashMap::new(),
     }
 }
@@ -296,24 +303,24 @@ fn lifecycle_writeback_submit_and_load_across_submitters() {
     reg.save_submission("budget", "1.0.0", &bob).unwrap();
 
     // load_current_submissions returns BOTH submitters' contributions.
-    let all = reg.load_current_submissions("budget", "1.0.0").unwrap();
+    let all = reg.load_current_submissions("budget", "1.0.0", &calp::ReviewAuthority::none()).unwrap();
     assert_eq!(all.len(), 2);
 
     // load_current_submissions_by(submitter) is scoped to exactly that submitter.
-    let alice_only = reg.load_current_submissions_by("budget", "1.0.0", "id-alice").unwrap();
+    let alice_only = reg.load_current_submissions_by("budget", "1.0.0", "id-alice", &calp::ReviewAuthority::none()).unwrap();
     assert_eq!(alice_only.len(), 1);
     assert_eq!(alice_only[0].submitter.id, "id-alice");
     assert_eq!(alice_only[0].submitter.display_name, "Alice");
     assert_eq!(alice_only[0].state, SubmissionState::Submitted);
     assert!(matches!(alice_only[0].value, SubmissionValue::Number { value } if value == 100.0));
 
-    let bob_only = reg.load_current_submissions_by("budget", "1.0.0", "id-bob").unwrap();
+    let bob_only = reg.load_current_submissions_by("budget", "1.0.0", "id-bob", &calp::ReviewAuthority::none()).unwrap();
     assert_eq!(bob_only.len(), 1);
     assert_eq!(bob_only[0].submitter.id, "id-bob");
     assert!(matches!(bob_only[0].value, SubmissionValue::Number { value } if value == 250.0));
 
     // load_current_region_submissions buckets across submitters for a single region.
-    let region_subs = reg.load_current_region_submissions("budget", "1.0.0", "budget-input").unwrap();
+    let region_subs = reg.load_current_region_submissions("budget", "1.0.0", "budget-input", &calp::ReviewAuthority::none()).unwrap();
     assert_eq!(region_subs.len(), 2);
     let sum: f64 = region_subs
         .iter()
@@ -369,7 +376,7 @@ fn lifecycle_supersedence_same_slot_newest_wins_no_double_count() {
     // structural, enforced by the fold rather than by file replacement.
     let raw = reg.load_submission_events("budget", "1.0.0").unwrap();
     assert_eq!(raw.len(), 2, "append-only: both event files remain on disk");
-    let loaded = reg.load_current_region_submissions("budget", "1.0.0", "budget-input").unwrap();
+    let loaded = reg.load_current_region_submissions("budget", "1.0.0", "budget-input", &calp::ReviewAuthority::none()).unwrap();
     assert_eq!(loaded.len(), 1, "the fold keeps exactly one current record per slot");
     assert_eq!(loaded[0].id, "sub-alice-rev-2", "the newer submission won");
     assert!(matches!(loaded[0].value, SubmissionValue::Number { value } if value == 175.0));
@@ -482,22 +489,22 @@ fn lifecycle_version_bump_retains_prior_version_submissions() {
     // when compatible). At the workspace primitive level what must hold is that
     // the v1 submissions remain READABLE after v2 exists, and that v2 starts
     // with its own (here empty) submission set — the app reads both and merges.
-    let v1_subs = reg.load_current_region_submissions("budget", "1.0.0", "budget-input").unwrap();
+    let v1_subs = reg.load_current_region_submissions("budget", "1.0.0", "budget-input", &calp::ReviewAuthority::none()).unwrap();
     assert_eq!(v1_subs.len(), 1, "v1 submissions survive a later version publish");
     assert_eq!(v1_subs[0].id, "sub-v1");
 
-    let v2_subs = reg.load_current_region_submissions("budget", "2.0.0", "budget-input").unwrap();
+    let v2_subs = reg.load_current_region_submissions("budget", "2.0.0", "budget-input", &calp::ReviewAuthority::none()).unwrap();
     assert!(v2_subs.is_empty(), "v2 starts with its own (empty) submission set");
 
     // Simulate the app's carry-forward: copy the compatible v1 submission into
     // v2 (the app would re-stamp version provenance; the workspace just stores).
     reg.save_submission("budget", "2.0.0", &v1_sub).unwrap();
-    let v2_after = reg.load_current_region_submissions("budget", "2.0.0", "budget-input").unwrap();
+    let v2_after = reg.load_current_region_submissions("budget", "2.0.0", "budget-input", &calp::ReviewAuthority::none()).unwrap();
     assert_eq!(v2_after.len(), 1);
     assert!(matches!(v2_after[0].value, SubmissionValue::Number { value } if value == 100.0));
 
     // And v1's own record is untouched by the carry-forward into v2.
-    let v1_again = reg.load_current_region_submissions("budget", "1.0.0", "budget-input").unwrap();
+    let v1_again = reg.load_current_region_submissions("budget", "1.0.0", "budget-input", &calp::ReviewAuthority::none()).unwrap();
     assert_eq!(v1_again.len(), 1);
 }
 
@@ -749,6 +756,7 @@ fn publish_with_data_source(
         excluded_regions: Vec::new(),
         custom_objects: Vec::new(),
         include_comments: false,
+        identity_policy: None,
         min_app_version: String::new(),
     };
     publish::publish(reg, &request, prof).unwrap();

@@ -159,6 +159,7 @@ fn publish_version(
         excluded_regions: Vec::new(),
         custom_objects: Vec::new(),
         include_comments: false,
+        identity_policy: None,
         min_app_version: String::new(),
     };
     publish::publish(reg, &request, prof).expect("publish failed");
@@ -184,12 +185,37 @@ fn scope_of(dir: &TempDir) -> calp::WorkspaceScope {
     calp::workspace_scope(&dir.path().to_string_lossy()).unwrap()
 }
 
-fn identity(name: &str, id: &str) -> SubmitterIdentity {
-    SubmitterIdentity {
-        display_name: name.to_string(),
-        id: id.to_string(),
-        extra: HashMap::new(),
+/// A subscriber's 32-byte signing seed, derived from their display name (the
+/// app keeps the real one in the Windows Credential Manager).
+fn seed_for(name: &str) -> [u8; 32] {
+    let digest = calp::integrity::sha256_hex(name.as_bytes());
+    let mut seed = [0u8; 32];
+    for (i, chunk) in digest.as_bytes().chunks(2).enumerate() {
+        seed[i] = u8::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16).unwrap();
     }
+    seed
+}
+
+/// A SIGNED subscriber identity (identity phase 1): a Windows account whose id
+/// commits to the subscriber's own key. `tag` names the account.
+fn identity(name: &str, tag: &str) -> SubmitterIdentity {
+    calp::identity_provider::identity_for(
+        calp::IdentityProviderKind::Windows,
+        &calp::identity_provider::AccountFacts {
+            subject: format!("S-1-5-21-100-200-300-{}", 1000 + tag.len()),
+            principal_name: format!("CORP\\{tag}"),
+            display_name: name.to_string(),
+            scope: calp::AccountScope::Domain,
+        },
+        &calp::submission_seal::public_key_of_seed(&seed_for(name)),
+    )
+    .unwrap()
+}
+
+/// Whose review decisions count: the publisher key of the signed manifest
+/// (the app passes the VERIFIED key plus the co-publishers).
+fn auth(reg: &LocalWorkspace) -> calp::ReviewAuthority {
+    calp::ReviewAuthority::from_keys([reg.get_version_manifest(PKG, "1.0.0").unwrap().publisher_key])
 }
 
 /// Validate a value against the region schema (mirroring the app's draft-save
@@ -227,8 +253,20 @@ fn commit(
         submitted_at: Some(updated_at.to_string()),
         review_reason: None,
         reviewed_by: None,
+        seal: None,
+        sender: Default::default(),
+        identity: Default::default(),
         extra: HashMap::new(),
     };
+    let mut sub = sub;
+    calp::submission_seal::seal_submission(
+        &mut sub,
+        PKG,
+        version,
+        &seed_for(&who.display_name),
+        calp::SubmissionOrigin::Interactive,
+    )
+    .expect("the sender signs its own answer");
     reg.save_submission(PKG, version, &sub).expect("save_submission failed");
 }
 
@@ -238,6 +276,7 @@ fn commit(
 /// is never touched; the decision is its own immutable file under `reviews/`.
 fn decide(
     reg: &LocalWorkspace,
+    prof: &Path,
     version: &str,
     submitter_id: &str,
     row: u32,
@@ -245,7 +284,7 @@ fn decide(
 ) {
     static REVIEW_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let subs = reg
-        .load_current_submissions_by(PKG, version, submitter_id)
+        .load_current_submissions_by(PKG, version, submitter_id, &auth(reg))
         .expect("load_current_submissions_by failed");
     let s = subs
         .into_iter()
@@ -261,8 +300,15 @@ fn decide(
         review_reason: None,
         reviewed_by: Some("Finance HQ".to_string()),
         reviewed_at: "2026-06-15T05:00:00Z".to_string(),
+        target_digest: String::new(),
+        seal: None,
         extra: HashMap::new(),
     };
+    // Signed with the publisher's key (owner decision 2026-10-22): an
+    // unsigned decision is ignored by every reader.
+    let mut review = review;
+    let keypair = calp::signing::PublisherKeypair::load_existing(prof).unwrap().expect("publisher key");
+    calp::submission_seal::seal_review(&mut review, &s, PKG, version, &keypair);
     reg.save_review(PKG, version, &review).expect("save_review failed");
 }
 
@@ -304,20 +350,20 @@ fn governed_submissions(
     });
     match region.visibility {
         Some(VisibilityPolicy::OwnOnly) => {
-            submissions.retain(|s| own.map(|o| s.submitter.id == o.id).unwrap_or(false));
+            submissions.retain(|s| calp::submission_seal::is_mine(own, s));
         }
         Some(VisibilityPolicy::OwnPlusAggregate) => {
             let mut token_for: HashMap<String, String> = HashMap::new();
             let mut next = 1;
             for s in submissions.iter() {
-                let is_own = own.map(|o| s.submitter.id == o.id).unwrap_or(false);
+                let is_own = calp::submission_seal::is_mine(own, s);
                 if !is_own && !token_for.contains_key(&s.submitter.id) {
                     token_for.insert(s.submitter.id.clone(), format!("Submitter {next}"));
                     next += 1;
                 }
             }
             for s in submissions.iter_mut() {
-                let is_own = own.map(|o| s.submitter.id == o.id).unwrap_or(false);
+                let is_own = calp::submission_seal::is_mine(own, s);
                 if !is_own {
                     s.submitter.display_name = token_for
                         .get(&s.submitter.id)
@@ -390,7 +436,7 @@ fn writeback_multi_user_simulation() {
     println!("[north/south/west] each committed Q1..Q4 forecasts");
 
     // 12 current records (3 submitters x 4 cells), one event file each.
-    assert_eq!(reg.load_current_region_submissions(PKG, "1.0.0", REGION).unwrap().len(), 12);
+    assert_eq!(reg.load_current_region_submissions(PKG, "1.0.0", REGION, &auth(&reg)).unwrap().len(), 12);
 
     // --- 4a. Supersedence: Alice corrects Q1 (100 -> 105) -----------------
     // A NEW submission id + NEWER updated_at for the SAME slot. The event log
@@ -407,7 +453,7 @@ fn writeback_multi_user_simulation() {
     // rewritten — but the folded view still collapses to 12 slots, so GATHER
     // never double-counts.
     assert_eq!(reg.load_submission_events(PKG, "1.0.0").unwrap().len(), 14);
-    let all_v1 = reg.load_current_region_submissions(PKG, "1.0.0", REGION).unwrap();
+    let all_v1 = reg.load_current_region_submissions(PKG, "1.0.0", REGION, &auth(&reg)).unwrap();
     assert_eq!(all_v1.len(), 12, "supersedence + clear fold per slot; no duplication");
     // The correction won.
     let alice_q1 = all_v1
@@ -423,26 +469,26 @@ fn writeback_multi_user_simulation() {
 
     // --- 5. Publisher approves Alice & Bob, rejects Carol's Q1 ------------
     for row in ROW_Q1..=ROW_Q4 {
-        decide(&reg, "1.0.0", &alice.id, row, SubmissionState::Approved);
-        decide(&reg, "1.0.0", &bob.id, row, SubmissionState::Approved);
+        decide(&reg, hq_prof.path(), "1.0.0", &alice.id, row, SubmissionState::Approved);
+        decide(&reg, hq_prof.path(), "1.0.0", &bob.id, row, SubmissionState::Approved);
     }
-    decide(&reg, "1.0.0", &carol.id, ROW_Q1, SubmissionState::Rejected);
+    decide(&reg, hq_prof.path(), "1.0.0", &carol.id, ROW_Q1, SubmissionState::Rejected);
     // Carol Q2/Q3 remain merely Submitted; Q4 is an (empty) submission.
     println!("[publisher] approved North+South; rejected West Q1; West Q2/Q3 still pending");
 
     // Re-read the authoritative post-decision records: decisions are review
     // EVENTS under reviews/, folded into the derived state at read time
     // (`all_v1` above is the pre-approval snapshot).
-    let after = reg.load_current_region_submissions(PKG, "1.0.0", REGION).unwrap();
+    let after = reg.load_current_region_submissions(PKG, "1.0.0", REGION, &auth(&reg)).unwrap();
     assert_eq!(after.len(), 12, "review events fold in; still one record per slot");
 
     // RETURN LEG (read-back): each subscriber can now learn the fate of what
     // they submitted by reloading their OWN slots — exactly the data the app's
     // calp_reconcile_writeback adopts into the local layer + grid cell styling.
-    let carol_own = reg.load_current_submissions_by(PKG, "1.0.0", &carol.id).unwrap();
+    let carol_own = reg.load_current_submissions_by(PKG, "1.0.0", &carol.id, &auth(&reg)).unwrap();
     let carol_q1 = carol_own.iter().find(|s| s.cell_row == ROW_Q1).unwrap();
     assert_eq!(carol_q1.state, SubmissionState::Rejected, "West sees Q1 was rejected");
-    let alice_own = reg.load_current_submissions_by(PKG, "1.0.0", &alice.id).unwrap();
+    let alice_own = reg.load_current_submissions_by(PKG, "1.0.0", &alice.id, &auth(&reg)).unwrap();
     assert!(
         alice_own.iter().all(|s| s.state == SubmissionState::Approved),
         "North sees all four approved"
@@ -536,29 +582,35 @@ fn writeback_multi_user_simulation() {
     println!("[author] published v2.0.0 (schema widened, compatible)");
 
     // v1 submissions remain readable; v2 starts empty.
-    assert_eq!(reg.load_current_region_submissions(PKG, "1.0.0", REGION).unwrap().len(), 12);
-    assert!(reg.load_current_region_submissions(PKG, "2.0.0", REGION).unwrap().is_empty());
+    assert_eq!(reg.load_current_region_submissions(PKG, "1.0.0", REGION, &auth(&reg)).unwrap().len(), 12);
+    assert!(reg.load_current_region_submissions(PKG, "2.0.0", REGION, &auth(&reg)).unwrap().is_empty());
 
     // Lenient carry-forward: records live in the version directory they were
     // submitted against, and the app merges across versions at READ time
-    // (newest per slot through the compatibility gate). Materializing them
-    // into v2 — as done here — must carry BOTH event kinds: the submission
-    // events and the review events that give them their derived state.
+    // (newest per slot through the compatibility gate). A COPY of them into
+    // v2's folder is refused there (identity phase 1): every answer's and
+    // every decision's signature names its application and version, so a
+    // replay into another version neither counts nor approves anything.
     for s in &after {
         reg.save_submission(PKG, "2.0.0", s).unwrap();
     }
     for r in reg.load_review_events(PKG, "1.0.0").unwrap() {
         reg.save_review(PKG, "2.0.0", &r).unwrap();
     }
+    let v2_fold = reg.load_submission_fold(PKG, "2.0.0", &auth(&reg)).unwrap();
+    assert!(v2_fold.current.is_empty(), "answers copied into another version do not verify there");
+    assert_eq!(v2_fold.forged.len(), 12, "every copied answer is reported, not silently dropped");
+    assert_eq!(v2_fold.ignored_reviews.len(), 9, "every copied decision is reported");
+    // What the read-time carry-forward sees: v1's records, governed by v2's region.
     let v2_governed = governed_submissions(
-        reg.load_current_region_submissions(PKG, "2.0.0", REGION).unwrap(),
+        reg.load_current_region_submissions(PKG, "1.0.0", REGION, &auth(&reg)).unwrap(),
         &region_v2,
         None,
     );
     assert_eq!(v2_governed.len(), 8);
     assert_eq!(sum_numbers(&v2_governed), expected_sum);
     // v1's own records are untouched by the carry-forward into v2.
-    assert_eq!(reg.load_current_region_submissions(PKG, "1.0.0", REGION).unwrap().len(), 12);
+    assert_eq!(reg.load_current_region_submissions(PKG, "1.0.0", REGION, &auth(&reg)).unwrap().len(), 12);
     println!("[publisher] v2.0.0 carried forward v1 forecasts: count=8, SUM(GATHER)={expected_sum}");
     println!("[OK] regional-budget collection simulation complete");
 }
@@ -677,7 +729,7 @@ fn writeback_concurrent_interleavings_converge() {
     // files one of these two writes would silently overwrite the other (SMB)
     // or fork a "conflicted copy" (Dropbox); here both are new files and
     // nothing is lost, whatever the order.
-    decide(&reg_a, "1.0.0", &alice.id, ROW_Q1, SubmissionState::Approved); // targets race-1
+    decide(&reg_a, hq_prof.path(), "1.0.0", &alice.id, ROW_Q1, SubmissionState::Approved); // targets race-1
     commit(&reg_b, "1.0.0", &region, &alice, ROW_Q1, SubmissionValue::Number { value: 105.0 }, "2026-06-15T03:05:00Z", "race-2");
 
     // Every event survives on disk.
@@ -688,7 +740,7 @@ fn writeback_concurrent_interleavings_converge() {
     // slot, and the approval of the superseded event is inert — the publisher
     // approved what they saw, not the correction they never reviewed.
     for reg in [&reg_a, &reg_b] {
-        let current = reg.load_current_region_submissions(PKG, "1.0.0", REGION).unwrap();
+        let current = reg.load_current_region_submissions(PKG, "1.0.0", REGION, &auth(&reg)).unwrap();
         assert_eq!(current.len(), 1);
         assert_eq!(current[0].id, "race-2");
         assert_eq!(
@@ -700,9 +752,9 @@ fn writeback_concurrent_interleavings_converge() {
     }
 
     // The publisher reviews the correction they can now see; states converge.
-    decide(&reg_a, "1.0.0", &alice.id, ROW_Q1, SubmissionState::Approved); // targets race-2
+    decide(&reg_a, hq_prof.path(), "1.0.0", &alice.id, ROW_Q1, SubmissionState::Approved); // targets race-2
     for reg in [&reg_a, &reg_b] {
-        let current = reg.load_current_region_submissions(PKG, "1.0.0", REGION).unwrap();
+        let current = reg.load_current_region_submissions(PKG, "1.0.0", REGION, &auth(&reg)).unwrap();
         assert_eq!(current[0].state, SubmissionState::Approved);
     }
 
@@ -734,7 +786,7 @@ fn writeback_concurrent_interleavings_converge() {
     }
     let events = reg_a.load_submission_events(PKG, "1.0.0").unwrap();
     assert_eq!(events.iter().filter(|s| s.cell_row == ROW_Q4).count(), 8, "no write was lost");
-    let current = reg_a.load_current_region_submissions(PKG, "1.0.0", REGION).unwrap();
+    let current = reg_a.load_current_region_submissions(PKG, "1.0.0", REGION, &auth(&reg_a)).unwrap();
     let q4: Vec<_> = current.iter().filter(|s| s.cell_row == ROW_Q4).collect();
     assert_eq!(q4.len(), 1, "one current record per slot");
     assert_eq!(q4[0].id, "stress-7", "newest (updated_at, id) wins deterministically");

@@ -58,6 +58,7 @@ fn publish_into(reg: &LocalWorkspace, prof: &std::path::Path, wb: &Workbook) {
         excluded_regions: Vec::new(),
         custom_objects: Vec::new(),
         include_comments: false,
+        identity_policy: None,
         min_app_version: String::new(),
     };
     publish::publish(reg, &request, prof).expect("publish failed");

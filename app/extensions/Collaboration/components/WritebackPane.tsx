@@ -26,6 +26,8 @@ import {
 } from "@api/collaboration";
 import { DESIGNATE_WRITEBACK_DIALOG_ID } from "../manifest";
 import { WRITEBACK_REGIONS_CHANGED_EVENT } from "./DesignateWritebackDialog";
+import { sentAsText, whoAmIText } from "../lib/senderLabel";
+import { subscribeWhoAmI, getWhoAmIVersion, getWhoAmI } from "../lib/whoAmIStore";
 import {
   lastWritebackValidatorSync,
   approveAndMountWritebackValidators,
@@ -86,6 +88,24 @@ function visibilityText(v: WritebackRegionSummary["visibility"]): string | null 
   return v ? `${visibilitySentence(v)}.` : null;
 }
 
+/** WHO YOU SEND AS (identity phase 1): the same sentence the Writeback tab's
+ *  Status shows, read once from Rust (lib/whoAmIStore). */
+function WhoAmINote(): React.ReactElement {
+  useSyncExternalStore(subscribeWhoAmI, getWhoAmIVersion, getWhoAmIVersion);
+  const { identity, error } = getWhoAmI();
+  const view = whoAmIText(identity, error);
+  return (
+    <div
+      data-testid="writeback-pane-who-am-i"
+      title={view.detail}
+      style={{ fontSize: 11, color: error ? "var(--tone-warn-fg)" : "var(--text-secondary)", marginBottom: 8 }}
+    >
+      {view.text}
+      {view.account && <div style={{ color: "var(--text-tertiary)" }}>{view.account}</div>}
+    </div>
+  );
+}
+
 /** The outbound-data preview: exactly what leaves the machine, to whom, as whom,
  *  shown for explicit confirmation before a writeback submission is sent. */
 function OutboundPreviewPanel({
@@ -120,8 +140,7 @@ function OutboundPreviewPanel({
         </div>
         <div style={{ wordBreak: "break-all" }}>Workspace: {preview.registryPath}</div>
         <div>
-          As: <strong>{preview.submitterName || "(unknown)"}</strong>
-          {preview.submitterId ? ` (${preview.submitterId})` : ""}
+          As: <strong>{sentAsText(preview) || "(unknown)"}</strong>
         </div>
       </div>
       <div
@@ -453,6 +472,7 @@ export function WritebackPane() {
       {hasSubscriberRegions && (
         <>
           <h4 style={{ marginTop: 0 }}>Subscribed Writeback Regions</h4>
+          <WhoAmINote />
           {submitError && (
             <div style={{ color: "var(--text-error)", fontSize: 11, marginBottom: 8 }}>
               {submitError}

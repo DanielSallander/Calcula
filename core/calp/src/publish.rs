@@ -202,6 +202,10 @@ pub struct PublishRequest<'a> {
     /// here when the application carries artifacts an older app would silently
     /// drop — see [`carries_wave_content`].
     pub min_app_version: String,
+    /// The application's identity rule, written into the SIGNED manifest
+    /// verbatim (`VersionManifest::identity_policy`). `None` = count every
+    /// answer (the default for Windows-account applications).
+    pub identity_policy: Option<crate::identity_check::IdentityPolicy>,
 }
 
 /// A custom object to publish (distribution brick 4). `payload` is opaque
@@ -1314,6 +1318,11 @@ pub fn publish(
         locked_cells: Vec::new(),
         writeback_regions: request.writeback_regions.clone(),
         model_writebacks: request.model_writebacks.clone(),
+        identity_policy: request.identity_policy,
+        // Signed answers only (identity phase 1): see the field.
+        signed_answers: !request.min_app_version.trim().is_empty()
+            && (request.writeback_regions.as_ref().is_some_and(|r| !r.is_empty())
+                || request.model_writebacks.as_ref().is_some_and(|m| !m.is_empty())),
         object_scripts: published_scripts,
         module_scripts: published_modules,
         notebooks: published_notebooks,
@@ -2318,6 +2327,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         publish(&reg, &request, prof.path()).unwrap();
@@ -2413,6 +2423,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         let result = publish(&reg, &request, prof.path()).unwrap();
@@ -2471,6 +2482,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         let result = publish(&reg, &request, prof.path()).unwrap();
@@ -2612,6 +2624,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         let result = publish(&reg, &request, prof.path()).expect("core publish is not the macro-link gate");
@@ -2648,6 +2661,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
 
@@ -2721,6 +2735,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
 
@@ -2758,6 +2773,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         publish(&reg, &request, prof.path()).unwrap();
@@ -2839,6 +2855,7 @@ mod tests {
                 excluded_regions: Vec::new(),
                 custom_objects: Vec::new(),
                 include_comments: false,
+                identity_policy: None,
                 min_app_version: String::new(),
             };
             publish(&reg, &request, prof.path()).unwrap();
@@ -2904,6 +2921,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
 
@@ -2961,6 +2979,7 @@ mod tests {
                 excluded_regions: Vec::new(),
                 custom_objects: Vec::new(),
                 include_comments: false,
+                identity_policy: None,
                 min_app_version: String::new(),
             };
             publish(&reg, &request, prof.path()).unwrap();
@@ -3105,6 +3124,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         };
         publish(reg, &request, prof)
@@ -3139,6 +3159,7 @@ mod tests {
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
             include_comments: false,
+            identity_policy: None,
             min_app_version: String::new(),
         }
     }

@@ -56,6 +56,8 @@ import {
   type WritebackStatusLine,
   type WritebackStatusTone,
 } from "../lib/writebackTabModel";
+import { subscribeWhoAmI, getWhoAmIVersion, getWhoAmI } from "../lib/whoAmIStore";
+import { whoAmIText } from "../lib/senderLabel";
 
 // ============================================================================
 // Shared view
@@ -203,8 +205,34 @@ function StatusLine({
   );
 }
 
+/**
+ * WHO YOU SEND AS (identity phase 1, owner decision 2026-10-22): "You are
+ * signed in as <name> (Windows account)", and on the second row the account
+ * itself -- the second column of the Status cluster, so the two-row fill rule
+ * holds. The full sentence rides on the tooltip.
+ */
+function useWhoAmILines(): [WritebackStatusLine, WritebackStatusLine, string] {
+  useSyncExternalStore(subscribeWhoAmI, getWhoAmIVersion, getWhoAmIVersion);
+  const { identity, error } = getWhoAmI();
+  const view = whoAmIText(identity, error);
+  return [
+    { tone: error ? "warn" : "info", text: view.text },
+    { tone: "info", text: view.account },
+    view.detail,
+  ];
+}
+
+function WhoAmILine({ line, detail, testId }: { line: WritebackStatusLine; detail: string; testId: string }) {
+  return (
+    <span title={detail || line.text} style={{ display: "inline-flex", minWidth: 0 }}>
+      <StatusLine line={line} icon={<RibbonIcon.Info size={ICON_SIZE_SM} />} testId={testId} />
+    </span>
+  );
+}
+
 export function WritebackStatusSection(_props: PanelSectionProps): React.ReactElement {
   const { summary } = useWritebackTabView();
+  const [who, account, detail] = useWhoAmILines();
   if (!summary) {
     return (
       <ControlGrid>
@@ -212,8 +240,10 @@ export function WritebackStatusSection(_props: PanelSectionProps): React.ReactEl
           line={{ tone: "info", text: "Select a cell in a writeback region" }}
           testId="writeback-tab-status-state"
         />
+        <WhoAmILine line={who} detail={detail} testId="writeback-tab-status-who" />
         <ControlGridBreak />
         <StatusLine line={{ tone: "info", text: "" }} testId="writeback-tab-status-visibility" />
+        <WhoAmILine line={account} detail={detail} testId="writeback-tab-status-account" />
       </ControlGrid>
     );
   }
@@ -221,12 +251,14 @@ export function WritebackStatusSection(_props: PanelSectionProps): React.ReactEl
   return (
     <ControlGrid>
       <StatusLine line={state} testId="writeback-tab-status-state" />
+      <WhoAmILine line={who} detail={detail} testId="writeback-tab-status-who" />
       <ControlGridBreak />
       <StatusLine
         line={visibility}
         icon={<RibbonIcon.Eye size={ICON_SIZE_SM} />}
         testId="writeback-tab-status-visibility"
       />
+      <WhoAmILine line={account} detail={detail} testId="writeback-tab-status-account" />
     </ControlGrid>
   );
 }

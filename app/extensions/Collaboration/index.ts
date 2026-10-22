@@ -55,6 +55,7 @@ import { WritebackPane } from "./components/WritebackPane";
 import {
   hasWritebackRegions,
   refreshWriteback,
+  refreshWritebackLocal,
   resetWritebackSnapshot,
   startWritebackStore,
   subscribeWritebackSnapshot,
@@ -87,6 +88,7 @@ import {
   resetWritebackTabModel,
   valuesText,
 } from "./lib/writebackTabModel";
+import { refreshCollectStreams, resetCollectStreams, wireCollectStreamsRefresh } from "./lib/collectStreamsStore";
 import { columnToLetter } from "@api/types";
 
 import { onSelectionOwnershipChanged } from "@api/selectionOwner";
@@ -776,7 +778,19 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(() => {
     resetWritebackTab();
     resetWritebackTabModel();
+    resetCollectStreams();
   });
+
+  // WRITEBACK > COLLECT FROM (lib/collectStreamsStore.ts): the one client copy
+  // of which streams this workbook collects, shared by the tab's hero and the
+  // Collected Responses pane. Read now, and again whenever the answer can have
+  // changed -- a document opened or created, a region designated or removed (a
+  // first publish creates the link) -- never on a cursor move.
+  void refreshCollectStreams();
+  // The events are listed in the store (COLLECT_STREAMS_REFRESH_EVENTS) --
+  // including ENVIRONMENTS_CHANGED_EVENT, the only event a publish (the FIRST
+  // publish creates the link), a pipeline edit and a promotion announce.
+  cleanupFns.push(...wireCollectStreamsRefresh((eventName, cb) => context.events.on(eventName, cb)));
 
   // RIGHT-CLICK SUBMIT on a writeback cell -- the same action as the tab's
   // Submit hero (preview, confirm, send, re-read). Shown only on a cell of a
@@ -956,8 +970,10 @@ function activate(context: ExtensionContext): void {
       );
     }
     // Re-read so the draft marker, the tab and the pane follow; the store
-    // repaints when the read lands.
-    void refreshWriteback();
+    // repaints when the read lands. LOCAL only: the save changed the layer,
+    // not the workspace, so a keystroke does not pay for a reconcile that
+    // reads every subscribed application's workspace.
+    void refreshWritebackLocal();
 
     // Allow the normal commit to proceed so the cell displays the value
     return { action: "allow" as const };

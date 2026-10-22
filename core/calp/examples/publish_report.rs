@@ -596,6 +596,7 @@ fn main() {
         excluded_regions,
         custom_objects: Vec::new(),
         include_comments: false,
+        identity_policy: None,
         min_app_version: String::new(),
     };
 

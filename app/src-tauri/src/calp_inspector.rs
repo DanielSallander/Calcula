@@ -1986,6 +1986,10 @@ pub struct InspectorRegionStats {
     pub approved: usize,
     pub rejected: usize,
     pub pending: usize,
+    /// WHO SENT THEM, as this computer concludes (identity phase 1): how many
+    /// answers are verified, signed but unconfirmed, not verified, or were
+    /// sent before sign-in (`calp::identity_check`).
+    pub identity: calp::IdentityCounts,
 }
 
 #[derive(Debug, Serialize)]
@@ -2006,6 +2010,9 @@ pub struct InspectorSubmissionDetail {
     /// Publisher's approve/reject feedback, when a decision exists.
     pub review_reason: Option<String>,
     pub reviewed_by: Option<String>,
+    /// The reader's identity verdict on the sender, and its plain sentence.
+    pub identity: calp::IdentityStatus,
+    pub identity_label: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -2029,6 +2036,15 @@ pub struct InspectorWriteback {
     /// submissions/_rollup.parquet (publisher-only; unsigned trust domain).
     pub rollup_present: bool,
     pub rollup_size_bytes: Option<usize>,
+    /// Verdict counts over every answer of this version (publisher-only, like
+    /// the stats; zero otherwise).
+    pub identity_counts: calp::IdentityCounts,
+    /// The version's SIGNED identity rule: count only verified senders.
+    pub require_verified: bool,
+    /// What storage this computer sees the workspace on, and the warning when
+    /// a Windows-account application's senders can never be verified there.
+    pub storage: calp::StorageKind,
+    pub storage_warning: Option<String>,
 }
 
 fn enum_str<T: Serialize>(v: &Option<T>) -> Option<String> {
@@ -2144,8 +2160,19 @@ pub fn calp_inspector_writeback(
     // environment so the section can group and label them rather than presenting
     // one pool.
     let submissions = if is_publisher {
-        reg.load_current_submissions(&package_name, &version)
-            .unwrap_or_default()
+        // Decisions count only when signed by this publisher or a co-publisher
+        // (identity phase 1); the possession check above anchors the key.
+        let scope = calp::workspace_scope(&registry_path).ok();
+        let authority =
+            crate::calp_commands::review_authority(reg, &package_name, &manifest.publisher_key, scope.as_ref());
+        // Each answer labelled with this computer's identity verdict.
+        crate::identity_verification::attested(
+            reg,
+            &package_name,
+            &version,
+            reg.load_current_submissions(&package_name, &version, &authority)
+                .unwrap_or_default(),
+        )
     } else {
         Vec::new()
     };
@@ -2158,8 +2185,8 @@ pub fn calp_inspector_writeback(
     };
 
     // KEYED BY (region, environment). See `InspectorRegionStats::environment`.
-    let mut per_region: BTreeMap<(String, String), (usize, std::collections::HashSet<String>, usize, usize, usize)> =
-        BTreeMap::new();
+    type RegionTally = (usize, std::collections::HashSet<String>, usize, usize, usize, calp::IdentityCounts);
+    let mut per_region: BTreeMap<(String, String), RegionTally> = BTreeMap::new();
     for s in &submissions {
         let entry = per_region
             .entry((s.region_id.clone(), s.environment.clone()))
@@ -2171,21 +2198,30 @@ pub fn calp_inspector_writeback(
             SubmissionState::Rejected => entry.3 += 1,
             _ => entry.4 += 1,
         }
+        entry.5.add(&s.identity);
     }
     let region_stats: Vec<InspectorRegionStats> = per_region
         .into_iter()
         .map(
-            |((region_id, environment), (count, submitters, approved, rejected, pending))| InspectorRegionStats {
-                region_id,
-                environment,
-                submission_count: count,
-                submitter_count: submitters.len(),
-                approved,
-                rejected,
-                pending,
+            |((region_id, environment), (count, submitters, approved, rejected, pending, identity))| {
+                InspectorRegionStats {
+                    region_id,
+                    environment,
+                    submission_count: count,
+                    submitter_count: submitters.len(),
+                    approved,
+                    rejected,
+                    pending,
+                    identity,
+                }
             },
         )
         .collect();
+    let identity_counts = calp::IdentityCounts::of(&submissions);
+    let storage = reg
+        .local_root()
+        .map(|root| crate::identity_verification::classify_storage(&root))
+        .unwrap_or(calp::StorageKind::Unknown);
 
     let submission_details: Vec<InspectorSubmissionDetail> = submissions
         .iter()
@@ -2204,6 +2240,8 @@ pub fn calp_inspector_writeback(
                 updated_at: s.updated_at.clone(),
                 review_reason: s.review_reason.clone(),
                 reviewed_by: s.reviewed_by.clone(),
+                identity: s.identity.status,
+                identity_label: s.identity.label(),
             }
         })
         .collect();
@@ -2229,6 +2267,14 @@ pub fn calp_inspector_writeback(
         submissions: submission_details,
         rollup_present: rollup_size_bytes.is_some(),
         rollup_size_bytes,
+        identity_counts,
+        require_verified: manifest.identity_policy.is_some_and(|p| p.require_verified),
+        storage,
+        storage_warning: if manifest.writeback_regions.as_ref().is_some_and(|r| !r.is_empty()) {
+            crate::identity_verification::publish_storage_warning(storage)
+        } else {
+            None
+        },
     })
 }
 

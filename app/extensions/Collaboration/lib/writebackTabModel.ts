@@ -28,8 +28,10 @@ import {
   type OutboundSubmissionPreview,
   type WritebackRegionDeclaration,
 } from "@api/collaboration";
+import { sentAsText } from "./senderLabel";
 import { confirmAsync, alertAsync } from "@api/dialogs";
 import { showToast } from "@api/notifications";
+import { focusCollectedResponsesRegion } from "./collectedResponsesFocus";
 import { openTaskPane, showTaskPaneContainer, showDialog } from "@api/ui";
 import { refreshGridData } from "@api/grid";
 import { emitAppEvent, AppEvents } from "@api/events";
@@ -304,7 +306,8 @@ export function outboundConfirmText(previews: readonly OutboundSubmissionPreview
   for (const p of previews) {
     if (previews.length > 1 || apps.length !== 1) lines.push(`To "${p.packageName}":`);
     lines.push(`Workspace: ${p.registryPath}`);
-    if (p.submitterName) lines.push(`Sent as: ${p.submitterName}`);
+    const sentAs = sentAsText(p);
+    if (sentAs) lines.push(`Sent as: ${sentAs}`);
     for (const v of p.values) {
       if (listed >= CONFIRM_VALUE_LINES) break;
       lines.push(valueLine(v));
@@ -666,8 +669,10 @@ export async function removeDesignatedRegion(regionId: string): Promise<void> {
   });
 }
 
-/** Open the publisher's Collected Responses pane. */
+/** Open the publisher's Collected Responses pane ON the region the cursor is
+ *  in (when there is one), not on whichever region the list puts first. */
 export function openCollectedResponses(): void {
+  focusCollectedResponsesRegion(publisherRegionId);
   openTaskPane(PUBLISHER_DASHBOARD_PANE_ID);
   showTaskPaneContainer();
 }

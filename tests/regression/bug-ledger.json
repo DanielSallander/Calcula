@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 552,
+  "nextId": 586,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -15206,6 +15206,890 @@
         "status": "fixed",
         "date": "2026-10-21",
         "description": "core/calp/src/pull.rs (PullResult.writeback_regions from the same verified manifest); app/src-tauri/src/calp_commands.rs (MaterializeMode::Checkout merges them into writeback_draft_regions by id, additive; checkout keeps the application's sheet ids so selectors are valid as signed). The grid now frames the author's own designated regions too (app/extensions/Collaboration/lib/writebackStore.ts getActiveSheetFrameRegions; lib/writebackOutline.ts). Pinned by calp_materialize_tests a_checkout_keeps_the_applications_writeback_regions_as_the_authors_own / a_subscribe_does_not_adopt_the_applications_writeback_regions, writebackStore.test.ts, and journey step 6 of app/e2e/journeys/writeback-subscriber.spec.ts (live 6/6; the 'w' check proved by sabotage: 28 -> 0)."
+      }
+    },
+    {
+      "id": "BUG-0552",
+      "status": "fixed",
+      "discovered": "2026-10-21",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Owner live test 2026-10-21: Application Inspector on C:\\writeback-test"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "inspector-workspace-pick-loads-nothing",
+        "severity": "medium",
+        "message": "Picking a workspace in the Application Inspector (Browse to workspace.calcula, a typed workspace folder, a saved workspace, or a handover naming no application) listed its applications but never loaded one: calp_inspector_resolve_location rightly returns packageName None for a workspace root, and resolveAndLoad only called loadOverview when a packageName came back. The application list stayed on 'Select application...' and every one of the eight sections showed the 'Browse ... then Inspect' hint the user had just followed, so the window read as empty tabs.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The 2026-09-25 move from a raw folder picker to the pickWorkspace file picker removed the common route that DID auto-load (aiming at an application folder, which the resolver pre-selects); the only Inspector journey (fixall-calp C6) asserted that an <option> was listed and never asserted any section content; no unit test rendered ApplicationInspectorApp.",
+      "repro": {
+        "description": "Collaboration > Application Inspector..., Browse..., pick C:\\writeback-test\\workspace.calcula (one application, writeback-test). Every tab shows the 'Browse to a workspace's workspace.calcula file ... then Inspect' hint; no calp_inspector_overview call is made until the user notices the application list at the right of the top bar, picks the application and presses Inspect."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-21",
+        "description": "app/extensions/Collaboration/components/inspector/ApplicationInspectorApp.tsx: selectAndLoad opens the application the location named, else a workspace's only application at latest (Browse, typed/saved location, and the cross-window handover, which now awaits the listing); choosing an application in the list opens it at once; a newly picked workspace clears the previous overview; the placeholder names the next step for the actual state. Pinned by extensions/Collaboration/__tests__/inspectorWorkspaceAutoLoad.test.tsx (8 tests; sabotage of the single-application branch fails 5) and the C6 positive control in app/e2e/journeys/fixall-calp.spec.ts (pointer file -> Overview title + Writeback section content)."
+      }
+    },
+    {
+      "id": "BUG-0553",
+      "status": "fixed",
+      "discovered": "2026-10-21",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Owner live test 2026-10-21: Collected Responses on writeback-test after submitting from another workbook"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "collected-responses-ignores-authors-own-regions",
+        "severity": "high",
+        "message": "Collected Responses found writeback regions only through the workbook's SUBSCRIPTIONS. The pane listed calp_get_writeback_regions (the subscriber index) and every command behind it (calp_load_region_submissions, calp_set_submission_state, both exports, the rollup get/set, calp_region_response_status, the script gateway's require_region_publisher) resolved through owning_subscription_for_region, which walks state.subscriptions only. The AUTHOR's own designated regions (writeback_draft_regions) are never subscriptions -- a working copy may not even subscribe to its own application -- so the person who designated B3:B5 and published it read 'No writeback regions in this workbook.' with answers waiting in the workspace, and the submission watch never polled the region (no 'submission received' event). The pane only worked for a publisher who also subscribed to their own application from the same workbook.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Every dashboard test and journey reviewed from a SUBSCRIBER workbook; the working-copy journey step asserted the author's region was framed and pushable but never opened Collected Responses.",
+      "repro": {
+        "description": "Designate B3:B5, publish 'writeback-test' to C:\\writeback-test. In another workbook subscribe and Submit All. Back in the publishing workbook (or a working copy via Open Application for Editing): Writeback > Collected Responses shows 'No writeback regions in this workbook.' and no responses."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-21",
+        "description": "app/src-tauri/src/calp_collection.rs: ONE publisher-side resolver (collection_for_region / publisher_collection): a designated region resolves through the WorkingCopyLink to the newest version of the application whose manifest declares it, read through the authorised developer reader (calp_inspector::open_authorized_content, CheckOnly anchor; no TOFU pin needed), then require_publisher; a subscribed region resolves as before. Every dashboard command, the script gateway gate and one shared stream walk (stream_versions) go through it; the author's default stream is every stream (one row per stream/person/cell); new command calp_list_collection_regions (835 commands) lists own regions first with a status and a sentence for not-published / push-first / not-publisher / unreachable. Frontend: PublisherDashboardPane and the submission watch read listCollectionRegions; review sends the row's own stream. Pinned by calp_collection_tests (7, the author test proved by sabotage), publisherDashboard.test.tsx, submissionWatch.test.ts, and journey step 6 of app/e2e/journeys/writeback-subscriber.spec.ts."
+      }
+    },
+    {
+      "id": "BUG-0554",
+      "status": "fixed",
+      "discovered": "2026-10-21",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Owner question 2026-10-21: subscribe again in a new workbook to writeback-test"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "resubscribe-never-shows-own-sent-values",
+        "severity": "high",
+        "message": "A workbook that did not already hold a subscriber's sent writeback values never showed them: subscribe (calp_pull -> materialize_pull_result) never touched writeback_layer, and reconcile_writeback_layer_internal returned early on an empty layer and only ever updated entries it already held, so a new workbook (or one closed without saving) that subscribed again showed blank cells although the workspace held the same subscriber's submissions (identity is per Windows user per computer). Reconcile also copied only the STATE of the newest workspace record onto an older local entry with a different id, so a value sent later from another workbook showed the OLD value marked approved.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Every writeback test and journey kept one workbook alive from submit to reconcile; nothing re-subscribed in a fresh workbook, and the reconcile test fixtures always seeded the layer first.",
+      "repro": {
+        "description": "Subscribe to writeback-test in a new workbook, type 1, 2, 3 into B3:B5, Submit All, close without saving. File > New, subscribe again: B3:B5 are blank and the layer is empty, although submissions/{your id}/ holds the three values."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-21",
+        "description": "app/src-tauri/src/calp_commands.rs: adopt_own_sent_values_inner (reconcile_writeback_layer_internal is a thin wrapper) reads this subscriber's current record per cell of every subscribed region through own_current_records_for_region (environment filter + carry-forward), never touches an unsent draft, adopts a record into an empty cell, copies only review state for the same submission, replaces a different submission whole when every version was read (ending the undo history), refuses records the current declaration rejects, keeps publisher formulas, builds the DocumentEffect only when something changes, writes the grid in phase A and recalculates in phase B, records an always-on writeback_restored audit row (core/calp/src/audit.rs), and calp_reconcile_writeback emits grid:refresh so the canvas re-reads. Pinned by 10 tests in writeback_local_sheet_tests.rs (sabotage of the adopt arm failed 6, of the replace arm failed the replace test) and step 6 of app/e2e/journeys/writeback-subscriber.spec.ts."
+      }
+    },
+    {
+      "id": "BUG-0555",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Design critique of Writeback > Collect From (critique-envs.json, problem 1), 2026-10-22"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "publisher-reads-carry-forward-without-compatibility",
+        "severity": "high",
+        "message": "load_region_current_submissions (the one row source of Collected Responses, its CSV/Parquet exports, the roster, review and the submission watch) carried answers forward from EVERY older version with no Strict-binding check and no geometry/schema compatibility check, unlike merge_lenient_submissions (GATHER and the BI datasets). A region whose selector moved or shrank between versions showed last quarter's answers filed against the wrong rows, and a Strict region showed answers from versions it had refused; once the author's BI writeback tables read the same rows, a model table would have aggregated them -- a plausible but wrong total.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Every Collected Responses fixture published one geometry; the carry-forward rule lived in two places and only the GATHER copy was ever tested against a moved region.",
+      "repro": {
+        "description": "Publish v1.0.0 with a writeback region on B3:B5 and collect an answer in B3. Publish v1.1.0 with the same region id moved to B5:B7 (or with version binding Strict). Open Collected Responses on the author's workbook: the v1.0.0 answer for B3 is listed and exported, although B3 is no longer in the region (GATHER on a subscriber correctly drops it)."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "app/src-tauri/src/calp_commands.rs: one rule, carries_forward_from (Strict + preserves_cell_meaning_of + schema), used by merge_lenient_submissions AND by the publisher reads through calp_collection::collected_versions, which keeps an older version only when its VERIFIED declaration (developer door for an author, the pin for a subscriber) is compatible with read_version's. Pinned by calp_collection_tests an_incompatible_or_strict_older_version_contributes_no_rows (sabotage: collected_versions keeps every version -> fails)."
+      }
+    },
+    {
+      "id": "BUG-0556",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Identity phase 1 (owner decision 2026-10-22): design-identity review + critique-identity.json"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-identity-copyable",
+        "severity": "high",
+        "message": "A writeback submitter was a random UUID read from %LOCALAPPDATA%\\Calcula\\subscriber-identity.json (calp::identity_provider::load_or_create). The id is a folder name every workspace reader can see, and the only check (the file's submitter.id equals its folder) is consistency, not authentication: anybody who could write the workspace could file answers under anybody's id, and a person who copied a colleague's id could send as that colleague.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The design doc claimed authentication 'falls out of corporate SSO/AD' (corrected 2026-10-21); no test ever wrote a file under someone else's id.",
+      "repro": {
+        "description": "Copy any submissions/<id>/ folder name into a hand-written event file under submissions/<id>/ in the workspace: the publisher's inbox, GATHER and the BI tables count it as that person's answer."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "Identity phase 1: the sender is the Windows account (SID + MACHINE\\user / DOMAIN\\user) bound to a per-user Ed25519 key in the Credential Manager (app/src-tauri/src/submitter_identity.rs); the id win-<SID>-<key commitment> commits to the key (core/calp/src/identity_provider.rs); every answer is signed over a fixed-order payload covering the whole identity, value, cell, region, application, version, environment and origin (core/calp/src/submission_seal.rs); the fold refuses unsigned / foreign-signed / edited / copied answers (core/calp/src/fold.rs). Pinned by fold::tests::a_forged_newer_answer_under_my_id_never_shadows_mine, submission_seal::tests::changing_any_signed_field_breaks_the_seal and app/src-tauri/src/submitter_identity_tests.rs::a_forged_answer_under_a_signed_id_never_reaches_the_inbox (sabotage-proven)."
+      }
+    },
+    {
+      "id": "BUG-0557",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Identity phase 1 (owner decision 2026-10-22): design-identity review + critique-identity.json"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-reviews-unsigned",
+        "severity": "high",
+        "message": "Publisher approve / reject / re-open decisions (ReviewEvent under {version}/reviews/) were unsigned, and the fold applied ANY review event targeting a submission id. Anybody who could write the workspace could approve their own answers into an on_approval GATHER total or a masterData column (newest approved wins), or reject a rival's.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The publisher gate (require_publisher) guarded the COMMAND that writes a review; nothing checked the FILE a reader folds, and every test wrote reviews through the gated command.",
+      "repro": {
+        "description": "Write {application}/{version}/reviews/x.json with newState 'approved' targeting any submission id: the inbox shows it approved and an on_approval GATHER counts it."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "Reviews carry a seal by the publisher's key or an authorised co-publisher's (calp::publishers::review_keys, the same set require_publisher_key accepts) and the digest of the exact answer decided; the fold ignores unsigned, foreign-signed and edited decisions and lists them (FoldOutcome::ignored_reviews); the review authority's co-publisher root is this computer's pin or developer anchor, never the unsigned version list. Pinned by fold::tests::unsigned_or_foreign_or_edited_reviews_are_ignored, app/src-tauri/src/submitter_identity_tests.rs::approvals_are_signed_and_a_forged_approval_is_ignored and ::a_planted_first_version_cannot_buy_a_review_authority (sabotage-proven)."
+      }
+    },
+    {
+      "id": "BUG-0558",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Identity phase 1 (owner decision 2026-10-22): design-identity review + critique-identity.json"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-fold-dedup-by-event-id",
+        "severity": "high",
+        "message": "fold_submissions deduplicated events by event id ALONE before any slot existed: a file planted in another sender's folder that reused a real answer's event id with a newer updated_at replaced it, and a review targeting that id applied to the clone too.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Event ids are UUIDs and the fixtures never reused one across folders; the loader's hygiene check only requires the filename stem to END with _{id}.",
+      "repro": {
+        "description": "Copy alice's event into submissions/bob/x_<alice-event-id>.json with a newer updatedAt and another value: the fold's step 1 kept the clone and dropped alice's answer."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "core/calp/src/fold.rs: dedup per (sender, event id), a signed event outranks an unsigned one, ties broken by (updated_at, id, digest); a review applies only when it names the record's id, sender AND digest. Pinned by fold::tests::a_reused_event_id_in_another_folder_cannot_displace_a_real_answer (sabotage-proven)."
+      }
+    },
+    {
+      "id": "BUG-0559",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Identity phase 1 (owner decision 2026-10-22): design-identity review + critique-identity.json"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-planted-record-adopted",
+        "severity": "high",
+        "message": "Reconcile (adopt_own_sent_values_inner) adopted -- and could REPLACE -- cell values from any well-formed record filed under this subscriber's self-asserted id, so a record planted in the workspace was shown in the subscriber's cell as 'what you last sent', recalculated, and on a replace ended their undo history (open-items 2.am).",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The only check was that the folder name and the record's submitter.id equal this computer's id, which anybody could read off the share.",
+      "repro": {
+        "description": "Write a record into submissions/<victim-id>/ for a cell of a subscribed region; on the victim's next reconcile the cell shows the planted value."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "One predicate, calp::submission_seal::is_mine (my id AND signed by my key), in own_records_by_region_in and again in adopt_own_sent_values_inner, apply_gather_governance's own_only / own_plus_aggregate and the one-shot lifecycle check. Pinned by writeback_local_sheet_tests::a_record_planted_under_my_id_is_never_adopted, app/src-tauri/src/submitter_identity_tests.rs::only_what_my_key_signed_is_mine and gather_governance_tests::a_record_under_my_id_that_i_did_not_sign_is_not_mine (sabotage-proven)."
+      }
+    },
+    {
+      "id": "BUG-0560",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Identity phase 1 (owner decision 2026-10-22): design-identity review + critique-identity.json"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-substring-principal-match",
+        "severity": "medium",
+        "message": "Expected respondents (compute_response_status) and masterData allowed editors (bi/writeback.rs editor_allowed / check_editor_allowed, calp_commands.rs submit_model_writeback) matched case-insensitively with a SUBSTRING fallback either way on the display name: 'Al' answered for 'Alice' and 'Alan', and any display name containing an allowed editor's name could edit master data.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The fallback was added so 'Alice' would match 'Alice (North)'; the display name was self-asserted and nothing tested a fragment.",
+      "repro": {
+        "description": "allowedEditors ['alice']; a sender whose display name is 'Malice' passes the master data gate."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "THE ONE MATCHER calp::identity_provider::principal_matches: exact, case-insensitive, on the SIGNED principal or the id, never the display name, never a substring; an unsigned answer matches by id only. Pinned by identity_provider::tests::the_matcher_is_exact_never_substring_never_display_name, gather_governance_tests::response_status_matches_and_lists_missing and bi::writeback::tests::master_data_editor_gate."
+      }
+    },
+    {
+      "id": "BUG-0561",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Identity phase 1 (owner decision 2026-10-22): design-identity review + critique-identity.json"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-signing-doors-feature-open",
+        "severity": "medium",
+        "message": "calp_submit_region, calp_submit_all_regions, calp_save_writeback_draft (an immediate region sends on save), bi_writeback_set_value, calp_set_submission_state, calp_set_model_submission_state and calp_get_subscriber_identity were FEATURE-OPEN: a non-trusted extension's governed backend door could send answers as the user and, on the publisher's machine, approve or reject as the publisher.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "They predate the backend capability model's denylist, which lists the dangerous few; a submit was not considered dangerous until it became a SIGNED act.",
+      "repro": {
+        "description": "assertExtensionMayInvoke('calp_submit_region', { trusted: false }) did not throw."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "app/src/api/backendCommands.ts collaborationTrust lists all seven (privileged 115 -> 122, docs/design/backend-facade.md); scripts keep the consent-gated broker (script_writeback) and their answers are signed with origin 'script'. Pinned by app/src/api/__tests__/backendCommands.test.ts ('classifies privileged vs feature-open commands', sabotage-proven) and app/src-tauri/src/submitter_identity_tests.rs::every_answer_is_signed_and_every_door_names_its_origin."
+      }
+    },
+    {
+      "id": "BUG-0562",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "identity-surface review of identity phase 1 (critique-identity item 1)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-forged-name-indistinguishable",
+        "severity": "high",
+        "message": "After identity phase 1 every answer is signed, but a colleague can mint a key of their own and sign an answer that CLAIMS another person's Windows SID and principal (a valid signature under a different id). Collected Responses showed it as 'Signed as CORPalice', the roster matched it to the expected respondent CORPalice, and GATHER totals, the BI tables and scripts counted it -- with nothing anywhere distinguishing it from Alice's own answer, and no way for a publisher to count only answers whose sender could be confirmed.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The signature checks were complete for what they claim (the key the id names); the name inside a signed answer is the sender's own claim, documented as unproven, and no reader looked at who WROTE the file.",
+      "repro": {
+        "description": "Workspace on an NTFS share. Bob signs, with his own key, an answer whose identity names Alice's SID and CORPalice, and saves it from his account. Publisher opens Collected Responses: the row reads 'Signed as CORPalice'; the roster shows CORPalice responded; =GATHER totals include Bob's value."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "Read-side verification (core/calp/src/identity_check.rs, app/src-tauri/src/identity_verification.rs): every reader labels each answer Verified / Signed, identity not confirmed / Not verified: written by X / Sent before sign-in from the NTFS owner of the answer's file, only where that record means something (never a sync folder, never a local account on a share, administrator owner = unconfirmed). A per-application signed rule (VersionManifest.identityPolicy.requireVerified, Publish dialog) makes GATHER, the roster, the BI tables and scripts count only Verified answers; the inbox and exports show the rest marked 'not counted'. A Verified sender is matched in the roster by the name Windows resolves for the file's writer. Pinned by identity_surface_tests (under_the_rule_only_verified_answers_count_and_the_rest_are_shown_labelled, gather_and_the_bi_table_count_only_verified_answers_under_the_rule, real_os_my_own_answer_is_verified_and_a_claimed_neighbour_is_not) and core identity_check tests, each sabotage-proven. On storage that cannot verify (Dropbox/OneDrive) the answer is labelled unconfirmed; Entra ID (phase 2) is the remedy there."
+      }
+    },
+    {
+      "id": "BUG-0563",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Critique of the envs + identity phase 1 work (fixer round 2026-10-22)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-prod-answers-dropped-when-line-ahead",
+        "severity": "high",
+        "message": "With the development line ahead of prod (prod -> 1.0.0, unpromoted head 1.1.0 that moved the region or made it Strict), the author's DEFAULT (prod) view dropped every prod answer: collected_versions judged prod's 1.0.0 answers against the HEAD's declaration, so Collected Responses, the roster, the exports, review ('No submission found') and the author's BI table showed nothing for the live stream -- only a log line recorded it. A prod subscriber's GATHER, which judges against prod's own version, still counted them.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Every environments test had head == prod or no environments; the carry-forward rule was written for one base per read.",
+      "repro": {
+        "description": "Pipeline [prod]; promote prod to 1.0.0; a prod answer in 1.0.0; push 1.1.0 moving the region two rows down; open Collected Responses with the default choice: empty."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "Each environment stream is carried forward from its OWN base (RegionCollection::stream_bases, set by AuthorWalk::resolve from the authorised pointer when it names an older version) and judged against that version's verified declaration; CollectedVersions::filter_for gives every reader the streams read from each version (load_region_collected_rows, the review search). Pinned by calp_collection_tests::the_default_prod_view_keeps_prods_answers_when_the_line_is_ahead (moved and Strict heads; inbox, roster, CSV, review, BI table), sabotage-proven."
+      }
+    },
+    {
+      "id": "BUG-0564",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Critique of the envs + identity phase 1 work (fixer round 2026-10-22)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-case-variant-sender-folder-drops-answers",
+        "severity": "high",
+        "message": "load_submission_events_by dropped every file whose sender id was not byte-equal to its folder name. On Windows storage WIN-<id> and win-<id> are one folder, sender ids are public and stable, so a share-writer could create submissions/WIN-<Alice's id>/ before Alice answered: her later answers landed there and the publisher's scan skipped them in silence (she saw them as sent). An unsigned plant under the case-variant id read as 'sent before sign-in' (is_signed_id was case-sensitive), and principal_matches compared ids case-insensitively, so the plant could satisfy an expected-respondent entry naming Alice's id.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "No test made a folder in advance; the folder-name check predated public, stable sender ids.",
+      "repro": {
+        "description": "Create submissions/WIN-<alice id>/ in a version Alice has not answered; Alice submits; the publisher's inbox does not list her answer."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "core/calp/src/workspace.rs compares the folder and the content id ignoring ASCII case (the folder is not authority; the seal is); identity_provider::is_signed_id treats any case of win-/entra- as a signed claim (so an unsigned case variant is FORGED and a signed one can never parse); principal_matches compares the id exactly. Pinned by workspace::tests::a_differently_cased_folder_made_in_advance_drops_no_answer and identity_provider tests, sabotage-proven."
+      }
+    },
+    {
+      "id": "BUG-0565",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Critique of the envs + identity phase 1 work (fixer round 2026-10-22)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-verified-by-moved-file-owner",
+        "severity": "high",
+        "message": "'Verified' rested on the NTFS owner of an answer file alone. The owner records who CREATED a file, and NTFS/SMB keep it when a file is moved within a volume or overwritten by another account, so on a share with the common inherited Modify right Mallory could move a file Alice created into his own forged-id folder, overwrite it with his signed answer, and have it read 'Verified', written by CORP\\alice, counted under 'count only verified senders' and matched as Alice.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The owner check was proven on files their creator wrote; nobody modelled a file changing hands after creation.",
+      "repro": {
+        "description": "On a share where Authenticated Users have Modify: sign an answer under win-<Alice SID>-<own key>, move an old file of Alice's into that folder, overwrite its content. The inbox reads Verified."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "app/src-tauri/src/identity_verification.rs reads the file's DACL with its owner (GetNamedSecurityInfoW OWNER|DACL): when any account other than the owner, SYSTEM and Administrators holds a right to write, delete or re-own it, or the sender folder is owned by another account, the verdict is 'Signed, identity not confirmed (other accounts can change this answer's file...)' (IdentityReason::OthersCanChange). Pinned by identity_check::tests::an_owner_match_on_a_file_others_can_change_is_not_verified, identity_verification::tests::the_dacl_rule_for_who_else_may_change_a_file and real_os_the_dacl_reader_sees_who_else_may_change_a_file, identity_surface_tests::on_a_share_where_others_can_change_the_files_nothing_is_verified; sabotage-proven."
+      }
+    },
+    {
+      "id": "BUG-0566",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Critique of the envs + identity phase 1 work (fixer round 2026-10-22)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "publish-dialog-switches-identity-rule-off",
+        "severity": "high",
+        "message": "The Publish/Push dialog always sent requireVerifiedIdentity, starting from an unticked box and adopting the base's rule only when the preview reported it. The preview swallowed a failed base read (.ok()), and Push could be pressed before the preview returned, so a push silently wrote NO rule into the signed manifest -- switching 'count only verified senders' off around Rust's CALP_PUSH_IDENTITY_RULE_UNKNOWN refusal, which only fires when no choice is sent.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The Rust test covered only the None path, which the dialog never took; no TS test covered the checkbox.",
+      "repro": {
+        "description": "Base version with the rule on; make the base unreadable to the preview (or press Push immediately); push: the new version counts every answer."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "PublishDialog sends the rule only when the author moved the box (lib/pushReadiness.ts identityRuleToSend), so Rust keeps the verified base's rule or refuses; the preview now says when it cannot read the base's rule (a warning, never a silent off). Pinned by pushReadiness.test.ts (identityRuleToSend + the dialog's call site) and identity_surface_tests::the_storage_warning_is_wired_into_publish_and_its_preview; sabotage-proven."
+      }
+    },
+    {
+      "id": "BUG-0567",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Critique of the envs + identity phase 1 work (fixer round 2026-10-22)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-refuted-name-matched-and-shown",
+        "severity": "medium",
+        "message": "A sender's self-claimed principal and display name kept deciding matches and display after the reader had disproved them: a Verified Mallory claiming 'CORP\\alice' edited a masterData column whose allowlist named Alice (requireVerified on), a Not-verified answer ('written by CORP\\bob') still made Alice 'responded' in the roster when the rule was off (the roster half of BUG-0562), and Collected Responses showed a green 'Signed as CORP\\alice' above a red 'Not verified: written by CORP\\bob'.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "BUG-0562's fix swapped in the proven name only for Verified answers in the roster; the editor gate and the sender line were not revisited.",
+      "repro": {
+        "description": "Rule off; Bob signs an answer claiming CORP\\alice; the roster lists CORP\\alice as responded and the row reads 'Signed as CORP\\alice'."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "calp::identity_check::matching_identity / answer_matches / shown_name: a Verified answer matches by the recorded writer (by no name when it claimed another), a Not-verified one by no name; the roster and the masterData gate (bi/writeback.rs entry_may_edit, which also refuses Not-verified entries) use them; senderLine words an unverified name as the sender's claim in a neutral tone; the CSV/Parquet exports carry writtenBy. Pinned by identity_check::tests::answers_match_by_the_proven_account_never_a_refuted_claim, identity_surface_tests::the_roster_never_matches_a_refuted_name_even_without_the_rule, bi::writeback::tests::a_verified_entry_claiming_an_allowed_editor_it_is_not_is_refused, senderLabel.test.ts; sabotage-proven."
+      }
+    },
+    {
+      "id": "BUG-0568",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Critique of the envs + identity phase 1 work (fixer round 2026-10-22)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-cellguard-signed-as-typed",
+        "severity": "medium",
+        "message": "A script's setCellValue into a claimed cell (the gateway's cellGuard action) went through the typed-by-the-user command, so an immediate region's send was SIGNED with origin Immediate ('the user typed it') -- a permanent wrong label inside the signature.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The origin census covered the SaveDraft and SubmitRegion arms only.",
+      "repro": {
+        "description": "A script with distribution.writeback writes into an immediate region's cell: the publisher reads 'sent on save'."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "The CellGuard arm calls save_writeback_draft_with_origin(.., SubmissionOrigin::Script); submitter_identity_tests::every_answer_is_signed_and_every_door_names_its_origin now requires it (sabotage-proven)."
+      }
+    },
+    {
+      "id": "BUG-0569",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Critique of the envs + identity phase 1 work (fixer round 2026-10-22)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-unsigned-answers-accepted-in-signed-versions",
+        "severity": "medium",
+        "message": "check_submission accepted any unsigned answer under a non-win-/entra- id as 'sent before sign-in' in EVERY version, so anyone who can write the share could add unlimited unsigned respondents (any display name) to versions only signing apps can open; with the rule off they reached GATHER, BI tables, scripts and the roster.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "'Before sign-in' was meant for old answers, but nothing tied it to versions that predate signing.",
+      "repro": {
+        "description": "Publish a version from this app; drop an unsigned answer file under a random id: it is listed, counted and named in the roster."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "VersionManifest.signed_answers (signed; written by every publish with writeback regions/columns and a minimum app version, which the app always stamps for them); LocalWorkspace::answers_must_be_signed decides from the VERIFIED manifest (fail closed on a broken signature or a key the reader's authority does not admit) and the fold treats an unsigned answer there as forged (FoldContext.unsigned_is_forged, check_submission_in). Pinned by fold::tests::an_unsigned_answer_in_a_version_that_requires_signatures_is_forged and identity_surface_tests::an_unsigned_answer_in_a_version_with_signed_answers_is_forged; sabotage-proven."
+      }
+    },
+    {
+      "id": "BUG-0570",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Critique of the envs + identity phase 1 work (fixer round 2026-10-22)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "collect-from-default-follows-unauthorised-pipeline",
+        "severity": "medium",
+        "message": "The author's default stream (the pipeline's last environment) ignored unauthorized_pointer: a Pipeline record signed by a key the application no longer authorises (a removed co-publisher, or a share-writer's self-signed record) retargeted the publisher's inbox, roster and BI tables, while the subscriber side refused the same state.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "default_filter, summary_of and streams_view each took environments.last() themselves.",
+      "repro": {
+        "description": "A co-publisher redefines the pipeline and is then removed: Collected Responses follows their last environment."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "One helper, calp_collection::default_environment: the last environment whose pointer is authorised, and a refusal with a sentence when the latest Pipeline record is unauthorised (every entry marked); used by default_filter, summary_of and the Collect From view. Pinned by calp_collection_tests::the_default_refuses_a_pipeline_set_by_an_unauthorised_key (sabotage-proven)."
+      }
+    },
+    {
+      "id": "BUG-0571",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Critique of the envs + identity phase 1 work (fixer round 2026-10-22)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "collect-from-quick-ticks-lose-toggles",
+        "severity": "medium",
+        "message": "In the stay-open Collect From menu each click sent an absolute set computed from the menu's last render; a second tick made while the first was on its way to Rust was computed from the old view and overwrote the first (untick test, quickly tick dev: test came back).",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The store serialised the requests but did not recompute them.",
+      "repro": {
+        "description": "From {prod,test}: untick test and immediately tick dev -> {prod,test,dev}."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "collectStreamsStore.toggleCollectStream computes the next set inside the write chain from the view at the moment the request runs; the menu rows call it. Pinned by collectStreamsStore.test.ts (two ticks before the first resolves), sabotage-proven."
+      }
+    },
+    {
+      "id": "BUG-0572",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Critique of the envs + identity phase 1 work (fixer round 2026-10-22)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "collect-from-stale-after-first-publish",
+        "severity": "medium",
+        "message": "After a first publish the Collect From control stayed disabled ('Publish first') until a region changed or the file was reopened, and a pipeline edit or promotion left the hero's default and the pane's lists stale: the store refreshed only on open/new/region events, and a publish, pipeline edit or promotion announces only ENVIRONMENTS_CHANGED_EVENT.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The handoff assumed the region event covered a first publish.",
+      "repro": {
+        "description": "Designate a region in a new workbook, publish it: the Collect From hero stays disabled."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "collectStreamsStore.COLLECT_STREAMS_REFRESH_EVENTS includes ENVIRONMENTS_CHANGED_EVENT (wired by wireCollectStreamsRefresh in index.ts) and Collected Responses reloads its regions on it. Pinned by collectStreamsStore.test.ts and publisherDashboard.test.tsx, sabotage-proven."
+      }
+    },
+    {
+      "id": "BUG-0573",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Critique of the envs + identity phase 1 work (fixer round 2026-10-22)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-author-pass-takes-over-subscription-table",
+        "severity": "medium",
+        "message": "When a publisher also subscribes to their own application from the same workbook, the new author BI pass claimed the region and the subscription loop skipped it: a model table imported earlier with the subscription's columns silently switched to the Collect From stream and received a batch with an environment column it was not imported with.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "'Subscribed tables keep their schema' held only when the region was not also designated.",
+      "repro": {
+        "description": "Subscribe to your own application, import its region as a model table, then designate the region in the workbook and refresh."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "The subscription view of an author-served region is still built as a SHADOW dataset (never offered for import), served under '{id}#subscription' to any bound table without an environment column (writeback_source::served_key); a new import gets the author table. Pinned by identity_surface_tests::a_designated_and_subscribed_region_keeps_the_subscriptions_view_as_a_shadow and writeback_source::tests::a_table_imported_from_the_subscription_keeps_reading_it, sabotage-proven."
+      }
+    },
+    {
+      "id": "BUG-0574",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Critique of the envs + identity phase 1 work (fixer round 2026-10-22)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "collected-responses-header-counts-uncounted",
+        "severity": "medium",
+        "message": "Under 'count only verified senders' the Collected Responses header (respondents, pending, approved, rejected) counted every row, right beside a strip saying the uncounted answers are 'left out of every total' and a roster line counting only counted rows.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The header predates the rule; the strip was added beside it.",
+      "repro": {
+        "description": "Rule on, one verified and two unverified senders: '3 respondents' next to '1 of 3 expected responded'."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "senderLabel.headerRows: under the rule the header counts counted rows only. Pinned by publisherDashboard.test.tsx 'under the rule, the header totals leave the uncounted answers out' (sabotage-proven)."
+      }
+    },
+    {
+      "id": "BUG-0575",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Critique of the envs + identity phase 1 work (fixer round 2026-10-22)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "publish-no-warning-for-unverifiable-storage",
+        "severity": "medium",
+        "message": "No publish warning for storage where 'count only verified senders' can count nothing (an HTTP or unreadable workspace classifies Unknown, which got no warning), the sync-folder warning and the checkbox promised verification on any network share (wrong for local accounts on a workgroup/NAS share), and the warning box said warnings 'only degrade for subscribers' although this one is about the publisher's own counts.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "publish_storage_warning matched only SyncFolder and NoOwnerRecords.",
+      "repro": {
+        "description": "Publish into an HTTP workspace with writeback regions: no warning; every answer later reads unconfirmed."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "publish_storage_warning warns for Unknown storage too and names what a share needs (domain accounts, per-sender folders only that sender can change); the checkbox says the same; the warning box header no longer claims subscriber-only effects. Pinned by identity_verification::tests::the_storage_rule (not separately sabotaged)."
+      }
+    },
+    {
+      "id": "BUG-0576",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Critique of the envs + identity phase 1 work (fixer round 2026-10-22)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-submit-signs-crafted-draft-claims",
+        "severity": "low",
+        "message": "Submit checked only a draft's id against this computer's identity and then signed the draft's own principal, display name and scope -- read from the workbook -- so a crafted .cala could have this user's key sign 'CORP\\ceo' or a scope that switches the owner check off, while the confirmation showed the OS identity.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "seal_submission checks the id/key commitment only; the drafts were assumed to carry the identity they were typed with.",
+      "repro": {
+        "description": "Edit writeback_drafts.json: keep your id, set principalName to CORP\\ceo; Submit All: the signed record claims CORP\\ceo."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "submitter_identity::seal_outgoing replaces the whole sender identity with current_identity() before signing (refusing a foreign id). Pinned by submitter_identity::tests::seal_outgoing_signs_only_as_this_computer (sabotage-proven)."
+      }
+    },
+    {
+      "id": "BUG-0577",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Critique of the envs + identity phase 1 work (fixer round 2026-10-22)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-publisher-gate-unverified-root",
+        "severity": "low",
+        "message": "require_publisher_key took its co-publisher root from the application's first version read WITHOUT a signature check (review_keys with no trusted root), unlike every reader's review authority (pin or developer anchor): a planted first version plus a planter-signed list passed the gate; and root_key_of trusted an edited first manifest's publisher_key.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The one-key-set claim was proven for readers only.",
+      "repro": {
+        "description": "As a subscriber who pinned the real publisher, plant 0.0.1 signed with your key and a list naming you: the publisher gate admits your profile."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "calp_commands::trusted_review_root is THE root for review_authority and require_publisher_key (now scoped); calp::publishers::root_key_of verifies the first manifest's signature. Pinned by submitter_identity_tests::a_planted_first_version_does_not_pass_the_publisher_gate (sabotage-proven)."
+      }
+    },
+    {
+      "id": "BUG-0578",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Critique of the envs + identity phase 1 work (fixer round 2026-10-22)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-review-authority-rollback",
+        "severity": "low",
+        "message": "Review authority accepted any root-signed publishers.json without the revision high-water mark the developer doors enforce, so restoring an older list made a removed co-publisher's signed approvals count again in every reader's fold, the author's included.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The rollback guard was built for the push doors; reviews became signature-decided later.",
+      "repro": {
+        "description": "Author anchored at list revision 3; restore revision 2 naming a removed co-publisher: their decisions count."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "calp::publishers::review_keys takes min_revision and refuses a lower list (PublisherListRolledBack); the author's developer anchor supplies its mark through trusted_review_root. The subscriber side keeps no mark yet (open-items 2.am). Pinned by publishers::tests::review_keys_refuse_a_list_below_the_seen_revision and submitter_identity_tests::a_rolled_back_co_publisher_list_buys_no_review_authority, sabotage-proven."
+      }
+    },
+    {
+      "id": "BUG-0579",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Critique of the envs + identity phase 1 work (fixer round 2026-10-22)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-review-decision-no-origin",
+        "severity": "low",
+        "message": "Review decisions carried no origin, so an approved script on a publisher's computer approving answers produced decisions indistinguishable from the publisher's own.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Answers got a signed origin in phase 1; decisions did not.",
+      "repro": {
+        "description": "A script calls setSubmissionState(approved): the inbox shows 'Reviewed by <publisher>'."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "ReviewSeal.origin (inside the signature when not Interactive; seal_review_with_origin); the gateway's review arms pass Script; the fold shows the reviewer as '<name> (by a script)'. Pinned by submission_seal::tests::a_scripts_review_decision_carries_its_origin_in_the_signature, fold::tests::a_scripts_decision_names_the_script and the gateway census; sabotage-proven."
+      }
+    },
+    {
+      "id": "BUG-0580",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Critique of the envs + identity phase 1 work (fixer round 2026-10-22)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-identity-disclosed-by-feature-open-commands",
+        "severity": "low",
+        "message": "calp_get_subscriber_identity was denylisted for naming the account's SID and principal, but calp_get_writeback_layer, calp_reconcile_writeback and calp_preview_region_submission -- feature-open -- return drafts and previews carrying the same identity.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The denylist was extended door by door.",
+      "repro": {
+        "description": "From a non-trusted extension, invoke calp_get_writeback_layer: every draft carries the sender's win-<SID> id and principal."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "The three commands are on the collaborationTrust denylist (backendCommands.ts); backendCommands.test.ts pins all of them (sabotage-proven). Counts: 125 privileged / 711 feature-open."
+      }
+    },
+    {
+      "id": "BUG-0581",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Critique of the envs + identity phase 1 work (fixer round 2026-10-22)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-foreign-draft-raw-ids",
+        "severity": "low",
+        "message": "A draft typed on another computer (an ordinary laptop/desktop path) was refused with two raw win-S-1-5-21-... ids and no way out.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The before-sign-in branch was worded; the signed branch was not.",
+      "repro": {
+        "description": "Save a workbook with drafts on one computer, open it on another, Submit."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "foreign_draft_refusal names the account the values were typed as and the remedy (Writeback > Discard Drafts). Pinned by submitter_identity_tests::a_draft_typed_before_sign_in_is_refused_never_restamped."
+      }
+    },
+    {
+      "id": "BUG-0582",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Critique of the envs + identity phase 1 work (fixer round 2026-10-22)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "collect-from-read-failure-shown-as-publish-first",
+        "severity": "low",
+        "message": "A failed Collect From read was kept as an error nobody showed: the hero read 'Publish this workbook's application first' for a published application, and a failed re-read kept a stale view with no sign of the failure.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "getCollectStreamsError had no consumer.",
+      "repro": {
+        "description": "Make the workspace unreachable, open the Writeback tab: 'Publish first'."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "heroTooltip/heroBadge take the error ('Could not read which streams this workbook collects: ...', a '!' badge, 'may be out of date' on a stale view); the menu shows the error and a failed read keeps the trigger clickable as the retry. Pinned by collectStreamsStore.test.ts (sabotage-proven)."
+      }
+    },
+    {
+      "id": "BUG-0583",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Critique of the envs + identity phase 1 work (fixer round 2026-10-22)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-bi-author-pass-rewalks-on-main-thread",
+        "severity": "low",
+        "message": "The BI author pass re-listed every region (subscribed applications included) and opened a NEW workspace walk per region, from bi_list_writeback_tables -- a sync command on the main thread -- and from the 60-second poll; an invalidation-driven rebuild did not record its fingerprint, so the next poll rebuilt again; and Collect From's Set read every version's answers for stream tags twice more.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The author pass was layered on the listing and publisher_collection for reuse, not cost.",
+      "repro": {
+        "description": "A workbook with several own regions on a slow share: opening the model import list freezes the window."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "calp_collection::ready_author_collections (one walk, one gate per key, no subscriber half) feeds collect_author_datasets; bi_list_writeback_tables is #[tauri::command(async)]; refresh_writeback_sources records the poll fingerprint; AuthorWalk caches stream tags per walk and Set re-links the same walk."
+      }
+    },
+    {
+      "id": "BUG-0584",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Live round 2026-10-22: identity + environments (writeback-subscriber / writeback-collect-streams journeys)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "identity-owner-lookup-beyond-max-path",
+        "severity": "high",
+        "message": "The reader's identity check asked Windows for an answer file's owner with the PLAIN path (identity_verification::plain_path). Calcula is not long-path aware, so GetNamedSecurityInfoW fails with ERROR_INVALID_NAME (123) for any path beyond MAX_PATH (260). An answer's file sits ~170 characters below its workspace ({app}\\{version}\\submissions\\win-<SID>-<32 hex>\\<region>_<row>_<col>_<id>.json), so in ANY workspace deeper than ~90 characters every answer read 'Signed, identity not confirmed (cannot be checked here: Windows did not say who wrote the file)' -- the owner's own answers in a %TEMP% copy of C:\\writeback-test included. Under 'count only verified senders' that would have counted NOTHING. The failure was not logged anywhere.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "Every real-OS test wrote its answers into a fresh TempDir (short path), and the live journeys were not re-run after identity phase 1; the verdict carried no error text and nothing was logged.",
+      "repro": {
+        "description": "Submit an answer into a workspace at %TEMP%\\calcula-writeback-subscriber\\workspace; Open Application for Editing; Collected Responses: Identity reads 'cannot be checked here: Windows did not say who wrote the file' although Get-Acl names the owner (Danne\\Salle). App log (after adding the warning): 'error 123'."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "app/src-tauri/src/identity_verification.rs: new api_path() hands the security calls the VERBATIM spelling (\\\\?\\C:\\..., \\\\?\\UNC\\server\\share\\...; relative, device and ./.. paths stay plain); owner_and_dacl and file_owner use it. An unreadable owner is now logged with its reason (both Unreadable arms of owner_of_answer). Pinned by identity_verification::tests::real_os_a_file_deeper_than_max_path_is_read_like_a_short_one, identity_surface_tests::real_os_my_own_answer_in_a_deep_workspace_is_verified (both fail when api_path returns plain_path: verdict OwnerUnreadable), the api_path spelling asserts, and live by app/e2e/journeys/writeback-subscriber.spec.ts step 7 (each answer 'Verified: written by Danne\\Salle (Windows account)'; the same sabotage live turns it into signedUnconfirmed)."
+      }
+    },
+    {
+      "id": "BUG-0585",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Live round 2026-10-22: identity + environments (writeback-subscriber / writeback-collect-streams journeys)"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "writeback-model-table-name-unreferenceable",
+        "severity": "high",
+        "message": "bi_import_writeback_tables named the imported table after its readable dataset name ('WB writeback-test Sheet1 (2)!B3:B5'). The model's validator accepts that, but the measure language reads a table only as a bare identifier ([A-Za-z0-9_] plus '.') and has no quoting, so no measure could reference the table: SUM('...'[value_number]) fails with \"unexpected character: '''\" and the bare spelling at '!'. With no measure there is no pivot value, no bi_query (\"at least one measure is required\"), no CUBE formula and no value list -- the imported writeback table could be listed but never read.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The writeback BI tests check the dataset encoder and the table listing (bi_list_writeback_tables.rowCount), never a query through a measure; the Model Editor import shows the table, which looks done.",
+      "repro": {
+        "description": "In a working copy with a writeback region: bi_model_create_blank, bi_import_writeback_tables([region]), then bi_model_upsert_measure with SUM('WB writeback-test Sheet1 (2)!B3:B5'[value_number]) -> parse error; bi_query with no measure -> 'at least one measure is required'."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "app/src-tauri/src/bi/writeback_source.rs: model_table_name() gives the imported table a model name of letters, digits and '_' only (WB_writeback_test_Sheet1_2_B3_B5; a leading digit gets 'WB_'; no '.', which reads as schema.table), deduped with _2, _3; the readable name becomes the table's DISPLAY name. Pinned by bi::writeback_source::tests::an_imported_writeback_table_is_named_so_a_measure_can_reference_it (parses SUM(<name>[value_number]) through bi_engine::parse_measure_expression; fails when model_table_name returns the display text) and live by app/e2e/journeys/writeback-collect-streams.spec.ts steps 2-3 (a model on the author's table answers bi_query {prod: 60}, then {prod: 60, test: 6} after ticking test; the same sabotage live fails the measure upsert at '!')."
       }
     }
   ]

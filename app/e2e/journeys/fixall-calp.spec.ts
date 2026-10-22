@@ -56,6 +56,7 @@ import {
   tryInvoke,
   tryModule,
   undoState,
+  destroyInspectorWindows,
   COLLAB,
   type AppWindow,
 } from "../helpers/calp-harness";
@@ -366,6 +367,9 @@ test.describe("fix-all live: collaboration (.calp)", () => {
     // A real workspace for the positive control.
     const { app } = await buildApp(page, "c6");
     const context = page.context();
+    // A FRESH window (see destroyInspectorWindows): one left open would only
+    // be focused, with the module and state it had.
+    await destroyInspectorWindows(page);
     const before = new Set(context.pages());
     try {
       await page.locator("button").filter({ hasText: /^Collaboration$/ }).first().click();
@@ -398,10 +402,57 @@ test.describe("fix-all live: collaboration (.calp)", () => {
         "the inspector did not list the real workspace's application",
         20_000,
       );
-      await inspector!.evaluate(async () => {
-        const w = window as unknown as AppWindow;
-        await w.__TAURI__.window?.getCurrentWindow().close();
-      }).catch(() => undefined);
+
+      // BUG-0552: listing is not enough -- the owner saw eight EMPTY tabs, because
+      // a workspace location names no application and nothing was ever loaded.
+      // Through the pointer file (the only thing Browse returns), the window must
+      // open an application by itself and every tab must carry content. This
+      // journey's workspace holds ONE application at this point, so it is opened
+      // with no further gesture; if an earlier run left more, it is chosen in the
+      // list, which opens it too.
+      await box.fill(path.join(WS, "workspace.calcula"));
+      await box.press("Enter");
+      const bodyText = () => inspector!.evaluate(() => document.body.innerText);
+      const picked = await eventually(
+        () => inspector!.evaluate(() => {
+          const sel = Array.from(document.querySelectorAll("select")).find((s) =>
+            Array.from(s.options).some((o) => o.textContent === "Select application…"));
+          return sel ? { value: sel.value, count: sel.options.length - 1 } : null;
+        }),
+        (s) => !!s,
+        "the inspector did not list the workspace's applications from the pointer file",
+        20_000,
+      );
+      if (picked!.count > 1 && picked!.value === "") {
+        await inspector!.locator("select").filter({ hasText: "Select application…" }).selectOption(app);
+      }
+      const title = await eventually(
+        () => inspector!.evaluate(() => document.querySelector("h2")?.textContent ?? ""),
+        (t) => t.includes(app) && /v1\.0\.0/.test(t),
+        "the Overview never showed the application and its version (the BUG-0552 empty-tabs state)",
+        30_000,
+      );
+      expect(title, "Overview names the application and the version it read").toContain(app);
+      expect(await bodyText(), "the 'Browse ... then Inspect' hint is gone once an application is loaded")
+        .not.toMatch(/Browse to a workspace's workspace\.calcula file/);
+      await inspector!.locator("div").filter({ hasText: /^Writeback$/ }).first().click();
+      // THIS application declares no writeback region (buildApp(page, "c6") never
+      // designates one), so the section's REAL content is its own empty-state line
+      // -- not the "Responses collected so far" card, which only renders for an
+      // application that declares a region. Either is content; the Browse hint
+      // (asserted absent below) is the BUG-0552 empty tab.
+      await eventually(
+        bodyText,
+        (t) => /This application declares no writeback regions or model writeback columns./.test(t)
+          || /Responses collected so far/.test(t),
+        "the Writeback tab showed no content for the loaded application",
+        20_000,
+      );
+      expect(await bodyText(), "the Writeback tab is not the empty-state hint")
+        .not.toMatch(/Browse to a workspace's workspace\.calcula file/);
+
+      // From the MAIN window: the inspector's own close() is refused.
+      expect(await destroyInspectorWindows(page), "the inspector window this test opened").toBe(1);
     } finally {
       fs.rmSync(missing, { recursive: true, force: true });
       await newFile(page);

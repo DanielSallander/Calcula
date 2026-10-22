@@ -1,7 +1,8 @@
 //! FILENAME: app/src-tauri/src/writeback_local_sheet_tests.rs
 //! PURPOSE: A subscriber's writeback regions live on the subscriber's LOCAL
-//!          sheets, detaching orphans nothing, and a discard puts back what was
-//!          sent.
+//!          sheets, detaching orphans nothing, a discard puts back what was
+//!          sent, and a reconcile shows a subscriber what they last sent -- in a
+//!          brand-new workbook too (BUG-0554).
 //! CONTEXT: The defect behind the owner's report ("I cannot see if it was
 //!          written back", 2026-10-21). A published region names the
 //!          PUBLISHER's sheet id; `pull()` gives every subscribed sheet a fresh
@@ -25,10 +26,10 @@ use calp::writeback::{
 use engine::{Cell, CellValue};
 
 use crate::calp_commands::{
-    discard_writeback_drafts_inner, ensure_range_unclaimed, ensure_writeback_draft_before_write,
+    adopt_own_sent_values_inner, discard_writeback_drafts_inner, ensure_range_unclaimed, ensure_writeback_draft_before_write,
     ensure_writeback_draft_before_write_on_sheets, install_writeback_index,
     reproject_writeback_layer_onto_grids, writeback_layer_cells_on_sheets, writeback_region_at,
-    writeback_region_entries, WritebackCellRef,
+    writeback_region_entries, AdoptOutcome, OwnSentRecords, WritebackCellRef,
 };
 use crate::document_effect::test_seed_effect;
 use crate::persistence::{FileState, UserFilesState};
@@ -148,6 +149,9 @@ fn entry(region_id: &str, row: u32, col: u32, value: f64, state: SubmissionState
         submitter: calp::SubmitterIdentity {
             display_name: "Subscriber".to_string(),
             id: "subscriber-1".to_string(),
+            principal_name: String::new(),
+            provider: Default::default(),
+            scope: Default::default(),
             extra: HashMap::new(),
         },
         value: SubmissionValue::Number { value },
@@ -159,6 +163,9 @@ fn entry(region_id: &str, row: u32, col: u32, value: f64, state: SubmissionState
         reviewed_by: None,
         environment: String::new(),
         model_key: None,
+        seal: None,
+        sender: Default::default(),
+        identity: Default::default(),
         extra: HashMap::new(),
     }
 }
@@ -470,7 +477,7 @@ fn discard_with_nothing_unsent_is_a_clean_zero_and_an_unknown_region_is_refused(
 /// the history: Ctrl+Z then Ctrl+Y would write it back into the cell with no
 /// draft behind it.
 ///
-/// SABOTAGE: drop the `end_undo_history_after_discard(state)` call -- the
+/// SABOTAGE: drop the `end_undo_history_after_writeback_rewrite(state, ..)` call in the discard -- the
 /// typing step survives and `can_undo` stays true.
 #[test]
 fn discard_ends_the_undo_history_and_is_audited() {
@@ -623,4 +630,608 @@ fn detaching_drops_orphans_the_index_never_held() {
         layer.drafts.iter().any(|d| d.region_id == "other"),
         "an entry the detach cannot attribute is kept"
     );
+}
+
+// ---------------------------------------------------------------------------
+// BUG-0554. A subscriber sees what THEY last sent -- on subscribe, reopen and
+// refresh -- never over an unsent draft
+// ---------------------------------------------------------------------------
+
+/// A record the way the WORKSPACE holds it: its own id and timestamp.
+fn sent_record(
+    id: &str,
+    row: u32,
+    col: u32,
+    value: f64,
+    state: SubmissionState,
+) -> WritebackSubmission {
+    let mut rec = entry("r", row, col, value, state);
+    rec.id = id.to_string();
+    rec.updated_at = "2026-10-21T18:52:00Z".to_string();
+    // What the fold concludes about a record this subscriber's key signed
+    // (identity phase 1): only such a record is "mine".
+    rec.sender = calp::SenderCheck::Signed;
+    rec
+}
+
+/// The fixture subscriber's identity -- the id `entry` files records under.
+fn fixture_identity() -> calp::SubmitterIdentity {
+    entry("r", 0, 0, 0.0, SubmissionState::Draft).submitter
+}
+
+/// The owner's region on the subscribed sheet (index 1, NOT active, a local
+/// id different from the publisher's), a dependent `C1 = SUM(B3:B5)` beside
+/// it, and an EMPTY writeback layer -- the shape of a brand-new workbook that
+/// just subscribed.
+fn fresh_subscriber() -> AppState {
+    let state = workbook_with_sheets(2);
+    let (sub, pkg) = subscribe(&state, &[1]);
+    install_writeback_index(&state, &[(sub, vec![region("r", pkg[0])])], Vec::new(), Vec::new());
+    state.grids.write(&test_seed_effect()).unwrap()[1]
+        .set_cell(0, 2, Cell::new_formula("SUM(B3:B5)".to_string()));
+    assert!(state.writeback_layer.read().unwrap().drafts.is_empty(), "fixture: a new workbook");
+    // This computer sends as the fixture subscriber.
+    *state.subscriber_identity.lock().unwrap() = Some(fixture_identity());
+    state
+}
+
+fn adopt(
+    state: &AppState,
+    file_state: &FileState,
+    sent: HashMap<(u32, u32), WritebackSubmission>,
+    complete: bool,
+) -> AdoptOutcome {
+    adopt_own_sent_values_inner(
+        state,
+        file_state,
+        &UserFilesState::default(),
+        &crate::pivot::types::PivotState::new(),
+        &crate::pane_control::PaneControlState::new(),
+        &crate::ribbon_filter::RibbonFilterState::new(),
+        move |_, region_id| {
+            assert_eq!(region_id, "r", "only the index's region is asked about");
+            Ok(OwnSentRecords { by_cell: sent.clone(), complete })
+        },
+    )
+    .unwrap()
+}
+
+/// THE OWNER'S CASE. A new workbook subscribes to the application the same
+/// person already answered from another workbook: B3:B5 show what they last
+/// sent, with each value's state, on the SUBSCRIBED sheet -- and the dependent
+/// recalculates. Nothing lands on the blank `Sheet1`.
+///
+/// SABOTAGE (proved 2026-10-21): make the `None if held.is_empty()` arm of
+/// `adopt_own_sent_values_inner` push nothing -- the pre-fix behaviour, where
+/// reconcile only ever looked at cells the layer already held. B3:B5 stay
+/// blank and this test fails at the first value assertion.
+#[test]
+fn a_fresh_subscribe_shows_the_values_this_subscriber_last_sent() {
+    let state = fresh_subscriber();
+    state.audit_log.write(&test_seed_effect()).unwrap().enabled = false;
+    let file_state = FileState::default();
+    let mut sent = HashMap::new();
+    sent.insert((2, 1), sent_record("s-b3", 2, 1, 4.0, SubmissionState::Submitted));
+    sent.insert((3, 1), sent_record("s-b4", 3, 1, 5.0, SubmissionState::Approved));
+    sent.insert((4, 1), sent_record("s-b5", 4, 1, 6.0, SubmissionState::Rejected));
+
+    let outcome = adopt(&state, &file_state, sent, true);
+
+    assert_eq!(outcome.cells_written, 3);
+    assert_eq!(outcome.entries_changed, 3);
+    assert_eq!(value_at(&state, 1, 2, 1), Some(CellValue::Number(4.0)));
+    assert_eq!(value_at(&state, 1, 3, 1), Some(CellValue::Number(5.0)));
+    assert_eq!(value_at(&state, 1, 4, 1), Some(CellValue::Number(6.0)));
+    assert_eq!(
+        value_at(&state, 1, 0, 2),
+        Some(CellValue::Number(15.0)),
+        "the dependent recalculated over the shown values"
+    );
+    for row in 2..=4 {
+        assert_eq!(value_at(&state, 0, row, 1), None, "the blank Sheet1 is untouched");
+    }
+    let layer = state.writeback_layer.read().unwrap();
+    assert_eq!(layer.get_draft("r", 2, 1).unwrap().state, SubmissionState::Submitted);
+    assert_eq!(layer.get_draft("r", 3, 1).unwrap().state, SubmissionState::Approved);
+    assert_eq!(layer.get_draft("r", 4, 1).unwrap().state, SubmissionState::Rejected);
+    assert_eq!(layer.get_draft("r", 2, 1).unwrap().id, "s-b3", "the workspace's own record");
+    drop(layer);
+    assert!(file_state.is_dirty(), "the workbook now holds values it did not hold");
+
+    // Recorded even with collaboration auditing OFF: the cells changed with no
+    // keystroke, so the trail must say where the values came from.
+    let audit = state.audit_log.read().unwrap();
+    let row = audit
+        .entries
+        .iter()
+        .find(|e| matches!(e.event, calp::audit::AuditEvent::WritebackRestored))
+        .expect("showing sent values is recorded");
+    assert!(row.description.contains("'writeback-test'"), "got: {}", row.description);
+    assert!(row.description.contains("B3, B4, B5"), "got: {}", row.description);
+    assert!(row.description.contains("Sheet2"), "got: {}", row.description);
+}
+
+/// IDENTITY PHASE 1 (open-items 2.am): a record PLANTED under my id -- written
+/// by hand into my folder, not signed by my key -- and a record under another
+/// id are never shown as "what you last sent", and a planted newer record never
+/// REPLACES a value the workbook holds.
+///
+/// SABOTAGE: drop the `is_mine` clause from `adopt_own_sent_values_inner`'s
+/// filter -- B3 shows 666.
+#[test]
+fn a_record_planted_under_my_id_is_never_adopted() {
+    let state = fresh_subscriber();
+    state.audit_log.write(&test_seed_effect()).unwrap().enabled = false;
+    put_in_layer(&state, sent_record("s-real", 4, 1, 6.0, SubmissionState::Submitted));
+    let mut sent = HashMap::new();
+    let mut planted = sent_record("s-plant", 2, 1, 666.0, SubmissionState::Approved);
+    planted.sender = calp::SenderCheck::BeforeSignIn;
+    sent.insert((2, 1), planted);
+    let mut foreign = sent_record("s-foreign", 3, 1, 777.0, SubmissionState::Submitted);
+    foreign.submitter.id = "someone-else".to_string();
+    sent.insert((3, 1), foreign);
+    let mut newer_plant = sent_record("s-newer", 4, 1, 999.0, SubmissionState::Approved);
+    newer_plant.sender = calp::SenderCheck::Unchecked;
+    sent.insert((4, 1), newer_plant);
+
+    let outcome = adopt(&state, &FileState::default(), sent, true);
+    assert_eq!(outcome.cells_written, 0, "{outcome:?}");
+    assert_eq!(outcome.entries_changed, 0);
+    let layer = state.writeback_layer.read().unwrap();
+    assert!(layer.get_draft("r", 2, 1).is_none());
+    assert!(layer.get_draft("r", 3, 1).is_none());
+    assert_eq!(layer.get_draft("r", 4, 1).unwrap().id, "s-real", "the held value is not replaced");
+}
+
+/// The subscribed sheet is the ACTIVE one: the value reaches `grid` (what the
+/// active sheet is read from) as well as `grids[active]`.
+#[test]
+fn a_shown_value_reaches_the_active_sheets_grid_too() {
+    let state = fresh_subscriber();
+    *state.active_sheet.write(&test_seed_effect()).unwrap() = 1;
+    let mut sent = HashMap::new();
+    sent.insert((2, 1), sent_record("s-b3", 2, 1, 4.0, SubmissionState::Submitted));
+    let outcome = adopt(&state, &FileState::default(), sent, true);
+    assert_eq!(outcome.cells_written, 1);
+    assert_eq!(
+        state.grid.read().unwrap().get_cell(2, 1).map(|c| c.value.clone()),
+        Some(CellValue::Number(4.0)),
+        "the active sheet's own grid shows it"
+    );
+    assert_eq!(value_at(&state, 1, 2, 1), Some(CellValue::Number(4.0)));
+}
+
+/// An UNSENT draft always wins, even over a newer sent record: it is what the
+/// subscriber typed last.
+#[test]
+fn a_shown_value_never_overwrites_an_unsent_draft() {
+    let state = fresh_subscriber();
+    put_in_layer(&state, entry("r", 4, 1, 9.0, SubmissionState::Draft));
+    set_number(&state, 1, 4, 1, 9.0);
+    let file_state = FileState::default();
+    let mut sent = HashMap::new();
+    sent.insert((4, 1), sent_record("s-b5", 4, 1, 6.0, SubmissionState::Approved));
+
+    let outcome = adopt(&state, &file_state, sent, true);
+
+    assert_eq!(outcome, AdoptOutcome::default());
+    assert!(!file_state.is_dirty(), "nothing changed, nothing dirtied");
+    assert_eq!(value_at(&state, 1, 4, 1), Some(CellValue::Number(9.0)));
+    let layer = state.writeback_layer.read().unwrap();
+    let held = layer.get_draft("r", 4, 1).unwrap();
+    assert_eq!(held.state, SubmissionState::Draft);
+    assert_eq!(held.value, SubmissionValue::Number { value: 9.0 });
+}
+
+/// THE SECOND DEFECT. This workbook sent 1 for B3; later the same person sent 4
+/// from another workbook and the publisher approved the 4. Reconcile used to
+/// copy only the STATE of the newest record, so B3 showed "1, approved" -- a
+/// value that was never approved. The entry is now replaced WHOLE, the cell
+/// shows 4, and the undo history ends (the step that typed the 1 must not be
+/// redone into a cell whose entry says 4).
+///
+/// SABOTAGE (proved 2026-10-21): make the `None if read.complete` arm copy only the state onto the
+/// held entry (the old behaviour) -- B3 keeps 1 and its id.
+#[test]
+fn a_newer_value_sent_from_another_workbook_replaces_the_stale_one_whole() {
+    let state = fresh_subscriber();
+    let mut mine = entry("r", 2, 1, 1.0, SubmissionState::Submitted);
+    mine.id = "sent-from-this-workbook".to_string();
+    put_in_layer(&state, mine);
+    set_number(&state, 1, 2, 1, 1.0);
+    {
+        let mut undo = state.undo_stack.lock().unwrap();
+        let txn = undo.begin_owned_transaction("Type 1 into B3");
+        undo.record_custom_restore("fixture".to_string(), Vec::new(), "Type 1 into B3");
+        undo.commit_owned(txn);
+    }
+    let file_state = FileState::default();
+    let mut sent = HashMap::new();
+    sent.insert((2, 1), sent_record("sent-from-another-workbook", 2, 1, 4.0, SubmissionState::Approved));
+
+    let outcome = adopt(&state, &file_state, sent, true);
+
+    assert_eq!(outcome.cells_written, 1);
+    // The history ending is REPORTED, with the cell, so the user is told: no
+    // keystroke of theirs caused it.
+    assert!(outcome.undo_history_ended);
+    assert_eq!(outcome.replaced_cells, vec!["Sheet2!B3".to_string()]);
+    assert_eq!(value_at(&state, 1, 2, 1), Some(CellValue::Number(4.0)));
+    let layer = state.writeback_layer.read().unwrap();
+    let held: Vec<_> = layer.drafts.iter().filter(|d| d.cell_row == 2 && d.cell_col == 1).collect();
+    assert_eq!(held.len(), 1, "one entry per cell: {:?}", held);
+    assert_eq!(held[0].id, "sent-from-another-workbook");
+    assert_eq!(held[0].value, SubmissionValue::Number { value: 4.0 });
+    assert_eq!(held[0].state, SubmissionState::Approved);
+    drop(layer);
+    assert!(file_state.is_dirty());
+    assert!(
+        !state.undo_stack.lock().unwrap().can_undo(),
+        "the step that typed the replaced 1 must not survive to be redone"
+    );
+}
+
+/// A PARTIAL read (some version could not be read) may fill a blank cell but
+/// never replaces a sent value the workbook holds: the unreadable version may
+/// be exactly where that value lives.
+#[test]
+fn a_partial_read_fills_blanks_but_never_replaces_a_sent_value() {
+    let state = fresh_subscriber();
+    let mut mine = entry("r", 2, 1, 1.0, SubmissionState::Submitted);
+    mine.id = "sent-here".to_string();
+    put_in_layer(&state, mine);
+    set_number(&state, 1, 2, 1, 1.0);
+    let mut sent = HashMap::new();
+    sent.insert((2, 1), sent_record("older-elsewhere", 2, 1, 4.0, SubmissionState::Approved));
+    sent.insert((3, 1), sent_record("s-b4", 3, 1, 5.0, SubmissionState::Submitted));
+
+    let outcome = adopt(&state, &FileState::default(), sent, false);
+
+    assert_eq!(outcome.cells_written, 1, "only the blank B4");
+    assert_eq!(value_at(&state, 1, 2, 1), Some(CellValue::Number(1.0)), "B3 kept");
+    assert_eq!(value_at(&state, 1, 3, 1), Some(CellValue::Number(5.0)), "B4 filled");
+    let layer = state.writeback_layer.read().unwrap();
+    assert_eq!(layer.get_draft("r", 2, 1).unwrap().id, "sent-here");
+    assert_eq!(layer.get_draft("r", 2, 1).unwrap().state, SubmissionState::Submitted);
+}
+
+/// The return leg is kept: the SAME submission approved by the publisher
+/// changes only the entry's state, reason and reviewer -- no cell is written.
+#[test]
+fn the_same_submission_only_takes_its_review_state() {
+    let state = fresh_subscriber();
+    let mine = sent_record("s-b3", 2, 1, 4.0, SubmissionState::Submitted);
+    put_in_layer(&state, mine);
+    set_number(&state, 1, 2, 1, 4.0);
+    let file_state = FileState::default();
+    let mut reviewed = sent_record("s-b3", 2, 1, 4.0, SubmissionState::Rejected);
+    reviewed.review_reason = Some("too high".to_string());
+    reviewed.reviewed_by = Some("Publisher".to_string());
+    let mut sent = HashMap::new();
+    sent.insert((2, 1), reviewed);
+
+    let outcome = adopt(&state, &file_state, sent, true);
+
+    assert_eq!(outcome, AdoptOutcome { cells_written: 0, entries_changed: 1, ..AdoptOutcome::default() });
+    let layer = state.writeback_layer.read().unwrap();
+    let held = layer.get_draft("r", 2, 1).unwrap();
+    assert_eq!(held.state, SubmissionState::Rejected);
+    assert_eq!(held.review_reason.as_deref(), Some("too high"));
+    assert_eq!(held.reviewed_by.as_deref(), Some("Publisher"));
+    drop(layer);
+    assert!(file_state.is_dirty(), "the review state is saved with the workbook");
+}
+
+/// Nothing new -- or a workspace that cannot be read -- leaves the document
+/// CLEAN. The reconcile runs on every open; dirtying here made the close
+/// prompt fire on a workbook that was merely looked at.
+///
+/// SABOTAGE: construct `mutates` before the `plan.is_empty()` return -- the
+/// first assertion on `is_dirty` fails.
+#[test]
+fn nothing_new_to_show_leaves_the_document_clean() {
+    let state = fresh_subscriber();
+    put_in_layer(&state, sent_record("s-b3", 2, 1, 4.0, SubmissionState::Approved));
+    set_number(&state, 1, 2, 1, 4.0);
+    let file_state = FileState::default();
+    let mut sent = HashMap::new();
+    sent.insert((2, 1), sent_record("s-b3", 2, 1, 4.0, SubmissionState::Approved));
+    assert_eq!(adopt(&state, &file_state, sent, true), AdoptOutcome::default());
+    assert!(!file_state.is_dirty(), "the layer already agrees with the workspace");
+
+    assert_eq!(adopt(&state, &file_state, HashMap::new(), true), AdoptOutcome::default());
+    assert!(!file_state.is_dirty(), "nothing sent, nothing to show");
+
+    let unreadable = adopt_own_sent_values_inner(
+        &state,
+        &file_state,
+        &UserFilesState::default(),
+        &crate::pivot::types::PivotState::new(),
+        &crate::pane_control::PaneControlState::new(),
+        &crate::ribbon_filter::RibbonFilterState::new(),
+        |_, _| Err("workspace offline".to_string()),
+    )
+    .expect("offline is normal: the region is skipped, not an error");
+    // ...but never in silence: the reason comes back, so Check Status can say
+    // it could not reach the workspace instead of "Status updated".
+    assert_eq!(
+        unreadable,
+        AdoptOutcome {
+            unreadable: vec![("r".to_string(), "workspace offline".to_string())],
+            ..AdoptOutcome::default()
+        }
+    );
+    assert!(!file_state.is_dirty());
+    assert_eq!(value_at(&state, 1, 2, 1), Some(CellValue::Number(4.0)));
+
+    // A workbook with no subscribed region never asks the workspace at all.
+    let plain = workbook_with_sheets(1);
+    let asked = std::cell::Cell::new(false);
+    let none = adopt_own_sent_values_inner(
+        &plain,
+        &file_state,
+        &UserFilesState::default(),
+        &crate::pivot::types::PivotState::new(),
+        &crate::pane_control::PaneControlState::new(),
+        &crate::ribbon_filter::RibbonFilterState::new(),
+        |_, _| {
+            asked.set(true);
+            Ok(OwnSentRecords { by_cell: HashMap::new(), complete: true })
+        },
+    )
+    .unwrap();
+    assert_eq!(none, AdoptOutcome::default());
+    assert!(!asked.get(), "no region, no workspace read");
+}
+
+/// A record the CURRENT declaration refuses is never shown: a cell outside the
+/// region (the region shrank since), a value its type check rejects (carried
+/// forward from a version whose type changed), a model-keyed record, and a
+/// record that claims to be an unsent draft.
+#[test]
+fn a_record_the_current_region_refuses_is_not_shown() {
+    let state = workbook_with_sheets(2);
+    // This computer sends as the fixture subscriber (identity phase 1: only
+    // what is mine is ever shown).
+    *state.subscriber_identity.lock().unwrap() = Some(fixture_identity());
+    let (sub, pkg) = subscribe(&state, &[1]);
+    let mut decl = region("r", pkg[0]);
+    decl.schema = Some(calp::writeback::ValueSchema {
+        value_type: calp::writeback::ValueType::Integer,
+        required: false,
+        min: None,
+        max: None,
+        enum_values: Vec::new(),
+        max_length: None,
+        pattern: None,
+        extra: HashMap::new(),
+    });
+    install_writeback_index(&state, &[(sub, vec![decl])], Vec::new(), Vec::new());
+    let file_state = FileState::default();
+    let mut sent = HashMap::new();
+    // Outside B3:B5.
+    sent.insert((9, 1), sent_record("outside", 9, 1, 1.0, SubmissionState::Submitted));
+    // The current type is an integer.
+    sent.insert((2, 1), sent_record("fraction", 2, 1, 2.5, SubmissionState::Submitted));
+    // Model-keyed.
+    let mut keyed = sent_record("keyed", 3, 1, 3.0, SubmissionState::Submitted);
+    keyed.model_key = Some(vec!["k".to_string()]);
+    sent.insert((3, 1), keyed);
+    // A "draft" in the workspace.
+    sent.insert((4, 1), sent_record("drafty", 4, 1, 4.0, SubmissionState::Draft));
+
+    assert_eq!(adopt(&state, &file_state, sent, true), AdoptOutcome::default());
+    assert!(!file_state.is_dirty());
+    assert!(state.writeback_layer.read().unwrap().drafts.is_empty());
+    assert_eq!(value_at(&state, 1, 9, 1), None);
+    assert_eq!(value_at(&state, 1, 2, 1), None);
+
+    // A value the type check accepts is shown.
+    let mut ok = HashMap::new();
+    ok.insert((2, 1), sent_record("whole", 2, 1, 3.0, SubmissionState::Submitted));
+    assert_eq!(adopt(&state, &file_state, ok, true).cells_written, 1);
+    assert_eq!(value_at(&state, 1, 2, 1), Some(CellValue::Number(3.0)));
+}
+
+/// The publisher made a cell a FORMULA in this version: the record enters the
+/// layer (a later version may free the cell again) but the formula is never
+/// overwritten -- the rule `reproject_writeback_layer_onto_grids` follows.
+#[test]
+fn a_shown_value_never_overwrites_a_publisher_formula() {
+    let state = fresh_subscriber();
+    state.grids.write(&test_seed_effect()).unwrap()[1]
+        .set_cell(3, 1, Cell::new_formula("1+1".to_string()));
+    let mut sent = HashMap::new();
+    sent.insert((3, 1), sent_record("s-b4", 3, 1, 5.0, SubmissionState::Submitted));
+
+    let outcome = adopt(&state, &FileState::default(), sent, true);
+
+    assert_eq!(outcome, AdoptOutcome { cells_written: 0, entries_changed: 1, ..AdoptOutcome::default() });
+    assert!(state.grids.read().unwrap()[1].get_cell(3, 1).unwrap().has_formula());
+    assert!(state.writeback_layer.read().unwrap().get_draft("r", 3, 1).is_some());
+}
+
+/// The reconcile command reads through `adopt_own_sent_values_inner`, so every
+/// path that reconciles (subscribe, open, refresh, environment switch) shows
+/// what was sent; and the command tells the grid to RE-READ its cells (the
+/// frontend's own repaint only repaints cached cells).
+#[test]
+fn the_reconcile_command_adopts_and_asks_the_grid_to_reread() {
+    let src = include_str!("calp_commands.rs");
+    let start = src.find("fn reconcile_writeback_layer_internal(").expect("reconcile");
+    let body = &src[start..start + src[start..].find("\n}\n").unwrap()];
+    assert!(body.contains("adopt_own_sent_values_inner("), "reconcile must adopt sent values");
+    assert!(
+        body.contains("own_sent_records_by_region(state)") && !body.contains("own_current_records_for_region("),
+        "the reader reads every region ONCE per pass, never a strict-then-lenient walk per region"
+    );
+    let start = src.find("pub fn calp_reconcile_writeback(").expect("command");
+    let body = &src[start..start + src[start..].find("\n}\n").unwrap()];
+    assert!(body.contains("emit(\"grid:refresh\""), "the grid must re-read the shown values");
+}
+
+/// A DRAFT THE WORKSPACE ALREADY HOLDS WAS SENT. The workbook was saved with an
+/// unsent draft, submitted, and closed without saving: on reopen the layer
+/// holds Draft id X while the workspace holds Submitted id X with the same
+/// value (a submit keeps the draft's id; every edit mints a new one). The
+/// entry takes the workspace's state, so the unsent marker and the tab badge
+/// go and Submit does not send X again. A Draft with a DIFFERENT id is a real
+/// unsent edit and still wins.
+///
+/// SABOTAGE: restore the old guard `if held.iter().any(|d| d.state ==
+/// SubmissionState::Draft) { continue; }` -- the entry stays a Draft and the
+/// first assertion fails.
+#[test]
+fn a_draft_the_workspace_already_holds_is_shown_as_sent() {
+    let state = fresh_subscriber();
+    put_in_layer(&state, sent_record("s-b3", 2, 1, 4.0, SubmissionState::Draft));
+    set_number(&state, 1, 2, 1, 4.0);
+    // A real unsent edit beside it: a different id than the workspace's record.
+    put_in_layer(&state, sent_record("typed-after", 3, 1, 8.0, SubmissionState::Draft));
+    set_number(&state, 1, 3, 1, 8.0);
+    let file_state = FileState::default();
+    let mut sent = HashMap::new();
+    sent.insert((2, 1), sent_record("s-b3", 2, 1, 4.0, SubmissionState::Submitted));
+    sent.insert((3, 1), sent_record("s-b4-earlier", 3, 1, 5.0, SubmissionState::Submitted));
+
+    let outcome = adopt(&state, &file_state, sent, true);
+
+    let layer = state.writeback_layer.read().unwrap();
+    assert_eq!(
+        layer.get_draft("r", 2, 1).unwrap().state,
+        SubmissionState::Submitted,
+        "the draft the workspace holds under its own id was sent"
+    );
+    let typed = layer.get_draft("r", 3, 1).unwrap();
+    assert_eq!(typed.state, SubmissionState::Draft, "a real unsent edit still wins");
+    assert_eq!(typed.value, SubmissionValue::Number { value: 8.0 });
+    drop(layer);
+    assert_eq!(outcome.cells_written, 0, "no value changed");
+    assert_eq!(outcome.entries_changed, 1);
+    assert_eq!(value_at(&state, 1, 3, 1), Some(CellValue::Number(8.0)));
+}
+
+/// THE LOCAL ENTRY OF A SUBMIT CARRIES ITS STREAM. Only the clone sent to the
+/// workspace was stamped, so a sent entry read "" (the development line) in
+/// the layer while an ADOPTED one carried its record's stream.
+#[test]
+fn the_submit_stamps_the_local_entry_with_its_stream_too() {
+    let src = include_str!("calp_commands.rs");
+    let start = src.find("fn submit_region_internal(").expect("submit");
+    let body = &src[start..start + src[start..].find("\n}\n").unwrap()];
+    let advance = body.find("submit_region(region_id, &now)").expect("the layer advances");
+    let stamp = body.find("entry.environment = environment.clone()").expect("the local stamp");
+    assert!(advance < stamp, "the entries the submit advanced are stamped");
+}
+
+/// Copy a workspace folder (the "temp copy" the owner's answers are tested on).
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap().flatten() {
+        let target = to.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
+/// IDENTITY PHASE 1, END TO END ON A COPY OF A WORKSPACE. This computer
+/// really sends B3 = 4 (signed with its key) into a temp workspace; the
+/// workspace is COPIED; and in the copy three records are planted under MY
+/// sender id -- an unsigned newer B3 = 666, a B4 = 777 signed by Mallory's key,
+/// and my OWN signed B5 = 888 lifted out of another version (a replay). Read
+/// back through the real reader (`own_records_by_region_in`, what reconcile and
+/// a fresh subscribe use) and shown through the real adopt path, only my 4 is
+/// "what you last sent"; B4 and B5 stay empty.
+///
+/// SABOTAGE: drop the `is_mine` filter in `own_records_by_region_in` AND make
+/// the fold keep forged answers -- 666/777/888 reach the cells. (Either guard
+/// alone holds, as `only_what_my_key_signed_is_mine` documents.)
+#[test]
+fn a_planted_answer_in_a_copy_of_the_workspace_never_seeds_my_cells() {
+    let prof = tempfile::TempDir::new().unwrap();
+    crate::profile_dir::with_test_profile(prof.path(), || {
+        let original = tempfile::TempDir::new().unwrap();
+        let me = crate::submitter_identity::current_identity().unwrap();
+        let mine_signed = |id: &str, row: u32, value: f64, version: &str, at: &str| {
+            let mut s = entry("r", row, 1, value, SubmissionState::Submitted);
+            s.id = id.to_string();
+            s.submitter = me.clone();
+            s.updated_at = at.to_string();
+            s.submitted_at = Some(at.to_string());
+            crate::submitter_identity::seal_outgoing(&mut s, APP, version, calp::SubmissionOrigin::Interactive)
+                .unwrap();
+            s
+        };
+        let real = mine_signed("s-mine", 2, 4.0, "1.0.0", "2026-10-22T09:00:00Z");
+        let reg = calp::workspace::LocalWorkspace::open(original.path()).unwrap();
+        reg.save_submission(APP, "1.0.0", &real).unwrap();
+
+        let copy = tempfile::TempDir::new().unwrap();
+        copy_tree(original.path(), copy.path());
+        let copied = calp::workspace::LocalWorkspace::open(copy.path()).unwrap();
+
+        // (1) Unsigned, newer, under my id.
+        let mut plant = real.clone();
+        plant.id = "s-plant".into();
+        plant.updated_at = "2030-01-01T00:00:00Z".into();
+        plant.value = SubmissionValue::Number { value: 666.0 };
+        plant.seal = None;
+        copied.save_submission(APP, "1.0.0", &plant).unwrap();
+        // (2) Signed by Mallory's key, under my id.
+        let mut mallory = real.clone();
+        mallory.id = "s-mallory".into();
+        mallory.cell_row = 3;
+        mallory.value = SubmissionValue::Number { value: 777.0 };
+        let mallory_seed = [42u8; 32];
+        let mut as_mallory = mallory.clone();
+        as_mallory.submitter = calp::identity_provider::identity_for(
+            calp::IdentityProviderKind::Windows,
+            &calp::identity_provider::AccountFacts {
+                subject: "S-1-5-21-1-2-3-6666".into(),
+                principal_name: "CORP\\mallory".into(),
+                display_name: "Mallory".into(),
+                scope: calp::AccountScope::Domain,
+            },
+            &calp::submission_seal::public_key_of_seed(&mallory_seed),
+        )
+        .unwrap();
+        calp::submission_seal::seal_submission(
+            &mut as_mallory,
+            APP,
+            "1.0.0",
+            &mallory_seed,
+            calp::SubmissionOrigin::Interactive,
+        )
+        .unwrap();
+        mallory.seal = as_mallory.seal;
+        copied.save_submission(APP, "1.0.0", &mallory).unwrap();
+        // (3) My own answer for ANOTHER version, replayed into 1.0.0.
+        let replay = mine_signed("s-replay", 4, 888.0, "9.9.9", "2030-01-02T00:00:00Z");
+        copied.save_submission(APP, "1.0.0", &replay).unwrap();
+
+        let (by_region, unread) = crate::calp_commands::own_records_by_region_in(
+            &copied,
+            APP,
+            &["1.0.0".to_string()],
+            "",
+            &me,
+            &calp::ReviewAuthority::none(),
+        );
+        assert!(unread.is_empty(), "{unread:?}");
+        let records = by_region.get("r").cloned().unwrap_or_default();
+        assert_eq!(records.len(), 1, "only what my key signed for this version: {:?}", records.keys());
+        assert_eq!(records.get(&(2, 1)).map(|s| s.id.as_str()), Some("s-mine"));
+
+        let state = fresh_subscriber();
+        state.audit_log.write(&test_seed_effect()).unwrap().enabled = false;
+        *state.subscriber_identity.lock().unwrap() = Some(me.clone());
+        let outcome = adopt(&state, &FileState::default(), records, true);
+        assert_eq!(outcome.cells_written, 1, "{outcome:?}");
+        assert_eq!(value_at(&state, 1, 2, 1), Some(CellValue::Number(4.0)), "my real answer, not 666");
+        assert_eq!(value_at(&state, 1, 3, 1), None, "Mallory's 777 never seeds my cell");
+        assert_eq!(value_at(&state, 1, 4, 1), None, "the replayed 888 never seeds my cell");
+    });
 }

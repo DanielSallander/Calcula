@@ -1213,7 +1213,36 @@ pub struct WritebackSubmission {
     /// `cell_row`/`cell_col` are 0. Absent for grid-region submissions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_key: Option<Vec<String>>,
-    /// Forward-compatibility.
+    /// The sender's signature, set at the one point where an answer leaves the
+    /// machine (`crate::submission_seal::seal_submission`). `None` on a draft and
+    /// on an answer sent before sign-in existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seal: Option<crate::submission_seal::SubmissionSeal>,
+    /// What the fold concluded about the sender (signed / sent before sign-in).
+    /// NEVER read from disk or from IPC (`skip_deserializing`), so a file cannot
+    /// claim to be signed; the fold also strips a `sender` key a file smuggles
+    /// into `extra`. Serialized only when set, so readers of a folded record
+    /// (the inbox, scripts) see it, and `save_submission` clears it before
+    /// writing.
+    #[serde(
+        default,
+        skip_deserializing,
+        skip_serializing_if = "crate::submission_seal::SenderCheck::is_unchecked"
+    )]
+    pub sender: crate::submission_seal::SenderCheck,
+    /// The READER'S verdict on who sent it (`crate::identity_check`): Verified,
+    /// signed but unconfirmed, not verified, sent before sign-in. Attached AFTER
+    /// the fold by the app (it depends on the reader's storage and owner
+    /// lookups, so it never takes part in the fold). Like `sender`: never read
+    /// from disk or IPC, stripped from `extra` by the fold, cleared by
+    /// `save_submission`.
+    #[serde(
+        default,
+        skip_deserializing,
+        skip_serializing_if = "crate::identity_check::IdentityVerdict::is_not_checked"
+    )]
+    pub identity: crate::identity_check::IdentityVerdict,
+    /// Forward-compatibility. Not signed: never read for any decision.
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
 }
@@ -1257,6 +1286,15 @@ pub struct ReviewEvent {
     pub reviewed_by: Option<String>,
     /// ISO 8601 timestamp of the decision.
     pub reviewed_at: String,
+    /// SHA-256 of the exact answer decided (`crate::submission_seal::event_digest`):
+    /// an approval of one value never covers a different value later saved
+    /// under the same submission id.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub target_digest: String,
+    /// The publisher's (or an authorised co-publisher's) signature. A review
+    /// without a valid one is IGNORED by the fold (owner decision 2026-10-22).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seal: Option<crate::submission_seal::ReviewSeal>,
     /// Forward-compatibility.
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
@@ -1606,6 +1644,9 @@ mod tests {
             submitter: crate::identity_provider::SubmitterIdentity {
                 display_name: "Tester".to_string(),
                 id: "me".to_string(),
+                principal_name: String::new(),
+                provider: Default::default(),
+                scope: Default::default(),
                 extra: HashMap::new(),
             },
             value: SubmissionValue::Number { value },
@@ -1617,6 +1658,9 @@ mod tests {
             reviewed_by: None,
             environment: String::new(),
             model_key: None,
+            seal: None,
+            sender: Default::default(),
+            identity: Default::default(),
             extra: HashMap::new(),
         }
     }
@@ -2228,6 +2272,9 @@ mod tests {
         crate::identity_provider::SubmitterIdentity {
             display_name: name.to_string(),
             id: format!("id-{}", name),
+            principal_name: String::new(),
+            provider: Default::default(),
+            scope: Default::default(),
             extra: HashMap::new(),
         }
     }
@@ -2249,6 +2296,9 @@ mod tests {
             submitted_at: None,
             review_reason: None,
             reviewed_by: None,
+            seal: None,
+            sender: Default::default(),
+            identity: Default::default(),
             extra: HashMap::new(),
         }
     }
@@ -2779,6 +2829,127 @@ pub fn visible_in(
     }
 }
 
+/// What a PUBLISHER-side reader admits, by stream tag: every stream, or exactly
+/// a set of them (`""` is the development line).
+///
+/// The publisher's Collect From choice (`WorkingCopyLink::collect_streams`)
+/// resolves to one of these, and so does a subscribed region (its one stream).
+/// A subscriber's own reads keep [`visible_in`] with exactly one stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamFilter {
+    All,
+    Only(std::collections::BTreeSet<String>),
+}
+
+impl StreamFilter {
+    /// Exactly one stream.
+    pub fn one(stream: &str) -> StreamFilter {
+        StreamFilter::Only(std::iter::once(stream.to_string()).collect())
+    }
+
+    pub fn admits(&self, environment: &str) -> bool {
+        match self {
+            StreamFilter::All => true,
+            StreamFilter::Only(set) => set.contains(environment),
+        }
+    }
+
+    /// The ONE stream, when exactly one is admitted.
+    pub fn single(&self) -> Option<&str> {
+        match self {
+            StreamFilter::Only(set) if set.len() == 1 => set.iter().next().map(|s| s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The admitted streams in order (`""` first), `None` for every stream.
+    pub fn streams(&self) -> Option<Vec<String>> {
+        match self {
+            StreamFilter::All => None,
+            StreamFilter::Only(set) => Some(set.iter().cloned().collect()),
+        }
+    }
+
+    /// "every stream" | "the development line, prod" -- for sentences and
+    /// audit rows. Never a number, so it is the same in every locale.
+    pub fn label(&self) -> String {
+        match self {
+            StreamFilter::All => "every stream".to_string(),
+            StreamFilter::Only(set) => set.iter().map(|s| stream_label(s)).collect::<Vec<_>>().join(", "),
+        }
+    }
+
+    /// A filename-safe spelling: "all-streams" | "line-prod".
+    pub fn slug(&self) -> String {
+        match self {
+            StreamFilter::All => "all-streams".to_string(),
+            StreamFilter::Only(set) => set
+                .iter()
+                .map(|s| if s.is_empty() { "line" } else { s.as_str() })
+                .collect::<Vec<_>>()
+                .join("-"),
+        }
+    }
+}
+
+/// The name one stream goes by in a sentence: "the development line" or the
+/// environment's own name.
+pub fn stream_label(environment: &str) -> String {
+    if environment.is_empty() {
+        "the development line".to_string()
+    } else {
+        environment.to_string()
+    }
+}
+
+/// [`visible_in`] for a set of streams.
+pub fn visible_in_streams(
+    submissions: Vec<WritebackSubmission>,
+    filter: &StreamFilter,
+) -> Vec<WritebackSubmission> {
+    match filter {
+        StreamFilter::All => submissions,
+        StreamFilter::Only(_) => submissions.into_iter().filter(|s| filter.admits(&s.environment)).collect(),
+    }
+}
+
+#[cfg(test)]
+mod stream_filter_tests {
+    use super::*;
+
+    fn sub(id: &str, environment: &str) -> WritebackSubmission {
+        let mut s: WritebackSubmission = serde_json::from_value(serde_json::json!({
+            "id": id, "regionId": "r1", "cellRow": 0, "cellCol": 0,
+            "submitter": { "id": "u1", "displayName": "U" },
+            "value": { "type": "number", "value": 1.0 },
+            "state": "submitted", "createdAt": "", "updatedAt": ""
+        }))
+        .unwrap();
+        s.environment = environment.to_string();
+        s
+    }
+
+    /// A set of streams admits exactly its members; the development line is a
+    /// member like any other.
+    ///
+    /// SABOTAGE: make `visible_in_streams` return `submissions` for `Only` too.
+    #[test]
+    fn a_set_of_streams_admits_exactly_its_members() {
+        let all = vec![sub("a", "test"), sub("b", "prod"), sub("c", "")];
+        let f = StreamFilter::Only(["".to_string(), "prod".to_string()].into_iter().collect());
+        let ids: Vec<String> = visible_in_streams(all.clone(), &f).into_iter().map(|s| s.id).collect();
+        assert_eq!(ids, vec!["b".to_string(), "c".to_string()]);
+        assert_eq!(visible_in_streams(all.clone(), &StreamFilter::All).len(), 3);
+        assert_eq!(visible_in_streams(all, &StreamFilter::one("test")).len(), 1);
+        assert_eq!(f.label(), "the development line, prod");
+        assert_eq!(f.slug(), "line-prod");
+        assert_eq!(f.single(), None);
+        assert_eq!(StreamFilter::one("prod").single(), Some("prod"));
+        assert_eq!(StreamFilter::All.label(), "every stream");
+        assert_eq!(StreamFilter::All.streams(), None);
+    }
+}
+
 #[cfg(test)]
 mod environment_tag_tests {
     use super::*;
@@ -2793,6 +2964,9 @@ mod environment_tag_tests {
             submitter: crate::identity_provider::SubmitterIdentity {
                 id: "u1".to_string(),
                 display_name: "U".to_string(),
+                principal_name: String::new(),
+                provider: Default::default(),
+                scope: Default::default(),
                 extra: Default::default(),
             },
             value: SubmissionValue::Number { value: 1.0 },
@@ -2804,6 +2978,9 @@ mod environment_tag_tests {
             reviewed_by: None,
             environment: environment.to_string(),
             model_key: None,
+            seal: None,
+            sender: Default::default(),
+            identity: Default::default(),
             extra: Default::default(),
         }
     }
