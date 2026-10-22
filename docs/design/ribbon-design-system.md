@@ -310,6 +310,7 @@ chip, slider, colour picker, tile or gallery in the ribbon, the sidebar or a fly
 | opening more rows, a palette or a gallery from a menu row ("Hide & Unhide >") | `MenuSub` inside any Menu | flattening Excel's flyouts into headings |
 | showing another extension's menu-bar subtree on a ribbon control | `RegisteredMenuButton` (+ `useRegisteredMenuItem`) | importing that extension, or a copied tree that drifts |
 | picking a value from a list | `Dropdown` | a native `<select>` in the ribbon |
+| naming a choice made in a menu (a field that opens a `MenuButton` of check rows -- Writeback's Collect from) | `FieldTrigger` (the Dropdown's own field) as the `MenuButton` trigger | a copy of the field's CSS (it drifts on the first change to the field look) |
 | picking one of a few | `SegmentedChoice` (a radiogroup) | a row of ToggleButtons |
 | turning a formatting-style state on/off | `ToggleButton` / `IconButton pressed` | |
 | turning an option in a set on/off | `Checkbox` | |
@@ -393,6 +394,7 @@ run on `--motion-hover`; reduced motion is honoured globally by
 | `SegmentedTabs` | 28; fills the width in a panel | `tablist` of `tab` + `aria-selected` | Left/Right/Home/End move and activate |
 | `MenuButton` + `Menu`, `MenuItem`, `MenuSeparator`, `MenuHeading` | card popover, 30px rows | `aria-haspopup="menu"`, `role="menu"`, `menuitem` / `menuitemradio` / `menuitemcheckbox` | Up/Down wrap, Home/End, typeahead, Escape returns focus to the trigger; `onSelect` runs AFTER close; split IconButton: opens from the MAIN half |
 | `Dropdown<T>` | 28, width 104 (band) / 100% (panel) | `combobox` + `listbox` of `option` + `aria-selected` | focus lands on the selected option; arrows STOP at the ends (native-select behaviour); `optionTestIdPrefix`; no `tooltip` prop — its `ariaLabel` names it |
+| `FieldTrigger` | as Dropdown: 28, width 104 (band, never squeezed) / 100% (panel), or `width` | a plain `<button>`: the caller, or a MenuButton's clone, adds the ARIA | the Dropdown's trigger itself, exported; a string child is `FieldTriggerText` (one line, ellipsis, `line-height: normal` so descenders are not clipped -- the field's own is 1); `trailing` sits before the chevron (a `Badge`); the accent border while `aria-expanded` |
 | `Checkbox` | one 28px row, 11px text (12 elsewhere) | a REAL `<input type="checkbox">` | `indeterminate`; `tooltip` shows on hover and becomes the input's description; `testId` on the input |
 | `Switch` | 28 row, 30x16 track | `<input type="checkbox" role="switch">` | the input is an invisible layer over the row, so Playwright can click it |
 | `Chip` | 24px pill | `<span>`, or `<button>` with `onClick` | `value` renders "name: **value**"; `tone` neutral/info/ok/warn/danger; `onRemove` adds a 16px close button |

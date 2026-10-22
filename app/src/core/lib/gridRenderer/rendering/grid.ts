@@ -168,6 +168,39 @@ function getLineSegments(
   return segments;
 }
 
+/** Where and how wide Core strokes a gridline on a given context. */
+export interface GridlineGeometry {
+  /** The canvas transform's scale: devicePixelRatio x zoom. */
+  deviceScale: number;
+  /** One DEVICE pixel, in the context's (CSS) units. */
+  lineWidth: number;
+  /** The centre of the device pixel the gridline at boundary `v` occupies. */
+  snap: (v: number) => number;
+}
+
+/**
+ * THE gridline stroke: a crisp 1-DEVICE-pixel hairline (like Excel). The canvas
+ * transform is scaled by devicePixelRatio*zoom, so a lineWidth of 1 would render
+ * as `deviceScale` device pixels — 2px+ on a high-DPI display, which reads as a
+ * heavy, blurry line. 1/deviceScale keeps it a true hairline, and snapping to
+ * the device-pixel grid keeps it sharp.
+ *
+ * ONE definition for every painter that draws a gridline or must land ON one:
+ * `drawGridLines` (the ordinary grid), `drawGridLinesZone` (core.ts: every
+ * frozen or split pane — it used to stroke 1 CSS px at `Math.floor(v) + 0.5` (BUG-0586),
+ * so with any freeze the gridlines were 2 device pixels at DPR 2 and sat one
+ * pixel beside a line drawn with this snap), and, through @api/gridLayers, a
+ * grid layer that re-tints a gridline (the writeback region frame).
+ */
+export function gridlineGeometry(ctx: CanvasRenderingContext2D): GridlineGeometry {
+  const deviceScale = (ctx.getTransform?.().a) || 1;
+  return {
+    deviceScale,
+    lineWidth: 1 / deviceScale,
+    snap: (v: number): number => (Math.round(v * deviceScale) + 0.5) / deviceScale,
+  };
+}
+
 /**
  * Draw the grid lines for the cell area.
  * Handles merged cells by not drawing internal grid lines.
@@ -181,14 +214,9 @@ export function drawGridLines(state: RenderState): void {
 
   const range = calculateVisibleRange(viewport, config, width, height, dimensions);
   ctx.strokeStyle = theme.gridLine;
-  // Draw gridlines as a crisp 1-DEVICE-pixel hairline (like Excel). The canvas
-  // transform is scaled by devicePixelRatio*zoom, so a lineWidth of 1 would
-  // render as `deviceScale` device pixels — 2px+ on a high-DPI display, which
-  // reads as a heavy, blurry line. 1/deviceScale keeps it a true hairline, and
-  // snapping to the device-pixel grid keeps it sharp.
-  const deviceScale = (ctx.getTransform?.().a) || 1;
-  ctx.lineWidth = 1 / deviceScale;
-  const snap = (v: number): number => (Math.round(v * deviceScale) + 0.5) / deviceScale;
+  // A 1-DEVICE-pixel hairline on the device-pixel grid (gridlineGeometry).
+  const { lineWidth, snap } = gridlineGeometry(ctx);
+  ctx.lineWidth = lineWidth;
 
   // Calculate insertion/deletion animation offsets (same logic as cells.ts)
   let rowAnimOffset = 0;

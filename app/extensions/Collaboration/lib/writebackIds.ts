@@ -16,6 +16,14 @@ export const WRITEBACK_PANE_ID = "collaboration:writeback";
  */
 export const WRITEBACK_TAB_ID = "writeback-tab";
 
+/**
+ * The Writeback tab's accent: THE theme token behind the contextual tab's
+ * colour (manifest.ts `WRITEBACK_TAB_COLOR`) and the region frame on the grid
+ * (writebackOutline.ts `FRAME_ACCENT_TOKEN`), which reads as belonging to the
+ * tab only while both name the same token -- so both are built from this one.
+ */
+export const WRITEBACK_ACCENT_TOKEN = "--tab-accent-writeback";
+
 /** The publisher's Collected Responses pane (the review dashboard). */
 export const PUBLISHER_DASHBOARD_PANE_ID = "collaboration:publisherDashboard";
 

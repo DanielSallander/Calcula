@@ -455,6 +455,11 @@ const chromeColorConfigs = [
       'extensions/CanvasSheet/components/**/*.{ts,tsx}',
       'extensions/Collaboration/components/WritebackTabSections.tsx',
       'extensions/Collaboration/components/WritebackPublisherTabSections.tsx',
+      // Writeback > Collect From (the tab's hero and the pane's dropdown) and
+      // the Collected Responses pane that hosts it: a task pane on tokens, so
+      // it reads in every skin (owner review, 2026-10-22).
+      'extensions/Collaboration/components/CollectFromMenuButton.tsx',
+      'extensions/Collaboration/components/PublisherDashboardPane.tsx',
       'extensions/ExtensionsManager/AddInsRibbonSection.tsx',
       'extensions/Animation/components/TimelineSections.tsx',
       'extensions/Settings/components/**/*.{ts,tsx}',

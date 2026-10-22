@@ -10,8 +10,13 @@ import {
   hasGridLayers,
   paintGridLayers,
   listGridLayers,
+  cellAreaOrigin,
+  gridlineGeometry,
+  rangeToCanvasRect,
   type GridLayerContext,
 } from "../gridLayers";
+import { gridlineGeometry as coreGridlineGeometry } from "../../core/lib/gridRenderer/rendering/grid";
+import { DEFAULT_GRID_CONFIG } from "../../core/types";
 
 function mockContext(): GridLayerContext {
   return {
@@ -103,5 +108,39 @@ describe("gridLayers registry", () => {
     } finally {
       unregisterGridLayer("a");
     }
+  });
+});
+
+describe("gridLayers geometry for a painter that lands on Core's own lines", () => {
+  it("gridlineGeometry IS Core's (the function both gridline painters call), not a copy", () => {
+    expect(gridlineGeometry).toBe(coreGridlineGeometry);
+    const ctx = { getTransform: () => ({ a: 2 }) } as unknown as CanvasRenderingContext2D;
+    const g = gridlineGeometry(ctx);
+    expect(g.lineWidth).toBe(0.5);
+    expect(g.snap(150.58)).toBe((Math.round(150.58 * 2) + 0.5) / 2);
+  });
+
+  it("cellAreaOrigin is the cell area's top-left: below and right of the headers, 0 when they are hidden", () => {
+    const ctx = mockContext();
+    expect(cellAreaOrigin({ ...ctx, config: { rowHeaderWidth: 22, colHeaderHeight: 20 } as never })).toEqual({ x: 22, y: 20 });
+    // View > Headings off: the frame's (effective) config carries 0, a real answer.
+    expect(cellAreaOrigin({ ...ctx, config: { rowHeaderWidth: 0, colHeaderHeight: 0 } as never })).toEqual({ x: 0, y: 0 });
+    // A config with no sizes reads the product defaults, as every painter does.
+    expect(cellAreaOrigin({ ...ctx, config: {} as never })).toEqual({
+      x: DEFAULT_GRID_CONFIG.rowHeaderWidth,
+      y: DEFAULT_GRID_CONFIG.colHeaderHeight,
+    });
+  });
+
+  it("cellAreaOrigin agrees with where rangeToCanvasRect clips a range under the headers", () => {
+    const ctx: GridLayerContext = {
+      ...mockContext(),
+      config: { ...DEFAULT_GRID_CONFIG, rowHeaderWidth: 30, colHeaderHeight: 25 },
+      viewport: { scrollX: 100, scrollY: 100, startRow: 0, startCol: 0, rowCount: 30, colCount: 10 },
+      dimensions: { columnWidths: new Map(), rowHeights: new Map() } as never,
+    };
+    const rect = rangeToCanvasRect(ctx, 0, 0, 20, 5)!;
+    expect(rect.clippedTop && rect.clippedLeft).toBe(true);
+    expect({ x: rect.x, y: rect.y }).toEqual(cellAreaOrigin(ctx));
   });
 });

@@ -796,39 +796,138 @@ general capability, not a special case for `GATHER`.
 
 What a subscriber sees on a sheet that carries writeback regions:
 
-- **One frame per region** (the owner's design, refined twice on 2026-10-21:
-  a dashed outline read as the copy marquee; then a tiny "w" on every outer
-  cell edge became ONE edit icon -- a pen over an open square -- per edge). A
-  soft SOLID 1px line round each region on the ACTIVE sheet, broken once per
-  edge by a 12px edit icon at the middle of the edge's VISIBLE length (so a
-  tall region scrolled half off still shows one). The line is the grid's cell
-  text colour at 45% alpha and the icon at 70%, so it follows every skin with
-  no literal. No fill: the cells keep their gridlines and the publisher's
-  formatting. An edge too short for the icon (a single 20px row's sides) keeps
-  a plain line. One rectangle per region per frame, whatever its size. It is a
-  grid LAYER under the selection (`collaboration:writeback-outline`,
-  `lib/writebackOutline.ts`, `drawEditIcon`), frozen-pane correct through
-  `@api/gridLayers` `rangeToCanvasRect`, and it is not painted on a canvas
-  page.
+- **One frame per region** (the owner's design, refined three times: on
+  2026-10-21 a dashed outline read as the copy marquee, then a tiny "w" on
+  every outer cell edge became ONE edit icon -- a pen over an open square -- per
+  edge; on 2026-10-22 the 1px grey line at 45% read "too sharp and noticeable"
+  and the 12px icon "a bit too intrusive on the cell"). The frame is a
+  **hairline drawn ON the region's own boundary gridlines** with Core's own
+  gridline geometry -- `@api/gridLayers` `gridlineGeometry`, the ONE function
+  both Core gridline painters call (`drawGridLines` for the ordinary grid,
+  `drawGridLinesZone` for every frozen or split pane; the pane painter stroked
+  1 CSS px at `Math.floor(v) + 0.5` until the 2026-10-22 review, so with Freeze
+  Top Row the frame sat beside the grey line on roughly every other vertical
+  edge again, and frozen gridlines were 2 device pixels at DPR 2): one DEVICE
+  pixel wide (`1 / deviceScale`, the canvas transform's DPR x zoom) and snapped
+  to the same device pixel (`(round(v * deviceScale) + 0.5) / deviceScale`), the
+  right and bottom edges on the next column's and row's gridline. It used to be
+  a 1-CSS-px line half a pixel INSIDE the region -- two device pixels beside the
+  gridline at DPR 2. It is tinted with the Writeback tab's accent (ONE constant,
+  `WRITEBACK_ACCENT_TOKEN` in `lib/writebackIds.ts`, builds both the tab's
+  colour and the frame's token: `--tab-accent-writeback`, #4338ca light /
+  #a5b4fc dark) at **35%**, read through the generic `@api/appearance`
+  `getCanvasThemeColor(token)` (any theme token as a canvas colour, `var()`
+  references resolved, cached per applied token set), so it reads as a softly
+  coloured gridline that belongs to the Writeback tab, in every skin, with no
+  literal. 35% because at 100% scaling a one-pixel line's weight IS its
+  contrast: at 55% it measured 3.3:1 on white -- the contrast of the line the
+  owner called too sharp; at 35% it is 2.3:1 in Light and 2.9:1 in Dark (a
+  plain gridline: 1.3:1 and 1.5:1). The horizontal edges run half a device
+  pixel past each corner and the vertical edges stop short of a corner a drawn
+  horizontal edge covers, so NO device pixel is painted twice (Chromium strokes
+  a one-device-pixel line as a hairline, segment by segment, so an overlap was
+  blended twice into a darker dot at every corner). No fill: the cells keep
+  their gridlines and the publisher's formatting. A border the author drew ON
+  the region's boundary is stroked over by the frame (borders are drawn in the
+  cell pass, before the layer), so a black boundary border reads dark indigo.
+- **An 8px edit icon on the TOP edge and one on the BOTTOM edge** (the same
+  accent at 85%; the line is broken 2px either side of it), at the horizontal
+  centre of the MIDDLE VISIBLE COLUMN -- never on the sides, and never on a
+  column boundary, where a cell's corner triangles live. NO SIDE ICONS (review
+  of the owner's "intrusive on the cell", 2026-10-22): a side icon centred on
+  the edge reaches 3px into the edge cell, exactly where Core's 3px text inset
+  ends a right-aligned number or starts a left-aligned label, so it touched the
+  middle row's value (zero pixels between the "0" of 850 and the icon), and a
+  one-row region was boxed in by four icons. Above and below a cell is where
+  no value is. The icon's stroke is one CSS pixel rounded DOWN to a whole
+  number of device pixels (1 from 100% to 175%, 2 at 200%) and its vertices
+  are aligned to device pixels, so it is crisp at every display scaling: a
+  1-CSS-px stroke is 1.25-1.75 device pixels at 125%-175%, which no position
+  makes crisp, and rounding UP to 2 filled the pen in. "Middle" is the column
+  holding the middle of the edge's VISIBLE width (a midpoint exactly on a
+  boundary goes to the left one; a hidden column never qualifies). An edge
+  whose middle column is narrower than 16px (icon + clear space + 2px of line
+  each side) keeps a plain line, and so does an edge where the icon would be
+  CUT: a top edge flush with the column header (a region in row 1, or scrolled
+  so its first row is the first one visible -- the headers are painted after
+  every layer and covered the icon's upper half; `@api/gridLayers`
+  `cellAreaOrigin` says where the cell area starts, 0 with the headings off)
+  and a bottom edge at the bottom of the canvas. The other edge keeps its icon;
+  a region taller than the window scrolled so that both edges are off screen
+  shows its frame lines and no icon. An edge that continues off-screen is not
+  drawn, nor is its icon. Cost: one rectangle for the region plus one for the
+  middle column when the whole width is on screen and its columns share one
+  width (the usual form); otherwise a binary search of the column holding the
+  midpoint -- O(log n) rectangles, never one per cell. It is a grid LAYER under
+  the selection (`collaboration:writeback-outline`, `lib/writebackOutline.ts`,
+  `drawEditIcon`, `middleVisibleLine`), frozen-pane correct through
+  `@api/gridLayers` `rangeToCanvasRect` and `gridlineGeometry`, and it is not
+  painted on a canvas page.
 - **The author sees it too.** The frame also covers the regions this workbook
   itself designated (`calp_get_writeback_draft_regions`, read by the same
   store), in a fresh workbook and in a working copy. Those get no marker (they
   hold no values) and the PUBLISHER's version of the Writeback tab (below).
-- **A marker on cells that need attention.** A ~3px disc at the cell's
-  top-right, inset to sit just LEFT of the 6px note/comment triangle so both
-  stay visible, ringed in the cell's background colour, with a tiny "!" from
-  DPR 1.5 up (`lib/writebackDecorations.ts`, an over-selection decoration at
-  priority 6):
+- **A marker on cells that need attention** (owner, 2026-10-22: "a small red
+  triangle in the left upper corner"; it was a ~3px disc -- a square when
+  rejected -- beside the note triangle at the top-right). A solid right
+  triangle in the cell's TOP-LEFT corner, right angle in the corner, legs 7px
+  (one more than the note triangle, for the reason under "Under Excel's error
+  indicator"), in the theme's DANGER tone (`getCanvasToneColors().dangerFg`),
+  skipped in a cell smaller than that (`lib/writebackDecorations.ts`, an
+  over-selection decoration, `collaboration:writeback-marker`, priority 9):
   - **draft** (typed but not sent -- including a CLEARED cell, which is a
-    pending retraction): the WARN tone;
-  - **rejected**: the DANGER tone;
-  - submitted, approved and empty cells: no marker. "It was sent" is said by the
+    pending retraction): the triangle;
+  - **rejected**: the triangle AND the value's TEXT in a danger ink -- a style
+    interceptor (`collaboration:writeback-rejected-text`, priority 150, after
+    conditional formatting's 100 so the status wins over a rule's font colour;
+    the test pins CF's registration) that sets the text colour only, never a
+    fill, and leaves alone a cell whose text an earlier interceptor made
+    invisible (a checkbox or an embedded button: the red would bring its
+    TRUE/FALSE back). The ink FOLLOWS THE FILL the cell shows: the active
+    skin's danger ink on the skin's own background; on an EXPLICIT fill
+    (`@api/cellPaint` `isExplicitCellFill`, the grid painter's own rule -- a
+    conditional format's fill included) the first of the active ink and the
+    Light and Dark grounds' (`@api/appearance` `getBaselineToneColors`) that
+    reaches 3:1 against it (`lib/inkContrast.ts`); none -- a mid-tone fill --
+    and the text keeps its own colour, the triangle alone marking the cell.
+    (The Dark skin's #fda29b on Excel's "Light Red Fill" #ffc7ce was 1.32:1,
+    over the preset's own #9c0006 at 5.92:1; it now gets #b42318, 4.48:1.) A
+    NUMBER FORMAT's colour (`[Red]`, `[Blue]`) is applied by Core after every
+    interceptor and wins: a rejected value in such a format keeps the format's
+    colour. So an in-grid reader tells "rejected" from "not sent" without
+    relying on the triangle alone, except on a mid-tone fill or under a
+    coloured number format;
+  - submitted, approved and empty cells: nothing. "It was sent" is said by the
     tab's Status line, the success toast and the marker disappearing.
-- Colours come from the active skin's tone tokens
-  (`@api/appearance` `getCanvasToneColors()`), never literals.
-- Both painters are registered only while the workbook HAS regions (the frame
-  also while it has designated ones), so a workbook without writeback pays
-  nothing per frame.
+- **Under Excel's error indicator.** ErrorChecking paints a green 5px triangle
+  in the SAME corner (over-selection, priority 10). The writeback marker's
+  priority 9 puts it underneath: where both apply, the green one is on top and
+  the strip between the two hypotenuses stays red -- 1.41px wide with 7px
+  legs: one full diagonal of solid red device pixels at 100%, three at 200%.
+  With 6px legs it was 0.71px, which at 100% rasterised as a brown 50/50 mix
+  and a pink fringe with no pixel of the marker's red (2026-10-22 review), so
+  a cell flagged "number stored as text" -- a number typed into a text-typed
+  region -- lost its "not sent" signal. `writebackPainters.test.ts` pins both
+  registrations, ErrorChecking's triangle size, and the solid band. The
+  note/comment triangle keeps the top-right corner. In a region's top row and
+  left column the frame re-tints the marker's outermost row / column of pixels
+  (both lie on the gridline) while the cell is NOT selected -- a selected
+  cell's over-selection decorations are replayed after the layers; one pixel
+  of a 7px triangle, which still reads red.
+- **Design Mode's cell-behaviour badge shares the corner.** ScriptableObjects
+  paints a top-LEFT triangle (5-7px) on every behaviour-attached cell in
+  Design Mode, at the default under-selection anchor, so on a marked writeback
+  cell the marker (over-selection) covers all but a ~0.6px fringe of it, and
+  an ORPHANED badge (red) looks like the marker. Not changed here -- moving
+  either indicator is the owner's call (open-items 2.ao).
+- Colours come from the active skin's tokens (`@api/appearance`
+  `getCanvasThemeColor` and `getCanvasToneColors`; the Light and Dark grounds'
+  danger inks through `getBaselineToneColors`), never literals.
+- The frame layer is registered only while the workbook HAS regions
+  (subscribed or designated); the marker and the rejected-text interceptor
+  only while it holds SUBSCRIBED regions, the only ones with values
+  (`createWritebackCellPainters`). A workbook without writeback pays nothing
+  per frame.
 
 Locked cells (after a deadline, a one-shot region already sent) still have no
 look of their own; an edit there is refused by the backend with its message.
@@ -980,10 +1079,11 @@ fresh workbook or a working copy (`WritebackPublisherPanelDefinition`,
   updated", or a warning naming why the workspace could not be reached, never a
   claimed update) and *Writeback Pane*.
 
-**Markers.** A draft is a small warn-tone DISC, a rejected value a small
-danger-tone SQUARE in the same place beside the note triangle -- different
-shapes, so they read apart at 100% scaling and without colour; at high DPI the
-disc carries a "!" and the square an "x".
+**Markers.** An unsent value and a rejected one both carry a small red
+triangle (7px) in the cell's top-left corner; a rejected value's text is also
+drawn in a danger ink that reads on the cell's fill, so the two read apart
+without relying on the triangle alone (2026-10-22; until then a warn-tone disc
+and a danger-tone square beside the note triangle). See Grid treatment.
 
 The soak/invariant walk knows the label (`CONTEXTUAL_TAB_RULES.Writeback`,
 `app/e2e/invariants/invariants.ts`: the tab may show only while the index holds
@@ -1077,9 +1177,14 @@ roster and both exports take NO stream argument; one row per
 (stream, person, cell) -- the same person answering in `test` and `prod` is
 two rows, each labelled whenever more than one stream can appear. The pane's
 former stream picker is gone; it shows the same Collect From control as the
-tab (author rows) or the fixed "in <stream> (this workbook's stream)" chip
-(subscribed rows). Approve/Reject send the ROW's own stream, which must be a
-collected one.
+tab, as a dropdown under "Collect from" that names the choice ("prod", "test,
+prod", "All streams"; author rows), or the fixed "in <stream> (this workbook's
+stream)" chip (subscribed rows). The header is three rows: Region, Collect
+from, then Refresh / Export CSV / Export Parquet. The strip under it names the
+streams in the SAME words and order as the dropdown ("from test, prod", "from
+all streams"), and its "Not collected: ..." warning points at the dropdown
+above it, not at the ribbon. Approve/Reject send the ROW's own stream, which
+must be a collected one.
 
 **A review decides on the record its id names.** One version can hold a
 `test` and a `prod` record for the same person and cell (the fold keeps one
@@ -1242,8 +1347,20 @@ every reader which streams it reads from each version.
 
 **The control.** `components/CollectFromMenuButton.tsx` over ONE store
 (`lib/collectStreamsStore.ts`) over the one Rust choice: a hero in the publisher
-Writeback tab (`writeback-tab-collect-from`) and a 28px button in Collected
-Responses (`publisher-dashboard-collect-from`). `MenuButton
+Writeback tab (`writeback-tab-collect-from`) and, in Collected Responses, a
+full-width field under a "Collect from" label that names the current choice
+(`publisher-dashboard-collect-from`, presentation "dropdown"). That field is the
+`@api/layout` `FieldTrigger` -- the Dropdown's own trigger, exported so no
+extension keeps a copy of the field look -- and the label is tied to it by id
+(a click on "Collect from" opens it, as "Region" focuses its select). ONE ORDER
+everywhere: the dropdown's text, its tooltip and the pane's strip name the
+streams in the menu's order (the development line, then the pipeline, then
+removed names; `collectStreamsModel.ts` `collectedInMenuOrder` / `menuOrder`).
+Rust hands an explicit choice over in NAME order (`collecting`, `summary`:
+"prod, test"), and a region's `environments` lists only environments with a
+version, so a chosen environment not promoted yet ranked last there: one choice
+was said three ways. Rust's own `summary` stays in name order for the audit
+row. `MenuButton
 closeOnSelect={false}` with `menuitemcheckbox` rows: "All streams", "Default:
 the last environment (<name>)" (only when another choice is held), then
 Development line, each environment in pipeline order (hint: version, "no version

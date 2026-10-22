@@ -8,7 +8,10 @@
 //          with its own list, its own keyboard (usually none) and its own
 //          dismissal. This is the one: values use Dropdown, commands use Menu
 //          (Menu.tsx), and both draw their rows with the one recipe in
-//          listRow.ts.
+//          listRow.ts. The trigger is exported on its own as FieldTrigger
+//          (FieldTriggerText for its value text), for a field that opens
+//          something other than a listbox -- a MenuButton of check rows that
+//          names its choice -- so no extension keeps a copy of the field look.
 //
 //          ARIA: the trigger is a <button role="combobox" aria-haspopup=
 //          "listbox" aria-expanded> named by `ariaLabel`; the popup is a
@@ -31,7 +34,7 @@
 //
 //          Colours come only from LT (../theme).
 
-import React, { useCallback, useEffect, useId, useRef, useState } from "react";
+import React, { forwardRef, useCallback, useEffect, useId, useRef, useState } from "react";
 import { css } from "@emotion/css";
 import { useSurfaceLayout } from "../context";
 import { LT } from "../theme";
@@ -169,10 +172,15 @@ const valueClass = css`
   overflow: hidden;
 `;
 
+/** The value's text: one line that ends in an ellipsis. `line-height: normal`
+ *  because the trigger's is 1 (a 12px line box) and this span clips -- with
+ *  the trigger's, every descender (the tail of the p in "prod", a comma, g, y,
+ *  q, j) was cut off about a pixel below the baseline (BUG-0587). */
 const valueTextClass = css`
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  line-height: normal;
 `;
 
 const placeholderClass = css`
@@ -197,6 +205,77 @@ const previewClass = css`
   align-items: center;
   flex: none;
 `;
+
+// ============================================================================
+// The field trigger (shared with callers whose popup is not a listbox)
+// ============================================================================
+
+export interface FieldTriggerTextProps extends React.HTMLAttributes<HTMLSpanElement> {
+  children?: React.ReactNode;
+}
+
+/**
+ * A field trigger's value TEXT: one line that ends in an ellipsis when the
+ * field is narrower than the text, with room for its descenders. A string
+ * child of {@link FieldTrigger} is wrapped in one; use it directly to put
+ * attributes on the text (a test id) or to set text beside an icon.
+ */
+export function FieldTriggerText({ className, children, ...rest }: FieldTriggerTextProps): React.ReactElement {
+  return (
+    <span {...rest} className={[valueTextClass, className].filter(Boolean).join(" ")}>
+      {children}
+    </span>
+  );
+}
+
+export interface FieldTriggerProps extends Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "children"> {
+  /** What the field says -- its current value. A string is drawn as
+   *  {@link FieldTriggerText}; anything else is placed as given. */
+  children?: React.ReactNode;
+  /** Between the value and the chevron (a Badge, say). */
+  trailing?: React.ReactNode;
+  /** Width in px. Default 104 in the band (and it never shrinks there), 100%
+   *  in a panel or a popover -- the Dropdown's rule. */
+  width?: number;
+}
+
+/**
+ * THE FIELD TRIGGER: the 28px value field a {@link Dropdown} opens from -- the
+ * control border on the input background, the accent border while its popup
+ * is open (`aria-expanded="true"`), the focus ring on keyboard focus, the one
+ * disabled look, the value, then a chevron. Exported for a control whose popup
+ * is NOT a listbox of values -- a MenuButton of check rows that names its
+ * current choice in the field -- so it looks exactly like every other dropdown
+ * field instead of carrying a copy of this recipe. A plain <button> that takes
+ * every prop the caller (or a MenuButton's clone: id, onClick, onKeyDown,
+ * aria-haspopup / aria-expanded / aria-controls) gives it.
+ */
+export const FieldTrigger = forwardRef<HTMLButtonElement, FieldTriggerProps>(function FieldTrigger(
+  { children, trailing, width, className, style, type, ...rest },
+  ref,
+) {
+  const layout = useSurfaceLayout();
+  const band = layout.container === "band";
+  const value = typeof children === "string" || typeof children === "number"
+    ? <FieldTriggerText>{children}</FieldTriggerText>
+    : children;
+  return (
+    <button
+      ref={ref}
+      type={type ?? "button"}
+      {...rest}
+      className={[triggerClass, className].filter(Boolean).join(" ")}
+      // In a band row (nowrap) a fixed-width field must not be squeezed.
+      style={{ width: width ?? (band ? DROPDOWN_BAND_WIDTH : "100%"), ...(band ? { flex: "none" } : {}), ...style }}
+    >
+      <span className={valueClass}>{value}</span>
+      {trailing}
+      <span className={chevronClass} aria-hidden>
+        <DropdownChevron size={9} />
+      </span>
+    </button>
+  );
+});
 
 // ============================================================================
 // The open list
@@ -385,8 +464,6 @@ export function Dropdown<T>({
   tooltipPlacement,
   zIndex,
 }: DropdownProps<T>): React.ReactElement {
-  const layout = useSurfaceLayout();
-  const band = layout.container === "band";
   const [triggerEl, setTriggerEl] = useState<HTMLButtonElement | null>(null);
   const [open, setOpen] = useState(false);
   const [triggerWidth, setTriggerWidth] = useState(0);
@@ -424,7 +501,7 @@ export function Dropdown<T>({
 
   let content: React.ReactNode;
   if (!selected) {
-    content = <span className={[valueTextClass, placeholderClass].join(" ")}>{placeholder ?? ""}</span>;
+    content = <FieldTriggerText className={placeholderClass}>{placeholder ?? ""}</FieldTriggerText>;
   } else if (renderValue) {
     content = renderValue(selected);
   } else {
@@ -435,33 +512,27 @@ export function Dropdown<T>({
             {selected.icon}
           </span>
         )}
-        <span className={valueTextClass}>{selected.label}</span>
+        <FieldTriggerText>{selected.label}</FieldTriggerText>
       </>
     );
   }
 
   const trigger = (
-      <button
-        ref={setTriggerEl}
-        type="button"
-        role="combobox"
-        aria-haspopup="listbox"
-        aria-expanded={isOpen}
-        aria-controls={isOpen ? listId : undefined}
-        aria-label={ariaLabel}
-        data-testid={testId}
-        disabled={disabled}
-        className={triggerClass}
-        // In a band row (nowrap) a fixed-width field must not be squeezed.
-        style={{ width: width ?? (band ? DROPDOWN_BAND_WIDTH : "100%"), ...(band ? { flex: "none" } : {}) }}
-        onClick={() => (isOpen ? setOpen(false) : openList())}
-        onKeyDown={handleTriggerKeyDown}
-      >
-        <span className={valueClass}>{content}</span>
-        <span className={chevronClass} aria-hidden>
-          <DropdownChevron size={9} />
-        </span>
-      </button>
+    <FieldTrigger
+      ref={setTriggerEl}
+      role="combobox"
+      aria-haspopup="listbox"
+      aria-expanded={isOpen}
+      aria-controls={isOpen ? listId : undefined}
+      aria-label={ariaLabel}
+      data-testid={testId}
+      disabled={disabled}
+      width={width}
+      onClick={() => (isOpen ? setOpen(false) : openList())}
+      onKeyDown={handleTriggerKeyDown}
+    >
+      {content}
+    </FieldTrigger>
   );
   const hasTooltip =
     (tooltip !== undefined && tooltip !== null && tooltip !== false && tooltip !== "") ||

@@ -67,15 +67,51 @@ export function heroBadge(view: CollectionStreamsView | null, error?: string | n
   return undefined;
 }
 
+/** A stream's name as a menu row says it ("" is the development line). */
+function streamLabelIn(view: CollectionStreamsView, stream: string): string {
+  const row = view.choices.find((c) => c.stream === stream);
+  if (row) return row.label;
+  return stream === "" ? "Development line" : stream;
+}
+
+/**
+ * THE ONE ORDER every view of the choice names streams in: the menu's -- the
+ * development line, then the pipeline in its order, then any other name
+ * (Rust's `choices`). Rust hands `collecting` and an explicit choice's
+ * `summary` over in NAME order ("prod, test"), and the dropdown, its tooltip
+ * and the pane's strip once said one choice three ways.
+ */
+export function menuOrder(view: CollectionStreamsView): string[] {
+  return view.choices.map((c) => c.stream);
+}
+
+/**
+ * The streams collected NOW, in the menu's words and order; a collected
+ * stream no row lists (defensive) by its own name, last. Null when every
+ * stream is collected or the choice could not be resolved (`collecting` null).
+ */
+export function collectedInMenuOrder(view: CollectionStreamsView): string[] | null {
+  if (view.collecting === null) return null;
+  const collected = new Set(view.collecting);
+  const words = view.choices.filter((c) => collected.has(c.stream)).map((c) => c.label);
+  for (const stream of view.collecting) {
+    if (!view.choices.some((c) => c.stream === stream)) words.push(streamLabelIn(view, stream));
+  }
+  return words;
+}
+
 /**
  * The hero's tooltip: what is collected, what is not, and who may change it. A
  * READ THAT FAILED is said as such -- never "publish first" for an application
- * that is published, and never a stale view presented as current.
+ * that is published, and never a stale view presented as current. An explicit
+ * choice is named in the menu's order (as the pane's dropdown says it); the
+ * default and "All streams" in Rust's words ("prod (the last environment)").
  */
 export function heroTooltip(view: CollectionStreamsView | null, error?: string | null): string {
   if (error && (!view || !view.linked)) return readErrorText(error);
   if (!view || !view.linked) return NOT_PUBLISHED_TOOLTIP;
-  const parts = [`Collecting from: ${view.summary}.`];
+  const ordered = view.mode === "only" ? collectedInMenuOrder(view) : null;
+  const parts = [`Collecting from: ${ordered && ordered.length > 0 ? ordered.join(", ") : view.summary}.`];
   if (error) parts.push(`The latest re-read failed, so this may be out of date. ${readErrorText(error)}.`);
   if (view.notCollected.length > 0) parts.push(`Not collected: ${view.notCollected.join(", ")}.`);
   if (view.environmentsError) parts.push(view.environmentsError);
@@ -84,11 +120,14 @@ export function heroTooltip(view: CollectionStreamsView | null, error?: string |
   return parts.join(" ");
 }
 
-/** The pane's warning line, or null. */
+/** The Collected Responses pane's warning line, or null. It sits under the
+ *  pane's own "Collect from" dropdown, so it points there -- not to the
+ *  ribbon. */
 export function notCollectedText(view: CollectionStreamsView | null): string | null {
   if (!view || !view.linked || view.notCollected.length === 0) return null;
   const names = view.notCollected.join(", ");
-  return `Not collected: ${names}. Tick ${view.notCollected.length === 1 ? "it" : "them"} in Writeback > Collect From to include ${view.notCollected.length === 1 ? "its" : "their"} answers.`;
+  const one = view.notCollected.length === 1;
+  return `Not collected: ${names}. Tick ${one ? "it" : "them"} in Collect from above to include ${one ? "its" : "their"} answers.`;
 }
 
 /** The menu row for "use the default" -- shown only when the workbook holds

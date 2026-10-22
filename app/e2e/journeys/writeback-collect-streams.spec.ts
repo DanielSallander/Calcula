@@ -16,7 +16,11 @@
  *      model table (bi_list_writeback_tables) holds 3 rows;
  *   3. ticking TEST in the hero's menu keeps the menu OPEN, and the pane (one
  *      source of truth) and the model table follow to 6 rows; the workbook is
- *      dirty and the change is in the audit trail;
+ *      dirty and the change is in the audit trail; the pane's header is not
+ *      squeezed -- its five controls neither overlap nor leave the pane, at the
+ *      default width and at 300px, and the dropdown's "test, prod" is not cut
+ *      (crops of the header at both widths are saved for the owner, never
+ *      compared);
  *   4. the choice survives save + File > New + reopen;
  *   5. a NEW environment (staging) arrives unticked with "not collected", and
  *      the pane warns; "All streams" collects it.
@@ -34,8 +38,22 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test, expect } from "../fixtures";
-import { activate, callModule, eventually, invoke, isDirty, newFile, openAt, sheets, COLLAB } from "../helpers/calp-harness";
+import {
+  activate,
+  bounded,
+  callModule,
+  eventually,
+  installAppImport,
+  invoke,
+  isDirty,
+  newFile,
+  openAt,
+  sheets,
+  COLLAB,
+  type AppWindow,
+} from "../helpers/calp-harness";
 import { checkout } from "../helpers/calp-collab";
+import { MOD } from "../helpers/canvas-live";
 import { closeTaskPanes } from "../helpers/object-pane";
 
 const SOURCE_WS = "C:\\writeback-test";
@@ -196,6 +214,135 @@ async function openAuthorTab(page: Page, grid: { clickCell: (ref: string) => Pro
   await byTestId(page, "writeback-tab-collect-from").waitFor({ state: "visible", timeout: 8000 });
 }
 
+// ---------------------------------------------------------------------------
+// The Collected Responses header's layout
+// ---------------------------------------------------------------------------
+
+/** The header's controls: Region, Collect from, then the three actions. */
+const HEADER_CONTROLS = [
+  "publisher-dashboard-region",
+  "publisher-dashboard-collect-from",
+  "publisher-dashboard-refresh",
+  "publisher-dashboard-export-csv",
+  "publisher-dashboard-export-parquet",
+] as const;
+
+/** The task pane's default width (src/shell/TaskPane/useTaskPaneStore.ts DEFAULT_WIDTH; the fixture resets the store before every test). */
+const DEFAULT_PANE_WIDTH = 320;
+
+interface Box {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+interface HeaderLayout {
+  /** The task pane store's width -- what the pane's resize handle sets. */
+  storeWidth: number;
+  /** The Collected Responses pane's own box. */
+  pane: Box;
+  boxes: Array<{ id: string; box: Box }>;
+  /** The Collect from dropdown's text, and whether it fits its box. */
+  text: { value: string; scrollWidth: number; clientWidth: number };
+}
+
+/** The task pane store's width (the store the resize handle writes). */
+async function taskPaneWidth(page: Page): Promise<number> {
+  await installAppImport(page);
+  return bounded(
+    "task pane width",
+    page.evaluate(async (mod) => {
+      const m = (await (window as unknown as AppWindow).__appImport!(mod)) as { useTaskPaneStore: { getState: () => { width: number } } };
+      return m.useTaskPaneStore.getState().width;
+    }, MOD.TASK_PANE_STORE),
+  );
+}
+
+/** Resize the task pane through its store's own `setWidth` (what dragging the pane's edge calls). */
+async function setTaskPaneWidth(page: Page, width: number): Promise<void> {
+  await installAppImport(page);
+  await bounded(
+    "set the task pane width",
+    page.evaluate(
+      async ({ mod, width }) => {
+        const m = (await (window as unknown as AppWindow).__appImport!(mod)) as {
+          useTaskPaneStore: { getState: () => { setWidth: (w: number) => void } };
+        };
+        m.useTaskPaneStore.getState().setWidth(width);
+      },
+      { mod: MOD.TASK_PANE_STORE, width },
+    ),
+  );
+}
+
+async function headerLayout(page: Page): Promise<HeaderLayout> {
+  const storeWidth = await taskPaneWidth(page);
+  const dom = await bounded(
+    "read the Collected Responses header",
+    page.evaluate((ids) => {
+      const box = (el: Element | null, what: string) => {
+        if (!el) throw new Error(`no ${what} on screen`);
+        const r = el.getBoundingClientRect();
+        return { x: r.x, y: r.y, width: r.width, height: r.height };
+      };
+      const text = document.querySelector<HTMLElement>('[data-testid="publisher-dashboard-collect-from"] [data-collect-from-text]');
+      return {
+        pane: box(document.querySelector('[data-testid="publisher-dashboard"]'), "Collected Responses pane"),
+        boxes: ids.map((id) => ({ id, box: box(document.querySelector(`[data-testid="${id}"]`), id) })),
+        text: { value: (text?.textContent ?? "").trim(), scrollWidth: text?.scrollWidth ?? -1, clientWidth: text?.clientWidth ?? -1 },
+      };
+    }, [...HEADER_CONTROLS]),
+  );
+  return { storeWidth, ...dom };
+}
+
+/** Every pair of header controls whose boxes overlap (edges that only touch do not). */
+function overlappingControls(l: HeaderLayout): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < l.boxes.length; i++) {
+    for (let j = i + 1; j < l.boxes.length; j++) {
+      const a = l.boxes[i].box;
+      const b = l.boxes[j].box;
+      if (a.x < b.x + b.width - 0.5 && b.x < a.x + a.width - 0.5 && a.y < b.y + b.height - 0.5 && b.y < a.y + a.height - 0.5) {
+        out.push(`${l.boxes[i].id} x ${l.boxes[j].id}`);
+      }
+    }
+  }
+  return out;
+}
+
+/** Every header control that is not wholly across the pane (or has no width). */
+function controlsOutsidePane(l: HeaderLayout): string[] {
+  return l.boxes
+    .filter(({ box }) => box.width <= 0 || box.x < l.pane.x - 0.5 || box.x + box.width > l.pane.x + l.pane.width + 0.5)
+    .map(({ id }) => id);
+}
+
+function describeLayout(l: HeaderLayout): string {
+  const r = (b: Box) => `${Math.round(b.x)},${Math.round(b.y)} ${Math.round(b.width)}x${Math.round(b.height)}`;
+  const controls = l.boxes.map(({ id, box }) => `${id.replace("publisher-dashboard-", "")} ${r(box)}`).join("; ");
+  return `store ${l.storeWidth}px, pane ${r(l.pane)}; ${controls}; text "${l.text.value}" scroll ${l.text.scrollWidth} / client ${l.text.clientWidth}`;
+}
+
+/**
+ * Save a crop of the pane's top -- its title bar, the header and the strip
+ * under it -- for the OWNER. Evidence only: never compared (the goldens are
+ * stale), so it cannot fail a run.
+ */
+async function savePaneHeaderShot(page: Page, name: string): Promise<void> {
+  const pane = await page.locator('[data-testid="publisher-dashboard"]').boundingBox();
+  const header = await page.locator('[data-testid="publisher-dashboard-header"]').boundingBox();
+  if (!pane || !header) throw new Error("no Collected Responses header on screen");
+  const top = Math.max(0, Math.floor(pane.y) - 40);
+  const file = test.info().outputPath(name);
+  await page.screenshot({
+    path: file,
+    clip: { x: Math.floor(pane.x) - 1, y: top, width: Math.ceil(pane.width) + 2, height: Math.ceil(header.y + header.height) + 64 - top },
+  });
+  console.log(`[collect-streams] for the owner: ${file}`);
+}
+
 let regionId = "";
 
 test.describe.serial("Writeback > Collect From: the publisher chooses which streams are collected", () => {
@@ -313,7 +460,44 @@ test.describe.serial("Writeback > Collect From: the publisher chooses which stre
     await expect(rows).toHaveCount(6, { timeout: 15_000 });
     const streams = (await rows.evaluateAll((els) => els.map((e) => e.getAttribute("data-stream")))).sort();
     expect(streams).toEqual(["prod", "prod", "prod", "test", "test", "test"]);
-    await expect(byTestId(page, "publisher-dashboard-collect-from")).toHaveAttribute("title", /Collecting from: prod, test\./);
+    // The pane's dropdown says the choice in the pipeline's order ("test, prod",
+    // test before prod), and its tooltip in the SAME order -- it used to read
+    // "Collecting from: prod, test." (Rust's name order) under "test, prod".
+    const paneCollectFrom = byTestId(page, "publisher-dashboard-collect-from");
+    await expect(paneCollectFrom).toHaveAttribute("title", /Collecting from: test, prod\./);
+    await expect(paneCollectFrom.locator("[data-collect-from-text]")).toHaveText("test, prod");
+    await expect(byTestId(page, "publisher-dashboard-streams")).toHaveText("from test, prod");
+
+    // THE HEADER IS NOT SQUEEZED (owner, 2026-10-22: "the sheet selector and
+    // the environment filter seems a bit squeezed" -- one row held the region
+    // select and the Collect From button, whose funnel overlapped the select and
+    // whose label was cut to "Collect Fr"). At the pane's default width and at
+    // 300px: no two of the five controls overlap and none leaves the pane; at
+    // the default width the dropdown says its whole choice.
+    const atDefault = await headerLayout(page);
+    console.log(`[collect-streams] header at the default width: ${describeLayout(atDefault)}`);
+    expect(atDefault.storeWidth, "the task pane is not at its default width").toBe(DEFAULT_PANE_WIDTH);
+    expect(overlappingControls(atDefault), `header controls overlap at the default width: ${describeLayout(atDefault)}`).toEqual([]);
+    expect(controlsOutsidePane(atDefault), `header controls leave the pane at the default width: ${describeLayout(atDefault)}`).toEqual([]);
+    expect(atDefault.text.value).toBe("test, prod");
+    expect(atDefault.text.clientWidth, "the Collect from text has no box").toBeGreaterThan(0);
+    expect(atDefault.text.scrollWidth, `the Collect from text is cut at the default width: ${describeLayout(atDefault)}`).toBeLessThanOrEqual(atDefault.text.clientWidth);
+    await savePaneHeaderShot(page, "collected-responses-header-default-width.png");
+    try {
+      await setTaskPaneWidth(page, 300);
+      const at300 = await eventually(
+        () => headerLayout(page),
+        (l) => l.storeWidth === 300 && l.pane.width <= atDefault.pane.width - 15,
+        "the pane did not narrow to 300px",
+        5000,
+      );
+      console.log(`[collect-streams] header at 300px: ${describeLayout(at300)}`);
+      expect(overlappingControls(at300), `header controls overlap at 300px: ${describeLayout(at300)}`).toEqual([]);
+      expect(controlsOutsidePane(at300), `header controls leave the pane at 300px: ${describeLayout(at300)}`).toEqual([]);
+      await savePaneHeaderShot(page, "collected-responses-header-300px.png");
+    } finally {
+      await setTaskPaneWidth(page, DEFAULT_PANE_WIDTH);
+    }
 
     await expect.poll(async () => (await authorTable(page, regionId))?.rowCount, { timeout: 15_000 }).toBe(6);
     expect(await isDirty(page), "the choice is saved with the workbook").toBe(true);

@@ -1,8 +1,10 @@
 // FILENAME: app/extensions/Collaboration/index.ts
 // PURPOSE: Collaboration extension entry point — .calp publish, subscribe, refresh, overrides.
 // CONTEXT: Registers task panes, dialogs, the writeback guards and the writeback
-// grid painters (a region frame layer -- a soft line with tiny "w"s -- and unsent/rejected state
-// markers, registered only while regions exist). It also owns TWO top-level
+// grid painters (a region frame layer -- a hairline on the region's boundary gridlines in the
+// Writeback tab's accent, one small edit icon on its top and bottom edges -- and, on unsent and
+// rejected cells, a red top-left triangle plus a rejected value's text in the danger tone;
+// registered only while regions exist). It also owns TWO top-level
 // menus — "Collaboration" (order 46) for the .calp application lifecycle and
 // "Writeback" (order 47) for the data-collection channel. They were one
 // "Distribution" submenu (this feature's name until 2026-09-25) under External
@@ -74,8 +76,8 @@ import {
   writebackRegionListKey,
 } from "./lib/writebackStore";
 import { decideWritebackRangeGuard, coerceWritebackInput } from "./lib/writebackGuards";
-import { createWritebackDecoration } from "./lib/writebackDecorations";
-import { createWritebackOutlinePainter } from "./lib/writebackOutline";
+import { createWritebackCellPainters } from "./lib/writebackDecorations";
+import { createWritebackOutlinePainter, writebackFrameColors } from "./lib/writebackOutline";
 import { WRITEBACK_REGIONS_CHANGED_EVENT } from "./components/DesignateWritebackDialog";
 import {
   handleWritebackSelectionChange,
@@ -92,8 +94,9 @@ import { refreshCollectStreams, resetCollectStreams, wireCollectStreamsRefresh }
 import { columnToLetter } from "@api/types";
 
 import { onSelectionOwnershipChanged } from "@api/selectionOwner";
-import { rangeToCanvasRect } from "@api/gridLayers";
-import { getCanvasToneColors, getActiveGridTheme } from "@api/appearance";
+import { rangeToCanvasRect, gridlineGeometry, cellAreaOrigin } from "@api/gridLayers";
+import { getBaselineToneColors, getCanvasToneColors, getCanvasThemeColor } from "@api/appearance";
+import { isExplicitCellFill } from "@api/cellPaint";
 import { getGridStateSnapshot } from "@api/grid";
 import { parseNumber } from "@api/locale";
 import { openApplicationInspectorWindow } from "./lib/openApplicationInspectorWindow";
@@ -980,40 +983,41 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(unregCommitGuard);
 
-  // GRID PAINTERS: one discreet "w" frame per region on the active sheet
-  // (a layer under the selection) and a small state marker on unsent and
-  // rejected cells (an over-selection decoration beside the note triangle).
-  // Registered only while regions exist, so a workbook without writeback pays
-  // nothing per frame. Colours come from the skin (the frame: the grid's cell
-  // text colour at low alpha; the markers: the tone tokens), read per frame.
+  // GRID PAINTERS: one discreet frame per region on the active sheet -- a
+  // hairline ON the region's boundary gridlines (Core's own gridline geometry)
+  // in the Writeback tab's accent, one small edit icon on its top and bottom
+  // edges (a layer under the selection) -- and, on unsent and rejected cells, a
+  // small red triangle in the top-left corner (an over-selection decoration,
+  // under ErrorChecking's green one) plus a rejected value's text in the danger
+  // tone (a style interceptor, text colour only). Registered only while regions
+  // exist, so a workbook without writeback pays nothing per frame. Colours come
+  // from the skin, read per frame: the frame through getCanvasThemeColor(the
+  // tab's accent token), the marker and the rejected text through the danger
+  // tone.
   let unregOutline: (() => void) | null = null;
-  let unregMarkers: (() => void) | null = null;
 
   const outlinePaint = createWritebackOutlinePainter({
     regions: getActiveSheetFrameRegions,
-    colors: () => {
-      const text = getActiveGridTheme().cellText;
-      return { line: text, glyph: text };
-    },
+    colors: () => writebackFrameColors(getCanvasThemeColor),
     rectOf: rangeToCanvasRect,
+    gridline: gridlineGeometry,
+    cellArea: cellAreaOrigin,
   });
-  const markerPaint = createWritebackDecoration({
+  const cellPainters = createWritebackCellPainters({
     cellState: getActiveCellState,
-    colors: () => {
-      const tones = getCanvasToneColors();
-      return {
-        warn: tones.warnFg,
-        danger: tones.dangerFg,
-        background: getActiveGridTheme().cellBackground,
-      };
-    },
-    pixelRatio: () => (typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1),
+    danger: () => getCanvasToneColors().dangerFg,
+    alternativeInks: () => [getBaselineToneColors("light").dangerFg, getBaselineToneColors("dark").dangerFg],
+    isExplicitFill: isExplicitCellFill,
+    registerDecoration: (id, fn, priority, anchor) =>
+      context.grid.decorations.register(id, fn, priority, anchor),
+    registerInterceptor: (id, fn, priority) =>
+      context.grid.styleInterceptors.register(id, fn, priority),
   });
 
   function updateGridPainters(): void {
     // The FRAME is for every writeback region the author designated or a
-    // subscription brought in; the state MARKERS only for subscribed regions,
-    // the only ones that hold values.
+    // subscription brought in; the state MARKER and the rejected text only for
+    // subscribed regions, the only ones that hold values.
     if (hasWritebackFrames()) {
       if (!unregOutline) {
         unregOutline = context.grid.layers.register({
@@ -1027,19 +1031,7 @@ function activate(context: ExtensionContext): void {
       unregOutline();
       unregOutline = null;
     }
-    if (hasWritebackRegions()) {
-      if (!unregMarkers) {
-        unregMarkers = context.grid.decorations.register(
-          "collaboration:writeback-marker",
-          markerPaint,
-          6, // just after the note triangle (5): the note stays on top
-          "over-selection",
-        );
-      }
-    } else if (unregMarkers) {
-      unregMarkers();
-      unregMarkers = null;
-    }
+    cellPainters.sync(hasWritebackRegions());
   }
 
   // Every snapshot change re-decides the painters (the store requests the
@@ -1090,10 +1082,7 @@ function activate(context: ExtensionContext): void {
       unregOutline();
       unregOutline = null;
     }
-    if (unregMarkers) {
-      unregMarkers();
-      unregMarkers = null;
-    }
+    cellPainters.dispose();
   });
 
   // Tear down every mounted advisory validator worker on deactivate.

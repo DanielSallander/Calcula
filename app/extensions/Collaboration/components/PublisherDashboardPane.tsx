@@ -15,8 +15,22 @@
 //          application the workbook published or was opened for editing from;
 //          a region that cannot be read yet says why (publish first, push first,
 //          not the publisher, workspace unreachable) instead of an empty inbox.
+//
+//          THE HEADER IS THREE ROWS (owner, 2026-10-22: "the sheet selector and
+//          the environment filter seem a bit squeezed"). It used to be ONE flex
+//          row holding the region select, the Collect From hero (outside the
+//          band a 28px icon button, whose funnel overlapped the select and whose
+//          label was cut to "Collect Fr"), Refresh and both exports. Now, from
+//          @api/layout's panel primitives: (1) "Region" over the region select
+//          at full width; (2) "Collect from" over a field-height dropdown that
+//          names the current choice (CollectFromMenuButton presentation
+//          "dropdown"; author regions only); (3) Refresh / Export CSV / Export
+//          Parquet as a toolbar that wraps. Everything is painted with LT tokens,
+//          so the pane follows the skin (Dark included); the chromeColorConfigs
+//          hex ban in app/eslint.boundaries.js covers this file.
 
-import React, { useState, useEffect, useCallback, useRef, useSyncExternalStore } from "react";
+import React, { useState, useEffect, useCallback, useId, useRef, useSyncExternalStore } from "react";
+import { css } from "@emotion/css";
 import { onAppEvent, AppEvents } from "@api";
 import type { WritebackSubmissionReceivedPayload } from "@api/events";
 import { acquireSubmissionWatch } from "@api/collaboration";
@@ -33,6 +47,20 @@ import {
   type RegionSubmission,
   type RegionResponseStatus,
 } from "@api/collaboration";
+import {
+  ActionRow,
+  Button,
+  Checkbox,
+  Field,
+  Select,
+  Stack,
+  LT,
+  FONT_FAMILY,
+  FONT_MONO,
+  GAP_MD,
+  GAP_SM,
+  LABEL_FONT_SIZE,
+} from "@api/layout";
 import { saveCsvReport, saveParquetReport } from "../lib/reportExport";
 import { WRITEBACK_REGIONS_CHANGED_EVENT, WRITEBACK_COLLECTION_STREAMS_CHANGED_EVENT } from "../lib/writebackIds";
 import { ENVIRONMENTS_CHANGED_EVENT } from "@api/collaboration";
@@ -43,7 +71,7 @@ import {
   getCollectStreamsView,
   refreshCollectStreams,
 } from "../lib/collectStreamsStore";
-import { notCollectedText } from "../lib/collectStreamsModel";
+import { menuOrder, notCollectedText } from "../lib/collectStreamsModel";
 import { CollectFromMenuButton } from "./CollectFromMenuButton";
 import { promptAsync } from "@api/dialogs";
 import { senderLine, identityLine, notCountedCount, headerRows, type SenderTone, type IdentityTone } from "../lib/senderLabel";
@@ -85,10 +113,11 @@ export function regionsReadFailedText(error: string): string {
 
 /**
  * The streams a region's rows come from, as the summary chip says it: "" for
- * the development line. `collecting` null = every stream.
+ * the development line. `collecting` null = every stream, said as the Collect
+ * from dropdown above it says it ("all streams", never a second wording).
  */
 export function collectingLabel(collecting: string[] | null): string {
-  if (collecting === null) return "every stream";
+  if (collecting === null) return "all streams";
   return collecting.map(streamName).join(", ");
 }
 
@@ -97,12 +126,117 @@ export function rowsShowStream(collecting: string[] | null): boolean {
   return collecting === null || collecting.length > 1;
 }
 
-const STATE_BADGE: Record<RegionSubmission["state"], { label: string; bg: string; fg: string }> = {
-  draft: { label: "Draft", bg: "#f1f3f4", fg: "#5f6368" },
-  submitted: { label: "Pending", bg: "#fef7e0", fg: "#b06000" },
-  approved: { label: "Approved", bg: "#e6f4ea", fg: "#137333" },
-  rejected: { label: "Rejected", bg: "#fce8e6", fg: "#c5221f" },
+/**
+ * `collecting` in the PIPELINE's order -- the development line, then the
+ * streams as `order` lists them, then any other name -- the order the Collect
+ * From menu, its dropdown and its tooltip use. Rust hands the set over in name
+ * order ("prod, test"), and the strip under a dropdown that says "test, prod"
+ * must not say it the other way round. For an author's region `order` is the
+ * menu's own (collectStreamsModel.ts `menuOrder`: every DEFINED environment,
+ * also one not promoted yet -- a region's `environments` lists only those with
+ * a version, so a chosen "staging" would rank last there).
+ */
+export function inPipelineOrder(collecting: string[], order: string[]): string[] {
+  const rank = (stream: string): number => {
+    if (stream === "") return -1;
+    const at = order.indexOf(stream);
+    return at === -1 ? order.length : at;
+  };
+  return [...collecting].sort((a, b) => rank(a) - rank(b) || (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/** The header's rows, top to bottom (each a `publisher-dashboard-header-row`
+ *  whose `data-row` is one of these). "collectFrom" is an AUTHOR region's
+ *  only: a subscribed region's stream is fixed and its strip says which. */
+export type HeaderRowName = "region" | "collectFrom" | "actions";
+
+// ============================================================================
+// Tones (LT tokens only: the pane follows the skin)
+// ============================================================================
+
+/** The status pills' tones: a foreground/background pair from the skin, so
+ *  each reads on the light and the dark ground alike. */
+type PillTone = "neutral" | "info" | "warn" | "ok" | "danger";
+
+const PILL_TONE: Record<PillTone, React.CSSProperties> = {
+  neutral: { background: LT.chipBg, color: LT.textSecondary, boxShadow: `inset 0 0 0 1px ${LT.chipBorder}` },
+  info: { background: LT.infoBg, color: LT.infoFg },
+  warn: { background: LT.warnBg, color: LT.warnFg },
+  ok: { background: LT.okBg, color: LT.okFg },
+  danger: { background: LT.dangerBg, color: LT.dangerFg },
 };
+
+const STATE_BADGE: Record<RegionSubmission["state"], { label: string; tone: PillTone }> = {
+  draft: { label: "Draft", tone: "neutral" },
+  submitted: { label: "Pending", tone: "warn" },
+  approved: { label: "Approved", tone: "ok" },
+  rejected: { label: "Rejected", tone: "danger" },
+};
+
+const SENDER_TONE: Record<SenderTone, string> = { ok: LT.okFg, warn: LT.warnFg, muted: LT.textSecondary };
+
+const IDENTITY_TONE: Record<IdentityTone, string> = {
+  ok: LT.okFg,
+  warn: LT.warnFg,
+  danger: LT.dangerFg,
+  muted: LT.textSecondary,
+};
+
+/** Approve: the ok tone's pair on an outlined @api Button. `&&` out-ranks the
+ *  Button's own outlined rule (the paneChrome primaryButtonClass idiom); the
+ *  hover tint is LAYERED over the tone, which a bare translucent fill would
+ *  drop. */
+const approveClass = css`
+  && {
+    color: ${LT.okFg};
+    background: ${LT.okBg};
+    border-color: ${LT.okFg};
+  }
+
+  &&:hover:not(:disabled) {
+    background: linear-gradient(${LT.hover}, ${LT.hover}), ${LT.okBg};
+  }
+
+  &&:active:not(:disabled) {
+    background: linear-gradient(${LT.active}, ${LT.active}), ${LT.okBg};
+  }
+`;
+
+// ============================================================================
+// Small parts
+// ============================================================================
+
+/** A status pill in the summary strips and on each row. */
+function Pill({
+  tone,
+  testId,
+  title,
+  children,
+}: {
+  tone: PillTone;
+  testId?: string;
+  title?: string;
+  children: React.ReactNode;
+}): React.ReactElement {
+  return (
+    <span style={{ ...styles.pill, ...PILL_TONE[tone] }} data-testid={testId} data-tone={tone} title={title}>
+      {children}
+    </span>
+  );
+}
+
+/** One row of the header: a named slot the tests and E2E can find. */
+function HeaderRow({ name, children }: { name: HeaderRowName; children: React.ReactNode }): React.ReactElement {
+  return (
+    <div data-testid="publisher-dashboard-header-row" data-row={name} style={styles.headerRow}>
+      {children}
+    </div>
+  );
+}
+
+// ============================================================================
+// The pane
+// ============================================================================
 
 export function PublisherDashboardPane(): React.ReactElement {
   const [regions, setRegions] = useState<CollectionRegion[]>([]);
@@ -116,6 +250,8 @@ export function PublisherDashboardPane(): React.ReactElement {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const regionSelectId = useId();
+  const collectFromId = useId();
   // The watch subscription must not be torn down and re-created every time the
   // publisher picks a different region, so the handler reads the selection
   // through a ref instead of closing over it.
@@ -129,16 +265,22 @@ export function PublisherDashboardPane(): React.ReactElement {
    * 2026-10-22): it is the workbook's ONE choice, Writeback > Collect From --
    * for its own region the streams the publisher chose (default: the
    * pipeline's last environment), for a subscribed region the stream the
-   * subscription follows. The pane shows the same control as the tab, and the
-   * strip names the streams, because "3 responses" without them is how a test
-   * count gets read as a production one.
+   * subscription follows. The pane shows the same control as the tab (as a
+   * dropdown that names the choice), and the strip names the streams, because
+   * "3 responses" without them is how a test count gets read as a production
+   * one.
    */
   useSyncExternalStore(subscribeCollectStreams, getCollectStreamsVersion, getCollectStreamsVersion);
   const streamsView = getCollectStreamsView();
 
   const current = regions.find((r) => r.regionId === selected) ?? null;
   const ready = current?.status === "ready";
-  const collecting: string[] | null = ready && current ? current.collecting : null;
+  // ONE order with the dropdown and its tooltip: the menu's, for an author's
+  // region (the workbook's own choice); a subscribed region collects one stream.
+  const streamOrder =
+    current?.role === "author" && streamsView?.linked ? menuOrder(streamsView) : current?.environments ?? [];
+  const collecting: string[] | null =
+    ready && current && current.collecting ? inPipelineOrder(current.collecting, streamOrder) : null;
 
   const loadRegions = useCallback(async () => {
     try {
@@ -364,10 +506,11 @@ export function PublisherDashboardPane(): React.ReactElement {
   const showRowStream = ready && rowsShowStream(collecting);
   const isAuthor = current?.role === "author";
   const notCollected = isAuthor && ready ? notCollectedText(streamsView) : null;
+  const canExport = Boolean(selected) && ready && submissions.length > 0;
 
   return (
     <div style={styles.container} data-testid="publisher-dashboard">
-      <div style={styles.header}>
+      <div style={styles.header} data-testid="publisher-dashboard-header">
         {regions.length === 0 ? (
           regionsError ? (
             <span style={styles.headerText} data-testid="publisher-dashboard-regions-error">
@@ -379,39 +522,69 @@ export function PublisherDashboardPane(): React.ReactElement {
             </span>
           )
         ) : (
-          <select
-            value={selected ?? ""}
-            onChange={(e) => setSelected(e.target.value)}
-            style={styles.select}
-            data-testid="publisher-dashboard-region"
-          >
-            {regions.map((r) => (
-              <option key={r.regionId} value={r.regionId}>
-                {collectionRegionLabel(r)}
-              </option>
-            ))}
-          </select>
+          <Stack gap={GAP_MD}>
+            <HeaderRow name="region">
+              <Field label="Region" htmlFor={regionSelectId}>
+                <Select
+                  id={regionSelectId}
+                  value={selected ?? ""}
+                  onChange={(e) => setSelected(e.target.value)}
+                  title={current ? collectionRegionLabel(current) : undefined}
+                  data-testid="publisher-dashboard-region"
+                >
+                  {regions.map((r) => (
+                    <option key={r.regionId} value={r.regionId}>
+                      {collectionRegionLabel(r)}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            </HeaderRow>
+            {current && isAuthor && (
+              <HeaderRow name="collectFrom">
+                <Field label="Collect from" htmlFor={collectFromId}>
+                  <CollectFromMenuButton
+                    presentation="dropdown"
+                    id={collectFromId}
+                    testId="publisher-dashboard-collect-from"
+                  />
+                </Field>
+              </HeaderRow>
+            )}
+            <HeaderRow name="actions">
+              <ActionRow gap={GAP_SM}>
+                <Button
+                  variant="outlined"
+                  onClick={() => selected && loadSubs(selected)}
+                  disabled={loading || !selected || !ready}
+                  aria-busy={loading || undefined}
+                  title="Read this region's answers again"
+                  data-testid="publisher-dashboard-refresh"
+                >
+                  Refresh
+                </Button>
+                <Button
+                  variant="outlined"
+                  onClick={exportCsv}
+                  disabled={!canExport}
+                  title="Export this region's submissions as CSV"
+                  data-testid="publisher-dashboard-export-csv"
+                >
+                  Export CSV
+                </Button>
+                <Button
+                  variant="outlined"
+                  onClick={exportParquet}
+                  disabled={!canExport}
+                  title="Export this region's submissions as Parquet (typed, for databases)"
+                  data-testid="publisher-dashboard-export-parquet"
+                >
+                  Export Parquet
+                </Button>
+              </ActionRow>
+            </HeaderRow>
+          </Stack>
         )}
-        {current && isAuthor && <CollectFromMenuButton testId="publisher-dashboard-collect-from" />}
-        <button onClick={() => selected && loadSubs(selected)} disabled={loading || !selected || !ready} style={styles.smallBtn}>
-          {loading ? "..." : "Refresh"}
-        </button>
-        <button
-          onClick={exportCsv}
-          disabled={!selected || !ready || submissions.length === 0}
-          style={styles.smallBtn}
-          title="Export this region's submissions as CSV"
-        >
-          Export CSV
-        </button>
-        <button
-          onClick={exportParquet}
-          disabled={!selected || !ready || submissions.length === 0}
-          style={styles.smallBtn}
-          title="Export this region's submissions as Parquet (typed, for databases)"
-        >
-          Export Parquet
-        </button>
       </div>
 
       {regions.length > 0 && regionsError && (
@@ -433,7 +606,7 @@ export function PublisherDashboardPane(): React.ReactElement {
       )}
 
       {notCollected && (
-        <div style={styles.notReady} data-testid="publisher-dashboard-not-collected">
+        <div style={{ ...styles.notReady, color: LT.warnFg }} data-testid="publisher-dashboard-not-collected">
           {notCollected}
         </div>
       )}
@@ -444,14 +617,14 @@ export function PublisherDashboardPane(): React.ReactElement {
             {respondents} respondent{respondents !== 1 ? "s" : ""}
           </span>
           {current.packageName && (
-            <span style={{ ...styles.chip, background: "#f1f3f4", color: "#5f6368" }} title={current.registryUrl ?? ""}>
+            <Pill tone="neutral" title={current.registryUrl ?? ""}>
               {current.packageName}
               {current.version ? ` v${current.version}` : ""}
-            </span>
+            </Pill>
           )}
-          <span
-            style={{ ...styles.chip, background: "#e8f0fe", color: "#1a5fb4" }}
-            data-testid="publisher-dashboard-streams"
+          <Pill
+            tone="info"
+            testId="publisher-dashboard-streams"
             title={
               isAuthor
                 ? "The streams this workbook collects (Writeback > Collect From)."
@@ -459,18 +632,18 @@ export function PublisherDashboardPane(): React.ReactElement {
             }
           >
             {isAuthor ? `from ${collectingLabel(collecting)}` : `in ${collectingLabel(collecting)} (this workbook's stream)`}
-          </span>
-          {pending > 0 && <span style={{ ...styles.chip, ...styles.chipPending }}>{pending} pending</span>}
-          {approved > 0 && <span style={{ ...styles.chip, ...styles.chipApproved }}>{approved} approved</span>}
-          {rejected > 0 && <span style={{ ...styles.chip, ...styles.chipRejected }}>{rejected} rejected</span>}
+          </Pill>
+          {pending > 0 && <Pill tone="warn">{pending} pending</Pill>}
+          {approved > 0 && <Pill tone="ok">{approved} approved</Pill>}
+          {rejected > 0 && <Pill tone="danger">{rejected} rejected</Pill>}
           {notCounted > 0 && (
-            <span
-              style={{ ...styles.chip, ...styles.chipRejected }}
-              data-testid="publisher-dashboard-not-counted"
+            <Pill
+              tone="danger"
+              testId="publisher-dashboard-not-counted"
               title="This application counts only answers from verified senders. These answers are shown here and counted nowhere else."
             >
               {notCounted} not counted (sender not verified)
-            </span>
+            </Pill>
           )}
         </div>
       )}
@@ -487,36 +660,41 @@ export function PublisherDashboardPane(): React.ReactElement {
           <span style={styles.summaryItem}>
             {status.responded.length} of {status.expected.length} expected responded
           </span>
-          {status.missing.length > 0 && (
-            <span style={{ ...styles.chip, ...styles.chipPending }}>
-              waiting on: {status.missing.join(", ")}
-            </span>
-          )}
+          {status.missing.length > 0 && <Pill tone="warn">waiting on: {status.missing.join(", ")}</Pill>}
           {(status.notCounted ?? []).length > 0 && (
-            <span style={{ ...styles.chip, ...styles.chipRejected }} data-testid="publisher-dashboard-roster-not-counted">
+            <Pill tone="danger" testId="publisher-dashboard-roster-not-counted">
               not counted (not verified): {(status.notCounted ?? []).join(", ")}
-            </span>
+            </Pill>
           )}
         </div>
       )}
 
       {ready && (
-        <label style={styles.rollupRow} title="Publisher only — keeps a typed Parquet of all submissions next to the data so a database can read it without parsing JSON">
-          <input
-            type="checkbox"
+        <div style={styles.rollupRow}>
+          <Checkbox
             checked={rollup}
-            onChange={(e) => toggleRollup(e.target.checked)}
-            style={{ marginRight: 6 }}
+            onChange={(next) => void toggleRollup(next)}
+            testId="publisher-dashboard-rollup"
+            tooltip="Publisher only — keeps a typed Parquet of all submissions next to the data so a database can read it without parsing JSON"
+            label={
+              <span style={styles.rollupLabel}>
+                Auto-export submissions to Parquet (this machine refreshes{" "}
+                <code style={styles.code}>submissions/_rollup.parquet</code> on review actions and dashboard loads)
+              </span>
+            }
           />
-          Auto-export submissions to Parquet (this machine refreshes <code>submissions/_rollup.parquet</code> on review actions and dashboard loads)
-        </label>
+        </div>
       )}
 
-      {error && <div style={styles.error}>{error}</div>}
+      {error && (
+        <div style={styles.error} role="alert">
+          {error}
+        </div>
+      )}
 
       <div style={styles.list} data-testid="publisher-dashboard-list">
         {!selected || !ready ? null : submissions.length === 0 ? (
-          <div style={styles.empty}>No submissions yet for this region.</div>
+          <div style={styles.empty}>{loading ? "Loading…" : "No submissions yet for this region."}</div>
         ) : (
           submissions.map((s) => {
             const key = `${s.environment}:${s.submitterId}:${s.cellRow}:${s.cellCol}`;
@@ -528,26 +706,36 @@ export function PublisherDashboardPane(): React.ReactElement {
                   <span style={styles.submitter} title={s.submitterId}>{s.submitterName || s.submitterId}</span>
                   {showRowStream && <span style={styles.cellRef}>{streamName(s.environment)}</span>}
                   <span style={styles.cellRef}>{a1(s.cellRow, s.cellCol)}</span>
-                  <span style={{ ...styles.badge, backgroundColor: badge.bg, color: badge.fg }}>{badge.label}</span>
+                  <Pill tone={badge.tone}>{badge.label}</Pill>
                 </div>
                 <SenderRow row={s} />
                 <IdentityRow row={s} />
-                <div style={styles.rowValue}>{s.valueDisplay || <em style={{ color: "#aaa" }}>(empty)</em>}</div>
+                <div style={styles.rowValue}>{s.valueDisplay || <em style={styles.emptyValue}>(empty)</em>}</div>
                 {s.state === "rejected" && s.reviewReason && (
-                  <div style={{ fontSize: 11, color: "#c5221f", marginTop: 2 }}>
-                    Reason: {s.reviewReason}
-                  </div>
+                  <div style={styles.reason}>Reason: {s.reviewReason}</div>
                 )}
                 <div style={styles.rowActions}>
                   {s.state !== "approved" && (
-                    <button disabled={isBusy} onClick={() => decide(s, "approved")} style={{ ...styles.smallBtn, ...styles.approve }}>
+                    <Button
+                      size="sm"
+                      variant="outlined"
+                      className={approveClass}
+                      disabled={isBusy}
+                      onClick={() => decide(s, "approved")}
+                    >
                       Approve
-                    </button>
+                    </Button>
                   )}
                   {s.state !== "rejected" && (
-                    <button disabled={isBusy} onClick={() => decide(s, "rejected")} style={{ ...styles.smallBtn, ...styles.reject }}>
+                    <Button
+                      size="sm"
+                      variant="outlined"
+                      tone="danger"
+                      disabled={isBusy}
+                      onClick={() => decide(s, "rejected")}
+                    >
                       Reject
-                    </button>
+                    </Button>
                   )}
                 </div>
               </div>
@@ -570,8 +758,6 @@ function SenderRow({ row }: { row: Parameters<typeof senderLine>[0] }) {
   );
 }
 
-const SENDER_TONE: Record<SenderTone, string> = { ok: "#137333", warn: "#b06000", muted: "#888" };
-
 /** THE IDENTITY COLUMN (identity phase 1, read side): this computer's verdict
  *  on who sent the answer -- verified, signed but not confirmed (and why),
  *  not verified ("written by ..."), or sent before sign-in -- and whether the
@@ -591,33 +777,73 @@ function IdentityRow({ row }: { row: RegionSubmission }) {
   );
 }
 
-const IDENTITY_TONE: Record<IdentityTone, string> = { ok: "#137333", warn: "#b06000", danger: "#c5221f", muted: "#888" };
+const divider = `1px solid ${LT.controlDivider}`;
 
 const styles: Record<string, React.CSSProperties> = {
-  container: { display: "flex", flexDirection: "column", height: "100%", overflow: "hidden", fontSize: 13 },
-  header: { display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderBottom: "1px solid #e0e0e0", flexShrink: 0 },
-  headerText: { fontSize: 12, color: "#888", flex: 1 },
-  select: { flex: 1, fontSize: 12, padding: "3px 4px" },
-  smallBtn: { fontSize: 12, padding: "3px 10px", borderRadius: 4, border: "1px solid #d0d0d0", background: "#fff", cursor: "pointer" },
-  approve: { background: "#137333", color: "#fff", borderColor: "#137333" },
-  reject: { background: "#fff", color: "#c5221f", borderColor: "#e0a0a0" },
-  summary: { display: "flex", alignItems: "center", flexWrap: "wrap" as const, gap: 6, padding: "6px 12px", borderBottom: "1px solid #f0f0f0", flexShrink: 0 },
-  notReady: { fontSize: 12, color: "#5f6368", background: "#f8f9fa", padding: "8px 12px", borderBottom: "1px solid #f0f0f0", flexShrink: 0, lineHeight: 1.4 },
-  rollupRow: { display: "flex", alignItems: "center", fontSize: 11, color: "#555", padding: "6px 12px", borderBottom: "1px solid #f0f0f0", flexShrink: 0, cursor: "pointer" },
-  summaryItem: { fontSize: 12, color: "#444", fontWeight: 500 },
-  chip: { fontSize: 10, padding: "1px 6px", borderRadius: 8 },
-  chipPending: { background: "#fef7e0", color: "#b06000" },
-  chipApproved: { background: "#e6f4ea", color: "#137333" },
-  chipRejected: { background: "#fce8e6", color: "#c5221f" },
-  error: { color: "#c5221f", fontSize: 12, padding: "6px 12px" },
+  container: {
+    display: "flex",
+    flexDirection: "column",
+    height: "100%",
+    overflow: "hidden",
+    fontFamily: FONT_FAMILY,
+    fontSize: 13,
+    color: LT.text,
+  },
+  header: { padding: "10px 12px", borderBottom: divider, flexShrink: 0, minWidth: 0 },
+  headerRow: { minWidth: 0 },
+  headerText: { display: "block", fontSize: 12, lineHeight: 1.4, color: LT.textSecondary },
+  summary: {
+    display: "flex",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 6,
+    padding: "6px 12px",
+    borderBottom: divider,
+    flexShrink: 0,
+  },
+  notReady: {
+    fontSize: 12,
+    color: LT.textSecondary,
+    padding: "8px 12px",
+    borderBottom: divider,
+    flexShrink: 0,
+    lineHeight: 1.4,
+  },
+  rollupRow: { padding: "2px 12px", borderBottom: divider, flexShrink: 0 },
+  rollupLabel: { fontSize: LABEL_FONT_SIZE, color: LT.textSecondary },
+  code: { fontFamily: FONT_MONO, fontSize: LABEL_FONT_SIZE },
+  summaryItem: { fontSize: 12, color: LT.text, fontWeight: 500 },
+  pill: {
+    display: "inline-flex",
+    alignItems: "center",
+    flexShrink: 0,
+    maxWidth: "100%",
+    fontSize: LABEL_FONT_SIZE,
+    fontWeight: 500,
+    lineHeight: "16px",
+    padding: "0 7px",
+    borderRadius: LT.radiusPill,
+    whiteSpace: "normal",
+    overflowWrap: "anywhere",
+  },
+  error: { color: LT.dangerFg, fontSize: 12, padding: "6px 12px", lineHeight: 1.4 },
   list: { flex: 1, overflowY: "auto", padding: "4px 0" },
-  row: { padding: "8px 12px", borderBottom: "1px solid #f0f0f0" },
+  row: { padding: "8px 12px", borderBottom: divider },
   rowMain: { display: "flex", alignItems: "center", gap: 8 },
-  submitter: { fontWeight: 600, color: "#333", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const, flex: 1 },
-  cellRef: { fontSize: 11, color: "#888", fontFamily: "monospace" },
-  badge: { fontSize: 10, padding: "1px 6px", borderRadius: 8, flexShrink: 0 },
-  sender: { fontSize: 11, marginTop: 2 },
-  rowValue: { fontSize: 13, color: "#222", marginTop: 2, wordBreak: "break-word" as const },
-  rowActions: { display: "flex", gap: 6, marginTop: 6, justifyContent: "flex-end" },
-  empty: { padding: "24px 12px", textAlign: "center" as const, color: "#999", fontSize: 12 },
+  submitter: {
+    fontWeight: 600,
+    color: LT.text,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    flex: 1,
+    minWidth: 0,
+  },
+  cellRef: { fontSize: LABEL_FONT_SIZE, color: LT.textSecondary, fontFamily: FONT_MONO },
+  sender: { fontSize: LABEL_FONT_SIZE, marginTop: 2 },
+  rowValue: { fontSize: 13, color: LT.text, marginTop: 2, wordBreak: "break-word" },
+  emptyValue: { color: LT.textTertiary },
+  reason: { fontSize: LABEL_FONT_SIZE, color: LT.dangerFg, marginTop: 2 },
+  rowActions: { display: "flex", gap: GAP_SM, marginTop: 6, justifyContent: "flex-end" },
+  empty: { padding: "24px 12px", textAlign: "center", color: LT.textSecondary, fontSize: 12 },
 };

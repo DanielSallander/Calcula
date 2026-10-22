@@ -12,12 +12,19 @@
 //          person who designated B3:B5 while answers waited in the workspace.
 //          Owner decision 2026-10-22: the pane's own stream picker is replaced
 //          by Collect From (one source of truth).
+//          Owner review 2026-10-22 ("the sheet selector and the environment
+//          filter seem a bit squeezed"): the header is THREE ROWS -- Region over
+//          its select, Collect from over a dropdown that names the choice (never
+//          the ribbon hero), then the actions as a wrapping toolbar -- and the
+//          pane paints with skin tokens only.
 //          @testing-library/react is not installed; react-dom + `act`. Every
 //          backend door is the @api/collaboration wrapper, doubled here.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { CollectionRegion, CollectionStreamsView, RegionSubmission } from "@api/collaboration";
 
 const h = vi.hoisted(() => ({
@@ -71,7 +78,8 @@ vi.mock("@api/notifications", () => ({ showToast: vi.fn() }));
 vi.mock("@api/dialogs", () => ({ promptAsync: vi.fn(async () => "") }));
 vi.mock("../reportExport", () => ({ saveCsvReport: vi.fn(), saveParquetReport: vi.fn() }));
 
-import { PublisherDashboardPane, NO_REGIONS_TEXT } from "../../components/PublisherDashboardPane";
+import { findHardcodedColours } from "@api/layout";
+import { PublisherDashboardPane, NO_REGIONS_TEXT, inPipelineOrder } from "../../components/PublisherDashboardPane";
 import { focusCollectedResponsesRegion } from "../collectedResponsesFocus";
 import { resetCollectStreams } from "../collectStreamsStore";
 import { WRITEBACK_COLLECTION_STREAMS_CHANGED_EVENT } from "../writebackIds";
@@ -464,5 +472,264 @@ describe("Writeback > Collect From in the pane (owner decision 2026-10-22)", () 
     await mount();
     expect(q("publisher-dashboard-collect-from")).toBeNull();
     expect(q("publisher-dashboard-streams")?.textContent).toBe("in test (this workbook's stream)");
+  });
+});
+
+// ============================================================================
+// The header (owner review 2026-10-22: "the sheet selector and the
+// environment filter seem a bit squeezed")
+// ============================================================================
+
+/** The header's rows, top to bottom, by name. */
+const headerRows = () =>
+  Array.from(container.querySelectorAll('[data-testid="publisher-dashboard-header"] [data-testid="publisher-dashboard-header-row"]'));
+const headerRowNames = () => headerRows().map((r) => r.getAttribute("data-row"));
+/** The text the Collect From dropdown SHOWS. */
+const collectFromText = () =>
+  container.querySelector('[data-testid="publisher-dashboard-collect-from"] [data-collect-from-text]')?.textContent ?? null;
+
+const SEVERAL: CollectionStreamsView = {
+  ...VIEW,
+  mode: "only",
+  selection: ["prod", "test"],
+  collecting: ["prod", "test"],
+  choices: VIEW.choices.map((c) => ({ ...c, included: c.stream !== "" })),
+  summary: "prod, test",
+};
+
+describe("the header: Region, Collect from, then the actions -- three rows", () => {
+  // SABOTAGE: put the select, the Collect From control and the buttons back in
+  // ONE flex row -- there is one row, not three.
+  it("an author region gets three rows, top to bottom, each holding its own controls", async () => {
+    await mount();
+    expect(headerRowNames()).toEqual(["region", "collectFrom", "actions"]);
+    const [region, collectFrom, actions] = headerRows();
+
+    const select = region.querySelector('[data-testid="publisher-dashboard-region"]') as HTMLSelectElement | null;
+    expect(select?.tagName).toBe("SELECT");
+    const regionLabel = region.querySelector("label");
+    expect(regionLabel?.textContent).toBe("Region");
+    // The label names the select (a click on "Region" focuses it).
+    expect(regionLabel?.htmlFor).toBe(select!.id);
+    expect(select!.id).not.toBe("");
+
+    const collectFromLabel = collectFrom.querySelector("label");
+    expect(collectFromLabel?.textContent).toBe("Collect from");
+    const trigger = collectFrom.querySelector('[data-testid="publisher-dashboard-collect-from"]');
+    expect(trigger?.tagName).toBe("BUTTON");
+    // The label names the dropdown too (a click on "Collect from" reaches it),
+    // as "Region" names its select.
+    expect(collectFromLabel?.htmlFor).toBe(trigger!.id);
+    expect(trigger!.id).not.toBe("");
+    expect(collectFromLabel?.control).toBe(trigger);
+
+    const ids = Array.from(actions.querySelectorAll("button")).map((b) => b.getAttribute("data-testid"));
+    expect(ids).toEqual(["publisher-dashboard-refresh", "publisher-dashboard-export-csv", "publisher-dashboard-export-parquet"]);
+    expect(Array.from(actions.querySelectorAll("button")).map((b) => b.textContent)).toEqual([
+      "Refresh",
+      "Export CSV",
+      "Export Parquet",
+    ]);
+
+    // Every control sits in its own row and nowhere else.
+    expect(region.querySelector('[data-testid="publisher-dashboard-collect-from"]')).toBeNull();
+    expect(region.querySelector("button")).toBeNull();
+    expect(collectFrom.querySelector("select")).toBeNull();
+    expect(actions.querySelector("select")).toBeNull();
+    expect(actions.querySelector('[data-testid="publisher-dashboard-collect-from"]')).toBeNull();
+  });
+
+  it("each field's label is ABOVE its control, the controls take the full width, and the toolbar wraps", async () => {
+    await mount();
+    const [region, collectFrom, actions] = headerRows();
+    // Field in a panel: a column, label first.
+    for (const rowEl of [region, collectFrom]) {
+      const field = rowEl.firstElementChild as HTMLElement;
+      expect(field.style.flexDirection).toBe("column");
+      expect(field.firstElementChild?.tagName).toBe("LABEL");
+    }
+    // The select's box spans the row (the Select wrapper), as does the
+    // dropdown: the @api field trigger sets its width -- 100% in a panel -- on
+    // the element itself.
+    // SABOTAGE: give FieldTrigger a fixed width in a panel -- this fails.
+    const select = region.querySelector("select")!;
+    expect((select.parentElement as HTMLElement).style.width).toBe("100%");
+    expect((collectFrom.querySelector("button") as HTMLElement).style.width).toBe("100%");
+    // A narrow pane (300px) wraps the three buttons instead of squeezing them.
+    expect((actions.firstElementChild as HTMLElement).style.flexWrap).toBe("wrap");
+  });
+
+  it.each([
+    ["All", { ...VIEW, mode: "all", collecting: null, summary: "All streams" } as CollectionStreamsView, "All streams"],
+    ["one stream", VIEW, "prod"],
+    ["several streams", SEVERAL, "test, prod"],
+  ])("Collect from names the choice: %s", async (_name, streams, text) => {
+    h.streams = streams;
+    await mount();
+    expect(collectFromText()).toBe(text);
+  });
+
+  // SABOTAGE: chip from `current.collecting` as Rust ordered it -- "from prod, test".
+  it("the strip names the streams in the pipeline's order, as the dropdown above it does", async () => {
+    h.regions = [{ ...OWN, environments: ["test", "prod"], collecting: ["prod", "test"] }];
+    h.streams = SEVERAL;
+    h.inbox = [row({ environment: "prod" }), row({ environment: "test", submissionId: "t", cellRow: 3 })];
+    await mount();
+    expect(collectFromText()).toBe("test, prod");
+    expect(q("publisher-dashboard-streams")?.textContent).toBe("from test, prod");
+    // ...and so does the dropdown's tooltip.
+    expect(q("publisher-dashboard-collect-from")?.getAttribute("title")).toContain("Collecting from: test, prod.");
+  });
+
+  // An environment the pipeline DEFINES but has not promoted is missing from a
+  // region's `environments` (only those with a version), so ranking by that
+  // list put a chosen "staging" last: dropdown "staging, prod", strip "from
+  // prod, staging". The strip ranks by the menu's own order.
+  // SABOTAGE: rank by `current.environments` again -- "from prod, staging".
+  it("one order for a stream not promoted yet: the strip, the dropdown and its tooltip agree", async () => {
+    const pipeline: CollectionStreamsView = {
+      ...VIEW,
+      mode: "only",
+      selection: ["prod", "staging"],
+      collecting: ["prod", "staging"],
+      choices: [
+        { stream: "", label: "Development line", kind: "developmentLine", included: false, version: null, hint: "" },
+        { stream: "test", label: "test", kind: "environment", included: false, version: "1.0.0", hint: "v1.0.0" },
+        { stream: "staging", label: "staging", kind: "environment", included: true, version: null, hint: "no version yet" },
+        { stream: "prod", label: "prod", kind: "environment", included: true, version: "1.0.0", hint: "v1.0.0" },
+      ],
+      summary: "prod, staging",
+    };
+    h.regions = [{ ...OWN, environments: ["test", "prod"], collecting: ["prod", "staging"] }];
+    h.streams = pipeline;
+    h.inbox = [row({ environment: "prod" })];
+    await mount();
+    expect(collectFromText()).toBe("staging, prod");
+    expect(q("publisher-dashboard-streams")?.textContent).toBe("from staging, prod");
+    expect(q("publisher-dashboard-collect-from")?.getAttribute("title")).toContain("Collecting from: staging, prod.");
+  });
+
+  it("every stream is 'all streams' in the strip, as the dropdown says it", async () => {
+    h.regions = [{ ...OWN, collecting: null }];
+    h.streams = { ...VIEW, mode: "all", collecting: null, summary: "All streams" };
+    await mount();
+    expect(collectFromText()).toBe("All streams");
+    expect(q("publisher-dashboard-streams")?.textContent).toBe("from all streams");
+  });
+
+  it("inPipelineOrder: the development line, the given order, then any other name", () => {
+    expect(inPipelineOrder(["prod", "test", ""], ["test", "prod"])).toEqual(["", "test", "prod"]);
+    expect(inPipelineOrder(["zeta", "prod", "alpha"], ["prod"])).toEqual(["prod", "alpha", "zeta"]);
+    expect(inPipelineOrder(["prod", "staging"], ["", "test", "staging", "prod"])).toEqual(["staging", "prod"]);
+    expect(inPipelineOrder([], ["prod"])).toEqual([]);
+  });
+
+  // SABOTAGE: drop `presentation="dropdown"` -- the pane shows the hero again,
+  // which outside the band is an icon + "Collect From" button.
+  it("the pane never shows the ribbon hero", async () => {
+    await mount();
+    const trigger = q("publisher-dashboard-collect-from") as HTMLButtonElement;
+    expect(trigger.getAttribute("data-presentation")).toBe("dropdown");
+    expect(trigger.textContent).not.toContain("Collect From");
+    // Only the chevron: no funnel icon to overlap the select.
+    expect(trigger.querySelectorAll("svg")).toHaveLength(1);
+    expect(container.querySelector("[data-hero-line]")).toBeNull();
+  });
+
+  it("a subscribed region has two rows (its stream is fixed: the strip says it)", async () => {
+    h.regions = [{ ...OWN, role: "subscriber", collecting: ["test"] }];
+    await mount();
+    expect(headerRowNames()).toEqual(["region", "actions"]);
+  });
+
+  it("a workbook with no regions has no rows, only the sentence", async () => {
+    h.regions = [];
+    await mount();
+    expect(headerRows()).toHaveLength(0);
+    expect(q("publisher-dashboard-header")?.textContent).toBe(NO_REGIONS_TEXT);
+  });
+
+  it("exports are live only with answers to export; Refresh only for a readable region", async () => {
+    await mount();
+    expect((q("publisher-dashboard-refresh") as HTMLButtonElement).disabled).toBe(false);
+    expect((q("publisher-dashboard-export-csv") as HTMLButtonElement).disabled).toBe(false);
+    expect((q("publisher-dashboard-export-parquet") as HTMLButtonElement).disabled).toBe(false);
+    const loads = h.loadRegionSubmissions.mock.calls.length;
+    await act(async () => {
+      (q("publisher-dashboard-refresh") as HTMLButtonElement).click();
+    });
+    await settle();
+    expect(h.loadRegionSubmissions.mock.calls.length).toBe(loads + 1);
+  });
+
+  it("with no answers yet the exports are disabled", async () => {
+    h.inbox = [];
+    await mount();
+    expect((q("publisher-dashboard-export-csv") as HTMLButtonElement).disabled).toBe(true);
+    expect((q("publisher-dashboard-export-parquet") as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+describe("the pane follows the skin: no colour literal, rendered or in source", () => {
+  it("renders every state with tokens only", async () => {
+    h.streams = { ...SEVERAL, notCollected: ["staging"] };
+    h.regions = [{ ...OWN, collecting: ["", "prod"], note: "v1.1.0 could not be verified on this computer." }];
+    h.inbox = [
+      row({ submissionId: "s1", state: "submitted", environment: "prod" }),
+      row({ submissionId: "s2", cellRow: 3, state: "approved", environment: "" }),
+      row({ submissionId: "s3", cellRow: 4, state: "rejected", reviewReason: "out of range", counted: false }),
+      row({ submissionId: "s4", cellRow: 5, state: "draft", valueDisplay: "" }),
+      row({
+        submissionId: "s5",
+        cellRow: 6,
+        sender: "signed",
+        identity: { status: "notVerified", reason: "ownerMismatch", writtenBy: "CORP\\bob" },
+        identityLabel: "Not verified: written by CORP\\bob",
+        counted: false,
+      }),
+    ];
+    h.regionResponseStatus.mockImplementation(async () => ({
+      expected: ["CORP\\alice", "CORP\\carol"],
+      responded: ["Alice"],
+      missing: ["CORP\\carol"],
+      beforeSignIn: [],
+      notCounted: ["Bob"],
+      requireVerified: true,
+    }));
+    await mount();
+    // Every strip is on screen, so every tone is scanned.
+    expect(q("publisher-dashboard-not-collected")).not.toBeNull();
+    expect(q("publisher-dashboard-note")).not.toBeNull();
+    expect(q("publisher-dashboard-rule")).not.toBeNull();
+    expect(q("publisher-dashboard-roster-not-counted")).not.toBeNull();
+    expect(q("publisher-dashboard-not-counted")).not.toBeNull();
+    expect(q("publisher-dashboard-rollup")).not.toBeNull();
+    expect(rows()).toHaveLength(5);
+    expect(findHardcodedColours(container)).toEqual([]);
+  });
+
+  it("a region that cannot be read, and a failed list, are on tokens too", async () => {
+    h.regions = [{ ...OWN, status: "notInPushedVersion", detail: "Push the application first." }];
+    await mount();
+    expect(findHardcodedColours(container)).toEqual([]);
+    h.listCollectionRegions.mockReset().mockImplementation(async () => {
+      throw new Error("the workspace share is offline");
+    });
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await mount();
+    expect(q("publisher-dashboard-regions-error")).not.toBeNull();
+    expect(findHardcodedColours(container)).toEqual([]);
+  });
+
+  // SABOTAGE: put `color: "#888"` back on any style -- this source scan fails
+  // (and so does `npm run lint:boundaries`, which now lists both files).
+  it.each(["PublisherDashboardPane.tsx", "CollectFromMenuButton.tsx"])("%s carries no colour literal", (file) => {
+    const src = fs.readFileSync(path.resolve(__dirname, "../../components", file), "utf8");
+    expect(src.match(/#[0-9a-fA-F]{3,8}\b/g)).toBeNull();
+    expect(src.match(/\b(?:rgba?|hsla?)\(/g)).toBeNull();
+    expect(
+      src.match(/["'`](?:red|blue|green|orange|yellow|purple|pink|brown|cyan|magenta|white|black|gray|grey|navy|teal|silver)["'`]/gi),
+    ).toBeNull();
   });
 });

@@ -24,6 +24,8 @@
 // ACTIVE sheet's (row, col), and an object's cell lives somewhere else. Pass the
 // cell's own conditional result as `conditional` instead.
 
+import { isDefaultBackgroundColor, isValidColor } from "../core/lib/gridRenderer/styles/styleUtils";
+
 export {
   paintStyledCellBox,
   paintStyledCellEdges,
@@ -33,3 +35,17 @@ export {
   type StyledCellPaint,
   type StyledCellTheme,
 } from "../core/lib/gridRenderer/rendering/styledCellBox";
+
+/**
+ * Whether the grid paints a cell background AS GIVEN. An absent, transparent or
+ * white background is a style's "no fill", and the grid paints the active
+ * skin's own cell background there instead -- the Dark skin's dark grey under a
+ * style that says `#ffffff` -- as it does for anything it cannot read. A
+ * painter that chooses an ink for the fill a cell SHOWS (a status colour drawn
+ * on a conditional-format fill, say) asks this first. Core's own rule
+ * (`isValidColor` and `isDefaultBackgroundColor`, the grid painter's), not a
+ * copy that could drift from it.
+ */
+export function isExplicitCellFill(backgroundColor: string | undefined | null): boolean {
+  return isValidColor(backgroundColor) && !isDefaultBackgroundColor(backgroundColor);
+}

@@ -17,8 +17,19 @@ import {
   rangeToCanvasRect as coreRangeToCanvasRect,
   type RangeCanvasRect,
 } from "../core/lib/gridRenderer/layout/rangeRect";
+import { rowHeaderGutter, colHeaderGutter } from "../core/lib/gridRenderer/layout/headerVisibility";
 
 export type { RangeCanvasRect };
+
+/**
+ * Where Core strokes a gridline on this context, and how wide: one DEVICE
+ * pixel (`lineWidth` = 1 / deviceScale) centred on `snap(boundary)`. The SAME
+ * function Core's own gridline painters use -- the ordinary grid and every
+ * frozen or split pane -- so a layer that re-tints a gridline (a region frame
+ * drawn ON the boundary gridlines) lands on Core's pixel at every DPR, zoom and
+ * pane, and follows Core if Core ever changes how it draws them.
+ */
+export { gridlineGeometry, type GridlineGeometry } from "../core/lib/gridRenderer/rendering/grid";
 
 // ============================================================================
 // Types
@@ -178,4 +189,19 @@ export function rangeToCanvasRect(
     context.freezeConfig,
     context.splitBarSize ?? 0,
   );
+}
+
+/**
+ * The top-left corner of the CELL AREA in canvas pixels: right of the row
+ * header and below the column header, as this frame paints them (0 and 0 when
+ * View > Headings is off; the context's config is the one the frame painted
+ * with). The headers are painted AFTER every layer anchored below
+ * "over-headers", so whatever a layer draws left of `x` or above `y` is covered
+ * -- a painter that centres a mark ON an edge flush with a header (a range in
+ * row 1, or scrolled so its first row is the first visible one) reads this to
+ * know the mark would be cut in half. The same gutters `rangeToCanvasRect`
+ * clips to.
+ */
+export function cellAreaOrigin(context: GridLayerContext): { x: number; y: number } {
+  return { x: rowHeaderGutter(context.config), y: colHeaderGutter(context.config) };
 }

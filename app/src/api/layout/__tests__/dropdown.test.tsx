@@ -10,7 +10,7 @@ import React, { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { SurfaceLayoutProvider, bandLayout, panelLayout, type SurfaceLayout } from "../context";
 import { Popover } from "../primitives/Popover";
-import { Dropdown, type DropdownOption, type DropdownProps } from "../primitives/Dropdown";
+import { Dropdown, FieldTrigger, FieldTriggerText, type DropdownOption, type DropdownProps } from "../primitives/Dropdown";
 import { DISABLED_OPACITY } from "../primitives/disabled";
 import { declared, hardcodedColours } from "./colourScan";
 
@@ -512,6 +512,85 @@ describe("Dropdown colours", () => {
     );
     click(byTestId("dd"));
     expect(listbox()).not.toBeNull();
+    expect(hardcodedColours(document.body)).toEqual([]);
+  });
+});
+
+// ============================================================================
+// The field trigger, on its own
+// ============================================================================
+
+describe("FieldTrigger: the Dropdown's field, for a control whose popup is not a listbox", () => {
+  // The trigger's line-height is 1 (a 12px line box) and the value text clips
+  // (overflow: hidden, for the ellipsis), so with the trigger's line-height
+  // every descender -- the tail of the p in "prod", a comma, g, y, q, j -- was
+  // cut a pixel below the baseline (BUG-0587, 2026-10-22 review; jsdom cannot see it, so
+  // the declared value is the evidence).
+  // SABOTAGE: drop `line-height: normal` from the value text -- it inherits 1.
+  it("the value text has a line box tall enough for its descenders, in the Dropdown too", () => {
+    render(
+      <>
+        <Legend />
+        <FieldTrigger data-testid="ft">prod, staging</FieldTrigger>
+      </>,
+    );
+    const dropdownText = byTestId("dd").querySelector("span > span") as HTMLElement;
+    expect(dropdownText.textContent).toBe("Bottom");
+    expect(declared(byTestId("dd"), "line-height")).toBe("1");
+    expect(declared(dropdownText, "line-height")).toBe("normal");
+    const fieldText = byTestId("ft").querySelector("span > span") as HTMLElement;
+    expect(fieldText.textContent).toBe("prod, staging");
+    expect(declared(fieldText, "line-height")).toBe("normal");
+    expect(declared(fieldText, "text-overflow")).toBe("ellipsis");
+  });
+
+  it("is the Dropdown's own trigger: the same class, the same 28px field, the same width rule", () => {
+    render(
+      <>
+        <Legend />
+        <FieldTrigger data-testid="ft" aria-label="Collect from: prod">prod</FieldTrigger>
+      </>,
+    );
+    const field = byTestId<HTMLButtonElement>("ft");
+    const dropdown = byTestId<HTMLButtonElement>("dd");
+    expect(field.className).toBe(dropdown.className);
+    expect(field.tagName).toBe("BUTTON");
+    expect(field.type).toBe("button");
+    expect(getComputedStyle(field).height).toBe("28px");
+    expect(field.style.width).toBe("100%");
+    expect(field.querySelectorAll("svg")).toHaveLength(1);
+    render(<FieldTrigger data-testid="ft">prod</FieldTrigger>, bandLayout());
+    expect(byTestId("ft").style.width).toBe("104px");
+    // flex: none (jsdom spells it "0 0 auto"): a band row never squeezes it.
+    expect(byTestId("ft").style.flexShrink).toBe("0");
+    render(<FieldTrigger data-testid="ft" width={150}>prod</FieldTrigger>);
+    expect(byTestId("ft").style.width).toBe("150px");
+  });
+
+  it("takes the caller's props (an id a label names it by, aria, data-*, handlers) and a trailing badge before the chevron", () => {
+    const onClick = vi.fn();
+    render(
+      <>
+        <label htmlFor="field-id">Collect from</label>
+        <FieldTrigger
+          id="field-id"
+          data-testid="ft"
+          aria-expanded={false}
+          onClick={onClick}
+          trailing={<b data-testid="pill">!</b>}
+        >
+          <FieldTriggerText data-testid="txt">test, prod</FieldTriggerText>
+        </FieldTrigger>
+      </>,
+    );
+    const field = byTestId<HTMLButtonElement>("ft");
+    expect(field.id).toBe("field-id");
+    expect((document.querySelector("label") as HTMLLabelElement).control).toBe(field);
+    expect(byTestId("txt").textContent).toBe("test, prod");
+    const kids = Array.from(field.children);
+    expect(kids.indexOf(byTestId("pill"))).toBe(kids.length - 2);
+    click(field);
+    expect(onClick).toHaveBeenCalledTimes(1);
     expect(hardcodedColours(document.body)).toEqual([]);
   });
 });

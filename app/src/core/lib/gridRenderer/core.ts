@@ -24,7 +24,7 @@ import type { GridTheme, RenderState } from "./types";
 import { DEFAULT_THEME } from "./types";
 import { formulaA1ToR1C1 } from "../r1c1";
 import { drawCorner, drawColumnHeaders, drawRowHeaders } from "./rendering/headers";
-import { drawGridLines } from "./rendering/grid";
+import { drawGridLines, gridlineGeometry } from "./rendering/grid";
 import { hasStyleInterceptors } from "../../../api/styleInterceptors";
 import { formatDateIn, getActiveLocale } from "../locale";
 import {
@@ -290,10 +290,14 @@ function drawGridLinesZone(
   const { ctx, config, theme, dimensions, cells, overlayRegionBounds } = state;
   const totalRows = config.totalRows || 1000;
   const totalCols = config.totalCols || 100;
-  
+
   ctx.strokeStyle = theme.gridLine;
-  ctx.lineWidth = 1;
-  
+  // The SAME hairline as the unfrozen grid (gridlineGeometry, grid.ts): it was a
+  // 1-CSS-px line at Math.floor(v) + 0.5 -- two device pixels at DPR 2, smeared
+  // at 125%, and one pixel beside a line drawn with the device-pixel snap.
+  const { lineWidth, snap } = gridlineGeometry(ctx);
+  ctx.lineWidth = lineWidth;
+
   let x = clipX + range.offsetX;
   for (let col = range.startCol; col <= range.endCol + 1 && col <= totalCols; col++) {
     if (x >= clipX && x <= clipX + clipWidth) {
@@ -318,8 +322,8 @@ function drawGridLinesZone(
         }
         
         ctx.beginPath();
-        ctx.moveTo(Math.floor(x) + 0.5, Math.max(segmentStartY, clipY));
-        ctx.lineTo(Math.floor(x) + 0.5, Math.min(segmentEndY, clipY + clipHeight));
+        ctx.moveTo(snap(x), Math.max(segmentStartY, clipY));
+        ctx.lineTo(snap(x), Math.min(segmentEndY, clipY + clipHeight));
         ctx.stroke();
       }
     }
@@ -353,8 +357,8 @@ function drawGridLinesZone(
         }
         
         ctx.beginPath();
-        ctx.moveTo(Math.max(segmentStartX, clipX), Math.floor(y) + 0.5);
-        ctx.lineTo(Math.min(segmentEndX, clipX + clipWidth), Math.floor(y) + 0.5);
+        ctx.moveTo(Math.max(segmentStartX, clipX), snap(y));
+        ctx.lineTo(Math.min(segmentEndX, clipX + clipWidth), snap(y));
         ctx.stroke();
       }
     }

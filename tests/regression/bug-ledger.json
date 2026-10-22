@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 586,
+  "nextId": 588,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -16090,6 +16090,58 @@
         "status": "fixed",
         "date": "2026-10-22",
         "description": "app/src-tauri/src/bi/writeback_source.rs: model_table_name() gives the imported table a model name of letters, digits and '_' only (WB_writeback_test_Sheet1_2_B3_B5; a leading digit gets 'WB_'; no '.', which reads as schema.table), deduped with _2, _3; the readable name becomes the table's DISPLAY name. Pinned by bi::writeback_source::tests::an_imported_writeback_table_is_named_so_a_measure_can_reference_it (parses SUM(<name>[value_number]) through bi_engine::parse_measure_expression; fails when model_table_name returns the display text) and live by app/e2e/journeys/writeback-collect-streams.spec.ts steps 2-3 (a model on the author's table answers bi_query {prod: 60}, then {prod: 60, test: 6} after ticking test; the same sabotage live fails the measure upsert at '!')."
+      }
+    },
+    {
+      "id": "BUG-0586",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Writeback review round 2026-10-22 (fixer): grid treatment + Collected Responses header"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "frozen-pane-gridlines-off-the-device-pixel-grid",
+        "severity": "medium",
+        "message": "With ANY freeze or split, Core paints every pane through drawGridLinesZone (core/lib/gridRenderer/core.ts), which stroked gridlines at lineWidth 1 (one CSS px) snapped to Math.floor(v) + 0.5, while the ordinary grid (drawGridLines, grid.ts) strokes a 1-DEVICE-pixel hairline snapped to (round(v * s) + 0.5) / s. Default columns are 64.29px, so boundaries land on fractions (150.58, 214.87, 407.74, 600.61, ...) and the two snaps disagree on roughly every other vertical line: Freeze Top Row moved half the vertical gridlines one pixel sideways at 100%, drew every frozen-pane gridline 2 device pixels wide at DPR 2 and smeared at 125%, and a painter that re-tints a gridline (the writeback region frame, which copied grid.ts's snap) sat BESIDE the grey line instead of on it.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The pane painter's tests (frozenPaneBorders, frozenPaneInterceptors) check borders and interceptors, not where a gridline lands; the freeze-panes E2E checks only the backend state; and one pixel of grey moved sideways is invisible until a second line is drawn on the gridline.",
+      "repro": {
+        "description": "Headless Chromium render of a Freeze-Top-Row grid (2026-10-22 review): at 100% the boundary 214.87 is gridline pixel 214 frozen and 215 unfrozen; at 200% the frozen gridline covers 2 device pixels. In the app at 100%: View > Freeze Top Row and compare the vertical gridline pixel columns of row 5 with the unfrozen grid (407.74 -> 407 vs 408)."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "core/lib/gridRenderer/rendering/grid.ts: gridlineGeometry(ctx) -- { deviceScale, lineWidth: 1/deviceScale, snap } -- is THE gridline stroke, used by drawGridLines and by drawGridLinesZone (core.ts), and exported through @api/gridLayers so a layer that re-tints a gridline uses the same function. Pinned by core/lib/gridRenderer/rendering/frozenPaneGridlines.test.ts (renderGrid frozen vs unfrozen at scales 1, 1.25, 2: one device pixel, identical vertical positions, every line on a device pixel's centre; fails when the zone keeps Math.floor or lineWidth 1) and by the writeback painters' source pin; checked live 2026-10-22 at 100% (frozen and unfrozen pixel columns identical, 215/408/601/665 among them)."
+      }
+    },
+    {
+      "id": "BUG-0587",
+      "status": "fixed",
+      "discovered": "2026-10-22",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "Writeback review round 2026-10-22 (fixer): grid treatment + Collected Responses header"
+      },
+      "links": [],
+      "violation": {
+        "oracleId": "dropdown-value-text-clips-descenders",
+        "severity": "low",
+        "message": "The @api/layout Dropdown trigger sets line-height: 1 (a 12px line box for 12px text) and its value text span has overflow: hidden (for the ellipsis), so every descender in a Dropdown's value -- the tail of p, g, y, q, j and a comma -- was cut about a pixel below the baseline. Visible in the writeback Collected Responses pane's 'Collect from' field ('test, prod': a p with no tail), which copied the recipe, and in every Dropdown whose value has a descender.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "jsdom does not lay text out, so the Dropdown's tests could not see a clipped glyph, and a one-pixel descender loss reads as a slightly odd font rather than a defect.",
+      "repro": {
+        "description": "Render a Dropdown (or the Collected Responses pane's Collect from field) whose value is 'prod' and zoom the screenshot 8x: the p has no tail and a comma is cut short; the native Region select above it keeps its descenders."
+      },
+      "fix": {
+        "status": "fixed",
+        "date": "2026-10-22",
+        "description": "app/src/api/layout/primitives/Dropdown.tsx: the value text class (now exported as FieldTriggerText, inside the exported FieldTrigger the Dropdown itself renders) sets line-height: normal. Pinned by src/api/layout/__tests__/dropdown.test.tsx 'the value text has a line box tall enough for its descenders, in the Dropdown too' (fails when the declaration is dropped); checked visually 2026-10-22 in the pane, Light and Dark."
       }
     }
   ]

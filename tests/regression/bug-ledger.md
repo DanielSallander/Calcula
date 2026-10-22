@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 585 | Open: 66 | Triaged: 0 | Fixed: 519 | Other: 0
+Total: 587 | Open: 66 | Triaged: 0 | Fixed: 521 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -6056,4 +6056,24 @@ The reader's identity check asked Windows for an answer file's owner with the PL
 bi_import_writeback_tables named the imported table after its readable dataset name ('WB writeback-test Sheet1 (2)!B3:B5'). The model's validator accepts that, but the measure language reads a table only as a bare identifier ([A-Za-z0-9_] plus '.') and has no quoting, so no measure could reference the table: SUM('...'[value_number]) fails with "unexpected character: '''" and the bare spelling at '!'. With no measure there is no pivot value, no bi_query ("at least one measure is required"), no CUBE formula and no value list -- the imported writeback table could be listed but never read.
 
 **Repro:** In a working copy with a writeback region: bi_model_create_blank, bi_import_writeback_tables([region]), then bi_model_upsert_measure with SUM('WB writeback-test Sheet1 (2)!B3:B5'[value_number]) -> parse error; bi_query with no measure -> 'at least one measure is required'.
+**Fix:** fixed
+
+## BUG-0586 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** frozen-pane-gridlines-off-the-device-pixel-grid
+
+With ANY freeze or split, Core paints every pane through drawGridLinesZone (core/lib/gridRenderer/core.ts), which stroked gridlines at lineWidth 1 (one CSS px) snapped to Math.floor(v) + 0.5, while the ordinary grid (drawGridLines, grid.ts) strokes a 1-DEVICE-pixel hairline snapped to (round(v * s) + 0.5) / s. Default columns are 64.29px, so boundaries land on fractions (150.58, 214.87, 407.74, 600.61, ...) and the two snaps disagree on roughly every other vertical line: Freeze Top Row moved half the vertical gridlines one pixel sideways at 100%, drew every frozen-pane gridline 2 device pixels wide at DPR 2 and smeared at 125%, and a painter that re-tints a gridline (the writeback region frame, which copied grid.ts's snap) sat BESIDE the grey line instead of on it.
+
+**Repro:** Headless Chromium render of a Freeze-Top-Row grid (2026-10-22 review): at 100% the boundary 214.87 is gridline pixel 214 frozen and 215 unfrozen; at 200% the frozen gridline covers 2 device pixels. In the app at 100%: View > Freeze Top Row and compare the vertical gridline pixel columns of row 5 with the unfrozen grid (407.74 -> 407 vs 408).
+**Fix:** fixed
+
+## BUG-0587 `[fixed]`
+
+**Found:** 2026-10-22 (manual)
+**Oracle:** dropdown-value-text-clips-descenders
+
+The @api/layout Dropdown trigger sets line-height: 1 (a 12px line box for 12px text) and its value text span has overflow: hidden (for the ellipsis), so every descender in a Dropdown's value -- the tail of p, g, y, q, j and a comma -- was cut about a pixel below the baseline. Visible in the writeback Collected Responses pane's 'Collect from' field ('test, prod': a p with no tail), which copied the recipe, and in every Dropdown whose value has a descender.
+
+**Repro:** Render a Dropdown (or the Collected Responses pane's Collect from field) whose value is 'prod' and zoom the screenshot 8x: the p has no tail and a comma is cut short; the native Region select above it keeps its descenders.
 **Fix:** fixed

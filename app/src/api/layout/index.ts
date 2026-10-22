@@ -126,8 +126,8 @@ export type { SplitFace } from "./primitives/Button";
 export { RegisteredMenuButton, useRegisteredMenuItem } from "./primitives/MenuTree";
 export type { RegisteredMenuButtonProps } from "./primitives/MenuTree";
 
-export { Dropdown } from "./primitives/Dropdown";
-export type { DropdownProps, DropdownOption } from "./primitives/Dropdown";
+export { Dropdown, FieldTrigger, FieldTriggerText } from "./primitives/Dropdown";
+export type { DropdownProps, DropdownOption, FieldTriggerProps, FieldTriggerTextProps } from "./primitives/Dropdown";
 
 export { Checkbox, Switch } from "./primitives/toggles";
 export type { CheckboxProps, SwitchProps } from "./primitives/toggles";

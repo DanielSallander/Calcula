@@ -12,6 +12,8 @@ import {
   notCollectedText,
   defaultRowLabel,
   choiceTestId,
+  collectedInMenuOrder,
+  menuOrder,
   NOT_PUBLISHED_TOOLTIP,
 } from "../collectStreamsModel";
 
@@ -97,11 +99,46 @@ describe("the hero says what is collected", () => {
     expect(heroTooltip(view({ linked: false }))).toBe(NOT_PUBLISHED_TOOLTIP);
   });
 
-  it("the pane's warning names what an explicit choice leaves out", () => {
+  // The tooltip names an explicit choice in the MENU's order, as the pane's
+  // dropdown says it -- never Rust's name order ("prod, test").
+  // SABOTAGE: use `view.summary` for every mode -- "Collecting from: prod, test.".
+  it("tooltip: an explicit choice in the menu's (pipeline) order; the default and All in Rust's words", () => {
+    const several = view({
+      mode: "only",
+      selection: ["prod", "test"],
+      collecting: ["prod", "test"],
+      choices: [choice("", false), choice("test", true), choice("prod", true)],
+      summary: "prod, test",
+    });
+    expect(heroTooltip(several)).toContain("Collecting from: test, prod.");
+    expect(collectedInMenuOrder(several)).toEqual(["test", "prod"]);
+    // A stream the pipeline defines but has not promoted yet still ranks by
+    // the pipeline (the menu lists every DEFINED environment).
+    const staging = view({
+      mode: "only",
+      selection: ["prod", "staging"],
+      collecting: ["prod", "staging"],
+      choices: [choice("", false), choice("test", false), choice("staging", true), choice("prod", true)],
+      summary: "prod, staging",
+    });
+    expect(heroTooltip(staging)).toContain("Collecting from: staging, prod.");
+    expect(menuOrder(staging)).toEqual(["", "test", "staging", "prod"]);
+    // The development line first, by its menu label.
+    expect(collectedInMenuOrder(view({ mode: "only", collecting: ["prod", ""], choices: [choice("", true), choice("prod", true)] }))).toEqual([
+      "Development line",
+      "prod",
+    ]);
+    expect(heroTooltip(view())).toContain("Collecting from: prod (the last environment).");
+    expect(heroTooltip(ALL)).toContain("Collecting from: All streams.");
+    expect(collectedInMenuOrder(ALL)).toBeNull();
+  });
+
+  it("the pane's warning names what an explicit choice leaves out, and points at the control above it", () => {
     expect(notCollectedText(view())).toBeNull();
     expect(notCollectedText(view({ notCollected: ["staging"] }))).toBe(
-      "Not collected: staging. Tick it in Writeback > Collect From to include its answers.",
+      "Not collected: staging. Tick it in Collect from above to include its answers.",
     );
+    expect(notCollectedText(view({ notCollected: ["staging"] }))).not.toContain("Writeback >");
     expect(notCollectedText(view({ notCollected: ["a", "b"] }))).toContain("Tick them");
   });
 

@@ -23,6 +23,7 @@ import {
   WRITEBACK_TAB_ID,
   PUBLISHER_DASHBOARD_PANE_ID,
   DESIGNATE_WRITEBACK_DIALOG_ID,
+  WRITEBACK_ACCENT_TOKEN,
 } from "./lib/writebackIds";
 
 export const COLLABORATION_EXTENSION_ID = "calcula.collaboration";
@@ -158,8 +159,9 @@ export const EditPipelineDialogDefinition: DialogDefinition = {
 /** Right of every other contextual tab (Report/Sparkline 510), Excel's place. */
 export const WRITEBACK_TAB_ORDER = 512;
 
-/** The tab's accent: the skin's writeback token, its light value as fallback. */
-export const WRITEBACK_TAB_COLOR = "var(--tab-accent-writeback, #4338ca)";
+/** The tab's accent: the skin's writeback token (the SAME token the region
+ *  frame on the grid is tinted with), its light value as fallback. */
+export const WRITEBACK_TAB_COLOR = `var(${WRITEBACK_ACCENT_TOKEN}, #4338ca)`;
 
 /**
  * Shown while Core's ACTIVE cell is inside a subscribed writeback region on the
