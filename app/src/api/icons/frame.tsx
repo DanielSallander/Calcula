@@ -22,10 +22,14 @@
 //          literal would be correct in exactly one of them.
 //
 //          The drawing rules the set is held to (the approved mockup, rev 2):
-//          filled shapes; rect corners rx >= 1.4 (the Visuals family -- chart
-//          types, report visuals, Table, Slicer, Timeline and Chart Design's
-//          Grouped toggle -- has its own corner rule instead: square or a full
-//          curve, see marks.tsx and ICONS.md section 2.5); NOTHING THINNER THAN
+//          filled shapes; rect corners rx >= 1.4, with the exceptions ICONS.md
+//          section 2.3 lists for pixel-grid cells, 2.4-thick bars and 2 or 3 px
+//          square marks, and Gridlines' two edge-to-edge rules, which are
+//          square (the Visuals family -- the
+//          Canvas Visuals gallery's 33 tiles (chart types, report visuals,
+//          Matrix, Table, Slicer, Timeline), the All Visuals hero and Chart
+//          Design's Grouped toggle -- has its own corner rule instead: square
+//          or a full curve, see marks.tsx and ICONS.md section 2.5); NOTHING THINNER THAN
 //          3 UNITS
 //          (a stroke is at least 2.6 with round caps and joins, or exactly 2.4
 //          on a straight horizontal/vertical run centred on the pixel grid:

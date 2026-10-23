@@ -32,6 +32,29 @@ const store = new Map<string, StoredScript>();
  */
 const unreadable = new Set<string>();
 
+/**
+ * New Macro's creation door, doubled over the SAME fake store the dialog lists
+ * from: the real `createStarterMacro` is a backend write the dialog then reads
+ * back through `listMacroModules`, so the double writes a record the listing
+ * can see. The description carries the `runtime=objectScript` marker the real
+ * one writes, which is what routes Run to the object-script mount.
+ */
+vi.mock("@api/macroModules", () => ({
+  createStarterMacro: vi.fn(async (opts?: { name?: string }) => {
+    const name = opts?.name ?? "Macro1";
+    const id = "macro-" + name.toLowerCase();
+    store.set(id, {
+      id,
+      name,
+      description: "Macro · runtime=objectScript · written T",
+      source:
+        "async function macro1(api) {}\nfunction setup(context) { return macro1(context.api); }",
+      scope: { type: "workbook" },
+    });
+    return { id, name, functionName: "macro1" };
+  }),
+}));
+
 /** The one-shot object-script mount the dialog uses for `api.*` macros. */
 const runOnce = vi.fn(async (_options: unknown) => undefined);
 
@@ -141,7 +164,10 @@ vi.mock("@api/buttonControlService", () => ({
 }));
 
 import { MacroLibraryDialog } from "../components/MacroLibraryDialog";
+import { styles } from "../components/styles";
 import { buildMacroDescription } from "../lib/macroLibrary";
+import { createStarterMacro } from "@api/macroModules";
+import { showToast } from "@api/notifications";
 import { claimExplicitMacroRun } from "@api/explicitMacroRun";
 import {
   registerScriptEditorProvider,
@@ -199,6 +225,8 @@ beforeEach(() => {
   store.clear();
   unreadable.clear();
   runOnce.mockClear();
+  vi.mocked(createStarterMacro).mockClear();
+  vi.mocked(showToast).mockClear();
   confirmAsync.mockClear();
   confirmAsync.mockReturnValue(Promise.resolve(true));
   hasProvider.value = true;
@@ -234,10 +262,20 @@ describe("MacroLibraryDialog", () => {
     expect(container.textContent).toContain("Object script");
   });
 
-  it("says so plainly when there is nothing saved yet", async () => {
+  it("says so plainly when there is nothing saved yet — and names both ways to get one", async () => {
     await render();
     expect(rows()).toHaveLength(0);
-    expect(container.textContent).toContain("No script modules yet");
+    // The empty state is the first screen a first-time user reads here. It
+    // names the door that needs nothing (New Macro) before the one that needs
+    // a recording, and says both land in this list.
+    expect(container.textContent).toContain("No macros yet");
+    expect(container.textContent).toContain("Press New Macro");
+    expect(container.textContent).toContain("Record Macro…");
+    expect(container.textContent).toContain("Both are saved here automatically");
+    // ...and the right-hand hint, shown while nothing is loaded, says it too.
+    const hint = container.querySelector("[data-macro-nothing-loaded]");
+    expect(hint).not.toBeNull();
+    expect(hint!.textContent).toContain("press New Macro to start from a working example");
   });
 
   it("shows the source when a macro is selected", async () => {
@@ -1040,5 +1078,246 @@ describe("MacroLibraryDialog — the selected module and the acted-on module agr
     await selectRow(0);
     expect(confirmAsync).not.toHaveBeenCalled();
     expect(textarea()!.value).toBe("Calcula.setCellValue(0, 0, 'mine');\n");
+  });
+});
+
+// =============================================================================
+// NEW MACRO — Excel's Create, from inside the Macros dialog (2026-10-22).
+//
+// "If I go to Developer, where should I write a macro?" The answer is a door
+// that needs nothing selected: it stores the working example as the next free
+// MacroN, lists and selects it HERE, and opens it in the Object Script Editor
+// through the same seam "Edit in Object Script Editor" uses. The dialog stays
+// open, exactly as it does after Edit. Creating selects the new module, which
+// replaces the textarea just as clicking a row does — so an edited buffer is
+// asked about first, in the same words, and a refusal creates nothing.
+// =============================================================================
+
+describe("MacroLibraryDialog — New Macro (Excel's Create)", () => {
+  const openMacroInEditor = vi.fn(async (_macroId: string): Promise<void> => undefined);
+
+  beforeEach(() => {
+    openMacroInEditor.mockClear();
+    registerScriptEditorProvider({ openMacroInEditor });
+  });
+
+  afterEach(() => {
+    // Registered for this block only; the module-level provider is global.
+    resetScriptEditorProvider();
+  });
+
+  function newMacroButton(): HTMLButtonElement {
+    return container.querySelector("[data-macro-new-button]") as HTMLButtonElement;
+  }
+
+  function textarea(): HTMLTextAreaElement | null {
+    return container.querySelector("textarea");
+  }
+
+  async function editSource(text: string): Promise<void> {
+    const area = textarea()!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        "value",
+      )!.set!;
+      setter.call(area, text);
+      area.dispatchEvent(new Event("input", { bubbles: true }));
+      await Promise.resolve();
+    });
+  }
+
+  /**
+   * Let the whole create chain land: the confirm, the store write, the list
+   * refresh, the selection, the load effect's read and the editor hand-off are
+   * each an awaited hop, and `press` only drains two microtasks. A macrotask
+   * per round drains every microtask queued so far; three rounds cover the
+   * state updates that each schedule a further effect.
+   */
+  async function settle(): Promise<void> {
+    for (let round = 0; round < 3; round++) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    }
+  }
+
+  /** The highlight the selected row carries, normalised the way jsdom stores it. */
+  function selectedRowColor(): string {
+    const probe = document.createElement("div");
+    probe.style.color = String(styles.listRowSelected.color);
+    return probe.style.color;
+  }
+
+  const MINE: StoredScript = {
+    id: "macro-mine",
+    name: "Mine",
+    description: buildMacroDescription({
+      runtime: "notebook",
+      actionCount: 1,
+      recordedAt: "2026-09-01T10:00:00.000Z",
+    }),
+    source: "Calcula.setCellValue(0, 0, 'v1');\n",
+    sourcePackage: null,
+  };
+
+  it("is enabled with nothing selected — it is the first positive action", async () => {
+    await render();
+    const button = newMacroButton();
+    expect(button, "no New Macro button in the footer").not.toBeNull();
+    expect(button.disabled).toBe(false);
+    expect(button.style.cursor).toBe("pointer");
+    expect(button.title).toMatch(/working example/i);
+    // Right after Close, before Delete: the footer order the spec fixes.
+    const labels = Array.from(container.querySelectorAll("button")).map((b) =>
+      b.textContent?.trim(),
+    );
+    expect(labels.indexOf("New Macro")).toBe(labels.indexOf("Close") + 1);
+    expect(labels.indexOf("Delete")).toBe(labels.indexOf("New Macro") + 1);
+  });
+
+  it("creates the starter, lists and selects it, opens it in the editor, and stays open", async () => {
+    await render();
+    expect(rows()).toHaveLength(0);
+
+    await press(newMacroButton());
+    await settle();
+
+    expect(createStarterMacro).toHaveBeenCalledTimes(1);
+
+    // Listed and SELECTED: the row carries the selection highlight...
+    const row = container.querySelector(
+      '[data-macro-library-item="macro-macro1"]',
+    ) as HTMLElement | null;
+    expect(row, "the new macro is not listed").not.toBeNull();
+    expect(row!.style.color).toBe(selectedRowColor());
+    // ...and the detail pane holds ITS source, which only a loaded record can.
+    expect(textarea(), "the new macro was listed but not loaded").not.toBeNull();
+    expect(textarea()!.value).toContain("async function macro1");
+    // The route is derived from the marker the starter's description carries,
+    // so Run is the object-script mount — and the label says so.
+    const route = container.querySelector("[data-macro-run-route]");
+    expect(route).not.toBeNull();
+    expect(route!.getAttribute("data-macro-run-route")).toBe("objectScript");
+    const run = container.querySelector("[data-macro-run-button]") as HTMLButtonElement;
+    expect(run.textContent).toBe("Run (object script)");
+    expect(run.disabled).toBe(false);
+
+    // Opened in the editor through the seam, by id.
+    expect(openMacroInEditor).toHaveBeenCalledTimes(1);
+    expect(openMacroInEditor).toHaveBeenCalledWith("macro-macro1");
+    // The dialog STAYS OPEN, as it does after "Edit in Object Script Editor".
+    expect(container.querySelector("[data-macro-library-dialog]")).not.toBeNull();
+    // The toast says what to do next, and names the macro.
+    const toasts = vi.mocked(showToast).mock.calls.map((call) => String(call[0]));
+    expect(toasts.some((t) => t.startsWith('"Macro1" was created.'))).toBe(true);
+    expect(toasts.some((t) => /Run \(F5\)/.test(t) && /Ctrl\+Z/.test(t))).toBe(true);
+    expect(container.querySelector("[data-macro-error]")).toBeNull();
+    // Busy is released: the next New Macro is pressable.
+    expect(newMacroButton().disabled).toBe(false);
+  });
+
+  it("asks before discarding unsaved edits, and a refusal creates nothing", async () => {
+    store.set(MINE.id, { ...MINE });
+    await render();
+    await selectFirstRow();
+    await editSource("Calcula.setCellValue(0, 0, 'v2');\n");
+
+    // The Tauri shape: a Promise, resolving to the refusal.
+    confirmAsync.mockReturnValue(Promise.resolve(false));
+    await press(newMacroButton());
+    await settle();
+
+    expect(confirmAsync, "no prompt before the edits were replaced").toHaveBeenCalledTimes(1);
+    expect(String(confirmAsync.mock.calls[0][0])).toMatch(/unsaved edits/i);
+    expect(createStarterMacro).not.toHaveBeenCalled();
+    expect(openMacroInEditor).not.toHaveBeenCalled();
+    // Nothing was written, nothing moved: the edit is still on screen.
+    expect(store.size).toBe(1);
+    expect(rows()).toHaveLength(1);
+    expect(textarea()!.value).toBe("Calcula.setCellValue(0, 0, 'v2');\n");
+  });
+
+  it("creates once the user agrees to discard the edits", async () => {
+    store.set(MINE.id, { ...MINE });
+    await render();
+    await selectFirstRow();
+    await editSource("Calcula.setCellValue(0, 0, 'v2');\n");
+
+    confirmAsync.mockReturnValue(Promise.resolve(true));
+    await press(newMacroButton());
+    await settle();
+
+    expect(confirmAsync).toHaveBeenCalledTimes(1);
+    expect(createStarterMacro).toHaveBeenCalledTimes(1);
+    expect(rows()).toHaveLength(2);
+    expect(textarea()!.value).toContain("async function macro1");
+    // The user's own record was not touched by the discarded draft.
+    expect(store.get(MINE.id)!.source).toBe(MINE.source);
+  });
+
+  it("does not ask when there is nothing to lose", async () => {
+    store.set(MINE.id, { ...MINE });
+    await render();
+    await selectFirstRow();
+
+    await press(newMacroButton());
+    await settle();
+
+    expect(confirmAsync).not.toHaveBeenCalled();
+    expect(createStarterMacro).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a failed create on screen, and selects and opens nothing", async () => {
+    vi.mocked(createStarterMacro).mockRejectedValueOnce(new Error("disk"));
+    await render();
+
+    await press(newMacroButton());
+    await settle();
+
+    const error = container.querySelector("[data-macro-error]");
+    expect(error, "a failed create rendered no message").not.toBeNull();
+    expect(error!.textContent).toContain("Could not create the macro: disk");
+    // The save is the first and only side effect, so a failure leaves nothing
+    // half-made: no row, no selection, no editor window.
+    expect(rows()).toHaveLength(0);
+    expect(textarea()).toBeNull();
+    expect(openMacroInEditor).not.toHaveBeenCalled();
+    const toasts = vi.mocked(showToast).mock.calls.map((call) => String(call[0]));
+    expect(toasts).toContain("Could not create the macro: disk");
+    // Busy is released even on failure.
+    expect(newMacroButton().disabled).toBe(false);
+  });
+
+  it("an editor that refuses the hand-off is reported the way Edit reports it, with the macro still created", async () => {
+    openMacroInEditor.mockRejectedValueOnce(new Error("editor window could not open"));
+    await render();
+
+    await press(newMacroButton());
+    await settle();
+
+    // Created, listed, loaded — the editor is the last step, not the first.
+    expect(createStarterMacro).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[data-macro-library-item="macro-macro1"]')).not.toBeNull();
+    expect(textarea()!.value).toContain("async function macro1");
+    // ...and the seam failure is reported by `openInEditor` itself, verbatim,
+    // the way Edit reports it: an error toast carrying the seam's message AND
+    // the inline line. The line is pinned on purpose: selecting the new macro
+    // loads it, and a successful load clears a stale on-screen error, which
+    // used to wipe this message a moment after it was shown (the dialog now
+    // hands a hand-off failure to the load so the line outlives it).
+    const errorToasts = vi
+      .mocked(showToast)
+      .mock.calls.filter((call) => (call[1] as { type?: string } | undefined)?.type === "error")
+      .map((call) => String(call[0]));
+    expect(errorToasts).toContain("editor window could not open");
+    expect(container.querySelector("[data-macro-error]")?.textContent ?? "").toContain(
+      "editor window could not open",
+    );
+    // It is NOT mislabelled as a failure to create: the macro exists.
+    expect(errorToasts.some((t) => t.startsWith("Could not create the macro"))).toBe(false);
+    expect(container.querySelector("[data-macro-error]")?.textContent ?? "").not.toContain(
+      "Could not create the macro",
+    );
   });
 });

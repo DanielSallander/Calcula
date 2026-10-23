@@ -12,7 +12,7 @@ The Scriptable Objects feature allows users to attach TypeScript scripts to any 
 ## 1. Object Script CRUD via Developer Menu
 
 ### 1a. Create a primitive script (Workbook)
-1. Open Developer > Object Scripts...
+1. Open Developer > Object Script Editor
 2. In the Code Editor dialog, use the "+ Add Script..." dropdown and select "Workbook"
 3. Verify a new script appears in the script selector with scaffold template source
 4. Verify the Monaco editor shows the scaffold with commented-out event handlers
@@ -30,7 +30,7 @@ The Scriptable Objects feature allows users to attach TypeScript scripts to any 
 5. Verify the console panel shows no errors
 
 ### 1d. Delete a script
-1. Open Developer > Object Scripts... (or the Object Scripts task pane)
+1. Open Developer > Object Script Editor (or the Object Scripts task pane)
 2. Hover over a script and click "Delete"
 3. Verify it's removed from the list
 
@@ -216,7 +216,7 @@ The Scriptable Objects feature allows users to attach TypeScript scripts to any 
 1. Create a Workbook script and a Cell script with simple logic
 2. Save the workbook as .cala
 3. Close and reopen the .cala file
-4. Open Developer > Object Scripts...
+4. Open Developer > Object Script Editor
 5. Verify both scripts are present with their source code intact
 
 ### 11b. Script access levels persist

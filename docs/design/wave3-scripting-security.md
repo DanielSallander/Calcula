@@ -818,6 +818,12 @@ Two related doors, outside the object-script grant:
   pass (`hostStartModuleScriptDebugSession`): restricted, `context.api` null.
   The editor's tier chip says so, and says what a run you start gets instead
   (`ObjectScriptEditorApp.tsx` `macroTierChipTitle`, follow-up F5).
+- **Developer > New Macro** (and the Macros dialog's and the Object Script
+  Editor's New Macro) are CREATION doors, not run doors: they store a module
+  (`createStarterMacro`, @api) and open it in the editor; nothing runs and no
+  pass is minted. The starter calls `api.getSelection`, which is outside the
+  grant in 11.4, so a copy shipped in an application is refused before it
+  mounts (`ungrantedApiCalls`); the template's header says so.
 
 ### 11.2 The pass: how a run is known to be a person's
 

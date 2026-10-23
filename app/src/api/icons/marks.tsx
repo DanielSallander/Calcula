@@ -8,10 +8,13 @@
 //          polygons, its parts held apart by ONE constant cut. The family is
 //          the 33 visuals, the All Visuals hero and Chart Design's Grouped
 //          toggle (which sits beside Stacked and Stacked100); the rest of the
-//          set keeps the duotone rules of frame.tsx. The columns, bars,
-//          stacked pairs, pills, D-marks, the plot's L and the cards' rule are
-//          drawn with the helpers below; the round pictures, the radar,
-//          treemap, histogram, Matrix and the hero are written out on the same
+//          set keeps the duotone rules of frame.tsx. The columns, bars, pills,
+//          D-marks, the plot's L and the cards' rule are drawn with the
+//          helpers below (chart.tsx's four stacked helpers add a square STRONG
+//          root to a dMark end, and data.tsx's tableRow sets one square cell
+//          between two dMark ends); the pie,
+//          donut, sunburst, radar, treemap, histogram, Matrix, Line and stacked
+//          column and the hero call no helper and are written out on the same
 //          sizes (their comments give the construction).
 //
 //          THE CORNER RULE (the whole family's look, "sharp yet smooth"):
@@ -31,14 +34,15 @@
 //          check:icon-contact` holds the family's ACCENT to it. The 30px All
 //          Visuals hero draws the same gap in ITS device pixels (1.6 = 2 px at
 //          30px). Two recorded exceptions sit closer than THE gap between parts
-//          of one ink: the Card's digits (1.2 apart) and one box-plot whisker
-//          per plot (1.2 long).
+//          of one ink: the Card's digits (the 1 and the 2 1.2 apart, the 2 and
+//          the 3 about 1.6) and one box-plot whisker per plot (1.2 long).
 //
 //          Every straight edge of a filled shape sits on the 1.2 pixel grid
-//          (whole pixels at 20px), and on the 2.4 grid wherever that costs
-//          nothing, which is also whole pixels at 150% and at the 30px quick
-//          tiles (ribbonIcons.test.tsx holds it). The hero is on its own 0.8
-//          grid, and the Card's stroked 2 and 3 antialias like any curve.
+//          (whole pixels at 20px; ribbonIcons.test.tsx holds it), and on the
+//          2.4 grid wherever that costs nothing, which is also whole pixels at
+//          150% and at the 30px quick tiles (ICONS.md 2.5 lists the 15 that
+//          cannot). The hero is on its own 0.8 grid, and the Card's stroked 2
+//          and 3 antialias like any curve.
 
 import React from "react";
 import { SOFT, coord } from "./frame";

@@ -53,6 +53,10 @@ import type {
   ScriptScope,
   WorkbookScriptRecord,
 } from "@api/workbookScripts";
+// New Macro: the worked example a macro starts from. A pure backend write over
+// the module store (@api), so this window -- which has no extension host --
+// creates one exactly as Developer > New Macro in the main window does.
+import { createStarterMacro } from "@api/macroModules";
 import {
   listTemplates,
   saveTemplate,
@@ -747,6 +751,11 @@ export function ObjectScriptEditorApp(): React.ReactElement {
   /** True once BOTH initial listings have answered — the point at which
    *  "the requested document does not exist" becomes a fact rather than a race. */
   const [listingsLoaded, setListingsLoaded] = useState(false);
+  /** True while the last listing of that store FAILED. An empty list that came
+   *  from a failed read is not an empty workbook, and the welcome panel must
+   *  not assert "nothing to edit yet" on it. */
+  const [objectListingFailed, setObjectListingFailed] = useState(false);
+  const [moduleListingFailed, setModuleListingFailed] = useState(false);
   const [source, setSource] = useState("");
   // The AI-authored draft under review, if any. It is NOT in `scripts`: it has
   // no backend record, is not registered and is not mounted. Saving it is what
@@ -1045,9 +1054,13 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     try {
       const allScripts = await loadAllObjectScripts();
       setScripts(allScripts);
+      setObjectListingFailed(false);
       return allScripts;
     } catch (e) {
       console.error("[ObjectScriptEditorApp] Failed to load scripts:", e);
+      // An empty list from a FAILED read must not pass for an empty workbook
+      // (the welcome panel below reads it as "nothing to edit yet").
+      setObjectListingFailed(true);
       return [];
     }
   }, []);
@@ -1071,8 +1084,10 @@ export function ObjectScriptEditorApp(): React.ReactElement {
         `Could not list this workbook's script modules, so recorded macros are missing ` +
           `from the list: ${e instanceof Error ? e.message : String(e)}`,
       );
+      setModuleListingFailed(true);
       return;
     }
+    setModuleListingFailed(false);
 
     // An external edit to the module the author is LOOKING at, with no local
     // edits of their own, is shown rather than hidden — but it is announced,
@@ -1560,6 +1575,23 @@ export function ObjectScriptEditorApp(): React.ReactElement {
       : null;
   /** True while the document in front of the author is a recorded MACRO (module script). */
   const isMacro = macroDoc !== null;
+  /**
+   * NOTHING TO EDIT YET. This window never shows a bare buffer: when the
+   * workbook holds no object script, no module and no draft, a welcome panel
+   * takes the editor's place and offers New Macro. It is a derived fact, not a
+   * state: the moment any document exists -- created here, recorded in the
+   * main window (the module store announces it and `loadMacros` re-lists), or
+   * handed over on the open channel -- the restore effect above selects it and
+   * the panel is gone. Only once both listings have answered, so a slow store
+   * is not mistaken for an empty one.
+   */
+  const showWelcome =
+    listingsLoaded &&
+    !objectListingFailed &&
+    !moduleListingFailed &&
+    scripts.length === 0 &&
+    macroDocs.length === 0 &&
+    !draftDoc;
   const activeScript =
     savedScript ?? (isDraft ? draftDoc!.script : macroDoc ? macroDoc.script : null);
   /**
@@ -2299,6 +2331,69 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     setIsDirty(false);
   }, [scripts]);
 
+  // New Macro (the welcome panel's button and "+ Add Script... > Macro").
+  // Creation is the ONE backend write (`createStarterMacro`, @api); this window
+  // then re-lists the module store and selects the new document by identity,
+  // the way the open channel does. The store announces the save to every window
+  // too, so the Macros dialog in the main window follows without being told.
+  const handleNewMacro = useCallback(async () => {
+    // LEAVING THE ACTIVE DOCUMENT IS A SWITCH, with the switch's own rules
+    // (`handleSelectScript`): a draft keeps its edits, a module is flushed, an
+    // edited object script is auto-saved behind the same gate as Save. The
+    // gate is asked FIRST, before anything is created: an object script whose
+    // text cannot be stored must not cost the author a macro that then sits
+    // in the list unopened, and it must not have its edits dropped by the
+    // switch either.
+    if (!isDraft && !isMacro && isDirty && activeScript) {
+      const gate = await gateObjectScriptSave(source, activeScript.name, hostValidateScript);
+      if (!gate.ok) {
+        reportToConsole(gate.detail, activeScript.id);
+        return;
+      }
+    }
+    try {
+      const { id, name } = await createStarterMacro();
+      // SELECT AFTER THE LIST HOLDS IT, NOT BEFORE. The restore effect releases
+      // a requested id that is in neither listing once `listingsLoaded` is true
+      // -- it nulls the selection and the "take the first one" fallback then
+      // chooses whatever sorts first, which with other documents open is not
+      // the macro just made. Both listings answered long ago in this window, so
+      // the switch must not be made until the re-list has landed. `loadMacros`
+      // also stashes the live buffer into the document being LEFT while that
+      // document is still the active one, which is the other half of the open
+      // channel's discipline.
+      await loadMacros();
+      await handleSelectScript(id);
+      // F5 IS MONACO'S KEY, NOT THE WINDOW'S: outside the editor it is WebView2's
+      // reload. The click that created the macro left focus on a button, so the
+      // cursor goes into the code now -- after the welcome panel has given the
+      // editor its place back -- and "press F5" is true the moment it is read.
+      setTimeout(() => editorRef.current?.focus(), 0);
+      reportToConsole(
+        'Created "' + name + '". Select some cells with numbers in the workbook, then press ' +
+          "the Run button (or F5 with the cursor in the code) to add 1 to each of them. " +
+          "It is listed under Developer ▸ Macros… too.",
+        id,
+        "info",
+      );
+    } catch (e) {
+      reportToConsole(
+        "Could not create the macro: " + (e instanceof Error ? e.message : String(e)),
+        undefined,
+        "error",
+      );
+    }
+  }, [
+    isDraft,
+    isMacro,
+    isDirty,
+    activeScript,
+    source,
+    loadMacros,
+    handleSelectScript,
+    reportToConsole,
+  ]);
+
   // ---- Debugging (task H1) -------------------------------------------------
   // This window has no script host of its own: the workers live in the main
   // window, so every command travels over the Tauri bridge and the session
@@ -2783,7 +2878,7 @@ export function ObjectScriptEditorApp(): React.ReactElement {
           onChange={(e) => { void handleSelectScript(e.target.value); }}
         >
           {scripts.length === 0 && !draftDoc && macroDocs.length === 0 && (
-            <option value="">No scripts</option>
+            <option value="">Nothing open — press New Macro</option>
           )}
           {draftDoc && (
             <option value={draftDoc.script.id}>
@@ -2824,18 +2919,22 @@ export function ObjectScriptEditorApp(): React.ReactElement {
           )}
         </select>
 
-        {/* Add script dropdown */}
+        {/* Add script dropdown. A MACRO is first: it is the one kind the user
+            runs themselves, and the welcome panel's New Macro is this same door. */}
         <select
           className="ose-select"
           value=""
           onChange={(e) => {
-            if (e.target.value) {
+            if (e.target.value === "__macro") {
+              void handleNewMacro();
+            } else if (e.target.value) {
               handleAddScript(e.target.value as ScriptableObjectType);
-              e.target.value = "";
             }
+            e.target.value = "";
           }}
         >
           <option value="">+ Add Script...</option>
+          <option value="__macro">Macro (a script you run)</option>
           {primitiveTypes.map((t) => (
             <option key={t} value={t}>
               {t.charAt(0).toUpperCase() + t.slice(1)}
@@ -3441,7 +3540,9 @@ export function ObjectScriptEditorApp(): React.ReactElement {
               the undo stack a designer edit is pushed onto, the breakpoints and
               the cursor. So the code view is HIDDEN while the designer is open,
               which is also what lets `handleDesignerSource` route its write
-              through `executeEdits`. */}
+              through `executeEdits`. The WELCOME PANEL below hides it for the
+              same reason: it covers an empty workbook, and the first document to
+              arrive must land in an editor that is still mounted. */}
           {designing && activeScript && isFormScript && (
             <div style={{ flex: 1, minHeight: 0 }} data-testid="form-designer-host">
               <FormDesignerPanel
@@ -3457,7 +3558,44 @@ export function ObjectScriptEditorApp(): React.ReactElement {
               />
             </div>
           )}
-          <div style={{ flex: 1, minHeight: 0, display: designing ? "none" : undefined }}>
+          {/* NOTHING TO EDIT YET. The window never shows a bare buffer: with no
+              document in the workbook this panel says what a macro is and makes
+              one from the worked example (New Macro), and names the other two
+              ways in — "+ Add Script…" above for an object script, and the
+              recorder in the workbook window. */}
+          {showWelcome && (
+            <div
+              data-testid="editor-welcome"
+              style={{ flex: 1, minHeight: 0, overflow: "auto", padding: 32, color: "#ccc" }}
+            >
+              <h2 style={{ margin: "0 0 12px", fontSize: 18, fontWeight: 600, color: "#fff" }}>
+                Nothing to edit yet
+              </h2>
+              <p style={{ margin: "0 0 16px", maxWidth: 560, lineHeight: 1.5 }}>
+                A macro is a short script saved in this workbook that you run yourself: from
+                this window (Run, F5), from Developer ▸ Macros…, from a button on a sheet, or
+                from the command line.
+              </p>
+              <button
+                type="button"
+                data-testid="editor-new-macro"
+                className="ose-btn primary"
+                style={{ padding: "6px 16px", fontSize: 12 }}
+                onClick={() => void handleNewMacro()}
+              >
+                New Macro
+              </button>
+              <p style={{ margin: "24px 0 0", maxWidth: 560, fontSize: 11, lineHeight: 1.5, color: "#aaa" }}>
+                An object script reacts to the workbook — a sheet, a cell, a button — instead
+                of being run by you. Add one with &quot;+ Add Script…&quot; above.
+              </p>
+              <p style={{ margin: "12px 0 0", maxWidth: 560, fontSize: 11, lineHeight: 1.5, color: "#aaa" }}>
+                You can also record one: Developer ▸ Record Macro… (Ctrl+Shift+R) in the
+                workbook window.
+              </p>
+            </div>
+          )}
+          <div style={{ flex: 1, minHeight: 0, display: designing || showWelcome ? "none" : undefined }}>
             <Editor
               height="100%"
               language={language}

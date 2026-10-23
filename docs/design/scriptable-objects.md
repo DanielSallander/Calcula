@@ -93,6 +93,31 @@ binding id in the cell-behaviors store) and `panel` (UI objects keyed by panel i
 - Each object type has a **scaffolded default script** with commented-out event handlers
 - Users uncomment what they need, autocomplete guides the rest
 
+**Macros start from a working example (2026-10-22).** A macro -- a module script the user runs
+themselves -- is created from three doors that all do the same thing: **Developer > New Macro** (the
+first item of the menu, `macroRecorder.new`), **Developer > Macros… > New Macro** (the dialog's
+footer; the dialog stays open), and the Object Script Editor's own welcome panel together with
+`+ Add Script… > Macro (a script you run)`. Each calls `createStarterMacro`
+(`app/src/api/macroModules.ts`; pure `@api` over `listWorkbookScripts` / `saveWorkbookScript`, so
+both windows and both extensions reach it without importing each other), which takes the first free
+`MacroN` name, stores a module `macro-<slug>` whose description carries the `runtime=objectScript`
+marker and which has NO `sourcePackage` (it is the user's own code), and fills it from
+`buildMacroStarterSource` (`app/src/api/scriptHost/macroStarter.ts`). The starter adds 1 to every
+selected cell that holds a number: `api.getSelection()`, one `getRangeValues` per selection area
+(typed cells, so the number 5 and the text "5" are told apart and a formula is never overwritten by
+its result), one `updateCellsBatch` with numbers written as numbers, `beginBatch` before the first
+write and `commitBatch` in `finally` so a half-run is still one undo step, and a `setup(context)`
+that runs it on every click when mounted on a button and once when run directly. Its header says
+how to run it, change it and what publishing it needs; `macroStarterTypings.test.ts` proves it
+type-checks clean under the editor's own `checkJs` language service, so `api.` and `context.`
+complete. The editor never shows an empty buffer: with no script, no macro and no draft it renders
+a welcome panel in front of the Monaco container (hidden, never unmounted), and the first macro
+created anywhere replaces it. Runtime split: the Notebook runtime (`Calcula.*`,
+`core/script-engine`) has no selection or active-cell op in its `OP_MANIFEST`, and its `getRange`
+returns display text (an "add 1 to a named range" version would overwrite a formula with its
+result), so no Notebook starter is offered; that runtime stays reachable from Record Macro…'s
+radio and from the Notebook sidebar.
+
 ### 5. Typed Contexts: Per-Type
 - Each object type defines its own context type (`SlicerContext`, `CellContext`, `SheetContext`, etc.)
 - Strong typing makes autocomplete valuable and prevents cross-type errors

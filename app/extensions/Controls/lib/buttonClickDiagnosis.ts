@@ -104,7 +104,7 @@ export function diagnoseButtonClick(
       message:
         `"${facts.script.name}" is bound to this button but is NOT running — ` +
         "its object script never mounted (Script Security may have blocked it, " +
-        "or it failed to start). Mount it from Developer ▸ Object Scripts " +
+        "or it failed to start). Mount it from Developer ▸ Object Script Editor " +
         "to see why.",
     };
   }

@@ -10,8 +10,9 @@
 //            TableStyle, FilterButton, GrandTotals) is one 3 x 3 grid of cells
 //            painted by a function of (row, column). HeaderRow and TotalRow
 //            therefore differ ONLY in which row is accent, which is exactly
-//            the difference between the two check boxes they sit next to in
-//            Table Design.
+//            the difference between the Header Row and Total Row options they
+//            name (Table Design draws those options as plain check boxes; no
+//            built-in control uses these two keys today).
 //          - The SPARKLINE family (Sparkline, SparkLine, SparkColumn,
 //            SparkWinLoss) shares one soft cell, because a sparkline lives in a
 //            cell. `Sparkline` is the feature (insert / group); `SparkLine`
@@ -747,8 +748,9 @@ function Matrix({ size }: RibbonIconProps): React.ReactElement {
  *  of cells on the table figure's GRID columns (rows 8.4..14.4 and
  *  15.6..21.6, 5 px each, 1.2 gutters, rx 1.6), SOFT with the active cell
  *  ACCENT. Table, which drew this button until 2026-10-08 and is the Table
- *  visual's tile on the same tab, is three rows cut into cells under an
- *  ACCENT header row (HeaderRow is the table figure with ACCENT header cells);
+ *  visual's tile on the same tab, is three rows cut into cells, an ACCENT
+ *  header row over two STRONG rows (HeaderRow is the table figure with ACCENT
+ *  header cells);
  *  the one bar over two rows is a different shape. A thinner title over three
  *  rows smeared into the old Table at 20px; a SOFT drop shadow beside SOFT
  *  cells was two greys of one tint. */
@@ -819,14 +821,16 @@ function PageNavigator({ size }: RibbonIconProps): React.ReactElement {
 /** Clear All Slicers (the Buttons menu's row): Power BI's funnel with an
  *  eraser, said in Clear Filter's language -- a SOFT card (19.2 square, rx
  *  3.4: the panel the Slicer drew until 2026-10-22; the Slicer is now dots
- *  and pills, ICONS.md 2.5) carrying a STRONG funnel, with Clear Filter's DANGER
- *  X (2.8 lines, arms 2.4 from (18, 18)) in a round bite out of the card's
+ *  and pills, ICONS.md 2.5) carrying a STRONG funnel, with a DANGER X in
+ *  Clear Filter's 2.8 line (arms 2.4 from (18, 18); Clear Filter's own are
+ *  2.2 from (19.2, 17.6)) in a round bite out of the card's
  *  lower right: a circle r 6.094 about (18, 18), the X's reach plus its cap
  *  plus 1.3, meeting the edges at 13.083. The funnel is its own smaller
- *  polygon, not FUNNEL: mouth 4.8..15.6, a 3 px stem 8.4..12 on whole pixels,
+ *  polygon, not FUNNEL: mouth 4.9..15.5, a 3 px stem 8.4..12 on whole pixels,
  *  rounded by a 1.2 same-channel stroke. Card (slicers) + funnel (filter) + X
- *  (clear), and no ACCENT: DANGER is the verb. Clear Filter is a bare funnel
- *  with the X, so the menu shows the two by shape. The X's round caps reach
+ *  (clear), and no ACCENT: DANGER is the verb. Clear Filter (a row of Home's
+ *  Sort & Filter menu, not of this one) is a bare funnel with the X, so the
+ *  two differ by shape. The X's round caps reach
  *  21.8 (Clear Filter's reach 22.8). A larger funnel ran its stem into the
  *  bite; the card with the old Slicer's item bars read as a list. */
 function ClearSlicers({ size }: RibbonIconProps): React.ReactElement {

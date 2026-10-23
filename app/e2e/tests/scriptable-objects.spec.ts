@@ -16,10 +16,10 @@ import { test, expect } from "../fixtures";
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Open Developer > Object Scripts... via menu click */
+/** Open Developer > Object Script Editor via menu click */
 async function openObjectScriptsDialog(page: any) {
   await page.locator("button").filter({ hasText: /^Developer$/ }).first().click();
-  const item = page.locator("button").filter({ hasText: /Object Scripts/ }).first();
+  const item = page.locator("button").filter({ hasText: /^Object Script Editor/ }).first();
   await item.waitFor({ state: "visible", timeout: 3000 });
   await item.click();
   await page.waitForTimeout(800);
@@ -100,9 +100,9 @@ async function listScripts(page: any) {
 // ===========================================================================
 
 test.describe("#1 Object Script CRUD", () => {
-  test("1a: Developer menu has Object Scripts item", async ({ grid }) => {
+  test("1a: Developer menu has Object Script Editor item", async ({ grid }) => {
     await grid.openMenu("Developer");
-    const item = grid.page.locator("button").filter({ hasText: /Object Scripts/ });
+    const item = grid.page.locator("button").filter({ hasText: /^Object Script Editor/ });
     await expect(item).toBeVisible({ timeout: 3000 });
     await grid.closeMenu();
   });
@@ -583,11 +583,11 @@ test.describe("#4-6 Context Menu - Edit Script events", () => {
 // ===========================================================================
 
 test.describe("Developer Menu Dialogs", () => {
-  // Object Scripts editor opens in a separate OS window (WebviewWindow),
+  // The Object Script Editor opens in a separate OS window (WebviewWindow),
   // so Playwright's CDP connection to the main page cannot see its contents.
-  test.fixme("Object Scripts dialog opens from Developer menu", async ({ grid }) => {
+  test.fixme("Object Script Editor opens from Developer menu", async ({ grid }) => {
     await grid.openMenu("Developer");
-    const item = grid.page.locator("button").filter({ hasText: /Object Scripts/ });
+    const item = grid.page.locator("button").filter({ hasText: /^Object Script Editor/ });
     if (await item.isVisible({ timeout: 2000 }).catch(() => false)) {
       await item.click();
       await grid.page.waitForTimeout(800);

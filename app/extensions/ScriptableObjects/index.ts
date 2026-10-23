@@ -1601,10 +1601,23 @@ async function activate(context: ExtensionContext): Promise<void> {
   ] as const) {
     cleanupFunctions.push(() => context.ui.menus.unregisterItem(menuId, itemId));
   }
+  // "Object Script Editor" is the name the window title
+  // (`lib/openObjectScriptWindow.ts:91`, "Calcula - Object Script Editor") and
+  // the Macros dialog's "Edit in Object Script Editor" button
+  // (`MacroRecorder/components/MacroLibraryDialog.tsx:747`) already use, so the
+  // menu label introduces no new name. `order: -10` places it LAST in the macro
+  // cluster -- New Macro (-40), Record Macro… (-30), Macros… (-20), all owned by
+  // the Macro Recorder -- and above the separator the Macro Recorder owns
+  // (`developer:macro-separator`, order -1): `sortMenuItems` (`ui.ts:510`) is a
+  // stable sort on `order ?? 0`, so a negative order sits above every
+  // order-less item and ties keep registration order. Only the label and the
+  // order change here; the window title, the seam messages and every other
+  // string keep their names.
   context.ui.menus.registerItem("developer", {
     id: "scriptable-objects.manage",
-    label: "Object Scripts...",
+    label: "Object Script Editor",
     icon: IconScript,
+    order: -10,
     action: () => {
       openObjectScriptEditor();
     },

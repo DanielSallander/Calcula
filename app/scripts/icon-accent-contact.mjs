@@ -17,7 +17,8 @@
 // `planAllowlist` -- the comparison, and what --write stores -- is exported so
 // src/api/__tests__/iconAccentContactAllowlist.test.ts can pin it without a browser.
 //
-// Method: each icon is drawn at 240px (10 px per grid unit) twice, as an SVG image on a canvas:
+// Method: each icon that paints ACCENT or DANGER is drawn at 240px (10 px per grid unit) twice, as
+// an SVG image on a canvas (an icon with neither is recorded as contact 0, undrawn):
 //   pass A: ACCENT + DANGER black, SOFT + STRONG white   -> the accent pixels that stay VISIBLE
 //   pass G: SOFT + STRONG black, ACCENT + DANGER white   -> the ground pixels that stay visible
 // "Contact" = accent boundary pixels with a ground pixel closer than 1.2 units (12 px), divided
@@ -25,7 +26,9 @@
 //
 // The Visuals family (VISUALS_FAMILY_GAPS below; ICONS.md 2.5, 2026-10-22) is measured at its own,
 // stricter gap -- 2.4 units, and 1.6 for the 30px All Visuals hero -- and is never allowlisted: a
-// family key in contact fails the check, in the report and in --write alike.
+// family key whose contact exceeds the edge-pixel TOLERANCE (1.0 unit of outline) fails the check,
+// in the report and in --write alike; a smaller nonzero contact passes and is printed only under
+// --report.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

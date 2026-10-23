@@ -4,7 +4,9 @@
 //          window was navigated to; switching between them keeps each one's
 //          unsaved edits; re-opening one selects it instead of duplicating it;
 //          the list follows the workbook; and Debug knows a macro is mounted
-//          from the module store.
+//          from the module store. Since 2026-10-22 the window also never shows
+//          a bare buffer: an empty workbook gets a welcome panel whose New
+//          Macro creates the worked example (the last describe block).
 // CONTEXT: The bug this pins: the editor held ONE macro in a single state slot,
 //          handed to it over the open-with-macro channel, and rendered exactly
 //          one option from it. A user with two recorded macros saw one at a
@@ -148,6 +150,28 @@ vi.mock("@api/workbookScripts", () => ({
     return match ? match[1] : null;
   },
   WORKBOOK_SCRIPTS_CHANGED_EVENT: "workbook:module-scripts-changed",
+}));
+
+// --- New Macro: the @api creation door, doubled over THIS test's store --------
+// The real `createStarterMacro` is one `saveWorkbookScript` call, and the real
+// store then announces the write to every window. The double does both against
+// the in-memory store above, so the editor's "re-list, then select by identity"
+// path is exercised exactly as it is live — including the refresh the change
+// channel triggers concurrently with the editor's own re-list.
+const createStarterMacro = vi.fn(async () => {
+  store.set("macro-macro1", {
+    id: "macro-macro1",
+    name: "Macro1",
+    description: "Macro · runtime=objectScript · written T",
+    source:
+      "async function macro1(api) {}\nfunction setup(context) { return macro1(context.api); }",
+    scope: { type: "workbook" },
+  });
+  for (const l of scriptsChangedListeners) l();
+  return { id: "macro-macro1", name: "Macro1", functionName: "macro1" };
+});
+vi.mock("@api/macroModules", () => ({
+  createStarterMacro: (...a: unknown[]) => createStarterMacro(...(a as [])),
 }));
 
 // --- Object-script backend (empty: this workbook has macros only) -------------
@@ -1076,5 +1100,199 @@ describe("Object Script Editor — a module's stored scope survives a live write
       type: "sheet",
       name: "Budget",
     });
+  });
+});
+
+// =============================================================================
+// NOTHING TO EDIT YET.
+//
+// The owner's complaint: "If I go to Developer, where should I write a macro
+// that adds 1 to a cell? The Object Script Editor is just empty." With no
+// document in the workbook the window used to show a bare Monaco buffer with a
+// "No scripts" placeholder and nothing to press. Now a welcome panel takes the
+// editor's place and its New Macro creates the worked example through the same
+// @api door Developer > New Macro uses; the panel HIDES the editor rather than
+// unmounting it (disposing the model would lose the undo stack, breakpoints
+// and cursor of the first document to arrive), and the "+ Add Script..."
+// dropdown offers the macro first. A workbook that holds any document never
+// sees the panel.
+// =============================================================================
+
+describe("Object Script Editor — nothing to edit yet", () => {
+  beforeEach(() => {
+    macroHandler = null;
+    scriptsChangedListeners = [];
+    listShouldFail = false;
+    unreadable.clear();
+    store.clear();
+    saveWorkbookScript.mockClear();
+    saveObjectScript.mockClear();
+    createStarterMacro.mockClear();
+    debugSessionOptions = undefined;
+    debugToolbarProps = undefined;
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  /** Let a click's whole async chain (create, re-list, select, report) land. */
+  async function settle(): Promise<void> {
+    await act(async () => {
+      for (let i = 0; i < 12; i++) await Promise.resolve();
+    });
+  }
+
+  function welcome(): Element | null {
+    return container.querySelector("[data-testid='editor-welcome']");
+  }
+
+  /** The "+ Add Script..." dropdown: the select whose placeholder says so. */
+  function addScriptSelect(): HTMLSelectElement {
+    const found = [...container.querySelectorAll("select")].find(
+      (s) => (s.options[0]?.textContent ?? "").trim() === "+ Add Script...",
+    );
+    expect(found, "no + Add Script... dropdown").toBeTruthy();
+    return found as HTMLSelectElement;
+  }
+
+  /** The closest ancestor of the buffer that states an inline `display`. */
+  function bufferDisplayHost(): HTMLElement {
+    let el: HTMLElement | null = buffer().parentElement;
+    while (el && el.style.display === "") el = el.parentElement;
+    expect(el, "no ancestor of the buffer carries an inline display").toBeTruthy();
+    return el as HTMLElement;
+  }
+
+  // (a) The empty state: a panel in place of the buffer, the buffer still there.
+  it("shows the welcome panel over a HIDDEN, still-mounted editor when the workbook has no document", async () => {
+    await mountApp();
+
+    const panel = welcome();
+    expect(panel, "no welcome panel for an empty workbook").toBeTruthy();
+    expect(panel!.textContent).toContain("Nothing to edit yet");
+    expect(panel!.querySelector("[data-testid='editor-new-macro']")).toBeTruthy();
+    // Hidden, never unmounted: the buffer is in the DOM under a display:none host.
+    expect(buffer(), "the editor was unmounted instead of hidden").toBeTruthy();
+    expect(bufferDisplayHost().style.display).toBe("none");
+    expect(optionLabels()[0]).toBe("Nothing open — press New Macro");
+  });
+
+  // (b) New Macro: one create, then the document is open and live.
+  it("New Macro creates the starter, opens it live and says so in the console", async () => {
+    await mountApp();
+
+    await act(async () => {
+      (container.querySelector("[data-testid='editor-new-macro']") as HTMLButtonElement).click();
+    });
+    await settle();
+
+    expect(createStarterMacro).toHaveBeenCalledTimes(1);
+    expect(welcome(), "the welcome panel stayed after the macro was created").toBeNull();
+    expect(bufferDisplayHost().style.display).not.toBe("none");
+    expect(buffer().value).toContain("async function macro1");
+    expect(select().value).toBe("macro-macro1");
+    expect(select().selectedOptions[0].textContent?.trim()).toBe("MACRO — Macro1");
+    expect(container.querySelector("[data-testid='module-live-indicator']")).toBeTruthy();
+    expect(container.textContent).toContain('Created "Macro1"');
+    expect(container.textContent).toContain(
+      "press the Run button (or F5 with the cursor in the code) to add 1 to each of them",
+    );
+  });
+
+  it("reports a failed create in the console and keeps the panel", async () => {
+    createStarterMacro.mockRejectedValueOnce(new Error("disk full"));
+    await mountApp();
+
+    await act(async () => {
+      (container.querySelector("[data-testid='editor-new-macro']") as HTMLButtonElement).click();
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Could not create the macro: disk full");
+    expect(welcome(), "a failed create must leave the panel in place").toBeTruthy();
+  });
+
+  // (c) The panel covers an EMPTY workbook only.
+  it("never shows the panel when the workbook holds a macro", async () => {
+    store.set(MACRO_A.id, MACRO_A);
+    await mountApp();
+
+    expect(welcome()).toBeNull();
+    expect(bufferDisplayHost().style.display).not.toBe("none");
+    expect(select().value).toBe(MACRO_A.id);
+  });
+
+  it("drops the panel the moment a macro arrives on the open channel", async () => {
+    await mountApp();
+    expect(welcome()).toBeTruthy();
+
+    store.set(MACRO_A.id, MACRO_A);
+    await deliverMacro(MACRO_A);
+
+    expect(welcome(), "the panel covered a document handed over to edit").toBeNull();
+    expect(buffer().value).toBe(MACRO_A.source);
+    expect(bufferDisplayHost().style.display).not.toBe("none");
+  });
+
+  it("drops the panel when a macro is recorded in the main window", async () => {
+    await mountApp();
+    expect(welcome()).toBeTruthy();
+
+    store.set(MACRO_B.id, MACRO_B);
+    await act(async () => {
+      scriptsChangedListeners.forEach((l) => l());
+      await Promise.resolve();
+    });
+
+    expect(welcome()).toBeNull();
+    expect(optionLabels()).toContain("MACRO — Beta refresh");
+  });
+
+  // (d) The same door from the "+ Add Script..." dropdown, first in the list.
+  it("offers Macro first in + Add Script..., and that entry creates the starter", async () => {
+    await mountApp();
+
+    const add = addScriptSelect();
+    expect(add.options[1].value).toBe("__macro");
+    expect(add.options[1].textContent?.trim()).toBe("Macro (a script you run)");
+
+    await act(async () => {
+      add.value = "__macro";
+      add.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await settle();
+
+    expect(createStarterMacro).toHaveBeenCalledTimes(1);
+    expect(welcome()).toBeNull();
+    expect(select().selectedOptions[0].textContent?.trim()).toBe("MACRO — Macro1");
+    // The dropdown is a command palette, not a value: it reads its placeholder again.
+    expect(addScriptSelect().value).toBe("");
+  });
+
+  // The entry is there with documents open too, and selecting it switches to the
+  // new macro without losing the one being left.
+  it("the Macro entry also works with another document open, and stashes that document's edits", async () => {
+    store.set(MACRO_A.id, MACRO_A);
+    await mountApp();
+    await deliverMacro(MACRO_A);
+    await type("// alpha, mid-edit");
+
+    const add = addScriptSelect();
+    await act(async () => {
+      add.value = "__macro";
+      add.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await settle();
+
+    expect(createStarterMacro).toHaveBeenCalledTimes(1);
+    expect(select().value).toBe("macro-macro1");
+    expect(buffer().value).toContain("async function macro1");
+
+    await choose(MACRO_A.id);
+    expect(buffer().value).toBe("// alpha, mid-edit");
   });
 });

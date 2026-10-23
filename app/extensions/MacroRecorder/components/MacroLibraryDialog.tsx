@@ -1,6 +1,9 @@
 //! FILENAME: app/extensions/MacroRecorder/components/MacroLibraryDialog.tsx
 // PURPOSE: Developer ▸ Macros… — the place a saved macro can actually be FOUND,
-//          read, RUN, edited, renamed, attached to a button, and deleted.
+//          read, RUN, edited, renamed, attached to a button, and deleted — and,
+//          since 2026-10-22, CREATED (Excel's Create): New Macro stores a working
+//          example that adds 1 to the selected cells and opens it in the Object
+//          Script Editor.
 // CONTEXT: Recording auto-saves into the workbook's module-script store. Saving
 //          into a store with no UI on top of it would be the same failure the
 //          recorder just had — code that exists with nothing reaching it — so
@@ -40,10 +43,11 @@
 // stamp with it, because a rename that dropped it would launder the record just
 // as thoroughly as the run did.
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDialogWindow } from "@api/dialogWindow";
 import type { DialogProps } from "@api/uiTypes";
 import { showToast } from "@api/notifications";
+import { createStarterMacro } from "@api/macroModules";
 import { mintExplicitMacroRun } from "@api/explicitMacroRun";
 import { hasButtonControlProvider } from "@api/buttonControlService";
 import {
@@ -113,6 +117,22 @@ export function MacroLibraryDialog(props: DialogProps): React.ReactElement | nul
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [output, setOutput] = useState<string | null>(null);
+  /** Mirror of `loaded`, readable from async callbacks after an await. */
+  const loadedRef = useRef<LoadedModule | null>(null);
+  loadedRef.current = loaded;
+  /**
+   * An error that must OUTLIVE the next successful load.
+   *
+   * A successful load ends by clearing the on-screen error (a stale "could not
+   * run" line must not sit under a module the user just switched to). New Macro
+   * selects the record it created and THEN hands it to the editor window; when
+   * that hand-off fails while the load is still in flight, the load's clear
+   * would wipe the seam's message a moment after it was shown, leaving only the
+   * toast. The load applies this instead of null, once, so the line stays --
+   * and only the load of THAT record: keyed by id, so a hand-off failure can
+   * never surface under a later, unrelated module.
+   */
+  const errorAfterLoadRef = useRef<{ id: string; message: string } | null>(null);
 
   const refresh = useCallback(async (): Promise<MacroModuleEntry[]> => {
     const next = await listMacroModules();
@@ -166,10 +186,17 @@ export function MacroLibraryDialog(props: DialogProps): React.ReactElement | nul
         setLoaded(next);
         setDraftName(next.name);
         setDraftSource(next.source);
-        setError(null);
+        // Clears a stale error -- unless a hand-off that raced this load left
+        // one to show for THIS record (see `errorAfterLoadRef`).
+        const pending = errorAfterLoadRef.current;
+        errorAfterLoadRef.current = null;
+        setError(pending && pending.id === next.id ? pending.message : null);
         setOutput(null);
       } catch (e) {
         if (cancelled) return;
+        // The failed load reports its own error below; a pending hand-off
+        // message for this record would only compete with it.
+        errorAfterLoadRef.current = null;
         setLoaded(null);
         setDraftName("");
         setDraftSource("");
@@ -238,28 +265,35 @@ export function MacroLibraryDialog(props: DialogProps): React.ReactElement | nul
    * (never `window.confirm`, which returns a Promise under Tauri and is truthy
    * for both answers) fails CLOSED: a dialog that cannot be shown keeps the
    * user's edits.
+   *
+   * The question itself is `confirmDiscardEdits`, shared with New Macro: creating
+   * a macro selects it, which replaces the textarea just as clicking a row does,
+   * so the two doors ask the same thing in the same words — or one of them would
+   * throw the work away without asking.
    */
+  const confirmDiscardEdits = useCallback(async (): Promise<boolean> => {
+    if (!dirty || !loaded) return true;
+    const keeping =
+      disposition.kind === "fork"
+        ? `Press "Save as my copy" first — that is the only way to keep this text, because ` +
+          `"${loaded.name}" belongs to the application "${disposition.packageName}" and is ` +
+          "never written back."
+        : "Press Save first to keep them.";
+    return confirmAsync(
+      `"${loaded.name}" has unsaved edits in this window. Opening another module ` +
+        `discards them.\n\n${keeping}\n\nDiscard the edits and open the other module?`,
+      { kind: "warning" },
+    );
+  }, [dirty, loaded, disposition]);
+
   const selectModule = useCallback(
     async (id: string): Promise<boolean> => {
       if (id === selectedId) return true;
-      if (dirty && loaded) {
-        const keeping =
-          disposition.kind === "fork"
-            ? `Press "Save as my copy" first — that is the only way to keep this text, because ` +
-              `"${loaded.name}" belongs to the application "${disposition.packageName}" and is ` +
-              "never written back."
-            : "Press Save first to keep them.";
-        const confirmed = await confirmAsync(
-          `"${loaded.name}" has unsaved edits in this window. Opening another module ` +
-            `discards them.\n\n${keeping}\n\nDiscard the edits and open the other module?`,
-          { kind: "warning" },
-        );
-        if (!confirmed) return false;
-      }
+      if (!(await confirmDiscardEdits())) return false;
       setSelectedId(id);
       return true;
     },
-    [selectedId, dirty, loaded, disposition],
+    [selectedId, confirmDiscardEdits],
   );
 
   const save = useCallback(async () => {
@@ -448,17 +482,67 @@ export function MacroLibraryDialog(props: DialogProps): React.ReactElement | nul
    * MacroRecorder importing ScriptableObjects internals). Used by both the
    * double-click on a row and the explicit "Edit in Object Script Editor"
    * button, so they cannot diverge.
+   *
+   * Resolves with the failure message when the editor could not be reached
+   * (already shown on screen and toasted here), or null on success -- so a
+   * caller that has a load in flight can keep the line alive past it.
    */
-  const openInEditor = useCallback(async (macroId: string) => {
+  const openInEditor = useCallback(async (macroId: string): Promise<string | null> => {
     setError(null);
     try {
       await requireScriptEditorProvider().openMacroInEditor(macroId);
+      return null;
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       setError(message);
       showToast(message, { type: "error" });
+      return message;
     }
   }, []);
+
+  /**
+   * New Macro — Excel's Create. Store the working example (it adds 1 to every
+   * selected cell holding a number) as the next free `MacroN`, list and select
+   * it HERE, then open it in the Object Script Editor through the same seam
+   * "Edit in Object Script Editor" uses, so a seam failure lands in
+   * `[data-macro-error]` and a toast exactly as it does for Edit.
+   *
+   * The save is `createStarterMacro`'s only side effect and it comes first, so
+   * a failure leaves nothing half-made. The dialog STAYS OPEN afterwards, as it
+   * does after Edit: the new row is loaded and runnable here while the editor
+   * window shows the same code. An edited textarea is asked about BEFORE
+   * anything is created — selecting the new macro would otherwise discard
+   * those edits on the one route the product offers for adapting a
+   * distributed macro — and a refusal does nothing at all.
+   */
+  const createNew = useCallback(async () => {
+    if (!(await confirmDiscardEdits())) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const created = await createStarterMacro();
+      await refresh();
+      setSelectedId(created.id);
+      showToast(
+        `"${created.name}" was created. Press Run (F5) in the editor to try it; ` +
+          "Ctrl+Z in the workbook undoes it.",
+        { type: "success" },
+      );
+      const failure = await openInEditor(created.id);
+      // The load of the new record may still be in flight; its success branch
+      // clears the error line, so hand it the seam's message to show instead.
+      // Once the record is loaded, the line `openInEditor` set already stays.
+      if (failure && loadedRef.current?.id !== created.id) {
+        errorAfterLoadRef.current = { id: created.id, message: failure };
+      }
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setError("Could not create the macro: " + message);
+      showToast("Could not create the macro: " + message, { type: "error" });
+    } finally {
+      setBusy(false);
+    }
+  }, [confirmDiscardEdits, refresh, openInEditor]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -533,8 +617,10 @@ export function MacroLibraryDialog(props: DialogProps): React.ReactElement | nul
             <div style={styles.list} data-macro-library-list="">
               {entries.length === 0 ? (
                 <div style={{ ...styles.hint, padding: 10 }}>
-                  No script modules yet. Record one with Developer ▸ Record
-                  Macro… (Ctrl+Shift+R) — it is saved here automatically.
+                  No macros yet. Press New Macro to start from a working example
+                  (it adds 1 to the selected cells), or record one with
+                  Developer ▸ Record Macro… (Ctrl+Shift+R). Both are saved here
+                  automatically.
                 </div>
               ) : (
                 entries.map((entry) => (
@@ -601,7 +687,7 @@ export function MacroLibraryDialog(props: DialogProps): React.ReactElement | nul
                 {selectedId
                   ? "That module could not be read, so nothing is loaded here. Every action " +
                     "in this dialog acts on the loaded module, so they are all switched off."
-                  : "Select a module to read, run or edit it."}
+                  : "Select a module to read, run or edit it, or press New Macro to start from a working example."}
               </div>
             ) : (
               <>
@@ -696,6 +782,18 @@ export function MacroLibraryDialog(props: DialogProps): React.ReactElement | nul
         <div style={styles.footer}>
           <button type="button" style={styles.btn} onClick={onClose}>
             Close
+          </button>
+          {/* The first POSITIVE action, so it sits right after Close: it needs
+              nothing selected, and the empty-state text names it. */}
+          <button
+            type="button"
+            data-macro-new-button=""
+            style={disabledIf(styles.btn, busy)}
+            disabled={busy}
+            title="Start a new macro from a working example (it adds 1 to the selected cells) and open it in the Object Script Editor."
+            onClick={() => void createNew()}
+          >
+            New Macro
           </button>
           <button
             type="button"

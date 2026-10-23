@@ -998,7 +998,7 @@ test.describe("commands and items after deactivate (X20, W21)", () => {
       // --- Scriptable Objects + a button bound to cellBehaviors.toggleHighlight ---
       {
         const before = await snapshot(page);
-        const DEV = ["Object Scripts...", "Script Templates...", "Script Libraries..."];
+        const DEV = ["Object Script Editor", "Script Templates...", "Script Libraries..."];
         await buttonBoundTo(page, 0, 0, "cellBehaviors.toggleHighlight");
         const NOT_REG = 'Button command "cellBehaviors.toggleHighlight" is not registered';
         expect((await pressButton(page, grid, "A1")).filter((t) => t.includes(NOT_REG)), "while active the button runs").toEqual([]);

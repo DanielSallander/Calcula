@@ -1,6 +1,7 @@
 //! FILENAME: app/extensions/MacroRecorder/index.ts
 // PURPOSE: Macro Recorder extension entry point — record what you do, read the
-//          script it produces, edit it, and bind it to a button.
+//          script it produces, edit it, and bind it to a button; or start one
+//          from a working example (Developer > New Macro) and open it live.
 // CONTEXT: VBA's ecosystem was bootstrapped by record -> read -> edit, and this
 //          is Calcula's on-ramp to its own (sandboxed, auditable) scripting.
 //          A recorder shipped inside the ScriptEditor extension in Wave 4;
@@ -16,6 +17,12 @@
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { ExtensionRegistry, AppEvents } from "@api";
 import { registerMacroRunProvider } from "@api/macroRunService";
+import { createStarterMacro } from "@api/macroModules";
+import type { CreatedStarterMacro } from "@api/macroModules";
+import {
+  hasScriptEditorProvider,
+  requireScriptEditorProvider,
+} from "@api/scriptEditorService";
 import { runMacroByRef } from "./lib/macroLibrary";
 import { macroRecorderBackend } from "./lib/macroRecorderBackend";
 import { showDialog } from "@api/ui";
@@ -108,6 +115,42 @@ function activate(context: ExtensionContext): void {
   // leaves a stale result behind that the dialog would happily re-open.
   context.commands.register(COMMANDS.CANCEL, () => abandonRecording());
   context.commands.register(COMMANDS.LIBRARY, () => showDialog(LIBRARY_DIALOG_ID));
+  // Developer > New Macro (2026-10-22). No dialog: the macro is created from
+  // the worked example under the first free `MacroN` name and opened live in
+  // the Object Script Editor through the same seam "Edit in Object Script
+  // Editor" uses. The SAVE comes first and alone, so a failure leaves nothing
+  // half-made; the two fallbacks after it both land the user in Developer >
+  // Macros…, where the saved macro is listed, so a macro that exists is never
+  // a macro the user cannot find. Returned (not fire-and-forget) so a caller
+  // of `commands.execute` sees the whole flow settle.
+  context.commands.register(COMMANDS.NEW, async () => {
+    const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+    let created: CreatedStarterMacro;
+    try {
+      created = await createStarterMacro();
+    } catch (e) {
+      showToast("Could not create the macro: " + msg(e), { type: "error" });
+      return;
+    }
+    showToast(
+      `"${created.name}" was created. Select some cells with numbers, then press Run in the editor to add 1 to each.`,
+      { type: "info" },
+    );
+    if (!hasScriptEditorProvider()) {
+      showToast(
+        `"${created.name}" was created and is listed under Developer ▸ Macros…, but the Object Script Editor is unavailable: the ScriptableObjects extension is not loaded.`,
+        { type: "warning" },
+      );
+      showDialog(LIBRARY_DIALOG_ID);
+      return;
+    }
+    try {
+      await requireScriptEditorProvider().openMacroInEditor(created.id);
+    } catch (e) {
+      showToast(msg(e), { type: "error" });
+      showDialog(LIBRARY_DIALOG_ID);
+    }
+  });
   cleanupFns.push(() => {
     for (const id of Object.values(COMMANDS)) context.commands.unregister(id);
   });
@@ -115,22 +158,47 @@ function activate(context: ExtensionContext): void {
   // 3. Developer menu items. The menu itself belongs to ScriptNotebook (it took
   //    it over from the retired ScriptEditor), so items are contributed to it
   //    rather than re-registering the menu.
+  //
+  //    THE ORDERS ARE NEGATIVE ON PURPOSE. `sortMenuItems` (@api/ui) is a stable
+  //    sort on `order ?? 0`, so a negative order sorts above every item that
+  //    declares none -- and every other Developer contribution (Notebook, Script
+  //    Templates…, Design Mode, Workbook Explorer, …) declares none. The old
+  //    orders of 10 and 11 put the two macro doors BELOW all of them, which is
+  //    how "where do I write a macro?" had no visible answer. The four macro
+  //    doors now lead the menu: New Macro (-40), Record Macro… (-30), Macros…
+  //    (-20), then ScriptableObjects' Object Script Editor item at -10, and the
+  //    separator at -1 closes the cluster (MenuBar.tsx renders `separator: true`
+  //    items). Nothing else in Developer moves.
+  context.ui.menus.registerItem("developer", {
+    id: MENU_ITEMS.NEW,
+    label: "New Macro",
+    commandId: COMMANDS.NEW,
+    order: -40,
+  });
   context.ui.menus.registerItem("developer", {
     id: MENU_ITEMS.RECORD,
     label: recordMenuLabel(getRecorderSnapshot().status),
     commandId: COMMANDS.START,
     shortcut: "Ctrl+Shift+R",
-    order: 10,
+    order: -30,
   });
   context.ui.menus.registerItem("developer", {
     id: MENU_ITEMS.LIBRARY,
     label: "Macros…",
     commandId: COMMANDS.LIBRARY,
-    order: 11,
+    order: -20,
+  });
+  context.ui.menus.registerItem("developer", {
+    id: MENU_ITEMS.SEPARATOR,
+    label: "",
+    separator: true,
+    order: -1,
   });
   cleanupFns.push(() => {
+    context.ui.menus.unregisterItem("developer", MENU_ITEMS.NEW);
     context.ui.menus.unregisterItem("developer", MENU_ITEMS.RECORD);
     context.ui.menus.unregisterItem("developer", MENU_ITEMS.LIBRARY);
+    context.ui.menus.unregisterItem("developer", MENU_ITEMS.SEPARATOR);
   });
 
   // 3b. Keep the item honest. Every end path — Stop, Discard, an activation

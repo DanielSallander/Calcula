@@ -29,6 +29,15 @@ import type {
   RecordedGridEventOf,
   RecordedModelEditEvent,
 } from "./types";
+// The two rules the recorder shares with Developer > New Macro's starter: a
+// macro's JavaScript identifier, and the sentence a module macro throws when
+// it is run without cell access. ONE source (@api/scriptHost/macroStarter, a
+// zero-import leaf, so this generator stays a pure function), so a recorded
+// macro and a written one print byte-identical text. Re-exported because the
+// recorder's tests pin them from here.
+import { macroNeedsCellAccessMessage, toIdentifier } from "@api/scriptHost/macroStarter";
+
+export { macroNeedsCellAccessMessage, toIdentifier };
 
 // ============================================================================
 // Options / result
@@ -155,28 +164,9 @@ function a1Range(
   return `${from}:${a1(endRow, endCol)}`;
 }
 
+/** A bare JavaScript identifier (`toIdentifier` applies the same test on the
+ *  @api side; this copy serves `objKey` only). */
 const IDENT_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
-
-/**
- * A safe JavaScript identifier derived from a macro name.
- * "Monthly close 2026" -> "monthlyClose2026"; unusable input -> `fallback`.
- */
-export function toIdentifier(name: string, fallback = "recordedMacro"): string {
-  const words = name
-    .replace(/[^A-Za-z0-9]+/g, " ")
-    .trim()
-    .split(/\s+/)
-    .filter((w) => w.length > 0);
-  if (words.length === 0) return fallback;
-  const joined =
-    words[0].toLowerCase() +
-    words
-      .slice(1)
-      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-      .join("");
-  const candidate = /^[0-9]/.test(joined) ? "_" + joined : joined;
-  return IDENT_RE.test(candidate) ? candidate : fallback;
-}
 
 /** An object-literal key: bare when it is a valid identifier, quoted otherwise. */
 function objKey(key: string): string {
@@ -1059,22 +1049,6 @@ function buildHeader(
     for (const u of unsupportedList) lines.push(`//   - ${u}`);
   }
   return lines;
-}
-
-/**
- * What a recorded object-script macro throws when it is run without cell
- * access (`context.api` is null): a run another script started, or a
- * restricted standing mount. Names the ways that DO give it cell access --
- * exactly the doors that mint a run pass (owner decision B) -- and says that
- * nothing changed, which is true because the guard runs before the first call.
- * Exported so tests pin the generated text against one source.
- */
-export function macroNeedsCellAccessMessage(name: string): string {
-  return (
-    `"${name}" did not run: it needs cell access, and this run has none. Run it yourself ` +
-    "-- from Developer > Macros > Run, a button that runs it, or the command line; a run " +
-    "another script starts never gets cell access. Nothing was changed."
-  );
 }
 
 function wrapObjectScript(

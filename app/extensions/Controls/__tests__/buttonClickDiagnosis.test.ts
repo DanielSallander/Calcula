@@ -61,7 +61,9 @@ describe("diagnoseButtonClick", () => {
     expect(d.variant).toBe("error");
     expect(d.message).toContain("Macro1426");
     expect(d.message).toMatch(/Script Security/);
-    expect(d.message).toMatch(/Object Scripts/);
+    // The menu item is "Object Script Editor" (relabelled 2026-10-22); the
+    // old "Object Scripts..." label no longer exists anywhere in the product.
+    expect(d.message).toMatch(/Developer ▸ Object Script Editor/);
   });
 
   it("says a running script registered no click handler", () => {

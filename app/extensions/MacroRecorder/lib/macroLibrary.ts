@@ -73,14 +73,11 @@ import type { MacroRunOptions } from "@api/macroRunService";
 import type { ScriptRunTrigger } from "@api/workbookScripts";
 import { voidExplicitMacroRun, type ExplicitMacroRun } from "@api/explicitMacroRun";
 import { describeMacroNotFromApplication } from "../../_shared/lib/buttonScriptRun";
+import { macroScriptId, uniqueMacroName } from "@api/macroNaming";
 import type { MacroTarget } from "./types";
 
 /** Which interpreter a stored module's source was written for. */
 export type MacroRuntime = MacroTarget;
-
-/** Id prefix for recorder-authored modules. Also the guarantee that a macro id
- *  can never collide with the reserved `__calcula_` namespace. */
-const MACRO_ID_PREFIX = "macro-";
 
 /** Reserved-id prefix the Rust CRUD hides and protects (mirror of
  *  RESERVED_SCRIPT_PREFIX in app/src-tauri/src/scripting/commands.rs). */
@@ -440,34 +437,13 @@ export async function forkMacroModule(options: {
 // ============================================================================
 // Naming
 // ============================================================================
-
-/** A name not already used by another module: "Macro1245", "Macro1245 (2)", … */
-export function uniqueMacroName(desired: string, taken: Iterable<string>): string {
-  const base = desired.trim() || "Recorded macro";
-  const used = new Set<string>();
-  for (const name of taken) used.add(name.toLowerCase());
-  if (!used.has(base.toLowerCase())) return base;
-  for (let n = 2; ; n++) {
-    const candidate = `${base} (${n})`;
-    if (!used.has(candidate.toLowerCase())) return candidate;
-  }
-}
-
-/** A stable, readable, non-reserved module id derived from a macro name. */
-export function macroScriptId(name: string, takenIds: Iterable<string>): string {
-  const slug =
-    name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "recorded";
-  const used = new Set<string>(takenIds);
-  const base = `${MACRO_ID_PREFIX}${slug}`;
-  if (!used.has(base)) return base;
-  for (let n = 2; ; n++) {
-    const candidate = `${base}-${n}`;
-    if (!used.has(candidate)) return candidate;
-  }
-}
+//
+// The naming is @api's (`@api/macroNaming`), not this file's: Developer > New
+// Macro mints names from BOTH windows (the main window and the Object Script
+// Editor's own), and the id/slug rule must be ONE -- host.ts resolves
+// `run <name>` at the command line by the same slug. Re-exported so the
+// recorder's callers and tests keep their one import path.
+export { MACRO_ID_PREFIX, macroScriptId, uniqueMacroName } from "@api/macroNaming";
 
 // ============================================================================
 // Store operations

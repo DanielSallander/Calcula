@@ -33,23 +33,37 @@
 //
 //          Pixel grid: every horizontal and vertical edge of a filled shape
 //          sits on a multiple of PIXEL_GRID (1.2 units, one device pixel at
-//          20px), so straight edges paint crisp at 100% instead of as a
-//          half-covered grey pixel. Where it costs nothing an edge sits on a
-//          multiple of 2.4, which is also crisp at 150% and at 30px. Only
-//          diagonals, curves, round caps and the Card's 2.6 digit strokes
-//          antialias; the All Visuals hero is drawn on its own 0.8 grid.
+//          20px), except one 1.6 run of Palette's freehand outline (y 16.3),
+//          so straight edges paint crisp at 100% instead of as a half-covered
+//          grey pixel. Where it costs nothing an edge sits on a multiple of
+//          2.4, which is also crisp at 150% and at 30px. Only diagonals,
+//          curves, round caps, that Palette run and the Card's 2.6 digit
+//          strokes antialias; the All Visuals hero is drawn on its own 0.8
+//          grid. The Visuals family's straight edges are test-enforced on
+//          the 1.2 grid; Palette's are not.
 //
 //          The HERO tiles of the Chart Design band draw at 30px (0.8 units per
-//          device pixel), where only a multiple of 2.4 is crisp: the six quick
-//          types (Column, Bar, Line, Area, Pie, Scatter), MarkOptions,
-//          SwitchRowCol, FormatPoint and Code. The Visuals family puts its
-//          columns, bars, plot L and areas on the 2.4 grid. A cut centred in
-//          the 24 box cannot be: a 2.4 cut there falls on 10.8 | 13.2, half
-//          pixels at 30px and at 150%. That costs the pie (the one quick tile
-//          that got softer at 30px), the donut, the sunburst, and the stacked
-//          pairs at 3.6 / 13.2. MarkOptions' middle rail is the other
-//          exception: three evenly spaced 2.4 rails centred on 12 can never all
-//          land on the 2.4 grid. The gallery (24px) and the band's tall
+//          device pixel), where, of the multiples of 1.2, only a multiple of
+//          2.4 is crisp: the six quick types (Column, Bar, Line, Area, Pie,
+//          Scatter), MarkOptions, SwitchRowCol, FormatPoint, Code, EditChart
+//          and SaveImage (the last two the generic Pencil and Download),
+//          beside generic.tsx's More tile. The Visuals family puts the
+//          columns and bars of its three-mark lattice, the plot L and the
+//          areas on the 2.4 grid. A cut centred in the 24 box cannot be: a
+//          2.4 cut there falls on 10.8 | 13.2, half pixels at 30px and at
+//          150%. That costs the pie (the one quick tile that got softer at
+//          30px), the donut, the sunburst, and everything on the pair slots
+//          at 3.6 / 13.2 (the stacked pairs, Line and stacked column,
+//          Grouped's columns and the Box plot's two plots); Table, Treemap,
+//          Multi-row card, KPI and Stock have edges on odd multiples of 1.2
+//          by construction (ICONS.md 2.5 lists them).
+//          MarkOptions' middle rail is another exception (three evenly spaced
+//          2.4 rails centred on 12 can never all land on the 2.4 grid), and so
+//          are FormatPoint's column ends (two tops at 13.2 and 8.4, all three
+//          feet at 18), SaveImage's Download (x 6, 10.8 and 22.8, y 18) and
+//          the More tile (its tiles at 10.8 | 13.2, its plus's arm edges at
+//          15.6), half pixels at 30px;
+//          EditChart's Pencil (x 2.4, y 21.6) is crisp. The gallery (24px) and the band's tall
 //          segments (28px) cannot be crisp on this grid: of the multiples of
 //          1.2, only 6, 12 and 18 are whole pixels there.
 //
@@ -833,8 +847,9 @@ function ChartAreaStacked({ size }: RibbonIconProps): React.ReactElement {
 
 /** 100% stacked area: ChartAreaStacked's lower series and cut unchanged, with
  *  the ACCENT filling up to the plot's FLAT top at y 2.4. The flat top is the
- *  whole difference from its twin, as the aligned ends are for the 100%
- *  bars. */
+ *  whole difference from its twin. (The 100% bars are told from theirs by
+ *  their aligned ends, but their roots change as well: 4.8 / 10.8 against
+ *  ChartBarStacked's 10.8 / 6.) */
 function ChartAreaStacked100({ size }: RibbonIconProps): React.ReactElement {
   return (
     <IconFrame size={size}>
@@ -874,7 +889,8 @@ function ChartComboStacked({ size }: RibbonIconProps): React.ReactElement {
  *  -- a flag drawn inside its own width, so the digits do not read as "I23"
  *  -- and the 2 and the 3 are 2.6 strokes on bowls of one centre-line radius
  *  (2.3), which antialias like any curve (the 2's foot has its top edge at
- *  14.2). The digits sit 1.2 apart, closer than THE gap: they are one value.
+ *  14.2). The digits sit closer than THE gap (the 1 and the 2 are 1.2 apart,
+ *  the 2 and the 3 about 1.6 at their closest): they are one value.
  *  No frame: a framed card read as a monitor with a chin (2026-10-08). Until
  *  2026-10-22 the digits were Paste Values' pixel digits moved; the two no
  *  longer share a drawing. */

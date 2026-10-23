@@ -2850,6 +2850,33 @@ export {
 export type { ScriptEditorProvider } from "./scriptEditorService";
 
 // ============================================================================
+// Macro modules (Developer > New Macro)
+// ============================================================================
+// Creating a macro from the worked example, and the naming rules behind it.
+// Shared side of the fence on purpose: the Macro Recorder (menu command, Macros
+// dialog) and the Object Script Editor (its own window; welcome panel, "+ Add
+// Script... > Macro") both create one, and neither may import the other.
+
+export { createStarterMacro } from "./macroModules";
+export type { CreatedStarterMacro } from "./macroModules";
+
+export {
+  buildMacroStarterSource,
+  macroStarterFunctionName,
+  MACRO_STARTER_DEFAULT_NAME,
+  toIdentifier,
+  macroNeedsCellAccessMessage,
+} from "./scriptHost/macroStarter";
+
+export {
+  uniqueMacroName,
+  macroScriptId,
+  nextDefaultMacroName,
+  buildStarterMacroDescription,
+  MACRO_ID_PREFIX,
+} from "./macroNaming";
+
+// ============================================================================
 // Script Assistant Service (IoC: ask an AI to edit the script on screen)
 // ============================================================================
 // The mirror of the block above: that seam lets AIChat open the editor, this one

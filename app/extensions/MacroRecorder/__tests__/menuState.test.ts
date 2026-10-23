@@ -170,7 +170,12 @@ describe("the Developer-menu record item", () => {
     expect(ids).toContain(MENU_ITEMS.RECORD);
     expect(ids).toContain(MENU_ITEMS.LIBRARY);
     expect(ids.filter((id) => id.includes("stop"))).toEqual([]);
-    expect(ids).toHaveLength(2);
+    // The macro cluster is exactly four items: New Macro, the ONE record/stop
+    // item, Macros…, and the separator under them (developerMenu.test.ts pins
+    // their labels and orders). A fifth would be a permanent Stop creeping back.
+    expect(ids).toContain(MENU_ITEMS.NEW);
+    expect(ids).toContain(MENU_ITEMS.SEPARATOR);
+    expect(ids).toHaveLength(4);
   });
 
   it("reads 'Record Macro…' while idle", () => {

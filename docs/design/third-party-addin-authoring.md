@@ -979,18 +979,29 @@ ChartPareto), the report visuals (ChartBarStacked ... ChartGauge, Matrix, AllVis
 Timeline, and Grouped, Stacked and Stacked100 were redrawn in one geometric style -- square where a
 part meets something, round where it ends, one 2-pixel cut between parts -- all with the same
 meaning and the same keys, so an add-in naming them keeps working and simply shows the new pictures.
-Most kept their composition; these changed it:
+Many also changed their composition -- the number or kind of their parts -- so a description of a
+picture written before 2026-10-22 may no longer fit. Among the larger changes:
 
+- The bar and column pictures no longer stand on a grey axis line: their square feet are the axis
+  (ChartHistogram, one block of adjacent bins, keeps a baseline).
 - Table is three rows cut into cells, its green header row thinner than the two rows under it.
 - Slicer is a list of round radio dots with labels and no panel; only the selected item is dark
   (a green dot beside a dark label), the others are grey.
 - ChartMultiRowCard shows two records, each a value over a grey rule, where it showed three.
-- ChartKpi is one diamond cut across its middle, a green up-triangle over a dark down-triangle,
-  where it showed two triangles side by side.
+- ChartKpi is one wide diamond cut across its middle, a green up-triangle over a dark
+  down-triangle, where it showed two triangles side by side.
 - ChartHistogram is one stepped block, where it showed separate bars.
 - ChartArea is a solid green area inside the x/y axes, where it was a grey area under a green line.
-- AllVisuals's lower-left tile is bars, where it was an area; it is still drawn for a 30px hero
-  button only.
+- ChartScatter shows four dots, the highest one green, where it showed three with the middle one
+  green; ChartFunnel and ChartWaterfall show three stages or marks, where they showed four.
+- Matrix has three grey header cells over two dark cells and its green totals L, where it had one
+  grey header bar over four dark cells and the L.
+- Grouped is two whole columns, a short dark one beside a tall green one, where it showed four
+  columns in two pairs.
+- Timeline's green selection is the left part of a track cut in two, where it was a green window in
+  the middle of one grey track.
+- AllVisuals's lower-left tile is bars, where it was an area, and its green is the tall column,
+  where it was the pie's quarter; it is still drawn for a 30px hero button only.
 
 ClearSlicers is a command, not a gallery tile, and was not redrawn: it still shows the panel the
 Slicer drew until 2026-10-22.
