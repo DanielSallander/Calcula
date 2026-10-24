@@ -15,6 +15,7 @@ import type { EncryptDialogResult } from "./EncryptFileDialog";
 import { UnlockFileDialog } from "./UnlockFileDialog";
 import type { UnlockDialogResult } from "./UnlockFileDialog";
 import { confirmAsync, alertAsync } from "@api/dialogs";
+import { describeBackendRefusal } from "@api/backendRefusal";
 
 const ENCRYPT_DIALOG_ID = "encrypt-file";
 const UNLOCK_DIALOG_ID = "unlock-file";
@@ -42,6 +43,44 @@ function promptUnlock(
   });
 }
 
+/**
+ * What a failed encrypt / remove-password tells the user. Both end in a save,
+ * so the backend's RETRYABLE refusal -- the workbook changed while it was
+ * being saved, so nothing was written -- reads as its plain sentence, never
+ * its internal code; every other error reads exactly as it always did
+ * (`@api/backendRefusal`).
+ */
+export function encryptionFailureMessage(error: unknown): string {
+  return "Failed to update workbook encryption: " + describeBackendRefusal(error);
+}
+
+/** Said when a refused Remove Password left the workbook encrypted, here and on disk. */
+export const REMOVE_REFUSED_STILL_ENCRYPTED =
+  "The password was not removed: the workbook is still encrypted, in this window and in the file on disk.";
+
+/** Said when a refused Remove Password could not put the passphrase back on the open workbook. */
+export const REMOVE_REFUSED_NOW_UNENCRYPTED =
+  "The password is no longer on the workbook open in this window, but the file on disk is still " +
+  "encrypted. The next save writes it without a password; to keep it encrypted, set the password " +
+  "again (File > Encrypt with Password).";
+
+/**
+ * What a failed Remove Password tells the user: the failure, AND where the
+ * encryption stands now -- read from the backend after the failure, never
+ * assumed. `workbook.removePassword` puts the passphrase back when the save
+ * that would write the file unencrypted is refused and the passphrase is
+ * remembered on this computer; when it is not, the open workbook stays
+ * unencrypted while the file on disk is still encrypted, and the user must be
+ * told which, because the next save differs (review round 8).
+ */
+export function removePasswordFailureMessage(error: unknown, stillEncrypted: boolean): string {
+  return (
+    encryptionFailureMessage(error) +
+    " " +
+    (stillEncrypted ? REMOVE_REFUSED_STILL_ENCRYPTED : REMOVE_REFUSED_NOW_UNENCRYPTED)
+  );
+}
+
 /** File > "Encrypt with Password…": set, change, or remove the password. */
 async function openEncryptDialog(): Promise<void> {
   let alreadyEncrypted = false;
@@ -64,13 +103,26 @@ async function openEncryptDialog(): Promise<void> {
             { title: "Remove encryption?", kind: "warning" },
           );
           if (!ok) return;
-          await workbook.removePassword();
+          try {
+            await workbook.removePassword();
+          } catch (error) {
+            console.error("[Encryption] remove password failed:", error);
+            // WHERE IT STANDS NOW, asked of the backend: still encrypted (the
+            // passphrase was put back) or not (it could not be).
+            let stillEncrypted = false;
+            try {
+              stillEncrypted = await workbook.isEncrypted();
+            } catch {
+              stillEncrypted = false;
+            }
+            await alertAsync(removePasswordFailureMessage(error, stillEncrypted));
+          }
         } else {
           await workbook.encrypt(result.password, result.remember);
         }
       } catch (error) {
         console.error("[Encryption] action failed:", error);
-        void alertAsync("Failed to update workbook encryption: " + String(error));
+        await alertAsync(encryptionFailureMessage(error));
       }
     },
   });

@@ -17,6 +17,7 @@ import {
   emitAppEvent,
 } from "@api";
 import type { LayoutConfig, AggregationType } from "@api";
+import type { DrillThroughBehavior } from "@api/pivot";
 import type { GridRegion } from "@api/gridOverlays";
 import { getGridRegions, requestOverlayRedraw } from "@api/gridOverlays";
 import { openObjectPane } from "@api/objectPane";
@@ -84,6 +85,8 @@ let analyzeTabRegistered = false;
  * Called when a `pivot:regionsUpdated` event fires.
  */
 export function updateCachedRegions(regions: PivotRegionData[]): void {
+  // The regions carry `hasDesignQueryDrill` as Rust reports it now, so this
+  // replacement also drops any patch a dialog save made (noteDrillBehaviorSaved).
   cachedRegions = Array.isArray(regions) ? regions : [];
   // Regions arrived, so clear the just-created flag
   justCreatedPivot = false;
@@ -223,6 +226,52 @@ export function getCachedRegions(): PivotRegionData[] {
  */
 export function isModelPivot(pivotId: string): boolean | undefined {
   return cachedRegions.find((r) => r.pivotId === pivotId)?.isModel;
+}
+
+// ---------------------------------------------------------------------------
+// "Has this pivot a design-query drill?" (docs/design/model-drillthrough.md 2.9)
+// ---------------------------------------------------------------------------
+//
+// The value-cell menu labels its run row "Drill through" when the pivot's
+// behaviour carries a design-query definition, else "Show Details" -- and a
+// menu label is SYNCHRONOUS, while the behaviour lives in the backend. So the
+// fact rides the REGION TRANSPORT beside `isModel`
+// (`PivotRegionData.hasDesignQueryDrill`, which Rust fills from the pivot's
+// BI drill behaviour where it builds the regions): the very first right-click
+// on a pivot that was never selected already knows it. That is the case an
+// earlier read-through cache got wrong. It was filled by one IPC per pivot
+// becoming active, it forgot everything on every region update, and so it was
+// cold exactly when it mattered: a canvas box menu is built ONCE from static
+// DOM, and a worksheet right-click resolves its labels before any read can
+// return.
+//
+// The Drill-through behavior dialog's Save patches the cached region
+// (`noteDrillBehaviorSaved`) so the label follows a save at once; the next
+// region update replaces the patch with what Rust then reports. A STALE answer
+// MISLABELS, never misroutes: the run re-reads the behaviour. No region cached
+// for the pivot means no answer (undefined), and the menu then says "Show
+// Details" -- it never promises a drill the pivot does not have.
+
+/**
+ * Synchronous: whether `pivotId`'s cached region says its drill-through
+ * behaviour carries a design-query definition; undefined when no region is
+ * cached for it (callers show the default label, never guess).
+ */
+export function hasDesignQueryDrill(pivotId: string): boolean | undefined {
+  return cachedRegions.find((r) => r.pivotId === pivotId)?.hasDesignQueryDrill;
+}
+
+/**
+ * The Drill-through behavior dialog saved `behavior` for `pivotId`: the cached
+ * region learns at once whether it now carries a design-query drill. A COPY
+ * of the region replaces it, so the region object every other listener of the
+ * regions event holds is not changed. No cached region (the pivot is not on
+ * this sheet) means nothing to patch: its sheet's next region update carries
+ * the saved fact from Rust.
+ */
+export function noteDrillBehaviorSaved(pivotId: string, behavior: DrillThroughBehavior | null): void {
+  const has = behavior?.designQuery != null;
+  cachedRegions = cachedRegions.map((r) => (r.pivotId === pivotId ? { ...r, hasDesignQueryDrill: has } : r));
 }
 
 /**

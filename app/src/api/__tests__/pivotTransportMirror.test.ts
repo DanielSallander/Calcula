@@ -94,7 +94,7 @@ const PINNED: ReadonlyArray<{ rust: string; ts: string; fields: string[]; option
     fields: ["pivot_anchor_row", "pivot_anchor_col"],
     optional: false,
   },
-  { rust: "pub struct PivotRegionData", ts: "export interface PivotRegionData", fields: ["is_model"], optional: false },
+  { rust: "pub struct PivotRegionData", ts: "export interface PivotRegionData", fields: ["is_model", "has_design_query_drill"], optional: false },
   {
     rust: "pub struct PivotFieldConfiguration",
     ts: "export interface PivotFieldConfiguration",

@@ -294,8 +294,10 @@ export function openFrEditor(
   // The session: ONE edit that this textarea and the formula bar both show.
   // Registered as the external formula target, so while it expects a
   // reference a grid click inserts "Sheet1!A1" here instead of moving the grid
-  // selection -- at the caret of whichever view owns it.
-  editorSession = createSession(token, frId, row, col, entry.name, entry.sheetIndex);
+  // selection -- at the caret of whichever view owns it. It names the host by
+  // its STABLE id too, so Core follows the host by identity from the first
+  // moment (review FR-RESYNC-COMMITS-ON-RENUMBER).
+  editorSession = createSession(token, frId, row, col, entry.name, entry.sheetIndex, entry.hostSheetId);
   unregisterExtTarget = registerExternalFormulaTarget({
     isExpectingReference: () => {
       const st = editorState;
@@ -370,6 +372,7 @@ function createSession(
   col: number,
   nameAtOpen: string,
   hostSheetIndex: number,
+  hostSheetId: string,
 ): ExternalEditSession {
   const live = (): FrEditorState | null =>
     editorState !== null && editorState.token === token && textarea !== null ? editorState : null;
@@ -380,6 +383,9 @@ function createSession(
       return buildQualifiedRef(getFloatingRangeById(frId)?.name ?? nameAtOpen, row, col);
     },
     hostSheetIndex,
+    // "" (an older backend) names nothing: Core then learns the host on the
+    // first trip away, the old rule.
+    ...(hostSheetId !== "" ? { hostSheetId } : {}),
     anchor: Object.freeze({ row, col }),
 
     getText(): string {

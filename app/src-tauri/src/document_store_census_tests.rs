@@ -257,6 +257,16 @@ const RESET_BY_METHOD_CALL: &[(&str, &str)] = &[
         "ScriptState.explicit_run_grants",
         "script_state.explicit_run_grants.clear(",
     ),
+    // F1, review round 7: the sheet-structure generation is the DOCUMENT's
+    // (it counts renumberings of this workbook's sheets), and the replacement
+    // MOVES it rather than zeroing it -- a snapshot compares two readings for
+    // equality, and a counter set back to an old value could make one taken
+    // before the replacement compare equal to one taken after it. The bump is
+    // `persistence::note_sheet_structure_change`, which the reset calls.
+    (
+        "AppState.sheet_structure_generation",
+        "state.sheet_structure_generation.fetch_add(",
+    ),
 ];
 
 /// Fields that are NOT the document's, with the reason each one is not.
@@ -1081,6 +1091,7 @@ const NOT_DOCUMENT_REPLACING: &[(&str, &str)] = &[
     ("update_ribbon_filter_selection", "sets one ribbon filter's selection and, with a gesture, filters \
       its target pivots in the same step (BI re-queries, hence BiState); the document stays"),
     ("drill_through_to_sheet", "adds a sheet of detail rows"),
+    ("drill_through", "the model-visual drill-through (model-drillthrough.md 2.5): `pivotContext` holds PivotState to READ one BI pivot's cell as member keys and its standing filters, and BiState only to READ the live connection's package data-source id after the pivot guards are released; `toSheet` holds BiState to run the compiled design query and then adds ONE ephemeral result sheet through `append_user_sheet`. It edits no pivot and replaces no document"),
     ("create_pivot_from_bi_model", "adds a pivot"),
     // -- BI / report / script surfaces ----------------------------------------
     ("bi_insert_result", "writes a query result into a range"),

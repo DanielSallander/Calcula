@@ -1828,11 +1828,44 @@ export interface SheetInfo {
   kind?: SheetKindName;
   /** The canvas's layout; absent for a worksheet. */
   canvasLayout?: CanvasLayout;
+  /**
+   * True for a TEMPORARY sheet: a drill-through's result, which the tab strip
+   * discards when the user leaves it and keeps on a double-click of its tab
+   * (`keepEphemeralSheet`). Session-only on the backend -- a save writes the
+   * sheet as an ordinary one -- and optional here for the same reason `sheetId`
+   * is: absent means an ordinary sheet (docs/design/model-drillthrough.md 2.6).
+   */
+  ephemeral?: boolean;
 }
 
 export interface SheetsResult {
   sheets: SheetInfo[];
   activeIndex: number;
+}
+
+/**
+ * The backend's answer to `discard_ephemeral_sheet` (`discardEphemeralSheet`;
+ * Rust `sheets::DiscardedSheet`): which sheet it removed, resolved from the
+ * STABLE id at the moment of deletion, and the list afterwards.
+ */
+export interface DiscardedSheet {
+  /** The TRUE workbook index the sheet had when the backend removed it. */
+  deletedIndex: number;
+  /** Its name, as it was. */
+  deletedName: string;
+  /** The sheet list and the active sheet afterwards. */
+  result: SheetsResult;
+}
+
+/**
+ * Whether a sheet wrapper reports to the macro recorder. `record: false` is for
+ * the drill-through's own choreography: the landing on its temporary sheet and
+ * the strip's discard of it are consequences of the drill, not steps of the
+ * user's macro, and replayed as a structural `deleteSheet` they would delete
+ * whatever sheet holds that index later (model-drillthrough.md 2.7).
+ */
+export interface SheetRecordingOptions {
+  record?: boolean;
 }
 
 export async function getSheets(): Promise<SheetsResult> {
@@ -1843,9 +1876,12 @@ export async function getActiveSheet(): Promise<number> {
   return invoke<number>("get_active_sheet");
 }
 
-export async function setActiveSheet(index: number): Promise<SheetsResult> {
+export async function setActiveSheet(
+  index: number,
+  options?: SheetRecordingOptions,
+): Promise<SheetsResult> {
   const result = await invoke<SheetsResult>("set_active_sheet", { index });
-  recordGridEvent({ kind: "activateSheet", index });
+  if (options?.record !== false) recordGridEvent({ kind: "activateSheet", index });
   return result;
 }
 
@@ -1935,14 +1971,14 @@ export async function setCanvasLayout(
   });
 }
 
-export async function deleteSheet(index: number): Promise<SheetsResult> {
-  const before = await sheetNamesBefore();
-  const removed = before.find((s) => s.index === index);
-  const result = await invoke<SheetsResult>("delete_sheet", { index });
-  emitAppEvent(AppEvents.SHEET_DELETED, {
-    sheetIndex: index,
-    sheetName: removed?.name ?? "",
-  });
+/**
+ * Announce a sheet DELETED -- SHEET_DELETED, then MUTATION_REFRESH over every
+ * domain a sheet's deletion leaves stale. ONE body for both routes that delete
+ * a sheet (`deleteSheet` and `discardEphemeralSheet`), so the two can never
+ * announce different cascades.
+ */
+function announceSheetDeleted(sheetIndex: number, sheetName: string): void {
+  emitAppEvent(AppEvents.SHEET_DELETED, { sheetIndex, sheetName });
   // §3bn. Deleting a sheet is the widest object deletion in the workbook: the
   // tables and pivots ON it go, the slicers, timelines, charts and sparklines
   // anchored to it go with them, and every one of those objects on a sheet
@@ -1964,8 +2000,76 @@ export async function deleteSheet(index: number): Promise<SheetsResult> {
     domains: ["sheets", "slicer", "pivot", "ribbonFilter", "objects", "paneControl", "floatingRanges"],
     source: "commit",
   });
-  recordGridEvent({ kind: "deleteSheet", index });
+}
+
+/**
+ * `deleteSheet`'s options: the recorder's, and the sheet the caller MEANS.
+ */
+export interface SheetDeleteOptions extends SheetRecordingOptions {
+  /**
+   * The STABLE id of the sheet the caller means by `index`. When given, the
+   * backend deletes only if the sheet at `index` still carries this id when
+   * the delete holds its locks, and otherwise refuses -- nothing deleted,
+   * nothing announced, nothing recorded -- with "The sheets changed while that
+   * sheet was being deleted, so nothing was deleted." An index read earlier
+   * names whichever sheet slid into it after a temporary sheet's discard, an
+   * MCP move or an insert, and a delete ends the undo history: the tab strip's
+   * Delete passes the id of the sheet its confirmation named
+   * (model-drillthrough.md 2.7).
+   */
+  expectedSheetId?: string;
+}
+
+export async function deleteSheet(
+  index: number,
+  options?: SheetDeleteOptions,
+): Promise<SheetsResult> {
+  const before = await sheetNamesBefore();
+  const expectedSheetId = options?.expectedSheetId;
+  // The name SHEET_DELETED carries. By id when the caller named the sheet: a
+  // delete that lands deleted THAT sheet at `index`, whatever stood at `index`
+  // when the names were read.
+  const removed =
+    (expectedSheetId !== undefined ? before.find((s) => s.sheetId === expectedSheetId) : undefined) ??
+    before.find((s) => s.index === index);
+  const result = await invoke<SheetsResult>(
+    "delete_sheet",
+    expectedSheetId !== undefined ? { index, expectedSheetId } : { index },
+  );
+  // Only after the delete LANDED, at the index it was asked for -- which, with
+  // an expected id, is guaranteed to be the index the backend deleted.
+  announceSheetDeleted(index, removed?.name ?? "");
+  // `record: false` skips ONLY the recorder: the announcements above are owed
+  // to every cache no matter who deleted the sheet.
+  if (options?.record !== false) recordGridEvent({ kind: "deleteSheet", index });
   return result;
+}
+
+/**
+ * Discard a TEMPORARY (drill-through) sheet by its STABLE id -- the tab strip's
+ * discard of a temporary sheet the user left, and of the one a drill runner
+ * clears before it adds the next (docs/design/model-drillthrough.md 2.7).
+ *
+ * By id, never by index: the backend resolves the id to the sheet's CURRENT
+ * index in the same command that deletes it, and refuses -- leaving the
+ * document clean and nothing deleted -- when no sheet has that id ("There is
+ * no sheet with that id.") or the sheet is no longer temporary ("That sheet is
+ * not temporary any more."). An index read earlier could name whichever sheet
+ * slid into it after an insert, a copy or a move: the strip once deleted the
+ * user's own sheet that way and left the temporary one behind.
+ *
+ * Otherwise it is the `delete_sheet` command's own body (the slicer pre and
+ * post work, the quiet BI re-query), and it announces EXACTLY what
+ * `deleteSheet` announces -- SHEET_DELETED with the index and name the backend
+ * reports, and the same seven-domain MUTATION_REFRESH -- through the one
+ * shared `announceSheetDeleted`. It records NOTHING: the discard is a
+ * consequence of the drill, not a step of the user's macro, and replayed it
+ * would delete whatever sheet holds that index later.
+ */
+export async function discardEphemeralSheet(sheetId: string): Promise<DiscardedSheet> {
+  const answer = await invoke<DiscardedSheet>("discard_ephemeral_sheet", { sheetId });
+  announceSheetDeleted(answer.deletedIndex, answer.deletedName);
+  return answer;
 }
 
 export async function renameSheet(index: number, newName: string): Promise<SheetsResult> {
@@ -2061,6 +2165,31 @@ function announceVisibilityChange(activeBefore: number | null, result: SheetsRes
 
 export async function setTabColor(index: number, color: string): Promise<SheetsResult> {
   return invoke<SheetsResult>("set_tab_color", { index, color });
+}
+
+/**
+ * Make a TEMPORARY (drill-through) sheet an ordinary one, by its STABLE id:
+ * the backend drops the id from the session-only ephemeral set and answers
+ * the list. A sheet PRIMITIVE, like `setScrollArea`: it dirties nothing (no
+ * save reads the flag) and the Shell calls it by its own name, never through a
+ * feature's command.
+ *
+ * The backend REFUSES an id no sheet has ("There is no sheet with that id." --
+ * say, the discard already landed) and an object-backed sheet. A sheet that is
+ * ALREADY ordinary is not refused: keeping the same sheet twice (a repeated
+ * double-click, Keep Sheet racing a refused discard's keep) is harmless and
+ * true. So an answer alone never proves THIS sheet was temporary and is now
+ * kept -- a caller that tells the user so reads the answered list: the row
+ * with this id, and its `ephemeral` flag off.
+ *
+ * Announces the `sheets` domain the way `renameSheet` does: a listed attribute
+ * changed, and the readers of the list -- the report pages, which skip an
+ * ephemeral canvas -- have to re-read to see the sheet as permanent.
+ */
+export async function keepEphemeralSheet(sheetId: string): Promise<SheetsResult> {
+  const result = await invoke<SheetsResult>("keep_ephemeral_sheet", { sheetId });
+  emitAppEvent(AppEvents.MUTATION_REFRESH, { domains: ["sheets"], source: "commit" });
+  return result;
 }
 
 export async function nextSheet(): Promise<SheetsResult> {

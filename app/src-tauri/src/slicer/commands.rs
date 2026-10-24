@@ -584,6 +584,32 @@ pub(crate) fn filter_targets_of_slicers_on_sheet(
     out
 }
 
+/// Owner decision 3 on the sheet-delete path, between parts 1 and 2: keep only
+/// the entries whose slicer the delete REALLY removed -- the ones no longer in
+/// the store.
+///
+/// Part 1 resolves by INDEX before the delete takes its locks, and another
+/// door (the MCP server, on its own thread) can renumber the sheets in that
+/// window, even away and back, which the delete's id check cannot see. The
+/// list can then name the slicers of a sheet that SURVIVED the delete, and
+/// clearing those would take a live slicer's selection off its pivots with no
+/// undo (a sheet delete ends the history). A slicer the delete removed is gone
+/// from the store; one it did not remove is still there.
+///
+/// A store that cannot be read keeps nothing: a filter whose slicer may still
+/// exist is never cleared.
+///
+/// LOCKS: `slicers` alone; the caller holds none.
+pub(crate) fn doomed_slicers_the_delete_removed(
+    slicer_state: &SlicerState,
+    doomed: Vec<DoomedSlicerFilters>,
+) -> Vec<DoomedSlicerFilters> {
+    match slicer_state.slicers.read() {
+        Ok(slicers) => doomed.into_iter().filter(|d| !slicers.contains_key(&d.slicer_id)).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Owner decision 3 on the sheet-delete path, part 2, run after the delete
 /// with every lock released: take each removed slicer's filter off the pivots
 /// it held. The host-side masks are cleared here, synchronously -- a

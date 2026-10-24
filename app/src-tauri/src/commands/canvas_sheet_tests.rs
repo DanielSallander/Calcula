@@ -161,6 +161,7 @@ fn deleting_a_sheet_before_a_canvas_keeps_the_kind_and_page_setups_aligned() {
         &wb.timeline,
         0,
         false,
+        None,
     )
     .expect("delete the first sheet");
 
@@ -1615,6 +1616,7 @@ fn the_canvas_frame_wire_shape_is_camel_case_and_optional() {
         end_col: 1,
         is_empty: false,
         is_model: false,
+        has_design_query_drill: false,
         canvas_frame: frame,
         style: None,
     };
@@ -1933,6 +1935,7 @@ fn an_animation_restore_for_a_deleted_sheet_writes_nothing() {
     wb.switch_to(0);
     crate::sheets::delete_sheet_impl(
         &wb.state, &wb.file, &wb.pivots, &wb.files, &wb.pane, &wb.filters, &wb.slicer, &wb.timeline, 1, false,
+        None,
     )
     .expect("delete Sheet2");
     assert_eq!(wb.state.sheet_names.read().unwrap()[1], "Sheet3");

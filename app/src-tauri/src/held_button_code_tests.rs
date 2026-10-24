@@ -1179,7 +1179,7 @@ fn body_of<'a>(src: &'a str, signature: &str) -> &'a str {
 #[test]
 fn the_release_and_its_gates_sit_where_every_push_passes() {
     let cmds = source("src/calp_commands.rs");
-    let assembly = body_of(&cmds, "fn assemble_publish_workbook(");
+    let assembly = body_of(&cmds, "fn assemble_publish_snapshot(");
     // The release sits in the ONE filter-then-release composition the assembly
     // calls (and the include tests drive).
     assert!(assembly.contains("filter_and_release("), "the assembly no longer filters and releases");

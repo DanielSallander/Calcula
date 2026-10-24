@@ -14,7 +14,7 @@
 // about it in silence. An UNLINKED workbook still gets the fields, because there
 // is genuinely nothing to remember yet, and publishing links it for next time.
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useReducer, useState } from "react";
 import type {
   ButtonCodeRelease,
   DialogProps,
@@ -42,24 +42,23 @@ import {
   openPanel,
 } from "@api";
 import type { ApplicationInfo } from "@api";
-import { holdBackCells, type HoldBackCellRef } from "@api/collaboration";
+import { holdBackCells, type PublishSheetSelection } from "@api/collaboration";
+import {
+  describeBackendRefusal,
+  isSheetGoneRefusal,
+  isSheetIndexOutOfRangeRefusal,
+  isWorkbookChangedWhileSaving,
+} from "@api/backendRefusal";
+import { formatNumber } from "@api/locale";
 import { CHECKOUT_DIALOG_ID, APPLICATION_EXPLORER_PANEL_ID } from "../manifest";
 import { VersionDiffView, cellKeyOf } from "./VersionDiffView";
-
-/**
- * `cellKeyOf` in reverse. The key carries the diff row's SHEET ID, which for a
- * working copy is directly the application's — so this is a parse, not a lookup
- * that could go stale between the tick and the push.
- */
-const parseCellKey = (k: string): HoldBackCellRef => {
-  const colAt = k.lastIndexOf(":");
-  const rowAt = k.lastIndexOf(":", colAt - 1);
-  return {
-    sheetId: k.slice(0, rowAt),
-    row: Number(k.slice(rowAt + 1, colAt)),
-    col: Number(k.slice(colAt + 1)),
-  };
-};
+import {
+  EMPTY_HOLD_BACK,
+  describeDroppedHoldBacks,
+  describeParkedHoldBacks,
+  holdBackReducer,
+  parseCellKey,
+} from "../lib/holdBack";
 import { listWorkspaces, type SavedWorkspace } from "@api/collaborationWorkspaces";
 import { useDialogWindow } from "@api/dialogWindow";
 import {
@@ -71,7 +70,7 @@ import {
 } from "@api/dialogLayout";
 import { pickWorkspaceFile, pickWorkspaceFolder } from "../lib/pickWorkspace";
 import { pushBlockingReason, identityRuleToSend } from "../lib/pushReadiness";
-import { listedIndices } from "../lib/listedSheets";
+import { keysAt, selectionWire, sheetKey, tickedSheets } from "../lib/listedSheets";
 import { describePushLanding } from "../lib/environments";
 import { PublishReportView } from "./ApplicationExplorerPanel";
 import {
@@ -107,6 +106,31 @@ import {
 
 /** Which of the two things this dialog is doing right now. */
 type Mode = "loading" | "push" | "create";
+
+/**
+ * The acts whose RETRYABLE refusal the answer strip can run again at once: each
+ * already has its own button (Push / Publish, Preview, the stale banner's
+ * Merge). The working-copy diff has none -- it runs on its own when the
+ * selection moves -- so its refusal is said, never offered as a retry.
+ */
+type RetryableAct = "push" | "preview" | "merge";
+
+/** What the Preview button (and a retried preview) labels its report with. */
+const PREVIEW_LABEL = "Preview — would publish";
+
+/**
+ * Said after a gone-sheet refusal once the list has been read again
+ * (`readSheetListAgain`): the dialog did what the refusal's own sentence asks.
+ */
+const SHEET_LIST_READ_AGAIN =
+  "The list of sheets has been read again, so it shows the sheets the workbook has now.";
+
+/**
+ * The act running now, if any (`actInFlightRef`): a push, a merge, or a
+ * Preview the author started by itself (the Preview button, Try again) -- a
+ * merge's own refresh is part of the merge and holds nothing of its own.
+ */
+type RunningAct = "push" | "merge" | "preview";
 
 export function PublishDialog({ onClose, data }: DialogProps) {
   // Opened from a sheet tab? Then highlight where that sheet sits in the push.
@@ -175,13 +199,48 @@ export function PublishDialog({ onClose, data }: DialogProps) {
   const [requireVerified, setRequireVerified] = useState(false);
   const requireVerifiedTouchedRef = React.useRef(false);
   /**
-   * Cells the author unticked in the diff, as `cellKeyOf` strings.
+   * THE HOLD-BACK: the cells the author unticked in the diff -- on sheets the
+   * latest comparison says the push CARRIES (`excluded`, as `cellKeyOf`
+   * strings, what the strip counts as staying local) and on sheets it says the
+   * push does not (`parked`) -- and what the dialog says about unticks a new
+   * comparison took away (`dropped`): lib/holdBack.ts.
    *
    * AN EXCLUSION SET. The diff rows are a bounded sample, so a changed cell may
    * have no row — storing what was opted OUT of means every cell the dialog
    * could not show is pushed, which is exactly what a push has always done.
+   *
+   * NEVER CLEARED, NEVER DROPPED WITH ITS SHEET, when the comparison is worked
+   * out again. The diff runs again whenever the selection moves -- also when
+   * this dialog itself reads the sheet list again after a gone-sheet refusal
+   * -- and clearing there ticked every held-back change again with no message,
+   * so the next Push published it (review round 9, F1); dropping the unticks
+   * of a sheet unticked by mistake did the same once it was ticked again
+   * (review round 10, R10-1). Now they are PARKED with their sheet and come
+   * back with it.
+   *
+   * SORTED BY WHAT RUST SAYS THE PUSH CARRIES, never by the ticked rows (review
+   * round 11, RV11-TS-1): a floating grid's backing sheet travels with its
+   * host page, and a sheet a chart on a ticked sheet reads joins the push, so a
+   * sort by the ticks parked an untick on a sheet that shipped -- and the push,
+   * which sent only `excluded`, published the cell. Now the diff's answer says
+   * which sheets the push carries (`carriedSheetIds`), and a push sends EVERY
+   * untick with its own selection, for Rust to hold back exactly the ones on
+   * sheets it carries. One reducer, so the sets and the sentences about them
+   * change in one update.
    */
-  const [excludedCells, setExcludedCells] = useState<Set<string>>(new Set());
+  const [holdBack, dispatchHoldBack] = useReducer(holdBackReducer, EMPTY_HOLD_BACK);
+  const excludedCells = holdBack.excluded;
+  /**
+   * EVERY UNTICK THE AUTHOR MADE, acting or parked: what the diff rows show
+   * unticked, and what a push sends. A row on screen can be on a sheet the push
+   * does not carry -- an unticked base sheet the diff lists as "removed", cell
+   * by cell -- and an untick there is parked; its box must still show it, or it
+   * would not answer the click.
+   */
+  const untickedCells = useMemo(
+    () => new Set<string>([...holdBack.excluded, ...holdBack.parked]),
+    [holdBack.excluded, holdBack.parked],
+  );
 
   /**
    * EVERY SHOW STARTS CLEAN — see `openDialog`'s `__openCount`.
@@ -201,7 +260,7 @@ export function PublishDialog({ onClose, data }: DialogProps) {
     setReport(null);
     setReportFor(null);
     setWarnings([]);
-    setExcludedCells(new Set());
+    dispatchHoldBack({ type: "reset" });
     setSelectionTouched(false);
     selectionTouchedRef.current = false;
     // "Include in application" belongs to ONE push. A tick that outlived the
@@ -215,6 +274,8 @@ export function PublishDialog({ onClose, data }: DialogProps) {
     setAdded([]);
     setUnshippedLinks([]);
     setReportIncludeFor(null);
+    // A merge analysis that failed before is asked again on a new show.
+    setMergeFailure(null);
   }, [openCount]);
   /**
    * What the chosen workspace already holds. `null` while unread — which is a
@@ -223,14 +284,24 @@ export function PublishDialog({ onClose, data }: DialogProps) {
    */
   const [existingApps, setExistingApps] = useState<ApplicationInfo[] | null>(null);
   /**
-   * Ticked sheets, by TRUE workbook index.
+   * Ticked sheets, by STABLE SHEET ID (`sheetKey` in lib/listedSheets.ts).
    *
    * Was a Set of NAMES mapped back to an index by POSITION in the name list —
    * which was already fragile and became wrong the moment the default stopped
    * being "every sheet": object-backed sheets and now subscribed ones make list
    * position and workbook index different numbers.
+   *
+   * Then a Set of TRUE workbook INDICES, which went wrong the moment the
+   * workbook moved under this non-modal dialog (review round 9): the indices
+   * came from a list read in an earlier command, and the backend resolved them
+   * against the list as it stood at the push. Drag the unticked private sheet
+   * in front of the report and Push shipped the private sheet under the
+   * author's key and left the report behind; "Try again" after a refusal resent
+   * the same positions, and a Preview re-read the list but kept the positions,
+   * moving every tick onto a neighbour on screen too. An id follows its sheet
+   * through a move, a copy and a delete, and it is what goes on the wire.
    */
-  const [sheetSelection, setSheetSelection] = useState<Set<number>>(new Set());
+  const [sheetSelection, setSheetSelection] = useState<Set<string>>(new Set());
   const [availableSheets, setAvailableSheets] = useState<PublishPreviewSheet[]>([]);
   /** What an untouched dialog would publish, straight from the backend. */
   const [defaultIndices, setDefaultIndices] = useState<number[]>([]);
@@ -252,9 +323,35 @@ export function PublishDialog({ onClose, data }: DialogProps) {
    * question being asked: "has the author touched this by now?"
    */
   const selectionTouchedRef = React.useRef(false);
+  /**
+   * THE TICKED ROWS, in list order, and that selection as one comparable
+   * string (over ids). Derived here, at render, ABOVE every effect that names
+   * them in a dependency list -- a dep array is evaluated at its call site --
+   * and read from the same render by every act, so a preview, a diff and a
+   * push all describe one set of sheets. A tick whose sheet has no row any
+   * more (deleted since) ticks nothing.
+   */
+  const ticked = tickedSheets(sheetSelection, availableSheets);
+  const tickedSignature = sheetsSignature(ticked.map(sheetKey));
 
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * The act a RETRYABLE refusal on screen came from -- the workbook changed
+   * while it was being read, so nothing was written (`@api/backendRefusal`) --
+   * and the exact text it was shown as. The strip offers "Try again" only while
+   * that text is still the error on screen, so a later, different error never
+   * inherits the button. Null = nothing to offer.
+   */
+  const [retry, setRetry] = useState<{ act: RetryableAct; shown: string } | null>(null);
+  /**
+   * Show what an act's failure says; when it is the retryable snapshot
+   * refusal, also remember the act, so the strip can run it again at once.
+   */
+  const showActFailure = (act: RetryableAct, err: unknown, shown: string): void => {
+    setError(shown);
+    setRetry(isWorkbookChangedWhileSaving(err) ? { act, shown } : null);
+  };
   const [report, setReport] = useState<PublishReport | null>(null);
   const [reportLabel, setReportLabel] = useState<string>("");
   /**
@@ -314,6 +411,23 @@ export function PublishDialog({ onClose, data }: DialogProps) {
   /** Which inclusion the visible REPORT was computed for. */
   const [reportIncludeFor, setReportIncludeFor] = useState<string | null>(null);
   const [pushed, setPushed] = useState(false);
+  /**
+   * THE ACT RUNNING NOW, if any -- a push, from its hold-back through the
+   * un-revert after it, a merge, or a Preview the author started by itself --
+   * set SYNCHRONOUSLY before the act's first await, so a second press in the
+   * same frame (a double-click, Push pressed again during the seconds a push
+   * spends signing and writing, a Try again) finds it set before React has
+   * re-rendered anything (review round 9, F3). A second push for the same
+   * version and base used to go out beside the first: one landed, the other was
+   * refused because the base had moved, and that refusal -- set last -- was
+   * what the strip showed, for a push that had landed. ONE ref for every act: a
+   * merge during a push, or a push during a merge, moves the base under the
+   * other; and a Preview beside either writes the status line, the report and
+   * the gates over the act's own (rounds 10 and 11).
+   */
+  const actInFlightRef = React.useRef<RunningAct | null>(null);
+  /** The same, for rendering: Push, Merge and Preview are disabled while an act runs. */
+  const [acting, setActing] = useState<RunningAct | null>(null);
   const [diff, setDiff] = useState<VersionDiff | null>(null);
   const [diffBusy, setDiffBusy] = useState(false);
   const [diffError, setDiffError] = useState<string | null>(null);
@@ -326,6 +440,23 @@ export function PublishDialog({ onClose, data }: DialogProps) {
   const [code, setCode] = useState<PromotionCodeState | null>(null);
   const [merge, setMerge] = useState<MergeAnalysisResponse | null>(null);
   const [mergeBusy, setMergeBusy] = useState(false);
+  /**
+   * A merge analysis that FAILED, as the sentence it is shown as, and the base
+   * -> head it was asked for (`mergeKey`).
+   *
+   * The analysis effect below used to re-run on its OWN completion: a failure
+   * set `merge` back to null and `mergeBusy` back to false, which is exactly
+   * that effect's trigger, so one refusal became an unbounded loop of full
+   * in-memory publishes -- each pass two audited reads of the workspace, and a
+   * signer refusal wrote an audit row on every one -- under a banner that said
+   * "Working out whether their changes overlap yours..." for as long as the
+   * dialog stayed open (review round 8). Now a failure is SAID, once, and asked
+   * again only by the author (the banner's Try again) or for another base or
+   * head (a merge, a re-read of the gates).
+   */
+  const [mergeFailure, setMergeFailure] = useState<{ key: string; message: string } | null>(null);
+  /** The base -> head a merge analysis answers; a new pair gets one fresh analysis. */
+  const mergeKey = `${workspace?.baseVersion ?? ""} -> ${gates?.registryLatest || workspace?.headVersion || ""}`;
 
   // ---- Load the workbook's own answer to "what am I?" ---------------------
   useEffect(() => {
@@ -357,51 +488,95 @@ export function PublishDialog({ onClose, data }: DialogProps) {
   }, []);
 
   // ---- Preview: the content report AND the gate status --------------------
+  //
+  // A PREVIEW IS AN ACT TOO. Started by itself (the Preview button, Try
+  // again), it holds the one act lock (`actInFlightRef`, "preview") from before
+  // its first await until its `finally`, so Push and Merge render disabled and
+  // refuse while it runs. `insideAct`: the act this preview is PART of -- a
+  // merge refreshes the report and the gates with one once it has landed; that
+  // refresh runs under the merge's lock, and neither takes it nor frees it.
   const runPreview = useCallback(
-    async (label: string) => {
-      setError(null);
-      setStatus("Analyzing…");
+    async (label: string, insideAct?: RunningAct) => {
+      // ONE ACT AT A TIME, PREVIEW INCLUDED, BOTH WAYS. A Preview pressed while
+      // a push or a merge ran went out beside it, and its success path sets the
+      // status line to null: "Pushing…" vanished mid-push and, once the push
+      // had landed, so did "Pushed … to the development line" (review round 10).
+      // And a Push or a Merge pressed while a Preview ran went out beside IT:
+      // the slower Preview then took down the landed push's "Pushed …" line
+      // (and the Open Application Explorer link with it) and put a "would
+      // publish" preview where the published report was (review round 11,
+      // RV11-TS-2). The buttons render disabled while `acting` is set; the ref
+      // is the same rule for a press that beat the re-render, and for a Try
+      // again (read synchronously, as the acts read it).
+      if (actInFlightRef.current !== null && actInFlightRef.current !== insideAct) return;
+      // SET BEFORE THE FIRST AWAIT, freed in the `finally` on every way out --
+      // only by the Preview that took it: a merge's own refresh holds nothing.
+      const ownsAct = insideAct === undefined;
+      if (ownsAct) {
+        actInFlightRef.current = "preview";
+        setActing("preview");
+      }
       try {
-        const target =
-          registryPath.trim() && packageName.trim()
-            ? { registryPath, packageName }
-            : undefined;
-        const asked = selectedIndices();
-        const including = includeList(includeState);
-        const result = await publishPreview(asked, includeComments, target, kind, including);
-        setReport(result.report);
-        setWithheld(result.report.withheld ?? []);
-        setAdded(result.report.addedToApplication ?? []);
-        setIncludeState((prev) =>
-          pruneTicks(prev, result.report.withheld ?? [], result.report.addedToApplication ?? []),
-        );
-        setUnshippedLinks(result.report.unshippedMacroLinks ?? []);
-        setIncludeFor(JSON.stringify(including));
-        setReportIncludeFor(JSON.stringify(including));
-        setButtonCode(result.report.buttonCode ?? null);
-        setButtonCodeFor(sheetsSignature(asked));
-        setReportLabel(`${label} ${result.sheetNames.join(", ")}`);
-        setWarnings(result.warnings);
-        if (!requireVerifiedTouchedRef.current && typeof result.baseRequiresVerified === "boolean") {
-          setRequireVerified(result.baseRequiresVerified);
+        setError(null);
+        setStatus("Analyzing…");
+        try {
+          const target =
+            registryPath.trim() && packageName.trim()
+              ? { registryPath, packageName }
+              : undefined;
+          // BY ID: the preview describes the sheets the push will ship, wherever
+          // they sit in the workbook by now.
+          const asked = tickedWire();
+          const including = includeList(includeState);
+          const result = await publishPreview(asked, includeComments, target, kind, including);
+          setReport(result.report);
+          setWithheld(result.report.withheld ?? []);
+          setAdded(result.report.addedToApplication ?? []);
+          setIncludeState((prev) =>
+            pruneTicks(prev, result.report.withheld ?? [], result.report.addedToApplication ?? []),
+          );
+          setUnshippedLinks(result.report.unshippedMacroLinks ?? []);
+          setIncludeFor(JSON.stringify(including));
+          setReportIncludeFor(JSON.stringify(including));
+          setButtonCode(result.report.buttonCode ?? null);
+          setButtonCodeFor(tickedSignature);
+          setReportLabel(`${label} ${result.sheetNames.join(", ")}`);
+          setWarnings(result.warnings);
+          if (!requireVerifiedTouchedRef.current && typeof result.baseRequiresVerified === "boolean") {
+            setRequireVerified(result.baseRequiresVerified);
+          }
+          setGates(result.gates ?? null);
+          // A new list keeps every tick on ITS sheet: the ticks are ids, so a
+          // renumbering since the last read moves none of them onto a neighbour.
+          if (result.sheets) setAvailableSheets(result.sheets);
+          if (result.defaultSheetIndices) {
+            setDefaultIndices(result.defaultSheetIndices);
+            if (!selectionTouchedRef.current)
+              setSheetSelection(new Set(keysAt(result.defaultSheetIndices, result.sheets ?? [])));
+          }
+          setReportFor(previewSignature());
+          setStatus(null);
+        } catch (err: unknown) {
+          // Every other error exactly as before; the retryable snapshot refusal
+          // as its plain sentence, with "Try again" beside it; a ticked sheet
+          // that is gone, or a position past the end of the list, as its plain
+          // sentence, and the list read again.
+          const shown = describeBackendRefusal(err);
+          showActFailure("preview", err, shown);
+          setStatus(null);
+          if (needsTheSheetListAgain(err)) void readSheetListAgain(shown);
         }
-        setGates(result.gates ?? null);
-        if (result.sheets) setAvailableSheets(result.sheets);
-        if (result.defaultSheetIndices) {
-          setDefaultIndices(result.defaultSheetIndices);
-          if (!selectionTouchedRef.current)
-            setSheetSelection(new Set(listedIndices(result.defaultSheetIndices, result.sheets)));
+      } finally {
+        if (ownsAct) {
+          actInFlightRef.current = null;
+          setActing(null);
         }
-        setReportFor(previewSignature());
-        setStatus(null);
-      } catch (err: unknown) {
-        setError(String(err));
-        setStatus(null);
       }
     },
-    // selectedIndices reads state; the deps below are what actually change it.
+    // The ticks and the list are read through `tickedWire` / `tickedSignature`;
+    // the deps below are what actually change them.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [registryPath, packageName, includeComments, sheetSelection, includeState],
+    [registryPath, packageName, includeComments, sheetSelection, availableSheets, includeState, kind],
   );
 
   // A preview with no sheet filter is how we learn the workbook's sheet names
@@ -440,7 +615,9 @@ export function PublishDialog({ onClose, data }: DialogProps) {
           // Only LISTED sheets: an index without a checkbox could never be
           // unticked (see lib/listedSheets.ts).
           if (!selectionTouchedRef.current) {
-            const seeded = listedIndices(result.defaultSheetIndices, result.sheets);
+            // Positions read against the list FROM THIS SAME ANSWER, then kept
+            // as the rows' stable ids.
+            const seeded = keysAt(result.defaultSheetIndices, result.sheets ?? []);
             setSheetSelection(new Set(seeded));
             // This answer IS the default selection's -- no second fetch for it.
             setButtonCodeFor(sheetsSignature(seeded));
@@ -453,8 +630,18 @@ export function PublishDialog({ onClose, data }: DialogProps) {
         // A failure here costs the checkbox list, not the dialog.
       }
     })();
-    // Re-run when the target changes so the gate panel stays truthful.
-  }, [mode, registryPath, packageName]);
+    // Re-run when the target changes so the gate panel stays truthful -- and on
+    // EVERY SHOW (`openCount`), so a dialog shown again while it is still open
+    // reads the sheets the workbook has NOW (review round 9, F2). The
+    // gone-sheet refusal tells the author to open the dialog again to see the
+    // current sheets; before this, showing it again re-ran only the reset
+    // above, and the list -- and the diff's "no longer in the workbook" --
+    // stayed exactly as they were. The reset effect is declared ABOVE this one,
+    // so in the same commit it has already cleared `selectionTouchedRef`, and
+    // the read below seeds the backend's default from the fresh list; the diff
+    // and the button-code review then follow the new list through their own
+    // effects. On mount `openCount` is already set, so the list is read once.
+  }, [mode, registryPath, packageName, openCount]);
 
   // The changes this push would make, computed by running the real publish
   // into memory and diffing it against the base. Loaded once the workbook is
@@ -470,10 +657,13 @@ export function PublishDialog({ onClose, data }: DialogProps) {
   // comments the working side had no `comments.json` and every comment read as
   // REMOVED. A change the push was not making, presented as a change it was.
   //
-  // Deps are RAW STATE only: `selectedIndices` and `previewSignature` are
-  // declared below this effect, and a dep array is evaluated at the call site
-  // during render, so naming either here is a ReferenceError on first render.
-  // They are called inside the body instead, exactly as `runPreview` does.
+  // Deps are RAW STATE, plus `tickedSignature`, which is derived ABOVE this
+  // effect: `tickedWire` and `previewSignature` are declared below it, and a
+  // dep array is evaluated at the call site during render, so naming either
+  // here is a ReferenceError on first render. They are called inside the body
+  // instead, exactly as `runPreview` does. The signature is over stable ids, so
+  // a renumbering that moves no tick asks nothing again, and a tick whose sheet
+  // left the list does.
   useEffect(() => {
     if (mode !== "push" || !workspace?.baseVersion) return;
     // Explicit rather than accidental: an empty selection means "the publish
@@ -481,16 +671,27 @@ export function PublishDialog({ onClose, data }: DialogProps) {
     // but benign by coincidence. Wait until the list has loaded so the request
     // says what it means.
     if (availableSheets.length === 0) return;
-    // NOTHING TICKED, NOTHING TO DESCRIBE. An empty `sheetIndices` means "the
+    // NOTHING MOVES HERE, BEFORE THE ANSWER. Which sheets this push carries is
+    // Rust's to say, not the ticked rows': a floating grid's backing sheet
+    // travels with the page that hosts it, and a sheet a chart on a ticked
+    // sheet reads joins the push. Sorting the unticks by the ticks HERE parked
+    // an untick on such a sheet -- its row showed ticked again, the line under
+    // the panel said its sheet was not in this push, and the push published the
+    // cell (review round 11, RV11-TS-1). So every untick stays where the LAST
+    // answer put it until THIS one lands (`.then` below). In between the push
+    // is right either way: it sends every untick with its own selection, and
+    // Rust holds back exactly the ones on sheets that push carries.
+    //
+    // NOTHING TICKED, NOTHING TO DESCRIBE. An empty selection means "the
     // default" on the wire, so fetching here would render a diff of the base
     // sheets under a list showing no selection — which is exactly the "glitchy"
     // panel this was reported as. The push is refused in that state anyway
-    // (`pushBlockingReason`), so there is no push for the panel to describe.
-    if (kind !== "library" && sheetSelection.size === 0) {
+    // (`pushBlockingReason`), so there is no push for the panel to describe --
+    // and no answer to move an untick by: they all stay where they are.
+    if (kind !== "library" && ticked.length === 0) {
       setDiff(null);
       setDiffError(null);
       setCode(null);
-      setExcludedCells(new Set());
       return;
     }
     let cancelled = false;
@@ -498,7 +699,8 @@ export function PublishDialog({ onClose, data }: DialogProps) {
     setDiffError(null);
     setCode(PROMOTION_CODE_LOADING);
     diffWorkingCopy({
-      sheetIndices: selectedIndices(),
+      // By stable id, as the push sends them: the panel describes the push.
+      ...tickedWire(),
       includeComments,
       includeInApplication: includeList(includeState),
       // THE CODE, from the same two sides as the cell diff: the signed base and
@@ -508,6 +710,29 @@ export function PublishDialog({ onClose, data }: DialogProps) {
       .then((result) => {
         if (cancelled) return;
         setDiff(result.diff);
+        // THE HOLD-BACK FOLLOWS THE ANSWER, AND NEVER LOSES AN UNTICK TO IT.
+        // `carriedSheetIds` is every sheet the in-memory publish behind this
+        // answer wrote: the ticked ones, each floating grid's backing sheet with
+        // its host, and the sheets the selection added (a chart's source). An
+        // untick on one of them acts; any other is PARKED -- it holds nothing
+        // back now, the line under the panel says so, and the next answer that
+        // carries its sheet brings it back on its row (lib/holdBack.ts). A
+        // re-read this dialog ran itself, a box moved on another sheet, or an
+        // untick and re-tick of the change's own sheet (or of the page that
+        // hosts it) never quietly ticks a held-back change again (review rounds
+        // 9, 10 and 11). NEVER built from `diff.sheets`: that also lists every
+        // unticked base sheet as "removed", which the push drops.
+        const carried = new Set(result.carriedSheetIds);
+        dispatchHoldBack({ type: "keepSheets", sheetIds: carried });
+        // ...and on the sheets it CARRIES, only the unticks this answer shows
+        // as ROWS stay. The rows are the only place an untick can be seen --
+        // this dialog lists the sample and nothing else -- so one without a row
+        // would act on a push nobody reviewed: the reason the set used to be
+        // cleared here. ONLY those sheets (`carried`): a sheet the push does not
+        // carry is not this answer's to judge -- a parked untick's sheet has no
+        // rows here, and a "removed" sheet's rows describe a sheet that is not
+        // published -- and that must never read as "no longer listed".
+        dispatchHoldBack({ type: "keepRows", keys: rowKeysOf(result.diff), sheetIds: carried });
         // An answer without the code list is NOT "no code changes".
         setCode(
           result.code
@@ -518,37 +743,52 @@ export function PublishDialog({ onClose, data }: DialogProps) {
       .catch((e: unknown) => {
         // A missing base version or an unreachable workspace costs the diff
         // panel, not the dialog — the push gates still run server-side. The
-        // code summary says the comparison failed: never swallowed.
+        // code summary says the comparison failed: never swallowed. The
+        // retryable snapshot refusal is said as its plain sentence (the code
+        // summary's reader strips it too); the diff has no retry of its own --
+        // it runs again when the selection moves.
         if (cancelled) return;
-        setDiffError(String(e));
+        // THE LAST ANSWER'S ROWS COME DOWN WITH IT (review round 10). They
+        // described the selection BEFORE this one, and under "Could not
+        // compare" they read as this push's changes -- a sheet unticked since
+        // still listed, a newly ticked one missing. The unticks are kept where
+        // the last answer put them, the strip under the panel goes on counting
+        // the ones on sheets it said the push carries, and a push still sends
+        // every one of them for Rust to judge.
+        setDiff(null);
+        setDiffError(describeBackendRefusal(e));
         setCode(promotionCodeFailed(e));
       })
       .finally(() => {
         if (!cancelled) setDiffBusy(false);
       });
-    // THE EXCLUSIONS DO NOT SURVIVE A REFETCH. The diff re-runs when the sheet
-    // selection or includeComments changes, and a key kept from the previous
-    // answer could name a row that no longer exists — an invisible exclusion
-    // acting on a push nobody reviewed. Clearing is the honest reset: every
-    // change on screen is ticked, which is where the dialog always starts.
-    setExcludedCells(new Set());
+    // THE EXCLUSIONS ARE SORTED AND PRUNED, NEVER CLEARED, ON A REFETCH (the
+    // two dispatches above, both on the answer). While the answer is out -- and
+    // after it fails -- the unticks stay where the last answer put them, the
+    // strip under the panel keeps counting the ones on sheets it said the push
+    // carries beside its "Push all" (see the strip for why that, rather than a
+    // blocked Push), and a push sends every untick for Rust to judge.
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, workspace?.baseVersion, pushed, sheetSelection, availableSheets.length, includeComments, kind, includeState]);
+  }, [mode, workspace?.baseVersion, pushed, tickedSignature, availableSheets.length, includeComments, kind, includeState]);
 
   // When the base is stale, WHY it is stale matters more than the fact. Ask
   // whether the intervening work actually overlaps yours before telling the
   // user their push is refused — most of the time on a decomposed application it
   // does not, and "you two collided" would be false.
-  const analyzeMerge = useCallback(async () => {
+  const analyzeMerge = useCallback(async (key: string) => {
     setMergeBusy(true);
+    setMergeFailure(null);
     try {
       setMerge(await pushMergeAnalyze());
-    } catch {
-      // No analysis is a worse-informed banner, not a broken dialog.
+    } catch (err: unknown) {
+      // No analysis is a worse-informed banner, not a broken dialog -- but it
+      // says WHY, in plain words, against the base -> head it was asked for,
+      // and that pair is never asked again by itself (`mergeFailure`).
       setMerge(null);
+      setMergeFailure({ key, message: explainPushError(err) });
     } finally {
       setMergeBusy(false);
     }
@@ -556,43 +796,62 @@ export function PublishDialog({ onClose, data }: DialogProps) {
 
   useEffect(() => {
     const stale = gates?.baseStale ?? workspace?.isStale ?? false;
-    if (mode === "push" && stale && !merge && !mergeBusy) {
-      void analyzeMerge();
+    // ONE analysis per base -> head: a failure for the pair on screen waits
+    // for the author's Try again.
+    if (mode === "push" && stale && !merge && !mergeBusy && mergeFailure?.key !== mergeKey) {
+      void analyzeMerge(mergeKey);
     }
-  }, [mode, gates?.baseStale, workspace?.isStale, merge, mergeBusy, analyzeMerge]);
+  }, [mode, gates?.baseStale, workspace?.isStale, merge, mergeBusy, mergeFailure, mergeKey, analyzeMerge]);
 
   const handleMerge = async () => {
-    setError(null);
-    setStatus("Merging…");
+    // ONE ACT AT A TIME (`actInFlightRef`): never a merge beside a running push,
+    // a running Preview or a second merge, whether the banner's button or Try
+    // again asked.
+    if (actInFlightRef.current !== null) return;
+    actInFlightRef.current = "merge";
+    setActing("merge");
     try {
-      const result = await pushMergeApply();
-      setStatus(
-        `Merged with v${result.mergedFromVersion}` +
-          (result.cellsApplied > 0
-            ? ` — ${result.cellsApplied} cell(s) from ${result.sheetsTouched.join(", ")}`
-            : ""),
-      );
-      setMerge(null);
-      // Everything downstream moved: the base, the gate statuses, the diff.
-      const fresh = await workingCopyStatus();
-      if (fresh) {
-        setWorkspace(fresh);
-        setVersion(fresh.suggestedNext?.patch ?? fresh.baseVersion);
+      setError(null);
+      setStatus("Merging…");
+      try {
+        const result = await pushMergeApply();
+        setStatus(
+          `Merged with v${result.mergedFromVersion}` +
+            (result.cellsApplied > 0
+              ? ` — ${formatNumber(result.cellsApplied)} cell(s) from ${result.sheetsTouched.join(", ")}`
+              : ""),
+        );
+        setMerge(null);
+        // Everything downstream moved: the base, the gate statuses, the diff.
+        const fresh = await workingCopyStatus();
+        if (fresh) {
+          setWorkspace(fresh);
+          setVersion(fresh.suggestedNext?.patch ?? fresh.baseVersion);
+        }
+        // Part of THIS act, so it runs although the merge is still in flight.
+        await runPreview(PREVIEW_LABEL, "merge");
+      } catch (err: unknown) {
+        showActFailure("merge", err, explainPushError(err));
+        setStatus(null);
       }
-      await runPreview("Preview — would publish");
-    } catch (err: unknown) {
-      setError(explainPushError(String(err)));
-      setStatus(null);
+    } finally {
+      actInFlightRef.current = null;
+      setActing(null);
     }
   };
 
-  /** Selected sheet NAMES resolved to workbook indices; [] = every sheet. */
   /** Everything a preview's answer depends on, as one comparable string. */
   const previewSignature = (): string =>
-    JSON.stringify({ i: selectedIndices(), c: includeComments });
+    JSON.stringify({ s: tickedSignature, c: includeComments });
 
   /**
-   * The sheets to publish, as TRUE workbook indices.
+   * The sheets to publish, as the publish doors read them: the ticked rows'
+   * STABLE ids (`sheetIds`, which the backend takes in preference) beside their
+   * positions in the list as last read -- positions alone only for a ticked row
+   * the backend listed without an id (lib/listedSheets.ts `selectionWire`).
+   * The push, its preview and the diff all send this, so a sheet dragged,
+   * copied or deleted while the dialog is open can never hand a tick to a
+   * neighbour, and "Try again" resends the same SHEETS, not the same positions.
    *
    * ALWAYS EXPLICIT once the list has loaded — never the empty array. Empty
    * means "resolve the default" to the backend, and the default now WITHHOLDS
@@ -601,9 +860,9 @@ export function PublishDialog({ onClose, data }: DialogProps) {
    * used to do (empty set, and all-ticked) both meant "empty", which is exactly
    * how that would have happened.
    */
-  const selectedIndices = (): number[] => {
-    if (availableSheets.length === 0) return [];
-    return listedIndices(sheetSelection, availableSheets);
+  const tickedWire = (): PublishSheetSelection => {
+    if (availableSheets.length === 0) return { sheetIndices: [] };
+    return selectionWire(ticked);
   };
 
   // THE BUTTONS' CODE FOLLOWS THE TICK LIST. Whenever the selection it answers
@@ -614,8 +873,8 @@ export function PublishDialog({ onClose, data }: DialogProps) {
   // stale, and the readiness line says to press Preview.
   useEffect(() => {
     if (mode === "loading" || availableSheets.length === 0) return;
-    const asked = selectedIndices();
-    const signature = sheetsSignature(asked);
+    const asked = tickedWire();
+    const signature = tickedSignature;
     // THE INCLUSION IS PART OF THE QUESTION (M4): ticking "Include in
     // application" changes what ships, what stays behind and which buttons
     // still run a macro the push leaves out -- so a tick asks again, exactly as
@@ -649,7 +908,7 @@ export function PublishDialog({ onClose, data }: DialogProps) {
     return () => {
       cancelled = true;
     };
-    // selectedIndices reads state; the deps are what change it.
+    // tickedWire reads state; the deps are what change it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, sheetSelection, availableSheets, registryPath, packageName, kind, buttonCodeFor, includeState, includeFor]);
 
@@ -670,6 +929,18 @@ export function PublishDialog({ onClose, data }: DialogProps) {
   };
 
   const handlePublish = async () => {
+    // ONE ACT AT A TIME, AND ONE PUSH PER VERSION (`actInFlightRef`). A press
+    // while a push, a merge or a Preview is running -- or after a push has
+    // landed -- does nothing at all: the button renders disabled then, and the
+    // strip already says "Pushing…", "Merging…" or "Analyzing…". (A push beside
+    // a Preview landed, and the slower Preview then took its receipt down:
+    // review round 11, RV11-TS-2.) Deliberately NOT setError("A push is
+    // already running."): the success path below never clears `error`, and the
+    // strip shows `error ?? status`, so that sentence would outlive the push
+    // and be the very wrong message this guard removes. `pushed` is checked
+    // here because `pushBlockingReason` returns null once pushed, so only the
+    // disabled button stood between a Try again and a second push.
+    if (actInFlightRef.current !== null || pushed) return;
     // VALIDATE ON CLICK, don't just sit there disabled. The button used to be
     // `disabled={!canPush}`, and the single condition a filled-in-looking dialog
     // could still fail was the change summary — whose PLACEHOLDER is a complete
@@ -683,174 +954,286 @@ export function PublishDialog({ onClose, data }: DialogProps) {
       setStatus(null);
       return;
     }
-    setError(null);
+    // SET BEFORE THE FIRST AWAIT (the hold-back below), and cleared in the
+    // outer `finally` only once the un-revert has finished: a next push whose
+    // hold-back landed on top of this one's undo entry would make the scoped
+    // un-revert refuse.
+    actInFlightRef.current = "push";
+    setActing("push");
+    try {
+      // THE SHEETS THIS PUSH SENDS, read ONCE and handed to both calls below:
+      // the hold-back is told exactly the selection the publish after it sends,
+      // so the cells Rust holds back are the ones on the sheets this very push
+      // carries.
+      const selection = tickedWire();
+      setError(null);
 
-    // HOLD BACK THE UNTICKED CELLS, then publish, then always put them back.
-    //
-    // The `finally` below is the entire safety property, and it is why this
-    // lives here rather than inside `calp_publish`: guaranteeing an un-revert
-    // across that command's six `?` sites would mean restructuring its critical
-    // region, and the guard that pins that region's shape goes BLIND rather
-    // than red when it moves.
-    //
-    // What the author sees: their sheet holds the base values while the publish
-    // runs, then snaps back. If the app dies in between, the hold-back is in the
-    // undo stack and the document is dirty — Ctrl+Z and AutoRecover both
-    // recover it.
-    //
-    // THE ID, NOT A BARE UNDO. The un-revert below names the entry it is
-    // reversing, because this dialog is non-modal and a publish takes seconds:
-    // the author can edit, and an MCP tool or a script can write, while it runs.
-    // A blind `pop_undo()` there reverses whichever of those landed last and
-    // leaves the held-back cells rolled back for good.
-    let holdBackSeq: number | null = null;
-    if (mode === "push" && excludedCells.size > 0 && workspace?.baseVersion) {
-      setStatus("Holding back unticked changes…");
-      try {
-        const r = await holdBackCells({
-          registryPath,
-          packageName,
-          baseVersion: workspace.baseVersion,
-          cells: [...excludedCells].map(parseCellKey),
-        });
-        holdBackSeq = r.undoSeq ?? null;
-        // A write with no id to scope its reversal to is the unsafe shape this
-        // was disabled for. It should be unreachable — `undoRecorded` is now
-        // derived from the id — so treat the disagreement as the refusal it is
-        // rather than falling back to a bare undo.
-        if (r.undoRecorded && holdBackSeq === null) {
+      // HOLD BACK THE UNTICKED CELLS, then publish, then always put them back.
+      //
+      // The `finally` below is the entire safety property, and it is why this
+      // lives here rather than inside `calp_publish`: guaranteeing an un-revert
+      // across that command's six `?` sites would mean restructuring its critical
+      // region, and the guard that pins that region's shape goes BLIND rather
+      // than red when it moves.
+      //
+      // What the author sees: their sheet holds the base values while the publish
+      // runs, then snaps back. If the app dies in between, the hold-back is in the
+      // undo stack and the document is dirty — Ctrl+Z and AutoRecover both
+      // recover it.
+      //
+      // THE ID, NOT A BARE UNDO. The un-revert below names the entry it is
+      // reversing, because this dialog is non-modal and a publish takes seconds:
+      // the author can edit, and an MCP tool or a script can write, while it runs.
+      // A blind `pop_undo()` there reverses whichever of those landed last and
+      // leaves the held-back cells rolled back for good.
+      //
+      // EVERY UNTICK, ACTING AND PARKED, WITH THE PUSH'S OWN SELECTION. Which
+      // sheets a push carries is Rust's to say -- the ticked ones, each floating
+      // grid's backing sheet with its host, every sheet a chart on a carried
+      // sheet reads -- so the hold-back resolves this push's `kind` and
+      // `selection` the way the publish does and holds back exactly the cells
+      // on sheets it carries, skipping the rest (`cellsSkipped`). Sending only
+      // the unticks this dialog had sorted as acting published an untick on a
+      // sheet that travels with another (review round 11, RV11-TS-1), and a
+      // parked untick whose sheet the push carries again before the diff says
+      // so must act too. Over-sending is harmless; under-sending is the leak.
+      let holdBackSeq: number | null = null;
+      if (mode === "push" && untickedCells.size > 0 && workspace?.baseVersion) {
+        setStatus("Holding back unticked changes…");
+        try {
+          const r = await holdBackCells({
+            registryPath,
+            packageName,
+            baseVersion: workspace.baseVersion,
+            cells: [...untickedCells].map(parseCellKey),
+            kind,
+            ...selection,
+          });
+          holdBackSeq = r.undoSeq ?? null;
+          // A write with no id to scope its reversal to is the unsafe shape this
+          // was disabled for. It should be unreachable — `undoRecorded` is now
+          // derived from the id — so treat the disagreement as the refusal it is
+          // rather than falling back to a bare undo.
+          if (r.undoRecorded && holdBackSeq === null) {
+            setStatus(null);
+            setError(
+              "Could not hold back the unticked changes safely, so nothing was published. " +
+                "Press Ctrl+Z once if your sheet is showing the published version's values.",
+            );
+            return;
+          }
+          // The canvas is still showing what was there before the hold-back.
+          window.dispatchEvent(new CustomEvent("grid:refresh"));
+        } catch (e: unknown) {
           setStatus(null);
+          // THE PUSH'S OWN SELECTION IS PART OF THIS REQUEST, so the hold-back
+          // meets the refusals the publish would meet, BEFORE it writes
+          // anything: a ticked sheet that is gone (`CALP_PUSH_SHEET_GONE`), a
+          // position past the end of the list, or the retryable snapshot
+          // refusal. Each is said and handled exactly as the publish's own
+          // below -- its plain sentence, "Try again" only for the retryable
+          // one, the sheet list read again for the other two -- never as the
+          // raw code beside a Ctrl+Z hint for a write that never happened.
+          // Any other CALP_PUSH_ refusal (a ticked sheet without a stable id) is
+          // the resolver refusing before anything was written, too.
+          if (isWorkbookChangedWhileSaving(e) || needsTheSheetListAgain(e) || /CALP_PUSH_[A-Z_]+:/.test(String(e))) {
+            const shown = explainPushError(e);
+            showActFailure("push", e, shown);
+            if (needsTheSheetListAgain(e)) void readSheetListAgain(shown);
+            return;
+          }
+          // Nothing was published. The hold-back either refused before writing —
+          // `CALP_HOLDBACK_NOT_DERIVABLE` (a cell downstream of an unticked change
+          // reads a data model, writeback submissions or a custom function, none
+          // of which this workbook can recompute) — or it failed partway, in
+          // which case the partial write is on the undo stack and the document
+          // is dirty.
+          const message = String(e).replace(/^CALP_HOLDBACK_\w+:\s*/, "");
           setError(
-            "Could not hold back the unticked changes safely, so nothing was published. " +
-              "Press Ctrl+Z once if your sheet is showing the published version's values.",
+            `Nothing was published. ${message}` +
+              (String(e).includes("CALP_HOLDBACK_")
+                ? ""
+                : " If your sheet is showing the published version's values, press Ctrl+Z once."),
           );
           return;
         }
-        // The canvas is still showing what was there before the hold-back.
-        window.dispatchEvent(new CustomEvent("grid:refresh"));
-      } catch (e: unknown) {
-        // Nothing was published. The hold-back either refused before writing —
-        // `CALP_HOLDBACK_NOT_DERIVABLE` (a cell downstream of an unticked change
-        // reads a data model, writeback submissions or a custom function, none
-        // of which this workbook can recompute) or `CALP_HOLDBACK_NO_SHEET` —
-        // or it failed partway, in which case the partial write is on the undo
-        // stack and the document is dirty.
-        setStatus(null);
-        const message = String(e).replace(/^CALP_HOLDBACK_\w+:\s*/, "");
-        setError(
-          `Nothing was published. ${message}` +
-            (String(e).includes("CALP_HOLDBACK_")
-              ? ""
-              : " If your sheet is showing the published version's values, press Ctrl+Z once."),
-        );
-        return;
       }
-    }
 
-    setStatus(mode === "push" ? "Pushing…" : "Publishing…");
-    try {
-      const result = await publishApplication({
-        registryPath,
-        packageName,
-        version,
-        kind,
-        sheetIndices: selectedIndices(),
-        // Stamped backend-side from the signing identity; sent for wire
-        // compatibility only. A display name the caller types is a display name
-        // that can disagree with the key beside it in the version list.
-        publishedBy: "",
-        includeComments,
-        mode: mode === "push" ? "update" : "createNew",
-        expectedBaseVersion: mode === "push" ? workspace?.baseVersion : undefined,
-        changeSummary,
-        // Only code the dialog SHOWED and the author ticked (BUG-0257).
-        acknowledgedButtonCode: [...ackedButtonCode],
-        // Only items whose code the dialog SHOWED, each with the hash Rust
-        // computed of it (M4).
-        includeInApplication: includeList(includeState),
-        // The identity rule: only the author's own change (see `requireVerified`).
-        requireVerifiedIdentity: identityRuleToSend(requireVerifiedTouchedRef.current, requireVerified),
-      });
-      // WHERE THE RELEASE NOW STANDS. "Pushed v1.5.0" answers where the bytes
-      // went, not who receives them, and the whole point of environments is
-      // that those are different questions. The landing line names each
-      // environment and its version — and is EMPTY when the application has
-      // none, so a solo workbook is not told about a feature it has not adopted.
-      const landing = describePushLanding(result.version, workspace?.environments ?? []);
-      setStatus(
-        `${mode === "push" ? "Pushed" : "Published"} ${result.packageName} v${result.version} to the ` +
-          `development line: ${result.sheetsPublished} sheet(s).` +
-          (landing ? ` ${landing}` : ""),
-      );
-      // Anything reading the pipeline is now stale: the head moved, which is
-      // what the first environment promotes FROM.
-      emitAppEvent(ENVIRONMENTS_CHANGED_EVENT, { registryPath, packageName });
-      setReport(result.report);
-      setWithheld(result.report.withheld ?? []);
-      setAdded(result.report.addedToApplication ?? []);
-      setUnshippedLinks(result.report.unshippedMacroLinks ?? []);
-      setIncludeFor(includeSignature(includeState));
-      setReportIncludeFor(includeSignature(includeState));
-      setButtonCode(result.report.buttonCode ?? null);
-      setButtonCodeFor(sheetsSignature(selectedIndices()));
-      setReportLabel(`Published ${result.packageName} v${result.version}`);
-      setWarnings(result.warnings);
-      setPushed(true);
-      // The link moved; re-read so the panel shows the new base.
-      workingCopyStatus()
-        .then((s) => {
-          if (s) {
-            setWorkspace(s);
-            setMode("push");
-          }
-        })
-        .catch(() => undefined);
-    } catch (err: unknown) {
-      setError(explainPushError(String(err)));
-      setStatus(null);
-      // A push refused over button code the review did not show (it changed
-      // since, or was never fetched for this selection): fetch it again, so
-      // the items can be read and ticked instead of the refusal repeating.
-      if (/CALP_PUSH_(BUTTON_CODE_UNREVIEWED|HELD_CODE_UNVERIFIED)/.test(String(err))) {
-        setButtonCodeFor(null);
-      }
-      // Refused over what was included, or over a button whose macro the push
-      // leaves out (M4): the answer on screen was wrong about this push, so
-      // fetch it again -- the items and their remedies come back to act on.
-      if (/CALP_PUSH_(INCLUDED_CHANGED|BUTTON_MACRO_NOT_SHIPPED)/.test(String(err))) {
-        setButtonCodeFor(null);
-        setIncludeFor(null);
-      }
-    } finally {
-      // ALWAYS, on both paths. A failed publish must not leave the author's
-      // workbook holding the base values, and a SUCCESSFUL one must not either
-      // — the whole point is that the held-back edits stay local.
-      if (holdBackSeq !== null) {
-        try {
-          // SCOPED to the entry the hold-back left. If anything landed on the
-          // history since — the author's own edit in this non-modal dialog, an
-          // MCP tool, a script — this refuses instead of reversing it, and says
-          // how many Ctrl+Z it now takes to reach the hold-back.
-          const r = await undo(holdBackSeq);
-          // The undo restored the cells; the canvas is still showing what the
-          // hold-back painted.
-          window.dispatchEvent(new CustomEvent("grid:refresh"));
-          if (r.refusal) {
+      setStatus(mode === "push" ? "Pushing…" : "Publishing…");
+      try {
+        const result = await publishApplication({
+          registryPath,
+          packageName,
+          version,
+          kind,
+          // THE TICKED SHEETS BY STABLE ID (`sheetIds`, beside their positions):
+          // Rust resolves them against the sheet list as it is NOW, and refuses
+          // an id that is gone by name -- never a neighbour (review round 9).
+          // The very `selection` the hold-back above was told.
+          ...selection,
+          // Stamped backend-side from the signing identity; sent for wire
+          // compatibility only. A display name the caller types is a display name
+          // that can disagree with the key beside it in the version list.
+          publishedBy: "",
+          includeComments,
+          mode: mode === "push" ? "update" : "createNew",
+          expectedBaseVersion: mode === "push" ? workspace?.baseVersion : undefined,
+          changeSummary,
+          // Only code the dialog SHOWED and the author ticked (BUG-0257).
+          acknowledgedButtonCode: [...ackedButtonCode],
+          // Only items whose code the dialog SHOWED, each with the hash Rust
+          // computed of it (M4).
+          includeInApplication: includeList(includeState),
+          // The identity rule: only the author's own change (see `requireVerified`).
+          requireVerifiedIdentity: identityRuleToSend(requireVerifiedTouchedRef.current, requireVerified),
+        });
+        // WHERE THE RELEASE NOW STANDS. "Pushed v1.5.0" answers where the bytes
+        // went, not who receives them, and the whole point of environments is
+        // that those are different questions. The landing line names each
+        // environment and its version — and is EMPTY when the application has
+        // none, so a solo workbook is not told about a feature it has not adopted.
+        const landing = describePushLanding(result.version, workspace?.environments ?? []);
+        setStatus(
+          `${mode === "push" ? "Pushed" : "Published"} ${result.packageName} v${result.version} to the ` +
+            `development line: ${formatNumber(result.sheetsPublished)} sheet(s).` +
+            (landing ? ` ${landing}` : ""),
+        );
+        // Anything reading the pipeline is now stale: the head moved, which is
+        // what the first environment promotes FROM.
+        emitAppEvent(ENVIRONMENTS_CHANGED_EVENT, { registryPath, packageName });
+        setReport(result.report);
+        setWithheld(result.report.withheld ?? []);
+        setAdded(result.report.addedToApplication ?? []);
+        setUnshippedLinks(result.report.unshippedMacroLinks ?? []);
+        setIncludeFor(includeSignature(includeState));
+        setReportIncludeFor(includeSignature(includeState));
+        setButtonCode(result.report.buttonCode ?? null);
+        setButtonCodeFor(tickedSignature);
+        setReportLabel(`Published ${result.packageName} v${result.version}`);
+        setWarnings(result.warnings);
+        setPushed(true);
+        // THE HOLD-BACK BELONGS TO ONE PUSH, and this one landed: the next push
+        // starts with every change ticked and nothing parked, exactly as a new
+        // show does. (The un-revert in the `finally` below already has its
+        // cells; the diff effect only sorts and prunes, never clears, so this
+        // is the one place a landed push is forgotten.)
+        dispatchHoldBack({ type: "reset" });
+        // The link moved; re-read so the panel shows the new base.
+        workingCopyStatus()
+          .then((s) => {
+            if (s) {
+              setWorkspace(s);
+              setMode("push");
+            }
+          })
+          .catch(() => undefined);
+      } catch (err: unknown) {
+        const shown = explainPushError(err);
+        showActFailure("push", err, shown);
+        setStatus(null);
+        // A TICKED SHEET IS GONE, or a position is past the end of the list:
+        // the same request can never succeed, so there is no Try again -- the
+        // list is read again instead (`readSheetListAgain`).
+        if (needsTheSheetListAgain(err)) void readSheetListAgain(shown);
+        // A push refused over button code the review did not show (it changed
+        // since, or was never fetched for this selection): fetch it again, so
+        // the items can be read and ticked instead of the refusal repeating.
+        if (/CALP_PUSH_(BUTTON_CODE_UNREVIEWED|HELD_CODE_UNVERIFIED)/.test(String(err))) {
+          setButtonCodeFor(null);
+        }
+        // Refused over what was included, or over a button whose macro the push
+        // leaves out (M4): the answer on screen was wrong about this push, so
+        // fetch it again -- the items and their remedies come back to act on.
+        if (/CALP_PUSH_(INCLUDED_CHANGED|BUTTON_MACRO_NOT_SHIPPED)/.test(String(err))) {
+          setButtonCodeFor(null);
+          setIncludeFor(null);
+        }
+      } finally {
+        // ALWAYS, on both paths. A failed publish must not leave the author's
+        // workbook holding the base values, and a SUCCESSFUL one must not either
+        // — the whole point is that the held-back edits stay local.
+        if (holdBackSeq !== null) {
+          try {
+            // SCOPED to the entry the hold-back left. If anything landed on the
+            // history since — the author's own edit in this non-modal dialog, an
+            // MCP tool, a script — this refuses instead of reversing it, and says
+            // how many Ctrl+Z it now takes to reach the hold-back.
+            const r = await undo(holdBackSeq);
+            // The undo restored the cells; the canvas is still showing what the
+            // hold-back painted.
+            window.dispatchEvent(new CustomEvent("grid:refresh"));
+            if (r.refusal) {
+              setError(
+                `Your unticked changes were rolled back for the push and were NOT ` +
+                  `restored automatically. ${r.refusal}`,
+              );
+            }
+          } catch (e: unknown) {
+            // The one failure this dialog cannot repair, so it must not be quiet:
+            // the author's edits are still in the undo stack, and that is the
+            // sentence they need.
             setError(
-              `Your unticked changes were rolled back for the push and were NOT ` +
-                `restored automatically. ${r.refusal}`,
+              `Your unticked changes were rolled back for the push and could NOT be ` +
+                `restored automatically (${String(e)}). Press Ctrl+Z once to bring them back.`,
             );
           }
-        } catch (e: unknown) {
-          // The one failure this dialog cannot repair, so it must not be quiet:
-          // the author's edits are still in the undo stack, and that is the
-          // sentence they need.
-          setError(
-            `Your unticked changes were rolled back for the push and could NOT be ` +
-              `restored automatically (${String(e)}). Press Ctrl+Z once to bring them back.`,
-          );
         }
       }
+    } finally {
+      // Every way out -- the hold-back's early returns included -- frees the
+      // dialog for the next act, and only after the un-revert above.
+      actInFlightRef.current = null;
+      setActing(null);
+    }
+  };
+
+  /**
+   * The strip's "Try again": the refused act, run again through the very
+   * handler its own button calls -- so a retried push holds back and puts back
+   * the unticked cells exactly as the first press did, and sends the ticked
+   * sheets BY ID: the renumbering that caused the refusal cannot move a tick.
+   */
+  const retryAct = (act: RetryableAct): void => {
+    if (act === "push") void handlePublish();
+    else if (act === "merge") void handleMerge();
+    else void runPreview(PREVIEW_LABEL);
+  };
+
+  /**
+   * A TICKED SHEET IS GONE (`CALP_PUSH_SHEET_GONE`): the push or its preview
+   * named, by stable id, a sheet the workbook no longer has -- the author
+   * deleted it while this non-modal dialog was open, or an agent did. Nothing
+   * was published, and the same ids can never succeed, so nothing offers
+   * "Try again". The list is read again instead: it then shows the sheets that
+   * exist now (the gone sheet's tick has no row left to tick, so nothing sends
+   * it), the review panels follow it through their own effects, and the
+   * sentence on screen says the list was read. The same for a position past
+   * the end of the list (`CALP_PUSH_SHEET_INDEX_OUT_OF_RANGE`), which only the
+   * positions-only fallback can send (a ticked row listed without an id,
+   * lib/listedSheets.ts `selectionWire`): resending those positions could only
+   * meet the same refusal, so it is never offered either.
+   *
+   * A failed read leaves the list as it was. The refusal's own sentence tells
+   * the author to open the dialog again, and that now works: EVERY SHOW reads
+   * the list again (the list loader's `openCount` dependency, review round 9
+   * F2), and so does the next Preview.
+   *
+   * Only on these two acts the author started: the diff and the button-code
+   * review run by themselves, and a re-read that re-ran them would be a loop
+   * waiting for a backend that keeps saying "gone".
+   */
+  const readSheetListAgain = async (shown: string): Promise<void> => {
+    const target =
+      registryPath.trim() && packageName.trim() ? { registryPath, packageName } : undefined;
+    try {
+      const listed = await publishPreview([], false, target, kind, includeList(includeState));
+      if (listed.sheets) setAvailableSheets(listed.sheets);
+      if (listed.defaultSheetIndices && !selectionTouchedRef.current) {
+        setSheetSelection(new Set(keysAt(listed.defaultSheetIndices, listed.sheets ?? [])));
+      }
+      setError((now) => (now === shown ? `${shown} ${SHEET_LIST_READ_AGAIN}` : now));
+    } catch {
+      // The list stays as it was; the sentence on screen says what to do.
     }
   };
 
@@ -896,9 +1279,7 @@ export function PublishDialog({ onClose, data }: DialogProps) {
    * afterwards, and nothing said so at the moment of ticking. This is that
    * moment.
    */
-  const tickedSubscribed = availableSheets.filter(
-    (s) => s.subscribedTo && sheetSelection.has(s.index),
-  );
+  const tickedSubscribed = ticked.filter((s) => s.subscribedTo);
 
   /**
    * The application this name would collide with, if any.
@@ -927,7 +1308,7 @@ export function PublishDialog({ onClose, data }: DialogProps) {
       version,
       changeSummary,
       pushed,
-      sheetsSelected: listedIndices(sheetSelection, availableSheets).length,
+      sheetsSelected: ticked.length,
       sheetsAvailable: availableSheets.length,
       kind,
       nameAlreadyTaken: nameClash !== null,
@@ -936,7 +1317,7 @@ export function PublishDialog({ onClose, data }: DialogProps) {
       buttonCodeStale:
         mode !== "loading" &&
         availableSheets.length > 0 &&
-        buttonCodeFor !== sheetsSignature(selectedIndices()),
+        buttonCodeFor !== tickedSignature,
       unshippedMacroLinks: unshippedLinks,
       includeStale:
         mode !== "loading" &&
@@ -951,7 +1332,7 @@ export function PublishDialog({ onClose, data }: DialogProps) {
           : [],
     });
   const blocked = blockingReason();
-  const canPush = !blocked && !pushed;
+  const canPush = !blocked && !pushed && acting === null;
 
   /**
    * What an "Include in application" row may do, for every list in this dialog
@@ -1114,7 +1495,14 @@ export function PublishDialog({ onClose, data }: DialogProps) {
             gates={gates}
             merge={merge}
             mergeBusy={mergeBusy}
+            // Only a failure for the base -> head on screen: one for another
+            // pair is about to be asked again.
+            mergeFailure={mergeFailure?.key === mergeKey ? mergeFailure.message : null}
+            onRetryAnalysis={() => void analyzeMerge(mergeKey)}
             onMerge={handleMerge}
+            // A push, a merge or a Preview is running: the one Merge button
+            // waits for it.
+            mergeDisabled={acting !== null}
           />
         )}
 
@@ -1366,9 +1754,12 @@ export function PublishDialog({ onClose, data }: DialogProps) {
                 // application's — that preservation is what checkout is for.
                 const inBase =
                   workspace?.baseSheets.some((s) => s.sheetId === sheet.sheetId) ?? false;
+                // THE TICK IS THE SHEET'S ID, so it stays on this sheet however
+                // the list is renumbered under the dialog.
+                const key = sheetKey(sheet);
                 return (
                   <label
-                    key={sheet.index}
+                    key={key}
                     style={{
                       display: "flex",
                       alignItems: "center",
@@ -1387,14 +1778,14 @@ export function PublishDialog({ onClose, data }: DialogProps) {
                   >
                     <input
                       type="checkbox"
-                      checked={sheetSelection.has(sheet.index)}
+                      checked={sheetSelection.has(key)}
                       onChange={(e) => {
                         setSelectionTouched(true);
                         selectionTouchedRef.current = true;
                         setSheetSelection((prev) => {
                           const next = new Set(prev);
-                          if (e.target.checked) next.add(sheet.index);
-                          else next.delete(sheet.index);
+                          if (e.target.checked) next.add(key);
+                          else next.delete(key);
                           return next;
                         });
                       }}
@@ -1655,16 +2046,13 @@ export function PublishDialog({ onClose, data }: DialogProps) {
                       selection={
                         mode === "push" && workspace?.baseVersion
                           ? {
-                              excluded: excludedCells,
+                              // EVERY untick shows unticked, the parked ones too:
+                              // a "removed" sheet's row is on screen although the
+                              // push does not carry its sheet.
+                              excluded: untickedCells,
                               label: "Push",
                               onToggle: (sheetId, c, include) =>
-                                setExcludedCells((prev) => {
-                                  const next = new Set(prev);
-                                  const key = cellKeyOf(sheetId, c);
-                                  if (include) next.delete(key);
-                                  else next.add(key);
-                                  return next;
-                                }),
+                                dispatchHoldBack({ type: "toggle", key: cellKeyOf(sheetId, c), include }),
                             }
                           : undefined
                       }
@@ -1673,9 +2061,25 @@ export function PublishDialog({ onClose, data }: DialogProps) {
                 </div>
                 {/* PINNED BELOW THE SCROLL, not inside it: this was the one
                     control that undoes an exclusion, and it scrolled away with
-                    the rows it is about. */}
+                    the rows it is about.
+
+                    AND ON SCREEN WHENEVER ANYTHING IS HELD BACK -- also while
+                    the comparison is worked out again and after it failed, when
+                    the rows themselves are not listed (review round 9, F1).
+                    That, rather than a blocked Push, is the honest answer to
+                    "an exclusion must never act unseen": what acts is only the
+                    author's own unticks, so a push then holds back no more than
+                    they chose (the base value stays, and it is already
+                    published), and this count and its "Push all" say so. A
+                    block would strand the author after a failed comparison
+                    instead, because nothing but a moved box asks for it again.
+                    It counts `excluded` only -- the unticks on sheets the latest
+                    comparison says this push CARRIES. A PARKED untick has a line
+                    of its own: the push sends it too, and Rust holds it back the
+                    moment the push carries its sheet. */}
                 {excludedCells.size > 0 && (
                   <div
+                    data-testid="push-holdback-strip"
                     style={{
                       fontSize: "11px",
                       marginTop: 6,
@@ -1686,15 +2090,57 @@ export function PublishDialog({ onClose, data }: DialogProps) {
                     }}
                   >
                     <span style={{ color: "var(--conflict-text, #856404)" }}>
-                      {excludedCells.size} change(s) stay local — the published version keeps
+                      {formatNumber(excludedCells.size)} change(s) stay local — the published version keeps
                       v{workspace?.baseVersion}&rsquo;s value there.
                     </span>
                     <button
                       style={{ fontSize: "11px" }}
-                      onClick={() => setExcludedCells(new Set())}
+                      onClick={() => dispatchHoldBack({ type: "includeAll" })}
                     >
                       Push all
                     </button>
+                  </div>
+                )}
+                {/* UNTICKS ON A SHEET THIS PUSH DOES NOT CARRY (`parked`,
+                    lib/holdBack.ts): they hold nothing back now, and act again
+                    the moment the push carries their sheet. TRUE BY
+                    CONSTRUCTION: it counts only unticks whose sheet the LATEST
+                    comparison says the push does not carry (its
+                    `carriedSheetIds`), never a guess from the sheet boxes --
+                    the guess said "not in this push" of a floating grid's
+                    backing sheet and of a chart's source, both of which shipped
+                    (review round 11, RV11-TS-1). And "no longer held back,
+                    because their sheet is no longer in this push" stayed on
+                    screen after the sheet was ticked again and its changes were
+                    pushed (review round 10, R10-1). */}
+                {holdBack.parked.size > 0 && (
+                  <div
+                    data-testid="push-holdback-parked"
+                    style={{
+                      fontSize: "11px",
+                      marginTop: 6,
+                      flexShrink: 0,
+                      color: "var(--text-secondary)",
+                    }}
+                  >
+                    {describeParkedHoldBacks(holdBack.parked.size)}
+                  </div>
+                )}
+                {/* UNTICKS A NEW COMPARISON TOOK AWAY, in plain words: it was
+                    asked for their sheet and no longer lists their row
+                    (lib/holdBack.ts). Never silently -- a dropped untick is a
+                    change the next push publishes. */}
+                {holdBack.dropped > 0 && (
+                  <div
+                    data-testid="push-holdback-dropped"
+                    style={{
+                      fontSize: "11px",
+                      marginTop: 6,
+                      flexShrink: 0,
+                      color: "var(--conflict-text, #856404)",
+                    }}
+                  >
+                    {describeDroppedHoldBacks(holdBack.dropped, workspace?.baseVersion ?? "")}
                   </div>
                 )}
               </div>
@@ -1850,21 +2296,28 @@ export function PublishDialog({ onClose, data }: DialogProps) {
           }}
         >
           {error ?? status ?? blocked}
+          {/* THE RETRYABLE REFUSAL -- the workbook changed while it was being
+              read, so nothing was written -- runs the same act again from here.
+              Only beside the error it belongs to (`retry.shown`). */}
+          {error !== null && retry !== null && retry.shown === error && (
+            <>
+              {" "}
+              <button
+                data-testid="publish-dialog-retry"
+                style={STRIP_LINK_STYLE}
+                onClick={() => retryAct(retry.act)}
+              >
+                Try again
+              </button>
+            </>
+          )}
           {/* A push cannot be undone from here, so the next gesture — deciding
               who receives it — needs a door, not a memory. */}
           {pushed && (workspace?.environments?.length ?? 0) > 0 && (
             <>
               {" "}
               <button
-                style={{
-                  background: "transparent",
-                  border: "none",
-                  color: "inherit",
-                  cursor: "pointer",
-                  padding: 0,
-                  font: "inherit",
-                  textDecoration: "underline",
-                }}
+                style={STRIP_LINK_STYLE}
                 onClick={() => openPanel(APPLICATION_EXPLORER_PANEL_ID)}
               >
                 Open Application Explorer
@@ -1903,16 +2356,26 @@ export function PublishDialog({ onClose, data }: DialogProps) {
 
       <div style={footerStyle}>
         <button onClick={onClose}>{pushed ? "Close" : "Cancel"}</button>
-        <button onClick={() => void runPreview("Preview — would publish")}>Preview</button>
+        {/* Disabled while any act runs (`acting`) -- a push, a merge, or a
+            Preview already running: a preview beside an act would clear the
+            "Pushing…" / "Pushed…" line it is under, and a second Preview has
+            nothing to add (runPreview's own guard says why). */}
+        <button onClick={() => void runPreview(PREVIEW_LABEL)} disabled={acting !== null}>
+          Preview
+        </button>
         {/*
           NOT `disabled`. A disabled primary button explains nothing, and the one
           condition a complete-looking dialog still fails is the change summary,
           whose placeholder is a full sentence and reads as a value. Clicking now
-          always answers — see `handlePublish`.
+          always answers — see `handlePublish`. Disabled only once the push has
+          landed, and while a push, a merge or a Preview is running (`acting`),
+          when the strip above already says "Pushing…", "Merging…" or
+          "Analyzing…" -- a push beside a Preview had its receipt taken down by
+          the slower Preview (review round 11, RV11-TS-2).
         */}
         <button
           onClick={handlePublish}
-          disabled={pushed}
+          disabled={pushed || acting !== null}
           title={blocked ?? undefined}
           style={{ fontWeight: 600, opacity: canPush ? 1 : 0.65 }}
         >
@@ -1934,13 +2397,22 @@ function WorkspaceBanner({
   gates,
   merge,
   mergeBusy,
+  mergeFailure,
+  onRetryAnalysis,
   onMerge,
+  mergeDisabled,
 }: {
   workspace: WorkingCopyStatus;
   gates: PushGateStatus | null;
   merge: MergeAnalysisResponse | null;
   mergeBusy: boolean;
+  /** Why the merge analysis for the base -> head on screen failed, as a sentence; null = it did not. */
+  mergeFailure: string | null;
+  /** Ask the analysis again -- the author's gesture; nothing else re-asks a failed one. */
+  onRetryAnalysis: () => void;
   onMerge: () => void;
+  /** A push, a merge or a Preview is running: Merge waits for it (the dialog's `acting`). */
+  mergeDisabled: boolean;
 }) {
   const stale = gates?.baseStale ?? workspace.isStale;
   const unreachable = !workspace.registryReachable && !gates?.registryLatest;
@@ -1990,6 +2462,27 @@ function WorkspaceBanner({
       </>
     );
 
+    // THE ANALYSIS FAILED: say why, once, and let the author ask again. It used
+    // to keep saying "Working out..." while the dialog re-ran the analysis in
+    // an unbounded loop (see `mergeFailure` in the dialog).
+    if (!mergeBusy && !merge && mergeFailure !== null) {
+      return (
+        <div style={boxStyle("warn")} data-testid="merge-analysis-failed">
+          {landed}
+          <div style={{ marginTop: 4 }}>
+            Could not work out whether their changes overlap yours: {mergeFailure}{" "}
+            <button
+              data-testid="merge-analysis-retry"
+              style={{ fontSize: "11px" }}
+              onClick={onRetryAnalysis}
+            >
+              Try again
+            </button>
+          </div>
+        </div>
+      );
+    }
+
     if (mergeBusy || !merge) {
       return (
         <div style={boxStyle("warn")}>
@@ -2013,7 +2506,7 @@ function WorkspaceBanner({
             Merging brings their work into this workbook and recalculates —
             after that, push as usual.
           </div>
-          <button onClick={onMerge} style={{ marginTop: 6, fontWeight: 600 }}>
+          <button onClick={onMerge} disabled={mergeDisabled} style={{ marginTop: 6, fontWeight: 600 }}>
             Merge with v{head}
           </button>
         </div>
@@ -2128,22 +2621,69 @@ function ChangeLists({ analysis }: { analysis: MergeAnalysisResponse["analysis"]
   );
 }
 
-/**
- * Turn a backend gate refusal into the sentence it already contains.
- *
- * The backend prefixes gate refusals with a stable `CALP_PUSH_*` code so a UI
- * can branch; the human half is the rest of the string. Showing the code to the
- * user would be showing them our internal vocabulary.
- */
+/** The answer strip's text buttons: they read as links in the strip's own colour. */
+const STRIP_LINK_STYLE: React.CSSProperties = {
+  background: "transparent",
+  border: "none",
+  color: "inherit",
+  cursor: "pointer",
+  padding: 0,
+  font: "inherit",
+  textDecoration: "underline",
+};
+
 /**
  * A sheet selection as one comparable string: which selection a button-code
- * answer belongs to. Order-insensitive.
+ * answer belongs to. Order-insensitive, and over the ticks' STABLE ids
+ * (`sheetKey`), so a renumbering that moves no tick changes nothing here and
+ * a tick whose sheet left the list does.
  */
-export function sheetsSignature(indices: readonly number[]): string {
-  return JSON.stringify([...indices].sort((a, b) => a - b));
+export function sheetsSignature(keys: readonly string[]): string {
+  return JSON.stringify([...keys].sort());
 }
 
-function explainPushError(raw: string): string {
+/**
+ * Every row a working-copy diff LISTS, as `cellKeyOf` strings: its sheets'
+ * sample rows, the only rows this dialog shows -- it offers no "Show all" --
+ * and so the only cells an author can untick (the hold-back's `keepRows`).
+ * They include a "removed" sheet's rows; `keepRows` judges only the sheets the
+ * answer says the push carries, so those never keep an untick acting.
+ */
+function rowKeysOf(diff: VersionDiff): Set<string> {
+  const keys = new Set<string>();
+  for (const sheet of diff.sheets) {
+    for (const cell of sheet.sample) keys.add(cellKeyOf(sheet.sheetId, cell));
+  }
+  return keys;
+}
+
+/**
+ * A refusal whose SAME request can never succeed, because the sheets it named
+ * are not the workbook's any more: a ticked id that is gone
+ * (`CALP_PUSH_SHEET_GONE`), or a position past the end of the sheet list
+ * (`CALP_PUSH_SHEET_INDEX_OUT_OF_RANGE`, which only the positions-only
+ * fallback for a row listed without an id can meet). Never "Try again": the
+ * act the author started reads the sheet list again instead
+ * (`readSheetListAgain`), so resending the same positions can never loop.
+ */
+function needsTheSheetListAgain(err: unknown): boolean {
+  return isSheetGoneRefusal(err) || isSheetIndexOutOfRangeRefusal(err);
+}
+
+/**
+ * Turn a backend refusal into the sentence it already contains.
+ *
+ * The backend prefixes gate refusals with a stable `CALP_PUSH_*` /
+ * `CALP_MERGE_*` code so a UI can branch; the human half is the rest of the
+ * string. The retryable snapshot refusal (`WORKBOOK_CHANGED_WHILE_SAVING`), the
+ * gone-sheet refusal (`CALP_PUSH_SHEET_GONE`) and the past-the-end refusal
+ * (`CALP_PUSH_SHEET_INDEX_OUT_OF_RANGE`) are read by the ONE shared recogniser,
+ * `@api/backendRefusal` -- never a second pattern here. Showing any code to the
+ * user would be showing them our internal vocabulary.
+ */
+function explainPushError(err: unknown): string {
+  if (isWorkbookChangedWhileSaving(err) || needsTheSheetListAgain(err)) return describeBackendRefusal(err);
+  const raw = String(err);
   const match = raw.match(/CALP_(?:PUSH|MERGE)_[A-Z_]+:\s*(.*)$/s);
   return match ? match[1].trim() : raw;
 }

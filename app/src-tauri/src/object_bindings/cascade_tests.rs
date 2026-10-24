@@ -216,6 +216,7 @@ impl Wb {
             &self.timelines,
             index,
             false,
+            None,
         )
         .expect("delete the sheet");
     }

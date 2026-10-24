@@ -457,6 +457,24 @@ describe("executeGetSheets", () => {
   });
 });
 
+// Review F1-rename-refuses-entry (round 5): a script's sheet change hands
+// Core the active sheet's STABLE id when the backend reports one -- an open
+// edit follows its sheet by it (and a dispatch without one clears it).
+describe("announceSheetsChanged hands Core the active sheet's stable id", () => {
+  it("an added sheet the backend reports WITH an id: the context dispatch carries it", async () => {
+    const lib = makeLib();
+    lib.addSheet.mockImplementationOnce(async (name?: string, kind?: "worksheet" | "canvas") => ({
+      sheets: [
+        ...sheetList(),
+        { index: 3, name: name ?? "Sheet4", visibility: "visible" as const, kind: kind ?? "worksheet", sheetId: "id-dash" },
+      ],
+      activeIndex: 3,
+    }));
+    await executeAddSheet(asLib(lib), "Dashboard", undefined, "canvas");
+    expect(mocks.grid.setActiveSheet, "the sheet's id was dropped").toHaveBeenCalledWith(3, "Dashboard", "canvas", "id-dash");
+  });
+});
+
 describe("executeAddSheet — the kind is forwarded", () => {
   it("unpositioned: forwards kind to lib.addSheet and returns the new sheet", async () => {
     const lib = makeLib();

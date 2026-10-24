@@ -53,17 +53,21 @@ describe("the push waits for the button code of the sheets actually ticked", () 
     expect(pushBlockingReason({ ...ready, buttonCodeStale: true, buttonCodeRefused: 3 })).toMatch(/Checking/);
   });
 
-  it("a selection is compared order-insensitively", () => {
-    expect(sheetsSignature([2, 0, 1])).toBe(sheetsSignature([0, 1, 2]));
-    expect(sheetsSignature([0, 1])).not.toBe(sheetsSignature([0, 2]));
+  // The ticks are STABLE SHEET IDS since review round 9 (a position moved
+  // under the non-modal dialog), so the signature is over ids.
+  it("a selection is compared order-insensitively, by id", () => {
+    expect(sheetsSignature(["sheet-c", "sheet-a", "sheet-b"])).toBe(sheetsSignature(["sheet-a", "sheet-b", "sheet-c"]));
+    expect(sheetsSignature(["sheet-a", "sheet-b"])).not.toBe(sheetsSignature(["sheet-a", "sheet-c"]));
   });
 
   // SABOTAGE: delete the `buttonCodeStale:` line from the dialog's readiness
   // call, or the effect that re-fetches on `sheetSelection`.
   it("the dialog marks its review stale for another selection and fetches it again", () => {
     expect(CODE).toMatch(
-      /buttonCodeStale:\s*mode !== "loading" &&\s*availableSheets\.length > 0 &&\s*buttonCodeFor !== sheetsSignature\(selectedIndices\(\)\)/,
+      /buttonCodeStale:\s*mode !== "loading" &&\s*availableSheets\.length > 0 &&\s*buttonCodeFor !== tickedSignature/,
     );
+    // ...where `tickedSignature` is the signature of the ticked rows' ids.
+    expect(CODE).toMatch(/const tickedSignature = sheetsSignature\(ticked\.map\(sheetKey\)\);/);
     // The refresh: an effect keyed on the tick list that asks the preview for
     // the ticked sheets and records which selection the answer belongs to.
     const effect = CODE.match(

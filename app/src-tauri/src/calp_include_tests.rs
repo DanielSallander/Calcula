@@ -704,7 +704,7 @@ fn every_assembly_door_passes_its_inclusions() {
     // The assembly hands its inclusions to the ONE composition the include
     // tests drive (`filter_and_release`): passing it none would drop every
     // ticked item from every push with those tests still green.
-    let assembly = body_of(&cmds, "fn assemble_publish_workbook(");
+    let assembly = body_of(&cmds, "fn assemble_publish_snapshot(");
     let call = &assembly[assembly.find("filter_and_release(").expect("the assembly no longer filters")..];
     assert!(
         call[..call.find(")?;").unwrap()].contains("\n        included,\n"),

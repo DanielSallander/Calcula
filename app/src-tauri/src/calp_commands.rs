@@ -23,7 +23,27 @@ pub struct PublishParams {
     pub package_name: String,
     pub version: String,
     pub kind: String,
+    /// The sheets to publish BY POSITION in the workbook's sheet list (0-based),
+    /// for the callers that choose their sheets in the same call they publish
+    /// with: a script (`caps.publish.package`) and the e2e helpers.
+    /// Empty = the default selection. IGNORED when `sheet_ids` is present
+    /// ([`RequestedSheets::from_wire`]); absent = empty, so a request that names
+    /// its sheets by id alone parses. A position no sheet list shows -- past the
+    /// end of the list, or a floating range's hidden backing sheet -- is
+    /// refused, non-retryably ([`CALP_PUSH_SHEET_INDEX_OUT_OF_RANGE`]).
+    #[serde(default)]
     pub sheet_indices: Vec<usize>,
+    /// The sheets to publish BY STABLE ID -- what the push dialog sends for the
+    /// rows the author ticked (`PublishPreviewSheet::sheet_id`). The dialog is
+    /// non-modal, so a position it read when it listed the sheets names whatever
+    /// sheet sits there when Push is pressed: a tab dragged in between handed
+    /// the tick to its neighbour, and an unticked sheet shipped to every
+    /// subscriber under the author's key (F1, review round 8). An id names the
+    /// sheet itself. When present it TAKES PRECEDENCE over `sheet_indices`; an
+    /// empty list means what an empty `sheet_indices` means; an id no sheet of
+    /// the workbook carries refuses the publish ([`CALP_PUSH_SHEET_GONE`]).
+    #[serde(default)]
+    pub sheet_ids: Option<Vec<String>>,
     pub published_by: String,
     /// What this publish IS. `"update"` pushes the next version of an application
     /// this workbook is a working copy of and REQUIRES `expected_base_version`;
@@ -182,6 +202,32 @@ pub(crate) fn restore_published_sheet_references(
     counts
 }
 
+/// The workbook's sheet ids and sheet names, read under ONE hold and copied out
+/// as `(ids, names)`.
+///
+/// `sheet_names` FIRST, then `sheet_ids`, BOTH held while they are cloned, both
+/// released before this returns (R5-TORN-PAIR-SIBLINGS; the rule is written on
+/// the `sheet_ids` field in lib.rs). Every caller pairs `ids[i]` with `names[i]`,
+/// and two separate clone-and-release reads TEAR that pair. Not by a microsecond
+/// window, either: a delete takes `sheet_names` first and removes the id late
+/// (`delete_sheet_impl` holds `sheet_names` pending through its formula
+/// pre-flight), so an ids-then-names reader that overlaps it gets the OLD ids
+/// beside the NEW names every time, and each later sheet's id is paired with its
+/// right-hand neighbour's name. The refresh, the reset and the push then rewrote
+/// pulled formulas to read that neighbour: wrong values, saved, no error.
+///
+/// RELEASED before it returns, because every caller goes on to take a store
+/// that must not be waited for under a sheet guard: `subscriptions` and the
+/// override layer (a cell writer holds `sheet_names` when it reaches
+/// `record_subscription_override_edits`, which takes both --
+/// R5-PREVIEW-SUBS-DEADLOCK), the floating-range rows (taken before `sheet_ids`
+/// by `reassert_object_sheet_markers`), the writeback index, the object stores.
+pub(crate) fn sheet_ids_and_names(state: &AppState) -> Result<(Vec<SheetId>, Vec<String>), String> {
+    let names = state.sheet_names.read().map_err(|e| e.to_string())?;
+    let ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
+    Ok((ids.clone(), names.clone()))
+}
+
 /// A SUBSCRIBER's renames of `package_name`'s sheets, as the LOWERCASED local
 /// name -> the name `base` publishes the sheet under, for every application
 /// sheet whose tab here is named differently (BUG-0151). Empty for a workbook
@@ -200,8 +246,8 @@ pub(crate) fn subscriber_published_names(
     package_name: &str,
     base: &calp::manifest::VersionManifest,
 ) -> Result<std::collections::HashMap<String, String>, String> {
-    let sheet_ids: Vec<SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
-    let sheet_names: Vec<String> = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+    // The pair under one hold, released before `subscriptions` is taken.
+    let (sheet_ids, sheet_names) = sheet_ids_and_names(state)?;
     let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
     let name_of = |local: SheetId| -> Option<String> {
         sheet_ids
@@ -241,8 +287,8 @@ pub(crate) fn rename_pulled_references_for_reset(
     sub: &calp::manifest::Subscription,
     result: &mut calp::pull::PullResult,
 ) -> Result<RefreshSheetNames, String> {
-    let sheet_ids: Vec<SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
-    let mut taken: Vec<String> = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+    // The pair under one hold: the reset rewrites pulled formulas through it.
+    let (sheet_ids, mut taken) = sheet_ids_and_names(state)?;
     let current = taken.clone();
     let name_of = |local: SheetId| -> Option<String> {
         sheet_ids
@@ -270,8 +316,8 @@ pub(crate) fn working_copy_sheet_renames(
     registry_path: &str,
     package_name: &str,
 ) -> Result<calp::sheet_renames::SheetRenames, String> {
-    let sheet_ids: Vec<SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
-    let sheet_names: Vec<String> = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+    // The pair under one hold: a push and a hold-back rewrite formulas through it.
+    let (sheet_ids, sheet_names) = sheet_ids_and_names(state)?;
     let link = state.working_copy_link.read().map_err(|e| e.to_string())?;
     let Some(link) = link.as_ref().filter(|l| l.targets(registry_path, package_name)) else {
         return Ok(calp::sheet_renames::SheetRenames::default());
@@ -761,17 +807,108 @@ pub(crate) fn filter_and_release(
     Ok((content, button_code))
 }
 
-fn assemble_publish_workbook(
-    state: &State<AppState>,
-    bi_state: &State<BiState>,
-    pivot_state: &State<crate::pivot::types::PivotState>,
-    script_state: &State<crate::scripting::types::ScriptState>,
-    slicer_state: &State<crate::slicer::SlicerState>,
-    ribbon_filter_state: &State<crate::ribbon_filter::RibbonFilterState>,
-    pane_control_state: &State<crate::pane_control::PaneControlState>,
-    user_files_state: &State<crate::persistence::UserFilesState>,
-    timeline_state: &State<crate::timeline_slicer::TimelineSlicerState>,
-    sheet_indices: &[usize],
+/// THE ONE DOOR the publish, its dry-run preview and the working-copy diff
+/// assemble their carrier through -- and it never hands them a TORN one (F1,
+/// review round 7). One [`assemble_publish_snapshot`] is taken; its shared
+/// body (`persistence::build_workbook_for_save`) copies the sheets and their
+/// index-keyed metadata under one grid hold, but the rest of the carrier --
+/// the slicers and timelines, the object walk, the pivot definitions, the cell
+/// types, the excluded pivot regions -- is read outside it (the slicers cannot
+/// be taken under the grid locks: the async slicer-item fetch holds them while
+/// it reads `grids`). So the attempt is kept only if no sheet was added,
+/// deleted, moved or copied before its last store read
+/// (`persistence::take_consistent_snapshot`), otherwise taken again; after
+/// `persistence::SNAPSHOT_ATTEMPTS` overlapped attempts the push is refused,
+/// retryably, before anything is written to the workspace.
+///
+/// THE SELECTION TRAVELS BY STABLE ID (F1, review round 8). An attempt is
+/// retaken precisely because the sheets were renumbered inside the one before
+/// it, so positions resolved before attempt 1 would index a renumbered list in
+/// every retake and ship whatever sheet slid into each. Each attempt maps
+/// `selected` through ITS OWN sheet list ([`publish_positions_in_snapshot`]),
+/// uses those positions for every step after its body, and hands them back
+/// ([`PublishedCarrier::sheet_indices`]) -- the ONLY positions the report, the
+/// push's gates, the warnings and `PublishRequest.sheet_indices` may use.
+///
+/// `what` names the act for the refusal's "while it was being ...":
+/// "published" for the push, "previewed" for its dry run, "compared" for the
+/// working-copy diff, "merged" for the merge -- never "published" for a door
+/// that publishes nothing.
+///
+/// Plain references, like `persistence::build_workbook_for_save` (a `State<T>`
+/// derefs to its `T`), so a runtime probe can drive the door itself.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assemble_publish_workbook(
+    state: &AppState,
+    bi_state: &BiState,
+    pivot_state: &crate::pivot::types::PivotState,
+    script_state: &crate::scripting::types::ScriptState,
+    slicer_state: &crate::slicer::SlicerState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    user_files_state: &crate::persistence::UserFilesState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+    selected: &PublishSheetIds,
+    registry_path: &str,
+    package_name: &str,
+    included: &[crate::calp_push_scope::IncludedItem],
+    what: &str,
+) -> Result<PublishedCarrier, String> {
+    crate::persistence::take_consistent_snapshot(state, what, || {
+        let (assembly, unpublished_pivots, sheet_indices, basis) = assemble_publish_snapshot(
+            state,
+            bi_state,
+            pivot_state,
+            script_state,
+            slicer_state,
+            ribbon_filter_state,
+            pane_control_state,
+            user_files_state,
+            timeline_state,
+            selected,
+            registry_path,
+            package_name,
+            included,
+            what,
+        )?;
+        Ok((PublishedCarrier { assembly, unpublished_pivots, sheet_indices }, basis))
+    })
+}
+
+/// What [`assemble_publish_workbook`] hands back for one consistent snapshot.
+pub(crate) struct PublishedCarrier {
+    /// The carrier.
+    pub assembly: PublishAssembly,
+    /// The pivots it had to leave behind (see `prune_unpublished_pivots`) -- a
+    /// separate value rather than a field of `PublishAssembly`, which tests
+    /// build by hand.
+    pub unpublished_pivots: Vec<calp::publish::UnpublishedPivot>,
+    /// WHERE THE SELECTED SHEETS SIT IN `assembly.workbook.sheets`: the
+    /// selection's ids mapped through this snapshot's own sheet list
+    /// ([`publish_positions_in_snapshot`]), in publish order. Never the
+    /// positions the resolver read -- a renumbering since hands those to other
+    /// sheets.
+    pub sheet_indices: Vec<usize>,
+}
+
+/// ONE attempt at [`assemble_publish_workbook`]'s carrier, with the
+/// `persistence::SnapshotBasis` its body read under the grid hold. Only the
+/// door decides whether it survived: a renumbering can land between the body
+/// and this attempt's later reads, and the attempt returns whatever it read.
+#[allow(clippy::too_many_arguments)]
+fn assemble_publish_snapshot(
+    state: &AppState,
+    bi_state: &BiState,
+    pivot_state: &crate::pivot::types::PivotState,
+    script_state: &crate::scripting::types::ScriptState,
+    slicer_state: &crate::slicer::SlicerState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    user_files_state: &crate::persistence::UserFilesState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+    // The sheets to publish, by STABLE id; this attempt finds them in its own
+    // sheet list (`publish_positions_in_snapshot`), right after its body.
+    selected: &PublishSheetIds,
     // The application THIS assembly is for. The published-name restoration
     // applies only when the workbook's working-copy link targets it — a link
     // belongs to one application, and creating a NEW one from the same workbook
@@ -782,23 +919,56 @@ fn assemble_publish_workbook(
     // the push dialog's publish, preview and diff pass theirs; every other
     // caller passes none.
     included: &[crate::calp_push_scope::IncludedItem],
-    // The carrier, and the pivots it had to leave behind (see
-    // `prune_unpublished_pivots`). A separate value rather than a field of
-    // `PublishAssembly`, which tests build by hand.
-) -> Result<(PublishAssembly, Vec<calp::publish::UnpublishedPivot>), String> {
+    // The act, for the refusal when a sheet this publish selected is gone.
+    what: &str,
+    // The carrier, the pivots it had to leave behind (see
+    // `prune_unpublished_pivots`), the positions this attempt published, and
+    // the basis the door checks after this attempt's last store read.
+) -> Result<
+    (
+        PublishAssembly,
+        Vec<calp::publish::UnpublishedPivot>,
+        Vec<usize>,
+        crate::persistence::SnapshotBasis,
+    ),
+    String,
+> {
     // Timelines CARRY into the application. Their EFFECT already travels as the
     // pivot's hidden_items/slicer_filters, so excluding the control while
     // carrying its filter would hand a subscriber a pivot pinned to the
     // publisher's last date range with no way to change it -- the worse of the
     // two answers.
-    let mut workbook = crate::persistence::build_workbook_for_save_with_slicers(
+    //
+    // `bi_state` rides in for the design-query charts: the carrier stamps each
+    // one's `packageDataSourceId` with the id its connection's data source is
+    // filed under in THIS package (`ChartKeysFor::Package`,
+    // `published_data_source_id`), so a chart this author created, kept from a
+    // drill-through or re-pointed ships with the key a subscriber's pull,
+    // refresh and open re-bind it by. Never the connection's own package key:
+    // a checkout's connection was minted from the previous version's data
+    // source, which this push files under a new id (review RB-1).
+    //
+    // `basis` is the sheet structure the body copied under its grid hold; the
+    // door (`assemble_publish_workbook`) compares it after this attempt's last
+    // store read -- the excluded pivot regions at the end.
+    let (mut workbook, basis) = crate::persistence::build_workbook_for_save_with_slicers(
         state,
         user_files_state,
+        bi_state,
         slicer_state,
         ribbon_filter_state,
         pivot_state,
         timeline_state,
     )?;
+
+    // WHERE THE SELECTED SHEETS SIT IN THIS ATTEMPT, by id, from the sheet list
+    // its body copied -- before anything below reads a position (F1, review
+    // round 8). Every step after this one (the renames, the pruning, the
+    // canonicalisations, the filter and the release, the cell types) uses these,
+    // and they go back to the caller with the carrier. A ticked sheet that is
+    // gone refuses here, retryably.
+    let published_positions = publish_positions_in_snapshot(&workbook, selected, what)?;
+    let sheet_indices: &[usize] = &published_positions;
 
     // Pane controls (Controls pane) are workbook-scoped and ride in the
     // application as pane_controls.json (config + current values, sorted
@@ -831,11 +1001,7 @@ fn assemble_publish_workbook(
     };
     crate::persistence::prune_dead_visual_refs_for_save(&mut workbook, &live_locations);
 
-    for &idx in sheet_indices {
-        if idx >= workbook.sheets.len() {
-            return Err(format!("Sheet index {} out of range", idx));
-        }
-    }
+    // (No bounds check: every position above was found IN `workbook.sheets`.)
 
     // A LOCAL RENAME DOES NOT TRAVEL. An application sheet publishes under the
     // name the application already knows it by, taken from the working-copy
@@ -1131,6 +1297,8 @@ fn assemble_publish_workbook(
             cell_type_objects,
         },
         unpublished_pivots,
+        published_positions,
+        basis,
     ))
 }
 
@@ -1685,17 +1853,21 @@ pub(crate) fn compute_publish_report(
 /// documented side effect: like any first publish, this creates the profile's
 /// signing keypair if it does not exist yet — the same file a real publish
 /// would create, and idempotent.
+///
+/// The stores are PLAIN references -- a door hands its `State`s, which deref to
+/// them -- so a test can run the very publish a working-copy diff compares
+/// (`subscribed_sheet_tests`, the carried sheets of review round 11).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn publish_into_for_preview(
-    state: &State<AppState>,
-    bi_state: &State<BiState>,
-    pivot_state: &State<crate::pivot::types::PivotState>,
-    script_state: &State<crate::scripting::types::ScriptState>,
-    slicer_state: &State<crate::slicer::SlicerState>,
-    ribbon_filter_state: &State<crate::ribbon_filter::RibbonFilterState>,
-    pane_control_state: &State<crate::pane_control::PaneControlState>,
-    user_files_state: &State<crate::persistence::UserFilesState>,
-    timeline_slicer_state: &State<crate::timeline_slicer::TimelineSlicerState>,
+    state: &AppState,
+    bi_state: &BiState,
+    pivot_state: &crate::pivot::types::PivotState,
+    script_state: &crate::scripting::types::ScriptState,
+    slicer_state: &crate::slicer::SlicerState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    user_files_state: &crate::persistence::UserFilesState,
+    timeline_slicer_state: &crate::timeline_slicer::TimelineSlicerState,
     registry: &dyn calp::transport::WorkspaceTransport,
     // The WORKSPACE the caller is previewing against, beside the transport. The
     // transport cannot answer "is this the application my link targets", and the
@@ -1704,7 +1876,10 @@ pub(crate) fn publish_into_for_preview(
     package_name: &str,
     version: SemVer,
     kind: &str,
-    sheet_indices: Vec<usize>,
+    // The sheets the caller named -- by id from the push dialog, by position
+    // from a script, none for the default -- resolved by the same validated
+    // selection the push uses (`resolve_publish_selection`).
+    requested: RequestedSheets,
     include_comments: bool,
     // The FRONTEND providers' distributable objects (the model overlay, reports),
     // which `calp_publish` merges in from its params (BUG-0150). `None` = the
@@ -1718,15 +1893,26 @@ pub(crate) fn publish_into_for_preview(
     // spelling, or every one reads as a change the reset would not make. A
     // WORKING COPY's renames are undone by the assembly itself.
     published_names: &std::collections::HashMap<String, String>,
+    // The caller's act, for a refusal's "while it was being ...": "compared"
+    // for the working-copy diff, "merged" for the merge. Nothing here is
+    // published, so a refusal must never say it was.
+    what: &str,
     // What the push dialog ADDS to the application ("Include in application"),
     // so the diff describes the push it would make. The merge passes none.
     included: &[crate::calp_push_scope::IncludedItem],
 ) -> Result<(), String> {
-    let filter_links =
-        FilterObjectLinks::snapshot(slicer_state, timeline_slicer_state, pivot_state)?;
-    let sheet_indices =
-        resolve_publish_sheet_indices(state, kind, sheet_indices, &filter_links)?.indices;
-    let (assembly, _unpublished_pivots) = assemble_publish_workbook(
+    let selection = resolve_publish_selection(
+        state,
+        slicer_state,
+        timeline_slicer_state,
+        pivot_state,
+        kind,
+        requested,
+        what,
+    )?;
+    // The positions THE CARRIER publishes, mapped by id inside the snapshot the
+    // door kept -- never the resolver's (F1, review round 8).
+    let PublishedCarrier { assembly, unpublished_pivots: _, sheet_indices } = assemble_publish_workbook(
         state,
         bi_state,
         pivot_state,
@@ -1736,10 +1922,11 @@ pub(crate) fn publish_into_for_preview(
         pane_control_state,
         user_files_state,
         timeline_slicer_state,
-        &sheet_indices,
+        &selection.ids,
         registry_path,
         package_name,
         included,
+        what,
     )?;
 
     let PublishAssembly {
@@ -2222,17 +2409,27 @@ pub fn calp_publish(
     // THE LIBRARY RULE NOW LIVES IN THE RESOLVER, not here. It used to be this
     // branch, which `calp_publish_preview` did not have — so a library preview
     // described every sheet for a publish that shipped none.
-    let filter_links =
-        FilterObjectLinks::snapshot(&slicer_state, &timeline_slicer_state, &pivot_state)?;
-    let selection = resolve_publish_sheet_indices(
+    //
+    // The dialog names its ticked sheets BY ID (`sheet_ids`, round 9), which
+    // wins over any positions: a tab moved since the dialog read the list is
+    // still the sheet the author ticked, and one deleted since refuses the push
+    // by name rather than handing its tick to a neighbour.
+    let requested = RequestedSheets::from_wire(params.sheet_ids, params.sheet_indices);
+    let selection = resolve_publish_selection(
         &state,
+        &slicer_state,
+        &timeline_slicer_state,
+        &pivot_state,
         &params.kind,
-        params.sheet_indices,
-        &filter_links,
+        requested,
+        "published",
     )?;
-    let sheet_indices = selection.indices.clone();
 
-    let (assembly, unpublished_pivots) = assemble_publish_workbook(
+    // `sheet_indices` is the CARRIER's: the selection's ids mapped through the
+    // snapshot the door kept (F1, review round 8). The report, the gates below
+    // and `PublishRequest.sheet_indices` use it and nothing else -- never the
+    // resolver's positions, which a renumbering since hands to other sheets.
+    let PublishedCarrier { assembly, unpublished_pivots, sheet_indices } = assemble_publish_workbook(
         &state,
         &bi_state,
         &pivot_state,
@@ -2242,10 +2439,11 @@ pub fn calp_publish(
         &pane_control_state,
         &user_files_state,
         &timeline_slicer_state,
-        &sheet_indices,
+        &selection.ids,
         &params.registry_path,
         &params.package_name,
         &params.include_in_application,
+        "published",
     )?;
     let report =
         compute_publish_report(&assembly, &state, &sheet_indices, params.include_comments, &selection);
@@ -2860,9 +3058,17 @@ pub fn calp_publish_model(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishPreviewParams {
-    /// Sheets to include (workbook indices). None or empty => all sheets.
+    /// Sheets to include, BY POSITION (workbook indices). None or empty => the
+    /// default selection. Ignored when `sheet_ids` is present -- the same rule
+    /// as `PublishParams::sheet_indices`, so the dry run resolves the same
+    /// sheets the push it previews would.
     #[serde(default)]
     pub sheet_indices: Option<Vec<usize>>,
+    /// Sheets to include, BY STABLE ID (`PublishPreviewSheet::sheet_id`): the
+    /// push dialog's ticked rows. Takes precedence over `sheet_indices`, exactly
+    /// as on `PublishParams::sheet_ids`; empty = the default selection.
+    #[serde(default)]
+    pub sheet_ids: Option<Vec<String>>,
     /// Mirror of PublishParams.include_comments, so the dry-run report shows
     /// comments exactly where the real publish would put them (default false).
     #[serde(default)]
@@ -2920,9 +3126,11 @@ pub struct PublishPreviewResponse {
     /// true the moment the default excludes anything.
     #[serde(default)]
     pub sheets: Vec<PublishPreviewSheet>,
-    /// The indices an empty selection resolves to. The dialog sends these
-    /// EXPLICITLY rather than `[]`, so "everything ticked" can never silently
-    /// mean "everything minus the subscribed ones".
+    /// The indices an empty selection resolves to -- the rows of `sheets` whose
+    /// `default_selected` is set, as positions in the list `sheets` was read
+    /// from. The dialog ticks those rows and sends their ids EXPLICITLY rather
+    /// than `[]`, so "everything ticked" can never silently mean "everything
+    /// minus the subscribed ones".
     #[serde(default)]
     pub default_sheet_indices: Vec<usize>,
 }
@@ -2931,10 +3139,15 @@ pub struct PublishPreviewResponse {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishPreviewSheet {
-    /// TRUE workbook index — the value to send back in `sheetIndices`.
+    /// TRUE workbook index, in the sheet list as THIS preview read it. Never
+    /// what the dialog sends back: a sheet moved, copied or deleted while the
+    /// dialog is open renumbers the list under it (see `sheet_id`).
     pub index: usize,
-    /// The workbook's stable sheet uuid, so the dialog can tell "this sheet was
-    /// in the base version" from "a sheet with the same NAME was".
+    /// The workbook's stable sheet uuid -- the value the push dialog sends back
+    /// in `sheetIds` for a ticked row (round 9), because it names this sheet
+    /// wherever it has moved by the time Push is pressed. It also lets the
+    /// dialog tell "this sheet was in the base version" from "a sheet with the
+    /// same NAME was".
     ///
     /// A working copy's ids ARE the application's, so this is directly
     /// comparable with `WorkingCopyLink::base_sheets[].sheet_id`. Comparing the
@@ -3005,15 +3218,19 @@ pub fn calp_publish_preview(
 ) -> Result<PublishPreviewResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
 
-    let filter_links =
-        FilterObjectLinks::snapshot(&slicer_state, &timeline_slicer_state, &pivot_state)?;
-    let selection = resolve_publish_sheet_indices(
+    // The sheets the dialog ticked, by id when it sent ids -- the same rule as
+    // the push (`RequestedSheets::from_wire`), so the dry run describes the
+    // sheets the push would ship.
+    let requested = RequestedSheets::from_wire(params.sheet_ids, params.sheet_indices.unwrap_or_default());
+    let selection = resolve_publish_selection(
         &state,
+        &slicer_state,
+        &timeline_slicer_state,
+        &pivot_state,
         &params.kind,
-        params.sheet_indices.unwrap_or_default(),
-        &filter_links,
+        requested,
+        "previewed",
     )?;
-    let sheet_indices = selection.indices.clone();
 
     // The link's own target, for a dry run that names none — see the call below.
     let link_target: (String, String) = {
@@ -3023,7 +3240,11 @@ pub fn calp_publish_preview(
             .unwrap_or_default()
     };
 
-    let (assembly, unpublished_pivots) = assemble_publish_workbook(
+    // `sheet_indices` is the CARRIER's -- the selection's ids mapped through the
+    // snapshot the door kept (F1, review round 8) -- and the report, the
+    // warnings and the sheet names below read it, never the resolver's
+    // positions. A refusal says "previewed": this door publishes nothing.
+    let PublishedCarrier { assembly, unpublished_pivots, sheet_indices } = assemble_publish_workbook(
         &state,
         &bi_state,
         &pivot_state,
@@ -3033,12 +3254,13 @@ pub fn calp_publish_preview(
         &pane_control_state,
         &user_files_state,
         &timeline_slicer_state,
-        &sheet_indices,
+        &selection.ids,
         // A content-only dry run names no target, so fall back to the link's own —
         // the preview then restores exactly the names its push would.
         params.registry_path.as_deref().unwrap_or(&link_target.0),
         params.package_name.as_deref().unwrap_or(&link_target.1),
         &params.include_in_application,
+        "previewed",
     )?;
     // The report carries the buttons whose macro this push would not publish
     // (`unshipped_macro_links`) -- the push REFUSES on them, so they are a
@@ -3091,6 +3313,13 @@ pub fn calp_publish_preview(
     };
 
     let sheets = publish_preview_sheet_list(&state, &selection)?;
+    // THE DEFAULT TICKS AS POSITIONS IN THE LIST `sheets` WAS READ FROM: each
+    // row's `default_selected` is decided by the selection's STABLE ids, so a
+    // sheet renumbering since the resolution cannot seed the dialog's ticks onto
+    // other rows (F1, review round 8). Object sheets have no row and never had
+    // a tick of their own: they travel with their host.
+    let default_sheet_indices: Vec<usize> =
+        sheets.iter().filter(|row| row.default_selected).map(|row| row.index).collect();
     // The rule the push would keep: the VERIFIED base's (the dialog's control
     // starts from it). Absent without a base. When the base cannot be read the
     // preview SAYS SO -- never a silent "off": the dialog then sends no choice,
@@ -3130,7 +3359,7 @@ pub fn calp_publish_preview(
         base_requires_verified,
         gates,
         sheets,
-        default_sheet_indices: selection.indices.clone(),
+        default_sheet_indices,
     })
 }
 
@@ -4070,6 +4299,155 @@ fn working_copy_base_sheets(
         .map(|l| l.base_sheets.iter().map(|s| s.sheet_id).collect()))
 }
 
+/// WHICH SHEETS A PUBLISH REQUEST NAMED, as its caller named them (round 9).
+///
+/// * BY ID -- the push dialog's ticked rows (`PublishPreviewSheet::sheet_id`,
+///   sent as `sheetIds`). The dialog is non-modal: the author can drag, copy or
+///   delete a tab between the dialog listing the sheets and Push, and so can an
+///   agent. A position read in that earlier command names whatever sheet sits
+///   there NOW -- the tick moved to a neighbour, and a sheet the author had
+///   unticked shipped to every subscriber under their key (F1, review round 8);
+///   "Try again" resent the same positions. An id names the sheet itself,
+///   wherever it has moved, or no sheet at all ([`CALP_PUSH_SHEET_GONE`]).
+///   The dialog's hold-back (`calp_hold_back_cells`) sends the request of the
+///   push it precedes, so the sheets its unticks act on are the ones that push
+///   carries (review round 11).
+/// * BY POSITION -- the callers that pick their sheets in the same call they
+///   publish with: a script (`caps.publish.package`, `caps.publish.preview`)
+///   and the e2e helpers. The push dialog falls back to positions only when a
+///   ticked row was listed without an id, which no id can name. A position is
+///   a place in a list the caller read, and every such list holds user sheets
+///   only (`sheets::build_sheet_list`), so one naming a floating range's
+///   backing sheet is refused like one past the end (review round 11).
+///
+/// Either one EMPTY names no sheet: the default selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RequestedSheets {
+    /// Positions in the sheet list as the caller read it.
+    ByPosition(Vec<usize>),
+    /// Stable sheet ids, as `identity::SheetId` renders them.
+    ById(Vec<String>),
+}
+
+impl Default for RequestedSheets {
+    /// No sheet named: the default selection.
+    fn default() -> Self {
+        Self::ByPosition(Vec::new())
+    }
+}
+
+impl RequestedSheets {
+    /// The request a door's wire params make: `sheet_ids` when present -- the
+    /// ids TAKE PRECEDENCE, an empty list included -- otherwise `sheet_indices`.
+    pub(crate) fn from_wire(sheet_ids: Option<Vec<String>>, sheet_indices: Vec<usize>) -> Self {
+        match sheet_ids {
+            Some(ids) => Self::ById(ids),
+            None => Self::ByPosition(sheet_indices),
+        }
+    }
+
+    /// Does the request name no sheet -- the default selection?
+    pub(crate) fn names_no_sheet(&self) -> bool {
+        match self {
+            Self::ByPosition(positions) => positions.is_empty(),
+            Self::ById(ids) => ids.is_empty(),
+        }
+    }
+
+    /// Does it name sheets BY POSITION? Such a request cannot be worked out
+    /// again after a renumbering: its positions were chosen against a sheet
+    /// list that is gone, and resolving them against the new one could move a
+    /// tick onto a neighbour. An id still names its sheet after any renumbering.
+    fn names_positions(&self) -> bool {
+        matches!(self, Self::ByPosition(positions) if !positions.is_empty())
+    }
+}
+
+/// The code of the refusal for a request that named, BY ID, a sheet the
+/// workbook no longer has (round 9): the author ticked it, and it was deleted
+/// before the publish read the sheets. Never handed to a neighbour, never
+/// dropped -- and NOT the retryable
+/// [`crate::persistence::WORKBOOK_CHANGED_WHILE_SAVING`]: resending the same
+/// ids can never succeed, and what helps is looking at the sheets again.
+pub(crate) const CALP_PUSH_SHEET_GONE: &str = "CALP_PUSH_SHEET_GONE";
+
+/// The code of the refusal for a request that named, BY POSITION, a sheet index
+/// no sheet list shows -- past the end of the list (review round 10), or a
+/// floating range's backing sheet, which no list a caller reads contains
+/// (review round 11) -- when no renumbering overlapped the request. NOT
+/// retryable: the same positions can never succeed, and what helps is reading
+/// the sheet list again and choosing again.
+pub(crate) const CALP_PUSH_SHEET_INDEX_OUT_OF_RANGE: &str = "CALP_PUSH_SHEET_INDEX_OUT_OF_RANGE";
+
+/// [`CALP_PUSH_SHEET_GONE`]'s sentence. Names each sheet whose name the workbook
+/// still records (`name_of_a_sheet_no_longer_here`), and says the door's own act
+/// -- "published", "previewed", "compared" -- as the retryable refusal does.
+fn sheet_gone_refusal(what: &str, gone: &[Option<String>]) -> String {
+    let named: Vec<String> = gone.iter().flatten().map(|name| format!("'{name}'")).collect();
+    let subject = match (gone.len(), named.as_slice()) {
+        (1, [name]) => format!("The sheet {name} you ticked is"),
+        (1, _) => "The sheet you ticked is".to_string(),
+        (count, []) => format!("{count} of the sheets you ticked are"),
+        (count, names) => format!("{count} of the sheets you ticked ({}) are", names.join(", ")),
+    };
+    format!(
+        "{CALP_PUSH_SHEET_GONE}: {subject} no longer in the workbook, so nothing was {what}. Open the \
+         dialog again to see the current sheets."
+    )
+}
+
+/// The name a sheet the workbook no longer has was last known by, when the
+/// workbook still records one: the working-copy link's base sheets -- the
+/// application's own sheets, by id, which is what a push dialog ticks. `None`
+/// when only the deleted tab ever named it, or the id does not parse. (The
+/// subscriptions' ledgers would name a subscribed sheet, but one cannot be
+/// deleted while it is subscribed, so its id never reaches this.) Read ALONE
+/// and released -- the caller holds nothing -- and an unreadable link only
+/// costs the sentence its name.
+fn name_of_a_sheet_no_longer_here(state: &AppState, id: &str) -> Option<String> {
+    let id = SheetId::parse(id.trim())?;
+    let link = state.working_copy_link.read().ok()?;
+    link.as_ref()?
+        .base_sheets
+        .iter()
+        .find(|sheet| sheet.sheet_id == id)
+        .map(|sheet| sheet.name.clone())
+        .filter(|name| !name.trim().is_empty())
+}
+
+/// [`CALP_PUSH_SHEET_INDEX_OUT_OF_RANGE`]'s sentence: the first position no
+/// sheet list shows, the indexes the lists DO show, and the door's own act.
+/// `listed` is those indexes, in order: the user sheets, which is what
+/// `getSheets()`, the tab bar and the push dialog list -- never a floating
+/// range's backing sheet, which none of them shows, so a count that took one in
+/// named an index the caller could not find (review round 11). It states what
+/// is there rather than that something changed -- nothing need have: a script
+/// asking for sheet 3 of three (counting from 1) reads exactly like a list that
+/// shrank before the call, and the remedy for both is to read the list and
+/// choose again, never to resend.
+///
+/// By the partition invariant the listed indexes are `0..n`, said as a range.
+/// A workbook loaded out of that order has them named one by one, so the
+/// sentence never states an index its list does not show.
+fn sheet_index_out_of_range_refusal(what: &str, past: usize, listed: &[usize]) -> String {
+    let count = listed.len();
+    let has = match listed {
+        [] => "no sheets".to_string(),
+        [only] => format!("1 sheet (index {only})"),
+        _ if listed.iter().enumerate().all(|(k, &i)| k == i) => {
+            format!("{count} sheets (indexes 0 to {})", count - 1)
+        }
+        [head @ .., last] => {
+            let head: Vec<String> = head.iter().map(|i| i.to_string()).collect();
+            format!("{count} sheets (indexes {} and {last})", head.join(", "))
+        }
+    };
+    format!(
+        "{CALP_PUSH_SHEET_INDEX_OUT_OF_RANGE}: There is no sheet at index {past}: the workbook has {has}. \
+         Nothing was {what}; read the sheet list again and choose the sheets again."
+    )
+}
+
 /// One sheet named in a publish, with where it came from.
 #[derive(Debug, Clone)]
 pub(crate) struct ProvenancedSheet {
@@ -4085,8 +4463,17 @@ pub(crate) struct ProvenancedSheet {
 /// sheets are leaving.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PublishSelection {
-    /// Workbook indices that will be published.
+    /// Workbook indices that will be published -- positions in the sheet list
+    /// THIS resolution read. A sheet added, deleted or moved after it hands
+    /// them to other sheets, so no door acts on them: each maps [`Self::ids`]
+    /// through its own snapshot's sheet list instead. Kept for the resolver's
+    /// tests, which state a resolution in the positions it read -- hence
+    /// unread outside them.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub indices: Vec<usize>,
+    /// The SAME sheets by STABLE id -- what the publish door carries into every
+    /// snapshot attempt (F1, review round 8).
+    pub ids: PublishSheetIds,
     /// Subscribed sheets the DEFAULT selection withheld. Empty when the author
     /// named sheets explicitly — then nothing was withheld.
     pub withheld_subscribed: Vec<ProvenancedSheet>,
@@ -4102,6 +4489,96 @@ pub(crate) struct PublishSelection {
     /// from a subscribed application, are published by ticking them, never as
     /// a side effect of an object reading from them.
     pub source_warnings: Vec<String>,
+}
+
+/// A publish selection by STABLE sheet id: what [`assemble_publish_workbook`]
+/// maps through each snapshot attempt's OWN sheet list
+/// ([`publish_positions_in_snapshot`]), never a list of positions resolved
+/// before the attempt (F1, review round 8).
+///
+/// Positions were what the door used to carry, and an attempt is retaken
+/// precisely BECAUSE the sheets were renumbered inside the previous one -- so
+/// the retake indexed a renumbered list with the old positions and shipped
+/// whatever sheet had slid into each: the async drill-through's temporary
+/// sheet to every subscriber in place of a floating range's backing sheet, an
+/// agent's deleted sheet's neighbour, or a non-retryable "out of range".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PublishSheetIds {
+    /// The USER sheets, in publish order: ticked (or the default), and the ones
+    /// an object on them reads from.
+    pub sheets: Vec<SheetId>,
+    /// The OBJECT sheets (a floating range's backing sheet) that joined through
+    /// a host in `sheets`, in publish order. Advisory for the ORDER only: each
+    /// attempt re-derives them from its own floating ranges, because a backing
+    /// sheet belongs to its range, not to the selection.
+    pub backing: Vec<SheetId>,
+}
+
+impl PublishSheetIds {
+    /// Does the selection carry this sheet (user or object)?
+    pub(crate) fn contains(&self, id: &SheetId) -> bool {
+        self.sheets.contains(id) || self.backing.contains(id)
+    }
+}
+
+/// WHERE A PUBLISH SELECTION'S SHEETS SIT IN ONE SNAPSHOT ATTEMPT -- positions in
+/// `workbook.sheets`, the attempt's own copy of the sheet list, worked out
+/// INSIDE the attempt and used by every later step of it and of the door
+/// (F1, review round 8).
+///
+/// * Each USER sheet the selection named is found by id. One that is gone (an
+///   agent deleted a ticked sheet) refuses the attempt with the retryable
+///   [`crate::persistence::WORKBOOK_CHANGED_WHILE_SAVING`] -- never its
+///   neighbour, which now holds its old position, and never a non-retryable
+///   "out of range".
+/// * The OBJECT sheets are re-derived from THIS snapshot's floating ranges: a
+///   range follows its host, so its backing sheet travels exactly when its host
+///   is published -- the resolver's own rule (an object sheet joins only
+///   through its owner), applied to the sheets as they are now. A range deleted
+///   since the resolution takes its backing sheet with it; one created on a
+///   published host since brings its own. The resolver's backing sheets come
+///   first, in its order, so an undisturbed publish lists exactly what the
+///   resolver did.
+///
+/// `what` finishes the refusal's "while it was being ..." for the door asking.
+/// Pure, so it is unit-tested without the nine `State` handles of the door.
+pub(crate) fn publish_positions_in_snapshot(
+    workbook: &persistence::Workbook,
+    selected: &PublishSheetIds,
+    what: &str,
+) -> Result<Vec<usize>, String> {
+    let position_of = |id: &SheetId| workbook.sheets.iter().position(|sheet| sheet.id == *id);
+    let mut positions: Vec<usize> = Vec::with_capacity(selected.sheets.len() + selected.backing.len());
+    for id in &selected.sheets {
+        let Some(position) = position_of(id) else {
+            return Err(crate::persistence::workbook_changed_refusal(
+                what,
+                "a sheet chosen for it was deleted before it could be read",
+            ));
+        };
+        if !positions.contains(&position) {
+            positions.push(position);
+        }
+    }
+    let hosts: std::collections::HashSet<SheetId> = selected.sheets.iter().copied().collect();
+    let claimed: Vec<SheetId> = workbook
+        .floating_ranges
+        .iter()
+        .filter(|range| hosts.contains(&range.host_sheet_id))
+        .map(|range| range.backing_sheet_id)
+        .collect();
+    for id in selected.backing.iter().chain(claimed.iter()) {
+        if !claimed.contains(id) {
+            // Its range is gone, or no longer sits on a sheet this publishes.
+            continue;
+        }
+        if let Some(position) = position_of(id) {
+            if !positions.contains(&position) {
+                positions.push(position);
+            }
+        }
+    }
+    Ok(positions)
 }
 
 /// Which tables and pivots each SLICER and TIMELINE reads from, keyed by the
@@ -4268,21 +4745,206 @@ impl FilterObjectLinks {
     }
 }
 
+/// THE SELECTION A PUBLISH DOOR ACTS ON: [`resolve_publish_sheet_indices`] over a
+/// fresh snapshot of the filter objects, VALIDATED against the sheet-structure
+/// generation so its positions and its ids describe ONE sheet list (F1, review
+/// round 8). `calp_publish`, `calp_publish_preview` and the working-copy diff
+/// and merge (`publish_into_for_preview`) all resolve here, each with the
+/// [`RequestedSheets`] its params name -- the push dialog's by id (round 9) --
+/// so a request's ids become positions inside this validated window, and from
+/// there on the selection travels by id again ([`PublishSheetIds`]).
+///
+/// The resolution reads the sheet list with its ids and visibility (one hold),
+/// the floating ranges, the charts, the tables and the slicers and timelines --
+/// which name their sheet BY POSITION -- one store at a time. A renumbering
+/// landing between two of those reads (an agent's delete or move, the async
+/// drill-through's add) would pair one list's positions with another's ids. So
+/// the generation is read first, under `sheet_names` (a renumbering in progress
+/// is waited out), and checked again after the last read
+/// (`persistence::snapshot_is_current`).
+///
+/// THE GENERATION DECIDES FIRST, THE RESULT SECOND (F3, review round 8). A
+/// resolution a renumbering overlapped is thrown away whatever it returned --
+/// an error included: a torn read is exactly what makes a resolution fail (a
+/// position past the end of the list it read), and its error described a list
+/// that no longer exists. A real error is returned only when no renumbering
+/// overlapped it. The overlapped resolution is then worked out again, at most
+/// `persistence::SNAPSHOT_ATTEMPTS` times, when the request named no sheets
+/// (the default reads nothing but live state) or named them BY ID (an id still
+/// names its sheet, wherever it moved; a ticked sheet the renumbering deleted
+/// refuses by name, [`CALP_PUSH_SHEET_GONE`]). One that named POSITIONS is
+/// refused at once, retryably: its positions were chosen against a sheet list
+/// that is gone, and resolving them again against the new one could move a tick
+/// onto a neighbour. That is the ONLY retryable refusal a request by position
+/// gets here: with nothing overlapping it, a position no sheet list shows --
+/// past the end of the list, or a floating range's backing sheet (review round
+/// 11) -- is refused as an index the workbook does not have
+/// ([`CALP_PUSH_SHEET_INDEX_OUT_OF_RANGE`], review round 10), which resending
+/// can never fix. `what` finishes the refusal's "while it was being ...".
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_publish_selection(
+    state: &AppState,
+    slicer_state: &crate::slicer::SlicerState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+    pivot_state: &crate::pivot::types::PivotState,
+    kind: &str,
+    requested: RequestedSheets,
+    what: &str,
+) -> Result<PublishSelection, String> {
+    let positions_named = requested.names_positions();
+    for attempt in 1..=crate::persistence::SNAPSHOT_ATTEMPTS {
+        crate::persistence::count_snapshot_attempt();
+        let basis = crate::persistence::current_snapshot_basis(state)?;
+        let filter_links = FilterObjectLinks::snapshot(slicer_state, timeline_state, pivot_state)?;
+        // NOT `?`: an error is judged by the generation like a selection is.
+        let resolved = resolve_publish_sheet_indices(state, kind, &requested, what, &filter_links);
+        if crate::persistence::snapshot_is_current(state, &basis)? {
+            return resolved;
+        }
+        if positions_named {
+            break;
+        }
+        crate::log_warn!(
+            "CALP",
+            "attempt {}/{}: a sheet was added, deleted or moved while the sheets to include were being \
+             worked out; the selection is worked out again",
+            attempt,
+            crate::persistence::SNAPSHOT_ATTEMPTS
+        );
+    }
+    Err(crate::persistence::workbook_changed_refusal(
+        what,
+        "a sheet was added, deleted or moved while the sheets to include were being worked out",
+    ))
+}
+
 /// Normalize the author's sheet selection: empty means "every sheet you own".
-/// Shared by calp_publish and calp_publish_preview so the dry-run can never
-/// describe a different application than the one a publish with the same input
-/// would write.
+/// Shared by every publish door -- through [`resolve_publish_selection`], which
+/// validates it against the sheet-structure generation -- so the dry-run can
+/// never describe a different application than the one a publish with the same
+/// input would write.
+///
+/// `requested` becomes positions HERE, in the one copy of the sheet list this
+/// resolution reads (round 9). An id is found wherever its sheet now sits, and
+/// one no sheet carries refuses by name ([`CALP_PUSH_SHEET_GONE`]) -- never its
+/// neighbour. A position is taken as given, except one no sheet list shows,
+/// which is refused as an index the workbook does not have
+/// ([`CALP_PUSH_SHEET_INDEX_OUT_OF_RANGE`], not retryable: review round 10):
+/// one past the end of the list, rather than carried on into the id loop
+/// below, where it read as a sheet with no stable id and told the caller to
+/// save and reopen the workbook (F2, review round 8); and one naming a floating
+/// range's backing sheet, which no list a caller reads contains, rather than
+/// dropped in silence by the explicit filter (review round 11). The sentence
+/// counts the sheets a caller can list. `what` is the door's act --
+/// "published", "previewed", "compared", "merged" -- for both refusals.
 pub(crate) fn resolve_publish_sheet_indices(
     state: &AppState,
     kind: &str,
-    requested: Vec<usize>,
+    requested: &RequestedSheets,
+    what: &str,
     // The slicers, timelines and pivot anchors, snapshotted by the caller (they
     // live outside `AppState`). `FilterObjectLinks::default()` means "no filter
     // objects and no pivots".
     filter_links: &FilterObjectLinks,
 ) -> Result<PublishSelection, String> {
     let provenance = crate::sheets::SheetProvenance::snapshot(state)?;
-    let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+    // THE SHEET LIST, ITS IDS AND ITS VISIBILITY AS ONE COPY, under one
+    // `sheet_names` hold, names first -- the order every renumbering takes them
+    // in, and each holds `sheet_names` across its whole mutation. So a
+    // position, its id and whether it is an object sheet always describe one
+    // list, and the id loop at the end can only refuse a sheet that really has
+    // no id (F3, review round 8: the ids used to be copied a hundred lines after
+    // the names, and a delete landing in between left a selected sheet without
+    // one, refused as "save and reopen"). The ids' and the visibility's guards
+    // end with their statements: nothing but `sheet_names` is held while another
+    // store is waited for.
+    let (sheet_names, sheet_ids, visibility) = {
+        let names = state.sheet_names.read().map_err(|e| e.to_string())?;
+        let ids: Vec<identity::SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
+        let visibility: Vec<String> = state.sheet_visibility.read().map_err(|e| e.to_string())?.clone();
+        (names.clone(), ids, visibility)
+    };
+    // WHAT THE REQUEST NAMED, as positions in THAT copy.
+    let requested: Vec<usize> = match requested {
+        RequestedSheets::ByPosition(positions) => {
+            // A POSITION NAMES A PLACE IN A SHEET LIST THE CALLER READ, and every
+            // list a caller can read holds the USER sheets only: the tab bar and
+            // `getSheets()` for scripts and MCP (`build_sheet_list`), and the
+            // push dialog's rows (`publish_preview_sheet_list`). A floating
+            // range's backing sheet is in the state vectors -- at the tail, by
+            // the partition invariant (`sheets::append_user_sheet`) -- but in
+            // no list (review round 11).
+            //
+            // So a position no list shows is refused, whichever way it misses:
+            // PAST THE END (a script's off-by-one, or a list read before a sheet
+            // was deleted; `is_user_sheet` admits a missing index, so it used to
+            // travel on and fail as a sheet with no id), or ON A BACKING SHEET
+            // (the same off-by-one landing in the object tail, which the
+            // explicit filter below dropped in silence: a script counting from 1
+            // sent `[1, 2, 3]` for three sheets and a floating grid, and the
+            // push signed the second and third without the first). Resending
+            // the same positions can never succeed, so the refusal is NOT the
+            // retryable one: it states the sheets the caller CAN list -- never a
+            // count that takes in a sheet no list shows -- and that the caller
+            // must read the list and choose again (review round 10). A
+            // resolution a renumbering overlapped never hands its caller this
+            // error -- `resolve_publish_selection` refuses that one retryably
+            // instead.
+            //
+            // ONE PREDICATE decides what is refused AND what the sentence
+            // counts, so the two cannot disagree. By the partition invariant the
+            // listed positions are `0..listed.len()`, so this refuses exactly
+            // the positions at or past that count; asking `is_user_sheet` rather
+            // than the count keeps a workbook loaded out of that order (a load
+            // copies the file's order and repairs nothing) from refusing a sheet
+            // its own list shows.
+            //
+            // BY POSITION ONLY. A request BY ID may name a backing sheet -- the
+            // subscriber diff sends the pulled backing sheets' ids, which
+            // `calp_get_sheet_provenance` lists -- and the explicit filter below
+            // sends it home to its host.
+            let listed_at = |i: usize| i < sheet_names.len() && crate::sheets::is_user_sheet(&visibility, i);
+            if let Some(&past) = positions.iter().find(|&&i| !listed_at(i)) {
+                let listed: Vec<usize> = (0..sheet_names.len()).filter(|&i| listed_at(i)).collect();
+                return Err(sheet_index_out_of_range_refusal(what, past, &listed));
+            }
+            positions.clone()
+        }
+        RequestedSheets::ById(ids) => {
+            let mut positions: Vec<usize> = Vec::with_capacity(ids.len());
+            let mut gone: Vec<&str> = Vec::new();
+            for raw in ids {
+                // A ROW THAT CARRIED NO ID: the dialog's list
+                // (`publish_preview_sheet_list`) sends an empty one for a sheet
+                // without a stable id. That sheet is still here, so "no longer
+                // in the workbook" would be a lie.
+                if raw.trim().is_empty() {
+                    return Err(sheet_without_id_refusal(None, what));
+                }
+                match SheetId::parse(raw.trim()).and_then(|id| sheet_ids.iter().position(|s| *s == id)) {
+                    Some(position) => {
+                        if !positions.contains(&position) {
+                            positions.push(position);
+                        }
+                    }
+                    None => {
+                        if !gone.contains(&raw.as_str()) {
+                            gone.push(raw);
+                        }
+                    }
+                }
+            }
+            if !gone.is_empty() {
+                let names: Vec<Option<String>> =
+                    gone.iter().map(|id| name_of_a_sheet_no_longer_here(state, id)).collect();
+                return Err(sheet_gone_refusal(what, &names));
+            }
+            // IN THE WORKBOOK'S ORDER, as the dialog's positions were: where an
+            // id sits in the request says nothing about where its sheet sits.
+            positions.sort_unstable();
+            positions
+        }
+    };
     let explicit = !requested.is_empty();
     // What the author actually TICKED. A subscribed sheet in this set is a
     // deliberate republish; one the expansion below would merely drag along is
@@ -4292,14 +4954,17 @@ pub(crate) fn resolve_publish_sheet_indices(
 
     let mut selected: Vec<usize> = if explicit {
         // AN OBJECT SHEET JOINS ONLY THROUGH ITS OWNER, whatever the request
-        // said. The dialog lists user sheets only, but it used to SEED its
-        // selection from the default list, which carries every backing sheet
-        // the floating-range expansion added -- so unticking a canvas page left
-        // its range's hidden backing index in the request, and the range's cells
+        // said. A request BY POSITION can no longer name one -- it is refused
+        // above, as a position no list shows (review round 11) -- but a request
+        // BY ID can, and does: the subscriber diff sends the ids of the backing
+        // sheets a subscription pulled (`calp_get_sheet_provenance` lists them).
+        // The dialog lists user sheets only, but it used to SEED its selection
+        // from the default list, which carries every backing sheet the
+        // floating-range expansion added -- so unticking a canvas page left its
+        // range's hidden backing sheet in the request, and the range's cells
         // shipped as an orphaned object sheet the author had withheld. The
         // backing sheets of the hosts that ARE selected come back below, through
         // the expansion, and nothing else does.
-        let visibility = state.sheet_visibility.read().map_err(|e| e.to_string())?;
         requested
             .into_iter()
             .filter(|&i| crate::sheets::is_user_sheet(&visibility, i))
@@ -4327,18 +4992,15 @@ pub(crate) fn resolve_publish_sheet_indices(
         // A sheet you ADD to the application is published by ticking it: the
         // dialog marks non-base sheets "(new — not in v<base>)", so the tick is
         // informed rather than a default nobody chose.
-        let visibility = state.sheet_visibility.read().map_err(|e| e.to_string())?;
-        let ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
         (0..sheet_names.len())
             .filter(|&i| crate::sheets::is_user_sheet(&visibility, i))
-            .filter(|&i| ids.get(i).map(|id| base.contains(id)).unwrap_or(false))
+            .filter(|&i| sheet_ids.get(i).map(|id| base.contains(id)).unwrap_or(false))
             .collect()
     } else {
         // "Every sheet" means every USER sheet: object-backed sheets are not
         // selectable anywhere (no tab, no picker), so an explicit-selection
         // publish never names them and the default must not either — they
         // join below, through their owner, exactly like an explicit selection.
-        let visibility = state.sheet_visibility.read().map_err(|e| e.to_string())?;
         let count = sheet_names.len();
         (0..count)
             .filter(|&i| crate::sheets::is_user_sheet(&visibility, i))
@@ -4397,11 +5059,9 @@ pub(crate) fn resolve_publish_sheet_indices(
     //
     // Both are left out and WARNED about, naming the object that reads them.
     //
-    // Every store is snapshotted alone and released before the next is taken.
-    let sheet_ids: Vec<identity::SheetId> =
-        state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
-    let visibility: Vec<String> =
-        state.sheet_visibility.read().map_err(|e| e.to_string())?.clone();
+    // The sheet list, its ids and its visibility are the one copy taken above;
+    // every other store is snapshotted alone and released before the next is
+    // taken.
     let fr_rows: Vec<(identity::SheetId, identity::SheetId)> = state
         .floating_ranges
         .read()
@@ -4700,13 +5360,55 @@ pub(crate) fn resolve_publish_sheet_indices(
         .filter_map(named)
         .collect();
 
+    // THE SELECTION BY STABLE ID, from the same `sheet_ids` and `visibility`
+    // copies the expansion above resolved against (F1, review round 8): the
+    // publish door maps these through each snapshot's own sheet list, so a
+    // renumbering after this point can never hand a tick to another sheet.
+    // `resolve_publish_selection` checks that no renumbering landed inside this
+    // resolution either. A sheet with no stable id cannot be told from the sheet
+    // that next takes its place, so it is refused rather than published by
+    // position. Every index here is a sheet the state vectors hold (a position
+    // no list shows was refused above, and the expansion adds only sheets that
+    // are there), so the refusal always names a sheet that is there.
+    let mut ids = PublishSheetIds::default();
+    for &i in &selected {
+        let Some(&id) = sheet_ids.get(i) else {
+            return Err(sheet_without_id_refusal(sheet_names.get(i).map(String::as_str), what));
+        };
+        if crate::sheets::is_user_sheet(&visibility, i) {
+            ids.sheets.push(id);
+        } else {
+            ids.backing.push(id);
+        }
+    }
+
     Ok(PublishSelection {
         indices: selected,
+        ids,
         withheld_subscribed,
         included_subscribed,
         auto_included: auto_included_names,
         source_warnings,
     })
+}
+
+/// The refusal for a sheet the publish would carry that has no stable id: it
+/// cannot be told from the sheet that next takes its place, so it is never
+/// published by position. `name` is the sheet's, when the request reached it by
+/// position; `None` for a ticked row whose id was empty (the dialog's list
+/// sends one for exactly such a sheet). The remedy is right only here -- the
+/// save writes an id for every sheet (`build_workbook_for_save`), so the
+/// reopened workbook has one -- which is why a position past the end of the
+/// list never reaches it (F2, review round 8).
+fn sheet_without_id_refusal(name: Option<&str>, what: &str) -> String {
+    let sheet = match name.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => format!("The sheet '{name}'"),
+        None => "A sheet you ticked".to_string(),
+    };
+    format!(
+        "CALP_PUSH_SHEET_WITHOUT_ID: {sheet} has no stable id, so a publish cannot tell it from the sheet that \
+         next takes its place. Nothing was {what}; save and reopen the workbook, then try again."
+    )
 }
 
 /// A chart's name for a disclosure line: the envelope's `name`, else its
@@ -4733,10 +5435,10 @@ pub(crate) fn publish_preview_sheet_list(
     state: &AppState,
     selection: &PublishSelection,
 ) -> Result<Vec<PublishPreviewSheet>, String> {
-    let names = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+    // Each row pairs `sheet_ids[i]` with `names[i]`: the two under one hold.
+    let (sheet_ids, names) = sheet_ids_and_names(state)?;
     let visibility = state.sheet_visibility.read().map_err(|e| e.to_string())?.clone();
-    let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
-    // Read ALONE and released, like the three above.
+    // Read ALONE and released, like the visibility above.
     let sheet_kinds = state.sheet_kinds.read().map_err(|e| e.to_string())?.clone();
     let provenance = crate::sheets::SheetProvenance::snapshot(state)?;
 
@@ -4752,7 +5454,10 @@ pub(crate) fn publish_preview_sheet_list(
                 .origin(i)
                 .map(|o| o.package_name.clone())
                 .unwrap_or_default(),
-            default_selected: selection.indices.contains(&i),
+            // By STABLE id, from the pair read under one hold above: the
+            // selection's positions describe the list ITS resolution read, and a
+            // renumbering since would tick another row (F1, review round 8).
+            default_selected: sheet_ids.get(i).is_some_and(|id| selection.ids.contains(id)),
             // `.get(i)` for the same reason as `sheet_id`: a short vector reads
             // as the padding default, a worksheet.
             kind: sheet_kinds
@@ -5165,10 +5870,11 @@ pub(crate) fn materialize_pulled_floating_ranges(
     // Snapshotted and RELEASED before the row store is taken:
     // `reassert_object_sheet_markers` takes the rows and then `sheet_ids`, so
     // holding `sheet_ids` while waiting for the rows would invert that order.
+    // The ids and names are read under ONE hold (`sheet_ids_and_names`), because
+    // a row's backing sheet is reported by the name at its id's index.
     // The visibility snapshot likewise: the crate-wide order is visibility
     // BEFORE rows, so it is never taken while the rows are held.
-    let sheet_ids: Vec<SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
-    let sheet_names: Vec<String> = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+    let (sheet_ids, sheet_names) = sheet_ids_and_names(state)?;
     let visibility: Vec<String> = state.sheet_visibility.read().map_err(|e| e.to_string())?.clone();
 
     let mut applied: Vec<(String, String)> = Vec::new();
@@ -5665,6 +6371,51 @@ pub(crate) fn remap_slicer_bi_connections(
             }
         }
     }
+}
+
+/// Re-point design-query CHARTS at the application connections in `ds_to_conn`
+/// (application data-source id -> live connection) -- the chart twin of
+/// `remap_slicer_bi_connections` (BUG-0588). A design-query chart's
+/// `connectionId` is a per-session uuid that a pull and every open re-mint, and
+/// nothing rewrote it: a subscribed design-query chart kept the PUBLISHER's
+/// uuid, `get_connection_bi_model` answered None, and the page filters that
+/// match visuals by connectionId stopped reaching it. The walk itself is
+/// `calp::chart_refs::remap_chart_spec_connection_ids` -- package data-source
+/// id first, then the old uuid string (the publisher's uuid IS the application
+/// data-source id at publish time); on a hit both fields are written, so the
+/// next open re-binds by the stable key.
+///
+/// `only` limits the rewrite to those chart ids (the charts a pull just
+/// materialised); `None` visits every chart, the self-heal the slicer remap
+/// also runs over its whole store -- a chart bound to a LOCAL connection
+/// matches no key and is left alone. A chart the walk does not change keeps
+/// its `spec_json` byte for byte: the spec is parsed, walked and re-serialised
+/// ONLY when the walk changed it. Holds no lock itself -- the caller hands in
+/// the guard -- so it runs under the pull's effect, the refresh's, or the open
+/// path's clean one. Returns how many charts were rewritten.
+pub(crate) fn remap_chart_bi_connections(
+    charts: &mut [crate::api_types::ChartEntry],
+    ds_to_conn: &std::collections::HashMap<String, crate::bi::types::ConnectionId>,
+    only: Option<&std::collections::HashSet<identity::EntityId>>,
+) -> usize {
+    if ds_to_conn.is_empty() {
+        return 0;
+    }
+    let resolve = |key: &str| ds_to_conn.get(key).map(|conn| conn.to_string());
+    let mut rewritten = 0usize;
+    for chart in charts.iter_mut() {
+        if only.is_some_and(|ids| !ids.contains(&chart.id)) {
+            continue;
+        }
+        let Ok(mut spec) = serde_json::from_str::<serde_json::Value>(&chart.spec_json) else {
+            continue;
+        };
+        if calp::chart_refs::remap_chart_spec_connection_ids(&mut spec, &resolve) {
+            chart.spec_json = crate::persistence::chart_spec_text_from_saved(&spec);
+            rewritten += 1;
+        }
+    }
+    rewritten
 }
 
 /// Apply a pulled document theme (Wave A). The theme is a workbook SINGLETON,
@@ -6631,6 +7382,13 @@ pub(crate) fn materialize_pull_result(
     //
     // A CHECKOUT is skipped outright: it preserves the application's sheet ids,
     // so the ids already match and there is nothing to rewrite.
+    //
+    // A design-query chart's CONNECTION id is a different matter: it never
+    // survives a pull in either mode, and the connections it must be re-bound to
+    // do not exist yet -- `load_embedded_data_sources` mints them further down.
+    // The ids landed here are kept so that re-bind reaches exactly these charts.
+    let mut materialized_chart_ids: std::collections::HashSet<identity::EntityId> =
+        std::collections::HashSet::new();
     if !result.charts.is_empty() {
         let chart_ref_map: std::collections::HashMap<SheetId, (SheetId, usize)> = result
             .sheets
@@ -6643,6 +7401,7 @@ pub(crate) fn materialize_pull_result(
             if let Some(&sheet_index) = chart_sheet_index.get(&chart.sheet_id) {
                 if !charts.iter().any(|c| c.id == chart.id) {
                     sub_objects.push(sub_object("chart", chart.id.to_string(), String::new()));
+                    materialized_chart_ids.insert(chart.id);
                     let mut spec = chart.spec;
                     if matches!(mode, MaterializeMode::Subscribe) {
                         calp::chart_refs::remap_chart_spec_sheet_ids(&mut spec, &chart_ref_map);
@@ -7290,6 +8049,35 @@ pub(crate) fn materialize_pull_result(
     // next mutation.
     crate::bi::writeback_source::invalidate_writeback_bi();
 
+    // THE PULLED DESIGN-QUERY CHARTS FIND THEIR MODEL (BUG-0588). Each one
+    // arrived naming the PUBLISHER's connection uuid -- which is the
+    // application's data-source id -- and the connections that uuid must become
+    // were minted just above, so this is the first point the re-bind is
+    // possible (the chart block ran before them). Package data-source id first,
+    // then the uuid string; both fields written, so the next open re-binds by
+    // the stable key (`restore_application_bi_connections`). On a SUBSCRIBE and
+    // on a CHECKOUT alike: unlike the sheet ids a checkout preserves, a
+    // connection uuid never survives a pull. Only the charts THIS pull landed:
+    // a chart the subscriber already had by id was not replaced and is not
+    // this pull's to rewrite. `charts` is taken alone, after every lock the
+    // loader held has been released.
+    if !materialized_chart_ids.is_empty() && !embedded_connection_ids.is_empty() {
+        let mut charts = state.charts.write(&effect).map_err(|e| e.to_string())?;
+        let rewritten = remap_chart_bi_connections(
+            &mut charts,
+            &embedded_connection_ids,
+            Some(&materialized_chart_ids),
+        );
+        if rewritten > 0 {
+            crate::log_info!(
+                "CALP",
+                "pull of '{}': {} design-query chart(s) re-bound to the application's connections",
+                result.package_name,
+                rewritten
+            );
+        }
+    }
+
     // Restore pivot definitions from the application and render to grid.
     // Publish canonicalizes each definition's source_sheet_index to the
     // sheet's POSITION in the application, so position i resolves to where the
@@ -7912,6 +8700,35 @@ pub struct HoldBackCellsParams {
     /// The version to take the held-back cells' values FROM — the base this
     /// push is being made against.
     pub base_version: String,
+    /// The kind the push this hold-back precedes sends (`PublishParams::kind`).
+    /// It decides the push's DEFAULT selection exactly as it does the push's: a
+    /// library that names no sheet publishes none, so none of its cells act.
+    pub kind: String,
+    /// The PUSH'S OWN selection, by position -- what the push sends as
+    /// `PublishParams::sheet_indices`, with the same meaning, and ignored when
+    /// `sheet_ids` is present ([`RequestedSheets::from_wire`]).
+    ///
+    /// WHICH UNTICKS ACT IS RUST'S QUESTION (review round 11, RV11-TS-1). The
+    /// push dialog knew only the rows it ticked, and a push carries more sheets
+    /// than that: a floating range's hidden backing sheet travels with its host,
+    /// and the sheet a chart, slicer, timeline or pivot on a published sheet
+    /// reads is added by the selection. An untick the dialog sorted by its ticks
+    /// alone stopped acting on exactly those sheets, and the push shipped the
+    /// author's value under their key. The hold-back now resolves this selection
+    /// through the push's own resolver and acts on the cells of every sheet it
+    /// carries.
+    #[serde(default)]
+    pub sheet_indices: Vec<usize>,
+    /// The push's own selection BY STABLE ID -- `PublishParams::sheet_ids`, with
+    /// the same meaning: when present it takes precedence over `sheet_indices`,
+    /// an empty list is the default selection, and an id no sheet carries
+    /// refuses the hold-back exactly as it would refuse the push
+    /// ([`CALP_PUSH_SHEET_GONE`]), before anything is written.
+    #[serde(default)]
+    pub sheet_ids: Option<Vec<String>>,
+    /// Every cell the author unticked. Only those on a sheet the push carries
+    /// are held back; the rest are counted in
+    /// [`HoldBackCellsResponse::cells_skipped`].
     pub cells: Vec<HoldBackCellRef>,
 }
 
@@ -7923,6 +8740,13 @@ pub struct HoldBackCellsResponse {
     /// for, and a count that silently shrank would make that impossible to
     /// verify.
     pub cells_held_back: usize,
+    /// How many cells the request named on a sheet the push does NOT carry --
+    /// unticked and not added by the selection, or no longer in the workbook --
+    /// and so left alone: SKIPPED, never refused and never written. The push
+    /// does not ship that sheet, so there is nothing to hold back on it (review
+    /// round 11, RV11-TS-1). `cells_held_back + cells_skipped` is every cell the
+    /// request named.
+    pub cells_skipped: usize,
     /// TRUE when a write happened and therefore an undo entry exists. The
     /// caller MUST call `undo` exactly once when this is true, and must NOT
     /// when it is false — a bare `undo` with nothing to reverse would take back
@@ -7944,6 +8768,94 @@ pub struct HoldBackCellsResponse {
     /// its `finally` on the wrong one gets the dangerous behaviour, not a
     /// compile error.
     pub undo_seq: Option<u64>,
+}
+
+/// WHICH OF THE AUTHOR'S UNTICKS ACT ON A PUSH, and how many do not (review
+/// round 11, RV11-TS-1).
+///
+/// The push dialog cannot answer this: it knows the rows it TICKED, and a push
+/// carries more sheets than that -- a floating range's hidden backing sheet
+/// travels with its host, and the sheet a chart, slicer, timeline or pivot on a
+/// published sheet reads is added by the selection. Sorted by the ticks alone,
+/// an untick on such a sheet stopped acting: the dialog showed the change
+/// ticked again and said it was "on a sheet not in this push", while the push
+/// shipped that sheet with the author's value under their key. So the resolver
+/// that decides what the push SHIPS decides this too, and a cell is held back
+/// exactly when its sheet is one the push carries.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct HoldBackPlan {
+    /// The cells to hold back, grouped by the stable id of the sheet they are
+    /// on -- a user sheet or a floating range's backing sheet -- in the order
+    /// the request first named each sheet. A cell named twice is listed twice,
+    /// as it always was: the count the caller undoes is the count it asked for.
+    pub(crate) sheets: Vec<(SheetId, Vec<(u32, u32)>)>,
+    /// Cells named on a sheet the push does not carry, or by an id that names
+    /// no sheet: SKIPPED, never refused and never written.
+    pub(crate) skipped: usize,
+}
+
+impl HoldBackPlan {
+    /// Sort `cells` by whether `carried` -- the push's resolved selection, its
+    /// user sheets AND its backing sheets -- holds the sheet each is on. Pure.
+    pub(crate) fn for_carried(carried: &PublishSheetIds, cells: &[HoldBackCellRef]) -> Self {
+        let mut plan = Self::default();
+        for cell in cells {
+            let Some(id) = SheetId::parse(cell.sheet_id.trim()).filter(|id| carried.contains(id)) else {
+                plan.skipped += 1;
+                continue;
+            };
+            match plan.sheets.iter_mut().find(|(sheet, _)| *sheet == id) {
+                Some((_, positions)) => positions.push((cell.row, cell.col)),
+                None => plan.sheets.push((id, vec![(cell.row, cell.col)])),
+            }
+        }
+        plan
+    }
+
+    /// Where each planned sheet sits in `sheet_ids` -- the copy of the sheet
+    /// list the write is about to index the grids with -- as `(position, id,
+    /// cells)`, and how many planned cells sit on a sheet that copy no longer
+    /// has: a sheet deleted after the selection was resolved is skipped like any
+    /// other the push does not carry -- never refused, and never handed to the
+    /// sheet that now holds its old position. Pure.
+    pub(crate) fn locate(&self, sheet_ids: &[SheetId]) -> (Vec<(usize, SheetId, Vec<(u32, u32)>)>, usize) {
+        let mut located: Vec<(usize, SheetId, Vec<(u32, u32)>)> = Vec::with_capacity(self.sheets.len());
+        let mut gone = 0usize;
+        for (id, positions) in &self.sheets {
+            match sheet_ids.iter().position(|sheet| sheet == id) {
+                Some(position) => located.push((position, *id, positions.clone())),
+                None => gone += positions.len(),
+            }
+        }
+        (located, gone)
+    }
+}
+
+/// The hold-back plan of a push: `requested` and `kind` are the push's OWN --
+/// what the dialog is about to push with -- resolved by the same validated
+/// resolver the push resolves through ([`resolve_publish_selection`]), and
+/// every cell in `cells` sorted by whether that selection carries its sheet.
+///
+/// A refusal of the selection comes back UNCHANGED, in the push's own words
+/// ("published"): a ticked id that is gone ([`CALP_PUSH_SHEET_GONE`]), a
+/// position no list shows ([`CALP_PUSH_SHEET_INDEX_OUT_OF_RANGE`]), the
+/// retryable renumbering ([`crate::persistence::WORKBOOK_CHANGED_WHILE_SAVING`]).
+/// The hold-back is the push's first step, so the sentence the author reads is
+/// the one the push would have given, and it is true: nothing was published,
+/// and nothing was written. Holds no guard when called, and none across the
+/// resolution.
+pub(crate) fn plan_hold_back_for_push(
+    state: &AppState,
+    slicer_state: &crate::slicer::SlicerState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+    pivot_state: &crate::pivot::types::PivotState,
+    kind: &str,
+    requested: RequestedSheets,
+    cells: &[HoldBackCellRef],
+) -> Result<HoldBackPlan, String> {
+    let selection =
+        resolve_publish_selection(state, slicer_state, timeline_state, pivot_state, kind, requested, "published")?;
+    Ok(HoldBackPlan::for_carried(&selection.ids, cells))
 }
 
 /// Put the BASE version's value back into the cells the author unticked, so the
@@ -7996,6 +8908,15 @@ pub struct HoldBackCellsResponse {
 /// one function because the selection differs — a diff there, an explicit cell
 /// list here — and folding them together would put a merge concept in the
 /// publish path.
+///
+/// WHICH UNTICKS ACT IS DECIDED HERE, by the push's own selection (review round
+/// 11, RV11-TS-1). The request carries the push's `kind` and its sheets, by id
+/// or by position, and every untick the author has; the cells on a sheet the
+/// push CARRIES -- a ticked sheet, a floating range's backing sheet that
+/// travels with its host, a source sheet the selection adds -- are held back,
+/// and the rest are skipped and counted (`cells_skipped`), never refused. A
+/// refusal of the selection itself comes back unchanged, before anything is
+/// read from the base or written ([`plan_hold_back_for_push`]).
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn calp_hold_back_cells(
@@ -8005,6 +8926,8 @@ pub fn calp_hold_back_cells(
     pivot_state: State<crate::pivot::types::PivotState>,
     pane_control_state: State<crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
+    slicer_state: State<crate::slicer::SlicerState>,
+    timeline_slicer_state: State<crate::timeline_slicer::TimelineSlicerState>,
     params: HoldBackCellsParams,
     window: tauri::Window,
 ) -> Result<HoldBackCellsResponse, String> {
@@ -8013,11 +8936,43 @@ pub fn calp_hold_back_cells(
     if params.cells.is_empty() {
         return Ok(HoldBackCellsResponse {
             cells_held_back: 0,
+            cells_skipped: 0,
             undo_recorded: false,
             undo_seq: None,
         });
     }
 
+    // WHICH UNTICKS ACT: the cells on a sheet THE PUSH CARRIES, by the push's
+    // own request and kind, through the resolver the push resolves through
+    // (review round 11, RV11-TS-1). The dialog sorted the unticks by the rows
+    // it ticked, and a push carries more: a floating range's backing sheet
+    // with its host, a chart's or a slicer's source sheet the selection adds.
+    // An untick there stopped acting and the push shipped the author's value.
+    //
+    // FIRST, holding nothing: before the base is read and before a grid is
+    // copied. A refusal of the selection -- a ticked sheet that is gone, a
+    // position no list shows, the retryable renumbering -- comes back
+    // unchanged, and nothing has been read, written or recorded.
+    let plan = plan_hold_back_for_push(
+        &state,
+        &slicer_state,
+        &timeline_slicer_state,
+        &pivot_state,
+        &params.kind,
+        RequestedSheets::from_wire(params.sheet_ids, params.sheet_indices),
+        &params.cells,
+    )?;
+    // NOTHING THE PUSH CARRIES: no write, so no undo entry -- the contract the
+    // caller keys its un-revert on -- and no base read either, since no base
+    // value is written for the signer check to vouch for.
+    if plan.sheets.is_empty() {
+        return Ok(HoldBackCellsResponse {
+            cells_held_back: 0,
+            cells_skipped: plan.skipped,
+            undo_recorded: false,
+            undo_seq: None,
+        });
+    }
 
     // The base side, through the same verification every content read uses —
     // PLUS the signer check (BUG-0262): these values are written into the
@@ -8042,38 +8997,41 @@ pub fn calp_hold_back_cells(
     let mut grids = state.grids.read().map_err(|e| e.to_string())?.clone();
     let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
 
-    // Group by sheet so each sheet's artifact is read once.
-    let mut by_sheet: std::collections::HashMap<String, Vec<(u32, u32)>> =
-        std::collections::HashMap::new();
-    for c in &params.cells {
-        by_sheet.entry(c.sheet_id.clone()).or_default().push((c.row, c.col));
+    // Each carried sheet BY ITS ID in this copy of the sheet list, its cells
+    // grouped so each sheet's artifact is read once. A sheet deleted since the
+    // selection was resolved is skipped like any other the push does not
+    // carry: never refused (the push will not ship it, so there is nothing to
+    // hold back on it), and never handed to the sheet now at its old position.
+    let (located, gone) = plan.locate(&sheet_ids);
+    let skipped = plan.skipped + gone;
+    if located.is_empty() {
+        return Ok(HoldBackCellsResponse {
+            cells_held_back: 0,
+            cells_skipped: skipped,
+            undo_recorded: false,
+            undo_seq: None,
+        });
     }
 
     let mut held = 0usize;
-    for (sheet_id, positions) in &by_sheet {
-        let Some(local_index) = sheet_ids.iter().position(|id| id.to_string() == *sheet_id) else {
-            return Err(format!(
-                "CALP_HOLDBACK_NO_SHEET: the sheet '{}' named by the selection is not in this \
-                 workbook any more. Close the push dialog and reopen it so the list matches.",
-                sheet_id
-            ));
-        };
-
-        // A sheet the base version does not have cannot hold anything back: the
-        // author is ADDING it, and the unit for that is the sheet checkbox.
+    for (local_index, sheet_id, positions) in &located {
+        // A sheet the base version does not have holds back to EMPTY: every
+        // cell on it is one the author ADDED (a new sheet they ticked, the
+        // backing sheet of a floating range they created), and holding an
+        // addition back means the cell is empty in the published version.
         let base_cells = published_cells_in_local_names(
             &*registry,
             &params.package_name,
             &base_version,
             &manifest,
-            sheet_id,
+            &sheet_id.to_string(),
             positions,
             &renames,
         )?
         .unwrap_or_else(|| positions.iter().map(|pos| (*pos, None)).collect());
 
         let grid = grids
-            .get_mut(local_index)
+            .get_mut(*local_index)
             .ok_or_else(|| "Sheet index out of range while holding cells back.".to_string())?;
 
         for (pos, base_cell) in base_cells {
@@ -8118,13 +9076,9 @@ pub fn calp_hold_back_cells(
     // `CALP_RESET_SPILL_CELL` uses one command over: this is rare, and the wrong
     // answer corrupts a published artifact rather than a cell.
     {
-        let seeds: Vec<crate::non_derivable::Node> = by_sheet
+        let seeds: Vec<crate::non_derivable::Node> = located
             .iter()
-            .filter_map(|(sheet_id, positions)| {
-                let idx = sheet_ids.iter().position(|id| id.to_string() == *sheet_id)?;
-                Some(positions.iter().map(move |&(r, c)| (idx, r, c)))
-            })
-            .flatten()
+            .flat_map(|(idx, _, positions)| positions.iter().map(move |&(r, c)| (*idx, r, c)))
             .collect();
 
         // The LIVE grids, not the rolled-back clone: the question is which cells
@@ -8242,6 +9196,7 @@ pub fn calp_hold_back_cells(
 
     Ok(HoldBackCellsResponse {
         cells_held_back: held,
+        cells_skipped: skipped,
         // `apply_script_modified_grids` returns early without recording anything
         // when `cells_modified == 0`, which `held > 0` excludes. The caller keys
         // its `undo` on this, so it must describe what actually happened rather
@@ -9151,21 +10106,40 @@ pub fn calp_get_application_objects(
         .iter()
         .map(|fr| (fr.id.to_string(), fr.host_sheet_id))
         .collect();
-    let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
-    let Some(sub) = subs
-        .subscriptions
-        .iter()
-        .find(|s| s.package_name == package_name)
-    else {
+    // THE SHEET PAIR, COPIED AND RELEASED (C7), not held across the object
+    // stores below: a guard held across nine further acquisitions is a pair with
+    // every one of them; a copy is a pair with none. The lists are a few dozen
+    // names.
+    //
+    // ONE STATEMENT, ONE HOLD (R5-TORN-PAIR-SIBLINGS). Each sheet's id is paired
+    // with its name by index below, so both must come from the same moment:
+    // `sheet_names` is taken first, and its guard -- a temporary -- lives to the
+    // end of this statement, so `sheet_ids` is read while it is still held; both
+    // are released at the `;`. Two statements let a delete or a move land between
+    // the reads and name a sheet after its neighbour. (Spelled inline rather than
+    // through `sheet_ids_and_names` so the copy stays visible in this body to
+    // `application_objects_copy_the_sheet_names_before_the_object_stores`.)
+    let (sheet_names, sheet_ids): (Vec<String>, Vec<SheetId>) = (
+        state.sheet_names.read().map_err(|e| e.to_string())?.clone(),
+        state.sheet_ids.read().map_err(|e| e.to_string())?.clone(),
+    );
+
+    // THE SUBSCRIPTION, COPIED AND RELEASED AT ONCE (R5-PREVIEW-SUBS-DEADLOCK).
+    // The guard used to be taken first and held to the end of this command --
+    // across both sheet reads and `pivot_tables` -- and a cell writer holds
+    // `sheet_names` and `pivot_tables` when it reaches
+    // `record_subscription_override_edits`, which takes `subscriptions`. The AI
+    // chat, the MCP server and the notebook run those writers OFF the main
+    // thread, so opening the Application Explorer during an agent's fill could
+    // leave each thread holding what the other waited for, with nothing in the
+    // log. A copy holds nothing.
+    let sub: Option<calp::manifest::Subscription> = {
+        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
+        subs.subscriptions.iter().find(|s| s.package_name == package_name).cloned()
+    };
+    let Some(sub) = sub else {
         return Err(format!("No subscription named '{}'", package_name));
     };
-
-    // COPIED AND RELEASED (C7), not held across the object stores below. The
-    // order here (`sheet_names` before `pivot_tables`) is the canonical one, but
-    // a guard held across nine further acquisitions is a pair with every one of
-    // them; a copy is a pair with none. The lists are a few dozen names.
-    let sheet_ids: Vec<SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
-    let sheet_names: Vec<String> = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
 
     let sheets: Vec<ApplicationSheetObjectInfo> = sub
         .sheets
@@ -9214,12 +10188,18 @@ pub fn calp_get_application_objects(
         .keys()
         .cloned()
         .collect();
+    // The pivot ids, copied and released BEFORE the object stores below. A cell
+    // writer holds `pivot_tables` and THEN takes `tables` and `named_ranges`
+    // (`update_cells_batch_core`, `update_cell_impl`, `fill_range`), off the main
+    // thread for an agent or a notebook; waiting for `pivot_tables` while holding
+    // `tables` was the same cycle as the subscription above, through another store.
+    let pivot_ids: std::collections::HashSet<String> =
+        pivot_state.pivot_tables.read().map_err(|e| e.to_string())?.keys().map(|k| k.to_string()).collect();
 
     let tables = state.tables.read().map_err(|e| e.to_string())?;
     let charts = state.charts.read().map_err(|e| e.to_string())?;
     let named_ranges = state.named_ranges.read().map_err(|e| e.to_string())?;
     let object_scripts = state.object_scripts.read().map_err(|e| e.to_string())?;
-    let pivot_tables = pivot_state.pivot_tables.read().map_err(|e| e.to_string())?;
     let workbook_scripts = script_state.workbook_scripts.read().map_err(|e| e.to_string())?;
     let workbook_notebooks = script_state
         .workbook_notebooks
@@ -9256,10 +10236,7 @@ pub fn calp_get_application_objects(
                 ),
                 "moduleScript" => (workbook_scripts.contains_key(&o.id), String::new()),
                 "notebook" => (workbook_notebooks.contains_key(&o.id), String::new()),
-                "pivot" => (
-                    pivot_tables.keys().any(|k| k.to_string() == o.id),
-                    String::new(),
-                ),
+                "pivot" => (pivot_ids.contains(&o.id), String::new()),
                 "dataSource" => (
                     connections
                         .values()
@@ -9673,9 +10650,12 @@ pub fn calp_export_overrides(
     window: tauri::Window,
 ) -> Result<calp::OverridePatch, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let layer = state.override_layer.read().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().to_rfc3339();
     // Determine baseline version from subscription manifest (first match wins).
+    // Read and released BEFORE the override layer: `subscriptions` comes first
+    // in the recorder's order (`record_subscription_override_edits`) and in the
+    // refresh apply's, so holding the layer while waiting for it was the
+    // inverted pair (R5-PREVIEW-SUBS-DEADLOCK).
     let baseline_version = {
         let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
         subs.subscriptions.iter()
@@ -9683,6 +10663,7 @@ pub fn calp_export_overrides(
             .map(|s| s.resolved_version.clone())
             .unwrap_or_else(|| "0.0.0".to_string())
     };
+    let layer = state.override_layer.read().map_err(|e| e.to_string())?;
     let patch = calp::OverridePatch::from_layer(&layer, &package_name, &baseline_version, &now);
     Ok(patch)
 }
@@ -9969,32 +10950,21 @@ pub fn calp_refresh_preview(
     window: tauri::Window,
 ) -> Result<calp::refresh::RefreshPreview, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
-    let layer = state.override_layer.read().map_err(|e| e.to_string())?;
 
-    // WHERE EACH OVERRIDDEN CELL ACTUALLY SITS. The apply resolves this as
-    // `id_registry.cell_position(sheet, cell).unwrap_or(ovr.position)`; the
-    // preview must resolve it identically or it will read the wrong upstream
-    // cell and report conflicts that do not exist. The id registry is app state
-    // and `core/calp` cannot see it, so it is snapshotted here and handed over.
-    //
-    // SCOPED SO THE LOCK IS RELEASED before the workspace loop below: `id_registry`
-    // is a bare `Mutex` on the grid write path, and the loop does workspace I/O
-    // that can be a remote transport. Lock order subscriptions -> override_layer
-    // -> id_registry, which is the order this function already takes them in.
-    let override_positions: std::collections::HashMap<(SheetId, CellId), (u32, u32)> = {
-        let id_reg = state.id_registry.lock().map_err(|e| e.to_string())?;
-        layer
-            .overrides
-            .iter()
-            .map(|o| {
-                let pos = id_reg
-                    .cell_position(o.sheet_id, o.cell_id)
-                    .unwrap_or(o.position);
-                ((o.sheet_id, o.cell_id), pos)
-            })
-            .collect()
-    };
+    // NOTHING IS HELD ACROSS ANOTHER STORE HERE (R5-PREVIEW-SUBS-DEADLOCK). This
+    // command used to take `subscriptions` and the override layer FIRST and keep
+    // both for the whole command -- while it waited for `sheet_names` and
+    // `sheet_ids` below, and across the workspace loop. Every cell writer takes
+    // them the other way round: it holds `grid`, `grids` and `sheet_names` (and
+    // the style, dependency, undo and pivot stores) and then calls
+    // `record_subscription_override_edits`, which takes `sheet_ids`,
+    // `subscriptions` and the override layer. The AI chat, the MCP server and the
+    // notebook run those writers OFF the main thread, so a fill overlapping
+    // Collaboration > Refresh left each thread holding what the other waited for:
+    // a window that never answers, nothing in the log. Now the sheet pair is
+    // read and released first, then the calp stores are copied in one scope and
+    // released, and the workspace loop runs on the copies. A preview built from
+    // a snapshot is safe: the apply re-validates against the live subscriptions.
 
     // The LIVE tab names, so the resolver names the sheet the user is looking
     // at. `SubscribedSheet.local_name` is stamped at subscribe and never
@@ -10005,9 +10975,17 @@ pub fn calp_refresh_preview(
     // payloads: a NEW sheet's collision-resolved name decides which pulled
     // references the apply rewrites, and the preview must reach the same names
     // (BUG-0151).
+    //
+    // `sheet_names` BEFORE `sheet_ids`, both held while the ids are paired with
+    // the names (R4-LOCK-1; the `sheet_ids` field doc in lib.rs). The delete
+    // holds `sheet_names` and then takes `sheet_ids`, on the MCP server's own
+    // thread when an agent deletes a sheet, so the opposite order here could
+    // deadlock the main thread against it. Two separate clone-and-release
+    // reads would dodge the deadlock but let a delete or move land between
+    // them and pair one sheet's id with another sheet's name.
     let (local_sheet_names, mut taken_names): (std::collections::HashMap<SheetId, String>, Vec<String>) = {
-        let ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
         let names = state.sheet_names.read().map_err(|e| e.to_string())?;
+        let ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
         (
             ids.iter()
                 .enumerate()
@@ -10015,6 +10993,53 @@ pub fn calp_refresh_preview(
                 .collect(),
             names.clone(),
         )
+    };
+
+    // THE CALP STORES, COPIED IN ONE SCOPE AND RELEASED before the workspace
+    // loop: each workspace group's subscriptions, the override layer, and where
+    // each overridden cell sits. Lock order `subscriptions` -> override layer ->
+    // `id_registry`, the recorder's own order, and no sheet lock is taken while
+    // any of them is held. The loop does workspace I/O that can be a remote
+    // transport; holding these across it stalled every cell writer that reached
+    // the recorder for up to the transport's timeout.
+    type PreviewGroups = Vec<(String, Vec<calp::manifest::Subscription>)>;
+    let (groups, layer, override_positions): (
+        PreviewGroups,
+        calp::OverrideLayer,
+        std::collections::HashMap<(SheetId, CellId), (u32, u32)>,
+    ) = {
+        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
+        let layer = state.override_layer.read().map_err(|e| e.to_string())?;
+
+        // WHERE EACH OVERRIDDEN CELL ACTUALLY SITS. The apply resolves this as
+        // `id_registry.cell_position(sheet, cell).unwrap_or(ovr.position)`; the
+        // preview must resolve it identically or it will read the wrong upstream
+        // cell and report conflicts that do not exist. The id registry is app
+        // state and `core/calp` cannot see it, so it is snapshotted here and
+        // handed over. `id_registry` is a bare `Mutex` on the grid write path, so
+        // its guard is scoped to this block too.
+        let override_positions: std::collections::HashMap<(SheetId, CellId), (u32, u32)> = {
+            let id_reg = state.id_registry.lock().map_err(|e| e.to_string())?;
+            layer
+                .overrides
+                .iter()
+                .map(|o| {
+                    let pos = id_reg
+                        .cell_position(o.sheet_id, o.cell_id)
+                        .unwrap_or(o.position);
+                    ((o.sheet_id, o.cell_id), pos)
+                })
+                .collect()
+        };
+        let groups: PreviewGroups = group_subscriptions_by_registry(&subs.subscriptions)
+            .into_iter()
+            .map(|(registry_path, indices)| {
+                let group: Vec<calp::manifest::Subscription> =
+                    indices.iter().map(|&i| subs.subscriptions[i].clone()).collect();
+                (registry_path, group)
+            })
+            .collect();
+        (groups, layer.clone(), override_positions)
     };
 
     let mut merged = calp::refresh::RefreshPreview {
@@ -10038,12 +11063,9 @@ pub fn calp_refresh_preview(
         unavailable: Vec::new(),
     };
 
-    for (registry_path, indices) in group_subscriptions_by_registry(&subs.subscriptions) {
+    for (registry_path, group) in groups {
         let (registry, scope) = crate::calp_registry::open_workspace_scoped(&registry_path)
             .map_err(|e| format!("Workspace '{}': {}", registry_path, e))?;
-        let group: Vec<_> = indices.iter()
-            .map(|&i| subs.subscriptions[i].clone())
-            .collect();
         let preview =
             calp::refresh::compute_preview_with_taken(
                 &registry,
@@ -10376,15 +11398,18 @@ pub(crate) type RefreshSheetNames = calp::refresh::RefreshSheetNames;
 /// PAYLOAD, not in the grids, so the upstream values the override rebase
 /// compares against are in the same spelling as the live cells.
 ///
-/// LOCKS: `sheet_ids` and `sheet_names` are cloned and released, then
-/// `subscriptions` is read -- the documented `sheet_ids` -> `subscriptions`
-/// order, never both held.
+/// LOCKS: the sheet pair is read under ONE hold, `sheet_names` first
+/// (`sheet_ids_and_names`), and released; only then is `subscriptions` read.
+/// The pair is never torn -- `name_of` below maps each local id to the name at
+/// its index, and a delete landing between two separate reads paired the ids of
+/// before it with the names of after it, so the pulled formulas were rewritten
+/// to read a NEIGHBOURING sheet and saved (R5-TORN-PAIR-SIBLINGS) -- and no
+/// sheet guard is held while `subscriptions` is awaited (R5-PREVIEW-SUBS-DEADLOCK).
 pub(crate) fn prepare_refresh_payloads(
     state: &AppState,
     payloads: &mut [calp::refresh::RefreshPayload],
 ) -> Result<Vec<RefreshSheetNames>, String> {
-    let sheet_ids: Vec<SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
-    let mut taken: Vec<String> = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+    let (sheet_ids, mut taken) = sheet_ids_and_names(state)?;
     // The CURRENT names, before `taken` starts growing with this pass's.
     let current_names = taken.clone();
     let name_of = |local_sid: SheetId| -> Option<String> {
@@ -11131,9 +12156,12 @@ pub(crate) fn apply_refresh_payloads(
             // commands (delete/move/copy_sheet) take controls while holding
             // the sheet locks for their per-sheet HashMap-store remap, so
             // sheet-then-controls is the canonical order — taking controls
-            // first here would be an AB/BA inversion against them.
-            let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
+            // first here would be an AB/BA inversion against them. Among the
+            // sheet locks, `sheet_names` BEFORE `sheet_ids` (R4-LOCK-1; the
+            // `sheet_ids` field doc in lib.rs), and both stay held: the ledger
+            // rows below pair `sheet_ids[idx]` with `sheet_names[idx]`.
             let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
+            let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
             // Same order as first pull: media in before the controls that name
             // it. Additive — the save-time sweep, not this path, decides what a
             // refresh made unreachable.
@@ -11563,6 +12591,17 @@ pub(crate) fn apply_refresh_payloads(
                 &ds_to_conn,
             );
             remap_slicer_bi_connections(&effect, &slicer_state, &ds_to_conn);
+            // ...and the refreshed design-query CHARTS (BUG-0588): the v2 specs
+            // `apply_refreshed_charts` landed above carry the publisher's uuid,
+            // and that function has no map. Every chart, as the slicer remap
+            // visits every slicer: a chart pulled before this re-bind existed
+            // heals here too, and one bound to a local connection matches no
+            // key. `charts` is taken alone; the connections lock was released
+            // when the map above was collected.
+            {
+                let mut charts = state.charts.write(&effect).map_err(|e| e.to_string())?;
+                remap_chart_bi_connections(&mut charts, &ds_to_conn, None);
+            }
         }
 
         // §2.z — ADOPT the refreshed application's pivots.
@@ -12490,8 +13529,8 @@ pub fn calp_get_sheet_provenance(
 /// needs — so the two-source join can be tested rather than only compiled.
 pub(crate) fn sheet_provenance_rows(state: &AppState) -> Result<Vec<SheetProvenanceInfo>, String> {
     let provenance = crate::sheets::SheetProvenance::snapshot(state)?;
-    let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
-    let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
+    // Each row pairs `sheet_ids[i]` with its index: the two under one hold.
+    let (sheet_ids, sheet_names) = sheet_ids_and_names(state)?;
     let link = state.working_copy_link.read().map_err(|e| e.to_string())?.clone();
     let base_sheets: std::collections::HashSet<identity::SheetId> = link
         .as_ref()
@@ -12613,9 +13652,15 @@ pub(crate) fn detach_sheet_inner(
     timeline_state: &crate::timeline_slicer::TimelineSlicerState,
     sheet_index: usize,
 ) -> Result<DetachSheetResponse, String> {
+    // `sheet_names` BEFORE `sheet_ids`, both held while the two are paired
+    // (R4-LOCK-1; the `sheet_ids` field doc in lib.rs). The delete holds
+    // `sheet_names` and then takes `sheet_ids` on the MCP server's own thread,
+    // so the opposite order here could deadlock a Detach against an agent's
+    // delete. Two clone-and-release reads would pair one sheet's id with
+    // another sheet's name if a delete or move landed between them.
     let (local_sid, sheet_name) = {
-        let ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
         let names = state.sheet_names.read().map_err(|e| e.to_string())?;
+        let ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
         let sid = *ids
             .get(sheet_index)
             .ok_or_else(|| format!("Sheet index {} is out of range.", sheet_index))?;
@@ -13307,7 +14352,11 @@ pub(crate) fn dev_subscribe_inner(
 
 /// Materialize a dev pull's controls (sanitized like a real pull) and record
 /// controlSheet ledger entries. Shared by dev subscribe + dev refresh.
-fn materialize_dev_controls(
+///
+/// `pub(crate)` for one reason: the lock-order probe in
+/// `state_digest_lock_order_tests.rs` runs it on a thread of its own while
+/// another thread holds `sheet_names`.
+pub(crate) fn materialize_dev_controls(
     state: &AppState,
     effect: &crate::document_effect::DocumentEffect,
     result: &calp::dev_mode::DevPullResult,
@@ -13359,8 +14408,11 @@ fn materialize_dev_controls(
         &page_targets,
     );
     drop(controls);
-    let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
+    // `sheet_names` BEFORE `sheet_ids`, both held while each ledger row pairs a
+    // local sheet id with its name (R4-LOCK-1; the `sheet_ids` field doc in
+    // lib.rs).
     let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
+    let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
     for entry in &result.controls {
         if let Some(&idx) = dev_map.get(&entry.sheet_id) {
             if let Some(local_sid) = sheet_ids.get(idx) {
@@ -13797,9 +14849,15 @@ pub fn calp_get_writeback_regions(
 pub(crate) fn writeback_region_entries(
     state: &AppState,
 ) -> Result<Vec<calp::WritebackRegionEntry>, String> {
+    // The sheet pair under ONE hold, released before the writeback index is
+    // taken. Each entry's `sheet_index` comes from the ids and its `sheet_name`
+    // from the name at that index, so the two separate reads this used to make
+    // named a region after its NEIGHBOURING sheet whenever a delete landed
+    // between them (R5-TORN-PAIR-SIBLINGS); and `sheet_ids` is no longer waited
+    // for while the writeback index is held.
+    let (sheet_ids, sheet_names) = sheet_ids_and_names(state)?;
     let mut entries = {
         let index = state.writeback_index.lock().map_err(|e| e.to_string())?;
-        let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
         let id_to_index: std::collections::HashMap<identity::SheetId, usize> = sheet_ids
             .iter()
             .enumerate()
@@ -13812,10 +14870,8 @@ pub(crate) fn writeback_region_entries(
         (a.sheet_index, a.row_start, a.col_start).cmp(&(b.sheet_index, b.row_start, b.col_start))
     });
 
-    if let Ok(names) = state.sheet_names.read() {
-        for e in entries.iter_mut() {
-            e.sheet_name = names.get(e.sheet_index).cloned();
-        }
+    for e in entries.iter_mut() {
+        e.sheet_name = sheet_names.get(e.sheet_index).cloned();
     }
 
     // Enrich each entry with its declaration's value type / required / deadline,
@@ -23238,6 +24294,43 @@ pub(crate) fn restore_application_bi_connections(
         crate::bi::writeback_source::invalidate_writeback_bi();
     }
 
+    // THE WORKBOOK'S DESIGN-QUERY CHARTS FIND THE RE-MINTED CONNECTIONS
+    // (BUG-0588). A saved chart carries the PREVIOUS session's uuid in
+    // `connectionId` and -- once a pull or an earlier open has bound it -- the
+    // stable application data-source id in `packageDataSourceId`; the
+    // connections were created just above, so re-bind here, by the stable key
+    // first, as the caller re-binds the pivots (`rebind_bi_pivots_to_
+    // connections`) and `load_embedded_data_sources` the slicers. The FULL live
+    // map rather than only what this call created: a data source another
+    // subscription had already materialised is one this workbook's charts may
+    // still name, and the rewrite is idempotent. Under the open path's clean
+    // effect -- a re-bind on open must not dirty a freshly opened workbook, the
+    // rule of every store rebuild in `open_file`. Lock order: the connections
+    // map is copied out and released before `charts` is taken.
+    let live_sources: std::collections::HashMap<String, crate::bi::types::ConnectionId> =
+        match bi_state.connections.lock() {
+            Ok(conns) => conns
+                .iter()
+                .filter_map(|(id, c)| c.package_data_source_id.clone().map(|ds| (ds, *id)))
+                .collect(),
+            Err(_) => std::collections::HashMap::new(),
+        };
+    if !live_sources.is_empty() {
+        let load = crate::document_effect::DocumentEffect::deliberately_clean(
+            crate::document_effect::CleanReason::LoadingFromDisk,
+        );
+        if let Ok(mut charts) = state.charts.write(&load) {
+            let rewritten = remap_chart_bi_connections(&mut charts, &live_sources, None);
+            if rewritten > 0 {
+                crate::log_info!(
+                    "CALP",
+                    "{} design-query chart(s) re-bound to application connections on open",
+                    rewritten
+                );
+            }
+        }
+    }
+
     ds_to_conn
 }
 
@@ -24070,12 +25163,31 @@ pub(crate) fn restore_pulled_pivots(
 // Capture BI Data Sources for Publishing
 // ============================================================================
 
+/// The id a live BI connection's data source is filed under in a package this
+/// workbook publishes or pushes: the connection's OWN id (its `EntityId`),
+/// for an application connection as for a local one. ONE function, because
+/// two things in the same package must agree on it: the embedded data source
+/// ([`capture_bi_data_sources`]) and the `packageDataSourceId` a design-query
+/// chart carries (`persistence::published_chart_connection_keys`). They used
+/// not to: the carrier stamped the connection's PACKAGE key, which after a
+/// checkout names the previous version's data source, so an existing
+/// subscriber's refresh bound the chart to the connection still serving that
+/// version's model (review RB-1, 2026-10-23).
+pub(crate) fn published_data_source_id(connection_id: &crate::bi::types::ConnectionId) -> String {
+    connection_id.to_string()
+}
+
 /// Extract active BI connections from BiState as publishable data sources.
 /// Captures each connected source's model JSON, bindings, and server/database
 /// (without credentials) so subscribers can refresh BI pivots against live
 /// data. The deprecated query-region path (direct cell insertion) is gone —
 /// BI data flows to subscribers through pivots (and CUBE formulas, planned).
-fn capture_bi_data_sources(
+///
+/// `pub(crate)` for `calp_materialize_tests`: the id each data source is filed
+/// under must agree with the key the carried design-query charts name
+/// (`persistence::published_chart_connection_keys`), and that agreement is
+/// asserted on what this function actually captures, not on its source text.
+pub(crate) fn capture_bi_data_sources(
     state: &AppState,
     bi_state: &BiState,
 ) -> Result<
@@ -24160,8 +25272,9 @@ fn capture_bi_data_sources(
             parsed_database
         };
 
-        // The connection's EntityId (canonical UUID string) is the stable data source ID
-        let ds_id = conn.id.to_string();
+        // The connection's EntityId (canonical UUID string) is the data source's id
+        // in this package -- the one a design-query chart's key names too.
+        let ds_id = published_data_source_id(&conn.id);
 
         // Convert bindings
         let bindings: Vec<calp::TableBinding> = conn.bindings.iter().map(|b| {

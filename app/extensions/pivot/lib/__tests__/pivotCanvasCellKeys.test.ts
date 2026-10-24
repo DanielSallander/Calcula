@@ -753,6 +753,7 @@ function cachedRegion(pivotId: string, startRow: number, startCol: number): Pivo
     endCol: startCol + 3,
     isEmpty: false,
     isModel: false,
+    hasDesignQueryDrill: false,
     canvasFrame: { x: 0, y: 0, width: 200, height: 60 } as PivotRegionData["canvasFrame"],
   };
 }

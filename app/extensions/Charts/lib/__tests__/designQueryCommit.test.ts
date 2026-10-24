@@ -29,7 +29,7 @@ import type { BiPivotModelInfo } from "../../../_shared/components/types";
 import { getChartById, loadChartsFromBackend, resetChartStore } from "../chartStore";
 import { chartsBackend } from "../chartsBackend";
 import { DESIGN_QUERY_UNDO_LABEL, commitDesignQuery } from "../designQueryCommit";
-import type { GaugeMarkOptions } from "../../types";
+import type { DesignQueryDataSource, GaugeMarkOptions } from "../../types";
 
 const MODEL: BiPivotModelInfo = {
   tables: [{ name: "Geo", columns: [{ name: "Region", dataType: "string", isNumeric: false }] }],
@@ -160,5 +160,52 @@ describe("commitDesignQuery", () => {
     const out = await commitDesignQuery("c1", { dslText: DSL, connectionId: "conn-a" });
     expect(out).toEqual({ status: "refused", error: "This chart does not run a design query." });
     expect(log).toEqual([]);
+  });
+});
+
+// The application connection's stable key (DesignQueryDataSource
+// .packageDataSourceId, model-drillthrough.md 2.10). Rust's remap tries the KEY
+// first, so a key that outlives a connection change re-binds the chart to its
+// OLD application connection at the next refresh or open -- silently undoing
+// the reader's pick (review: stale-package-key-reverts-repoint). The store's
+// deep merge keeps a key the patch leaves out, so the commit must clear it.
+describe("commitDesignQuery and the application connection's stable key", () => {
+  /** The `spec.data` the store PERSISTS through `update_chart` -- what Rust stores and remaps. */
+  async function persistedDataAfter(request: { dslText: string; connectionId: string }): Promise<Record<string, unknown>> {
+    const entries: Array<{ specJson: string }> = [];
+    invokeBackend.mockImplementation((cmd: string, args?: { entry?: { specJson: string } }) => {
+      if (cmd === "get_connection_bi_model") return Promise.resolve(MODEL);
+      log.push(cmd);
+      if (cmd === "update_chart" && args?.entry) entries.push(args.entry);
+      return new Promise((resolve) => setTimeout(() => resolve(undefined), 0));
+    });
+    const out = await commitDesignQuery("c1", request);
+    expect(out).toEqual({ status: "written" });
+    expect(entries).toHaveLength(1);
+    return (JSON.parse(entries[0].specJson) as { spec: { data: Record<string, unknown> } }).spec.data;
+  }
+
+  function keyedSpec() {
+    return { ...spec(), data: { type: "designQuery", dslText: DSL, connectionId: "conn-a", packageDataSourceId: "ds-A" } };
+  }
+
+  it("a CHANGED connection drops the old key, in the store and in what is saved", async () => {
+    await load(keyedSpec());
+    const data = await persistedDataAfter({ dslText: DSL, connectionId: "conn-b" });
+    expect(data).toEqual({ type: "designQuery", dslText: DSL, connectionId: "conn-b" });
+    expect(data).not.toHaveProperty("packageDataSourceId");
+    expect((getChartById("c1")!.spec.data as DesignQueryDataSource).packageDataSourceId).toBeUndefined();
+  });
+
+  it("an UNCHANGED connection keeps the key (the key re-binds the chart once its uuid is re-minted)", async () => {
+    await load(keyedSpec());
+    const next = "ROWS: Geo.Region\nVALUES: [Target]";
+    const data = await persistedDataAfter({ dslText: next, connectionId: "conn-a" });
+    expect(data).toEqual({ type: "designQuery", dslText: next, connectionId: "conn-a", packageDataSourceId: "ds-A" });
+  });
+
+  it("a chart without a key is written without one (Rust stamps it at save, from the live connection)", async () => {
+    const data = await persistedDataAfter({ dslText: DSL, connectionId: "conn-b" });
+    expect(data).not.toHaveProperty("packageDataSourceId");
   });
 });

@@ -187,7 +187,7 @@ beforeEach(() => {
   resetPivotCellSelection();
   vi.mocked(openTaskPane).mockClear();
   updateCachedRegions([
-    { pivotId: "cp1", name: "Sales", startRow: 0, startCol: 1024, endRow: 49, endCol: 1026, isEmpty: false, isModel: false },
+    { pivotId: "cp1", name: "Sales", startRow: 0, startCol: 1024, endRow: 49, endCol: 1026, isEmpty: false, isModel: false, hasDesignQueryDrill: false },
   ]);
   cleanups = installPivotVisual({ getTheme: () => DEFAULT_PIVOT_THEME }, () => () => undefined);
   paintedBox();

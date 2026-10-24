@@ -2662,9 +2662,12 @@ pub(crate) fn bi_request_from_definition(
         r
     };
     // Skip the synthetic values-only "Total" row field — it is not a model
-    // column (update_bi_pivot_fields re-injects it as needed).
-    let is_synthetic_total =
-        |f: &PivotField| -> bool { f.name == "Total" && !calc_group_names.contains("Total") };
+    // column (update_bi_pivot_fields re-injects it as needed). The ONE test of
+    // what that field is, shared with the drill-through's group-path loop so
+    // the two cannot drift (a calculation group named "Total" is kept).
+    let is_synthetic_total = |f: &PivotField| -> bool {
+        crate::pivot::utils::is_synthetic_total_row(definition, meta, f.source_index)
+    };
 
     // Hierarchy placements: update_bi_pivot_fields appended each hierarchy's
     // level fields after the plain fields and recorded the range in
@@ -3967,10 +3970,23 @@ pub fn get_pivot_at_cell(
         })
         .collect();
 
-    // Check if this is a BI-backed pivot and populate bi_model
-    let bi_model = {
+    // Check if this is a BI-backed pivot and populate bi_model. The synthetic
+    // values-only "Total" row is decided HERE, under the same guard, by THE
+    // shared rule (`is_synthetic_total_row`): a calculation group or a model
+    // column named "Total" stays in the field list, as the refresh and the
+    // drill treat it.
+    let (bi_model, synthetic_rows) = {
         let bi_meta = pivot_state.bi_metadata.read().unwrap();
-        bi_meta.get(&pivot_id).map(|meta| {
+        let synthetic_rows: Vec<usize> = match bi_meta.get(&pivot_id) {
+            Some(meta) => definition
+                .row_fields
+                .iter()
+                .map(|f| f.source_index)
+                .filter(|&i| crate::pivot::utils::is_synthetic_total_row(definition, meta, i))
+                .collect(),
+            None => Vec::new(),
+        };
+        let bi_model = bi_meta.get(&pivot_id).map(|meta| {
             log_info!(
                 "CALP-DIAG",
                 "get_pivot_at_cell: BI pivot_id={}, connection_id={}, {} tables, {} measures, row_fields={}, col_fields={}, val_fields={}",
@@ -3996,20 +4012,23 @@ pub fn get_pivot_at_cell(
                 // The cache holds no model to read a strategy from.
                 strategy: None,
             }
-        })
+        });
+        (bi_model, synthetic_rows)
     };
 
-    // For BI pivots, filter out the synthetic "Total" row field
-    // (it's an internal implementation detail, not a user-visible field)
-    let field_configuration = if bi_model.is_some() {
+    // The synthetic "Total" row field is an internal implementation detail,
+    // not a user-visible field.
+    let field_configuration = if synthetic_rows.is_empty() {
+        field_configuration
+    } else {
         PivotFieldConfiguration {
-            row_fields: field_configuration.row_fields.into_iter()
-                .filter(|f| f.name != "Total")
+            row_fields: field_configuration
+                .row_fields
+                .into_iter()
+                .filter(|f| !synthetic_rows.contains(&f.source_index))
                 .collect(),
             ..field_configuration
         }
-    } else {
-        field_configuration
     };
 
     Ok(Some(PivotRegionInfo {
@@ -4071,11 +4090,20 @@ pub fn get_pivot_regions_for_sheet(
 /// The body of [`get_pivot_regions_for_sheet`] for sheet `sheet`, over plain
 /// references so a test can drive it.
 pub(crate) fn pivot_regions_for_sheet(state: &AppState, pivot_state: &PivotState, sheet: usize) -> Vec<PivotRegionData> {
-    // Which pivots are data-model pivots, read FIRST and released at the end
-    // of the statement: no guard is held when `pivot_tables` is taken below,
-    // so this adds no lock-order edge.
-    let model_ids: std::collections::HashSet<PivotId> =
-        pivot_state.bi_metadata.read().unwrap().keys().cloned().collect();
+    // Which pivots are data-model pivots, and whether each one's drill-through
+    // is a DESIGN-QUERY drill, read FIRST and released at the end of the
+    // statement: no guard is held when `pivot_tables` is taken below, so this
+    // adds no lock-order edge. A pivot is a model pivot when it is a key here.
+    let model_drill: std::collections::HashMap<PivotId, bool> = pivot_state
+        .bi_metadata
+        .read()
+        .unwrap()
+        .iter()
+        .map(|(id, meta)| {
+            let design_query = meta.drill_through.as_ref().is_some_and(|d| d.design_query.is_some());
+            (*id, design_query)
+        })
+        .collect();
     // LOCK ORDER: `pivot_tables` BEFORE `protected_regions` (see
     // `resolve_dest_sheet_index`, which reads the region under `pivot_tables`).
     let pivot_tables = pivot_state.pivot_tables.read().unwrap();
@@ -4104,7 +4132,10 @@ pub(crate) fn pivot_regions_for_sheet(state: &AppState, pivot_state: &PivotState
                 end_row: r.end_row,
                 end_col: r.end_col,
                 is_empty,
-                is_model: model_ids.contains(&pid),
+                is_model: model_drill.contains_key(&pid),
+                // The value cell's run-row label, known on the first
+                // right-click (false for a range pivot: it has no metadata).
+                has_design_query_drill: model_drill.get(&pid).copied().unwrap_or(false),
                 // The frontend region sync reads the canvas pivot's box here.
                 canvas_frame,
                 // ...and every pivot's persisted style (the renderer's theme).
@@ -10599,8 +10630,9 @@ pub(crate) async fn update_bi_pivot_fields_unrecorded(
     let old_row_fields = definition.row_fields.clone();
     let hierarchy_row_start;
     if use_synthetic_dim {
-        // Synthetic "Total" dimension as the only row field
-        definition.row_fields = vec![PivotField::new(0, "Total".to_string())];
+        // Synthetic "Total" dimension as the only row field, MARKED as such so
+        // a calculation group of the same name is never taken for it.
+        definition.row_fields = vec![crate::pivot::utils::synthetic_total_row_field()];
         hierarchy_row_start = 1;
     } else {
         let mut row_fields_vec: Vec<PivotField> = request
@@ -13252,5 +13284,207 @@ mod number_format_origin_tests {
         assert_eq!(by_name.get("Plain"), Some(&None));
         let json = serde_json::to_value(&measures).unwrap();
         assert!(json.as_array().unwrap().iter().any(|m| m["formatString"] == "#,##0.00"), "{json}");
+    }
+}
+
+#[cfg(test)]
+mod region_drill_flag_tests {
+    //! A pivot REGION says whether the pivot's drill-through is a DESIGN-QUERY
+    //! drill (`PivotRegionData::has_design_query_drill`, model-drillthrough.md
+    //! 2.9), so the value cell's run row is labelled right on the very first
+    //! right-click of a pivot nobody selected -- a canvas box's menu is built
+    //! once, from what is known at that moment.
+    use super::*;
+    use crate::document_effect::test_seed_effect;
+    use crate::pivot::types::{BiPivotMetadata, DrillDesignQuery, DrillPresentation, DrillThroughBehavior, DrillThroughKind};
+
+    /// A pivot whose protected region sits on sheet 0 at `start_row`.
+    fn pivot_on_sheet_0(state: &AppState, pivots: &PivotState, start_row: u32) -> PivotId {
+        let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        let mut def = PivotDefinition::new(id, (0, 0), (2, 1));
+        def.row_fields.push(PivotField::new(0, "Sales.Region".to_string()));
+        pivots.pivot_tables.write(&test_seed_effect()).unwrap().insert(id, (def, PivotCache::new(id, 1)));
+        state.protected_regions.lock().unwrap().push(crate::ProtectedRegion {
+            id: format!("pivot-{}", id),
+            region_type: "pivot".to_string(),
+            owner_id: id,
+            sheet_index: 0,
+            start_row,
+            start_col: 0,
+            end_row: start_row + 2,
+            end_col: 1,
+            reserved_only: false,
+        });
+        id
+    }
+
+    fn meta(drill_through: Option<DrillThroughBehavior>) -> BiPivotMetadata {
+        BiPivotMetadata {
+            connection_id: identity::EntityId::ZERO,
+            data_source_id: None,
+            model_tables: vec![],
+            measures: vec![],
+            hierarchies: vec![],
+            calculation_groups: vec![],
+            data_as_of: None,
+            last_query: None,
+            lookup_columns: std::collections::HashSet::new(),
+            drill_through,
+            perspectives: vec![],
+            selected_perspective: None,
+            cultures: vec![],
+        }
+    }
+
+    fn design_query() -> DrillDesignQuery {
+        DrillDesignQuery {
+            dsl_text: "ROWS: [Sales.Region]\nVALUES: [Revenue]".to_string(),
+            presentation: DrillPresentation::Table,
+            name: Some("Region detail".to_string()),
+            keep_filters: true,
+        }
+    }
+
+    /// SABOTAGE: fill `has_design_query_drill: false` in
+    /// `pivot_regions_for_sheet` -- the design-query pivot's assertion fails.
+    #[test]
+    fn a_region_says_whether_its_pivot_has_a_design_query_drill() {
+        let state = crate::create_app_state();
+        let pivots = PivotState::new();
+        let range = pivot_on_sheet_0(&state, &pivots, 0);
+        let plain = pivot_on_sheet_0(&state, &pivots, 10);
+        let scripted = pivot_on_sheet_0(&state, &pivots, 20);
+        let designed = pivot_on_sheet_0(&state, &pivots, 30);
+        {
+            let mut bi = pivots.bi_metadata.write(&test_seed_effect()).unwrap();
+            bi.insert(plain, meta(None));
+            bi.insert(
+                scripted,
+                meta(Some(DrillThroughBehavior { kind: DrillThroughKind::Script, query: None, design_query: None })),
+            );
+            // A design query WINS over `kind` (2.1), whatever kind it carries.
+            bi.insert(
+                designed,
+                meta(Some(DrillThroughBehavior {
+                    kind: DrillThroughKind::Builtin,
+                    query: None,
+                    design_query: Some(design_query()),
+                })),
+            );
+        }
+
+        let regions = pivot_regions_for_sheet(&state, &pivots, 0);
+        let flags = |id: PivotId| {
+            regions
+                .iter()
+                .find(|r| r.pivot_id == id)
+                .map(|r| (r.is_model, r.has_design_query_drill))
+                .expect("fixture: every pivot's region is listed")
+        };
+        assert_eq!(flags(range), (false, false), "a range pivot has no design-query drill");
+        assert_eq!(flags(plain), (true, false), "a model pivot with no drill behaviour");
+        assert_eq!(flags(scripted), (true, false), "a scripted drill is not a design-query drill");
+        assert_eq!(flags(designed), (true, true), "the design-query drill is known from the region alone");
+
+        // The wire key is camelCase and ALWAYS sent, like `isModel`.
+        let wire = |id: PivotId| serde_json::to_value(regions.iter().find(|r| r.pivot_id == id).unwrap()).unwrap();
+        assert_eq!(wire(designed)["hasDesignQueryDrill"], serde_json::json!(true));
+        assert_eq!(wire(range)["hasDesignQueryDrill"], serde_json::json!(false), "the key is always sent");
+
+        // The next listing follows the stored behaviour: remove the query.
+        pivots.bi_metadata.write(&test_seed_effect()).unwrap().get_mut(&designed).unwrap().drill_through = None;
+        let regions = pivot_regions_for_sheet(&state, &pivots, 0);
+        assert!(!regions.iter().find(|r| r.pivot_id == designed).unwrap().has_design_query_drill);
+    }
+}
+
+#[cfg(test)]
+mod synthetic_total_request_tests {
+    //! `bi_request_from_definition` asks THE shared test of the synthetic
+    //! values-only "Total" row (`pivot::utils::is_synthetic_total_row`), the
+    //! one the drill-through's group-path loop asks too.
+    use super::*;
+    use crate::pivot::types::BiPivotMetadata;
+
+    fn meta(calc_groups: &[&str]) -> BiPivotMetadata {
+        BiPivotMetadata {
+            connection_id: identity::EntityId::ZERO,
+            data_source_id: None,
+            model_tables: vec![],
+            measures: vec![],
+            hierarchies: vec![],
+            calculation_groups: calc_groups
+                .iter()
+                .map(|g| serde_json::from_value(serde_json::json!({ "name": g, "items": [] })).expect("fixture: a group"))
+                .collect(),
+            data_as_of: None,
+            last_query: None,
+            lookup_columns: std::collections::HashSet::new(),
+            drill_through: None,
+            perspectives: vec![],
+            selected_perspective: None,
+            cultures: vec![],
+        }
+    }
+
+    /// The refresh request of a values-only pivot leaves the synthetic row
+    /// out (`update_bi_pivot_fields` re-injects it), while a calculation group
+    /// NAMED "Total" on rows is re-placed as its pseudo ref.
+    #[test]
+    fn a_refresh_request_leaves_the_synthetic_total_out_and_keeps_a_group_named_total() {
+        let mut def = PivotDefinition::new(identity::EntityId::ZERO, (0, 0), (0, 0));
+        def.row_fields.push(PivotField::new(0, "Total".to_string()));
+        let cache = PivotCache::new(def.id, 1);
+
+        let request = bi_request_from_definition(def.id, &def, &cache, &meta(&[]));
+        assert!(request.row_fields.is_empty(), "the synthetic row is not a model column: {:?}", request.row_fields);
+
+        let request = bi_request_from_definition(def.id, &def, &cache, &meta(&["Total"]));
+        assert_eq!(request.row_fields.len(), 1, "a calculation group named Total is a real dimension");
+        assert_eq!(request.row_fields[0].table, CALC_GROUP_TABLE);
+        assert_eq!(request.row_fields[0].column, "Total");
+    }
+
+    /// The body of free fn `name` in `src` (from its `fn name(` line to the
+    /// first line that is exactly `}`), every `//` comment removed.
+    fn fn_body(src: &str, name: &str) -> String {
+        let header = format!("fn {}(", name);
+        let lines: Vec<&str> = src.lines().collect();
+        let start = lines
+            .iter()
+            .position(|l| l.contains(&header) && !l.trim_start().starts_with("//"))
+            .unwrap_or_else(|| panic!("`fn {}(` is gone: update this pin, do not delete it", name));
+        let end = lines[start + 1..].iter().position(|l| *l == "}").map(|o| start + 1 + o).unwrap_or(lines.len() - 1);
+        lines[start..=end].iter().map(|l| l.split("//").next().unwrap_or("")).collect::<Vec<_>>().join("\n")
+    }
+
+    /// ONE copy of the predicate: the refresh request and the drill's
+    /// group-path loop both CALL the helper, and the request keeps no
+    /// hand-written "Total" test of its own beside it.
+    ///
+    /// SABOTAGE: restore the old in-line closure (`f.name == "Total" &&
+    /// !calc_group_names.contains("Total")`) -- both assertions on the request
+    /// fail.
+    #[test]
+    fn the_refresh_and_the_drill_ask_the_one_synthetic_total_test() {
+        let commands = include_str!("commands.rs").replace("\r\n", "\n");
+        let request = fn_body(&commands, "bi_request_from_definition");
+        assert!(request.contains("is_synthetic_total_row("), "the refresh request no longer asks the shared test");
+        assert!(!request.contains("\"Total\""), "the refresh request spells its own \"Total\" test again");
+
+        let drill = include_str!("../drill_through.rs").replace("\r\n", "\n");
+        let context = fn_body(&drill, "pivot_context_core");
+        assert!(context.contains("is_synthetic_total_row("), "the drill's group-path loop no longer asks the shared test");
+
+        // The field list the pane shows (review RB-3): a calculation group named
+        // "Total" placed alone on rows was dropped from it by a name test of its own.
+        let at_cell = fn_body(&commands, "get_pivot_at_cell");
+        assert!(at_cell.contains("is_synthetic_total_row("), "get_pivot_at_cell no longer asks the shared test");
+        assert!(!at_cell.contains("\"Total\""), "get_pivot_at_cell spells its own \"Total\" test again");
+
+        // The one write site places the MARKED field (review RB3).
+        let update = fn_body(&commands, "update_bi_pivot_fields_unrecorded");
+        assert!(update.contains("synthetic_total_row_field()"), "update_bi_pivot_fields_unrecorded no longer places the marked synthetic row");
+        assert!(!update.contains("PivotField::new(0, \"Total\""), "update_bi_pivot_fields_unrecorded builds an UNMARKED Total row again");
     }
 }

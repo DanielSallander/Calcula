@@ -12,10 +12,16 @@
 //          `useEditing.ts`'s own return path is deliberately NOT routed here:
 //          it is the densest code in the app, and moving a dimension refresh
 //          into Core's commit could run `moveActiveCell` on the other sheet's
-//          widths.
+//          widths. It only hands this module every sheet context it renders
+//          (`followShownSheetForExternalSession`), so a live session follows
+//          the sheets by identity when a door it never heard of moves the grid.
 
-import { setActiveSheet as setActiveSheetApi, type SheetsResult } from "./tauri-api";
+import { getSheets, setActiveSheet as setActiveSheetApi, type SheetInfo, type SheetsResult } from "./tauri-api";
 import { setActiveSheet, type GridAction } from "../state/gridActions";
+// The grid's own sheet context: an un-parked session's host IS the sheet the
+// grid shows, which is how the host's NAME is learned (pointModeView.ts reads
+// the same snapshot).
+import { getGridStateSnapshot } from "../state/GridContext";
 // Precedent for this Core -> api/gridDispatch reach: GridContext.tsx and
 // overlayTextEditor.ts. It is the module-level dispatch bridge, not a facade.
 import { dispatchGridAction } from "../../api/gridDispatch";
@@ -24,7 +30,13 @@ import { dispatchGridAction } from "../../api/gridDispatch";
 import { getMoveAfterReturn, getMoveDirection } from "../../api/editingPreferences";
 import {
   getExternalEditSession,
+  getExternalSessionHostIndex,
+  getExternalSessionHostName,
+  getExternalSessionHostSheetId,
+  isExternalSessionHostSheet,
   isExternalSessionParked,
+  noteExternalSessionHost,
+  sameSheetName,
   setExternalSessionParked,
   type ExternalEditMove,
 } from "./formulaEditTarget";
@@ -39,8 +51,11 @@ export type GridDispatch = (action: GridAction) => void;
  *     reducer then resolves it from `sheetSurfaces`)
  *  3. if a session is live: park BEFORE the dispatch, so the render the
  *     dispatch causes (paint, and every hit test until the next render)
- *     already reads it
- *  4. dispatch(setActiveSheet(...))
+ *     already reads it. "Is this the host" is decided by the host's IDENTITY
+ *     -- its stable id, else its name (learned from the grid on the first trip
+ *     away, re-found in every result) -- never by the index the session
+ *     opened with: the sheets are renumbered, and renamed, under an open edit
+ *  4. dispatch(setActiveSheet(...)), with the sheet's stable id
  *  5. window "sheet:formulaModeSwitch" (GridCanvas refetches)
  *  6. ONLY when a session is live: window "dimensions:refresh". Session-only
  *     ON PURPOSE: useEditing's own return path does not refresh dimensions,
@@ -54,15 +69,21 @@ export async function switchSheetForPointMode(
   dispatch: GridDispatch = dispatchGridAction,
   options: { refreshDimensions?: boolean } = {},
 ): Promise<SheetsResult> {
+  learnHostFromShownSheet();
   const result = await setActiveSheetApi(index);
   const sheet = result.sheets.find((s) => s.index === result.activeIndex);
   const name = sheet?.name ?? "";
   const surface = sheet ? (sheet.kind === "canvas" ? "canvas" : "grid") : undefined;
 
   const live = getExternalEditSession() !== null;
-  if (live) setExternalSessionParked(result.activeIndex);
+  if (live) {
+    // Parked or not is decided by the host's IDENTITY (formulaEditTarget
+    // `setExternalSessionParked`), with its index re-found in this fresh list.
+    followHostIn(result.sheets);
+    setExternalSessionParked(result.activeIndex, name, sheet?.sheetId);
+  }
 
-  dispatch(setActiveSheet(result.activeIndex, name, surface));
+  dispatch(setActiveSheet(result.activeIndex, name, surface, sheet?.sheetId));
 
   if (typeof window !== "undefined") {
     window.dispatchEvent(
@@ -75,6 +96,144 @@ export async function switchSheetForPointMode(
     }
   }
   return result;
+}
+
+// ----------------------------------------------------------------------------
+// The live session's HOST, by identity (reviews TSHELL4-DISCARD-LANDS-UNDER-OPEN-EDIT,
+// F1-rename-refuses-entry)
+// ----------------------------------------------------------------------------
+// The owner's `hostSheetIndex` is the host's index when the edit OPENED. A
+// temporary sheet's discard, a delete, a move or a copy -- the strip's, an MCP
+// tool's or a script's -- renumbers the sheets while the edit is open: a trip
+// to the sheet that slid into that index then UN-parked the edit on a foreign
+// sheet, and Enter "returned" to it. So the host is followed by IDENTITY: its
+// stable id -- the owner's own (`session.hostSheetId`), else the one the grid's
+// context carried -- so a rename of the host is followed too, else its name.
+// The VIEWED sheet of a parked edit is followed the same way (review
+// FR-RESYNC-COMMITS-ON-RENUMBER): it is renumbered by the same operations.
+
+/**
+ * Learn the live session's host NAME on its first trip away: an un-parked
+ * session's host is the sheet the grid shows, so Core's own sheet context names
+ * it (and holds its index, and its stable id, now). Only while the name is
+ * unknown -- after that the fresh list of every switch keeps it
+ * (`followHostIn`): the context can lag a dispatch until the next
+ * render, and right after a return to the host it may still name the sheet
+ * just left. A host its owner named by id is never re-learned as another
+ * sheet: a context naming another id is ignored (`noteExternalSessionHost`).
+ */
+function learnHostFromShownSheet(): void {
+  if (getExternalEditSession() === null || isExternalSessionParked()) return;
+  if (getExternalSessionHostName() !== null) return;
+  const shown = getGridStateSnapshot()?.sheetContext;
+  if (!shown || !shown.activeSheetName) return;
+  noteExternalSessionHost(shown.activeSheetIndex, shown.activeSheetName, shown.activeSheetId);
+}
+
+/** The live session's host identity as Core knows it NOW (captured before an await: an owner's teardown clears it). */
+interface HostIdentity {
+  name: string | null;
+  sheetId: string | null;
+}
+
+function hostIdentityNow(): HostIdentity {
+  return { name: getExternalSessionHostName(), sheetId: getExternalSessionHostSheetId() };
+}
+
+/**
+ * The sheet `identity` names in `sheets`: by its stable id when it has one and
+ * the list carries ids, else by its name. Null when the list has no such sheet
+ * (deleted -- or, for a sheet known only by name, renamed -- under the edit);
+ * UNDEFINED when nothing in `identity` can be compared in this list (an
+ * id-only identity and a list without ids, or no identity at all), which is a
+ * "cannot tell", never a "gone".
+ */
+function sheetIn(sheets: readonly SheetInfo[], identity: HostIdentity): SheetInfo | null | undefined {
+  if (identity.sheetId !== null && sheets.some((s) => typeof s.sheetId === "string" && s.sheetId !== "")) {
+    return sheets.find((s) => s.sheetId === identity.sheetId) ?? null;
+  }
+  const { name } = identity;
+  if (name === null) return undefined;
+  return sheets.find((s) => sameSheetName(s.name, name)) ?? null;
+}
+
+/**
+ * Re-find the live session's HOST by identity in a fresh sheet list: its index
+ * -- and name -- NOW. A host in no list keeps its last index (and stays
+ * not-the-view). The VIEWED sheet needs no re-finding here: the switch that
+ * reads this list parks on the sheet it lands on; between switches the view is
+ * followed through the sheet the grid is moved to
+ * (`followShownSheetForExternalSession`).
+ */
+function followHostIn(sheets: readonly SheetInfo[]): void {
+  const found = sheetIn(sheets, hostIdentityNow());
+  if (found) noteExternalSessionHost(found.index, found.name, found.sheetId);
+}
+
+/**
+ * The host's TRUE index NOW, for a return to it: found by `identity` -- its
+ * stable id, else its name -- in a fresh list (null when no sheet is it any
+ * more: deleted, or for a host known only by name, renamed under the edit).
+ * The index the session holds when Core knows nothing to look it up by (no id
+ * from the owner, no trip away yet: the old rule, and no extra read) or when
+ * the answer cannot be checked (no list, or an id-only identity against a list
+ * without ids).
+ */
+async function hostIndexNow(identity: HostIdentity, knownIndex: number): Promise<number | null> {
+  if (identity.name === null && identity.sheetId === null) return knownIndex;
+  const answer = await getSheets();
+  if (!answer || !Array.isArray(answer.sheets)) return knownIndex;
+  const found = sheetIn(answer.sheets, identity);
+  if (found === undefined) return knownIndex;
+  return found?.index ?? null;
+}
+
+/** The sheet the grid shows, as Core's sheet context names it. */
+export interface ShownSheetContext {
+  activeSheetIndex: number;
+  activeSheetName?: string;
+  activeSheetId?: string;
+}
+
+/**
+ * The grid now SHOWS `shown` -- its sheet context as rendered -- moved there by
+ * a door the live session never heard of: a temporary sheet's discard, a
+ * script's or an MCP tool's delete, move, copy or rename (each renumbers or
+ * renames the sheets under the edit), or a script's activateSheet. Core keeps
+ * following the session's sheets BY IDENTITY (review
+ * FR-RESYNC-COMMITS-ON-RENUMBER); useEditing.ts calls this after every render
+ * that changed the context:
+ *
+ *  - PARKED: the parked state is "the grid shows a sheet that is not the
+ *    host", so it is re-decided for the shown sheet -- by identity
+ *    (`setExternalSessionParked`): the host again -> un-parked (the owner
+ *    re-shows its in-place view); the viewed sheet renumbered -> the view at
+ *    its index NOW; another sheet -> the view re-pointed there. A parked edit
+ *    is a formula picking a reference: it survives the move, and it is never
+ *    ended from here (its owner must never commit it while parked).
+ *  - NOT PARKED: an un-parked session's host IS the sheet the grid shows, so a
+ *    shown sheet that is the host by identity is followed -- its index and
+ *    name NOW (the eager half of learning the host). A shown sheet that is NOT
+ *    the host is left alone: that is a switch away the OWNER decides about (a
+ *    floating grid commits its edit), and it is never parked from here.
+ *
+ * Idempotent: the render after a point-mode switch shows exactly what the
+ * switch already decided, and several hook instances may call it per render.
+ * A context that names neither a sheet name nor an id says nothing about
+ * identity, and changes nothing.
+ */
+export function followShownSheetForExternalSession(shown: ShownSheetContext): void {
+  if (getExternalEditSession() === null) return;
+  const name = shown.activeSheetName ?? "";
+  const sheetId = shown.activeSheetId !== undefined && shown.activeSheetId !== "" ? shown.activeSheetId : undefined;
+  if (name === "" && sheetId === undefined) return;
+  if (isExternalSessionParked()) {
+    setExternalSessionParked(shown.activeSheetIndex, name, sheetId);
+    return;
+  }
+  if (name !== "" && isExternalSessionHostSheet({ index: shown.activeSheetIndex, name, sheetId })) {
+    noteExternalSessionHost(shown.activeSheetIndex, name, sheetId);
+  }
 }
 
 /**
@@ -95,7 +254,18 @@ export async function switchSheetForPointMode(
 export async function returnParkedViewToHost(dispatch: GridDispatch = dispatchGridAction): Promise<boolean> {
   const session = getExternalEditSession();
   if (!session || !isExternalSessionParked()) return false;
-  await switchSheetForPointMode(session.hostSheetIndex, dispatch, { refreshDimensions: true });
+  // Captured NOW: the owner's teardown runs right after this call returns.
+  const identity = hostIdentityNow();
+  const hostIndex = getExternalSessionHostIndex() ?? session.hostSheetIndex;
+  const target = await hostIndexNow(identity, hostIndex);
+  if (target === null) {
+    // The host is in no list any more: there is nothing to return to, and its
+    // objects went with it. A session still live stays parked -- the grid does
+    // show a sheet that is not its host.
+    console.warn("[pointModeSheetSwitch] the edit's sheet is gone; there is no sheet to return to.");
+    return false;
+  }
+  await switchSheetForPointMode(target, dispatch, { refreshDimensions: true });
   return true;
 }
 
@@ -105,9 +275,12 @@ let ending = false;
  * End the live session: switch back to its host first when parked, then
  * commit or cancel through the OWNER's own path.
  *
- * In-flight guarded (a second call while one runs returns false). If the host
- * cannot be switched back to (deleted underneath), the session still ends:
- * `parked` is cleared and the commit/cancel runs. Resolves what the owner's
+ * In-flight guarded (a second call while one runs returns false). The host is
+ * found by IDENTITY (its stable id, else its name) at its index now
+ * (`hostIndexNow`). If the host cannot be switched back to (deleted underneath
+ * -- or, known only by name, renamed -- or the switch refused), the session
+ * still ends: `parked` is cleared and the commit/cancel runs -- never a
+ * switch to the index it opened with. Resolves what the owner's
  * commit resolves (false = refused), true for a cancel, false when there was
  * no session (or it went away during the switch).
  */
@@ -123,7 +296,18 @@ export async function endExternalFormulaSession(
   try {
     if (isExternalSessionParked()) {
       try {
-        await switchSheetForPointMode(session.hostSheetIndex, dispatch);
+        // The host by IDENTITY, at its index NOW -- never the index the
+        // session opened with, which names whichever sheet slid into it.
+        const target = await hostIndexNow(
+          hostIdentityNow(),
+          getExternalSessionHostIndex() ?? session.hostSheetIndex,
+        );
+        if (target === null) {
+          console.warn("[pointModeSheetSwitch] the edit's sheet is gone; ending the edit where it is.");
+          setExternalSessionParked(null);
+        } else {
+          await switchSheetForPointMode(target, dispatch);
+        }
       } catch (err) {
         console.error("[pointModeSheetSwitch] could not return to the edit's sheet:", err);
         setExternalSessionParked(null);

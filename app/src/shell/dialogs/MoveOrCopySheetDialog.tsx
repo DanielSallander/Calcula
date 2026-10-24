@@ -2,12 +2,20 @@
 // PURPOSE: Excel's Move or Copy dialog (Home > Cells > Format > Move or Copy
 //          Sheet...): a "Before sheet" list ending in "(move to end)", a
 //          "Create a copy" box, OK / Cancel.
-// CONTEXT: The dialog only ANSWERS -- `{ beforeIndex, copy }`, with
-//          `beforeIndex` a TRUE workbook index or null for the end -- and the
-//          sheet tab strip does the work (sheetTabFlows.ts: `copy_sheet` and/or
-//          `move_sheet`, then the strip's own sheet-switch steps). Opened by
-//          the `core.sheet.moveOrCopy` command (SheetTabs/sheetCommands.ts),
-//          registered with the dialog host there.
+// CONTEXT: The dialog only ANSWERS -- `{ beforeSheetId, copy }`, with
+//          `beforeSheetId` the STABLE id of the chosen sheet or null for the
+//          end -- and the sheet tab strip does the work (sheetTabFlows.ts:
+//          `copy_sheet` and/or `move_sheet`, then the strip's own sheet-switch
+//          steps). Opened by the `core.sheet.moveOrCopy` command
+//          (SheetTabs/sheetCommands.ts), registered with the dialog host there.
+//
+//          BY IDENTITY, never by index: the dialog can stay open while a
+//          temporary sheet's discard renumbers every sheet after it
+//          (model-drillthrough.md 2.7), and an index taken when it opened then
+//          names whichever sheet slid into it -- OK copied or moved the WRONG
+//          sheet (review TSHELL3-CONVERSE-DIALOG-WINDOW). The strip finds the
+//          source and the chosen sheet again by these ids, and refuses with a
+//          toast when either is gone.
 //
 //          Named divergences from Excel:
 //            - no "To book:" box: a Calcula window holds one workbook, so the
@@ -28,26 +36,27 @@ import * as S from "./MoveOrCopySheetDialog.styles";
 
 export const MOVE_OR_COPY_SHEET_DIALOG_ID = "core:move-or-copy-sheet";
 
-/** What the user chose. `beforeIndex` null is "(move to end)". */
+/** What the user chose: the STABLE id of the sheet to place it before, or null for "(move to end)". */
 export interface MoveOrCopySheetChoice {
-  beforeIndex: number | null;
+  beforeSheetId: string | null;
   copy: boolean;
 }
 
 export interface MoveOrCopySheetData {
-  /** TRUE index of the sheet being moved or copied. */
-  sourceIndex: number;
+  /** STABLE id of the sheet being moved or copied. */
+  sourceSheetId: string;
   sourceName: string;
-  /** The sheets the "Before sheet" list offers, in tab order (TRUE indices). */
-  sheets: Array<{ index: number; name: string }>;
+  /** The sheets the "Before sheet" list offers, in tab order, by STABLE id. */
+  sheets: Array<{ sheetId: string; name: string }>;
   /** False for a sheet the backend cannot copy (a canvas). */
   canCopy: boolean;
   /** Called once with the choice on OK; never on Cancel. */
   onResult: (choice: MoveOrCopySheetChoice) => void | Promise<void>;
 }
 
-/** A row of the list: a sheet's TRUE index, or the end. */
-type RowKey = number | "end";
+/** A row of the list: a sheet's STABLE id, or the end. */
+type RowKey = string;
+const END: RowKey = "end";
 
 export function MoveOrCopySheetDialog(props: DialogProps): React.ReactElement | null {
   const { onClose, data } = props;
@@ -56,17 +65,18 @@ export function MoveOrCopySheetDialog(props: DialogProps): React.ReactElement | 
   const canCopy = d.canCopy === true;
   const onResult = d.onResult;
 
+  // A sheet id is a uuid, so it can never be the end row's "end".
   const rows = useMemo<Array<{ key: RowKey; label: string }>>(
     () => [
-      ...sheets.map((s) => ({ key: s.index as RowKey, label: s.name })),
-      { key: "end" as RowKey, label: "(move to end)" },
+      ...sheets.map((s) => ({ key: s.sheetId, label: s.name })),
+      { key: END, label: "(move to end)" },
     ],
     [sheets],
   );
 
   // Excel opens with the sheet being moved selected in the list.
   const [selected, setSelected] = useState<RowKey>(() =>
-    sheets.some((s) => s.index === d.sourceIndex) ? (d.sourceIndex as number) : "end",
+    sheets.some((s) => s.sheetId === d.sourceSheetId) ? (d.sourceSheetId as string) : END,
   );
   const [copy, setCopy] = useState(false);
 
@@ -87,7 +97,7 @@ export function MoveOrCopySheetDialog(props: DialogProps): React.ReactElement | 
   const confirm = useCallback(
     (row: RowKey = selected) => {
       onClose();
-      void onResult?.({ beforeIndex: row === "end" ? null : row, copy: canCopy && copy });
+      void onResult?.({ beforeSheetId: row === END ? null : row, copy: canCopy && copy });
     },
     [selected, copy, canCopy, onResult, onClose],
   );

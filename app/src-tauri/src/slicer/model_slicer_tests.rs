@@ -1823,6 +1823,7 @@ fn delete_sheet_as_the_command_does(fx: &Fx, index: usize) -> Vec<EntityId> {
     let doomed = crate::slicer::commands::filter_targets_of_slicers_on_sheet(&fx.state, &fx.pivots, &fx.slicer, index);
     crate::sheets::delete_sheet_impl(
         &fx.state, &fx.file, &fx.pivots, &fx.files, &fx.pane, &fx.filters, &fx.slicer, &fx.timelines, index, false,
+        None,
     )
     .expect("delete the dashboard sheet");
     crate::slicer::commands::clear_filters_of_deleted_slicers(

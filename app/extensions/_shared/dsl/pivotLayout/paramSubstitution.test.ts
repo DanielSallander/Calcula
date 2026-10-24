@@ -123,6 +123,53 @@ describe("substituteControlParams", () => {
     expect(out).toBe('FILTERS: size = ("5"" pipe")');
   });
 
+  // --- Opaque names: brackets and single quotes, as the lexer reads them -----
+
+  it("ignores @, a quote and # inside a BRACKETED name (the lexer reads [...] as one name)", () => {
+    // SABOTAGE: drop the bracket skip -- `@mail` reads as an unset param and
+    // the WHOLE line is dropped; the `"` in `15" screens` flips the string
+    // state so the real @Size after it is never found.
+    expect(substituteControlParams('FILTERS: [Contacts.e@mail] = ("x")', resolver({}))).toBe(
+      'FILTERS: [Contacts.e@mail] = ("x")',
+    );
+    const quoteInName = 'FILTERS: [P.15" screens] = ("A"), [C.Email] = ("bob@example.com")';
+    expect(substituteControlParams(quoteInName, resolver({}))).toBe(quoteInName);
+    expect(
+      substituteControlParams('FILTERS: [P.15" screens] = @Size', resolver({ Size: { kind: "text", value: "L" } })),
+    ).toBe('FILTERS: [P.15" screens] = ("L")');
+    expect(
+      substituteControlParams("FILTERS: [Orders.Order#] = @Ord", resolver({ Ord: { kind: "text", value: "7" } })),
+    ).toBe('FILTERS: [Orders.Order#] = ("7")');
+    expect(extractControlParams("FILTERS: [Contacts.e@mail] = @Who")).toEqual(["Who"]);
+  });
+
+  it("an UNCLOSED bracket runs to the end of the line, as the lexer reads it: nothing after it is a param", () => {
+    expect(extractControlParams("FILTERS: [Geo.Region = @Region")).toEqual([]);
+    expect(extractControlParams("FILTERS: x = @A, [Geo.Region = @B")).toEqual(["A"]);
+  });
+
+  it("ignores @ inside a SINGLE-QUOTED name, and an unclosed one runs to the end of the line", () => {
+    expect(extractControlParams("FILTERS: 'e@mail' = @Who")).toEqual(["Who"]);
+    expect(substituteControlParams("FILTERS: 'e@mail' = (\"x\")", resolver({}))).toBe("FILTERS: 'e@mail' = (\"x\")");
+    expect(extractControlParams("FILTERS: x = @A, 'open = @B")).toEqual(["A"]);
+  });
+
+  it("a [ or ' inside a quoted VALUE is data, not the start of a name", () => {
+    expect(
+      substituteControlParams('FILTERS: x = ("[a", "it\'s"), y = @Y', resolver({ Y: { kind: "text", value: "v" } })),
+    ).toBe('FILTERS: x = ("[a", "it\'s"), y = ("v")');
+  });
+
+  it("re-substituting a substituted line is a no-op (values are quoted, names bracketed)", () => {
+    const once = substituteControlParams(
+      'FILTERS: [Contacts.e@mail] = @Who, [P.15" screens] = ("A")',
+      resolver({ Who: { kind: "textList", value: ["a@b.com", 'say "hi"'] } }),
+    );
+    expect(once).toBe('FILTERS: [Contacts.e@mail] = ("a@b.com", "say ""hi"""), [P.15" screens] = ("A")');
+    expect(substituteControlParams(once, resolver({}))).toBe(once);
+    expect(hasControlParams(once)).toBe(false);
+  });
+
   it("hasControlParams detects @tokens on FILTERS lines only", () => {
     expect(hasControlParams("FILTERS: x = @A")).toBe(true);
     expect(hasControlParams('FILTERS: x = @"A B"')).toBe(true);

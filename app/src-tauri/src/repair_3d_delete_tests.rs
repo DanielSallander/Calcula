@@ -111,6 +111,7 @@ fn deleting_a_sheet_turns_its_wrapped_references_into_ref() {
         &crate::timeline_slicer::TimelineSlicerState::new(),
         1,
         false,
+        None,
     )
     .expect("delete Data");
     let grid = state.grid.read().unwrap();
@@ -168,6 +169,7 @@ fn delete_sheet_at(state: &AppState, index: usize) {
         &crate::timeline_slicer::TimelineSlicerState::new(),
         index,
         false,
+        None,
     )
     .expect("delete the sheet");
 }

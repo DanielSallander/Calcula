@@ -65,10 +65,14 @@ export async function push(
   const wc = await workingCopy(page);
   if (!wc) throw new Error("push: this workbook is not a working copy");
   const sheetIndices = await pushDefaultIndices(page, workspace, app);
+  // The kind the publish below sends: the hold-back is told the push's own
+  // selection beside it, as PublishDialog tells it (review round 11,
+  // RV11-TS-1), and Rust holds back only the cells on sheets that push carries.
+  const kind = "report";
   let holdBackSeq: number | null = null;
   if (holdBack.length > 0) {
-    const r = await callModule<{ undoRecorded: boolean; undoSeq?: number | null; cellsHeldBack: number }>(page, COLLAB, "holdBackCells", [
-      { registryPath: workspace, packageName: app, baseVersion: wc.baseVersion, cells: holdBack },
+    const r = await callModule<{ undoRecorded: boolean; undoSeq?: number | null; cellsHeldBack: number; cellsSkipped: number }>(page, COLLAB, "holdBackCells", [
+      { registryPath: workspace, packageName: app, baseVersion: wc.baseVersion, cells: holdBack, kind, sheetIndices },
     ]);
     holdBackSeq = r.undoSeq ?? null;
     if (r.undoRecorded && holdBackSeq === null) throw new Error("hold-back recorded an undo step with no id");
@@ -79,7 +83,7 @@ export async function push(
         registryPath: workspace,
         packageName: app,
         version,
-        kind: "report",
+        kind,
         sheetIndices,
         publishedBy: "",
         includeComments: false,
@@ -236,23 +240,32 @@ export function describeDiff(d: VersionDiff): string {
   }).slice(0, 3000);
 }
 
+/** The module SubscriptionDiffDialog takes its sheet selection's wire shape from. */
+export const LISTED_SHEETS = "/extensions/Collaboration/lib/listedSheets.ts";
+
 /** The subscriber's "View changes" diff, exactly as SubscriptionDiffDialog asks for it. */
 export async function subscriberDiff(page: Page, app: string): Promise<VersionDiff> {
   const subs = await callModule<{ subscriptions: Array<{ packageName: string; registryUrl: string; resolvedVersion: string }> }>(page, COLLAB, "getSubscriptions");
   const sub = subs.subscriptions.find((s) => s.packageName === app);
   if (!sub) throw new Error(`no subscription to ${app}`);
-  const rows = await callModule<Array<{ role: string; packageName: string; registryUrl: string; upstreamRemoved?: boolean; sheetIndex: number; packageSheetId: string }>>(
-    page,
-    COLLAB,
-    "getSheetProvenance",
-  );
+  const rows = await callModule<
+    Array<{ role: string; packageName: string; registryUrl: string; upstreamRemoved?: boolean; sheetIndex: number; sheetId: string; packageSheetId: string }>
+  >(page, COLLAB, "getSheetProvenance");
   const mine = rows.filter((r) => r.role === "subscribed" && r.packageName === app && r.registryUrl === sub.registryUrl && !r.upstreamRemoved);
+  // BY STABLE ID beside the positions -- this workbook's LOCAL ids, which the
+  // backend takes in preference -- through the dialog's own `selectionWire`,
+  // run in the page. Positions alone name a pulled floating range's hidden
+  // backing sheet by a position no sheet list shows, which Rust refuses
+  // (CALP_PUSH_SHEET_INDEX_OUT_OF_RANGE); its id is accepted.
+  const selection = await callModule<{ sheetIndices: number[]; sheetIds?: string[] }>(page, LISTED_SHEETS, "selectionWire", [
+    mine.map((x) => ({ index: x.sheetIndex, sheetId: x.sheetId })),
+  ]);
   const r = await callModule<{ diff: VersionDiff }>(page, COLLAB, "diffWorkingCopy", [
     {
       registryPath: sub.registryUrl,
       packageName: app,
       baseVersion: sub.resolvedVersion,
-      sheetIndices: mine.map((x) => x.sheetIndex),
+      ...selection,
       includeComments: true,
       scopeSheetIds: mine.map((x) => x.packageSheetId),
     },

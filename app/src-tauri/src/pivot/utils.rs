@@ -99,6 +99,56 @@ pub(crate) fn bi_placed_field_keys(definition: &PivotDefinition, meta: &BiPivotM
     })
 }
 
+/// The name `update_bi_pivot_fields` gives the synthetic row dimension of a
+/// values-only BI pivot (`use_synthetic_dim`): its cache field 0 and its one
+/// row field are both called this.
+const SYNTHETIC_TOTAL_ROW: &str = "Total";
+
+/// THE synthetic "Total" row field of a values-only BI pivot, MARKED as such
+/// (`PivotField::is_synthetic_total`): what `update_bi_pivot_fields` places as
+/// the one row field when no dimension is placed. The marker, not the name, is
+/// what [`is_synthetic_total_row`] reads.
+pub(crate) fn synthetic_total_row_field() -> PivotField {
+    let mut field = PivotField::new(0, SYNTHETIC_TOTAL_ROW.to_string());
+    field.is_synthetic_total = true;
+    field
+}
+
+/// Whether cache field `field_index` of a BI pivot is the SYNTHETIC "Total"
+/// row -- the placeholder dimension a values-only pivot (measures, perhaps a
+/// filter-area field, no row or column field) is given so it has one row to
+/// show its totals on. It is not a model column and it pins every record, so it
+/// is padding, never a partial path: a drill skips it (`drill_through.rs`'s
+/// group-path loop) and a refresh's request leaves it out
+/// (`bi_request_from_definition`; `update_bi_pivot_fields` re-injects it).
+///
+/// True when a ROW field placed at `field_index` CARRIES the synthetic marker
+/// ([`synthetic_total_row_field`]; review RB3: a model that merely HAS a
+/// calculation group named "Total" made the name rule misread a values-only
+/// pivot's row as that group) -- or, for a field saved before the marker, is
+/// named "Total" while no calculation group of the model is (a group of that
+/// name placed alone on rows ALSO sits at cache index 0 under that name, and is a
+/// real dimension whose item must not be dropped) -- and `field_index` is not a
+/// placed model column ([`bi_placed_field_keys`]). THE one copy of this test,
+/// so the drill and the refresh cannot drift apart on what "synthetic" means.
+pub(crate) fn is_synthetic_total_row(
+    definition: &PivotDefinition,
+    meta: &BiPivotMetadata,
+    field_index: usize,
+) -> bool {
+    // A FIELD saved before the marker existed falls back to the name rule:
+    // named "Total" while no calculation group of the model is (such a group
+    // placed alone on rows also sits at index 0 under that name).
+    let named_like_it_before_the_marker = |f: &PivotField| {
+        f.name == SYNTHETIC_TOTAL_ROW && !meta.calculation_groups.iter().any(|g| g.name == SYNTHETIC_TOTAL_ROW)
+    };
+    definition
+        .row_fields
+        .iter()
+        .any(|f| f.source_index == field_index && (f.is_synthetic_total || named_like_it_before_the_marker(f)))
+        && !bi_placed_field_keys(definition, meta).iter().any(|(i, _)| *i == field_index)
+}
+
 /// The member `{ key, label }` of `value_id` in field `field_index`, its
 /// label written for `locale` from the locale-free `FieldCache::member_source`.
 pub(crate) fn member_ref(
@@ -316,12 +366,34 @@ pub(crate) fn col_index_to_letter(col: u32) -> String {
 // COLLAPSE STATE PRESERVATION
 // ============================================================================
 
+/// The field `new_field` WAS before a rebuild: the old field of the same NAME
+/// and the same KIND. The synthetic values-only "Total" row
+/// (`PivotField::is_synthetic_total`, [`synthetic_total_row_field`]) is never
+/// the namesake of a calculation group called "Total", nor the reverse (review
+/// RB3): matched by name alone, a group dragged onto a measure-only pivot took
+/// the synthetic row's Ascending sort over its own declaration order, and kept
+/// it on every later edit as if the user had chosen it.
+///
+/// THE one matcher [`preserve_collapse_state`] and [`preserve_field_settings`]
+/// both ask, so the two cannot drift apart on what "the same field" means --
+/// that drift between two readers of one fact is the RB3 failure itself. A
+/// field saved before the marker reads `false`, so such a file's synthetic row
+/// counts as an ordinary field named "Total": a calculation group of that name
+/// placed over it still inherits from it (the RB3 blind spot, kept only for a
+/// file saved before the marker), and the marked row a rebuild places does not.
+fn previous_namesake<'a>(old_fields: &'a [PivotField], new_field: &PivotField) -> Option<&'a PivotField> {
+    old_fields
+        .iter()
+        .find(|o| o.name == new_field.name && o.is_synthetic_total == new_field.is_synthetic_total)
+}
+
 /// Carry over collapse state (collapsed flag + per-item collapsed_items) from
-/// old fields to new fields that match by name.  Fields that were removed or
-/// added keep the default (expanded) state.
+/// old fields to new fields that match by name and kind
+/// ([`previous_namesake`]). Fields that were removed or added keep the default
+/// (expanded) state.
 pub(crate) fn preserve_collapse_state(new_fields: &mut [PivotField], old_fields: &[PivotField]) {
     for new_field in new_fields.iter_mut() {
-        if let Some(old) = old_fields.iter().find(|o| o.name == new_field.name) {
+        if let Some(old) = previous_namesake(old_fields, new_field) {
             new_field.collapsed = old.collapsed;
             new_field.collapsed_items = old.collapsed_items.clone();
         }
@@ -329,9 +401,10 @@ pub(crate) fn preserve_collapse_state(new_fields: &mut [PivotField], old_fields:
 }
 
 /// Carry each field's own SETTINGS -- sort order, subtotals, show-all-items
-/// and grouping -- from the field of the same NAME the pivot held before a
-/// rebuild, found in ANY zone (a field dragged from Rows to Columns is still
-/// the same field and keeps its settings, as in Excel).
+/// and grouping -- from the field of the same NAME and kind
+/// ([`previous_namesake`]) the pivot held before a rebuild, found in ANY zone
+/// (a field dragged from Rows to Columns is still the same field and keeps its
+/// settings, as in Excel).
 ///
 /// A BI pivot's field-list edit rebuilds every field from `PivotField::new`
 /// over the NEW cache, whose column indices change -- so a sort, a grouping or
@@ -342,7 +415,7 @@ pub(crate) fn preserve_collapse_state(new_fields: &mut [PivotField], old_fields:
 /// left alone.
 pub(crate) fn preserve_field_settings(new_fields: &mut [PivotField], old_fields: &[PivotField]) {
     for new_field in new_fields.iter_mut() {
-        if let Some(old) = old_fields.iter().find(|o| o.name == new_field.name) {
+        if let Some(old) = previous_namesake(old_fields, new_field) {
             new_field.sort_order = old.sort_order;
             new_field.show_subtotals = old.show_subtotals;
             new_field.show_all_items = old.show_all_items;
@@ -1142,4 +1215,273 @@ pub(crate) fn is_bi_cosmetic_only_change(
     }
 
     true
+}
+
+#[cfg(test)]
+mod synthetic_total_row_tests {
+    //! THE one test of what the synthetic values-only "Total" row is
+    //! ([`is_synthetic_total_row`]): the drill-through's group-path loop skips
+    //! it (a measure-only pivot must drill), `bi_request_from_definition` leaves
+    //! it out of a refresh -- and neither may drop a calculation group that
+    //! happens to be called "Total".
+    use super::*;
+
+    /// A model snapshot with these calculation groups and these tables
+    /// (name, columns). Built through serde so a field the types gain later
+    /// (with a default) does not break the fixture.
+    fn meta(calc_groups: &[&str], tables: &[(&str, &[&str])]) -> BiPivotMetadata {
+        BiPivotMetadata {
+            connection_id: identity::EntityId::ZERO,
+            data_source_id: None,
+            model_tables: tables
+                .iter()
+                .map(|(name, columns)| {
+                    serde_json::from_value(serde_json::json!({
+                        "name": name,
+                        "columns": columns
+                            .iter()
+                            .map(|c| serde_json::json!({ "name": c, "dataType": "string", "isNumeric": false }))
+                            .collect::<Vec<_>>(),
+                    }))
+                    .expect("fixture: a model table")
+                })
+                .collect(),
+            measures: vec![],
+            hierarchies: vec![],
+            calculation_groups: calc_groups
+                .iter()
+                .map(|g| serde_json::from_value(serde_json::json!({ "name": g, "items": [] })).expect("fixture: a group"))
+                .collect(),
+            data_as_of: None,
+            last_query: None,
+            lookup_columns: std::collections::HashSet::new(),
+            drill_through: None,
+            perspectives: vec![],
+            selected_perspective: None,
+            cultures: vec![],
+        }
+    }
+
+    /// What `update_bi_pivot_fields` builds for VALUES only: the synthetic
+    /// "Total" dimension as the one row field, at cache index 0, MARKED.
+    fn values_only() -> PivotDefinition {
+        let mut def = PivotDefinition::new(identity::EntityId::ZERO, (0, 0), (0, 0));
+        def.row_fields.push(synthetic_total_row_field());
+        def
+    }
+
+    /// The same pivot as a file saved before the marker holds it: an unmarked
+    /// row field named "Total" -- also exactly what a calculation group named
+    /// "Total", placed alone on rows, looks like.
+    fn unmarked_total_row() -> PivotDefinition {
+        let mut def = PivotDefinition::new(identity::EntityId::ZERO, (0, 0), (0, 0));
+        def.row_fields.push(PivotField::new(0, "Total".to_string()));
+        def
+    }
+
+    #[test]
+    fn the_values_only_total_row_is_synthetic_and_no_other_index_is() {
+        let def = values_only();
+        let m = meta(&[], &[("Sales", &["Region", "Amount"])]);
+        assert!(is_synthetic_total_row(&def, &m, 0), "the measure-only pivot's row is padding");
+        assert!(!is_synthetic_total_row(&def, &m, 1), "no row field sits at index 1");
+    }
+
+    /// SABOTAGE: drop the calculation-group clause of the fallback -- a group
+    /// named "Total" placed alone on rows (an UNMARKED field at index 0, also
+    /// named "Total") reads as synthetic, and a drill on one of its items would
+    /// silently widen.
+    #[test]
+    fn a_calculation_group_named_total_is_a_real_dimension() {
+        assert!(!is_synthetic_total_row(&unmarked_total_row(), &meta(&["Total"], &[]), 0));
+        // Another group's name changes nothing.
+        assert!(is_synthetic_total_row(&unmarked_total_row(), &meta(&["Time Intelligence"], &[]), 0));
+    }
+
+    /// Review RB3: a model that merely HAS a calculation group named "Total"
+    /// (not placed) made the name rule read a values-only pivot's synthetic row
+    /// as that group -- the refresh asked for the group, the drill refused the
+    /// coordinate, and the pane listed a Total chip that the next edit turned into
+    /// the group. The MARKER decides.
+    ///
+    /// SABOTAGE: drop `f.is_synthetic_total ||` from the predicate -- the first
+    /// assertion fails.
+    #[test]
+    fn the_marked_row_is_synthetic_even_when_the_model_has_a_group_named_total() {
+        assert!(is_synthetic_total_row(&values_only(), &meta(&["Total"], &[]), 0));
+        assert!(is_synthetic_total_row(&values_only(), &meta(&[], &[]), 0));
+        // A file saved before the marker keeps the name rule, with its known
+        // blind spot (the group of the same name wins).
+        assert!(is_synthetic_total_row(&unmarked_total_row(), &meta(&[], &[]), 0));
+        assert!(!is_synthetic_total_row(&unmarked_total_row(), &meta(&["Total"], &[]), 0));
+    }
+
+    /// The marker is written only when true and reads false when absent, so a
+    /// definition saved before it parses unchanged and an ordinary field adds
+    /// nothing to the file.
+    #[test]
+    fn the_marker_is_written_only_when_true_and_absent_reads_false() {
+        let marked = serde_json::to_value(synthetic_total_row_field()).unwrap();
+        assert_eq!(marked["is_synthetic_total"], serde_json::json!(true));
+        let plain = serde_json::to_value(PivotField::new(3, "Region".to_string())).unwrap();
+        assert!(plain.get("is_synthetic_total").is_none(), "an ordinary field writes no marker: {plain}");
+        let mut old = marked.clone();
+        old.as_object_mut().unwrap().remove("is_synthetic_total");
+        let parsed: PivotField = serde_json::from_value(old).unwrap();
+        assert!(!parsed.is_synthetic_total, "absent reads false");
+    }
+
+    /// Only a ROW field named exactly "Total" at that index is the synthetic
+    /// row: a column or filter field of that name is not, a row field of
+    /// another name is not, and an index a placed MODEL column holds never is.
+    ///
+    /// SABOTAGE: drop the `bi_placed_field_keys` clause -- the last assertion
+    /// fails.
+    #[test]
+    fn only_a_row_field_named_total_that_is_no_model_column_counts() {
+        let m = meta(&[], &[("Sales", &["Region", "Amount"])]);
+
+        let mut on_columns = PivotDefinition::new(identity::EntityId::ZERO, (0, 0), (0, 0));
+        on_columns.column_fields.push(PivotField::new(0, "Total".to_string()));
+        assert!(!is_synthetic_total_row(&on_columns, &m, 0), "a COLUMN field named Total");
+
+        let mut renamed = PivotDefinition::new(identity::EntityId::ZERO, (0, 0), (0, 0));
+        renamed.row_fields.push(PivotField::new(0, "Totals".to_string()));
+        assert!(!is_synthetic_total_row(&renamed, &m, 0), "another name");
+
+        let mut model_column = values_only();
+        model_column.column_fields.push(PivotField::new(0, "Sales.Region".to_string()));
+        assert!(
+            !is_synthetic_total_row(&model_column, &m, 0),
+            "an index a placed model column names is a model coordinate, whatever else claims it"
+        );
+    }
+}
+
+#[cfg(test)]
+mod previous_namesake_tests {
+    //! What a BI pivot's rebuild carries from an old field to a new one
+    //! ([`preserve_collapse_state`], [`preserve_field_settings`]): only from the
+    //! field of the same name AND the same kind ([`previous_namesake`]), so the
+    //! synthetic values-only "Total" row and a calculation group called "Total"
+    //! never hand each other their settings (review RB3, round-3 finding F1).
+    use super::*;
+
+    /// A calculation group called "Total" placed on an axis, as
+    /// `update_bi_pivot_fields_unrecorded` builds it (`make_calc_group_field`):
+    /// an ordinary, UNMARKED field over the reshaped item column whose items
+    /// show in DECLARATION order, as Power BI shows them.
+    fn calc_group_named_total() -> PivotField {
+        let mut field = PivotField::new(0, "Total".to_string());
+        field.sort_order = SortOrder::DataSourceOrder;
+        field
+    }
+
+    /// The scenario: a measure-only pivot's one row is the MARKED synthetic
+    /// "Total", and the user drags a calculation group that is also called
+    /// "Total" (items declared Actual, Prior Year, Growth) onto Rows. Matched by
+    /// name alone, the group took the synthetic row's Ascending sort over its
+    /// declaration order -- Actual, Growth, Prior Year -- and every later edit
+    /// kept that as if it were the user's own setting. Nothing of the synthetic
+    /// row may carry over: no setting and no collapse state.
+    ///
+    /// SABOTAGE: match by name alone in `previous_namesake` (drop its
+    /// `is_synthetic_total` clause) -- the sort-order assertion fails.
+    /// SABOTAGE: let `preserve_collapse_state` find by name alone again (the two
+    /// helpers drift apart) -- the collapse assertion fails.
+    #[test]
+    fn a_calculation_group_named_total_never_inherits_the_synthetic_rows_settings() {
+        let mut synthetic = synthetic_total_row_field();
+        synthetic.collapsed = true;
+        synthetic.collapsed_items = vec!["Total".to_string()];
+        let old = vec![synthetic];
+
+        let mut placed = vec![calc_group_named_total()];
+        placed[0].show_all_items = true;
+        placed[0].show_subtotals = false;
+        preserve_collapse_state(&mut placed, &old);
+        preserve_field_settings(&mut placed, &old);
+
+        let group = &placed[0];
+        assert_eq!(
+            group.sort_order,
+            SortOrder::DataSourceOrder,
+            "the group took the synthetic row's sort: its items no longer show in declaration order"
+        );
+        assert!(
+            group.show_all_items && !group.show_subtotals,
+            "another setting of the synthetic row carried over to the group"
+        );
+        assert!(
+            !group.collapsed && group.collapsed_items.is_empty(),
+            "the synthetic row's collapse state carried over to the group"
+        );
+        assert!(!group.is_synthetic_total, "the group must stay a real dimension");
+    }
+
+    /// The reverse: a pivot that showed a calculation group called "Total" (the
+    /// user sorted it Descending, turned its subtotals off and collapsed an item)
+    /// loses its last dimension, so the rebuild places the synthetic row. That is
+    /// a different field that happens to share the name, and it keeps its own
+    /// defaults.
+    ///
+    /// SABOTAGE: match by name alone in `previous_namesake` -- the sort-order
+    /// assertion fails.
+    #[test]
+    fn the_synthetic_row_never_inherits_a_calculation_group_named_total() {
+        let mut group = calc_group_named_total();
+        group.sort_order = SortOrder::Descending;
+        group.show_subtotals = false;
+        group.collapsed_items = vec!["Actual".to_string()];
+        let old = vec![group];
+
+        let mut placed = vec![synthetic_total_row_field()];
+        preserve_collapse_state(&mut placed, &old);
+        preserve_field_settings(&mut placed, &old);
+
+        let row = &placed[0];
+        assert_eq!(row.sort_order, SortOrder::Ascending, "the synthetic row took the group's sort");
+        assert!(row.show_subtotals, "the synthetic row took the group's subtotals setting");
+        assert!(row.collapsed_items.is_empty(), "the synthetic row took the group's collapse state");
+        assert!(row.is_synthetic_total, "the synthetic row must stay marked");
+    }
+
+    /// POSITIVE CONTROL: the kind check stops only the mix-up, never a field's
+    /// own settings. A calculation group called "Total" keeps the sort and the
+    /// collapse state the user gave it through a rebuild -- also when the old
+    /// fields hold the synthetic row FIRST under the same name (the group sat in
+    /// the filter area of a measure-only pivot, and rows are searched before
+    /// filters, so a name-only match found the synthetic row) -- and the
+    /// synthetic row keeps its own from one measure-only rebuild to the next.
+    ///
+    /// SABOTAGE: make `previous_namesake` match nothing -- the first assertion
+    /// fails. (A name-only match fails it too: it finds the synthetic row.)
+    #[test]
+    fn a_field_still_keeps_its_own_settings_through_a_rebuild() {
+        let mut sorted = calc_group_named_total();
+        sorted.sort_order = SortOrder::Descending;
+        sorted.collapsed_items = vec!["Actual".to_string()];
+        let old = vec![synthetic_total_row_field(), sorted];
+
+        let mut placed = vec![calc_group_named_total()];
+        preserve_collapse_state(&mut placed, &old);
+        preserve_field_settings(&mut placed, &old);
+        assert_eq!(placed[0].sort_order, SortOrder::Descending, "the user's sort of the group was lost");
+        assert_eq!(
+            placed[0].collapsed_items,
+            vec!["Actual".to_string()],
+            "the group's collapse state was lost"
+        );
+
+        let mut old_row = synthetic_total_row_field();
+        old_row.show_subtotals = false;
+        old_row.collapsed = true;
+        let mut placed = vec![synthetic_total_row_field()];
+        preserve_collapse_state(&mut placed, std::slice::from_ref(&old_row));
+        preserve_field_settings(&mut placed, std::slice::from_ref(&old_row));
+        assert!(
+            !placed[0].show_subtotals && placed[0].collapsed,
+            "the synthetic row lost its own settings from one rebuild to the next"
+        );
+    }
 }

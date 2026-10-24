@@ -1618,6 +1618,16 @@ pub struct PivotRegionData {
     /// id. Carried on the region so the frontend knows SYNCHRONOUSLY which
     /// menu items apply (Summarize Values By is a range-pivot item).
     pub is_model: bool,
+    /// True when the pivot's drill-through behaviour holds a DESIGN-QUERY drill
+    /// (`BiPivotMetadata.drill_through.design_query` is present), so the value
+    /// cell's run row reads "Drill through" rather than "Show Details". Carried
+    /// on the region for the reason `is_model` is: the very first right-click
+    /// on a pivot that was never selected -- a canvas box's menu is built once,
+    /// from what is known at that moment -- must already know, and a cache
+    /// filled by a later IPC answer arrives after the menu is drawn
+    /// (model-drillthrough.md 2.9). Always false for a range pivot.
+    #[serde(default)]
+    pub has_design_query_drill: bool,
     /// Present only for a canvas pivot: the box its view is shown in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canvas_frame: Option<CanvasFrameConfig>,
@@ -2060,12 +2070,77 @@ pub struct DrillQueryOverride {
 
 /// Per-pivot configuration of double-click drill-through behavior. Persists in
 /// the workbook and travels in `.calp` so subscribers get the publisher's drill.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+///
+/// A present `design_query` WINS over `kind` (docs/design/model-drillthrough.md
+/// 2.1): the model-visual drill-through is a FIELD, not a fourth
+/// `DrillThroughKind` variant, because an older reader meeting an unknown
+/// variant fails `SavedBiPivotMetadata` as a whole and drops the pivot's model
+/// binding (a lie under the format rule), while an unknown field is ignored and
+/// the older reader runs the previous drill (loss only). `drill_through_tests`
+/// pins that the OLD shape parses the NEW JSON.
+///
+/// No `Eq`: `DrillPresentation::Chart` carries `serde_json::Value` mark
+/// options, which has no total equality.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DrillThroughBehavior {
     pub kind: DrillThroughKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<DrillQueryOverride>,
+    /// The design-query drill (`drill_through.rs`): a DSL text run with the
+    /// clicked datum's members baked in as `FILTERS:`, shown on an ephemeral
+    /// sheet as a table or a chart. Present => it is the drill that runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub design_query: Option<DrillDesignQuery>,
+}
+
+/// A design-query drill-through definition: what a BI pivot's (or, in the
+/// chart spec, a design-query chart's) drill runs and how it shows the result.
+/// Mirrored by `DrillThroughDefinition` in `app/src/api/drillThrough.ts`.
+/// It stores NO connection id: the run takes the connection from the source
+/// object (model-drillthrough.md 2.2).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DrillDesignQuery {
+    /// The design-query DSL (`ROWS:` / `COLUMNS:` / `VALUES:` / `FILTERS:` /
+    /// `CALC:`); the clicked members are added as one `FILTERS:` clause at run
+    /// time, on member KEYS.
+    pub dsl_text: String,
+    /// A table of static cells on a worksheet, or a chart on a canvas.
+    pub presentation: DrillPresentation,
+    /// The definition's name: the result sheet's name and the chart's title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Carry the page's filters into the drill (Power BI's "Keep all
+    /// filters"). Absent reads TRUE.
+    #[serde(default = "default_true")]
+    pub keep_filters: bool,
+}
+
+/// The `keep_filters` default: a definition that does not say keeps the
+/// page's filters.
+fn default_true() -> bool {
+    true
+}
+
+/// How a design-query drill-through shows its result. Internally tagged on
+/// `kind` (`{"kind":"table"}` / `{"kind":"chart","mark":"bar",...}`) so the
+/// chart form can carry its mark without a second nesting level.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum DrillPresentation {
+    /// A worksheet of static cells: caption rows, then the view.
+    Table,
+    /// A canvas with one design-query chart of `mark` filling the page.
+    #[serde(rename_all = "camelCase")]
+    Chart {
+        /// A chart mark id (`@api/chartMarks`), e.g. "bar".
+        mark: String,
+        /// The mark's options as the Charts extension's spec spells them;
+        /// opaque to the backend.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mark_options: Option<serde_json::Value>,
+    },
 }
 
 /// Serializable BI pivot metadata for persistence in .cala/.calp files.
@@ -2400,6 +2475,7 @@ mod drill_through_tests {
                     value: "1".to_string(),
                 }],
             }),
+            design_query: None,
         };
 
         let json = serde_json::to_string(&behavior).expect("serialize");
@@ -2407,9 +2483,127 @@ mod drill_through_tests {
         assert!(json.contains("dimensionColumns"), "json={json}");
         assert!(!json.contains("dimension_columns"), "json={json}");
         assert!(json.contains("orderBy"), "json={json}");
+        // An absent design query writes nothing: the JSON an older reader
+        // already understands.
+        assert!(!json.contains("designQuery"), "json={json}");
 
         let back: DrillThroughBehavior = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(behavior, back);
+    }
+
+    #[test]
+    fn design_query_drill_round_trips_camel_case_for_both_presentations() {
+        let chart = DrillThroughBehavior {
+            kind: DrillThroughKind::Builtin,
+            query: None,
+            design_query: Some(DrillDesignQuery {
+                dsl_text: "ROWS: [Product.Category]\nVALUES: Revenue".to_string(),
+                presentation: DrillPresentation::Chart {
+                    mark: "bar".to_string(),
+                    mark_options: Some(serde_json::json!({ "stacked": true })),
+                },
+                name: Some("Category detail".to_string()),
+                keep_filters: false,
+            }),
+        };
+        let json = serde_json::to_string(&chart).expect("serialize");
+        for key in ["designQuery", "dslText", "keepFilters", "markOptions", r#""kind":"chart""#, r#""mark":"bar""#] {
+            assert!(json.contains(key), "missing {key} in json={json}");
+        }
+        for snake in ["design_query", "dsl_text", "keep_filters", "mark_options"] {
+            assert!(!json.contains(snake), "snake_case {snake} leaked into json={json}");
+        }
+        let back: DrillThroughBehavior = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(chart, back);
+
+        let table = DrillThroughBehavior {
+            kind: DrillThroughKind::Query,
+            query: None,
+            design_query: Some(DrillDesignQuery {
+                dsl_text: "VALUES: Revenue".to_string(),
+                presentation: DrillPresentation::Table,
+                name: None,
+                keep_filters: true,
+            }),
+        };
+        let json = serde_json::to_string(&table).expect("serialize");
+        assert!(json.contains(r#""presentation":{"kind":"table"}"#), "json={json}");
+        assert!(!json.contains("\"name\""), "an absent name is not written: json={json}");
+        let back: DrillThroughBehavior = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(table, back);
+    }
+
+    #[test]
+    fn keep_filters_absent_reads_true() {
+        let json = r#"{"kind":"builtin","designQuery":{"dslText":"VALUES: Revenue","presentation":{"kind":"table"}}}"#;
+        let back: DrillThroughBehavior = serde_json::from_str(json).expect("deserialize");
+        let dq = back.design_query.expect("the design query is present");
+        assert!(dq.keep_filters, "Power BI's 'Keep all filters' is the default");
+        assert_eq!(dq.name, None);
+        assert_eq!(dq.presentation, DrillPresentation::Table);
+    }
+
+    #[test]
+    fn behavior_json_without_design_query_still_parses_to_none() {
+        // Every behavior saved before the design-query drill existed.
+        for json in [
+            r#"{"kind":"builtin"}"#,
+            r#"{"kind":"script"}"#,
+            r#"{"kind":"query","query":{"columns":["amount"]}}"#,
+        ] {
+            let back: DrillThroughBehavior = serde_json::from_str(json).expect("deserialize");
+            assert!(back.design_query.is_none(), "json={json}");
+        }
+    }
+
+    /// THE LIE-VS-LOSS PIN (model-drillthrough.md 2.1). The drill is a new
+    /// FIELD, never a new `DrillThroughKind` variant: an older reader -- this
+    /// local copy of the struct as it was -- parses the NEW JSON and keeps the
+    /// `kind` it understands (loss of the new drill, no format link needed). A
+    /// variant would have failed `from_value::<SavedBiPivotMetadata>` and
+    /// dropped the pivot's whole model binding.
+    #[test]
+    fn the_old_behavior_shape_parses_the_new_json() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        #[serde(rename_all = "camelCase")]
+        struct LegacyDrillThroughBehavior {
+            kind: DrillThroughKind,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            query: Option<DrillQueryOverride>,
+        }
+
+        let new = DrillThroughBehavior {
+            kind: DrillThroughKind::Script,
+            query: None,
+            design_query: Some(DrillDesignQuery {
+                dsl_text: "VALUES: Revenue".to_string(),
+                presentation: DrillPresentation::Chart { mark: "card".to_string(), mark_options: None },
+                name: Some("Detail".to_string()),
+                keep_filters: true,
+            }),
+        };
+        let json = serde_json::to_string(&new).expect("serialize");
+        let legacy: LegacyDrillThroughBehavior =
+            serde_json::from_str(&json).expect("the old shape must parse the new JSON");
+        assert_eq!(legacy.kind, DrillThroughKind::Script, "the kind it understands survives");
+        assert_eq!(legacy.query, None);
+
+        // And the whole saved metadata, the unit an older reader parses: the
+        // behavior with a design query inside loads, and the kind is kept.
+        let meta_json = format!(
+            r#"{{
+            "pivotId": "00000000-0000-0000-0000-000000000000",
+            "modelTables": [],
+            "measures": [],
+            "lookupColumns": [],
+            "hierarchies": [],
+            "drillThrough": {json}
+        }}"#
+        );
+        let saved: SavedBiPivotMetadata = serde_json::from_str(&meta_json).expect("deserialize metadata");
+        let behavior = saved.drill_through.expect("drillThrough present");
+        assert_eq!(behavior.kind, DrillThroughKind::Script);
+        assert!(behavior.design_query.is_some());
     }
 
     #[test]
@@ -2549,5 +2743,33 @@ mod pivot_notice_tests {
         };
         let json = serde_json::to_string(&drill).unwrap();
         assert!(json.contains(r#""kind":"degraded""#), "got: {json}");
+    }
+}
+
+#[cfg(test)]
+mod region_wire_tests {
+    //! `PivotRegionData.hasDesignQueryDrill` (C5 of the drill-through fix
+    //! round): camelCase on the wire, always sent, and a payload written
+    //! before the field existed reads as `false` -- "no answer => Show
+    //! Details", never a promised drill the pivot does not have.
+    use super::*;
+
+    #[test]
+    fn the_design_query_flag_is_camel_case_always_sent_and_defaults_to_false() {
+        let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        let old = serde_json::json!({
+            "pivotId": id.to_string(), "name": "P",
+            "startRow": 0, "startCol": 0, "endRow": 1, "endCol": 1,
+            "isEmpty": false, "isModel": true
+        });
+        let mut region: PivotRegionData = serde_json::from_value(old).expect("an old region payload still parses");
+        assert!(!region.has_design_query_drill, "absent reads false");
+
+        let wire = serde_json::to_value(&region).unwrap();
+        assert_eq!(wire["hasDesignQueryDrill"], serde_json::json!(false), "false is sent, not omitted");
+        region.has_design_query_drill = true;
+        let wire = serde_json::to_value(&region).unwrap();
+        assert_eq!(wire["hasDesignQueryDrill"], serde_json::json!(true));
+        assert!(wire.get("has_design_query_drill").is_none(), "never the Rust spelling: {wire}");
     }
 }

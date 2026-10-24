@@ -6,6 +6,7 @@
 import { getChartMarkMeta, chartMarkFurniture, type ChartMarkFurniture } from "@api/chartMarks";
 import type { VisualContainerFormat, VisualTitle } from "@api/visualContainer";
 import type { MemberPath } from "@api/reportFilters";
+import type { DrillThroughDefinition } from "@api/drillThrough";
 
 // ============================================================================
 // Chart Types
@@ -755,6 +756,28 @@ export interface DesignQueryDataSource {
   dslText: string;
   /** The BI connection whose model the query runs against. */
   connectionId: string;
+  /**
+   * The STABLE key of an APPLICATION connection (the host connection's
+   * `packageDataSourceId`): a subscriber's connections are re-minted with fresh
+   * uuids on every open, and Rust re-binds `connectionId` from this key on
+   * pull, refresh and open (`core/calp/src/chart_refs.rs`,
+   * `remap_chart_spec_connection_ids`; docs/design/model-drillthrough.md 2.10),
+   * rewriting BOTH fields when a key resolves.
+   *
+   * WHO WRITES IT: Rust, at the serialization boundary. Every save, AutoRecover
+   * and publish/push stamps it from the LIVE connection in
+   * `collect_charts_for_save` (persistence.rs): set when `connectionId` names an
+   * application connection, removed when it names a local one, left as it is
+   * when it names no live connection -- on the SAVED copy only, never in the
+   * store. So a chart made by any door (the dialog, the object pane, a
+   * drill-through, a script, the AI) carries it on disk with no TypeScript
+   * writing it. TypeScript must only never keep a WRONG one: the two Charts
+   * doors that rewrite `data` keep it while the connection is unchanged and
+   * drop it when the connection changes (`lib/designQuerySource.ts`), because
+   * the remap prefers the key and a stale one would re-bind the chart to its
+   * old application connection.
+   */
+  packageDataSourceId?: string;
 }
 
 /**
@@ -1770,6 +1793,19 @@ export interface ChartSpec {
    * as `BiValueFieldRef.numberFormat`, so Rust fills the formatted values.
    */
   fieldFormats?: Record<string, string>;
+
+  /**
+   * Design-query charts: the chart's DRILL-THROUGH definition
+   * (docs/design/model-drillthrough.md 2.1) -- a design-query DSL text plus the
+   * presentation its result takes (a table of cells or a chart of some mark),
+   * run from a datum's right-click with the clicked members baked in as one
+   * `FILTERS:` clause. Stores NO connection id: the run uses `data.connectionId`.
+   * Travels in the opaque spec (.cala and .calp); an older reader shows the
+   * chart without its drill. The ONE shape is `@api/drillThrough`'s, shared
+   * with the BI pivot's `DrillThroughBehavior.designQuery`; the extension's
+   * JSON schema (lib/chartSpecSchema.ts) is the gate for the script door.
+   */
+  drillThrough?: DrillThroughDefinition;
 }
 
 /**
@@ -2089,6 +2125,17 @@ export type ChartElementId = (typeof CHART_ELEMENT_IDS)[number];
  * no-op, not an error.
  */
 export const CHART_FORMAT_SELECTION_COMMAND = "chart.format.selection";
+
+/**
+ * The dialog that edits (or, on a subscribed page, shows) a design-query
+ * chart's drill-through definition: radios None | Design query hosting the
+ * shared `_shared/drillThrough` editor (docs/design/model-drillthrough.md 2.9).
+ * Declared here for the same reason as {@link CHART_FORMAT_SELECTION_COMMAND}:
+ * the context menu opens it and `index.ts` registers it, and a string typed
+ * twice is a route that works until one of the two is renamed -- an unknown
+ * dialog id is a silent no-op.
+ */
+export const CHART_DRILL_THROUGH_DIALOG_ID = "chart:drillThroughBehavior";
 
 /**
  * Result of hit-testing a point within a chart — Excel's

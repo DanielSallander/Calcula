@@ -5,6 +5,7 @@ import type { MenuDefinition } from '@api/ui';
 import { workbook } from '@api/system';
 import { IconNew, IconOpen, IconSave, IconSaveAs } from '@api';
 import { confirmAsync, alertAsync } from "@api/dialogs";
+import { describeBackendRefusal } from "@api/backendRefusal";
 
 export interface FileMenuHandlers {
   handleNew: () => Promise<void>;
@@ -64,6 +65,16 @@ export async function fileOpen(): Promise<void> {
   }
 }
 
+/**
+ * What a failed Save / Save As tells the user. Every error reads exactly as it
+ * always did; the backend's RETRYABLE refusal -- the workbook changed while it
+ * was being saved, so nothing was written -- reads as its plain sentence,
+ * never its internal code (`@api/backendRefusal`).
+ */
+export function saveFailureMessage(error: unknown): string {
+  return 'Failed to save file: ' + describeBackendRefusal(error);
+}
+
 export async function fileSave(): Promise<void> {
   try {
     const path = await workbook.save();
@@ -72,7 +83,7 @@ export async function fileSave(): Promise<void> {
     }
   } catch (error) {
     console.error('[FileMenu] handleSave error:', error);
-    void alertAsync('Failed to save file: ' + String(error));
+    await alertAsync(saveFailureMessage(error));
   }
 }
 
@@ -84,7 +95,7 @@ export async function fileSaveAs(): Promise<void> {
     }
   } catch (error) {
     console.error('[FileMenu] handleSaveAs error:', error);
-    void alertAsync('Failed to save file: ' + String(error));
+    await alertAsync(saveFailureMessage(error));
   }
 }
 

@@ -11,12 +11,18 @@
 //          Two cases:
 //            - a PARKED external session (explicit state in formulaEditTarget,
 //              current at notify time), and
-//            - a Core edit whose `sourceSheetIndex` is a NUMBER different from
-//              the active sheet. An ordinary edit carries no source index; it
-//              must never blank the overlays, hence the typeof guard.
+//            - a Core edit whose sheet is not the one the grid shows -- decided
+//              by the sheet's IDENTITY, its name (core/lib/editSheetIdentity.ts),
+//              never by `sourceSheetIndex` alone: a temporary sheet's discard, a
+//              delete, a move or a copy renumbers the edit's sheet while it is
+//              open, and an index comparison then blanked every overlay on the
+//              very sheet the edit belongs to (review
+//              TSHELL4-DISCARD-LANDS-UNDER-OPEN-EDIT). An edit that names no
+//              sheet at all must never blank the overlays.
 
 import { getGridStateSnapshot } from "../state/GridContext";
 import { isExternalSessionParked, subscribeExternalEdit } from "./formulaEditTarget";
+import { isEditOnShownSheet } from "./editSheetIdentity";
 
 /**
  * True while the grid shows a sheet that is not the sheet the open edit (and
@@ -25,9 +31,8 @@ import { isExternalSessionParked, subscribeExternalEdit } from "./formulaEditTar
 export function isPointModeOnForeignSheet(): boolean {
   if (isExternalSessionParked()) return true;
   const snapshot = getGridStateSnapshot();
-  if (!snapshot) return false;
-  const source = snapshot.editing?.sourceSheetIndex;
-  return typeof source === "number" && source !== snapshot.sheetContext.activeSheetIndex;
+  if (!snapshot || !snapshot.editing) return false;
+  return !isEditOnShownSheet(snapshot.editing, snapshot.sheetContext);
 }
 
 type PointModeViewListener = (foreign: boolean) => void;

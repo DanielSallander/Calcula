@@ -306,10 +306,29 @@ describe('serialize filters', () => {
     expect(text).not.toContain('NOT IN');
   });
 
-  it('escapes double quotes in filter values', () => {
+  it('escapes double quotes in filter values by DOUBLING them (the lexer\'s one escape)', () => {
+    // This pinned a backslash escape (`\"`) for two years; the lexer never read
+    // it, so the value did not round-trip. The doubled quote is what
+    // `quoteCalcName` and @param substitution always wrote.
     const filters = [zf('Name', { hiddenItems: ['He said "hello"'] })];
     const text = serialize([], [], [], filters, emptyLayout);
-    expect(text).toContain('\\"hello\\"');
+    expect(text).toContain('""hello""');
+    expect(text).not.toContain('\\"');
+  });
+
+  it('round-trips a filter value with a quote in it', () => {
+    const filters = [zf('Name', { hiddenItems: ['He said "hello"'] })];
+    const { ast, errors } = roundTrip([], [], [], filters, emptyLayout);
+    expect(errors).toHaveLength(0);
+    expect(ast.filters[0].values).toEqual(['He said "hello"']);
+  });
+
+  it('round-trips a quoted FIELD NAME with a quote in it', () => {
+    const filters = [zf('Size "L"', { hiddenItems: ['x'] })];
+    const { text, ast, errors } = roundTrip([], [], [], filters, emptyLayout);
+    expect(text).toContain('"Size ""L"""');
+    expect(errors).toHaveLength(0);
+    expect(ast.filters[0].fieldName).toBe('Size "L"');
   });
 
   it('round-trips NOT IN filter', () => {

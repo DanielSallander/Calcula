@@ -19,12 +19,30 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::calp_commands::RequestedSheets;
 use crate::persistence::FileState;
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
+
+/// `resolve_publish_sheet_indices` for a request BY POSITION, in the push's
+/// words and with no filter objects -- the question every test here asks of
+/// the resolver (round 9 gave it a request type and the door's act word).
+fn resolve_positions(
+    state: &AppState,
+    kind: &str,
+    positions: Vec<usize>,
+) -> Result<crate::calp_commands::PublishSelection, String> {
+    crate::calp_commands::resolve_publish_sheet_indices(
+        state,
+        kind,
+        &RequestedSheets::ByPosition(positions),
+        "published",
+        &Default::default(),
+    )
+}
 
 /// A workbook with `count` user sheets, seeded the way a load does.
 fn workbook_with_sheets(count: usize) -> AppState {
@@ -145,7 +163,7 @@ fn publishing_does_not_ship_a_subscribed_sheet_by_default() {
     subscribe_sheet(&state, 1, "acme.finance", r"\\share\ws");
 
     let selection =
-        crate::calp_commands::resolve_publish_sheet_indices(&state, "report", Vec::new(), &Default::default()).unwrap();
+        resolve_positions(&state, "report", Vec::new()).unwrap();
 
     assert_eq!(
         selection.indices,
@@ -168,7 +186,7 @@ fn an_explicitly_ticked_subscribed_sheet_still_publishes() {
     subscribe_sheet(&state, 1, "acme.finance", r"\\share\ws");
 
     let selection =
-        crate::calp_commands::resolve_publish_sheet_indices(&state, "report", vec![1], &Default::default()).unwrap();
+        resolve_positions(&state, "report", vec![1]).unwrap();
 
     assert_eq!(selection.indices, vec![1], "an explicit tick must be honoured");
     assert_eq!(
@@ -190,7 +208,7 @@ fn the_report_rows_name_the_application_and_vanish_when_empty() {
     subscribe_sheet(&state, 1, "acme.finance", r"\\share\ws");
 
     let withheld =
-        crate::calp_commands::resolve_publish_sheet_indices(&state, "report", Vec::new(), &Default::default()).unwrap();
+        resolve_positions(&state, "report", Vec::new()).unwrap();
     let (included_row, excluded_row) =
         crate::calp_commands::subscribed_sheet_report_rows(&withheld);
     let excluded_row = excluded_row.expect("a withheld sheet must produce a 'stays behind' row");
@@ -204,7 +222,7 @@ fn the_report_rows_name_the_application_and_vanish_when_empty() {
     assert!(included_row.is_none());
 
     let ticked =
-        crate::calp_commands::resolve_publish_sheet_indices(&state, "report", vec![1], &Default::default()).unwrap();
+        resolve_positions(&state, "report", vec![1]).unwrap();
     let (included_row, excluded_row) = crate::calp_commands::subscribed_sheet_report_rows(&ticked);
     let included_row = included_row.expect("a ticked subscribed sheet must be disclosed");
     assert!(included_row.detail.contains("acme.finance"));
@@ -216,7 +234,7 @@ fn the_report_rows_name_the_application_and_vanish_when_empty() {
     // A workbook with no subscriptions produces neither row.
     let plain = workbook_with_sheets(2);
     let none =
-        crate::calp_commands::resolve_publish_sheet_indices(&plain, "report", Vec::new(), &Default::default()).unwrap();
+        resolve_positions(&plain, "report", Vec::new()).unwrap();
     let (a, b) = crate::calp_commands::subscribed_sheet_report_rows(&none);
     assert!(a.is_none() && b.is_none());
 }
@@ -235,19 +253,19 @@ fn a_library_resolves_no_sheets_and_the_rule_lives_in_one_place() {
     let state = workbook_with_sheets(3);
 
     let library =
-        crate::calp_commands::resolve_publish_sheet_indices(&state, "library", Vec::new(), &Default::default()).unwrap();
+        resolve_positions(&state, "library", Vec::new()).unwrap();
     assert!(
         library.indices.is_empty(),
         "a library ships its module scripts, not the author's workbook"
     );
 
     let report =
-        crate::calp_commands::resolve_publish_sheet_indices(&state, "report", Vec::new(), &Default::default()).unwrap();
+        resolve_positions(&state, "report", Vec::new()).unwrap();
     assert_eq!(report.indices, vec![0, 1, 2]);
 
     // Explicit selection still wins for a library — the author named sheets.
     let explicit =
-        crate::calp_commands::resolve_publish_sheet_indices(&state, "library", vec![1], &Default::default()).unwrap();
+        resolve_positions(&state, "library", vec![1]).unwrap();
     assert_eq!(explicit.indices, vec![1]);
 
     let publish_body = body_of("pub fn calp_publish(");
@@ -267,7 +285,7 @@ fn the_preview_sheet_list_reports_true_indices_and_provenance() {
     subscribe_sheet(&state, 1, "acme.finance", r"\\share\ws");
 
     let selection =
-        crate::calp_commands::resolve_publish_sheet_indices(&state, "report", Vec::new(), &Default::default()).unwrap();
+        resolve_positions(&state, "report", Vec::new()).unwrap();
     let rows = crate::calp_commands::publish_preview_sheet_list(&state, &selection).unwrap();
 
     assert_eq!(rows.len(), 3);
@@ -310,6 +328,7 @@ fn deleting_a_subscribed_sheet_is_refused_and_names_detach() {
         &crate::timeline_slicer::TimelineSlicerState::new(),
         1,
         false,
+        None,
     )
     .expect_err("a subscribed sheet must not be deletable");
 
@@ -378,6 +397,96 @@ fn the_delete_guard_runs_before_the_preflight_and_before_mutates() {
     );
 }
 
+/// The `delete_sheet` command's body over plain states, minus the slicer
+/// pre/post work and the background re-query (which needs an AppHandle).
+fn delete_through_the_impl(
+    state: &AppState,
+    file_state: &FileState,
+    index: usize,
+    expected: Option<identity::SheetId>,
+) -> Result<crate::sheets::SheetsResult, String> {
+    crate::sheets::delete_sheet_impl(
+        state,
+        file_state,
+        &crate::pivot::types::PivotState::new(),
+        &crate::persistence::UserFilesState::default(),
+        &crate::pane_control::PaneControlState::new(),
+        &crate::ribbon_filter::RibbonFilterState::new(),
+        &crate::slicer::SlicerState::new(),
+        &crate::timeline_slicer::TimelineSlicerState::new(),
+        index,
+        false,
+        expected,
+    )
+}
+
+/// Review RA-1, the pre-work. A delete that names its sheet by STABLE id is
+/// answered about THAT sheet. The discard of a temporary sheet looked it up at
+/// index 3, and then another door (the MCP server, on its own thread) moved a
+/// SUBSCRIBED sheet into index 3. The subscribed-sheet guard ran by index,
+/// before the delete's own id check, so the strip kept the temporary sheet and
+/// showed "Cannot delete sheet 'Vendor KPIs': it came from the application
+/// ... Detach it first" -- advice about a sheet the user never touched. And a
+/// caller that MEANS the subscribed sheet is still refused about it, wherever
+/// it now sits.
+///
+/// SABOTAGE: key the guard by `index` again (drop the `index_of_sheet` arm in
+/// `delete_sheet_impl`) -- the first block fails, refused with the
+/// subscribed-sheet message instead of the id check's.
+#[test]
+fn a_delete_by_stable_id_is_answered_about_the_sheet_it_meant() {
+    // Sheet1, Costs, Vendor KPIs (subscribed), Drillthrough (temporary), all
+    // through the real add path so the move below is the real one.
+    let state = crate::create_app_state();
+    let setup = FileState::default();
+    for name in ["Costs", "Vendor KPIs", "Drillthrough"] {
+        crate::sheets::add_sheet_inner(&state, &setup, Some(name.to_string()), ::persistence::SheetKind::Worksheet)
+            .expect("add");
+    }
+    subscribe_sheet(&state, 2, "acme.finance", r"\\share\ws");
+    let vendor = sheet_id_at(&state, 2);
+    let drill = sheet_id_at(&state, 3);
+    state.ephemeral_sheets.lock().unwrap().insert(drill);
+    let names = |state: &AppState| state.sheet_names.read().unwrap().clone();
+    let clean = FileState::default();
+
+    // 1. The other door's move lands after the discard's lookup.
+    let err = crate::sheets::discard_ephemeral_sheet_with(&state, &drill.to_string(), |index, id| {
+        assert_eq!(index, 3, "fixture: the lookup found the temporary sheet at 3");
+        crate::sheets::move_sheet_impl(
+            &state,
+            &setup,
+            &crate::slicer::SlicerState::new(),
+            &crate::timeline_slicer::TimelineSlicerState::new(),
+            &crate::ribbon_filter::RibbonFilterState::new(),
+            2,
+            3,
+        )
+        .expect("the other door's move");
+        assert_eq!(names(&state)[index], "Vendor KPIs", "fixture: the looked-up index now names the subscribed sheet");
+        delete_through_the_impl(&state, &clean, index, Some(id))
+    })
+    .unwrap_err();
+    assert_eq!(
+        err,
+        crate::sheets::SHEETS_CHANGED_UNDER_THE_DELETE,
+        "the answer must be about the temporary sheet the discard meant, not the subscribed sheet that slid into its index"
+    );
+    assert_eq!(names(&state), vec!["Sheet1", "Costs", "Drillthrough", "Vendor KPIs"], "nothing was deleted");
+    assert!(!clean.is_dirty(), "the refusal leaves the document clean");
+
+    // 2. A caller that MEANS the subscribed sheet, and looked it up at 2 before
+    //    the move, is refused about THAT sheet -- by name, with the remedy --
+    //    although index 2 now holds the temporary sheet.
+    let err = delete_through_the_impl(&state, &clean, 2, Some(vendor)).unwrap_err();
+    assert!(
+        err.contains("Vendor KPIs") && err.contains("acme.finance") && err.contains("Detach"),
+        "refused about the sheet it meant, by name and with the remedy: {err}"
+    );
+    assert_eq!(names(&state), vec!["Sheet1", "Costs", "Drillthrough", "Vendor KPIs"]);
+    assert!(!clean.is_dirty());
+}
+
 // ---------------------------------------------------------------------------
 // C. Detach
 // ---------------------------------------------------------------------------
@@ -393,14 +502,14 @@ fn detaching_a_sheet_makes_it_publishable() {
     let file_state = FileState::default();
 
     let before =
-        crate::calp_commands::resolve_publish_sheet_indices(&state, "report", Vec::new(), &Default::default()).unwrap();
+        resolve_positions(&state, "report", Vec::new()).unwrap();
     assert_eq!(before.indices, vec![0, 2], "precondition: withheld while subscribed");
 
     let result = crate::calp_commands::detach_sheet_inner(&state, &file_state, &crate::pivot::types::PivotState::new(), &crate::slicer::SlicerState::new(), &crate::timeline_slicer::TimelineSlicerState::new(), 1).unwrap();
     assert_eq!(result.package_name, "acme.finance");
 
     let after =
-        crate::calp_commands::resolve_publish_sheet_indices(&state, "report", Vec::new(), &Default::default()).unwrap();
+        resolve_positions(&state, "report", Vec::new()).unwrap();
     assert_eq!(after.indices, vec![0, 1, 2], "detached means yours to publish");
     assert!(after.withheld_subscribed.is_empty());
 }
@@ -526,7 +635,7 @@ fn a_working_copy_publishes_only_the_applications_sheets_by_default() {
     make_working_copy(&state, &[1], "sales", r"\\share\ws");
 
     let selection =
-        crate::calp_commands::resolve_publish_sheet_indices(&state, "report", Vec::new(), &Default::default()).unwrap();
+        resolve_positions(&state, "report", Vec::new()).unwrap();
 
     assert_eq!(
         selection.indices,
@@ -543,7 +652,7 @@ fn a_new_sheet_can_still_be_added_to_the_application_by_ticking_it() {
     make_working_copy(&state, &[1], "sales", r"\\share\ws");
 
     let selection =
-        crate::calp_commands::resolve_publish_sheet_indices(&state, "report", vec![1, 2], &Default::default()).unwrap();
+        resolve_positions(&state, "report", vec![1, 2]).unwrap();
     assert_eq!(selection.indices, vec![1, 2]);
 }
 
@@ -556,7 +665,7 @@ fn a_new_sheet_can_still_be_added_to_the_application_by_ticking_it() {
 fn a_standalone_workbook_still_defaults_to_every_sheet() {
     let state = workbook_with_sheets(3);
     let selection =
-        crate::calp_commands::resolve_publish_sheet_indices(&state, "report", Vec::new(), &Default::default()).unwrap();
+        resolve_positions(&state, "report", Vec::new()).unwrap();
     assert_eq!(selection.indices, vec![0, 1, 2]);
 }
 
@@ -813,7 +922,7 @@ fn the_marked_working_copy_sheets_are_the_ones_a_push_carries() {
         .filter(|r| r.role == "workingCopy")
         .map(|r| r.sheet_index)
         .collect();
-    let published = crate::calp_commands::resolve_publish_sheet_indices(&state, "report", Vec::new(), &Default::default())
+    let published = resolve_positions(&state, "report", Vec::new())
         .unwrap()
         .indices;
     assert_eq!(marked, published, "the mark and the push must name the same sheets");
@@ -953,7 +1062,30 @@ fn resolve(
     requested: Vec<usize>,
     links: &crate::calp_commands::FilterObjectLinks,
 ) -> crate::calp_commands::PublishSelection {
-    crate::calp_commands::resolve_publish_sheet_indices(state, "report", requested, links).unwrap()
+    crate::calp_commands::resolve_publish_sheet_indices(
+        state,
+        "report",
+        &RequestedSheets::ByPosition(requested),
+        "published",
+        links,
+    )
+    .unwrap()
+}
+
+/// The selection for a request BY ID: the stable ids of the sheets at
+/// `positions` now, as the push dialog and the subscriber diff send them --
+/// the one request that may name a floating range's backing sheet (the
+/// subscriber diff sends the ids of the backing sheets a subscription pulled).
+fn resolve_ids(state: &AppState, positions: &[usize]) -> crate::calp_commands::PublishSelection {
+    let ids: Vec<String> = positions.iter().map(|&i| sheet_id_at(state, i).to_string()).collect();
+    crate::calp_commands::resolve_publish_sheet_indices(
+        state,
+        "report",
+        &RequestedSheets::ById(ids),
+        "published",
+        &Default::default(),
+    )
+    .unwrap()
 }
 
 /// A chart on a published sheet brings the sheet it reads. Without it the
@@ -1504,22 +1636,51 @@ fn floating_range_on(state: &AppState, host: usize, name: &str) -> usize {
 /// joins only through its owner, whatever the request says; a chart reading a
 /// range's cells brings the range's HOST.
 ///
+/// BY POSITION the backing sheet cannot be named at all any more (review round
+/// 11): no list a caller reads shows it, so `[1, backing]` is refused as an
+/// index the workbook does not have -- never cleaned up in silence, which is
+/// how a script's off-by-one into the object tail published the wrong sheets
+/// under the author's key. BY ID it still can be -- the subscriber diff sends
+/// the ids of the backing sheets a subscription pulled -- and there the
+/// backing sheet stays home without its host.
+///
 /// SABOTAGE: restore `requested` verbatim in the explicit branch AND drop the
-/// final `claimed_backing` retain -- the backing index survives `[1, backing]`.
+/// final `claimed_backing` retain -- the backing sheet survives the ids of
+/// `[Sheet2, backing]`. Or let the `ByPosition` branch of
+/// `resolve_publish_sheet_indices` pass an object sheet -- `[1, backing]`
+/// resolves again.
 #[test]
 fn an_unticked_hosts_backing_sheet_stays_home() {
+    use crate::calp_commands::CALP_PUSH_SHEET_INDEX_OUT_OF_RANGE;
     let state = workbook_with_sheets(2);
     let backing = floating_range_on(&state, 0, "Float1");
 
     let default = resolve(&state, Vec::new(), &Default::default());
     assert_eq!(sorted(default.indices), vec![0, 1, backing]);
 
-    // Page (Sheet1) unticked, its backing index still in the request.
-    let unticked = resolve(&state, vec![1, backing], &Default::default());
+    // Page (Sheet1) unticked, its backing sheet still in a request BY POSITION:
+    // refused as a position no list shows, and counted as the lists count.
+    let refusal = resolve_positions(&state, "report", vec![1, backing])
+        .map(|s| s.indices)
+        .expect_err("a request naming the backing sheet by position resolved");
+    assert_eq!(
+        refusal,
+        format!(
+            "{CALP_PUSH_SHEET_INDEX_OUT_OF_RANGE}: There is no sheet at index {backing}: the workbook has 2 sheets \
+             (indexes 0 to 1). Nothing was published; read the sheet list again and choose the sheets again."
+        )
+    );
+
+    // The same request BY ID -- Sheet2 and the backing sheet: the backing
+    // sheet does not ship without its host.
+    let unticked = resolve_ids(&state, &[1, backing]);
     assert_eq!(unticked.indices, vec![1], "the backing sheet must not ship without its range");
+    assert!(unticked.ids.backing.is_empty(), "a backing sheet travels without its host: {:?}", unticked.ids);
 
     let host_only = resolve(&state, vec![0], &Default::default());
     assert_eq!(sorted(host_only.indices), vec![0, backing], "it still travels WITH its host");
+    let host_by_id = resolve_ids(&state, &[0]);
+    assert_eq!(sorted(host_by_id.indices), vec![0, backing], "by id, it still travels WITH its host");
 
     // A chart on Sheet2 reading the range's cells brings the range's owner.
     chart_on(&state, 1, backing, "From the range");
@@ -1690,5 +1851,449 @@ fn a_pruned_pivot_is_named_with_the_sheet_that_kept_it_home() {
     assert_eq!(
         result.timeline_slicers_published, 0,
         "and the timeline indeed stays home with its pivot"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// G. A hold-back acts on what the PUSH CARRIES (review round 11, RV11-TS-1)
+// ---------------------------------------------------------------------------
+//
+// The push dialog decided which of the author's unticks act from the rows it
+// TICKED, and a push carries more sheets than that: a floating range's hidden
+// backing sheet travels with its host, and a chart's source sheet is added by
+// the selection. An untick on such a sheet stopped acting -- its row showed
+// ticked again, a line said the change was "on a sheet not in this push" -- and
+// the push shipped the author's value under their key. Rust, which decides
+// what ships, now decides this too: `calp_hold_back_cells` resolves the push's
+// own request through the push's own resolver (`plan_hold_back_for_push`) and
+// holds back exactly the cells on the sheets that push carries. WHERE the
+// command asks is pinned in `scoped_undo_tests`.
+
+/// One untick, as the push dialog sends it: the diff row's sheet id, and the cell.
+fn untick(state: &AppState, sheet: usize, row: u32, col: u32) -> crate::calp_commands::HoldBackCellRef {
+    crate::calp_commands::HoldBackCellRef { sheet_id: sheet_id_at(state, sheet).to_string(), row, col }
+}
+
+/// The plan `calp_hold_back_cells` acts on for `requested`, in the push's kind
+/// ("report") and with no filter objects.
+fn hold_back_plan_for(
+    state: &AppState,
+    requested: RequestedSheets,
+    cells: &[crate::calp_commands::HoldBackCellRef],
+) -> Result<crate::calp_commands::HoldBackPlan, String> {
+    crate::calp_commands::plan_hold_back_for_push(
+        state,
+        &crate::slicer::SlicerState::new(),
+        &crate::timeline_slicer::TimelineSlicerState::new(),
+        &crate::pivot::types::PivotState::new(),
+        "report",
+        requested,
+        cells,
+    )
+}
+
+/// The request of a push that ticked the sheets at `ticked`, BY ID, as the
+/// push dialog sends it.
+fn ticked_by_id(state: &AppState, ticked: &[usize]) -> RequestedSheets {
+    RequestedSheets::ById(ticked.iter().map(|&i| sheet_id_at(state, i).to_string()).collect())
+}
+
+/// The hold-back plan of a push that ticked the sheets at `ticked`.
+fn hold_back_plan(
+    state: &AppState,
+    ticked: &[usize],
+    cells: &[crate::calp_commands::HoldBackCellRef],
+) -> Result<crate::calp_commands::HoldBackPlan, String> {
+    hold_back_plan_for(state, ticked_by_id(state, ticked), cells)
+}
+
+/// The selection `calp_publish` itself resolves for `requested`.
+fn push_selection(
+    state: &AppState,
+    requested: RequestedSheets,
+) -> Result<crate::calp_commands::PublishSelection, String> {
+    crate::calp_commands::resolve_publish_selection(
+        state,
+        &crate::slicer::SlicerState::new(),
+        &crate::timeline_slicer::TimelineSlicerState::new(),
+        &crate::pivot::types::PivotState::new(),
+        "report",
+        requested,
+        "published",
+    )
+}
+
+/// THE DEFECT, for a floating grid. Sheet1 is a page hosting a floating grid
+/// backed by Float1; the author unticks Float1!B2 and pushes both user sheets.
+/// The dialog has no Float1 row to tick -- the push carries Float1 with its
+/// host -- and that was exactly the untick that stopped acting. It acts now.
+/// With the host unticked the range stays home, and its untick is skipped and
+/// counted, never refused.
+///
+/// SABOTAGE: judge `HoldBackPlan::for_carried` by `carried.sheets` alone (the
+/// user sheets): the backing sheet's untick is skipped, and its cell ships.
+#[test]
+fn a_hold_back_acts_on_a_floating_ranges_backing_sheet_when_its_host_is_ticked() {
+    let state = workbook_with_sheets(2);
+    let backing = floating_range_on(&state, 0, "Float1");
+    make_working_copy(&state, &[0, 1, backing], "sales", r"\\share\ws");
+    let float = sheet_id_at(&state, backing);
+    let pushed = push_selection(&state, ticked_by_id(&state, &[0, 1])).expect("the push's selection resolves");
+    assert_eq!(pushed.ids.backing, vec![float], "fixture: the push carries the backing sheet with its host");
+
+    let b2 = untick(&state, backing, 1, 1);
+    let plan = hold_back_plan(&state, &[0, 1], std::slice::from_ref(&b2)).expect("the push's selection resolves");
+    assert_eq!(
+        plan.sheets,
+        vec![(float, vec![(1, 1)])],
+        "the untick on the floating grid's backing sheet does not act, although the push carries that sheet with its host"
+    );
+    assert_eq!(plan.skipped, 0);
+
+    let host_home = hold_back_plan(&state, &[1], std::slice::from_ref(&b2)).expect("the push's selection resolves");
+    assert!(
+        host_home.sheets.is_empty(),
+        "an untick acted on the backing sheet of a host the push leaves home: {host_home:?}"
+    );
+    assert_eq!(host_home.skipped, 1, "the untick the push does not carry is skipped -- and counted");
+}
+
+/// THE DEFECT, for a chart source. A chart on Sheet1 reads Sheet2; the author
+/// unticks Sheet2!C3, then unticks Sheet2 itself. The selection adds Sheet2
+/// back for the chart, so the push ships it -- and the untick must still act.
+///
+/// SABOTAGE: plan by the sheets the request NAMED (the dialog's ticks) instead
+/// of the resolved `selection.ids`: the source sheet's untick is skipped, and
+/// its cell ships.
+#[test]
+fn a_hold_back_acts_on_a_chart_source_the_push_adds_although_it_is_unticked() {
+    let state = workbook_with_sheets(2);
+    chart_on(&state, 0, 1, "Revenue");
+    make_working_copy(&state, &[0, 1], "sales", r"\\share\ws");
+    let data = sheet_id_at(&state, 1);
+    let pushed = push_selection(&state, ticked_by_id(&state, &[0])).expect("the push's selection resolves");
+    assert_eq!(pushed.auto_included, vec!["Sheet2".to_string()], "fixture: the push adds the chart's source sheet");
+
+    let plan = hold_back_plan(&state, &[0], &[untick(&state, 1, 2, 2)]).expect("the push's selection resolves");
+    assert_eq!(
+        plan.sheets,
+        vec![(data, vec![(2, 2)])],
+        "the untick on the sheet the push adds for its chart does not act, although the push ships that sheet"
+    );
+    assert_eq!(plan.skipped, 0);
+}
+
+/// An untick on a sheet the push does NOT carry -- unticked, and nothing on a
+/// ticked sheet reads it -- is skipped and counted, never refused and never
+/// written. Alone it leaves the plan EMPTY, which `calp_hold_back_cells`
+/// answers with no write and no undo entry, before it even reads the base
+/// (pinned in `scoped_undo_tests`); beside unticks that act, only those are
+/// held back.
+///
+/// SABOTAGE: let `HoldBackPlan::for_carried` keep every cell whose sheet id
+/// parses: Sheet3's untick is planned, and its sheet is rolled back for a push
+/// that does not ship it.
+#[test]
+fn a_hold_back_skips_a_cell_on_a_sheet_the_push_does_not_carry() {
+    let state = workbook_with_sheets(3);
+    make_working_copy(&state, &[0, 1, 2], "sales", r"\\share\ws");
+
+    let alone = hold_back_plan(&state, &[0, 1], &[untick(&state, 2, 0, 0)]).expect("the push's selection resolves");
+    assert_eq!(
+        alone,
+        crate::calp_commands::HoldBackPlan { sheets: Vec::new(), skipped: 1 },
+        "a lone untick on a sheet the push leaves home must plan nothing -- and count itself"
+    );
+
+    let mixed = hold_back_plan(
+        &state,
+        &[0, 1],
+        &[untick(&state, 2, 0, 0), untick(&state, 1, 4, 4), untick(&state, 2, 1, 0), untick(&state, 1, 4, 5)],
+    )
+    .expect("the push's selection resolves");
+    assert_eq!(
+        mixed.sheets,
+        vec![(sheet_id_at(&state, 1), vec![(4, 4), (4, 5)])],
+        "only the unticks on the carried sheet act"
+    );
+    assert_eq!(mixed.skipped, 2);
+}
+
+/// A cell on a sheet NO LONGER IN THE WORKBOOK is skipped, never refused
+/// (`CALP_HOLDBACK_NO_SHEET` is gone): the push cannot ship that sheet, so there
+/// is nothing to hold back on it. Whether it went before the push resolved its
+/// selection, or after -- between the resolution and the grid copy the write
+/// indexes (`HoldBackPlan::locate`). A sheet that only MOVED is found where it
+/// now sits, and one deleted is never handed to a sheet that took its place.
+///
+/// SABOTAGE: stop counting in `HoldBackPlan::locate` (`None => {}`): the
+/// deleted sheet's cells vanish from both counts, and the answer stops adding
+/// up to the request.
+#[test]
+fn a_hold_back_skips_a_cell_on_a_sheet_no_longer_in_the_workbook() {
+    let state = crate::create_app_state();
+    let setup = FileState::default();
+    for name in ["Data", "Notes", "Extra"] {
+        crate::sheets::add_sheet_inner(&state, &setup, Some(name.to_string()), ::persistence::SheetKind::Worksheet)
+            .expect("add");
+    }
+    make_working_copy(&state, &[0, 1, 2, 3], "sales", r"\\share\ws");
+    let (data, notes) = (sheet_id_at(&state, 1), sheet_id_at(&state, 2));
+    let on_notes = untick(&state, 2, 0, 0);
+    let on_data = untick(&state, 1, 3, 3);
+
+    // 1. Notes goes before the push resolves its selection.
+    delete_through_the_impl(&state, &setup, 2, Some(notes)).expect("delete Notes");
+    let plan = hold_back_plan(&state, &[0, 1], &[on_notes, on_data])
+        .expect("a cell on a deleted sheet refused the hold-back");
+    assert_eq!(plan.sheets, vec![(data, vec![(3, 3)])]);
+    assert_eq!(plan.skipped, 1, "the deleted sheet's untick is skipped -- and counted");
+    let no_sheet = crate::calp_commands::HoldBackCellRef { sheet_id: "not a sheet id".to_string(), row: 0, col: 0 };
+    assert_eq!(
+        hold_back_plan(&state, &[0, 1], &[no_sheet]).expect("the push's selection resolves"),
+        crate::calp_commands::HoldBackPlan { sheets: Vec::new(), skipped: 1 },
+        "an id that names no sheet is skipped too"
+    );
+
+    // 2. Data MOVES after the selection was resolved: found where it now sits.
+    crate::sheets::move_sheet_impl(
+        &state,
+        &setup,
+        &crate::slicer::SlicerState::new(),
+        &crate::timeline_slicer::TimelineSlicerState::new(),
+        &crate::ribbon_filter::RibbonFilterState::new(),
+        1,
+        2,
+    )
+    .expect("move Data");
+    let ids = state.sheet_ids.read().unwrap().clone();
+    let now_at = ids.iter().position(|id| *id == data).expect("Data is still here");
+    assert_ne!(now_at, 1, "fixture: Data moved");
+    assert_eq!(plan.locate(&ids), (vec![(now_at, data, vec![(3, 3)])], 0), "a moved sheet is not found by its id");
+
+    // 3. ...and is deleted: skipped and counted, never handed to the sheet now
+    //    at either of its old positions.
+    delete_through_the_impl(&state, &setup, now_at, Some(data)).expect("delete Data");
+    let ids = state.sheet_ids.read().unwrap().clone();
+    assert_eq!(
+        plan.locate(&ids),
+        (Vec::new(), 1),
+        "a cell on a sheet deleted since the resolution must be skipped, and counted"
+    );
+}
+
+/// A REFUSAL OF THE PUSH'S SELECTION COMES BACK UNCHANGED. A push that ticked a
+/// sheet since deleted is refused exactly as the push itself would refuse it --
+/// the code, the sentence, the sheet's name from the link -- and so is one that
+/// names a position no list shows. `calp_hold_back_cells` asks this before it
+/// reads the base or copies a grid, so nothing is written (pinned in
+/// `scoped_undo_tests`).
+///
+/// SABOTAGE: answer a refused selection in `plan_hold_back_for_push` with an
+/// empty one (`.unwrap_or_default()`): every untick is skipped in silence, and
+/// the author learns of the gone sheet only from the push that follows -- if
+/// it still refuses.
+#[test]
+fn a_hold_back_whose_ticked_sheet_is_gone_refuses_as_the_push_would() {
+    use crate::calp_commands::{CALP_PUSH_SHEET_GONE, CALP_PUSH_SHEET_INDEX_OUT_OF_RANGE};
+    let state = crate::create_app_state();
+    let setup = FileState::default();
+    for name in ["Data", "Notes"] {
+        crate::sheets::add_sheet_inner(&state, &setup, Some(name.to_string()), ::persistence::SheetKind::Worksheet)
+            .expect("add");
+    }
+    make_working_copy(&state, &[0, 1, 2], "sales", r"\\share\ws");
+    let notes = sheet_id_at(&state, 2);
+    let cells = [untick(&state, 1, 0, 0)];
+    delete_through_the_impl(&state, &setup, 2, Some(notes)).expect("delete Notes");
+
+    let ticked = || RequestedSheets::ById(vec![sheet_id_at(&state, 0).to_string(), notes.to_string()]);
+    let refusal = hold_back_plan_for(&state, ticked(), &cells).expect_err("a push naming a gone sheet planned a hold-back");
+    let pushed = push_selection(&state, ticked()).map(|s| s.ids).expect_err("fixture: the push refuses it");
+    assert_eq!(refusal, pushed, "the hold-back's refusal is not the push's own");
+    assert!(refusal.starts_with(&format!("{CALP_PUSH_SHEET_GONE}:")), "{refusal}");
+    assert!(refusal.contains("'Notes'") && refusal.contains("nothing was published"), "{refusal}");
+
+    let past = || RequestedSheets::ByPosition(vec![0, 7]);
+    let refusal = hold_back_plan_for(&state, past(), &cells).expect_err("a position no list shows planned a hold-back");
+    assert_eq!(refusal, push_selection(&state, past()).map(|s| s.ids).expect_err("fixture: the push refuses it"));
+    assert!(refusal.starts_with(&format!("{CALP_PUSH_SHEET_INDEX_OUT_OF_RANGE}:")), "{refusal}");
+}
+
+/// THE WORKING-COPY DIFF NAMES EVERY SHEET ITS PUSH CARRIES, and no sheet it
+/// drops (`WorkingCopyDiff::carried_sheet_ids`) -- what the push dialog sorts
+/// its unticks by, because the rows cannot say it. Sheet1 carries a chart that
+/// reads Data; Page hosts a floating grid backed by Float1; Notes is a base
+/// sheet the author unticked. Pushing Sheet1 and Page carries Sheet1, Page,
+/// Data (for the chart) and Float1 (with its host), in publish order -- and NOT
+/// Notes, which the diff lists `removed`, every cell a row with a checkbox.
+/// Data and Float1 are unchanged, so they have no row at all.
+///
+/// Driven through the very in-memory publish `calp_diff_working_copy` compares
+/// (`publish_into_for_preview`), read the way the command reads it (pinned
+/// below).
+///
+/// SABOTAGE: let `carried_sheet_ids` default an id the map does not name to
+/// nothing (`unwrap_or_default()`): a working copy's answer names no sheet.
+#[test]
+fn the_working_copy_diff_names_every_sheet_its_push_carries_and_none_it_drops() {
+    use calp::transport::WorkspaceTransport;
+    const PKG: &str = "rv11-carried-sheets";
+    let state = crate::create_app_state();
+    let setup = FileState::default();
+    for name in ["Data", "Notes", "Page"] {
+        crate::sheets::add_sheet_inner(&state, &setup, Some(name.to_string()), ::persistence::SheetKind::Worksheet)
+            .expect("add");
+    }
+    chart_on(&state, 0, 1, "Revenue");
+    let backing = floating_range_on(&state, 3, "Float1");
+    state.grids.write(&crate::document_effect::test_seed_effect()).unwrap()[2]
+        .set_cell(0, 0, engine::Cell::new_text("private".to_string()));
+    let [summary, data, notes, page, float] = [0, 1, 2, 3, backing].map(|i| sheet_id_at(&state, i));
+
+    let publish = |memory: &calp::MemoryWorkspace, version: calp::SemVer, ticked: &[identity::SheetId]| {
+        crate::calp_commands::publish_into_for_preview(
+            &state,
+            &crate::bi::types::BiState::new(),
+            &crate::pivot::types::PivotState::new(),
+            &crate::scripting::types::ScriptState::new(),
+            &crate::slicer::SlicerState::new(),
+            &crate::ribbon_filter::RibbonFilterState::new(),
+            &crate::pane_control::PaneControlState::new(),
+            &crate::persistence::UserFilesState::default(),
+            &crate::timeline_slicer::TimelineSlicerState::new(),
+            memory,
+            "",
+            PKG,
+            version.clone(),
+            "report",
+            RequestedSheets::ById(ticked.iter().map(|id| id.to_string()).collect()),
+            false,
+            Some(Vec::new()),
+            &HashMap::new(),
+            "compared",
+            &[],
+        )
+        .expect("the in-memory publish");
+        memory.get_version_manifest(PKG, &version.to_string()).expect("the manifest it wrote")
+    };
+    let base_memory = calp::MemoryWorkspace::new();
+    let base = publish(&base_memory, calp::SemVer::new(1, 0, 0), &[summary, data, notes, page]);
+    let push_memory = calp::MemoryWorkspace::new();
+    let push = publish(&push_memory, calp::SemVer::new(0, 0, 0), &[summary, page]);
+
+    let carried = crate::calp_diff::carried_sheet_ids(&push, &HashMap::new());
+    assert_eq!(
+        carried,
+        [summary, page, data, float].map(|id| id.to_string()).to_vec(),
+        "the carried sheets are the ticked ones, the chart's source and the floating grid's backing sheet, in publish order"
+    );
+
+    let base_artifacts = base_memory.artifacts_of(PKG, "1.0.0");
+    let push_artifacts = push_memory.artifacts_of(PKG, "0.0.0");
+    let diff = calp::diff::diff_sides(
+        &calp::diff::DiffSide::InMemory { manifest: &base, artifacts: &base_artifacts },
+        &calp::diff::DiffSide::InMemory { manifest: &push, artifacts: &push_artifacts },
+        &calp::diff::DiffOptions::default(),
+    )
+    .expect("the diff");
+    let row = |id: identity::SheetId| diff.sheets.iter().find(|s| s.sheet_id == id.to_string());
+    let removed = row(notes).expect("fixture: the base sheet the push drops is listed");
+    assert_eq!(removed.change, "removed", "fixture: as removed");
+    assert!(!removed.sample.is_empty(), "fixture: its cells are rows, each with a checkbox");
+    assert!(!carried.contains(&notes.to_string()), "a base sheet the push drops is said to be carried");
+    assert!(
+        row(data).is_none() && row(float).is_none(),
+        "fixture: the carried sheets nobody changed have no row -- the rows cannot say what is carried"
+    );
+
+    // A SUBSCRIBER's carried sheets are spelled as its rows are: through the
+    // local -> application map, a sheet the map does not name keeping its own.
+    let map: HashMap<String, String> =
+        [(summary.to_string(), "application-summary".to_string())].into_iter().collect();
+    let spelled = crate::calp_diff::carried_sheet_ids(&push, &map);
+    assert_eq!(spelled[0], "application-summary");
+    assert_eq!(spelled[1..], carried[1..]);
+
+    // On the wire: `carriedSheetIds`, beside the rows.
+    let answer = crate::calp_diff::WorkingCopyDiff {
+        package_name: PKG.to_string(),
+        base_version: "1.0.0".to_string(),
+        diff,
+        carried_sheet_ids: carried.clone(),
+        code: None,
+    };
+    let json = serde_json::to_value(&answer).expect("the answer serializes");
+    assert_eq!(json["carriedSheetIds"], serde_json::json!(carried));
+}
+
+/// `calp_diff_working_copy` answers with what ITS in-memory publish wrote: the
+/// carried sheets are read off the manifest that publish left, through the id
+/// map the diff applies, and travel in the answer -- never rebuilt from the
+/// rows or the request.
+///
+/// SABOTAGE: build `carried_sheet_ids` in the command from `diff.sheets`.
+#[test]
+fn the_working_copy_diff_reads_its_carried_sheets_off_its_own_publish() {
+    let diff_src = strip_line_comments(include_str!("calp_diff.rs"));
+    let start = diff_src.find("pub fn calp_diff_working_copy(").expect("the command moved");
+    let body = &diff_src[start..start + diff_src[start..].find("\n}\n").expect("its end")];
+    let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("`{needle}` is gone from calp_diff_working_copy"));
+    let wrote = at("let mut working_manifest = memory");
+    let carried = at("let carried_sheet_ids = carried_sheet_ids(&working_manifest, &sheet_id_map);");
+    let diffed = at("&DiffOptions { sheet_id_map, ..DiffOptions::default() }");
+    assert!(wrote < carried && carried < diffed, "the carried sheets are not read off the publish, through the rows' map");
+    assert!(at("Ok(WorkingCopyDiff {") < at("        carried_sheet_ids,\n"), "the answer does not carry them");
+    assert_eq!(body.matches("carried_sheet_ids").count(), 3, "a second source of the carried sheets");
+}
+
+/// THE WIRE the push dialog sends: the push's own `kind` (required) and its
+/// sheets -- `sheetIds` taking precedence over `sheetIndices`, as on the push --
+/// and the answer's `cellsSkipped`, all camelCase through `rename_all`.
+///
+/// SABOTAGE: drop `#[serde(default)]` from `sheet_indices` (a request naming no
+/// positions -- by id, or the default -- stops parsing), or rename
+/// `cells_skipped`. (Not `sheet_ids`: serde reads an absent `Option` as `None`
+/// with or without the attribute, so that sabotage would change nothing.)
+#[test]
+fn the_hold_back_takes_the_pushs_own_selection_on_the_wire() {
+    use crate::calp_commands::{HoldBackCellsParams, HoldBackCellsResponse};
+    let request = |extra: serde_json::Value| -> Result<HoldBackCellsParams, serde_json::Error> {
+        let mut json = serde_json::json!({
+            "registryPath": r"\\share\ws",
+            "packageName": "sales",
+            "baseVersion": "1.0.0",
+            "cells": [{ "sheetId": "id-float", "row": 1, "col": 1 }],
+        });
+        json.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(json)
+    };
+    let by_id = request(serde_json::json!({ "kind": "report", "sheetIndices": [0, 1], "sheetIds": ["id-a", "id-b"] }))
+        .expect("the dialog's request parses");
+    assert_eq!(by_id.kind, "report");
+    assert_eq!(by_id.cells.len(), 1);
+    assert_eq!(
+        RequestedSheets::from_wire(by_id.sheet_ids, by_id.sheet_indices),
+        RequestedSheets::ById(vec!["id-a".to_string(), "id-b".to_string()])
+    );
+    let ids_alone = request(serde_json::json!({ "kind": "report", "sheetIds": ["id-a"] })).expect("ids alone parse");
+    assert_eq!(
+        RequestedSheets::from_wire(ids_alone.sheet_ids, ids_alone.sheet_indices),
+        RequestedSheets::ById(vec!["id-a".to_string()])
+    );
+    let by_position = request(serde_json::json!({ "kind": "report", "sheetIndices": [2] })).expect("positions alone parse");
+    assert_eq!(
+        RequestedSheets::from_wire(by_position.sheet_ids, by_position.sheet_indices),
+        RequestedSheets::ByPosition(vec![2])
+    );
+    let default = request(serde_json::json!({ "kind": "library" })).expect("no sheets parses: the default selection");
+    assert!(RequestedSheets::from_wire(default.sheet_ids, default.sheet_indices).names_no_sheet());
+    let no_kind = request(serde_json::json!({})).expect_err("a request without the push's kind parsed");
+    assert!(no_kind.to_string().contains("kind"), "{no_kind}");
+
+    let answer = HoldBackCellsResponse { cells_held_back: 2, cells_skipped: 1, undo_recorded: true, undo_seq: Some(7) };
+    assert_eq!(
+        serde_json::to_value(&answer).expect("serializes"),
+        serde_json::json!({ "cellsHeldBack": 2, "cellsSkipped": 1, "undoRecorded": true, "undoSeq": 7 })
     );
 }

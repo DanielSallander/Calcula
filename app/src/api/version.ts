@@ -16,7 +16,7 @@
  * whenever @api gains a member, and list it in API_CHANGELOG below
  * (src/api/__tests__/apiVersion.test.ts checks that every listed name exists).
  */
-export const API_VERSION = "1.5.0";
+export const API_VERSION = "1.6.0";
 
 /** One @api addition: a runtime export of `module` (a member of it when the
  *  name is dotted), or a TYPE-only member declared in `declaredIn`. */
@@ -61,8 +61,112 @@ export interface ApiChangelogEntry {
  * interactions and the one target-aware resolver; @api/modelVisuals; the chart
  * mark's cross-filter capability);
  * docs/EXTENSION_GUIDE.md "New in API v1.5.0" mirrors it.
+ * 1.6.0 is the model-visual drill-through (2026-10-23,
+ * docs/design/model-drillthrough.md): the drill-through definition's one TS
+ * shape (@api/drillThrough), the synchronous "is this sheet subscribed?"
+ * answer (@api/collaboration), the right-clicked datum's member identity on
+ * ChartRightClickTarget, the Charts seam that completes and checks a
+ * design-query chart spec, the workbook-wide flag on a resolved report
+ * filter, the temporary-sheet flag on SheetInfo and the sheet primitives that
+ * keep or discard such a sheet by its stable id;
+ * docs/EXTENSION_GUIDE.md "New in API v1.6.0" mirrors it.
  */
 export const API_CHANGELOG: readonly ApiChangelogEntry[] = [
+  {
+    version: "1.6.0",
+    added: [
+      // ---- The drill-through definition: ONE TS shape for a chart's
+      // ChartSpec.drillThrough and a BI pivot's DrillThroughBehavior.designQuery,
+      // and the drill_through command's wire.
+      { name: "drillKeepsFilters", module: "@api/drillThrough" },
+      { name: "drillThroughDisplayName", module: "@api/drillThrough" },
+      { name: "drillThroughSheetName", module: "@api/drillThrough" },
+      { name: "DRILL_THROUGH_DEFAULT_SHEET_NAME", module: "@api/drillThrough" },
+      { name: "DrillThroughDefinition", declaredIn: "src/api/drillThrough.ts", pattern: "export interface DrillThroughDefinition \\{" },
+      { name: "DrillPresentation", declaredIn: "src/api/drillThrough.ts", pattern: "export type DrillPresentation =" },
+      { name: "DrillFilterSpec", declaredIn: "src/api/drillThrough.ts", pattern: "export interface DrillFilterSpec \\{" },
+      { name: "DrillThroughRequest", declaredIn: "src/api/drillThrough.ts", pattern: "export type DrillThroughRequest =" },
+      { name: "DrillThroughResponse", declaredIn: "src/api/drillThrough.ts", pattern: "export type DrillThroughResponse =" },
+      {
+        name: "DrillThroughBehavior.designQuery",
+        declaredIn: "src/api/pivotTypes.ts",
+        pattern: "designQuery\\?: DrillThroughDefinition;",
+      },
+      // ---- Read-only on a subscribed sheet: one synchronous answer every
+      // family asks (Collaboration publishes it over its provenance cache).
+      { name: "registerSubscribedSheetsProvider", module: "@api/collaboration" },
+      { name: "isSheetSubscribed", module: "@api/collaboration" },
+      { name: "resetSubscribedSheetsProvider", module: "@api/collaboration" },
+      { name: "SubscribedSheetsProvider", declaredIn: "src/api/collaboration.ts", pattern: "export interface SubscribedSheetsProvider \\{" },
+      // ---- The right-clicked datum's MODEL identity (member keys, not labels).
+      { name: "ChartRightClickTarget.memberPath", declaredIn: "src/api/chartData.ts", pattern: "memberPath\\?: MemberPath \\| null;" },
+      {
+        name: "ChartRightClickTarget.drillIdentity",
+        declaredIn: "src/api/chartData.ts",
+        pattern: "drillIdentity\\?: ChartDrillIdentityKind;",
+      },
+      { name: "ChartDrillIdentityKind", declaredIn: "src/api/chartData.ts", pattern: "export type ChartDrillIdentityKind =" },
+      // ---- The Charts seam: Charts completes and checks a design-query chart
+      // spec, so no caller copies its defaults.
+      {
+        name: "IChartStoreService.buildDesignQueryChartSpec",
+        declaredIn: "src/api/componentStoreRegistry.ts",
+        pattern: "buildDesignQueryChartSpec\\(req: \\{",
+      },
+      {
+        name: "IChartStoreService.validateChartSpec",
+        declaredIn: "src/api/componentStoreRegistry.ts",
+        pattern: "validateChartSpec\\(fullSpec: Record<string, unknown>\\): string\\[\\];",
+      },
+      // ---- A resolved report filter says whether it is workbook-wide.
+      { name: "ResolvedFieldFilter.workbookWide", declaredIn: "src/api/reportFilters/types.ts", pattern: "workbookWide: boolean;" },
+      // ---- The temporary (drill-through result) sheet.
+      { name: "SheetInfo.ephemeral", declaredIn: "src/core/lib/tauri-api.ts", pattern: "ephemeral\\?: boolean;" },
+      { name: "PivotRegionData.hasDesignQueryDrill", declaredIn: "src/api/pivotTypes.ts", pattern: "hasDesignQueryDrill: boolean;" },
+      { name: "keepEphemeralSheet", module: "@api/lib" },
+      { name: "discardEphemeralSheet", module: "@api/lib" },
+      // ---- deleteSheet names the sheet it means (a background discard renumbers sheets).
+      { name: "SheetDeleteOptions.expectedSheetId", declaredIn: "src/core/lib/tauri-api.ts", pattern: "expectedSheetId\\?: string;" },
+      // ---- An open edit follows its sheet by the STABLE id (a background discard renumbers sheets).
+      { name: "SheetContext.activeSheetId", declaredIn: "src/core/types/types.ts", pattern: "activeSheetId\\?: string;" },
+      { name: "EditingCell.sourceSheetId", declaredIn: "src/core/types/types.ts", pattern: "sourceSheetId\\?: string;" },
+      { name: "findEditSheet", module: "@api/editing" },
+      { name: "isExternalSessionHostSheet", module: "@api/externalEdit" },
+      { name: "getExternalSessionHostName", module: "@api/externalEdit" },
+      { name: "getExternalSessionHostIndex", module: "@api/externalEdit" },
+      { name: "ExternalEditSession.hostSheetId", declaredIn: "src/core/lib/formulaEditTarget.ts", pattern: "readonly hostSheetId\\?: string;" },
+      // ---- A save or publish refused because the sheets kept changing while it read them.
+      { name: "WORKBOOK_CHANGED_WHILE_SAVING", module: "@api/backendRefusal" },
+      { name: "isWorkbookChangedWhileSaving", module: "@api/backendRefusal" },
+      { name: "describeBackendRefusal", module: "@api/backendRefusal" },
+      { name: "CALP_PUSH_SHEET_GONE", module: "@api/backendRefusal" },
+      { name: "isSheetGoneRefusal", module: "@api/backendRefusal" },
+      // ---- A request by POSITION past the end of the sheet list: refused, never retried.
+      { name: "CALP_PUSH_SHEET_INDEX_OUT_OF_RANGE", module: "@api/backendRefusal" },
+      { name: "isSheetIndexOutOfRangeRefusal", module: "@api/backendRefusal" },
+      // ---- A toast can be taken back when what it says stops being true.
+      { name: "ToastHandle", declaredIn: "src/api/notifications.ts", pattern: "export interface ToastHandle \{" },
+      // ---- The publish doors take the ticked sheets by STABLE id.
+      { name: "PublishSheetSelection", declaredIn: "src/api/collaboration.ts", pattern: "export interface PublishSheetSelection" },
+      { name: "PublishParams.sheetIds", declaredIn: "src/api/collaboration.ts", pattern: "sheetIds\\?: string\\[\\];" },
+      // ---- Which sheets a push CARRIES is Rust's answer, never the ticked rows
+      // (review round 11, RV11-TS-1): a floating grid's backing sheet travels
+      // with its host, and a chart's source joins the push.
+      { name: "WorkingCopyDiff.carriedSheetIds", declaredIn: "src/api/collaboration.ts", pattern: "carriedSheetIds: string\\[\\];" },
+    ],
+    changed: [
+      "activateSheet: takes an optional { record } -- record: false switches without a macro-recorder step",
+      "deleteSheet: takes an optional { record, expectedSheetId } -- record: false deletes without a macro-recorder step; expectedSheetId deletes only while the sheet at that index still carries that id",
+      "setActiveSheet: takes an optional { record } -- record: false switches without a macro-recorder step",
+      "setSheetContext / setActiveSheet (the grid actions): take an optional trailing sheetId, stored as SheetContext.activeSheetId and cleared by a dispatch that carries none",
+      "registerExternalFormulaTarget: seeds the session host's identity from session.hostSheetId, so the host helpers decide by that id from the start",
+      "reportPagesFrom: leaves a temporary (ephemeral) canvas out of the report's page list",
+      "showToast: returns a ToastHandle whose dismiss() takes the toast down (a no-op once it is gone, or with no renderer); a caller that ignores it behaves as before",
+      "registerToastSink: takes an optional dismisser beside the sink, and a sink returns the id it gave the toast so a handle can take it back",
+      "describeBackendRefusal: also strips CALP_PUSH_SHEET_INDEX_OUT_OF_RANGE to its plain sentence; every other error is unchanged",
+      "holdBackCells: takes the push's own kind and sheet selection (sheetIndices / sheetIds, as PublishParams) beside the cells, holds back only the cells on sheets that push carries, and reports the rest as cellsSkipped -- skipped, never refused; a selection naming a gone sheet is refused before anything is written, as the push would refuse it",
+    ],
+  },
   {
     version: "1.5.0",
     added: [

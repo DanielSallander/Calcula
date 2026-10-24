@@ -145,6 +145,24 @@ describe("reportPagesFrom: canvases only, in tab order", () => {
     const pages = reportPagesFrom({ sheets: [{ index: 0, name: "Old", visibility: "visible" }], activeIndex: 0 });
     expect(pages).toEqual([]);
   });
+
+  it("skips an EPHEMERAL canvas (a drill-through's result page) but a kept one is a page again", () => {
+    // SABOTAGE: drop the `ephemeral` check -- the navigator offers a button to
+    // a page that closes when the reader leaves it.
+    const pages = reportPagesFrom({
+      sheets: [canvas(0, "Overview"), canvas(1, "Drill", { ephemeral: true }), canvas(2, "Kept", { ephemeral: false })],
+      activeIndex: 1,
+    });
+    expect(names(pages)).toEqual(["Overview", "Kept"]);
+  });
+
+  it("still carries an ephemeral canvas's id by true index (a drill from a drill resolves its filters on it)", async () => {
+    h.sheets = [worksheet(0, "Data"), canvas(1, "Drill", { ephemeral: true })];
+    await refreshReportPages();
+    const snap = getReportPagesSnapshot();
+    expect(names(snap.pages)).toEqual([]);
+    expect(sheetIdAt(snap, 1)).toBe("id-Drill");
+  });
 });
 
 describe("selectReportPages: THE one membership rule", () => {

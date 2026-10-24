@@ -887,6 +887,18 @@ describe("api/externalEdit.ts and api/editing.ts are one binding", () => {
       expect(editing[fn], fn).toBe(external[fn]);
       expect(external[fn], fn).toBe(coreSwitch[fn]);
     }
+    // The live session's HOST by identity (review F3-strip-uses-owner-host-index):
+    // the tab strip decides "is this the host's tab" by Core's own rule, never a copy.
+    for (const fn of ["isExternalSessionHostSheet", "getExternalSessionHostName", "getExternalSessionHostIndex"]) {
+      expect(typeof external[fn], fn).toBe("function");
+      expect(editing[fn], fn).toBe(external[fn]);
+      expect(external[fn], fn).toBe(core[fn]);
+    }
+    // WHICH sheet an open cell edit belongs to (review F1-rename-refuses-entry):
+    // the strip marks the source tab by Core's own identity rule.
+    const identity = (await import("../../core/lib/editSheetIdentity")) as Record<string, unknown>;
+    expect(typeof editing.findEditSheet).toBe("function");
+    expect(editing.findEditSheet).toBe(identity.findEditSheet);
     // The pick slot stays on `api/editing`, and is Core's too.
     expect(editing.registerExternalFormulaTarget).toBe(core.registerExternalFormulaTarget);
   });
@@ -894,7 +906,7 @@ describe("api/externalEdit.ts and api/editing.ts are one binding", () => {
   it("the Core-internal parking write and the test reset are on neither door", async () => {
     const editing = (await import("../editing")) as Record<string, unknown>;
     const external = (await import("../externalEdit")) as Record<string, unknown>;
-    for (const name of ["setExternalSessionParked", "__resetExternalEditForTests"]) {
+    for (const name of ["setExternalSessionParked", "noteExternalSessionHost", "__resetExternalEditForTests"]) {
       expect(editing[name], name).toBeUndefined();
       expect(external[name], name).toBeUndefined();
     }

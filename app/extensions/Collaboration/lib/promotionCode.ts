@@ -21,6 +21,7 @@ import type {
   PromotionCodeKind,
   PromotionImpact,
 } from "@api/collaboration";
+import { describeBackendRefusal } from "@api/backendRefusal";
 
 /** What each kind of code is called, keyed by `CodeKind`'s wire value. */
 export const PROMOTION_CODE_KIND: Record<PromotionCodeKind, { label: string; noun: string }> = {
@@ -121,9 +122,14 @@ export const PROMOTION_CODE_LOADING: PromotionCodeState = {
   error: null,
 };
 
-/** The state for a rejected impact read: the failure is SAID, never swallowed. */
+/**
+ * The state for a rejected impact read: the failure is SAID, never swallowed --
+ * and said as a person reads it: the retryable snapshot refusal (the push
+ * preview's diff can meet it) as its plain sentence, every other reason as it
+ * came (`@api/backendRefusal`).
+ */
 export function promotionCodeFailed(reason: unknown): PromotionCodeState {
-  const text = String(reason ?? "").trim();
+  const text = describeBackendRefusal(reason ?? "").trim();
   return {
     status: "failed",
     changes: [],

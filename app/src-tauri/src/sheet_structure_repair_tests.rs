@@ -46,6 +46,7 @@ fn delete(state: &AppState, file: &FileState, pane: &crate::pane_control::PaneCo
         &crate::timeline_slicer::TimelineSlicerState::new(),
         index,
         false,
+        None,
     )
     .expect("delete the sheet");
 }

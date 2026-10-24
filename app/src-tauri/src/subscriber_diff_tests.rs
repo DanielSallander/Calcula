@@ -413,7 +413,7 @@ fn a_spill_origin_cannot_be_half_kept() {
 /// `assemble_publish_workbook`.
 #[test]
 fn a_published_sheet_keeps_the_name_the_application_knows_it_by() {
-    let body = body_of("fn assemble_publish_workbook(");
+    let body = body_of("fn assemble_publish_snapshot(");
     assert!(
         body.contains("renamed_for_publish"),
         "the publish assembly stopped restoring published sheet names, so a \
@@ -439,7 +439,7 @@ fn a_published_sheet_keeps_the_name_the_application_knows_it_by() {
 /// that the assembly calls it only AFTER the names were restored.
 #[test]
 fn the_name_restoration_precedes_everything_that_reads_a_sheet_name() {
-    let body = body_of("fn assemble_publish_workbook(");
+    let body = body_of("fn assemble_publish_snapshot(");
     let restore = body
         .find("renamed_for_publish")
         .expect("the restoration is gone");
@@ -518,7 +518,7 @@ fn the_pivot_retention_set_is_case_insensitive_like_every_other_name_compare() {
 #[test]
 fn a_push_withholds_content_the_application_never_had() {
     // The assembly filters through the ONE composition the include tests drive.
-    let assembly = body_of("fn assemble_publish_workbook(");
+    let assembly = body_of("fn assemble_publish_snapshot(");
     assert!(
         assembly.contains("filter_and_release("),
         "the publish assembly no longer filters through filter_and_release"

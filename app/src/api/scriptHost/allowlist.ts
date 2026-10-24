@@ -528,7 +528,7 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   "api.clearRange":        { tier: "unlocked", class: "mutate", validate: vClearRange, limits: { maxCells: MAX_RANGE_CELLS },
                              desc: "Clear a block of cells on a sheet — everything, only their contents, or only their formatting (one undo step)" },
   "api.getSheets":         { tier: "unlocked", class: "read",   validate: vNone,
-                             desc: "List the sheets in this workbook, with each one's kind (worksheet or canvas), visibility and tab colour" },
+                             desc: "List the sheets in this workbook, with each one's kind (worksheet or canvas), visibility, tab colour and whether it is a temporary drill-through sheet" },
   // Tab colour is the one sheet attribute the CRUD rows above left unreachable.
   // Same tier and no capability as setSheetVisibility: pure document chrome,
   // nothing outside the workbook.

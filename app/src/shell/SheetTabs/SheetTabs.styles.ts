@@ -81,6 +81,12 @@ interface TabProps {
   $tabColor?: string;
   /** Thin Excel-style divider on the left edge; hidden next to selected tabs. */
   $withSeparator?: boolean;
+  /**
+   * A TEMPORARY sheet (a drill-through's result, discarded when the user
+   * leaves it): its name is italic, the strip's one visual for "not yet part
+   * of the workbook" (docs/design/model-drillthrough.md 2.7).
+   */
+  $isEphemeral?: boolean;
 }
 
 /** True when the tab renders "selected" (raised on the grid background). */
@@ -119,6 +125,7 @@ export const Tab = styled.button<TabProps>`
       : v('--text-secondary')
   };
   font-weight: ${props => (props.$isActive ? 600 : 400)};
+  font-style: ${props => (props.$isEphemeral ? 'italic' : 'normal')};
   cursor: pointer;
   font-size: 12px;
   white-space: nowrap;
@@ -196,6 +203,8 @@ export const TabDecoration = styled.span<TabDecorationProps>`
   font-size: 10px;
   line-height: 1;
   font-weight: 700;
+  /* The NAME of a temporary tab is italic; its marks stay upright. */
+  font-style: normal;
   color: ${props => props.$color || v('--text-secondary')};
   ${props => props.$background && `
     background-color: ${props.$background};

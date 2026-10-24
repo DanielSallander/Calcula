@@ -1,7 +1,7 @@
 {
   "$schema": "./registry-schema.json",
   "version": "1.0.0",
-  "lastUpdated": "2026-05-31",
+  "lastUpdated": "2026-10-23",
   "tiers": {
     "1": "Core Foundations - breaks everything if broken",
     "2": "High-Use Features - daily user workflows",
@@ -1283,18 +1283,63 @@
       ],
       "screenshots": [],
       "notes": "E2E coverage exists."
+    },
+    {
+      "id": "feat.model-drillthrough",
+      "name": "Drill-through on model visuals",
+      "tier": 3,
+      "category": "Data Analysis",
+      "description": "Design-query drill-through on BI pivots and design-query charts: author the definition (DSL + table/chart presentation), run it from the right-click or a pivot value cell, land the result on a temporary sheet that closes on leave unless its tab is double-clicked",
+      "coverage": "partial",
+      "unitTests": [
+        "extensions/_shared/drillThrough/__tests__/dslFilters.test.ts",
+        "extensions/_shared/drillThrough/__tests__/runDrillThrough.test.ts",
+        "extensions/_shared/drillThrough/__tests__/DrillThroughDefinitionEditor.test.tsx",
+        "extensions/Charts/lib/__tests__/chartDrillIdentity.test.ts",
+        "extensions/Charts/lib/__tests__/designQuerySource.test.ts",
+        "extensions/Charts/lib/__tests__/designQueryChartSpec.test.ts",
+        "extensions/Charts/components/__tests__/ChartContextMenuDrillThrough.test.tsx",
+        "extensions/Charts/components/__tests__/DrillThroughBehaviorDialog.test.tsx",
+        "extensions/Charts/components/__tests__/createChartDialogPackageKey.test.tsx",
+        "extensions/Pivot/handlers/__tests__/hasDesignQueryDrill.test.ts",
+        "extensions/Pivot/lib/__tests__/drillDispatch.test.ts",
+        "extensions/Pivot/components/__tests__/drillThroughBehaviorDialog.test.tsx",
+        "extensions/Collaboration/__tests__/subscribedSheetBadge.test.ts",
+        "src/api/__tests__/drillThrough.test.ts",
+        "src/api/__tests__/collaborationSubscribedSheets.test.ts",
+        "src/api/__tests__/extensionGuideApiV160.test.ts",
+        "src/core/lib/__tests__/sheetRecording.test.ts",
+        "src/shell/SheetTabs/__tests__/ephemeralSheets.test.ts",
+        "src/shell/SheetTabs/__tests__/sheetTabsTemporarySheets.test.tsx",
+        "src/shell/SheetTabs/__tests__/keepSheetMenuItem.test.ts",
+        "src/shell/SheetTabs/__tests__/sheetCommands.test.ts"
+      ],
+      "rustTests": [
+        "app/src-tauri/src/drill_through.rs (19 tests)",
+        "app/src-tauri/src/object_sheet_tests.rs (the ephemeral flag, keep and discard by id)",
+        "app/src-tauri/src/pivot/types.rs drill_through_tests",
+        "app/src-tauri/src/pivot/commands.rs (region flag, synthetic Total)",
+        "app/src-tauri/src/mcp/objects.rs (temporary marker)",
+        "app/src-tauri/src/calp_materialize_tests.rs (BUG-0588 re-bind)",
+        "core/calp/src/chart_refs.rs (re-bind + save-time stamp)"
+      ],
+      "e2eTests": [
+        "e2e/journeys/drill-through.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "J1-J9 live on the serverless sales-star fixture (oracle from designQueryOracle, no goldens); each of SB1-SB10 in the journey header seen red once. Gaps: no journey for a subscriber running a publisher's definition from a pulled .calp (proved in Rust only), for Keep filters with live page slicers, for a drill from a drill (vitest only), or for authoring a definition through either Drill-through behavior... dialog (the journey writes definitions straight into the store)."
     }
   ],
   "summary": {
-    "totalFeatures": 68,
+    "totalFeatures": 75,
     "tier1": 13,
     "tier2": 16,
-    "tier3": 24,
-    "tier4": 15,
+    "tier3": 30,
+    "tier4": 16,
     "coverageFull": 0,
-    "coveragePartial": 55,
-    "coverageUnitOnly": 3,
+    "coveragePartial": 72,
+    "coverageUnitOnly": 0,
     "coverageVisualOnly": 0,
-    "coverageNone": 10
+    "coverageNone": 3
   }
 }

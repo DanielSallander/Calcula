@@ -1249,9 +1249,15 @@ mod tests {
         out
     }
 
-    /// The published 109 / 66 / 41 / 2 split, pinned. (107 / 65 / 40 / 2 until
-    /// WP-D S2 added `object_bindings` (Persisted) and `object_binding_runtime`
-    /// (a bare Mutex: a derived cache, never saved).)
+    /// The published 111 / 66 / 42 / 3 split, pinned. (110 / 66 / 42 / 2 until
+    /// F1 review round 7 added `sheet_structure_generation`, an `AtomicU64` --
+    /// neither wrapper, genuinely lock-free -- that every sheet renumbering
+    /// bumps so a save, AutoRecover or publish snapshot can tell it read across
+    /// one; 109 / 66 / 41 / 2 until the model-visual drill-through added
+    /// `ephemeral_sheets`, a bare Mutex: session-only like `scroll_areas`, never
+    /// saved; 107 / 65 / 40 / 2 until WP-D S2 added `object_bindings`
+    /// (Persisted) and `object_binding_runtime` (a bare Mutex: a derived cache,
+    /// never saved).)
     ///
     /// WHY A TEST AND NOT A DOC LINE. This count has been published wrong four
     /// times (36, 51, 59, and a 2026-08-17 miscount reading 39 bare + 3 unlocked
@@ -1281,15 +1287,17 @@ mod tests {
             .map(|(n, _)| n)
             .collect();
 
-        assert_eq!(decls.len(), 109, "AppState field count changed");
+        assert_eq!(decls.len(), 111, "AppState field count changed");
         assert_eq!(persisted.len(), 66, "Persisted<T> count changed");
-        assert_eq!(bare.len(), 41, "bare Mutex/RwLock count changed");
+        assert_eq!(bare.len(), 42, "bare Mutex/RwLock count changed");
         assert_eq!(
             neither,
-            ["undo_stack", "calc_cancel"],
-            "exactly two fields carry neither wrapper: `undo_stack` is `UndoHistory`, \
-             which holds its OWN Mutex (do not read this as unlocked and add one), and \
-             `calc_cancel` is `CancelToken(Arc<AtomicBool>)`, genuinely lock-free"
+            ["undo_stack", "calc_cancel", "sheet_structure_generation"],
+            "exactly three fields carry neither wrapper: `undo_stack` is `UndoHistory`, \
+             which holds its OWN Mutex (do not read this as unlocked and add one), \
+             `calc_cancel` is `CancelToken(Arc<AtomicBool>)`, genuinely lock-free, and \
+             `sheet_structure_generation` is an `AtomicU64` that adds no edge to the lock \
+             order on purpose (do not wrap it in a Mutex: it is bumped under sheet locks)"
         );
         assert_eq!(
             persisted.len() + bare.len() + neither.len(),

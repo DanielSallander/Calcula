@@ -163,6 +163,8 @@ export function createReferenceNavigator(ctx: ReferenceNavigatorContext): Refere
         result.activeIndex,
         activeName,
         activeSheet?.kind === "canvas" ? "canvas" : "grid",
+        // The sheet's STABLE id: an open edit follows its sheet by it.
+        activeSheet?.sheetId,
       ),
     );
     window.dispatchEvent(

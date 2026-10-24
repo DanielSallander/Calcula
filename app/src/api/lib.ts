@@ -131,6 +131,14 @@ export {
   hideSheet,
   unhideSheet,
   setTabColor,
+  // A drill-through's temporary sheet made permanent (the tab strip's
+  // double-click and Keep Sheet; docs/design/model-drillthrough.md 2.7)
+  keepEphemeralSheet,
+  // ...and discarded, by its stable id (the tab strip's leave observer and
+  // its core.sheet.discardEphemeral door). An EXTENSION never calls this: it
+  // runs core.sheet.discardEphemeral, so the strip's own discard body (the
+  // view-cache renumbering, the list, Core's sheet context) runs with it.
+  discardEphemeralSheet,
   nextSheet,
   previousSheet,
   setScrollArea,
@@ -278,6 +286,9 @@ export type {
   SheetVisibility,
   SheetsResult,
   SheetKindName,
+  SheetRecordingOptions,
+  SheetDeleteOptions,
+  DiscardedSheet,
   CanvasLayout,
   CanvasLayoutPatch,
   CanvasObjectRef,

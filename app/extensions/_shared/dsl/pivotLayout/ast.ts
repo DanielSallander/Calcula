@@ -16,6 +16,13 @@ export interface PivotLayoutAST {
   calculatedFields: CalcFieldNode[];
   topN?: TopNNode;
   saveAs?: string;
+  /**
+   * Where each `FILTERS:` keyword stood, in order. The parser ACCUMULATES
+   * filter terms across clauses (a second clause adds to the first), so the
+   * node list alone cannot say how many clauses there were; the validator
+   * reads this to warn on a repeated clause. Absent when there was none.
+   */
+  filtersClauses?: SourceLocation[];
 }
 
 /** A field reference in ROWS, COLUMNS, or as part of other clauses. */

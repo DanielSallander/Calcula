@@ -24,7 +24,7 @@
 //          callers say WHICH sheet; how a switch is made lives here.
 
 import { setActiveSheet as setActiveSheetBackend } from "../core/lib/tauri-api";
-import type { SheetsResult } from "../core/lib/tauri-api";
+import type { SheetRecordingOptions, SheetsResult } from "../core/lib/tauri-api";
 import { primeSheetSwitch } from "../core/lib/sheetSwitchPrefetch";
 import { setActiveSheet } from "../core/state/gridActions";
 import { getGridStateSnapshot } from "../core/state/GridContext";
@@ -38,7 +38,10 @@ import { AppEvents, emitAppEvent } from "./events";
  * restored selection. Returns the backend's answer; the sheet it reports
  * active is the one switched to.
  */
-export async function activateSheet(index: number): Promise<SheetsResult> {
+export async function activateSheet(
+  index: number,
+  options?: SheetRecordingOptions,
+): Promise<SheetsResult> {
   window.dispatchEvent(
     new CustomEvent("sheet:beforeSwitch", {
       detail: {
@@ -47,7 +50,14 @@ export async function activateSheet(index: number): Promise<SheetsResult> {
       },
     }),
   );
-  const result = await setActiveSheetBackend(index);
+  // `{ record: false }` reaches the wrapper, which is where the macro recorder
+  // is told about an `activateSheet` step: a drill-through's landing on its
+  // temporary sheet is a consequence of the drill, not a step of the user's
+  // macro (model-drillthrough.md 2.7). The default call is the one it always was.
+  const result =
+    options?.record === false
+      ? await setActiveSheetBackend(index, { record: false })
+      : await setActiveSheetBackend(index);
   await primeSheetSwitch(result.activeIndex);
   // By the index FIELD, never list position: object-backed sheets are absent
   // from the list while indices stay true.
@@ -55,7 +65,10 @@ export async function activateSheet(index: number): Promise<SheetsResult> {
   const name = active?.name ?? "";
   // No await from here on: the context, the grid's refetch and the tab strip
   // move in one flush.
-  dispatchGridAction(setActiveSheet(result.activeIndex, name, active?.kind === "canvas" ? "canvas" : "grid"));
+  // With the sheet's STABLE id: an open edit follows its sheet by it.
+  dispatchGridAction(
+    setActiveSheet(result.activeIndex, name, active?.kind === "canvas" ? "canvas" : "grid", active?.sheetId),
+  );
   window.dispatchEvent(
     new CustomEvent("sheet:normalSwitch", {
       detail: { newSheetIndex: result.activeIndex, newSheetName: name },

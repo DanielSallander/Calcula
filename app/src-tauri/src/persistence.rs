@@ -603,7 +603,202 @@ pub(crate) fn restore_sheet_view_from_workbook(
     Ok(())
 }
 
-/// Build a Workbook from the current AppState (used by save_file and export_as_package).
+// ============================================================================
+// ONE SNAPSHOT, NEVER A TORN ONE (F1, review round 7)
+// ============================================================================
+//
+// A save, an AutoRecover tick and a publish each copy the live document into
+// a `Workbook`, and most of what they copy is keyed to the sheet list BY
+// INDEX: visibility, kind, freeze, tab colour, page setup, merges, CF/DV,
+// comments, controls, protection, sheet-scoped names, slicers, timelines,
+// AutoFilters, a grid pivot's source. A structural sheet operation running OFF
+// the main thread -- the async drill-through's `append_user_sheet` on a tokio
+// worker, an MCP agent's delete / move / add on the server's thread -- that
+// landed between the sheet loop and those reads renumbered them under the
+// copy, and the file got a TORN snapshot: a floating grid's object sheet
+// written as a visible tab (or a canvas), its formats and validations filed
+// under the next sheet or dropped, every later sheet given its neighbour's
+// metadata. Nothing reported it.
+//
+// Two mechanisms close it, and which one covers which read is decided by the
+// lock order, not by taste:
+//
+//   * THE BODY ([`build_workbook_for_save`]) holds `grid` and then `grids` from
+//     its first store read to its last. Every sheet-renumbering operation
+//     takes `grid` or `grids` FIRST and holds it across the renumbering itself
+//     (the sheet list and every index-keyed store it re-keys), and every cell
+//     writer takes `grid` first, so while the body holds both nothing can
+//     renumber the sheets under it -- and because the crate's canonical order
+//     is `grid`, `grids`, then everything else, holding them while taking the
+//     rest closes no cycle. Walked transitively before landing: nothing the
+//     body reaches takes `grid` / `grids` again, awaits, does file IO, or
+//     takes a store that any other path holds while it acquires `grid` /
+//     `grids`.
+//   * THE TAILS ([`assemble_workbook_snapshot`] after the body, and the
+//     `.calp` carrier's slicer/timeline collectors plus the rest of
+//     `calp_commands::assemble_publish_snapshot`) cannot be held the same way:
+//     they read `SlicerState::slicers`, and the async slicer-item fetch
+//     (`slicer::commands::get_slicer_items_core`) holds the slicers while it
+//     reads `grids`. A tail that took the slicers under the grid locks would
+//     close a cycle with it. So the tails keep the lock shape BUG-0591 gave
+//     them (copy and release, nothing held across a collector), and each
+//     snapshot is VALIDATED instead: the body reads
+//     `AppState::sheet_structure_generation` under its hold, every
+//     renumbering bumps it inside its own `sheet_names` hold, and
+//     [`take_consistent_snapshot`] re-reads it after the tail under
+//     `sheet_names` alone. A snapshot a renumbering overlapped is taken again
+//     -- at most [`SNAPSHOT_ATTEMPTS`] times -- and then refused, retryably,
+//     rather than written torn.
+
+/// How many times a save / AutoRecover / publish snapshot is taken before it
+/// is refused because a structural sheet operation overlapped every attempt.
+pub(crate) const SNAPSHOT_ATTEMPTS: usize = 3;
+
+/// The prefix of the refusal [`take_consistent_snapshot`] gives when every
+/// attempt was overlapped by a renumbering of the sheets. Retryable: nothing
+/// was written, and the next save normally succeeds.
+pub(crate) const WORKBOOK_CHANGED_WHILE_SAVING: &str = "WORKBOOK_CHANGED_WHILE_SAVING";
+
+/// Record that the sheets were RENUMBERED (`AppState::sheet_structure_generation`).
+///
+/// Called by `sheets::remap_sheet_keyed_stores` -- the re-key every in-place
+/// renumbering goes through, inside its own `sheet_names` hold -- and by the
+/// two paths that install a whole new sheet list (`open_file`,
+/// `reset_document_scoped_stores`). Lock-free: an atomic adds no edge to the
+/// lock order, so it may be called under any guard.
+pub(crate) fn note_sheet_structure_change(state: &AppState) {
+    state
+        .sheet_structure_generation
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// What one snapshot of the live document was taken against: the
+/// sheet-structure generation, read by [`build_workbook_for_save`] UNDER its
+/// grid hold, so it describes exactly the sheet list the snapshot's sheets
+/// were copied from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotBasis {
+    generation: u64,
+}
+
+/// The [`SnapshotBasis`] of a snapshot whose caller holds `grid` and `grids`.
+fn capture_snapshot_basis(state: &AppState) -> SnapshotBasis {
+    SnapshotBasis {
+        generation: state.sheet_structure_generation.load(std::sync::atomic::Ordering::SeqCst),
+    }
+}
+
+/// The [`SnapshotBasis`] of a read that holds NO grid lock -- the `.calp`
+/// publish selection (`calp_commands::resolve_publish_selection`), which reads
+/// the sheet list, its ids, its visibility and the objects naming a sheet by
+/// position one store at a time. Read under `sheet_names` ALONE, so a
+/// renumbering in progress is waited out and counted; the reads that follow are
+/// then checked against it with [`snapshot_is_current`], exactly as a snapshot's
+/// tail is (F1, review round 8).
+pub(crate) fn current_snapshot_basis(state: &AppState) -> Result<SnapshotBasis, String> {
+    let renumberings_finished = state.sheet_names.read().map_err(|e| e.to_string())?;
+    let basis = capture_snapshot_basis(state);
+    drop(renumberings_finished);
+    Ok(basis)
+}
+
+/// The retryable refusal ([`WORKBOOK_CHANGED_WHILE_SAVING`]) for a read a sheet
+/// renumbering kept from finishing faithfully -- a sheet the publish selected
+/// is gone from its snapshot, or the selection itself was overlapped: `what`
+/// finishes "while it was being ..." ("published", "previewed", "compared",
+/// "merged") and `why` says what changed. Same code, same shape --
+/// "<code>: the workbook changed while it was being <what> -- <why>. Nothing was
+/// written; try again." -- as [`take_consistent_snapshot`]'s own refusal, so one
+/// recogniser reads both.
+pub(crate) fn workbook_changed_refusal(what: &str, why: &str) -> String {
+    format!(
+        "{}: the workbook changed while it was being {} -- {}. Nothing was written; try again.",
+        WORKBOOK_CHANGED_WHILE_SAVING, what, why
+    )
+}
+
+// How many validated attempts -- snapshots ([`take_consistent_snapshot`]) and
+// the publish selection (`calp_commands::resolve_publish_selection`) -- were
+// made on THIS thread, so a runtime probe can PROVE which attempt a door kept
+// rather than infer it from timing (`state_digest_lock_order_tests.rs`, F4
+// review round 8). Test-only: a production build counts nothing.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SNAPSHOT_ATTEMPTS_TAKEN_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Count one validated attempt on this thread (see
+/// `SNAPSHOT_ATTEMPTS_TAKEN_FOR_TEST`); a no-op outside tests.
+#[cfg(test)]
+pub(crate) fn count_snapshot_attempt() {
+    SNAPSHOT_ATTEMPTS_TAKEN_FOR_TEST.with(|taken| taken.set(taken.get() + 1));
+}
+
+/// Count one validated attempt on this thread -- a no-op outside tests.
+#[cfg(not(test))]
+pub(crate) fn count_snapshot_attempt() {}
+
+/// Were the sheets left un-renumbered since `basis` was captured?
+///
+/// Takes `sheet_names` ALONE, holding nothing else -- so no cycle is possible
+/// -- and only to WAIT OUT a renumbering in progress: every one holds
+/// `sheet_names` across its whole mutation and bumps the generation inside
+/// that hold, so once this has the lock, any renumbering that touched a store
+/// the snapshot read has finished and is counted. Call it after the
+/// snapshot's LAST store read.
+pub(crate) fn snapshot_is_current(state: &AppState, basis: &SnapshotBasis) -> Result<bool, String> {
+    let renumberings_finished = state.sheet_names.read().map_err(|e| e.to_string())?;
+    let now = state.sheet_structure_generation.load(std::sync::atomic::Ordering::SeqCst);
+    drop(renumberings_finished);
+    Ok(now == basis.generation)
+}
+
+/// Take a snapshot of the live document that no sheet renumbering tore.
+///
+/// `take` builds ONE snapshot and returns it with the [`SnapshotBasis`] its
+/// body read under the grid hold; after it returns -- after its last store
+/// read -- [`snapshot_is_current`] asks whether the sheets were renumbered in
+/// between. If they were, the snapshot is thrown away and taken again; after
+/// [`SNAPSHOT_ATTEMPTS`] overlapped attempts the caller gets a retryable
+/// refusal ([`WORKBOOK_CHANGED_WHILE_SAVING`]) and nothing is written. `what`
+/// finishes "while the workbook was being ..." -- the caller's own act:
+/// "saved", or for the `.calp` door "published", "previewed", "compared" or
+/// "merged" (`calp_commands::assemble_publish_workbook`).
+///
+/// An error from `take` is returned as it is, never retried.
+pub(crate) fn take_consistent_snapshot<T>(
+    state: &AppState,
+    what: &str,
+    mut take: impl FnMut() -> Result<(T, SnapshotBasis), String>,
+) -> Result<T, String> {
+    for attempt in 1..=SNAPSHOT_ATTEMPTS {
+        count_snapshot_attempt();
+        let (snapshot, basis) = take()?;
+        if snapshot_is_current(state, &basis)? {
+            return Ok(snapshot);
+        }
+        crate::log_warn!(
+            "PERSIST",
+            "attempt {}/{}: a sheet was added, deleted or moved while the workbook was being {}; \
+             the snapshot is taken again rather than written torn",
+            attempt,
+            SNAPSHOT_ATTEMPTS,
+            what
+        );
+    }
+    Err(format!(
+        "{}: the workbook changed while it was being {} -- a sheet was added, deleted or moved during \
+         each of {} attempts to read it. Nothing was written; try again.",
+        WORKBOOK_CHANGED_WHILE_SAVING, what, SNAPSHOT_ATTEMPTS
+    ))
+}
+
+/// Build a Workbook from the current AppState -- the shared core of every
+/// projection of the live document into a file: `assemble_workbook_snapshot`
+/// (the `.cala` save, Save As `.xlsx`, AutoRecover) and
+/// `build_workbook_for_save_with_slicers` (the `.calp` publish, its preview and
+/// the working-copy diff). Takes plain references (a `State<T>` derefs to its
+/// `T`), so a test can drive it.
 ///
 /// Captures ALL sheets, not just the active one (BUG-0011: the old
 /// single-sheet `Workbook::from_grid` build silently dropped every other
@@ -611,12 +806,49 @@ pub(crate) fn restore_sheet_view_from_workbook(
 /// the active-sheet dimension/merge mirrors, which are the source of truth
 /// while a sheet is active (the `all_*` slots for the active sheet are
 /// empty — they were std::mem::take'n on switch).
+///
+/// ONE HOLD FROM THE FIRST READ TO THE LAST (F1, review round 7). `grid` and
+/// `grids` are taken before the first store read and released after the last
+/// one -- `enrich_workbook_metadata`'s -- so no sheet can be added, deleted,
+/// moved or copied between the sheet loop and the index-keyed metadata it is
+/// paired with. See the section header above for why that is safe and what
+/// covers the callers' tails. Returns the [`SnapshotBasis`] read under the
+/// hold, which the caller hands to [`take_consistent_snapshot`].
+///
+/// `bi_state` is read for one thing: the live connections' keys that
+/// [`collect_charts_for_save`] stamps onto every saved design-query chart --
+/// the package key each was minted from for the `.cala` save, or the id each
+/// data source is filed under in the package for the `.calp` carrier
+/// (`chart_keys_for`). It is copied out FIRST and its lock released before
+/// any `AppState` guard below is taken.
 pub fn build_workbook_for_save(
-    state: &State<AppState>,
-    user_files_state: &State<UserFilesState>,
-) -> Result<Workbook, String> {
+    state: &AppState,
+    user_files_state: &UserFilesState,
+    bi_state: &crate::bi::types::BiState,
+    chart_keys_for: ChartKeysFor,
+) -> Result<(Workbook, SnapshotBasis), String> {
+    let chart_keys = match chart_keys_for {
+        ChartKeysFor::Document => chart_connection_keys(bi_state)?,
+        ChartKeysFor::Package => published_chart_connection_keys(bi_state)?,
+    };
+    // THE HOLD. `grid`, then `grids` -- the canonical order -- held until the
+    // explicit `drop`s after `enrich_workbook_metadata`, the body's last read.
+    // Every sheet-renumbering operation (`append_user_sheet`, `delete_sheet_impl`,
+    // move, copy, the partition restore, a pull's materialize) and every cell
+    // writer takes one of the two FIRST, so none of them can land between the
+    // sheet loop below and the per-sheet metadata read after it. Releasing them
+    // after the loop (BUG-0591's shape) let the async drill-through's add rotate
+    // a floating grid's object sheet one place to the right under the save, which
+    // then wrote it as a visible tab with the new sheet's kind and page setup and
+    // dropped its formats. This does not bring BUG-0591's deadlocks back: those
+    // were a save holding a store a cell writer takes LATE (`sheet_ids`, `tables`)
+    // while it waited for one the writer takes EARLY, and no cell writer can be
+    // past its first lock while this holds both.
     let active_grid = state.grid.read().map_err(|e| e.to_string())?;
     let grids = state.grids.read().map_err(|e| e.to_string())?;
+    // The sheet structure this snapshot is of, read under the hold: nothing can
+    // renumber the sheets between this reading and the sheet loop.
+    let basis = capture_snapshot_basis(state);
     let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
     let styles = state.style_registry.read().map_err(|e| e.to_string())?;
@@ -625,7 +857,18 @@ pub fn build_workbook_for_save(
     let all_cw = state.all_column_widths.read().map_err(|e| e.to_string())?;
     let all_rh = state.all_row_heights.read().map_err(|e| e.to_string())?;
     let tables = state.tables.read().map_err(|e| e.to_string())?;
-    let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
+    // COPIED, read while `sheet_names` is still held (so each sheet's id below is
+    // paired with its name under one hold) and released at once. It used to be a
+    // guard held to the end of this function -- across the user files, the media
+    // and `enrich_workbook_metadata`'s merged regions -- and a cell writer holds
+    // `files` and `merged_regions` when it reaches
+    // `record_subscription_override_edits`, which takes `sheet_ids` (BUG-0591,
+    // R5-PREVIEW-SUBS-DEADLOCK). The grid hold now excludes those writers for the
+    // whole body, so that edge could no longer close a cycle here; the copy stays
+    // because nothing below needs the guard and a released store is one fewer
+    // edge for a later caller to inherit. The copy cannot go stale: the hold
+    // keeps every renumbering out until the last read below.
+    let sheet_ids: Vec<SheetId> = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
 
     let mut workbook = Workbook::new();
     workbook.sheets.clear();
@@ -658,15 +901,15 @@ pub fn build_workbook_for_save(
             .cloned()
             .unwrap_or_else(|| format!("Sheet{}", i + 1));
         let mut sheet = persistence::Sheet::from_grid(id, name, grid_ref, &styles, &dimensions);
-        apply_user_hidden_to_sheet(&state, &mut sheet, i);
+        apply_user_hidden_to_sheet(state, &mut sheet, i);
         // Dynamic-array ownership. Joined on here for the same reason the
         // user-hidden sets are: it lives in AppState, not in the grid.
-        apply_spill_extents_to_sheet(&state, &mut sheet, i);
+        apply_spill_extents_to_sheet(state, &mut sheet, i);
         workbook.sheets.push(sheet);
     }
 
-    drop(grids);
-    drop(active_grid);
+    // The sheet loop's own guards go now; `grid` and `grids` do NOT -- they are
+    // what keeps a renumbering out until the index-keyed reads below are done.
     drop(sheet_names);
     drop(styles);
     drop(col_widths);
@@ -675,14 +918,19 @@ pub fn build_workbook_for_save(
     drop(all_rh);
 
     workbook.tables = collect_tables_for_save(&tables, &sheet_ids);
-    workbook.charts = collect_charts_for_save(state, &sheet_ids);
+    // Released as soon as it has been read, not at the end: the cell writers hold
+    // `files` and `merged_regions` (read below) when they take `tables`. They
+    // cannot be running while the grid locks are held, but a store held across
+    // reads that do not need it is an edge a later caller inherits for nothing.
+    drop(tables);
+    workbook.charts = collect_charts_for_save(state, &sheet_ids, &chart_keys);
     workbook.sparklines = collect_sparklines_for_save(state, &sheet_ids);
     workbook.floating_ranges = collect_floating_ranges_for_save(state);
     workbook.user_files = user_files_state.files.lock().map_err(|e| e.to_string())?.clone();
     // Content-addressed media (pictures). The FULL session store is attached
     // here so every workbook-building path carries it; the unreferenced ones are
     // swept off the archive at the one real save chokepoint
-    // (`assemble_workbook_for_save`), never off the session store. See
+    // (`assemble_workbook_snapshot`), never off the session store. See
     // `media::sweep_unreferenced_media` for why that split is what keeps undo
     // honest.
     workbook.media = state.media.read().map_err(|e| e.to_string())?.clone();
@@ -708,28 +956,54 @@ pub fn build_workbook_for_save(
     // Enrich with sheet-level metadata (merged regions, freeze panes, etc.)
     enrich_workbook_metadata(&mut workbook, state, &sheet_ids);
 
-    Ok(workbook)
+    // THE HOLD ENDS HERE, after the body's last store read and before anything
+    // a caller does next (file IO included): visibility, kind, page setup, CF,
+    // DV and every other index-keyed store above were read against the same
+    // sheet list the loop copied.
+    drop(grids);
+    drop(active_grid);
+
+    Ok((workbook, basis))
 }
 
-/// Build a Workbook from the current AppState including slicer and ribbon filter state.
+/// Build a Workbook from the current AppState including slicer and ribbon filter
+/// state -- the `.calp` carrier's collector, the first step of
+/// `calp_commands::assemble_publish_snapshot`.
+///
+/// Returns the body's [`SnapshotBasis`] with the workbook: the slicer and
+/// timeline collectors below are part of the publish snapshot's TAIL, outside
+/// the body's grid hold (the slicers cannot be taken under it -- see the
+/// section header), so the publish validates them, with the rest of its tail,
+/// through [`take_consistent_snapshot`].
 pub fn build_workbook_for_save_with_slicers(
-    state: &State<AppState>,
-    user_files_state: &State<UserFilesState>,
-    slicer_state: &State<crate::slicer::SlicerState>,
-    ribbon_filter_state: &State<crate::ribbon_filter::RibbonFilterState>,
-    pivot_state: &State<'_, crate::pivot::types::PivotState>,
-    timeline_state: &State<crate::timeline_slicer::TimelineSlicerState>,
-) -> Result<Workbook, String> {
-    let mut workbook = build_workbook_for_save(state, user_files_state)?;
-    let sheet_ids_bwfs = state.sheet_ids.read().map_err(|e| e.to_string())?;
-    workbook.slicers = collect_slicers_for_save(slicer_state, &sheet_ids_bwfs);
+    state: &AppState,
+    user_files_state: &UserFilesState,
+    bi_state: &crate::bi::types::BiState,
+    slicer_state: &crate::slicer::SlicerState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    pivot_state: &crate::pivot::types::PivotState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+) -> Result<(Workbook, SnapshotBasis), String> {
+    // The carrier: a design-query chart's key is the id its data source is
+    // filed under in this package (review RB-1).
+    let (mut workbook, basis) = build_workbook_for_save(state, user_files_state, bi_state, ChartKeysFor::Package)?;
+    // THE SNAPSHOT'S OWN SHEET IDS, in its own order -- never a second read of
+    // `sheet_ids`. A fresh read paired this tail's indices with whatever sheet
+    // list was live by then, while the sheets the carrier ships came from the
+    // body; the snapshot's ids are the body's by construction, and
+    // `take_consistent_snapshot` refuses the whole snapshot if a renumbering
+    // landed before the tail's last read. No guard is taken, so nothing here is
+    // held across the timeline collector's `pivot_tables`
+    // (R5-PREVIEW-SUBS-DEADLOCK, BUG-0591).
+    let snapshot_sheet_ids: Vec<SheetId> = workbook.sheets.iter().map(|sheet| sheet.id).collect();
+    workbook.slicers = collect_slicers_for_save(slicer_state, &snapshot_sheet_ids);
     workbook.timeline_slicers =
-        collect_timeline_slicers_for_save(timeline_state, pivot_state, &sheet_ids_bwfs);
+        collect_timeline_slicers_for_save(timeline_state, pivot_state, &snapshot_sheet_ids);
     workbook.ribbon_filters = collect_ribbon_filters_for_save(ribbon_filter_state);
     workbook.pivot_layouts = state.pivot_layouts.read().unwrap().clone();
     workbook.object_scripts = state.object_scripts.read().unwrap().clone();
     workbook.extension_data = state.extension_data.read().unwrap().clone();
-    Ok(workbook)
+    Ok((workbook, basis))
 }
 
 /// Collect conditional-formatting + data-validation state into the persisted,
@@ -1321,8 +1595,8 @@ pub(crate) fn collect_slicers_for_save(
 /// `timeline_slicers.json` on every save — a `HashMap` iterates in arbitrary
 /// order, which would otherwise make every save a spurious diff.
 fn collect_timeline_slicers_for_save(
-    timeline_state: &State<crate::timeline_slicer::TimelineSlicerState>,
-    pivot_state: &State<'_, crate::pivot::types::PivotState>,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+    pivot_state: &crate::pivot::types::PivotState,
     sheet_ids: &[SheetId],
 ) -> Vec<persistence::SavedTimelineSlicer> {
     let timelines = match timeline_state.timelines.read() {
@@ -1709,7 +1983,7 @@ pub(crate) fn restore_slicers(
 
 /// Collect ribbon filters from RibbonFilterState into SavedRibbonFilter format.
 fn collect_ribbon_filters_for_save(
-    ribbon_filter_state: &State<crate::ribbon_filter::RibbonFilterState>,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
 ) -> Vec<persistence::SavedRibbonFilter> {
     let filters = ribbon_filter_state.filters.read().unwrap();
     filters
@@ -1928,7 +2202,7 @@ fn restore_ribbon_filters(
 /// Collect pane controls from PaneControlState into SavedPaneControl format.
 /// Sorted by (order, id) for deterministic artifact bytes across saves.
 pub(crate) fn collect_pane_controls_for_save(
-    pane_control_state: &State<crate::pane_control::PaneControlState>,
+    pane_control_state: &crate::pane_control::PaneControlState,
 ) -> Vec<persistence::SavedPaneControl> {
     let controls = pane_control_state.controls.lock().unwrap();
     let mut saved: Vec<persistence::SavedPaneControl> =
@@ -2045,16 +2319,129 @@ pub(crate) fn chart_spec_text_from_saved(spec: &serde_json::Value) -> String {
     }
 }
 
-/// Collect charts from AppState into SavedChart format for persistence.
-pub(crate) fn collect_charts_for_save(state: &State<AppState>, sheet_ids: &[SheetId]) -> Vec<persistence::SavedChart> {
+/// What a save knows about every LIVE BI connection, for the design-query
+/// chart stamp in [`collect_charts_for_save`]: connection id -> the
+/// application data-source id it represents (`Some`, a connection a pull or an
+/// open minted for an application's embedded data source) or `None` (a
+/// connection authored in this workbook, which has no package key).
+pub(crate) type ChartConnectionKeys =
+    std::collections::HashMap<crate::bi::types::ConnectionId, Option<String>>;
+
+/// Which key a saved design-query chart carries ([`collect_charts_for_save`]).
+/// The two answers differ for a connection a pull or an open minted, and BOTH
+/// are right for their file -- which is why the caller says which file it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChartKeysFor {
+    /// The `.cala` save and AutoRecover: the application data-source id the
+    /// connection was minted from ([`chart_connection_keys`]), which the next
+    /// open's re-mint answers to.
+    Document,
+    /// The `.calp` carrier (publish, preview, working-copy diff): the id each
+    /// data source is filed under in THIS package
+    /// ([`published_chart_connection_keys`]).
+    Package,
+}
+
+/// Copy [`ChartConnectionKeys`] out of `BiState.connections`, for the `.cala`
+/// save and AutoRecover ([`ChartKeysFor::Document`]). The lock is
+/// RELEASED before this returns, so a caller takes it before -- never under --
+/// the chart store and the other document stores a save reads: the save adds
+/// no lock-order edge between the BI store and `AppState`.
+pub(crate) fn chart_connection_keys(
+    bi_state: &crate::bi::types::BiState,
+) -> Result<ChartConnectionKeys, String> {
+    let connections = bi_state.connections.lock().map_err(|e| e.to_string())?;
+    Ok(connections
+        .iter()
+        .map(|(id, connection)| (*id, connection.package_data_source_id.clone()))
+        .collect())
+}
+
+/// The `.calp` CARRIER's keys ([`ChartKeysFor::Package`]): every live
+/// connection -> the id its data source is filed under in the package being
+/// written, `calp_commands::published_data_source_id` -- the one function the
+/// capture of the data sources uses too, so the chart's key and the embedded
+/// data source cannot name two different things. A connection the capture
+/// skips (no model loaded) gets a key that names nothing in the package, which
+/// re-binds exactly as no key does. Same lock discipline as
+/// [`chart_connection_keys`].
+pub(crate) fn published_chart_connection_keys(
+    bi_state: &crate::bi::types::BiState,
+) -> Result<ChartConnectionKeys, String> {
+    let connections = bi_state.connections.lock().map_err(|e| e.to_string())?;
+    Ok(connections
+        .keys()
+        .map(|id| (*id, Some(crate::calp_commands::published_data_source_id(id))))
+        .collect())
+}
+
+/// Stamp one SAVED chart spec's design-query sources with the stable key of
+/// the live connection each names (`calp::chart_refs::stamp_chart_spec_package_keys`):
+/// an application connection's data-source id is written as
+/// `packageDataSourceId`, a local connection's absence of one REMOVES the key,
+/// and a `connectionId` that names no live connection (or is not a uuid) leaves
+/// the source exactly as it is. Returns whether anything changed.
+pub(crate) fn stamp_saved_chart_package_keys(
+    spec: &mut serde_json::Value,
+    connection_keys: &ChartConnectionKeys,
+) -> bool {
+    use calp::chart_refs::LiveConnectionKey;
+    let lookup = |connection: &str| -> Option<LiveConnectionKey> {
+        let id = identity::EntityId::parse(connection)?;
+        let package = connection_keys.get(&id)?;
+        Some(match package {
+            Some(key) if !key.is_empty() => LiveConnectionKey::Application(key.clone()),
+            _ => LiveConnectionKey::Local,
+        })
+    };
+    calp::chart_refs::stamp_chart_spec_package_keys(spec, &lookup)
+}
+
+/// Collect charts from AppState into SavedChart format for persistence -- the
+/// ONE place a workbook's charts are serialised: the `.cala` save, AutoRecover
+/// (both through `assemble_workbook_for_save`) and the `.calp` publish, its
+/// dry-run preview and the working-copy diff (through
+/// `build_workbook_for_save_with_slicers` in `assemble_publish_workbook`) all
+/// reach it through `build_workbook_for_save`.
+///
+/// THE PACKAGE KEY IS STAMPED HERE. A design-query chart binds its model by
+/// `connectionId`, a per-session uuid that every open re-mints for an
+/// application's connections, so the open re-binds it by its stable
+/// `packageDataSourceId` (BUG-0588). No TypeScript writer could be trusted to
+/// keep that key -- the drill-through's result chart, the Insert Chart dialog,
+/// scripts and the AI never wrote it, a full spec replace dropped it, and the
+/// store's deep merge kept a STALE one after a re-point to a local connection,
+/// which the open then preferred. So every saved design-query source is stamped
+/// from the live connection it names, through `connection_keys` (copied out of
+/// the BI store before this runs): set when the connection has a key, removed
+/// when it has none, untouched when the uuid names no live connection. See
+/// `stamp_chart_spec_package_keys`. WHICH key is the caller's
+/// ([`ChartKeysFor`]): the `.cala` save writes the application data-source id
+/// the connection was minted from ([`chart_connection_keys`]); the `.calp`
+/// carrier writes the id the data source is filed under in that package
+/// ([`published_chart_connection_keys`]) -- a checkout's connection was minted
+/// from the previous version's data source, which a push files under a new id.
+///
+/// ONLY THE SAVED COPY. `state.charts` is the Charts extension's store and is
+/// never written here: a stamp written back would make the TS store diverge,
+/// and `record_chart_sheet_id_stamp`'s exact-diff check would then refuse the
+/// store's later sheet-id stamps.
+///
+/// Takes `&AppState` (a `State<AppState>` derefs to it) so a test can drive it.
+pub(crate) fn collect_charts_for_save(
+    state: &AppState,
+    sheet_ids: &[SheetId],
+    connection_keys: &ChartConnectionKeys,
+) -> Vec<persistence::SavedChart> {
     let charts = state.charts.read().unwrap();
     charts
         .iter()
-        .filter_map(|c| Some(persistence::SavedChart {
-            id: c.id,
-            sheet_id: sheet_index_to_id(sheet_ids, c.sheet_index)?,
-            spec: saved_chart_spec_from_text(&c.id, &c.spec_json),
-        }))
+        .filter_map(|c| {
+            let sheet_id = sheet_index_to_id(sheet_ids, c.sheet_index)?;
+            let mut spec = saved_chart_spec_from_text(&c.id, &c.spec_json);
+            stamp_saved_chart_package_keys(&mut spec, connection_keys);
+            Some(persistence::SavedChart { id: c.id, sheet_id, spec })
+        })
         .collect()
 }
 
@@ -2084,7 +2471,7 @@ pub(crate) fn restore_charts(saved: &[persistence::SavedChart], state: &AppState
 }
 
 /// Collect sparkline entries from AppState for saving to .cala.
-pub(crate) fn collect_sparklines_for_save(state: &State<AppState>, sheet_ids: &[SheetId]) -> Vec<persistence::SavedSparkline> {
+pub(crate) fn collect_sparklines_for_save(state: &AppState, sheet_ids: &[SheetId]) -> Vec<persistence::SavedSparkline> {
     let sparklines = state.sparklines.read().unwrap();
     sparklines
         .iter()
@@ -2625,34 +3012,81 @@ pub(crate) fn restore_pivot_definitions(
 /// workbook properties. SHARED by save_file and auto_recover_save — any new
 /// persisted surface added here reaches BOTH paths, so the recovery snapshot
 /// can never silently drift behind the real save again.
+///
+/// NEVER A TORN SNAPSHOT (F1, review round 7): one [`assemble_workbook_snapshot`]
+/// is taken, and it is kept only if no sheet was added, deleted, moved or
+/// copied before its last store read ([`take_consistent_snapshot`]); otherwise
+/// it is taken again, and after [`SNAPSHOT_ATTEMPTS`] overlapped attempts the
+/// save is refused retryably ([`WORKBOOK_CHANGED_WHILE_SAVING`]) -- AutoRecover
+/// then simply skips its tick -- rather than writing a file whose per-sheet
+/// metadata belongs to the neighbouring sheets.
 #[allow(clippy::too_many_arguments)]
-fn assemble_workbook_for_save(
-    state: &State<AppState>,
-    user_files_state: &State<UserFilesState>,
-    slicer_state: &State<crate::slicer::SlicerState>,
-    ribbon_filter_state: &State<crate::ribbon_filter::RibbonFilterState>,
-    pane_control_state: &State<crate::pane_control::PaneControlState>,
-    script_state: &State<crate::scripting::types::ScriptState>,
-    pivot_state: &State<crate::pivot::types::PivotState>,
-    bi_state: &State<crate::bi::types::BiState>,
-    timeline_state: &State<crate::timeline_slicer::TimelineSlicerState>,
+pub(crate) fn assemble_workbook_for_save(
+    state: &AppState,
+    user_files_state: &UserFilesState,
+    slicer_state: &crate::slicer::SlicerState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    script_state: &crate::scripting::types::ScriptState,
+    pivot_state: &crate::pivot::types::PivotState,
+    bi_state: &crate::bi::types::BiState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
 ) -> Result<Workbook, String> {
+    take_consistent_snapshot(state, "saved", || {
+        assemble_workbook_snapshot(
+            state,
+            user_files_state,
+            slicer_state,
+            ribbon_filter_state,
+            pane_control_state,
+            script_state,
+            pivot_state,
+            bi_state,
+            timeline_state,
+        )
+    })
+}
+
+/// ONE attempt at [`assemble_workbook_for_save`]'s snapshot, with the
+/// [`SnapshotBasis`] its body read under the grid hold. Never written as it is:
+/// only [`take_consistent_snapshot`] decides whether it survived -- the TAIL
+/// below runs outside the body's hold (the slicers cannot be taken under it),
+/// so a renumbering can land between the body and the tail's reads, and this
+/// returns whatever it read.
+///
+/// `pub(crate)` so the runtime probes in `state_digest_lock_order_tests.rs` can
+/// run one attempt alone and show what a tail read across a renumbering looks
+/// like -- the shape `assemble_workbook_for_save` exists to refuse.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assemble_workbook_snapshot(
+    state: &AppState,
+    user_files_state: &UserFilesState,
+    slicer_state: &crate::slicer::SlicerState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    script_state: &crate::scripting::types::ScriptState,
+    pivot_state: &crate::pivot::types::PivotState,
+    bi_state: &crate::bi::types::BiState,
+    timeline_state: &crate::timeline_slicer::TimelineSlicerState,
+) -> Result<(Workbook, SnapshotBasis), String> {
     // Multi-sheet workbook build (BUG-0011: the old inline single-sheet
     // Workbook::from_grid build dropped every sheet but the active one).
     // build_workbook_for_save captures all sheets, tables, charts,
     // sparklines, user files, theme and defaults, and runs the per-sheet
-    // metadata enrichment.
-    let mut workbook = build_workbook_for_save(state, user_files_state)?;
+    // metadata enrichment -- all of it under ONE grid hold. A design-query
+    // chart keeps the package key its connection was minted from: the next
+    // open re-binds by it.
+    let (mut workbook, basis) = build_workbook_for_save(state, user_files_state, bi_state, ChartKeysFor::Document)?;
 
-    // Object property BINDINGS (bindings.json, .cala v10). FIRST, before
-    // `sheet_ids_save` below is taken and held to the end of this function:
-    // the live-object walk reads `sheet_ids` itself, and a std mutex is not
-    // reentrant. The family stores are read and released by the walk, and only
+    // Object property BINDINGS (bindings.json, .cala v10). The live-object walk
+    // reads `sheet_ids` itself, with nothing of this function held. The family
+    // stores are read and released by the walk, and only
     // then is the (leaf) binding store read; a binding whose object no longer
     // exists is not written. The walk's result is HOISTED out of the block:
     // the canvas interactions and the ribbon filters' "Selected visuals" are
-    // pruned against the same walk below (P4 DC-2), never by a second walk
-    // taken while `sheet_ids_save` is held.
+    // pruned against the same walk below (P4 DC-2), never by a second walk.
+    // Part of the TAIL: it reads the slicers, which cannot be taken under the
+    // body's grid hold, so it is covered by `take_consistent_snapshot`.
     let live_locations = {
         let stores = crate::object_bindings::object_json::ObjectStores {
             state,
@@ -2667,7 +3101,23 @@ fn assemble_workbook_for_save(
         locations
     };
 
-    let sheet_ids_save = state.sheet_ids.read().map_err(|e| e.to_string())?;
+    // THE SNAPSHOT'S OWN SHEET IDS, in its own order: the slicers and timelines
+    // below name their sheet by INDEX, and that index must mean the sheet the
+    // body copied, not whatever sheet holds it by now. A second read of
+    // `sheet_ids` here paired the tail with the live list -- torn as soon as a
+    // renumbering landed after the body -- while the snapshot's ids are the
+    // body's by construction, and `take_consistent_snapshot` refuses the
+    // attempt if a renumbering landed before this tail's last read.
+    //
+    // NO GUARD, and never one held (R5-PREVIEW-SUBS-DEADLOCK, BUG-0591): a
+    // `sheet_ids` guard held to the end of this function ran everything below
+    // with it held -- `collect_pivot_definitions` (which takes `sheet_names`,
+    // the R4-LOCK-1 inversion through a call, and `pivot_tables`), the timeline
+    // collector (`pivot_tables`), the named styles (`style_registry`),
+    // `subscriptions` and the override layer -- while a cell writer holds
+    // `sheet_names`, `pivot_tables` and `style_registry` when it reaches
+    // `record_subscription_override_edits`, which takes `sheet_ids`.
+    let sheet_ids_save: Vec<SheetId> = workbook.sheets.iter().map(|sheet| sheet.id).collect();
     workbook.slicers = collect_slicers_for_save(slicer_state, &sheet_ids_save);
     workbook.timeline_slicers =
         collect_timeline_slicers_for_save(timeline_state, pivot_state, &sheet_ids_save);
@@ -2834,9 +3284,10 @@ fn assemble_workbook_for_save(
         log::debug!("[media] dropped {} unreferenced blob(s) from the archive", dropped);
     }
 
-    // Sheet-level metadata was already enriched by build_workbook_for_save.
-    drop(sheet_ids_save);
-    Ok(workbook)
+    // Sheet-level metadata was already enriched by build_workbook_for_save. The
+    // basis goes back with the snapshot: `assemble_workbook_for_save` checks it
+    // now, after this attempt's last store read.
+    Ok((workbook, basis))
 }
 
 // ============================================================================
@@ -3545,6 +3996,10 @@ pub fn open_file(
         // Restore sheet IDs from the workbook
         let mut sheet_ids = state.sheet_ids.write(&load_effect).map_err(|e| e.to_string())?;
         *sheet_ids = workbook.sheets.iter().map(|s| s.id).collect();
+        // A whole new sheet list, installed under the held `grid` / `grids` /
+        // `sheet_names`: every index means another sheet now, so the
+        // sheet-structure generation moves (`SnapshotBasis`, F1 review round 7).
+        note_sheet_structure_change(state.inner());
 
         // Set active sheet index
         *state.active_sheet.write(&load_effect).map_err(|e| e.to_string())? = active_idx;
@@ -4617,15 +5072,33 @@ pub(crate) fn reset_document_scoped_stores(
         grids.clear();
         grids.push(engine::grid::Grid::new());
     }
-    *state.sheet_names.write(effect).map_err(|e| e.to_string())? = vec!["Sheet1".to_string()];
-    // A blank document gets a FRESH SheetId, and this is the one store whose
-    // absence from the old `new_file` was invisible rather than merely wrong:
-    // `build_workbook_for_save` reads `sheet_ids[i]`, so File > New used to hand
-    // the new document the PREVIOUS document's sheet identity — the key every
-    // .calp override, subscription ledger entry and writeback region is filed
-    // under. Two unrelated workbooks then claimed the same sheet.
-    *state.sheet_ids.write(effect).map_err(|e| e.to_string())? =
-        vec![SheetId::from_bytes(identity::generate_uuid_v7())];
+    // THE LIST, ITS IDS AND THE GENERATION'S MOVE IN ONE `sheet_names` HOLD, as
+    // in every other renumbering: `snapshot_is_current` waits on `sheet_names`
+    // to see a renumbering whole, and the census of every bump site
+    // (`every_sheet_renumbering_bumps_inside_its_sheet_names_hold`) holds this
+    // one to the same rule (F5, review round 8). `sheet_ids` after
+    // `sheet_names` is the crate's order (the save's body and the cell writers
+    // take them that way).
+    {
+        let mut sheet_names = state.sheet_names.write(effect).map_err(|e| e.to_string())?;
+        *sheet_names = vec!["Sheet1".to_string()];
+        // A blank document gets a FRESH SheetId, and this is the one store whose
+        // absence from the old `new_file` was invisible rather than merely wrong:
+        // `build_workbook_for_save` reads `sheet_ids[i]`, so File > New used to
+        // hand the new document the PREVIOUS document's sheet identity — the key
+        // every .calp override, subscription ledger entry and writeback region is
+        // filed under. Two unrelated workbooks then claimed the same sheet.
+        *state.sheet_ids.write(effect).map_err(|e| e.to_string())? =
+            vec![SheetId::from_bytes(identity::generate_uuid_v7())];
+        // A whole new sheet list: the sheet-structure generation MOVES -- it is
+        // never set back, because a snapshot compares two readings for equality
+        // and a counter returned to an old value could make one taken before the
+        // replacement compare equal to one taken after it (`SnapshotBasis`, F1
+        // review round 7). New and Open run on the main thread, like every
+        // snapshot, so none can overlap this today; the bump keeps "every change
+        // of what an index means moves the generation" true without an exception.
+        note_sheet_structure_change(state);
+    }
     *state.active_sheet.write(effect).map_err(|e| e.to_string())? = 0;
 
     {
@@ -4660,6 +5133,14 @@ pub(crate) fn reset_document_scoped_stores(
         let mut scroll_areas = state.scroll_areas.lock().map_err(|e| e.to_string())?;
         scroll_areas.clear();
         scroll_areas.push(None);
+    }
+    {
+        // Session-only like `scroll_areas`, and the DOCUMENT's: the ids in it are
+        // this workbook's sheets, so a replaced document starts with no sheet
+        // flagged ephemeral (a saved drill-through sheet reopens as an ordinary
+        // sheet). A leaf lock, taken alone.
+        let mut ephemeral_sheets = state.ephemeral_sheets.lock().map_err(|e| e.to_string())?;
+        ephemeral_sheets.clear();
     }
     {
         let mut tab_colors = state.tab_colors.write(effect).map_err(|e| e.to_string())?;
@@ -5585,7 +6066,7 @@ pub fn write_text_file(path: String, content: String, encoding: Option<String>, 
 
 /// Collect scripts from ScriptState into SavedScript format for persistence.
 pub(crate) fn collect_scripts_for_save(
-    script_state: &State<crate::scripting::types::ScriptState>,
+    script_state: &crate::scripting::types::ScriptState,
 ) -> Vec<persistence::SavedScript> {
     use crate::scripting::types::ScriptScope;
     let scripts = script_state.workbook_scripts.read().unwrap();
@@ -5661,7 +6142,7 @@ pub(crate) fn saved_output_to_item(
 
 /// Collect notebooks from ScriptState into SavedNotebook format for persistence.
 pub(crate) fn collect_notebooks_for_save(
-    script_state: &State<crate::scripting::types::ScriptState>,
+    script_state: &crate::scripting::types::ScriptState,
 ) -> Vec<persistence::SavedNotebook> {
     let notebooks = script_state.workbook_notebooks.read().unwrap();
     notebooks

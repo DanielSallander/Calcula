@@ -476,17 +476,57 @@ export async function encryptCurrentFile(
 }
 
 /**
- * Remove encryption from the current workbook: clear the session passphrase,
- * re-save as a plain ZIP, and forget any remembered passphrase.
+ * Remove encryption from the current workbook: re-save it as a plain ZIP, and
+ * forget the passphrase remembered for it.
+ *
+ * THE WORKBOOK IN THIS WINDOW AND THE FILE ON DISK MUST NOT DISAGREE (review
+ * round 8). Rust takes the passphrase off the session BEFORE the save that
+ * writes the file unencrypted (`clear_session_password`, then a `save_file`
+ * with none), and that save can still be refused: by a Before-Save guard, or
+ * with the retryable snapshot refusal while an agent keeps moving sheets. The
+ * passphrase used to stay off. The workbook here was no longer encrypted while
+ * the file on disk still was; reopening the dialog to try again offered to SET
+ * a password, not remove one; and the next ordinary save wrote the workbook in
+ * plain text, although the message had said nothing was written. A guard that
+ * cancelled the save even forgot the remembered passphrase.
+ *
+ * So every step that can still refuse runs FIRST ({@link prepareSave}): when
+ * one says no, nothing has been cleared or forgotten. And a write refused after
+ * the clear puts the passphrase back (`set_session_password`) from the one
+ * place this side can read it: the passphrase remembered for this file on this
+ * computer, the one the open flow unlocks it with (the encrypt and unlock
+ * dialogs remember by default). The workbook is then encrypted here and on disk
+ * alike, and marked unsaved. The session passphrase itself never reaches the
+ * frontend, so one that was NOT remembered cannot be put back from here: the
+ * refusal then propagates with the workbook here unencrypted. Either way the
+ * caller asks {@link isDocumentEncrypted} which it is, and says so -- the
+ * Encryption extension's message does.
  */
 export async function removeFilePassword(): Promise<string | null> {
-  const currentPath = await getCurrentFilePath();
-  await tracedInvoke('clear_session_password', {});
-  const savedPath = await saveFile();
-  if (savedPath) await keychainDelete(savedPath);
-  else if (currentPath) await keychainDelete(currentPath);
-  emitAppEvent(ENCRYPTION_STATE_CHANGED);
-  return savedPath;
+  const prepared = await prepareSave();
+  if (prepared === null) return null;
+  // What a refused write puts back: the passphrase remembered for this file,
+  // read before anything changes (null when none was remembered).
+  const remembered = await keychainGet(prepared.path);
+  try {
+    await tracedInvoke('clear_session_password', {});
+    const savedPath = await writePreparedSave(prepared).catch(async (error: unknown) => {
+      if (remembered !== null) {
+        try {
+          await tracedInvoke('set_session_password', { password: remembered });
+        } catch (restoreError) {
+          console.error('[FILE] removeFilePassword: the passphrase could not be put back:', restoreError);
+        }
+      }
+      throw error;
+    });
+    // Only once the file on disk IS unencrypted is the remembered passphrase
+    // of no further use.
+    await keychainDelete(savedPath);
+    return savedPath;
+  } finally {
+    emitAppEvent(ENCRYPTION_STATE_CHANGED);
+  }
 }
 
 // ============================================================================

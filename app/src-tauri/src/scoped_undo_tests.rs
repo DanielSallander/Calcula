@@ -296,10 +296,12 @@ fn the_hold_backs_transaction_cannot_dangle() {
     let body = body_of(CALP_SRC, "pub fn calp_hold_back_cells(");
     // The authorised read (signature + BUG-0262 signer check) is a refusal too.
     let verify = at(&body, "open_authorized_content(", "the workspace verification");
-    let no_sheet = at(&body, "CALP_HOLDBACK_NO_SHEET", "the missing-sheet refusal");
+    // So is the push's own selection (review round 11): a ticked sheet that is
+    // gone, a position no list shows, the retryable renumbering.
+    let selection = at(&body, "plan_hold_back_for_push(", "the push's own selection");
     let begin = at(&body, "undo.begin_owned_transaction(", "the transaction");
     assert!(
-        verify < begin && no_sheet < begin,
+        verify < begin && selection < begin,
         "every refusal must precede the transaction"
     );
 
@@ -361,4 +363,62 @@ fn an_empty_hold_back_reports_no_entry() {
     let region = &body[empty..empty + 300];
     assert!(region.contains("undo_recorded: false"));
     assert!(region.contains("undo_seq: None"));
+}
+
+/// WHICH UNTICKS ACT IS THE PUSH'S OWN SELECTION'S ANSWER, asked FIRST (review
+/// round 11, RV11-TS-1). The decision is behavioural in `subscribed_sheet_tests`
+/// (section G); what is pinned here is where the command asks it:
+///
+/// * the plan is asked with the request's own kind, sheets and cells, and its
+///   refusal propagates -- before the base is read, a grid is copied or the
+///   transaction opens, so a refused selection writes nothing;
+/// * a plan that carries none of the cells returns at once with no entry
+///   (`undo_recorded: false`, `undo_seq: None`) and its skipped count, before
+///   the base read;
+/// * the write walks the plan's cells located BY ID in the clone's own sheet
+///   list, a sheet gone since counted as skipped -- never the request's own
+///   grouping, and never the missing-sheet refusal a skip replaced.
+///
+/// SABOTAGE: move the `plan_hold_back_for_push(` call below the grid copy, or
+/// put the per-request `by_sheet` grouping back.
+#[test]
+fn the_hold_back_asks_the_pushs_own_selection_before_it_reads_or_writes() {
+    let body = body_of(CALP_SRC, "pub fn calp_hold_back_cells(");
+    let plan = at(&body, "let plan = plan_hold_back_for_push(", "the push's own selection");
+    let call = &body[plan..plan + body[plan..].find(")?;").expect("the plan's refusal is not propagated")];
+    for arg in ["&params.kind,", "RequestedSheets::from_wire(params.sheet_ids, params.sheet_indices),", "&params.cells,"] {
+        assert!(call.contains(arg), "the plan is not asked with `{arg}`: {call}");
+    }
+    let nothing = at(&body, "if plan.sheets.is_empty() {", "the return when the push carries none of the cells");
+    let read = at(&body, "open_authorized_content(", "the base read");
+    let copy = at(&body, "state.grids.read()", "the grid copy");
+    let located = at(&body, "let (located, gone) = plan.locate(&sheet_ids);", "the cells located by id");
+    let begin = at(&body, "undo.begin_owned_transaction(", "the transaction");
+    let write = at(&body, "apply_script_modified_grids(", "the write");
+    assert!(
+        plan < nothing && nothing < read && read < copy && copy < located && located < begin && begin < write,
+        "the push's selection must decide first, a plan of nothing must return before the base read, and the \
+         cells must be located in the clone's own sheet list before anything is written"
+    );
+    let early = &body[nothing..nothing + body[nothing..].find("});").expect("the early return's end")];
+    for field in ["cells_held_back: 0,", "cells_skipped: plan.skipped,", "undo_recorded: false,", "undo_seq: None,"] {
+        assert!(early.contains(field), "the return for a plan of nothing does not say `{field}`: {early}");
+    }
+    assert!(body.contains("let skipped = plan.skipped + gone;"), "a sheet gone since the resolution is not counted");
+    assert!(body.contains("cells_skipped: skipped,"), "the answer does not report the skipped cells");
+    assert!(!body.contains("by_sheet"), "the cells are grouped by the request again, not by the push's selection");
+    assert!(
+        !body.contains("CALP_HOLDBACK_NO_SHEET"),
+        "a cell on a sheet no longer in the workbook is refused again instead of skipped"
+    );
+
+    // The plan asks the push's own resolver, in the push's words, and sorts by
+    // what it CARRIES -- never by the request's own sheets.
+    let asked = body_of(CALP_SRC, "pub(crate) fn plan_hold_back_for_push(");
+    assert!(
+        asked.contains("resolve_publish_selection(state, slicer_state, timeline_state, pivot_state, kind, requested, \"published\")?"),
+        "the hold-back's selection is not the push's own: {asked}"
+    );
+    assert!(asked.contains("HoldBackPlan::for_carried(&selection.ids, cells)"), "{asked}");
+    assert!(!asked.contains("resolve_publish_sheet_indices("), "resolved without the generation check: {asked}");
 }

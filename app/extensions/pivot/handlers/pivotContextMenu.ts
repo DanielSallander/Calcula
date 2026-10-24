@@ -25,11 +25,15 @@ import {
   markTaskPaneManuallyClosed,
   clearTaskPaneManuallyClosed,
   getTaskPaneManuallyClosed,
+  getReportPagesSnapshot,
+  isSheetSubscribed,
+  sheetIdAt,
   type GridContextMenuItem,
   type GridMenuContext,
 } from "@api";
 import { emitAppEvent } from "@api/events";
 import { pivotCellItemKey } from "@api/pivotMembers";
+import { getLayoutSurface } from "@api/layoutSurface";
 import { PivotEvents } from "../../_shared/lib/pivotEvents";
 
 import {
@@ -49,7 +53,7 @@ import {
   valueFieldIndexFor,
   valueFieldNameFor,
 } from "./pivotContextMenuHelpers";
-import { isModelPivot, openPivotPaneForPivot } from "./selectionHandler";
+import { hasDesignQueryDrill, isModelPivot, openPivotPaneForPivot } from "./selectionHandler";
 import { CommandRegistry } from "@api/commands";
 import { PIVOT_CANVAS_COPY_CELLS_COMMAND } from "../lib/pivotCanvasCellCommands";
 import { runPivotDrillThrough } from "../lib/pivotCellDoubleClick";
@@ -251,6 +255,55 @@ async function openValueFieldDialog(ctx: GridMenuContext, dialog: ValueFieldDial
   await requestValueFieldDialog({ pivotId, valueFieldIndex, dialog });
 }
 
+// ============================================================================
+// Drill-through doors (docs/design/model-drillthrough.md 2.9)
+// ============================================================================
+
+/** The run row's label when the pivot has a design-query drill: Power BI's verb. */
+export const DRILL_THROUGH_LABEL = "Drill through";
+/** The run row's label otherwise: Excel's. */
+export const SHOW_DETAILS_LABEL = "Show Details";
+/** The authoring row's label on a sheet the user may edit. */
+export const DRILL_BEHAVIOR_LABEL = "Drill-through behavior...";
+/** The authoring row's label on a SUBSCRIBED sheet: the same dialog, read-only. */
+export const VIEW_DRILL_BEHAVIOR_LABEL = "View drill-through behavior...";
+
+/**
+ * The value-cell run row's label: "Drill through" when the pivot's cached
+ * REGION says its behaviour carries a design-query definition, else "Show
+ * Details" -- also when that is not known, so a range pivot never promises a
+ * drill it does not have. The fact rides the region transport beside
+ * `isModel` (selectionHandler `hasDesignQueryDrill`), so the first right-click
+ * on a pivot that was never selected -- a canvas box's menu is built once --
+ * is already right, with no read of its own. A stale answer mislabels, never
+ * misroutes: `runPivotDrillThrough` re-reads the behaviour.
+ */
+export function showDetailsLabel(ctx: GridMenuContext): string {
+  const pivotId = getPivotIdFromContext(ctx);
+  if (pivotId === null) return SHOW_DETAILS_LABEL;
+  return hasDesignQueryDrill(pivotId) === true ? DRILL_THROUGH_LABEL : SHOW_DETAILS_LABEL;
+}
+
+/**
+ * Whether the pivot's sheet is READ-ONLY for authoring a drill: a canvas
+ * page whose layout surface is not editable, or a worksheet that came from
+ * an application (`@api/collaboration isSheetSubscribed`). A subscriber can
+ * RUN a publisher's drill and READ its definition (wave3 12.1: a not-code
+ * artifact is transparent because it is listed), never edit it.
+ */
+export function drillBehaviorReadOnly(ctx: GridMenuContext): boolean {
+  if (isCanvasPivotContext(ctx)) {
+    return getLayoutSurface(ctx.sheetIndex)?.editable === false;
+  }
+  const sheetId = sheetIdAt(getReportPagesSnapshot(), ctx.sheetIndex);
+  return sheetId !== null && isSheetSubscribed(sheetId);
+}
+
+/** The authoring row's label for this sheet. */
+export function drillBehaviorLabel(ctx: GridMenuContext): string {
+  return drillBehaviorReadOnly(ctx) ? VIEW_DRILL_BEHAVIOR_LABEL : DRILL_BEHAVIOR_LABEL;
+}
+
 /**
  * The items a VALUE cell (a data cell or a value-area total) gets, leading the
  * pivot group (order < 20), on a worksheet pivot and a canvas pivot box alike
@@ -304,14 +357,19 @@ function valueCellMenuItems(): GridContextMenuItem[] {
           label: "Sort Smallest to Largest",
           disabled: true,
           disabledReason: SORT_BY_VALUE_REASON,
-          onClick: () => showToast(SORT_BY_VALUE_REASON, { variant: "info" }),
+          // A statement, not the toast's handle: an item's onClick returns nothing.
+          onClick: () => {
+            showToast(SORT_BY_VALUE_REASON, { variant: "info" });
+          },
         },
         {
           id: "pivot:sortByValue:descending",
           label: "Sort Largest to Smallest",
           disabled: true,
           disabledReason: SORT_BY_VALUE_REASON,
-          onClick: () => showToast(SORT_BY_VALUE_REASON, { variant: "info" }),
+          onClick: () => {
+            showToast(SORT_BY_VALUE_REASON, { variant: "info" });
+          },
         },
       ],
       onClick: () => {}, // Parent item - no direct action
@@ -389,7 +447,10 @@ function valueCellMenuItems(): GridContextMenuItem[] {
     },
     {
       id: "pivot:showDetails",
-      label: "Show Details",
+      // "Drill through" when the pivot's behaviour has a design query, else
+      // Excel's "Show Details"; one drill behind both (runPivotDrillThrough
+      // branches on the behaviour it re-reads).
+      label: showDetailsLabel,
       group: "pivot",
       order: 14,
       visible: (ctx) => isValueCell(ctx),
@@ -398,7 +459,12 @@ function valueCellMenuItems(): GridContextMenuItem[] {
       onClick: menuAction("Show Details", (ctx) => {
         const cached = getCachedCellData(ctx);
         if (!cached || !ctx.clickedCell) throw new Error("the PivotTable cell under the pointer could not be read");
-        runPivotDrillThrough(cached.region.pivotId, cached.cell, ctx.clickedCell.row, ctx.clickedCell.col);
+        // The menu knows the pivot's sheet and name: the drill's source for
+        // the page filters and its sheet-name fallback.
+        runPivotDrillThrough(cached.region.pivotId, cached.cell, ctx.clickedCell.row, ctx.clickedCell.col, {
+          sheetIndex: ctx.sheetIndex,
+          name: cached.region.name,
+        });
       }),
     },
     {
@@ -502,13 +568,16 @@ export function registerPivotContextMenuItems(): () => void {
     // ------------------------------------------------------------------
     {
       id: "pivot:drillBehavior",
-      label: "Drill-through behavior...",
+      // "View drill-through behavior..." on a subscribed sheet / page: the
+      // same dialog opens READ-ONLY (a subscriber reads a publisher's
+      // definition, never edits it).
+      label: drillBehaviorLabel,
       group: "pivot",
       order: 36,
       visible: isInPivotRegion,
       onClick: menuAction("Drill-through behavior", (ctx) => {
         const pivotId = pivotIdOrThrow(ctx);
-        showDialog(PIVOT_DRILL_BEHAVIOR_DIALOG_ID, { pivotId });
+        showDialog(PIVOT_DRILL_BEHAVIOR_DIALOG_ID, { pivotId, readOnly: drillBehaviorReadOnly(ctx) });
       }),
     },
 

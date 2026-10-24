@@ -142,6 +142,7 @@ import {
   gridExtensions,
   GridMenuGroups,
   type GridMenuContext,
+  registerSubscribedSheetsProvider,
 } from "@api";
 import { CollaborationRoleStatusItem } from "./components/CollaborationRoleStatusItem";
 import { SUBSCRIBED_CHIP, WORKING_COPY_CHIP } from "./lib/roleChipColors";
@@ -152,6 +153,7 @@ import {
   subscriptionForSheetId,
   refreshSubscribedSheets,
   resetSubscribedSheets,
+  subscribedSheetsProvider,
 } from "./lib/subscribedSheets";
 import { announceSubscribedContentReplaced } from "./lib/refreshAftermath";
 
@@ -369,6 +371,12 @@ function activate(context: ExtensionContext): void {
   // Subscriptions may already exist: the workbook was opened before we activated.
   void reloadSubscribedSheets();
   cleanupFns.push(() => resetSubscribedSheets());
+  // The one SYNC "is this sheet subscribed?" answer (@api/collaboration
+  // isSheetSubscribed) for Charts, Pivot and CanvasSheet: published over the
+  // SAME cache the badge reads, SUBSCRIBED role only, and taken back on
+  // deactivate with the rest of this list. One answer, one refresh wiring, one
+  // failure policy (a failed read keeps the previous answer, above).
+  cleanupFns.push(registerSubscribedSheetsProvider(subscribedSheetsProvider));
 
   // DETACH — the deliberate way to make a subscribed sheet yours, and the remedy
   // the backend's delete guard points at by name. `visible`, not `disabled`: an

@@ -117,16 +117,96 @@ describe("a push that holds cells back always puts them back", () => {
     expect(body).toMatch(/Ctrl\+Z/);
   });
 
-  it("clears the exclusions when the diff is refetched", () => {
-    // The diff re-runs on a sheet-selection or includeComments change. A key
-    // kept from the previous answer could name a row that no longer exists — an
-    // invisible exclusion acting on a push nobody reviewed.
-    // SABOTAGE: delete the `setExcludedCells(new Set())` from the diff effect.
-    const effectStart = DIALOG.indexOf("diffWorkingCopy({");
-    expect(effectStart).toBeGreaterThan(-1);
+  it("SORTS and PRUNES the exclusions by what the ANSWER says the push carries, and never clears them there", () => {
+    // The diff re-runs whenever the selection moves -- also when the dialog
+    // itself reads the sheet list again after a gone-sheet refusal. CLEARING
+    // there (what this pin used to require) ticked every held-back change
+    // again with no message, and the next Push published it (review round 9,
+    // F1). Then the unticks were sorted BEFORE the fetch by the ticked rows'
+    // ids -- and a push carries more than its ticked rows (a floating grid's
+    // backing sheet with its host, a chart's source), so an untick on such a
+    // sheet was parked while the push shipped it (review round 11, RV11-TS-1).
+    // Now NOTHING moves before the fetch; when the answer lands, the unticks
+    // are sorted by the sheets it says the push carries (`carriedSheetIds`) --
+    // acting there, PARKED elsewhere, never dropped -- and on those sheets only
+    // the unticks that are one of its rows stay. The behaviour is pinned
+    // MOUNTED in pushHoldBackSurvivesReRead.test.tsx and by
+    // lib/__tests__/holdBack.test.ts.
+    // SABOTAGE: put `dispatchHoldBack({ type: "reset" })` back in the effect,
+    // sort before the fetch again, drop either dispatch, or judge the answer
+    // by anything but its `carriedSheetIds`.
+    const effectStart = DIALOG.indexOf('if (mode !== "push" || !workspace?.baseVersion) return;');
+    expect(effectStart, "the diff effect moved").toBeGreaterThan(-1);
+    const fetchAt = DIALOG.indexOf("diffWorkingCopy({", effectStart);
+    const thenAt = DIALOG.indexOf(".then((result) => {", fetchAt);
+    const catchAt = DIALOG.indexOf(".catch((e: unknown) => {", thenAt);
     const effectEnd = DIALOG.indexOf("}, [mode, workspace?.baseVersion", effectStart);
-    expect(effectEnd).toBeGreaterThan(effectStart);
-    expect(DIALOG.slice(effectStart, effectEnd)).toMatch(/setExcludedCells\(new Set\(\)\)/);
+    expect(fetchAt).toBeGreaterThan(effectStart);
+    expect(thenAt).toBeGreaterThan(fetchAt);
+    expect(catchAt).toBeGreaterThan(thenAt);
+    expect(effectEnd).toBeGreaterThan(catchAt);
+    const effect = DIALOG.slice(effectStart, effectEnd);
+    // Before the fetch: nothing is sorted, and no guess at the carried sheets.
+    const beforeFetch = DIALOG.slice(effectStart, fetchAt);
+    expect(beforeFetch, "the unticks are moved before the answer says where").not.toMatch(/dispatchHoldBack\(/);
+    expect(beforeFetch).not.toMatch(/askedFor/);
+    // When the answer lands: the sort and then the row prune, both over the
+    // sheets THAT ANSWER says the push carries.
+    const onAnswer = DIALOG.slice(thenAt, catchAt);
+    expect(onAnswer).toMatch(/const carried = new Set\(result\.carriedSheetIds\);/);
+    const sortAt = onAnswer.indexOf('dispatchHoldBack({ type: "keepSheets", sheetIds: carried });');
+    const pruneAt = onAnswer.indexOf(
+      'dispatchHoldBack({ type: "keepRows", keys: rowKeysOf(result.diff), sheetIds: carried });',
+    );
+    expect(sortAt, "the answer does not sort the unticks by the sheets it carries").toBeGreaterThan(-1);
+    expect(pruneAt, "the answer does not prune the unticks on the sheets it carries").toBeGreaterThan(-1);
+    expect(sortAt, "the prune runs before the sort").toBeLessThan(pruneAt);
+    // And nowhere in the effect a clear.
+    expect(effect).not.toMatch(/type: "reset"/);
+    expect(effect).not.toMatch(/type: "includeAll"/);
+    expect(effect).not.toMatch(/setExcludedCells/);
+  });
+
+  it("sends EVERY untick with the push's own kind and selection -- the very selection the publish sends", () => {
+    // Which sheets a push carries is Rust's to say, so the hold-back is told
+    // the push it is part of and holds back exactly the cells on the sheets
+    // that push carries (review round 11, RV11-TS-1). Sending only `excluded`
+    // left a parked untick on a sheet the push carries again unsent.
+    // SABOTAGE: send `[...excludedCells]`, drop `kind` or the selection, or
+    // compute the publish's selection a second time.
+    const body = handlePublishBody();
+    const READ_ONCE = "const selection = tickedWire();";
+    const selectionAt = body.indexOf(READ_ONCE);
+    const holdAt = body.indexOf("holdBackCells(");
+    const publishAt = body.indexOf("publishApplication(");
+    expect(selectionAt, "the push's selection is not read once").toBeGreaterThan(-1);
+    expect(selectionAt).toBeLessThan(holdAt);
+    const holdCall = body.slice(holdAt, body.indexOf("});", holdAt));
+    expect(holdCall, "the hold-back is not sent every untick").toMatch(/cells: \[\.\.\.untickedCells\]\.map\(parseCellKey\),/);
+    expect(holdCall, "the hold-back is not told the push's kind").toMatch(/\bkind,/);
+    expect(holdCall, "the hold-back is not told the push's selection").toMatch(/\.\.\.selection,/);
+    const publishCall = body.slice(publishAt, body.indexOf("});", publishAt));
+    expect(publishCall, "the publish does not send the one selection the hold-back was told").toMatch(
+      /\.\.\.selection,/,
+    );
+    expect(body.slice(selectionAt + READ_ONCE.length), "the selection is read a second time").not.toMatch(
+      /tickedWire\(\)/,
+    );
+    // EVERY untick is both sets: the acting ones and the parked ones.
+    expect(DIALOG).toMatch(/new Set<string>\(\[\.\.\.holdBack\.excluded, \.\.\.holdBack\.parked\]\)/);
+  });
+
+  it("forgets the hold-back only where a push starts afresh: a new show, and a push that landed", () => {
+    // SABOTAGE: drop the reset from the landed push -- the unticks of a push
+    // that shipped would then hold back the NEXT push's cells too.
+    const body = handlePublishBody();
+    const landedAt = body.indexOf("setPushed(true);");
+    const catchAt = body.indexOf("} catch (err: unknown) {", landedAt);
+    expect(landedAt, "the landed push no longer marks itself").toBeGreaterThan(-1);
+    expect(body.slice(landedAt, catchAt)).toMatch(/dispatchHoldBack\(\{ type: "reset" \}\)/);
+    const show = DIALOG.indexOf("const openCount = data?.__openCount;");
+    const showEnd = DIALOG.indexOf("}, [openCount]);", show);
+    expect(DIALOG.slice(show, showEnd)).toMatch(/dispatchHoldBack\(\{ type: "reset" \}\)/);
   });
 
   it("offers the checkboxes only on a PUSH with a base version", () => {

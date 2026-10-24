@@ -83,6 +83,7 @@ import type {
   CanvasLayout,
   CanvasLayoutPatch,
   SheetKindName,
+  SheetsResult,
 } from "../lib";
 // columnToLetter: the A1 spelling delivered on onDataChange change entries.
 // (The worker-side canonicalModel keeps a private twin, colToLetters; this is
@@ -5771,14 +5772,12 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       return added;
     }
     case "api.deleteSheet": {
+      // [ref] — the work (and its reasoning: the delete names its sheet by the
+      // STABLE id read with the index) lives in executeDeleteSheet, exported so
+      // a renumbering between the read and the delete is testable.
       const [ref] = args as [number | string];
       const lib = await getLib();
-      const before = await lib.getSheets();
-      const index = resolveSheetRefIn(before.sheets, ref, "deleteSheet");
-      if (before.sheets.length <= 1) {
-        throw new BrokerError("ValidationError", "Cannot delete the last remaining sheet");
-      }
-      const result = await lib.deleteSheet(index);
+      const result = await executeDeleteSheet(lib, ref);
       await resumeScriptBatchAfterHistoryEnded(lib, definition.id);
       await announceSheetsChanged(result);
       return undefined;
@@ -10705,14 +10704,19 @@ async function syncDimensionToGrid(
  *  context and fire the one event the tab bar + extensions already listen to
  *  (SheetTabs reloads its list from SHEET_CHANGED). */
 async function announceSheetsChanged(
-  result: { sheets: Array<{ index: number; name: string; kind?: string }>; activeIndex: number },
+  result: { sheets: Array<{ index: number; name: string; kind?: string; sheetId?: string }>; activeIndex: number },
 ): Promise<void> {
   const active = result.sheets.find((s) => s.index === result.activeIndex) ?? result.sheets[0];
   const [gridApi, dispatchMod] = await Promise.all([import("../grid"), import("../gridDispatch")]);
   if (active) {
-    // The surface rides the same dispatch as the context (a canvas never tears).
+    // The surface rides the same dispatch as the context (a canvas never tears),
+    // and so does the sheet's STABLE id when the list carries one: an open
+    // edit follows its sheet by it (a dispatch without one clears it).
+    const surface = active.kind === "canvas" ? "canvas" : "grid";
     dispatchMod.dispatchGridAction(
-      gridApi.setActiveSheet(active.index, active.name, active.kind === "canvas" ? "canvas" : "grid"),
+      typeof active.sheetId === "string" && active.sheetId !== ""
+        ? gridApi.setActiveSheet(active.index, active.name, surface, active.sheetId)
+        : gridApi.setActiveSheet(active.index, active.name, surface),
     );
   }
   emitAppEvent(AppEvents.SHEET_CHANGED, {
@@ -10824,6 +10828,54 @@ export async function executeCopySheet(
     throw new BrokerError("HostError", "The sheet was copied but the new sheet could not be identified");
   }
   return { index: added.index, name: added.name };
+}
+
+/**
+ * api.deleteSheet — [ref], a sheet's 0-based index or its name.
+ *
+ * BY THE STABLE ID READ WITH THE INDEX (review SCRIPT-DELETE-BY-STALE-INDEX).
+ * The ref resolves against ONE read of the sheet list, and that same read's row
+ * gives the sheet's stable id; the delete carries it (`expectedSheetId`), so
+ * the backend deletes only if the sheet at that index still has that id when
+ * the delete holds its locks. A temporary sheet's discard landing between the
+ * read and the delete renumbers every sheet after it -- `api.setActiveSheet`
+ * announces a switch, the tab strip's leave read sends the discard, and the
+ * script's next read can still answer the list from before it -- and a delete
+ * by the bare index then removed whichever sheet slid into it, with no undo (a
+ * sheet delete ends the history). Such a delete is refused instead, nothing is
+ * deleted, and the script gets an error naming the sheet and the backend's own
+ * reason. Any refusal of the delete reaches it the same way: the backend
+ * refuses a delete whole, so a rejection always means nothing was deleted.
+ *
+ * A list without the sheet's id (a backend skew; the backend always reports
+ * one) is refused rather than deleted unguarded.
+ */
+export async function executeDeleteSheet(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  ref: number | string,
+): Promise<SheetsResult> {
+  const before = await lib.getSheets();
+  const index = resolveSheetRefIn(before.sheets, ref, "deleteSheet");
+  if (before.sheets.length <= 1) {
+    throw new BrokerError("ValidationError", "Cannot delete the last remaining sheet");
+  }
+  const meant = before.sheets.find((s) => s.index === index);
+  const expectedSheetId = meant?.sheetId;
+  if (!meant || !expectedSheetId) {
+    throw new BrokerError(
+      "HostError",
+      `deleteSheet: the workbook did not report which sheet "${meant?.name ?? index}" is, so nothing was deleted`,
+    );
+  }
+  try {
+    return await lib.deleteSheet(index, { expectedSheetId });
+  } catch (err) {
+    if (err instanceof BrokerError) throw err;
+    throw new BrokerError(
+      "HostError",
+      `deleteSheet: sheet "${meant.name}" was not deleted: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
 
 /**

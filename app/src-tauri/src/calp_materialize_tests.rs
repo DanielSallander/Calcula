@@ -3144,6 +3144,7 @@ fn a_refresh_after_the_subscriber_deleted_a_pulled_sheet_never_reads_their_names
         &h.timeline,
         pulled_data,
         false,
+        None,
     )
     .expect("the detached copy is the subscriber's to delete");
     assert!(
@@ -4000,4 +4001,780 @@ fn a_subscribe_does_not_adopt_the_applications_writeback_regions() {
         h.state.writeback_draft_regions.read().unwrap().is_empty(),
         "a subscriber designated nothing",
     );
+}
+
+// ===========================================================================
+// BUG-0588 -- a subscribed design-query chart finds its model. A chart binds
+// its model by `data.connectionId`, a per-SESSION uuid; a pull mints a fresh
+// connection for every embedded data source and every open re-mints it, and
+// nothing rewrote the chart's uuid: BI pivots re-bound through their
+// data-source id, slicers healed themselves, charts kept the PUBLISHER's uuid
+// and found no model. The publisher's connection uuid IS the application
+// data-source id at publish time (`let ds_id = conn.id.to_string()` in the
+// push), which is the key the re-bind resolves by.
+// ===========================================================================
+
+/// A minimal BI model as published JSON: one table, one measure (the
+/// `published_strategy_gate_tests` fixture in calp_commands.rs, verbatim).
+fn sales_model_json() -> serde_json::Value {
+    let model = bi_engine::DataModel::builder()
+        .add_table(
+            bi_engine::Table::new(
+                "Sales",
+                vec![
+                    bi_engine::Column::new("Amount", bi_engine::DataType::Float64),
+                    bi_engine::Column::new("Region", bi_engine::DataType::String),
+                ],
+            )
+            .unwrap(),
+        )
+        .add_measure(bi_engine::sum_measure("Revenue", "Sales", "Amount"))
+        .build()
+        .expect("the fixture model builds");
+    serde_json::to_value(&model).expect("the model serializes")
+}
+
+/// `publish_as`, with ONE embedded data source whose application id is
+/// `publisher_connection` -- the publisher's connection uuid, exactly as the
+/// push keys it (`collect_publish_data_sources`: `let ds_id = conn.id.to_string()`).
+#[allow(clippy::too_many_arguments)]
+fn publish_with_model(
+    dir: &TempDir,
+    prof: &Path,
+    wb: &Workbook,
+    sheet_indices: Vec<usize>,
+    package: &str,
+    version: (u32, u32, u32),
+    base: Option<(u32, u32, u32)>,
+    publisher_connection: &str,
+) {
+    let reg = calp::workspace::LocalWorkspace::open(dir.path()).unwrap();
+    let mode = match base {
+        None => PushMode::CreateNew,
+        Some((a, b, c)) => PushMode::Update { expected_base: SemVer::new(a, b, c) },
+    };
+    let request = PublishRequest {
+        workbook: wb,
+        package_name: package.to_string(),
+        version: SemVer::new(version.0, version.1, version.2),
+        kind: "report".to_string(),
+        mode,
+        change_summary: format!("v{}.{}.{}", version.0, version.1, version.2),
+        sheet_indices,
+        now: "2026-10-23T00:00:00Z".to_string(),
+        published_by: "author".to_string(),
+        writeback_regions: None,
+        model_writebacks: None,
+        object_scripts: None,
+        module_scripts: None,
+        notebooks: None,
+        data_sources: vec![calp::publish::PublishDataSource {
+            id: publisher_connection.to_string(),
+            name: "Sales model".to_string(),
+            connection_type: "embedded".to_string(),
+            server: String::new(),
+            database: String::new(),
+            model_json: sales_model_json(),
+            bindings: Vec::new(),
+            calculated_table_snapshots: Vec::new(),
+            writeback_history_json: None,
+        }],
+        excluded_regions: Vec::new(),
+        custom_objects: Vec::new(),
+        include_comments: false,
+        identity_policy: None,
+        min_app_version: String::new(),
+    };
+    publish::publish(&reg, &request, prof).expect("publish failed");
+}
+
+/// A design-query chart ENVELOPE on `host`, bound to `connection` (a uuid
+/// string) exactly as the Charts extension writes it: `{type: "designQuery",
+/// dslText, connectionId}` -- no package key; the publisher never had one.
+fn design_query_chart(host: identity::SheetId, connection: &str, name: &str) -> persistence::SavedChart {
+    persistence::SavedChart {
+        id: new_entity(),
+        sheet_id: host,
+        spec: serde_json::json!({
+            "chartId": 1,
+            "name": name,
+            "sheetIndex": 0,
+            "spec": {
+                "mark": "bar",
+                "data": {
+                    "type": "designQuery",
+                    "dslText": "ROWS: [Sales.Region]\nVALUES: [Revenue]",
+                    "connectionId": connection
+                },
+                "series": []
+            }
+        }),
+    }
+}
+
+/// `(spec.data.connectionId, spec.data.packageDataSourceId)` of a chart envelope.
+fn spec_connection(spec_json: &str) -> (String, Option<String>) {
+    let v: serde_json::Value = serde_json::from_str(spec_json).unwrap();
+    (
+        v["spec"]["data"]["connectionId"].as_str().unwrap_or_default().to_string(),
+        v["spec"]["data"]["packageDataSourceId"].as_str().map(str::to_string),
+    )
+}
+
+/// The live connection materialised for the application data source `ds_id`,
+/// and how many connections carry that id (one, or the pull double-minted).
+fn connection_for(h: &Harness, ds_id: &str) -> (identity::EntityId, usize) {
+    let conns = h.bi.connections.lock().unwrap();
+    let matching: Vec<identity::EntityId> = conns
+        .iter()
+        .filter(|(_, c)| c.package_data_source_id.as_deref() == Some(ds_id))
+        .map(|(id, _)| *id)
+        .collect();
+    let first = *matching.first().expect("the application's data source was materialised");
+    (first, matching.len())
+}
+
+/// `get_connection_bi_model`'s question, asked of the store: does the id the
+/// chart now names have a connection with an engine behind it?
+fn has_engine(h: &Harness, connection: &str) -> bool {
+    let Some(id) = identity::EntityId::parse(connection) else {
+        return false;
+    };
+    h.bi.connections.lock().unwrap().get(&id).is_some_and(|c| c.engine.is_some())
+}
+
+/// SUBSCRIBE: the pulled chart comes out naming the connection THIS pull
+/// minted for the application's data source -- not the publisher's uuid, which
+/// is no connection here -- and carries the stable package data-source id
+/// beside it, so the next open can re-bind by it.
+///
+/// SABOTAGE: drop the `remap_chart_bi_connections` call after
+/// `load_embedded_data_sources` in `materialize_pull_result` -- the first
+/// `assert_eq!` on `connection_id` fails.
+#[test]
+fn a_subscribed_design_query_chart_is_bound_to_the_connection_the_pull_minted() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let publisher_connection = new_entity().to_string();
+    let mut wb = Workbook::default();
+    wb.sheets = vec![Sheet::new("Dashboard".to_string())];
+    let dashboard = wb.sheets[0].id;
+    wb.charts = vec![design_query_chart(dashboard, &publisher_connection, "Revenue by region")];
+    publish_with_model(&dir, prof.path(), &wb, vec![0], "literals", (1, 0, 0), None, &publisher_connection);
+
+    let h = Harness::new();
+    h.materialize(subscribe_pull(&dir, prof.path()), MaterializeMode::Subscribe);
+
+    let (live, minted) = connection_for(&h, &publisher_connection);
+    assert_eq!(minted, 1, "one connection per embedded data source");
+    assert_ne!(
+        live.to_string(),
+        publisher_connection,
+        "the premise: a pull mints a FRESH uuid, so the publisher's names no connection here"
+    );
+    let charts = h.state.charts.read().unwrap();
+    let chart = charts.iter().find(|c| c.id == wb.charts[0].id).expect("the chart landed");
+    let (connection_id, package_key) = spec_connection(&chart.spec_json);
+    assert_eq!(connection_id, live.to_string(), "bound to the connection the pull minted");
+    assert_eq!(
+        package_key.as_deref(),
+        Some(publisher_connection.as_str()),
+        "and the stable package data-source id is recorded beside it"
+    );
+    assert!(has_engine(&h, &connection_id), "the connection it names has a model behind it");
+    // The query itself is untouched.
+    let v: serde_json::Value = serde_json::from_str(&chart.spec_json).unwrap();
+    assert_eq!(v["spec"]["data"]["dslText"], "ROWS: [Sales.Region]\nVALUES: [Revenue]");
+    assert_eq!(v["name"], "Revenue by region");
+}
+
+/// A CHECKOUT re-binds too. Unlike the sheet ids a checkout preserves, the
+/// connection uuid never survives a pull (the working copy mints its own), so
+/// a design-query chart opened for editing would otherwise find no model
+/// either. A range-bound chart in the same checkout still keeps its bytes
+/// (`a_checked_out_chart_keeps_its_spec_bytes`): the walk touches design-query
+/// sources only.
+///
+/// SABOTAGE: gate the re-bind on `MaterializeMode::Subscribe` as the sheet-id
+/// remap is -- the `connection_id` assertion fails.
+#[test]
+fn a_checked_out_design_query_chart_is_bound_to_the_working_copys_connection() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let publisher_connection = new_entity().to_string();
+    let mut wb = dashboard_and_data(); // Dashboard (a RANGE chart reading Data), Data
+    let dashboard = wb.sheets[0].id;
+    wb.charts.push(design_query_chart(dashboard, &publisher_connection, "Revenue by region"));
+    publish_with_model(&dir, prof.path(), &wb, vec![0, 1], "literals", (1, 0, 0), None, &publisher_connection);
+    let checked_out = checkout_pull(&dir, prof.path());
+    let range_spec_published = checked_out.charts.iter().find(|c| c.id == wb.charts[0].id).unwrap().spec.clone();
+
+    let h = Harness::new();
+    h.empty_as_checkout_does();
+    h.materialize(checked_out, MaterializeMode::Checkout);
+
+    let (live, _) = connection_for(&h, &publisher_connection);
+    let charts = h.state.charts.read().unwrap();
+    let design = charts.iter().find(|c| c.id == wb.charts[1].id).expect("the design-query chart landed");
+    let (connection_id, package_key) = spec_connection(&design.spec_json);
+    assert_eq!(connection_id, live.to_string(), "the working copy's own connection");
+    assert_eq!(package_key.as_deref(), Some(publisher_connection.as_str()));
+    let range = charts.iter().find(|c| c.id == wb.charts[0].id).expect("the range chart landed");
+    let stored: serde_json::Value = serde_json::from_str(&range.spec_json).unwrap();
+    assert_eq!(stored, range_spec_published, "a range-bound chart is not rewritten by the re-bind");
+}
+
+/// REFRESH: v2's chart lands through `apply_refreshed_charts`, which has no
+/// data-source map, still naming the publisher's uuid; the re-bind after the
+/// refresh map is built points it at the EXISTING application connection (the
+/// refresh swaps that connection's engine rather than minting a second one).
+///
+/// SABOTAGE: drop the chart re-bind beside `remap_slicer_bi_connections` in
+/// `apply_refresh_payloads` -- the v2 `connection_id` assertion fails.
+#[test]
+fn a_refreshed_design_query_chart_is_bound_to_the_existing_application_connection() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let publisher_connection = new_entity().to_string();
+    let mut wb = Workbook::default();
+    wb.sheets = vec![Sheet::new("Dashboard".to_string())];
+    let dashboard = wb.sheets[0].id;
+    wb.charts = vec![design_query_chart(dashboard, &publisher_connection, "Revenue v1")];
+    publish_with_model(&dir, prof.path(), &wb, vec![0], "literals", (1, 0, 0), None, &publisher_connection);
+
+    let h = Harness::new();
+    h.materialize(pull_latest(&dir, prof.path(), "literals"), MaterializeMode::Subscribe);
+    let (live_v1, _) = connection_for(&h, &publisher_connection);
+
+    // v2 replaces the chart (a new id, as a re-created chart has).
+    wb.charts = vec![design_query_chart(dashboard, &publisher_connection, "Revenue v2")];
+    publish_with_model(&dir, prof.path(), &wb, vec![0], "literals", (1, 1, 0), Some((1, 0, 0)), &publisher_connection);
+    h.refresh(vec![(0, pull_latest(&dir, prof.path(), "literals"))]);
+
+    let (live_v2, minted) = connection_for(&h, &publisher_connection);
+    assert_eq!(minted, 1, "the refresh re-used the connection rather than minting a second");
+    assert_eq!(live_v2, live_v1, "the same connection serves v2");
+    let charts = h.state.charts.read().unwrap();
+    let chart = charts.iter().find(|c| c.id == wb.charts[0].id).expect("v2's chart landed");
+    let (connection_id, package_key) = spec_connection(&chart.spec_json);
+    assert_eq!(connection_id, live_v2.to_string(), "v2's chart names the live connection");
+    assert_eq!(package_key.as_deref(), Some(publisher_connection.as_str()));
+    assert!(has_engine(&h, &connection_id));
+}
+
+/// THE WIRING AND ITS ORDER, which the behavioural tests above cannot pin for
+/// the open path (`restore_application_bi_connections` verifies against the
+/// real profile's pins, so no temp workspace reaches it): each of the three
+/// doors re-binds charts AFTER the connections it binds them to exist -- the
+/// pull after `load_embedded_data_sources`, the refresh after the full
+/// data-source map (beside the slicer remap), the open path after its loader
+/// loop -- and the open path does it under the clean effect, because a re-bind
+/// on open must not dirty a freshly opened workbook.
+#[test]
+fn every_connection_door_re_binds_design_query_charts_after_minting_their_connections() {
+    let pull = calp_commands_fn_code("pub(crate) fn materialize_pull_result(");
+    let minted = pull.find("load_embedded_data_sources(").expect("the pull mints connections");
+    let rebound = pull.find("remap_chart_bi_connections(").expect("the pull does not re-bind charts");
+    assert!(minted < rebound, "the pull re-binds charts before their connections exist");
+
+    let refresh = calp_commands_fn_code("pub(crate) fn apply_refresh_payloads(");
+    let map = refresh
+        .find("remap_slicer_bi_connections(")
+        .expect("the refresh lost its slicer remap, the marker of the full data-source map");
+    let rebound = refresh.find("remap_chart_bi_connections(").expect("the refresh does not re-bind charts");
+    assert!(map < rebound, "the refresh re-binds charts before the full data-source map exists");
+
+    let open = calp_commands_fn_code("pub(crate) fn restore_application_bi_connections(");
+    let minted = open.find("load_embedded_data_sources(").expect("the open path mints connections");
+    let rebound = open.find("remap_chart_bi_connections(").expect("the open path does not re-bind charts");
+    assert!(minted < rebound, "the open path re-binds charts before its connections exist");
+    let clean = open
+        .find("CleanReason::LoadingFromDisk")
+        .expect("the open path's re-bind must run under the loading-from-disk effect");
+    assert!(clean < rebound, "the clean effect is constructed before the charts are written");
+}
+
+// ---------------------------------------------------------------------------
+// The SAVE-time package key (drill-through fix round, 2026-10-23). The remap
+// above re-binds a design-query chart on the next open by its stable
+// `packageDataSourceId`; the save is where that key is written, from the live
+// connection the chart names, for every chart -- whoever wrote it.
+// ---------------------------------------------------------------------------
+
+/// A connection authored in THIS workbook: no package data source behind it.
+fn local_connection(id: identity::EntityId) -> crate::bi::types::Connection {
+    crate::bi::types::Connection {
+        id,
+        name: "My model".into(),
+        description: String::new(),
+        connection_type: crate::bi::types::ConnectionType::PostgreSQL,
+        connection_string: String::new(),
+        server: String::new(),
+        database: String::new(),
+        preferred_auth: "Integrated".into(),
+        model_path: None,
+        engine: None,
+        model_key: None,
+        connector_index: None,
+        bindings: vec![],
+        last_refreshed: None,
+        created_at: String::new(),
+        is_connected: false,
+        active_queries: std::collections::HashMap::new(),
+        package_data_source_id: None,
+        active_role: None,
+        base_model: None,
+        calculated_measures: vec![],
+    }
+}
+
+/// A design-query chart RECORD as the chart store holds it (`ChartEntry`) on
+/// sheet `sheet_index`: `{type, dslText, connectionId[, packageDataSourceId]}`
+/// -- what a drill-through's chart, the Insert Chart dialog or a script writes.
+fn design_query_entry(sheet_index: usize, connection: &str, package: Option<&str>) -> crate::api_types::ChartEntry {
+    let mut data = serde_json::json!({
+        "type": "designQuery",
+        "dslText": "ROWS: [Sales.Region]\nVALUES: [Revenue]",
+        "connectionId": connection
+    });
+    if let Some(p) = package {
+        data["packageDataSourceId"] = serde_json::Value::String(p.to_string());
+    }
+    let id = new_entity();
+    crate::api_types::ChartEntry {
+        id,
+        sheet_index,
+        spec_json: serde_json::json!({
+            "chartId": id.to_string(),
+            "name": "Region detail",
+            "sheetIndex": sheet_index,
+            "spec": { "mark": "bar", "data": data, "series": [] }
+        })
+        .to_string(),
+    }
+}
+
+/// The saved `spec.data` of chart `id`.
+fn saved_data(saved: &[persistence::SavedChart], id: identity::EntityId) -> &serde_json::Value {
+    &saved.iter().find(|c| c.id == id).expect("the chart was saved").spec["spec"]["data"]
+}
+
+/// THE KEPT DRILL CHART SURVIVES THE NEXT OPEN, AND A RE-POINT IS NOT UNDONE
+/// (review findings rust/kept-drill-chart-has-no-package-key,
+/// charts/no-writer-of-package-key, contracts/drill-chart-no-package-key,
+/// charts/stale-package-key-reverts-repoint).
+///
+/// A subscriber's workbook: the pull minted an application connection for the
+/// publisher's data source, and the subscriber has a model of their own. The
+/// chart store then holds three charts no TypeScript writer keyed correctly --
+/// a kept drill-through chart naming the application connection by its
+/// SESSION uuid only, a chart re-pointed to the local model that still carries
+/// the application's key (the store's deep merge kept it), and a chart whose
+/// uuid names no live connection. The save stamps the first, strips the second
+/// and leaves the third alone -- in the SAVED copy only: the store keeps its
+/// bytes. Then the next open (every application connection re-minted) re-binds
+/// the drill chart and leaves the re-pointed one on the local model, which is
+/// exactly what the unstamped records could not do.
+///
+/// SABOTAGE: skip `stamp_saved_chart_package_keys` in `collect_charts_for_save`
+/// -- the drill chart's key assertion fails (and so does the re-bind).
+#[test]
+fn a_save_stamps_each_design_query_chart_from_its_live_connection_and_never_touches_the_store() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let publisher_connection = new_entity().to_string();
+    let mut wb = Workbook::default();
+    wb.sheets = vec![Sheet::new("Dashboard".to_string())];
+    let dashboard = wb.sheets[0].id;
+    wb.charts = vec![design_query_chart(dashboard, &publisher_connection, "Revenue by region")];
+    publish_with_model(&dir, prof.path(), &wb, vec![0], "literals", (1, 0, 0), None, &publisher_connection);
+
+    let h = Harness::new();
+    h.materialize(subscribe_pull(&dir, prof.path()), MaterializeMode::Subscribe);
+    let (application, _) = connection_for(&h, &publisher_connection);
+    let local = new_entity();
+    h.bi.connections.lock().unwrap().insert(local, local_connection(local));
+
+    let kept_drill = design_query_entry(0, &application.to_string(), None);
+    let re_pointed = design_query_entry(0, &local.to_string(), Some(&publisher_connection));
+    let orphan = design_query_entry(0, &new_entity().to_string(), Some("ds-not-loaded"));
+    {
+        let effect = crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default());
+        let mut charts = h.state.charts.write(&effect).unwrap();
+        charts.extend([kept_drill.clone(), re_pointed.clone(), orphan.clone()]);
+    }
+    let store = |h: &Harness| -> Vec<(identity::EntityId, String)> {
+        h.state.charts.read().unwrap().iter().map(|c| (c.id, c.spec_json.clone())).collect()
+    };
+    let store_before = store(&h);
+
+    let keys = crate::persistence::chart_connection_keys(&h.bi).expect("the connections are readable");
+    // Pins the OWNED return. SABOTAGE: make `ChartConnectionKeys` a MutexGuard
+    // over `BiState.connections` (the stamp reading `package_data_source_id`
+    // through it) -- this assertion fails and nothing else does.
+    assert!(h.bi.connections.try_lock().is_ok(), "the connections lock is released before the charts are read");
+    let sheet_ids = h.state.sheet_ids.read().unwrap().clone();
+    let saved = crate::persistence::collect_charts_for_save(&h.state, &sheet_ids, &keys);
+
+    // (a) The kept drill chart: its live application connection's key is
+    //     written beside the session uuid, which is not rewritten.
+    let drill = saved_data(&saved, kept_drill.id);
+    assert_eq!(drill["packageDataSourceId"], publisher_connection.as_str(), "the stable key is saved");
+    assert_eq!(drill["connectionId"], application.to_string().as_str());
+    // (b) The re-pointed chart: a local connection has no key, so the stale
+    //     application key is removed -- not nulled, not emptied.
+    let mine = saved_data(&saved, re_pointed.id);
+    assert!(mine.get("packageDataSourceId").is_none(), "the stale key is not saved: {mine}");
+    assert_eq!(mine["connectionId"], local.to_string().as_str());
+    // (c) A uuid no live connection answers to: saved exactly as stored.
+    let parse = |text: &str| serde_json::from_str::<serde_json::Value>(text).unwrap();
+    let orphan_saved = saved.iter().find(|c| c.id == orphan.id).expect("the orphan was saved");
+    assert_eq!(orphan_saved.spec, parse(&orphan.spec_json), "the key that may still heal it is kept");
+    // (d) The pulled chart was already bound and keyed: saved as stored.
+    let pulled = saved.iter().find(|c| c.id == wb.charts[0].id).expect("the pulled chart was saved");
+    let pulled_stored = &store_before.iter().find(|(id, _)| *id == wb.charts[0].id).unwrap().1;
+    assert_eq!(pulled.spec, parse(pulled_stored));
+    // (e) Only the SAVED copy: the chart store keeps every byte.
+    assert_eq!(store(&h), store_before, "the save wrote its stamp back into the chart store");
+
+    // (f) The next open: the application's data source gets a FRESH connection.
+    let reopened = new_entity();
+    let open: std::collections::HashMap<String, crate::bi::types::ConnectionId> =
+        [(publisher_connection.clone(), reopened)].into_iter().collect();
+    let mut from_disk: Vec<crate::api_types::ChartEntry> = saved
+        .iter()
+        .filter(|c| c.id == kept_drill.id || c.id == re_pointed.id)
+        .map(|c| crate::api_types::ChartEntry {
+            id: c.id,
+            sheet_index: 0,
+            spec_json: crate::persistence::chart_spec_text_from_saved(&c.spec),
+        })
+        .collect();
+    assert_eq!(crate::calp_commands::remap_chart_bi_connections(&mut from_disk, &open, None), 1);
+    let reopened_spec = |id: identity::EntityId| {
+        spec_connection(&from_disk.iter().find(|c| c.id == id).unwrap().spec_json).0
+    };
+    assert_eq!(reopened_spec(kept_drill.id), reopened.to_string(), "the kept drill chart finds its model");
+    assert_eq!(reopened_spec(re_pointed.id), local.to_string(), "the user's re-point survives the reopen");
+    // The premise, on the records as the store holds them: unstamped, the
+    // drill chart cannot be re-bound and the stale key pulls the other back.
+    let mut unstamped = vec![kept_drill.clone()];
+    assert_eq!(crate::calp_commands::remap_chart_bi_connections(&mut unstamped, &open, None), 0);
+    let mut stale = vec![re_pointed.clone()];
+    assert_eq!(crate::calp_commands::remap_chart_bi_connections(&mut stale, &open, None), 1);
+    assert_eq!(spec_connection(&stale[0].spec_json).0, reopened.to_string());
+}
+
+/// A WORKING COPY'S PUSH KEYS ITS DESIGN-QUERY CHARTS BY THE ID IT FILES THEIR
+/// DATA SOURCE UNDER (review RB-1). A checkout mints the developer's connection
+/// with the PREVIOUS version's data-source id as its package key; the push
+/// files that data source under the connection's own id. Before the fix the
+/// carrier stamped the package key, and an existing subscriber -- who still
+/// holds the connection serving the previous version, beside the one the
+/// refresh minted for the new id -- had every such chart re-bound to the OLD
+/// version's model, because the re-bind prefers the key.
+///
+/// SABOTAGE: return `package_data_source_id` from
+/// `published_chart_connection_keys` -- the carrier key assertions fail.
+///
+/// The builder's `ChartKeysFor` choice is NOT reachable from here:
+/// `build_workbook_for_save_with_slicers` takes Tauri `State` handles, which no
+/// unit test in this crate can construct. Flipping it to `ChartKeysFor::Document`
+/// leaves this test green; it is caught only by the source pin in
+/// `every_door_that_serialises_charts_stamps_them_through_the_one_collector`,
+/// which is therefore that choice's sole guard and must not be deleted as
+/// redundant with this one.
+#[test]
+fn the_carrier_keys_a_checked_out_design_query_chart_by_the_id_its_data_source_is_filed_under() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let publisher_connection = new_entity().to_string();
+    let mut wb = Workbook::default();
+    wb.sheets = vec![Sheet::new("Dashboard".to_string())];
+    let dashboard = wb.sheets[0].id;
+    wb.charts = vec![design_query_chart(dashboard, &publisher_connection, "Revenue by region")];
+    publish_with_model(&dir, prof.path(), &wb, vec![0], "literals", (1, 0, 0), None, &publisher_connection);
+
+    let h = Harness::new();
+    h.empty_as_checkout_does();
+    h.materialize(checkout_pull(&dir, prof.path()), MaterializeMode::Checkout);
+    let (working, _) = connection_for(&h, &publisher_connection);
+    // A chart the developer made in the working copy (Insert Chart, a kept
+    // drill chart): bound by the session uuid only.
+    let made_here = design_query_entry(0, &working.to_string(), None);
+    {
+        let effect = crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default());
+        h.state.charts.write(&effect).unwrap().push(made_here.clone());
+    }
+    let sheet_ids = h.state.sheet_ids.read().unwrap().clone();
+    let filed_under = crate::calp_commands::published_data_source_id(&working);
+    assert_eq!(filed_under, working.to_string(), "a push files the data source under the connection's own id");
+
+    // The .cala save: the package key, which the next open's re-mint answers to.
+    let document = crate::persistence::chart_connection_keys(&h.bi).unwrap();
+    let saved = crate::persistence::collect_charts_for_save(&h.state, &sheet_ids, &document);
+    assert_eq!(saved_data(&saved, made_here.id)["packageDataSourceId"], publisher_connection.as_str());
+
+    // The carrier: the id the data source is filed under in THIS package --
+    // for the chart made here AND for the pulled one, whose store copy carries
+    // the previous version's key from the checkout's re-bind.
+    let package = crate::persistence::published_chart_connection_keys(&h.bi).unwrap();
+    let carried = crate::persistence::collect_charts_for_save(&h.state, &sheet_ids, &package);
+    assert_eq!(saved_data(&carried, made_here.id)["packageDataSourceId"], filed_under.as_str());
+    assert_eq!(saved_data(&carried, wb.charts[0].id)["packageDataSourceId"], filed_under.as_str());
+    assert_eq!(saved_data(&carried, made_here.id)["connectionId"], working.to_string().as_str(), "the session uuid is not rewritten");
+
+    // The consequence at an EXISTING subscriber after the refresh: the old
+    // connection still serves v1 (package key = the publisher's id), the
+    // refresh minted a second one for the id v2 files its data source under.
+    let (still_v1, v2) = (new_entity(), new_entity());
+    let live: std::collections::HashMap<String, crate::bi::types::ConnectionId> =
+        [(publisher_connection.clone(), still_v1), (filed_under.clone(), v2)].into_iter().collect();
+    let entry = |saved: &[persistence::SavedChart], id: identity::EntityId| crate::api_types::ChartEntry {
+        id,
+        sheet_index: 0,
+        spec_json: crate::persistence::chart_spec_text_from_saved(&saved.iter().find(|c| c.id == id).unwrap().spec),
+    };
+    let mut from_v2 = vec![entry(&carried, made_here.id), entry(&carried, wb.charts[0].id)];
+    assert_eq!(crate::calp_commands::remap_chart_bi_connections(&mut from_v2, &live, None), 2);
+    for chart in &from_v2 {
+        assert_eq!(spec_connection(&chart.spec_json).0, v2.to_string(), "bound to the connection serving v2");
+    }
+    // The premise: the package key, carried as before the fix, binds v1's model.
+    let mut stale = vec![entry(&saved, made_here.id)];
+    assert_eq!(crate::calp_commands::remap_chart_bi_connections(&mut stale, &live, None), 1);
+    assert_eq!(spec_connection(&stale[0].spec_json).0, still_v1.to_string());
+}
+
+/// THE EMBEDDED DATA SOURCE AND THE CARRIED CHART NAME THE SAME THING -- checked
+/// on what the capture really captures (review RB1-WIRING-PIN-GAPS (b)). The
+/// source pin below can only check two substrings, and a root fix applied to the
+/// capture alone, `conn.package_data_source_id.clone().unwrap_or_else(||
+/// published_data_source_id(&conn.id))`, keeps both and every pin green: the
+/// carrier would then key each chart by the connection's own id while the
+/// package files its data source under the package key, and every subscriber's
+/// design-query chart would name a data source the package does not have (RB-1,
+/// reversed).
+///
+/// SABOTAGE: file the data source under `conn.package_data_source_id` (else the
+/// connection's own id) in `capture_bi_data_sources` -- the first data-source
+/// assertion fails.
+#[test]
+fn a_checked_out_push_files_each_data_source_under_the_key_its_carried_charts_name() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+    let publisher_connection = new_entity().to_string();
+    let mut wb = Workbook::default();
+    wb.sheets = vec![Sheet::new("Dashboard".to_string())];
+    let dashboard = wb.sheets[0].id;
+    wb.charts = vec![design_query_chart(dashboard, &publisher_connection, "Revenue by region")];
+    publish_with_model(&dir, prof.path(), &wb, vec![0], "literals", (1, 0, 0), None, &publisher_connection);
+
+    let h = Harness::new();
+    h.empty_as_checkout_does();
+    h.materialize(checkout_pull(&dir, prof.path()), MaterializeMode::Checkout);
+    let (working, minted) = connection_for(&h, &publisher_connection);
+    assert_eq!(minted, 1, "fixture: one connection for the application's one data source");
+    assert_eq!(h.bi.connections.lock().unwrap().len(), 1, "fixture: the checkout's connection is the only one");
+    assert_ne!(
+        working.to_string(),
+        publisher_connection,
+        "the premise: a checkout mints a fresh id, so the connection's own id and its package key differ"
+    );
+
+    let (sources, _) = crate::calp_commands::capture_bi_data_sources(&h.state, &h.bi).expect("the capture runs");
+    let ids: Vec<&str> = sources.iter().map(|ds| ds.id.as_str()).collect();
+    assert_eq!(sources.len(), 1, "the checked-out connection's model is captured: {ids:?}");
+
+    let package = crate::persistence::published_chart_connection_keys(&h.bi).unwrap();
+    let keyed = package.get(&working).cloned().flatten().expect("the carrier keys the checkout's connection");
+    let sheet_ids = h.state.sheet_ids.read().unwrap().clone();
+    let carried = crate::persistence::collect_charts_for_save(&h.state, &sheet_ids, &package);
+    let carried_key = saved_data(&carried, wb.charts[0].id)["packageDataSourceId"]
+        .as_str()
+        .expect("the carried chart is keyed")
+        .to_string();
+    for ds in &sources {
+        assert_eq!(ds.id, keyed, "the data source is filed under the key the carrier gives its connection");
+        assert_eq!(ds.id, carried_key, "the carried chart names the data source the package embeds");
+    }
+}
+
+/// The byte offset of the first `AppState` guard taken in `code`: the first
+/// `state.<store>.read(` / `.write(` / `.lock(` / `.lock_pending(`, where `state`
+/// is the whole receiver (not `pivot_state.` or `bi_state.`).
+fn first_state_guard(code: &str) -> Option<usize> {
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut first: Option<usize> = None;
+    for method in [".read(", ".write(", ".lock(", ".lock_pending("] {
+        for (at, _) in code.match_indices(method) {
+            let before = &code[..at];
+            let field_start = before.rfind(|c: char| !is_ident(c)).map_or(0, |i| i + 1);
+            if field_start == at {
+                continue;
+            }
+            let Some(receiver) = before[..field_start].strip_suffix("state.") else {
+                continue;
+            };
+            if receiver.chars().last().is_some_and(is_ident) {
+                continue;
+            }
+            let start = receiver.len();
+            first = Some(first.map_or(start, |f| f.min(start)));
+        }
+    }
+    first
+}
+
+/// The CODE (comments stripped per line) of one top-level function of the
+/// crate file `rel` (relative to the crate root), from `signature` to the next
+/// top-level item.
+fn crate_fn_code(rel: &str, signature: &str) -> String {
+    let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel))
+        .unwrap_or_else(|e| panic!("cannot read {rel}: {e}"));
+    let src = src.replace("\r\n", "\n");
+    let start = src.find(signature).unwrap_or_else(|| panic!("{rel} no longer has `{signature}`"));
+    let rest = &src[start + signature.len()..];
+    let end = ["\npub fn ", "\npub(crate) fn ", "\nfn ", "\n#[tauri::command]", "\n#[cfg(test)]"]
+        .iter()
+        .filter_map(|next| rest.find(next))
+        .min()
+        .unwrap_or(rest.len());
+    rest[..end]
+        .lines()
+        .map(|l| match l.find("//") {
+            Some(i) => &l[..i],
+            None => l,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// EVERY DOOR THAT SERIALISES THE CHART STORE STAMPS IT. The compiler already
+/// forces every caller of `build_workbook_for_save` to hand in the BI store and
+/// every caller of `collect_charts_for_save` to hand in a key map; what it
+/// cannot force is that the map is the LIVE one, taken before the document
+/// locks, and that no second serialiser exists. This pins both:
+/// - the collector stamps, and its one caller (the shared builder) copies the
+///   live keys out FIRST -- before any `AppState` guard -- and passes them;
+/// - the `.cala` save and AutoRecover (`assemble_workbook_for_save`) and the
+///   `.calp` publish, preview and working-copy diff (`assemble_publish_workbook`
+///   through `build_workbook_for_save_with_slicers`) all go through it;
+/// - nothing else in the crate calls the collector.
+///
+/// SABOTAGE: pass `&ChartConnectionKeys::new()` instead of `&chart_keys` in
+/// `build_workbook_for_save` -- the builder assertion fails. Or compute the
+/// carrier's keys (`published_chart_connection_keys(bi_state)`) after the
+/// builder's first AppState guard -- the key-order assertion fails. Or build the
+/// carrier with `ChartKeysFor::Document` in `build_workbook_for_save_with_slicers`
+/// -- the carrier assertion fails, and this is the ONLY test that catches it:
+/// the behavioural carrier test cannot reach that builder (it takes Tauri
+/// `State` handles), so this pin is that choice's sole guard.
+#[test]
+fn every_door_that_serialises_charts_stamps_them_through_the_one_collector() {
+    let collect = crate_fn_code("src/persistence.rs", "pub(crate) fn collect_charts_for_save(");
+    assert!(collect.contains("stamp_saved_chart_package_keys("), "the collector no longer stamps the package key");
+
+    let build = crate_fn_code("src/persistence.rs", "pub fn build_workbook_for_save(");
+    let first_guard = first_state_guard(&build).expect("the builder no longer takes any AppState guard");
+    // EVERY copy of the BI keys comes before that guard -- the `.cala` arm's
+    // `chart_connection_keys(` AND the carrier arm's
+    // `published_chart_connection_keys(`, which contains it. A `find` saw only
+    // the first (review RB1-WIRING-PIN-GAPS (a)): computing the carrier's keys
+    // after `state.grid.read()` kept this test green while the publish, the
+    // preview and the working-copy diff took the BI lock under every guard.
+    let key_copies: Vec<usize> = build.match_indices("chart_connection_keys(").map(|(at, _)| at).collect();
+    assert!(
+        key_copies.len() >= 2,
+        "the builder no longer copies the keys for both the document and the carrier: {key_copies:?}"
+    );
+    for at in &key_copies {
+        assert!(
+            *at < first_guard,
+            "a copy of the BI keys (byte {at} of the builder) comes after its first AppState guard (byte \
+             {first_guard}): the BI connections must be copied out before any AppState guard is taken"
+        );
+    }
+    assert!(
+        build.contains("collect_charts_for_save(state, &sheet_ids, &chart_keys)"),
+        "the builder no longer hands the LIVE keys to the collector"
+    );
+
+    assert!(build.contains("published_chart_connection_keys(bi_state)"), "the builder no longer offers the carrier's keys");
+    // The .cala save and AutoRecover build through ONE snapshot attempt, taken
+    // again until no sheet renumbering overlapped it (F1, review round 7): the
+    // door names the attempt, and the attempt builds with the document's keys.
+    let save_door = crate_fn_code("src/persistence.rs", "pub(crate) fn assemble_workbook_for_save(");
+    assert!(
+        save_door.contains("take_consistent_snapshot(") && save_door.contains("assemble_workbook_snapshot("),
+        "the .cala save no longer builds through its validated snapshot attempt"
+    );
+    let save = crate_fn_code("src/persistence.rs", "pub(crate) fn assemble_workbook_snapshot(");
+    assert!(
+        save.contains("build_workbook_for_save(state, user_files_state, bi_state, ChartKeysFor::Document)"),
+        "the .cala save keeps the key the next open re-binds by"
+    );
+    let carrier = crate_fn_code("src/persistence.rs", "pub fn build_workbook_for_save_with_slicers(");
+    assert!(
+        carrier.contains("build_workbook_for_save(state, user_files_state, bi_state, ChartKeysFor::Package)"),
+        "the .calp carrier writes the id its data sources are filed under (review RB-1)"
+    );
+    // ONE function names a published data source, for the embedded data source
+    // and for the chart's key alike.
+    let published = crate_fn_code("src/persistence.rs", "pub(crate) fn published_chart_connection_keys(");
+    assert!(published.contains("published_data_source_id("), "the carrier's keys no longer come from published_data_source_id");
+    let capture = calp_commands_fn_code("fn capture_bi_data_sources(");
+    assert!(capture.contains("published_data_source_id(&conn.id)"), "the capture no longer files data sources under published_data_source_id");
+    // The publish door takes one validated attempt at a time; the attempt holds
+    // the carrier's build.
+    let publish_door = calp_commands_fn_code("fn assemble_publish_workbook(");
+    assert!(
+        publish_door.contains("take_consistent_snapshot(") && publish_door.contains("assemble_publish_snapshot("),
+        "the publish door no longer builds through its validated snapshot attempt"
+    );
+    let publish = calp_commands_fn_code("fn assemble_publish_snapshot(");
+    let call = publish.find("build_workbook_for_save_with_slicers(").expect("the publish assembly");
+    let args = &publish[call..call + publish[call..].find(")?;").expect("the call's end")];
+    assert!(args.contains("bi_state"), "the publish assembly no longer hands the BI store to the carrier: {args}");
+
+    for (rel, door, assembler) in [
+        ("src/persistence.rs", "pub fn save_file(", "assemble_workbook_for_save("),
+        ("src/persistence.rs", "pub fn auto_recover_save(", "assemble_workbook_for_save("),
+        ("src/calp_commands.rs", "pub fn calp_publish(", "assemble_publish_workbook("),
+        ("src/calp_commands.rs", "pub fn calp_publish_preview(", "assemble_publish_workbook("),
+        ("src/calp_commands.rs", "pub(crate) fn publish_into_for_preview(", "assemble_publish_workbook("),
+    ] {
+        assert!(crate_fn_code(rel, door).contains(assembler), "`{door}` no longer builds through `{assembler}`");
+    }
+
+    // No second serialiser: outside test files, the collector is defined once
+    // and called once.
+    fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                rust_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    rust_files(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+    let mut calls: Vec<String> = Vec::new();
+    for path in files {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        if name.ends_with("tests.rs") {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).unwrap();
+        for (n, line) in src.lines().enumerate() {
+            let code = line.split("//").next().unwrap_or("");
+            if code.contains("collect_charts_for_save(") && !code.contains("fn collect_charts_for_save(") {
+                calls.push(format!("{}:{}", name, n + 1));
+            }
+        }
+    }
+    assert_eq!(calls.len(), 1, "the chart store must be serialised through exactly one call: {calls:?}");
+    assert!(calls[0].starts_with("persistence.rs:"), "{calls:?}");
 }

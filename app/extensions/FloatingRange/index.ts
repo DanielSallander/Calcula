@@ -28,6 +28,7 @@ import {
 } from "@api";
 import {
   getActiveSheet,
+  getSheets,
   clearRangeWithOptions,
   beginUndoTransaction,
   commitUndoTransaction,
@@ -46,7 +47,6 @@ import {
 } from "@api/gridOverlays";
 import {
   endExternalFormulaSession,
-  getParkedViewSheetIndex,
   isExternalSessionParked,
   registerExternalAddressResolver,
   isTypedCharacterKey,
@@ -241,6 +241,49 @@ function clampedCellFromFramePoint(
 
 function externalTargetExpecting(): boolean {
   return getExternalFormulaTarget()?.isExpectingReference() === true;
+}
+
+// ============================================================================
+// Which sheet a range lives on -- by IDENTITY
+// ============================================================================
+//
+// Review FR-RESYNC-COMMITS-ON-RENUMBER: "did the sheet change under my edit"
+// was decided by INDEX, and a renumbering is not a change of sheet. A script's
+// delete or move of an earlier sheet, an MCP tool's, or a temporary sheet's
+// discard renumbers the host under an open edit; the index test then COMMITTED
+// the half-typed "=SUM(" as literal text -- parked or not. Every range row
+// carries its host's STABLE id (`hostSheetId`), and the backend re-derives the
+// host's index on every list, so the question is asked of a FRESH row and the
+// active sheet's id.
+
+/** The sheet the backend has active: its index and STABLE id ("" when the list carries none). */
+interface ActiveSheet {
+  index: number;
+  sheetId: string;
+}
+
+/** The backend's active sheet, its index and id read in ONE answer (a renumbering cannot land between them). */
+async function readActiveSheet(): Promise<ActiveSheet> {
+  const { sheets, activeIndex } = await getSheets();
+  const active = sheets.find((s) => s.index === activeIndex);
+  return { index: activeIndex, sheetId: typeof active?.sheetId === "string" ? active.sheetId : "" };
+}
+
+/**
+ * Whether `entry` -- a FRESH row -- is hosted on `sheet`: by the stable id when
+ * both carry one (whatever index either holds), else by index (an older
+ * backend: both indexes were read from the backend just now).
+ */
+function frHostedOn(entry: FloatingRangeEntry, sheet: ActiveSheet): boolean {
+  if (entry.hostSheetId !== "" && sheet.sheetId !== "") return entry.hostSheetId === sheet.sheetId;
+  return entry.sheetIndex === sheet.index;
+}
+
+/** Whether range `frId` (when there is one) is still hosted on `sheet` -- false for a range that is gone. */
+function frStillOn(frId: string | null, sheet: ActiveSheet): boolean {
+  if (frId === null) return true;
+  const entry = getFloatingRangeById(frId);
+  return entry !== null && frHostedOn(entry, sheet);
 }
 
 /**
@@ -1794,8 +1837,11 @@ function activate(context: ExtensionContext): void {
   //     Core refuses while any external edit is live (the keyboard in
   //     api/keybindings.ts; the command -- ribbon, Quick Access Toolbar,
   //     menu -- in useSpreadsheetSelection). A door that still switches
-  //     regardless is a genuine switch, and its SHEET_CHANGED commits below
-  //     as any genuine switch does.
+  //     regardless (a script's activateSheet) moves the PARKED view, and the
+  //     edit survives it: Core re-points the park to the sheet now shown, or
+  //     un-parks it back on its host (pointModeSheetSwitch.ts
+  //     `followShownSheetForExternalSession`), and the re-sync below never
+  //     commits a parked edit (review FR-RESYNC-COMMITS-ON-RENUMBER).
   const onBeforeSheetSwitch = () => {
     if (isExternalSessionParked() && isFrEditorOpen()) return;
     if (isFrEditorOpen()) void commitFrEditor(null);
@@ -1856,49 +1902,88 @@ function activate(context: ExtensionContext): void {
   }
 
   /**
+   * Re-publish after the rows were re-read: the content extents were read by
+   * backing-sheet INDEX (frExtent.ts), which a renumbering moves, so they are
+   * re-read too -- each stays in force until its re-read lands. The session
+   * scroll is untouched (a switch keeps it).
+   */
+  const republishAfterReload = () => {
+    invalidateAllFrExtents();
+    syncFloatingRangeRegions();
+    requestOverlayRedraw();
+  };
+
+  /**
+   * An edit of a range that is GONE from the fresh rows is discarded --
+   * returning to its sheet first when parked; the write would only be refused.
+   */
+  const discardEditOfGoneRange = async (frId: string) => {
+    await endExternalFormulaSession("cancel");
+    // The external slot may hold another editor (a pick-only chart text
+    // editor), in which case the call above found no session.
+    if (getFrEditorCell()?.frId === frId) cancelFrEditor();
+  };
+
+  /**
    * SHEET_CHANGED. Two kinds arrive here: a GENUINE switch (it names the new
    * sheet) and a detail-less STRUCTURAL announcement (the Shell fans the
    * `sheets` refresh domain out to it: a script, MCP, an undo, an application
-   * pull, "Detach all") that usually leaves the active sheet where it was.
-   * "Did the sheet change" decides everything:
-   *   - a genuine switch COMMITS an open edit at once, before any await --
-   *     never cancels it (a plain value left by a tab click is Excel's
-   *     commit), and never a half-typed formula on a background pull;
-   *   - while an edit is PARKED the backend's active sheet is the VIEWED one
-   *     by design: the ranges are re-read but the host sheet is kept, or the
-   *     host's ranges would be re-filtered away under the parked edit.
+   * pull, "Detach all", a temporary sheet's discard). Neither is trusted by
+   * INDEX (review FR-RESYNC-COMMITS-ON-RENUMBER): a script's or an MCP tool's
+   * delete or move of an earlier sheet, or a discard, RENUMBERS the host under
+   * an open edit, and the old "index changed" test committed the half-typed
+   * entry -- parked or not. So nothing is decided before the rows are re-read
+   * (the backend re-derives every range's host index on each list), and then
+   * by IDENTITY -- the edited range's own `hostSheetId` against the active
+   * sheet's stable id (`frHostedOn`):
+   *   - PARKED: the backend's active sheet is the VIEWED one by design. The
+   *     edit is NEVER committed from here (a commit wrote "=SUM(" as literal
+   *     text without going back); the host is kept -- where the edited range's
+   *     FRESH row says it is now, so a renumbering of the host is followed --
+   *     or the host's ranges would be re-filtered away under the parked edit.
+   *   - the active sheet is still the edited range's host: a renumbering (or
+   *     nothing at all). The ranges are re-filtered to the host's index NOW,
+   *     and the edit and the selection are KEPT.
+   *   - the active sheet is not its host any more: a genuine switch away. The
+   *     edit is COMMITTED (never cancelled: a plain value left by a switch is
+   *     Excel's commit). A UI switch already committed it at once through
+   *     `sheet:beforeSwitch` (8b); this catches the switches that announce only
+   *     SHEET_CHANGED (a script's activateSheet).
+   *   - the edited range is gone (its host deleted): the edit is discarded.
+   * A selection is kept exactly while its range is still on the active sheet.
    */
-  const resyncForSheetChange = (payload?: unknown) => {
-    const detail = (payload ?? {}) as { sheetIndex?: unknown };
-    const shown = getParkedViewSheetIndex() ?? getFrActiveSheetIndex();
-    if (typeof detail.sheetIndex === "number" && detail.sheetIndex !== shown) {
-      if (isFrEditorOpen()) void commitFrEditor(null);
-      clearLocalSelection();
-    }
+  const resyncForSheetChange = () => {
     reloadQueue = reloadQueue
       .then(async () => {
-        const next = await getActiveSheet();
-        const viewed = getParkedViewSheetIndex();
-        if (viewed !== null && next === viewed) {
-          await loadFloatingRangesFromBackend();
-          invalidateAllFrExtents();
-          syncFloatingRangeRegions();
-          requestOverlayRedraw();
-          return;
-        }
-        if (next === getFrActiveSheetIndex()) return;
-        if (isFrEditorOpen()) void commitFrEditor(null);
-        resetFrSelection();
-        setFrActiveSheetIndex(next);
-        // Store holds ALL sheets (Charts model) — a switch only re-filters.
-        // Host/backing indexes may have shifted (sheet add/delete), so re-read.
+        // The rows FIRST: never decide on an index read before them.
         await loadFloatingRangesFromBackend();
-        // The content extents were read by backing-sheet INDEX (frExtent.ts),
-        // so they are re-read too; each stays in force until its re-read
-        // lands. The session scroll is untouched -- a switch keeps it.
-        invalidateAllFrExtents();
-        syncFloatingRangeRegions();
-        requestOverlayRedraw();
+        let active = await readActiveSheet();
+        const editing = getFrEditorCell();
+        const edited = editing ? getFloatingRangeById(editing.frId) : null;
+        if (editing && edited === null) {
+          await discardEditOfGoneRange(editing.frId);
+          // A parked discard returns to the host first: where the backend is NOW.
+          active = await readActiveSheet();
+        } else if (editing && edited && isExternalSessionParked()) {
+          // Read AFTER the awaits: a point-mode tab click answered meanwhile
+          // has parked the edit, and the backend then reports the VIEWED sheet.
+          setFrActiveSheetIndex(edited.sheetIndex);
+          republishAfterReload();
+          return;
+        } else if (editing && edited) {
+          if (frHostedOn(edited, active)) {
+            setFrActiveSheetIndex(active.index);
+            republishAfterReload();
+            return;
+          }
+          void commitFrEditor(null);
+        }
+        const keepSelection =
+          frStillOn(getLocalSelection()?.frId ?? null, active) && frStillOn(getSelectedFloatingRange(), active);
+        if (!keepSelection) resetFrSelection();
+        // Store holds ALL sheets (Charts model) -- a switch only re-filters.
+        setFrActiveSheetIndex(active.index);
+        republishAfterReload();
       })
       .catch((err) => {
         console.error("[FloatingRange] Sheet-change re-sync failed:", err);
@@ -1917,22 +2002,29 @@ function activate(context: ExtensionContext): void {
         // one: keep the host, or the host's ranges (the parked edit's among
         // them) would be re-filtered to the viewed sheet and never
         // re-published on the way back (the return emits no SHEET_CHANGED).
+        // The host is where the edited range's FRESH row says it is NOW -- a
+        // renumbering under the parked edit moved it (review
+        // FR-RESYNC-COMMITS-ON-RENUMBER) -- never the index it had.
         // The park is read AFTER the await: read before it, a point-mode tab
         // click whose set_active_sheet the backend answered first parked the
         // edit while this call was in flight, and the VIEWED sheet then
         // replaced the host.
-        const next = await getActiveSheet();
-        if (getParkedViewSheetIndex() === null) setFrActiveSheetIndex(next);
+        let next = await getActiveSheet();
         // Prune id-keyed side state for rows that no longer exist.
         const live = new Set(getAllFloatingRanges().map((e) => e.id));
         // An edit of a range that is gone is DISCARDED (returning to its
         // sheet first when parked); the write would only be refused.
         const editing = getFrEditorCell();
         if (editing && !live.has(editing.frId)) {
-          await endExternalFormulaSession("cancel");
-          // The external slot may hold another editor (a pick-only chart
-          // text editor), in which case the call above found no session.
-          if (getFrEditorCell()?.frId === editing.frId) cancelFrEditor();
+          await discardEditOfGoneRange(editing.frId);
+          // The return to the host emits no SHEET_CHANGED: where the backend is NOW.
+          next = await getActiveSheet();
+        }
+        if (isExternalSessionParked()) {
+          const edited = editing ? getFloatingRangeById(editing.frId) : null;
+          if (edited) setFrActiveSheetIndex(edited.sheetIndex);
+        } else {
+          setFrActiveSheetIndex(next);
         }
         const selectedId = getSelectedFloatingRange();
         if (selectedId && !live.has(selectedId)) deselectAllFloatingRanges();

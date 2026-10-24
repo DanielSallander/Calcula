@@ -605,6 +605,97 @@ pub fn delete_sheet(state: State<AppState>) -> Result<SheetsResult, String> {
     );
 }
 
+/// Structural sheet commands that run ANOTHER structural command rather than
+/// a body of their own, each with the command it runs.
+///
+/// `discard_ephemeral_sheet` deletes a drill-through's temporary sheet by its
+/// stable id: it resolves the id, refuses an unknown or kept sheet, and then
+/// runs the `delete_sheet` COMMAND itself for the resolved index -- not a copy
+/// of its body, so the two cannot drift. It therefore ends the undo history
+/// exactly where `delete_sheet` does, which `sheet_structure_commands_invalidate_the_undo_history`
+/// checks; this pin keeps the "runs it" half true.
+const STRUCTURAL_SHEET_COMMANDS_BY_DELEGATION: [(&str, &str); 1] = [("discard_ephemeral_sheet", "delete_sheet")];
+
+/// Does `code` CALL `name`: `name(` with no identifier character in front, so
+/// a call to `delete_sheet_impl(` or `undelete_sheet(` is not a call to
+/// `delete_sheet(`.
+fn calls(code: &str, name: &str) -> bool {
+    let needle = format!("{name}(");
+    code.match_indices(&needle).any(|(at, _)| {
+        code[..at]
+            .chars()
+            .next_back()
+            .map_or(true, |c| !(c.is_ascii_alphanumeric() || c == '_'))
+    })
+}
+
+/// Every delegating structural command in `text` that no longer runs the
+/// command it is listed with. Comments are stripped first: a comment naming
+/// the call is not the call.
+fn delegation_offenders(text: &str) -> Vec<String> {
+    let bodies = crate::formula_serialisation_tests::free_function_bodies(text);
+    let mut offenders: Vec<String> = Vec::new();
+    for (command, runs) in STRUCTURAL_SHEET_COMMANDS_BY_DELEGATION {
+        assert!(
+            STRUCTURAL_SHEET_COMMANDS.contains(&runs),
+            "`{command}` is listed as running `{runs}`, which the census does not cover -- the pin would vouch for nothing"
+        );
+        let Some((_, body)) = bodies.iter().find(|(name, _)| name == command) else {
+            offenders.push(format!("`{command}` is not a free function in sheets.rs any more"));
+            continue;
+        };
+        let code: String = body
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !calls(&code, runs) {
+            offenders.push(format!("`{command}` no longer runs `{runs}`"));
+        }
+    }
+    offenders
+}
+
+#[test]
+fn the_structural_commands_that_run_another_one_still_run_it() {
+    let offenders = delegation_offenders(SHEETS_RS);
+    assert!(
+        offenders.is_empty(),
+        "these structural sheet commands no longer run the command whose undo reset the \
+         census credits them with:\n  {}\n\nA sheet command that changes the structure \
+         must end the undo history (BUG-0005). Run the listed command, or call \
+         `invalidate_undo_history_for_sheet_structure` and move the command into \
+         STRUCTURAL_SHEET_COMMANDS.",
+        offenders.join("\n  ")
+    );
+}
+
+#[test]
+fn the_delegation_pin_can_see_a_command_that_stops_running_what_it_is_listed_with() {
+    // TEETH, and the two near misses it must not take for the call: the
+    // command named in a COMMENT, and a call to `delete_sheet_impl` (the body
+    // minus the slicer work the real command does).
+    const SABOTAGED: &str = r#"
+pub fn discard_ephemeral_sheet(state: State<AppState>, sheet_id: String) -> Result<DiscardedSheet, String> {
+    // delete_sheet(app, state, index) used to run here
+    let result = delete_sheet_impl(&state, index, false)?;
+    Ok(result)
+}
+"#;
+    assert_eq!(delegation_offenders(SABOTAGED), vec!["`discard_ephemeral_sheet` no longer runs `delete_sheet`".to_string()]);
+    const HONEST: &str = r#"
+pub fn discard_ephemeral_sheet(state: State<AppState>, sheet_id: String) -> Result<DiscardedSheet, String> {
+    discard_ephemeral_sheet_with(state.inner(), &sheet_id, move |index| {
+        delete_sheet(app, state, index)
+    })
+}
+"#;
+    assert!(delegation_offenders(HONEST).is_empty(), "the real shape must pass");
+    assert!(calls("x = delete_sheet(a)", "delete_sheet"));
+    assert!(!calls("x = delete_sheet_impl(a)", "delete_sheet"));
+    assert!(!calls("x = undelete_sheet(a)", "delete_sheet"));
+}
+
 // ---------------------------------------------------------------------------
 // THE ADD-PATH CENSUS (fix round 5, the review of round 4's B4)
 //
@@ -671,11 +762,15 @@ fn every_caller_of_the_one_add_path_ends_what_the_add_path_leaves_to_it() {
         }
     }
     callers.sort();
-    // Non-vacuity: the three callers this census exists for are the ones it sees.
+    // Non-vacuity: the callers this census exists for are the ones it sees --
+    // the three it was written for, and the model-visual drill-through's
+    // ephemeral-sheet core, written as ONE left-margin function so the
+    // `activate: true`, the undo reset and the rebuild are all charged to it.
     for expected in [
         "sheets.rs::add_sheet_inner",
         "pivot/commands.rs::drill_through_to_sheet_core",
         "pivot/commands.rs::show_report_filter_pages_core",
+        "drill_through.rs::drill_through_to_ephemeral_sheet_core",
     ] {
         assert!(
             callers.iter().any(|c| c == expected),

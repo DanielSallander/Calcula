@@ -50,10 +50,11 @@ vi.mock("../../../api", () => ({
   useGridContext: () => ({ state: gridState, dispatch }),
   setSelection: (payload: unknown) => ({ type: "SET_SELECTION", payload }),
   scrollToCell: (row: number, col: number) => ({ type: "SCROLL_TO_CELL", row, col }),
-  setActiveSheet: (index: number, name: string) => ({
+  setActiveSheet: (index: number, name: string, _surface?: string, sheetId?: string) => ({
     type: "SET_ACTIVE_SHEET",
     index,
     name,
+    sheetId,
   }),
   columnToLetter: (col: number) => {
     let n = col;
@@ -236,6 +237,18 @@ describe("Name Box - sheet-qualified entries", () => {
 
     expect(setActiveSheetApiMock).toHaveBeenCalledWith(1);
     expect(lastSelection()).toMatchObject({ startRow: 0, startCol: 0 });
+  });
+
+  // Review F1-rename-refuses-entry (round 5): the switch hands Core the sheet's
+  // STABLE id -- an open edit follows its sheet by it.
+  it("hands Core the landed sheet's stable id when the backend reports one", async () => {
+    setActiveSheetApiMock.mockImplementation((index: number) =>
+      Promise.resolve({ sheets: SHEETS.map((s) => ({ ...s, sheetId: `id-${s.name}` })), activeIndex: index }),
+    );
+    await render();
+    await commit("Sheet2!A1");
+    const switched = dispatch.mock.calls.map((c) => c[0]).find((a) => a?.type === "SET_ACTIVE_SHEET");
+    expect(switched, "the Name Box switch dropped the sheet's id").toMatchObject({ index: 1, name: "Sheet2", sheetId: "id-Sheet2" });
   });
 
   it("accepts a quoted sheet name with a space", async () => {

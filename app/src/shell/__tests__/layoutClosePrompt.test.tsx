@@ -604,3 +604,82 @@ describe("Save on the close prompt asks every Before-Save veto first", () => {
     expect(h.pluginMessage).toHaveBeenCalledTimes(2);
   });
 });
+
+// A WRITE THAT FAILS IS SAID, never only logged (review round 7, F3). The user
+// pressed Save on the close prompt and is watching a window that did not close;
+// the console told them nothing. Rust refuses `save_file` RETRYABLY when a sheet
+// renumbering (an agent deleting or moving sheets) kept landing inside its
+// snapshot -- "WORKBOOK_CHANGED_WHILE_SAVING: the workbook changed while it was
+// being saved -- ..." -- and that code must never reach the screen. The box is
+// the plugin's two-button `confirm` (the REAL confirmAsync, Tauri shape): "Try
+// Again" writes the same prepared save once more; anything else keeps the
+// window open.
+describe("a failed write on the close prompt is said, with a retry", () => {
+  const REFUSAL =
+    "WORKBOOK_CHANGED_WHILE_SAVING: the workbook changed while it was being saved -- a sheet was " +
+    "added, deleted or moved during each of 3 attempts to read it. Nothing was written; try again.";
+  const PLAIN =
+    "The workbook changed while it was being saved -- a sheet was added, deleted or moved during " +
+    "each of 3 attempts to read it. Nothing was written; try again.";
+
+  // SABOTAGE: put the console-only catch back (no confirm), or show
+  // String(error) in it.
+  it("the retryable refusal reads as its plain sentence, and declining keeps the window open", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    h.pluginMessage.mockResolvedValue("Save");
+    h.writePreparedSave.mockRejectedValueOnce(REFUSAL);
+    h.pluginConfirm.mockResolvedValue(false);
+    await requestClose();
+
+    expect(h.pluginConfirm, "the failed write was never said").toHaveBeenCalledTimes(1);
+    const [shown, options] = h.pluginConfirm.mock.calls[0] as [string, Record<string, unknown>];
+    expect(shown).toContain(PLAIN);
+    expect(shown, "the raw code reached the screen").not.toContain("WORKBOOK_CHANGED_WHILE_SAVING");
+    expect(options).toMatchObject({ okLabel: "Try Again", cancelLabel: "Cancel" });
+    expect(h.writePreparedSave).toHaveBeenCalledTimes(1);
+    expect(h.destroy).not.toHaveBeenCalled();
+
+    // Not wedged: the next close asks the three-button question again.
+    await requestClose();
+    expect(h.pluginMessage).toHaveBeenCalledTimes(2);
+  });
+
+  // SABOTAGE: return after the confirm instead of looping back to the write.
+  it("Try Again writes the SAME prepared save once more, then closes -- with no second teardown", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    h.pluginMessage.mockResolvedValue("Save");
+    h.writePreparedSave.mockRejectedValueOnce(REFUSAL);
+    h.pluginConfirm.mockResolvedValueOnce(true);
+    await requestClose();
+
+    expect(h.writePreparedSave).toHaveBeenCalledTimes(2);
+    expect(h.writePreparedSave.mock.calls[1]).toEqual(h.writePreparedSave.mock.calls[0]);
+    expect(h.writePreparedSave).toHaveBeenLastCalledWith({ path: SAVED_PATH, kind: "save" });
+    expect(h.destroy).toHaveBeenCalledTimes(1);
+    expect(h.writePreparedSave.mock.invocationCallOrder[1]).toBeLessThan(h.destroy.mock.invocationCallOrder[0]);
+    expect(h.emitted.filter((name) => name === "BEFORE_CLOSE")).toHaveLength(1);
+  });
+
+  it("any other write failure is said exactly as it came", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    h.pluginMessage.mockResolvedValue("Save");
+    h.writePreparedSave.mockRejectedValueOnce(new Error("disk full"));
+    h.pluginConfirm.mockResolvedValue(false);
+    await requestClose();
+
+    expect(h.pluginConfirm).toHaveBeenCalledTimes(1);
+    expect(String(h.pluginConfirm.mock.calls[0][0])).toContain("Error: disk full");
+    expect(h.destroy).not.toHaveBeenCalled();
+  });
+
+  it("a retry box that cannot be shown keeps the window open (it fails closed)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    h.pluginMessage.mockResolvedValue("Save");
+    h.writePreparedSave.mockRejectedValue(REFUSAL);
+    h.pluginConfirm.mockRejectedValue(new Error("a modal is already open"));
+    await requestClose();
+
+    expect(h.writePreparedSave).toHaveBeenCalledTimes(1);
+    expect(h.destroy).not.toHaveBeenCalled();
+  });
+});

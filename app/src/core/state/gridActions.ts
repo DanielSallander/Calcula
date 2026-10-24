@@ -226,13 +226,16 @@ export interface ClearClipboardAction {
 export interface SetSheetContextAction {
   type: typeof GRID_ACTIONS.SET_SHEET_CONTEXT;
   /** `surface` is optional: a dispatcher holding the sheet list passes it; one
-   *  that does not falls back to the `sheetSurfaces` map. */
-  payload: { activeSheetIndex: number; activeSheetName: string; surface?: SheetSurface };
+   *  that does not falls back to the `sheetSurfaces` map. `activeSheetId` is
+   *  the sheet's STABLE id; a dispatch without one CLEARS the context's id
+   *  (see `SheetContext.activeSheetId`). */
+  payload: { activeSheetIndex: number; activeSheetName: string; surface?: SheetSurface; activeSheetId?: string };
 }
 
 export interface SetActiveSheetAction {
   type: typeof GRID_ACTIONS.SET_ACTIVE_SHEET;
-  payload: { index: number; name: string; surface?: SheetSurface };
+  /** `sheetId`: the sheet's STABLE id; absent clears the context's id. */
+  payload: { index: number; name: string; surface?: SheetSurface; sheetId?: string };
 }
 
 /** Replace the known surface of every sheet (keyed by TRUE index) and
@@ -383,33 +386,49 @@ export type GridAction =
 
 /**
  * Set the sheet context (active sheet index and name).
+ *
+ * `sheetId` is the sheet's STABLE id (`SheetInfo.sheetId`): every dispatcher
+ * that holds the sheet list passes it. A dispatch without one CLEARS the
+ * context's id, so an id is never kept for a sheet the context may have left
+ * (an open edit then decides by name, then index -- core/lib/editSheetIdentity.ts).
  */
 export function setSheetContext(
   activeSheetIndex: number,
   activeSheetName: string,
   surface?: SheetSurface,
+  sheetId?: string,
 ): SetSheetContextAction {
   return {
     type: GRID_ACTIONS.SET_SHEET_CONTEXT,
-    payload: surface
-      ? { activeSheetIndex, activeSheetName, surface }
-      : { activeSheetIndex, activeSheetName },
+    payload: {
+      activeSheetIndex,
+      activeSheetName,
+      ...(surface ? { surface } : {}),
+      ...(sheetId ? { activeSheetId: sheetId } : {}),
+    },
   };
 }
 
 /**
  * Set the active sheet (for switching sheets during formula editing).
  * Pass `surface` when the caller holds the sheet list; otherwise the reducer
- * resolves it from the `sheetSurfaces` map.
+ * resolves it from the `sheetSurfaces` map. `sheetId` as for `setSheetContext`:
+ * absent clears the context's id.
  */
 export function setActiveSheet(
   index: number,
   name: string,
   surface?: SheetSurface,
+  sheetId?: string,
 ): SetActiveSheetAction {
   return {
     type: GRID_ACTIONS.SET_ACTIVE_SHEET,
-    payload: surface ? { index, name, surface } : { index, name },
+    payload: {
+      index,
+      name,
+      ...(surface ? { surface } : {}),
+      ...(sheetId ? { sheetId } : {}),
+    },
   };
 }
 

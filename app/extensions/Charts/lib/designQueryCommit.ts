@@ -14,6 +14,10 @@
 //              an Apply, or a wells click that changes nothing, leaves no
 //              empty undo step and does not dirty the document;
 //            - otherwise ONE `updateChartSpec(chartId, { data, markOptions? })`
+//              -- `data` carrying the application connection's stable key
+//              only while the connection is unchanged, and an explicit
+//              `packageDataSourceId: undefined` when it changes
+//              (designQuerySource.ts) --
 //              and the applySpec choreography (cache, regions,
 //              CHART_UPDATED) inside `runInUndoTransaction("Edit chart
 //              data")`, with the debounced `update_chart` FLUSHED before the
@@ -35,6 +39,7 @@ import { invalidateChartCache } from "../rendering/chartRenderer";
 import type { ChartSpec, DesignQueryDataSource, GaugeMarkOptions } from "../types";
 import { isDesignQueryDataSource } from "../types";
 import { ChartEvents } from "./chartEvents";
+import { designQuerySourceFor } from "./designQuerySource";
 import {
   flushPendingChartSavesQuietly,
   getChartById,
@@ -123,7 +128,12 @@ export async function commitDesignQuery(
   if (isUnchanged(chart.spec, chart.spec.data, request)) return { status: "unchanged" };
 
   const patch: Partial<ChartSpec> = {
-    data: { type: "designQuery", dslText: request.dslText, connectionId: request.connectionId },
+    // The application connection's stable key is KEPT while the connection is
+    // unchanged and CLEARED -- explicitly, because the deep merge keeps a key
+    // the patch leaves out -- when it changes: Rust's remap prefers the key, so
+    // a stale one would re-bind the chart to its OLD application connection at
+    // the next refresh or open (lib/designQuerySource.ts).
+    data: designQuerySourceFor(request.dslText, request.connectionId, chart.spec.data),
   };
   if (request.markOptions) {
     // An explicit undefined CLEARS a key in the store's deep merge.

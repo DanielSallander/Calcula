@@ -45,8 +45,10 @@ import {
   type ResetCellRef,
 } from "@api/collaboration";
 import { useDialogWindow } from "@api/dialogWindow";
+import { describeBackendRefusal } from "@api/backendRefusal";
 import { VersionDiffView, cellKeyOf } from "./VersionDiffView";
 import { announceSubscribedContentReplaced } from "../lib/refreshAftermath";
+import { selectionWire } from "../lib/listedSheets";
 
 /** What the caller asked for. `mode` is the only difference between the two. */
 export interface SubscriptionDiffRequest {
@@ -95,6 +97,8 @@ export function SubscriptionDiffDialog({ onClose, data }: DialogProps) {
    * what it always did.
    */
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
+  /** Bumped by "Compare again": one more comparison, on the author's gesture. */
+  const [attempt, setAttempt] = useState(0);
 
   /**
    * EVERY SHOW STARTS CLEAN.
@@ -121,18 +125,39 @@ export function SubscriptionDiffDialog({ onClose, data }: DialogProps) {
     setLoading(true);
   }, [openCount]);
 
+  /**
+   * THE COMPARISON -- on every show, and again on "Compare again".
+   *
+   * It ran only when the APPLICATION changed. A re-show of this non-modal
+   * dialog for the same application -- the way to try again after a refusal
+   * whose own sentence says "try again", or View changes followed by Reset on
+   * the same tab -- bumped `__openCount`, and the effect above reset the
+   * dialog to "Comparing..." with `Reset to published...` disabled, but the
+   * comparison never ran again: the dialog hung until it was closed (review
+   * round 8). `openCount` and `attempt` are part of the question now, and a
+   * run that a newer one replaced keeps its answer to itself (`cancelled`), so
+   * a slow comparison can never land under a later show's title.
+   */
   useEffect(() => {
     if (!req) {
       setLoading(false);
       setDiffError("This dialog was opened without an application to compare against.");
       return;
     }
+    let cancelled = false;
+    setLoading(true);
+    setDiff(null);
+    setDiffError(null);
+    // A new comparison may list other rows: an exclusion kept from the last
+    // one would act on a reset nobody reviewed.
+    setExcluded(new Set());
     (async () => {
       try {
         // RE-READ THE PROVENANCE, never the module cache: its index map is
         // documented as stale after an insert or a move until the next refresh,
         // and the indices decide which sheets the comparison covers.
         const rows = await getSheetProvenance();
+        if (cancelled) return;
         const mine = rows.filter(
           (r) =>
             r.role === "subscribed" &&
@@ -160,7 +185,13 @@ export function SubscriptionDiffDialog({ onClose, data }: DialogProps) {
           // default", which for a subscribing workbook is every sheet EXCEPT
           // these — the backend refuses it rather than answering the inverse
           // question.
-          sheetIndices: mine.map((r) => r.sheetIndex),
+          //
+          // BY STABLE ID (`sheetIds`, this workbook's LOCAL ids, which take
+          // precedence) beside the positions, exactly as the push dialog sends
+          // its ticks: a sheet moved between the provenance read and the
+          // comparison is still compared, never its neighbour, and one deleted
+          // in between is refused by name. Positions alone when a row has no id.
+          ...selectionWire(mine.map((r) => ({ index: r.sheetIndex, sheetId: r.sheetId }))),
           // Cancels a false "every comment removed": the publish assembly writes
           // comments.json only when this is set, and a reset never touches a
           // comment.
@@ -172,15 +203,21 @@ export function SubscriptionDiffDialog({ onClose, data }: DialogProps) {
           // id, not the subscriber's local one.
           scopeSheetIds: mine.map((r) => r.packageSheetId),
         });
-        setDiff(d);
+        if (!cancelled) setDiff(d);
       } catch (err: unknown) {
-        setDiffError(String(err));
+        // The retryable snapshot refusal and the gone-sheet refusal as their
+        // plain sentences; every other error exactly as before
+        // (@api/backendRefusal). "Compare again" sits beside it.
+        if (!cancelled) setDiffError(describeBackendRefusal(err));
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     })();
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [req?.packageName, req?.registryUrl, req?.resolvedVersion]);
+  }, [req?.packageName, req?.registryUrl, req?.resolvedVersion, openCount, attempt]);
 
   const handleReset = async () => {
     if (!req) return;
@@ -308,6 +345,23 @@ export function SubscriptionDiffDialog({ onClose, data }: DialogProps) {
                 }}
               >
                 {diffError}
+                {/* THE REFUSAL SAYS "TRY AGAIN", so the dialog offers it here:
+                    the only other way was to close it and show it again. */}
+                {req && (
+                  <>
+                    {" "}
+                    <button
+                      data-testid="subscription-diff-retry"
+                      style={{ fontSize: "11px" }}
+                      onClick={() => {
+                        setConfirming(false);
+                        setAttempt((a) => a + 1);
+                      }}
+                    >
+                      Compare again
+                    </button>
+                  </>
+                )}
                 {isReset && (
                   <div style={{ marginTop: 6, ...secondary }}>
                     The comparison could not be built, but the reset itself does not need

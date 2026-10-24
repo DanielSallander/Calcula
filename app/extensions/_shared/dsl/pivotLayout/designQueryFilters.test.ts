@@ -65,3 +65,67 @@ describe('compileDesignQuery carries every item filter', () => {
     expect(req.rowFields).toEqual([{ table: 'Geo', column: 'Region' }]);
   });
 });
+
+describe('compileDesignQuery sends ONE filter ref per field', () => {
+  // Two `=` terms on one field used to collapse to the LAST one (a Map by field
+  // name, last wins, handed to both refs): a drill-through's baked
+  // `("Bikes")` REPLACED the author's `("Bikes", "Clothing")` -- or, the other
+  // way round, a page slicer's whole list replaced the clicked member. The
+  // result was silently wrong, not empty. SABOTAGE: rebuild the inclusions as
+  // `new Map(unresolvedInclusions.map(u => [u.fieldName, u.values]))`.
+
+  it('two inclusion terms on one field AND together: the INTERSECTION, in the first list\'s order', () => {
+    const req = compiled(
+      'ROWS: Geo.City\nVALUES: [Revenue]\nFILTERS: Geo.Region = ("East", "North", "West"), Geo.Region = ("West", "East")',
+    );
+    expect(req.filterFields).toEqual([
+      { table: 'Geo', column: 'Region', includedItems: ['East', 'West'], hiddenItems: [] },
+    ]);
+  });
+
+  it('the author\'s inclusion and a second FILTERS clause (a baked drill term) AND together', () => {
+    const req = compiled(
+      'ROWS: Geo.City\nVALUES: [Revenue]\nFILTERS: Geo.Region = ("East", "North")\nFILTERS: [Geo.Region] = ("East")',
+    );
+    expect(req.filterFields).toEqual([
+      { table: 'Geo', column: 'Region', includedItems: ['East'], hiddenItems: [] },
+    ]);
+  });
+
+  it('two lists with no member in common travel as an EMPTY inclusion (keeps nothing), never as "no filter"', () => {
+    const req = compiled('ROWS: Geo.City\nVALUES: [Revenue]\nFILTERS: Geo.Region = ("East"), Geo.Region = ("West")');
+    expect(req.filterFields).toEqual([{ table: 'Geo', column: 'Region', includedItems: [], hiddenItems: [] }]);
+  });
+
+  it('two NOT IN terms on one field UNITE their hidden items, once each', () => {
+    const req = compiled(
+      'ROWS: Geo.City\nVALUES: [Revenue]\nFILTERS: Sales.Year NOT IN ("2022", "2023"), Sales.Year NOT IN ("2023", "2021")',
+    );
+    expect(req.filterFields).toEqual([{ table: 'Sales', column: 'Year', hiddenItems: ['2022', '2023', '2021'] }]);
+    expect(req.filterFields[0]).not.toHaveProperty('includedItems');
+  });
+
+  it('an inclusion and an exclusion on one field ride ONE ref', () => {
+    const req = compiled(
+      'ROWS: Geo.City\nVALUES: [Revenue]\nFILTERS: Geo.Region = ("East", "West"), Geo.Region NOT IN ("West")',
+    );
+    expect(req.filterFields).toEqual([
+      { table: 'Geo', column: 'Region', includedItems: ['East', 'West'], hiddenItems: ['West'] },
+    ]);
+  });
+
+  it('different fields stay different refs, in first-appearance order', () => {
+    const req = compiled(
+      'ROWS: Geo.City\nVALUES: [Revenue]\nFILTERS: Sales.Year NOT IN ("2023"), Geo.Region = ("East"), Sales.Year NOT IN ("2022")',
+    );
+    expect(req.filterFields).toEqual([
+      { table: 'Sales', column: 'Year', hiddenItems: ['2023', '2022'] },
+      { table: 'Geo', column: 'Region', includedItems: ['East'], hiddenItems: [] },
+    ]);
+  });
+
+  it('a bracketed field name with another casing is the same field (the compiler emits the model\'s spelling)', () => {
+    const req = compiled('ROWS: Geo.City\nVALUES: [Revenue]\nFILTERS: geo.region = ("East", "North"), [Geo.Region] = ("North")');
+    expect(req.filterFields).toEqual([{ table: 'Geo', column: 'Region', includedItems: ['North'], hiddenItems: [] }]);
+  });
+});

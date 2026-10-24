@@ -6,6 +6,9 @@ Layer 2 (`script` mode) are in the product, verified against code 2026-08-16.
 this document describe**, and one requirement of section 6 (the badge) was never
 built. Read **"9a. As built"** before trusting any contract below; sections 4-9
 are preserved unchanged as the original design record, not as current API.
+**2026-10-23:** a fourth behaviour, the DESIGN-QUERY drill (`DrillThroughBehavior.designQuery`: a DSL text
+plus a table or chart presentation, landing on a temporary sheet), WINS over `kind` when present. It is
+specified in `model-drillthrough.md`, not here; `builtin` / `query` / `script` are unchanged.
 **Date:** 2026-06-19 (design); code-verified 2026-08-16
 **Related:** `wave3-scripting-security.md`, `vision-gap-review.md`, the BI-engine adoption work (secured drillthrough)
 

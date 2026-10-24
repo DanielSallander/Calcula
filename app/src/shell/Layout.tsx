@@ -57,7 +57,11 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 // asks Excel's THREE-button question -- Save / Don't Save / Cancel -- because
 // only an explicit "Don't Save" may discard: X, Escape and a failure to ask
 // all keep the window open.
-import { askSaveDiscardCancelAsync } from "../api/dialogs";
+import { askSaveDiscardCancelAsync, confirmAsync } from "../api/dialogs";
+// A failed write is SAID in the person's words: the backend's retryable
+// refusal (the workbook changed while it was being saved) as its plain
+// sentence, every other error as it came.
+import { describeBackendRefusal } from "../api/backendRefusal";
 import type { ViewMode } from "../core/types";
 // Extension management
 import { useExtensionInitializer, useExtensions } from "./hooks/useExtensions";
@@ -84,6 +88,35 @@ function ShellComponentHost(): React.ReactElement {
 }
 // DEV ONLY: Mock data loader for testing - remove these imports when done testing
 import { loadMockData, shouldLoadMockData } from "./utils/mockData";
+
+/**
+ * Write the close prompt's prepared Save. On a failure the window must stay
+ * open -- never close over unsaved work -- and the user is TOLD, never only the
+ * console: they pressed Save and are watching a window that did not close. The
+ * reason reads as a person reads it (`@api/backendRefusal`: the retryable
+ * refusal -- the workbook changed while it was being saved, nothing was
+ * written -- as its plain sentence), and "Try Again" writes the SAME prepared
+ * save once more: every refusing step already ran, and the teardown already
+ * went out. Cancel, X, Escape and a box that cannot be shown all stop
+ * (confirmAsync fails closed), so a failure to ask can never close the window.
+ *
+ * True once the file is written; false when the user stops trying.
+ */
+async function writeCloseSaveOrOfferRetry(prepared: PreparedSave): Promise<boolean> {
+  for (;;) {
+    try {
+      await writePreparedSave(prepared);
+      return true;
+    } catch (error) {
+      console.error("[Layout] Save failed during close; keeping the window open:", error);
+      const again = await confirmAsync(
+        `Your changes could not be saved, so Calcula stays open.\n\n${describeBackendRefusal(error)}`,
+        { title: "Save failed", kind: "warning", okLabel: "Try Again", cancelLabel: "Cancel" }
+      );
+      if (!again) return false;
+    }
+  }
+}
 
 /**
  * Loading screen shown while extensions are initializing.
@@ -419,18 +452,13 @@ function LayoutInner(): React.ReactElement {
           // all of which belong in the file.
           await tearDownForClose();
 
-          try {
-            await writePreparedSave(prepared);
-          } catch (error) {
-            // The write the user asked for failed. Same rule: do not close
-            // over unsaved work. (The teardown has run -- it had to, for the
-            // file to be right -- so the window stays over a workbook whose
-            // scripts are unmounted; a failed WRITE is the one refusal that
-            // cannot be asked before it.)
-            console.error(
-              "[Layout] Save failed during close; keeping the window open:",
-              error
-            );
+          // The write the user asked for. If it fails, same rule: do not close
+          // over unsaved work. (The teardown has run -- it had to, for the
+          // file to be right -- so the window stays over a workbook whose
+          // scripts are unmounted; a failed WRITE is the one refusal that
+          // cannot be asked before it.) The failure is SAID, with a retry of
+          // the same write -- see writeCloseSaveOrOfferRetry.
+          if (!(await writeCloseSaveOrOfferRetry(prepared))) {
             prompting = false;
             return;
           }

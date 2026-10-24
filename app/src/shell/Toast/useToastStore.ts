@@ -19,7 +19,9 @@ export interface ToastItem {
 
 interface ToastState {
   toasts: ToastItem[];
-  addToast: (toast: Omit<ToastItem, "id">) => void;
+  /** Show a toast; returns the id it was given, which `removeToast` takes back. */
+  addToast: (toast: Omit<ToastItem, "id">) => string;
+  /** Take a toast down by its id; nothing when it is already gone. */
   removeToast: (id: string) => void;
 }
 
@@ -39,6 +41,7 @@ export const useToastStore = create<ToastState>((set) => ({
         }));
       }, toast.duration);
     }
+    return id;
   },
   removeToast: (id) =>
     set((state) => ({
@@ -48,8 +51,13 @@ export const useToastStore = create<ToastState>((set) => ({
 
 // Provide the implementation for the API's showToast() — the Shell owns the
 // renderer, the API owns the contract (registerToastSink). Registered at module
-// load (the ToastContainer in Layout imports this store at app startup).
-registerToastSink((toast) => useToastStore.getState().addToast(toast));
+// load (the ToastContainer in Layout imports this store at app startup). The
+// sink returns the id addToast gave the toast, and the dismisser beside it is
+// what a ToastHandle's dismiss() calls, so a caller can take its toast back.
+registerToastSink(
+  (toast) => useToastStore.getState().addToast(toast),
+  (id) => useToastStore.getState().removeToast(id),
+);
 
 // A script that cancels a save or a close must be VISIBLE — otherwise Ctrl+S
 // looks broken. Core owns the veto choke point but cannot render; the Shell

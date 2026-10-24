@@ -5,6 +5,10 @@
 //          session) was invisible to it, so a tab click during "=" took the
 //          ORDINARY switch and ended the edit; and the one tab that could bring a
 //          parked edit back -- its host, usually a canvas -- was refused.
+//          A tab DRAG's click is not decided here: the strip refuses it in
+//          its own early returns, before its group-clearing step (review
+//          RESOLVETABCLICK-DRAGGING-DEAD) -- sheetTabsTemporarySheets.test.tsx
+//          drives those through the mounted strip.
 
 import { describe, it, expect } from "vitest";
 import { resolveTabClick, type TabClickInput } from "../resolveTabClick";
@@ -18,16 +22,19 @@ function click(over: Partial<TabClickInput> = {}): TabClickInput {
     activeIsCanvas: false,
     ctrlKey: false,
     shiftKey: false,
-    dragging: false,
     coreFormulaMode: false,
     session: null,
     ...over,
   };
 }
 
-const expecting = { hostSheetIndex: 2, parked: false, expecting: true };
-const parked = { hostSheetIndex: 2, parked: true, expecting: false };
-const plain = { hostSheetIndex: 2, parked: false, expecting: false };
+// The session as the strip hands it over: `targetIsSessionHost` is the
+// strip's identity verdict on the CLICKED tab (isExternalSessionHostSheet).
+const expecting = { targetIsSessionHost: false, parked: false, expecting: true };
+const parked = { targetIsSessionHost: false, parked: true, expecting: false };
+const plain = { targetIsSessionHost: false, parked: false, expecting: false };
+/** The same parked session, the click landing on its host's tab. */
+const parkedOnHostTab = { ...parked, targetIsSessionHost: true };
 
 describe("resolveTabClick", () => {
   it("an EXPECTING external session makes a tab click point-mode navigation", () => {
@@ -36,7 +43,7 @@ describe("resolveTabClick", () => {
 
   it("a PARKED session's host canvas tab brings the edit back", () => {
     expect(
-      resolveTabClick(click({ index: 2, activeIndex: 0, targetIsCanvas: true, session: parked })),
+      resolveTabClick(click({ index: 2, activeIndex: 0, targetIsCanvas: true, session: parkedOnHostTab })),
     ).toBe("pointMode");
   });
 
@@ -86,8 +93,17 @@ describe("resolveTabClick", () => {
     expect(resolveTabClick(click({ ctrlKey: true, session: expecting }))).toBe("pointMode");
   });
 
-  it("the click that ends a tab drag is not a click", () => {
-    expect(resolveTabClick(click({ dragging: true }))).toBe("ignore");
-    expect(resolveTabClick(click({ dragging: true, session: expecting }))).toBe("ignore");
+  // Review F3-strip-uses-owner-host-index: the host is the strip's IDENTITY
+  // verdict on the clicked tab, never an index compared with the owner's
+  // opening one -- after a renumbering under a parked edit, the host's own tab
+  // (now at another index) was ignored, and a canvas that slid into the old
+  // index was accepted.
+  it("a parked session's host is decided by the identity verdict, never by an index", () => {
+    // The host renumbered from 2 to 1: its tab is the host, at whatever index.
+    expect(resolveTabClick(click({ index: 1, activeIndex: 0, targetIsCanvas: true, session: parkedOnHostTab }))).toBe("pointMode");
+    // The canvas that slid into the host's OLD index (2) is not the host.
+    expect(resolveTabClick(click({ index: 2, activeIndex: 0, targetIsCanvas: true, session: parked }))).toBe("ignore");
+    // No session: a canvas is never a reference target in formula mode.
+    expect(resolveTabClick(click({ index: 2, targetIsCanvas: true, coreFormulaMode: true }))).toBe("ignore");
   });
 });

@@ -182,6 +182,7 @@ fn a_block_whose_sheet_was_deleted_is_dropped_not_rewritten_elsewhere() {
         &b.timeline,
         1,
         false,
+        None,
     )
     .expect("delete Sheet2");
 
@@ -292,6 +293,7 @@ fn a_delete_during_the_query_leaves_the_write_nowhere_to_go() {
         &b.timeline,
         1,
         false,
+        None,
     )
     .expect("delete Sheet2");
     let at = with_block_sheet(&b.state, live[0].sheet_id, |target| target.sheet_index).expect("the locks");

@@ -18,7 +18,7 @@ import { validateOptions } from "../../_shared/cli/optionSchema";
 import type { CliOptionSpec, CliOptionTable } from "../../_shared/cli/optionSchema";
 import type { CliIo, WritePreview } from "../../_shared/cli/registry";
 import type { ClearApplyTo } from "@api/backend";
-import type { SheetInfo, SheetKindName } from "@api/lib";
+import type { SheetInfo, SheetKindName, SheetsResult } from "@api/lib";
 import { mintExplicitMacroRun } from "@api/explicitMacroRun";
 import {
   colLetterToIndex,
@@ -504,8 +504,22 @@ export async function runAppWrite(cmd: GenericCommand, s: AppCliSession, io: Cli
       return;
     }
     case "deleteSheet": {
+      // By the STABLE id read WITH the index (review CLI-DELETE-BY-STALE-INDEX):
+      // between `requireSheet`'s read and the delete, a temporary sheet's
+      // discard can renumber every sheet after it, and a delete by the bare
+      // index removed the neighbour that slid into it -- with no undo, a sheet
+      // delete ends the history. With the id the backend refuses instead and
+      // deletes nothing; the refusal fails THIS line, naming the sheet.
       const sheet = await requireSheet(s, action.name, cmd.line);
-      const res = await s.gateway.deleteSheet(sheet.index);
+      if (!sheet.sheetId) {
+        fail(`Sheet '${sheet.name}' was not deleted: the workbook did not report which sheet it is`, cmd.line);
+      }
+      let res: SheetsResult;
+      try {
+        res = await s.gateway.deleteSheet(sheet.index, sheet.sheetId);
+      } catch (e) {
+        fail(`Sheet '${sheet.name}' was not deleted: ${e instanceof Error ? e.message : String(e)}`, cmd.line);
+      }
       s.sheets = res.sheets;
       s.activeSheetIndex = res.activeIndex;
       await resumeRunBatchAfterHistoryEnded(s);

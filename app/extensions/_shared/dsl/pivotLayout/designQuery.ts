@@ -106,6 +106,32 @@ function valueRef(name: string, customName?: string): DesignQueryValueRef {
 /** Only fully-qualified "Table.Column" fields go to the backend (bare grid names don't apply). */
 const isBiField = (f: ZoneField) => f.name.includes('.');
 
+/** The items of the FIRST list that every other list also names, in the first list's order. */
+function intersectInOrder(lists: string[][]): string[] {
+  const [first, ...rest] = lists;
+  const sets = rest.map((l) => new Set(l));
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of first) {
+    if (seen.has(item) || !sets.every((s) => s.has(item))) continue;
+    seen.add(item);
+    out.push(item);
+  }
+  return out;
+}
+
+/** Every item of either list once, first-appearance order. */
+function unionInOrder(a: string[], b: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of [...a, ...b]) {
+    if (seen.has(item)) continue;
+    seen.add(item);
+    out.push(item);
+  }
+  return out;
+}
+
 /**
  * Compile design-query DSL text against a BI model into a backend request.
  * Only the BI (model-backed) path is supported — a design query always runs
@@ -136,18 +162,47 @@ export function compileDesignQuery(
   // `unresolvedInclusions`), so it travels as the items to KEEP and the
   // backend inverts it. It used to travel as nothing, and the query ran
   // UNFILTERED with no warning (BUG-0197).
-  const inclusions = new Map(result.unresolvedInclusions.map((u) => [u.fieldName, u.values]));
-  const filterRef = (f: ZoneField): DesignQueryFieldRef => {
-    const ref = { ...splitRef(f.name, biTableNames, f.isLookup), hiddenItems: f.hiddenItems ?? [] };
-    const included = inclusions.get(f.name);
-    return included ? { ...ref, includedItems: [...included] } : ref;
-  };
+  //
+  // ONE REF PER FIELD. The compiler emits one ZoneField per FILTERS term and
+  // reports each unresolved inclusion by field NAME, so two `=` terms on one
+  // field -- the author's `[Product.Category] = ("Bikes", "Clothing")` and a
+  // drill-through's baked `("Bikes")` -- used to collapse to whichever came
+  // last (a Map by name, last wins, handed to BOTH refs). They are merged
+  // instead: the inclusion is the INTERSECTION of every `=` list on the field
+  // and the hidden list the UNION of every `NOT IN`, so the author's filter
+  // ANDs with the drilled one. Rust already keeps one IN-list per ref and
+  // intersects same-column inclusions on its host-mask fallback; the collapse
+  // was purely here. An empty intersection travels as `[]`, which keeps
+  // nothing -- the honest answer to two lists with no member in common.
+  const inclusionLists = new Map<string, string[][]>();
+  for (const u of result.unresolvedInclusions) {
+    const lists = inclusionLists.get(u.fieldName) ?? [];
+    lists.push([...u.values]);
+    inclusionLists.set(u.fieldName, lists);
+  }
+  const filterRefs = new Map<string, DesignQueryFieldRef>();
+  for (const f of result.filters.filter(isBiField)) {
+    const existing = filterRefs.get(f.name);
+    if (existing) {
+      if (f.hiddenItems && f.hiddenItems.length > 0) {
+        existing.hiddenItems = unionInOrder(existing.hiddenItems ?? [], f.hiddenItems);
+      }
+      continue;
+    }
+    const ref: DesignQueryFieldRef = {
+      ...splitRef(f.name, biTableNames, f.isLookup),
+      hiddenItems: f.hiddenItems ? [...f.hiddenItems] : [],
+    };
+    const lists = inclusionLists.get(f.name);
+    if (lists && lists.length > 0) ref.includedItems = intersectInOrder(lists);
+    filterRefs.set(f.name, ref);
+  }
   const request: DesignQueryRequest = {
     connectionId,
     rowFields: result.rows.filter(isBiField).map(axisRef),
     columnFields: result.columns.filter(isBiField).map(axisRef),
     valueFields: result.values.map((f) => valueRef(f.name, f.customName)),
-    filterFields: result.filters.filter(isBiField).map(filterRef),
+    filterFields: [...filterRefs.values()],
     calculatedFields: result.calculatedFields.length > 0 ? result.calculatedFields : undefined,
     valueColumnOrder: result.valueColumnOrder.length > 0 ? result.valueColumnOrder : undefined,
     layout: result.layout,

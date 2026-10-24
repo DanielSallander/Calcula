@@ -106,6 +106,19 @@ const DELETE_COMMANDS: &[(&str, ObjectKind)] = &[
     ("bi_delete_connection", ObjectKind::BiConnection),
 ];
 
+/// Delete commands with NO body of their own: each RUNS a `DELETE_COMMANDS`
+/// entry, so the cascades it owes are that entry's (parts 3 and 3b check them
+/// there), with the reason. Found by what they are spelled like
+/// (`is_delete_verb`) and checked by what they CALL
+/// (`every_delegating_delete_runs_its_declared_delete`): a delegating delete
+/// that grew its own body would lose the cascades without a census noticing.
+const DELETE_COMMANDS_BY_DELEGATION: &[(&str, &str, &str)] = &[(
+    "discard_ephemeral_sheet",
+    "delete_sheet",
+    "A drill-through's temporary sheet, deleted by its stable id when the user \
+     leaves it: it resolves the id and runs the delete_sheet COMMAND itself.",
+)];
+
 /// Delete commands that are NOT workbook-object deletions, each with the reason.
 ///
 /// The list is small, argued and dangerous to get wrong in the permissive
@@ -496,6 +509,7 @@ pub(crate) fn body_with_one_hop(
 
 fn is_delete_verb(name: &str) -> bool {
     name.starts_with("delete_")
+        || name.starts_with("discard_")
         || name.starts_with("remove_")
         || name.starts_with("clear_all_")
         || name.contains("_delete_")
@@ -513,7 +527,11 @@ fn every_delete_command_declares_what_happens_to_its_dependents() {
         commands.len()
     );
 
-    let declared: BTreeSet<&str> = DELETE_COMMANDS.iter().map(|(n, _)| *n).collect();
+    let declared: BTreeSet<&str> = DELETE_COMMANDS
+        .iter()
+        .map(|(n, _)| *n)
+        .chain(DELETE_COMMANDS_BY_DELEGATION.iter().map(|(n, _, _)| *n))
+        .collect();
     let excused: BTreeSet<&str> = OUT_OF_SCOPE.iter().map(|(n, _)| *n).collect();
 
     let mut undeclared: Vec<&str> = Vec::new();
@@ -573,6 +591,11 @@ fn every_declared_delete_command_still_exists() {
             missing.push(name);
         }
     }
+    for (name, _, _) in DELETE_COMMANDS_BY_DELEGATION {
+        if !commands.contains(*name) {
+            missing.push(name);
+        }
+    }
     assert!(
         missing.is_empty(),
         "DELETE_COMMANDS / OUT_OF_SCOPE name commands that no longer exist: \
@@ -580,6 +603,88 @@ fn every_declared_delete_command_still_exists() {
          look complete while covering nothing.",
         missing
     );
+}
+
+/// Does `code` CALL `name`: `name(` with no identifier character in front, so
+/// `undelete_sheet(` or `delete_sheet_impl(` is not a call of `delete_sheet`.
+/// The twin of `undo_sheet_structure_tests::calls`.
+fn calls(code: &str, name: &str) -> bool {
+    let needle = format!("{name}(");
+    code.match_indices(&needle).any(|(at, _)| {
+        code[..at]
+            .chars()
+            .next_back()
+            .map_or(true, |c| !(c.is_ascii_alphanumeric() || c == '_'))
+    })
+}
+
+/// Every delegating delete that no longer runs a declared delete, by name.
+fn delegation_offenders(bodies: &BTreeMap<String, Vec<String>>) -> Vec<String> {
+    let declared: BTreeSet<&str> = DELETE_COMMANDS.iter().map(|(n, _)| *n).collect();
+    let mut out = Vec::new();
+    for (command, delegate, _) in DELETE_COMMANDS_BY_DELEGATION {
+        if !declared.contains(delegate) {
+            out.push(format!("`{command}` delegates to `{delegate}`, which is not a DELETE_COMMANDS entry"));
+            continue;
+        }
+        let runs = bodies.get(*command).is_some_and(|group| group.iter().any(|body| calls(body, delegate)));
+        if !runs {
+            out.push(format!("`{command}` no longer runs `{delegate}`"));
+        }
+    }
+    out
+}
+
+/// A delegating delete owes exactly its delegate's cascades, which parts 3
+/// and 3b check on the delegate -- so it must keep RUNNING the delegate.
+///
+/// SABOTAGE: give `discard_ephemeral_sheet` a body that calls
+/// `delete_sheet_impl` instead of `delete_sheet` -- this test fails (the
+/// slicer clearing and the BI re-query in `delete_sheet` would be lost).
+#[test]
+fn every_delegating_delete_runs_its_declared_delete() {
+    let sources = read_crate_sources();
+    let offenders = delegation_offenders(&all_bodies(&sources));
+    assert!(offenders.is_empty(), "{}", offenders.join("\n"));
+}
+
+#[test]
+fn the_delegation_check_sees_a_delegate_that_is_not_called() {
+    // TEETH, over synthetic bodies, and the two near misses it must not take
+    // for the call: `delete_sheet_impl(`, which does not even contain the
+    // needle `delete_sheet(`, and `undelete_sheet(`, which DOES -- only the
+    // identifier boundary in `calls` tells that one apart, so a plain substring
+    // test would take it for the call. (A comment was already stripped by the
+    // reader.) Review RA-2: before the `undelete_sheet(` body, nothing here
+    // exercised the boundary at all.
+    //
+    // SABOTAGE: make `calls` a plain `code.contains(&format!("{name}("))` -- the
+    // `undelete_sheet(` body is taken for the call and its assertion fails.
+    let one_body = |body: &str| -> BTreeMap<String, Vec<String>> {
+        [("discard_ephemeral_sheet".to_string(), vec![body.to_string()])].into_iter().collect()
+    };
+    let not_running = vec!["`discard_ephemeral_sheet` no longer runs `delete_sheet`".to_string()];
+
+    let sabotaged = one_body("pub fn discard_ephemeral_sheet() {\n    let r = delete_sheet_impl(state, index, false, None)?;\n}\n");
+    assert_eq!(delegation_offenders(&sabotaged), not_running);
+
+    let prefixed = one_body("pub fn discard_ephemeral_sheet() {\n    let r = undelete_sheet(state, index)?;\n}\n");
+    assert_eq!(
+        delegation_offenders(&prefixed),
+        not_running,
+        "`undelete_sheet(` contains the needle but is not a call of `delete_sheet`"
+    );
+
+    let honest = one_body("pub fn discard_ephemeral_sheet() {\n    with(|index, id| delete_sheet(app, state, index, Some(id)))\n}\n");
+    assert!(delegation_offenders(&honest).is_empty());
+
+    // The boundary itself, both ways -- the twin's three, plus the two
+    // branches neither copy pinned.
+    assert!(calls("x = delete_sheet(a)", "delete_sheet"));
+    assert!(calls("delete_sheet(a)", "delete_sheet"), "a call at the very start of the text has nothing in front of it");
+    assert!(calls("sheets::delete_sheet(a)", "delete_sheet"), "a path qualifier is not an identifier character");
+    assert!(!calls("x = delete_sheet_impl(a)", "delete_sheet"));
+    assert!(!calls("x = undelete_sheet(a)", "delete_sheet"));
 }
 
 // ---------------------------------------------------------------------------

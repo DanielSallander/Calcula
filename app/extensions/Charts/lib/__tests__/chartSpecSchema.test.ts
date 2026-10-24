@@ -4,7 +4,14 @@
 import { describe, it, expect } from "vitest";
 import * as fs from "fs";
 import * as path from "path";
-import { chartSpecJsonSchema, generateSpecReference, CHART_CONTAINER_FORBIDDEN_TITLE_LEAVES } from "../chartSpecSchema";
+import {
+  chartSpecJsonSchema,
+  generateSpecReference,
+  CHART_CONTAINER_FORBIDDEN_TITLE_LEAVES,
+  CHART_DRILL_THROUGH_DSL_MAX_CHARS,
+  CHART_DRILL_THROUGH_NAME_MAX_CHARS,
+  CHART_MARK_ID_PATTERN,
+} from "../chartSpecSchema";
 import { VISUAL_CONTAINER_JSON_SCHEMA } from "@api/visualContainer";
 import { buildDefaultSpec } from "../chartSpecDefaults";
 import { PALETTE_NAMES } from "../../rendering/chartTheme";
@@ -217,7 +224,7 @@ const CHART_SPEC_KEYS: Array<keyof ChartSpec> = [
   "title", "xAxis", "yAxis", "legend", "palette", "seriesColors", "markOptions", "layers",
   "transform", "config", "tooltip", "trendlines", "dataLabels", "dataTable",
   "seriesRefs", "filters", "dataPointOverrides", "encoding", "repeat", "facet", "concat", "params",
-  "plotHiddenCells", "container", "fieldFormats",
+  "plotHiddenCells", "container", "fieldFormats", "drillThrough",
 ];
 
 const ALL_CHART_TYPES: ChartType[] = [
@@ -760,5 +767,190 @@ describe("chartSpecJsonSchema nested drift guard", () => {
       dataPointOverrides: [{ seriesIndex: 0, categoryIndex: 0, glow: true } as never],
     };
     expect(schemaViolations(spec, SCHEMA).length).toBeGreaterThan(0);
+  });
+});
+
+// ============================================================================
+// Drill-through (docs/design/model-drillthrough.md 2.1). The chart's definition
+// is a CLOSED definition with bounds, because THIS SCHEMA IS THE GATE for the
+// script door: `chart.updateSpec` is a restricted `object.setState` aspect that
+// reaches `checkChartSpec` = this shape + the 2 MB cap. A bound that lived only
+// in a comment would let a distributed script persist a 2 MB "drill query".
+// ============================================================================
+
+describe("drillThrough definition (the script-door gate)", () => {
+  const dataRange: DataRangeRef = { sheetIndex: 0, startRow: 0, startCol: 0, endRow: 9, endCol: 3 };
+  const autoDetected = {
+    categoryIndex: 0,
+    series: [{ name: "Revenue", sourceIndex: 1, color: null }],
+    orientation: "columns" as const,
+  };
+  /** A design-query bar chart carrying `drillThrough`. */
+  function designQuerySpec(drillThrough: unknown): Record<string, unknown> {
+    return {
+      ...buildDefaultSpec(dataRange, true, autoDetected, "bar"),
+      data: { type: "designQuery", dslText: "ROWS: Geo.Region\nVALUES: [Revenue]", connectionId: "conn-1" },
+      series: [],
+      drillThrough,
+    };
+  }
+  const table = { kind: "table" };
+  const okDef = {
+    dslText: "ROWS: Product.Name\nVALUES: [Revenue]",
+    presentation: table,
+    name: "Product detail",
+    keepFilters: false,
+  };
+
+  it("declares drillThrough as a closed definition referenced from the root", () => {
+    expect(SCHEMA.properties.drillThrough.$ref).toBe("#/definitions/DrillThroughDefinition");
+    const def = DEFS.DrillThroughDefinition;
+    expect(def.additionalProperties).toBe(false);
+    expect(def.required).toEqual(["dslText", "presentation"]);
+    expect(Object.keys(def.properties).sort()).toEqual(["dslText", "keepFilters", "name", "presentation"]);
+  });
+
+  it("accepts a table definition, and a chart definition with its mark options", () => {
+    expect(schemaViolations(designQuerySpec(okDef), SCHEMA)).toEqual([]);
+    const chart = {
+      dslText: "ROWS: Product.Name\nVALUES: [Revenue]",
+      presentation: { kind: "chart", mark: "pie", markOptions: { innerRadiusRatio: 0.4 } },
+    };
+    expect(schemaViolations(designQuerySpec(chart), SCHEMA)).toEqual([]);
+    const stackedBar = {
+      dslText: "ROWS: Product.Name\nVALUES: [Revenue]",
+      presentation: { kind: "chart", mark: "bar", markOptions: { stackMode: "stacked" } },
+    };
+    expect(schemaViolations(designQuerySpec(stackedBar), SCHEMA)).toEqual([]);
+  });
+
+  it("pins the dslText bound at 20000 characters: at the bound passes, one past it is refused", () => {
+    expect(CHART_DRILL_THROUGH_DSL_MAX_CHARS).toBe(20000);
+    expect(DEFS.DrillThroughDefinition.properties.dslText.maxLength).toBe(CHART_DRILL_THROUGH_DSL_MAX_CHARS);
+    expect(schemaViolations(designQuerySpec({ ...okDef, dslText: "x".repeat(20000) }), SCHEMA)).toEqual([]);
+    const past = schemaViolations(designQuerySpec({ ...okDef, dslText: "x".repeat(20001) }), SCHEMA);
+    expect(past.join("\n")).toContain("spec.drillThrough.dslText");
+    expect(past.join("\n")).toContain("longer than 20000");
+  });
+
+  it("pins the name bound at 80 characters", () => {
+    expect(CHART_DRILL_THROUGH_NAME_MAX_CHARS).toBe(80);
+    expect(DEFS.DrillThroughDefinition.properties.name.maxLength).toBe(CHART_DRILL_THROUGH_NAME_MAX_CHARS);
+    expect(schemaViolations(designQuerySpec({ ...okDef, name: "n".repeat(80) }), SCHEMA)).toEqual([]);
+    expect(schemaViolations(designQuerySpec({ ...okDef, name: "n".repeat(81) }), SCHEMA).join("\n")).toContain(
+      "spec.drillThrough.name",
+    );
+  });
+
+  it("enumerates the presentation by kind: a chart needs a mark, an unknown kind and a table with a mark are refused", () => {
+    const refused = (presentation: unknown) =>
+      schemaViolations(designQuerySpec({ ...okDef, presentation }), SCHEMA).length > 0;
+    expect(refused({ kind: "chart" })).toBe(true);
+    expect(refused({ kind: "chart", mark: "" })).toBe(true);
+    expect(refused({ kind: "page" })).toBe(true);
+    expect(refused({ kind: "table", mark: "bar" })).toBe(true);
+    expect(refused({ kind: "chart", mark: "bar" })).toBe(false);
+    expect(refused({ kind: "table" })).toBe(false);
+  });
+
+  // The result chart is made by createChart, which validates the full spec:
+  // the mark pattern and the closed per-mark markOptions. A definition this
+  // gate accepted but createChart refused failed only AFTER the drill had
+  // added its temporary canvas -- an empty page (review: presentation-gate).
+  it("gives the presentation's mark THE chart mark pattern, the one constant ChartSpec.mark uses", () => {
+    expect(SCHEMA.properties.mark.pattern).toBe(CHART_MARK_ID_PATTERN);
+    expect(DEFS.DrillPresentationChart.properties.mark.pattern).toBe(CHART_MARK_ID_PATTERN);
+    const violations = (mark: string) =>
+      schemaViolations(designQuerySpec({ ...okDef, presentation: { kind: "chart", mark } }), SCHEMA).join("\n");
+    expect(violations("bar-3d")).toContain("spec.drillThrough.presentation.mark");
+    expect(violations("bar-3d")).toContain("does not match");
+    // A sandboxed custom mark's id ("sandbox:<id>") is refused by ChartSpec.mark too.
+    expect(violations("sandbox:spark")).toContain("does not match");
+    // A registered custom mark id is valid here exactly as on ChartSpec.mark.
+    expect(violations("customRadial")).toBe("");
+  });
+
+  it("narrows the presentation's markOptions per mark exactly as ChartSpec's: an option the mark does not have is refused", () => {
+    // ONE narrowing for both: the drill's presentation reuses the root's.
+    expect(DEFS.DrillPresentationChart.allOf).toBe(SCHEMA.allOf);
+    const violations = (presentation: unknown) =>
+      schemaViolations(designQuerySpec({ ...okDef, presentation }), SCHEMA).join("\n");
+    expect(violations({ kind: "chart", mark: "bar", markOptions: { innerRadius: 0.4 } })).toContain(
+      "spec.drillThrough.presentation.markOptions: unknown property 'innerRadius'",
+    );
+    // The spelling an earlier fixture used for a stacked bar: not a bar option.
+    expect(violations({ kind: "chart", mark: "bar", markOptions: { stacked: true } })).toContain(
+      "unknown property 'stacked'",
+    );
+    expect(violations({ kind: "chart", mark: "bar", markOptions: { stackMode: "sideways" } })).toContain(
+      "spec.drillThrough.presentation.markOptions.stackMode",
+    );
+    expect(violations({ kind: "chart", mark: "gauge", markOptions: { needle: "red" } })).toContain(
+      "unknown property 'needle'",
+    );
+    expect(violations({ kind: "chart", mark: "card", markOptions: { decimals: 99 } })).toContain("above the maximum");
+    expect(violations({ kind: "chart", mark: "bar", markOptions: { stackMode: "stacked" } })).toBe("");
+    // A registered custom mark is not narrowed, exactly as on ChartSpec.
+    expect(violations({ kind: "chart", mark: "customRadial", markOptions: { anything: 1 } })).toBe("");
+  });
+
+  it("refuses an unknown key (no connection id lives in the definition), a non-boolean keepFilters and a missing query", () => {
+    expect(schemaViolations(designQuerySpec({ ...okDef, connectionId: "conn-2" }), SCHEMA).join("\n")).toContain(
+      "unknown property 'connectionId'",
+    );
+    expect(schemaViolations(designQuerySpec({ ...okDef, keepFilters: "yes" }), SCHEMA).length).toBeGreaterThan(0);
+    expect(schemaViolations(designQuerySpec({ presentation: table }), SCHEMA).join("\n")).toContain(
+      "missing required 'dslText'",
+    );
+  });
+
+  it("documents the definition in the reference, property by property, exactly once", () => {
+    const ref = generateSpecReference();
+    expect(ref).toContain("| drillThrough |");
+    expect(ref.split("## DrillThroughDefinition").length - 1).toBe(1);
+    for (const prop of Object.keys(DEFS.DrillThroughDefinition.properties)) {
+      expect(ref, `DrillThroughDefinition reference table is missing ${prop}`).toContain(`| ${prop} |`);
+    }
+  });
+});
+
+describe("DesignQueryDataSource.packageDataSourceId (the subscriber's stable connection key, 2.10)", () => {
+  const dataRange: DataRangeRef = { sheetIndex: 0, startRow: 0, startCol: 0, endRow: 9, endCol: 3 };
+  const autoDetected = {
+    categoryIndex: 0,
+    series: [{ name: "Revenue", sourceIndex: 1, color: null }],
+    orientation: "columns" as const,
+  };
+  function sourceSpec(data: Record<string, unknown>): Record<string, unknown> {
+    return { ...buildDefaultSpec(dataRange, true, autoDetected, "bar"), data, series: [] };
+  }
+  const base = { type: "designQuery", dslText: "ROWS: Geo.Region\nVALUES: [Revenue]", connectionId: "conn-1" };
+
+  it("is an optional string beside connectionId; the required list is unchanged and the definition stays closed", () => {
+    expect(schemaViolations(sourceSpec({ ...base, packageDataSourceId: "ds-1" }), SCHEMA)).toEqual([]);
+    expect(schemaViolations(sourceSpec(base), SCHEMA)).toEqual([]);
+    expect(DEFS.DesignQueryDataSource.required).toEqual(["type", "dslText", "connectionId"]);
+    expect(DEFS.DesignQueryDataSource.additionalProperties).toBe(false);
+    expect(DEFS.DesignQueryDataSource.properties.packageDataSourceId.type).toBe("string");
+  });
+
+  it("still refuses a non-string key and a key the source does not declare", () => {
+    expect(schemaViolations(sourceSpec({ ...base, packageDataSourceId: 7 }), SCHEMA).length).toBeGreaterThan(0);
+    // Through the whole spec the source is refused, but WHICH union branch's
+    // complaint is reported is the checker's choice: it reports the branch
+    // with the FEWEST violations, and the plain-string branch ("expected type
+    // string") ties with the design-query branch ("unknown property"), so
+    // only the refusal itself is asserted here ...
+    expect(schemaViolations(sourceSpec({ ...base, dataSourceId: "ds-1" }), SCHEMA).length).toBeGreaterThan(0);
+    // ... and the closed definition is asserted on its own, where the reason
+    // is unambiguous.
+    expect(schemaViolations({ ...base, dataSourceId: "ds-1" }, DEFS.DesignQueryDataSource).join("\n")).toContain(
+      "unknown property 'dataSourceId'",
+    );
+    expect(schemaViolations({ ...base, packageDataSourceId: "ds-1" }, DEFS.DesignQueryDataSource)).toEqual([]);
+  });
+
+  it("is documented in the reference's data-source list", () => {
+    expect(generateSpecReference()).toContain("packageDataSourceId");
   });
 });

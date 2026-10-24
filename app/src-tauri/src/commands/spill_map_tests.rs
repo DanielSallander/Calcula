@@ -1378,6 +1378,7 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("pivot/commands.rs", "create_pivot_core", "a pivot's output region is protected against every content write, so no spill ORIGIN can be inside it (create_pivot_inner is now its State-handle wrapper)"),
         ("pivot/commands.rs", "delete_pivot_table", "clears the same protected region"),
         ("pivot/commands.rs", "drill_through_to_sheet_core", "builds a freshly created sheet's cells in a detached grid, which can hold no pre-existing spill (the `drill_through_to_sheet` command is a one-line delegation to it; this entry named the command, and passed only because the census read `pub(crate) async fn` bodies as part of the function before them)"),
+        ("drill_through.rs", "drill_through_to_ephemeral_sheet_core", "writes literals into a DETACHED grid for a sheet that did not exist yet (the model-visual drill-through's caption rows above a `write_pivot_to_grid` view), which can hold no pre-existing spill; the `drill_through` command's `toSheet` op delegates here"),
         ("bi/commands.rs", "bi_insert_result", "writes a query result block and seeds the shared cascade"),
         ("bi/commands.rs", "bi_refresh_connection", "rewrites the same result block and seeds the shared cascade"),
         ("bi/cube.rs", "build_cube_prefetch", "builds a detached prefetch grid, never the document's"),

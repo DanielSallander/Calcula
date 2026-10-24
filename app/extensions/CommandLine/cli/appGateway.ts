@@ -65,7 +65,14 @@ export interface AppCliGateway {
   getSheets(): Promise<SheetsResult>;
   /** `kind` omitted = a worksheet; "canvas" adds a canvas page. */
   addSheet(name?: string, kind?: SheetKindName): Promise<SheetsResult>;
-  deleteSheet(index: number): Promise<SheetsResult>;
+  /**
+   * `expectedSheetId`: the STABLE id read together with `index`. The backend
+   * then deletes only if the sheet at `index` still carries it, and otherwise
+   * refuses -- nothing deleted -- because the sheets were renumbered between
+   * the read and the delete (a temporary sheet's discard), and a delete by the
+   * bare index removed the neighbour that slid into it, with no undo.
+   */
+  deleteSheet(index: number, expectedSheetId?: string): Promise<SheetsResult>;
   renameSheet(index: number, newName: string): Promise<SheetsResult>;
   hideSheet(index: number, level?: "hidden" | "veryHidden"): Promise<SheetsResult>;
   unhideSheet(index: number): Promise<SheetsResult>;
@@ -210,7 +217,8 @@ export function createLiveAppGateway(): AppCliGateway {
   return {
     getSheets: () => getSheets(),
     addSheet: (name?: string, kind?: SheetKindName) => addSheet(name, kind),
-    deleteSheet: (index: number) => deleteSheet(index),
+    deleteSheet: (index: number, expectedSheetId?: string) =>
+      deleteSheet(index, expectedSheetId === undefined ? undefined : { expectedSheetId }),
     renameSheet: (index: number, newName: string) => renameSheet(index, newName),
     hideSheet: (index: number, level?: "hidden" | "veryHidden") => hideSheet(index, level),
     unhideSheet: (index: number) => unhideSheet(index),

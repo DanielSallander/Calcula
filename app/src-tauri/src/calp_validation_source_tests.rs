@@ -370,7 +370,7 @@ fn canonicalizes_what_it_returns(body: &str) -> bool {
 #[test]
 fn the_publish_assembly_canonicalizes_every_list_source_it_ships() {
     let src = include_str!("calp_commands.rs").replace("\r\n", "\n");
-    let body = fn_code(&src, "assemble_publish_workbook");
+    let body = fn_code(&src, "assemble_publish_snapshot");
     assert!(
         canonicalizes_what_it_returns(&body),
         "`assemble_publish_workbook` no longer canonicalizes the list-validation sources of the \

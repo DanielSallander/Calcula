@@ -75,8 +75,22 @@ describe("the wire shape is Rust's", () => {
       baseVersion: "",
       diff: {} as WorkingCopyDiff["diff"],
       code: null,
+      carriedSheetIds: [],
     };
     expect(rustFields(DIFF_RS, "WorkingCopyDiff").sort()).toEqual(Object.keys(sample).sort());
+  });
+
+  // The push dialog sorts its hold-back by this list (review round 11,
+  // RV11-TS-1): a list Rust could leave out, or send as null, would park every
+  // untick and say "this push does not carry" of sheets that ship.
+  // SABOTAGE: make the TS field optional, or the Rust one an Option.
+  it("`carriedSheetIds` is a list Rust always sends: never optional, never null", () => {
+    const diff = rustBody(DIFF_RS, "WorkingCopyDiff");
+    expect(diff).toContain("pub carried_sheet_ids: Vec<String>,");
+    const ts = fs.readFileSync(path.resolve(__dirname, "../collaboration.ts"), "utf8").replace(/\r\n/g, "\n");
+    const start = ts.indexOf("export interface WorkingCopyDiff {");
+    const body = ts.slice(start, ts.indexOf("\n}\n", start));
+    expect(body).toMatch(/^\s*carriedSheetIds: string\[\];$/m);
   });
 
   it("WorkingCopyCode: every Rust field is a TypeScript field -- the promotion impact's three code fields", () => {

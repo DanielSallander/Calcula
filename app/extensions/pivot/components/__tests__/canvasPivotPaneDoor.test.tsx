@@ -226,7 +226,7 @@ describe("R4: the value-field dialog contract on a canvas box goes through the O
   it("closed by hand: the request opens the object pane on FIELDS (a door), the lifted editor takes it on mount, no pivot-editor pane opens", async () => {
     // The canvas pivot: cached (the host hook's sheet check) and its box published.
     updateCachedRegions([
-      { pivotId: "7", name: "Sales", startRow: 0, startCol: 1024, endRow: 9, endCol: 1026, isEmpty: false, isModel: false, canvasFrame: { x: 10, y: 20, width: 300, height: 200 } },
+      { pivotId: "7", name: "Sales", startRow: 0, startCol: 1024, endRow: 9, endCol: 1026, isEmpty: false, isModel: false, hasDesignQueryDrill: false, canvasFrame: { x: 10, y: 20, width: 300, height: 200 } },
     ]);
     const box = {
       id: "pivot-visual-7",

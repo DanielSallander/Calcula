@@ -84,7 +84,6 @@ describe("sheet groups", () => {
       activeIsCanvas,
       ctrlKey: true,
       shiftKey: false,
-      dragging: false,
       coreFormulaMode: false,
       session: null,
     });

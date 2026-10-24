@@ -81,6 +81,34 @@ export interface IChartStoreService {
    *  region and announces the new chart exactly as the Insert Chart dialog
    *  does. Returns the new chart's stable id. */
   createChart(fullSpec: Record<string, unknown>, placement?: ChartPlacement): string;
+  /**
+   * The FULL spec of a new design-query chart, completed by the Charts
+   * extension from ITS OWN default skeleton -- the one Insert Chart builds
+   * from (axes, legend, palette, headers, series orientation, category index)
+   * -- around what the caller owns: the query and its connection, the mark and
+   * its options, the title. A design query's measures are its series, so the
+   * spec carries none. PURE: nothing is created, stored or validated; hand the
+   * answer to {@link validateChartSpec}, then to {@link createChart}.
+   *
+   * The seam exists so no caller copies the skeleton (CLAUDE.md, the Seam
+   * Rule): a copied recipe drifts on the owner's first default change, and a
+   * new required key would make every copy fail in `createChart`.
+   */
+  buildDesignQueryChartSpec(req: {
+    dslText: string;
+    connectionId: string;
+    mark: string;
+    markOptions?: Record<string, unknown>;
+    title: string;
+  }): Record<string, unknown>;
+  /**
+   * The ChartSpec schema's violations of `fullSpec` as messages, [] when it is
+   * valid -- the SAME check {@link createChart} runs before it creates
+   * anything. PURE. A caller that must not leave anything behind when the
+   * chart is refused (the drill-through, before it adds its result sheet)
+   * asks this first.
+   */
+  validateChartSpec(fullSpec: Record<string, unknown>): string[];
   /** Delete a chart (undoable through the extension's own delete trash).
    *  Returns false when no chart has that id. */
   deleteChart(chartId: string): boolean;

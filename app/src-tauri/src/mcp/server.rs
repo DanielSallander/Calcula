@@ -1112,7 +1112,7 @@ impl CalculaMcpServer {
 
     // ---- Sheet management (D5) ----
 
-    #[tool(description = "List the workbook's sheets with their 0-based indices, names, kind (worksheet or canvas; a canvas holds objects only, never cells), visibility and which one is active. The indices are what add_sheet/rename_sheet/delete_sheet/move_sheet and the sheet_index arguments elsewhere take. Read-only.")]
+    #[tool(description = "List the workbook's sheets with their 0-based indices, names, kind (worksheet or canvas; a canvas holds objects only, never cells), visibility and which one is active. A drill-through's result sheet is marked (temporary: ...): it is deleted without a prompt when the user leaves it unless they keep it by double-clicking its tab, so put no lasting work on it (or ask the user to keep it first). The indices are what add_sheet/rename_sheet/delete_sheet/move_sheet and the sheet_index arguments elsewhere take. Read-only.")]
     async fn list_sheets(&self) -> Result<CallToolResult, ErrorData> {
         log_info!("MCP", "Tool call: list_sheets");
         match tools_objects::list_sheets(&self.app_handle) {

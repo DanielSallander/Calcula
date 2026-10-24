@@ -12,8 +12,9 @@
 //
 //          Deliberately NOT here: `registerExternalFormulaTarget` /
 //          `getExternalFormulaTarget` (they stay in `@api/editing`),
-//          `setExternalSessionParked` (Core-internal: only the point-mode
-//          switch may park a session) and the test reset.
+//          `setExternalSessionParked` and `noteExternalSessionHost`
+//          (Core-internal: only the point-mode switch may park a session or
+//          learn its host) and the test reset.
 
 export {
   subscribeExternalEdit,
@@ -25,6 +26,13 @@ export {
   getParkedViewSheetIndex,
   isCrossSheetPointMode,
   getCrossSheetPointModeKey,
+  // The live session's HOST by identity (review F3-strip-uses-owner-host-index):
+  // the tab strip asks `isExternalSessionHostSheet` of the CLICKED tab at event
+  // time -- the one rule that brings a parked canvas-hosted edit back -- and of
+  // each tab for its source marker, never the owner's opening `hostSheetIndex`.
+  isExternalSessionHostSheet,
+  getExternalSessionHostName,
+  getExternalSessionHostIndex,
   publishExternalCellTarget,
   getExternalCellTarget,
   resolveFormulaBarSource,

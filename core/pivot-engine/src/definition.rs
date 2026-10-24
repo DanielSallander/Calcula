@@ -104,6 +104,15 @@ pub struct PivotField {
     /// the raw value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub number_format: Option<String>,
+
+    /// The SYNTHETIC row a values-only BI pivot gets (the host's
+    /// `update_bi_pivot_fields`): not a source column but a placeholder with
+    /// ONE member that every record has. Set only on that row, so a
+    /// calculation group that happens to carry the same name is never taken
+    /// for it -- a fact of the FIELD, so it travels with the definition through
+    /// undo, save and a `.calp`. Written only when true; absent reads false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_synthetic_total: bool,
 }
 
 impl PivotField {
@@ -121,6 +130,7 @@ impl PivotField {
             is_attribute: false,
             sort_by_field_index: None,
             number_format: None,
+            is_synthetic_total: false,
         }
     }
 
@@ -139,6 +149,7 @@ impl PivotField {
             is_attribute: true,
             sort_by_field_index: None,
             number_format: None,
+            is_synthetic_total: false,
         }
     }
 }

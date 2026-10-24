@@ -327,6 +327,36 @@ Pointers start at the chart's definition: \`/spec/title\`, \`/spec/xAxis/title\`
 \`/spec/series/0/name\`, \`/spec/markOptions/goal\`. A formula may read cells
 (\`=Sheet1!B1\`), names, or the page's model measures (\`=[Revenue]\`), and a measure
 follows the page's slicers.
+
+## Drill-through
+
+A design-query chart can carry a **drill-through**: a second design query that
+"Drill through" on a bar, slice, point or legend entry runs for the clicked
+member, shown on a temporary sheet (it closes when you leave it; double-click
+its tab to keep it). Author it from the chart's right-click menu,
+**Drill-through behavior...**, or write it into the spec:
+
+\`\`\`json
+"drillThrough": {
+  "name": "Product detail",
+  "dslText": "ROWS: Product.Name\\nVALUES: [Revenue], [Units]",
+  "presentation": { "kind": "table" },
+  "keepFilters": true
+}
+\`\`\`
+
+- \`presentation\` is \`{ "kind": "table" }\` (a worksheet of cells) or
+  \`{ "kind": "chart", "mark": "bar", "markOptions": { ... } }\` (a canvas with one chart).
+  \`mark\` takes the ids the chart's own \`mark\` takes, and \`markOptions\` only that
+  mark's options (see Mark Options): a definition the result chart would refuse is
+  refused when it is written.
+- At run time the clicked members are appended as ONE \`FILTERS:\` clause on their
+  member KEYS, so the kept result's Design tab shows exactly what it was filtered to.
+  Your own \`FILTERS:\` on the same field ANDs with them.
+- \`keepFilters\` (default true) also carries the page's filters that reach this chart.
+- The definition stores no connection id: it runs against the chart's \`data.connectionId\`.
+- A Card, KPI or Gauge names no member, so its drill runs with the page's filters only;
+  a transformed or composed chart's points name no member and cannot drill.
 `);
 
   // ── Mark Options ─────────────────────────────────────────────────────

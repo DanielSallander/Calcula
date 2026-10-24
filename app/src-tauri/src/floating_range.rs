@@ -992,6 +992,12 @@ pub(crate) fn rename_floating_range_inner(
     new_name: String,
 ) -> Result<FloatingRangeInfo, String> {
     let row = find_row(state, id)?;
+    // STILL OPEN (review RA-1): the index is looked up here with the lock
+    // released and the rename acts BY INDEX, so a sheet add landing in between
+    // (it rotates every object sheet up one) can hand the rename another
+    // range's backing sheet. The delete below closes the same gap by passing
+    // the backing sheet's id, checked under its locks; `rename_sheet_inner`
+    // takes no id yet.
     let backing_index = sheet_index_of(state, row.backing_sheet_id)
         .ok_or_else(|| "Floating range backing sheet is missing".to_string())?;
     // An object's name is an object edit on its HOST (a chart's title rides
@@ -1087,6 +1093,14 @@ pub(crate) fn delete_floating_range_inner(
 
     // The sheet delete first — it holds the refusal gate. Only after it
     // succeeds does the object row go, so a refused delete changes nothing.
+    //
+    // The index was looked up above with the lock already released, and the
+    // MCP server runs on its own thread: a user-sheet add rotates every object
+    // sheet up one, so by the time the delete takes its locks `backing_index`
+    // can name ANOTHER range's backing sheet, or the new user sheet. So the
+    // delete is told which sheet this is by its stable id, and refuses
+    // (`SHEETS_CHANGED_UNDER_THE_DELETE`) rather than deleting a different one
+    // (review RA-1).
     crate::sheets::delete_sheet_impl(
         state,
         file_state,
@@ -1098,6 +1112,7 @@ pub(crate) fn delete_floating_range_inner(
         timeline_state,
         backing_index,
         true,
+        Some(row.backing_sheet_id),
     )?;
 
     let effect = crate::document_effect::DocumentEffect::mutates(file_state);
@@ -1181,6 +1196,19 @@ pub(crate) fn register_object_sheet_edges(state: &AppState) {
     }
 }
 
+/// Run `attempt`, and run it ONCE MORE when the sheet delete inside it refused
+/// because the sheets were renumbered between its lookup and its locks
+/// ([`crate::sheets::SHEETS_CHANGED_UNDER_THE_DELETE`]); every attempt of a
+/// floating-range delete looks its backing sheet up again by its stable id.
+/// Any other outcome -- a success, any other refusal, a second renumbering --
+/// is returned as it is.
+pub(crate) fn retry_once_if_renumbered<T>(mut attempt: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+    match attempt() {
+        Err(refusal) if refusal == crate::sheets::SHEETS_CHANGED_UNDER_THE_DELETE => attempt(),
+        outcome => outcome,
+    }
+}
+
 /// The Sheet → FloatingRange cascade (`DEPENDENCY_MATRIX`): every floating
 /// range HOSTED on the deleted sheet dies with it. Called by
 /// `delete_sheet_impl` with all locks released; each orphan deletes its own
@@ -1208,18 +1236,24 @@ pub(crate) fn delete_floating_ranges_for_host(
     };
     for id in orphaned {
         // Indexes shift after every delete; each pass re-resolves from the
-        // stable id inside delete_floating_range_inner.
-        if let Err(e) = delete_floating_range_inner(
-            state,
-            file_state,
-            pivot_state,
-            user_files_state,
-            pane_control_state,
-            ribbon_filter_state,
-            slicer_state,
-            timeline_state,
-            id,
-        ) {
+        // stable id inside delete_floating_range_inner. A pass the sheet delete
+        // REFUSED because another door renumbered the sheets between that
+        // lookup and the delete's locks is looked up again and tried once more:
+        // falling through to the branch below would drop the row and leave its
+        // backing sheet behind.
+        if let Err(e) = retry_once_if_renumbered(|| {
+            delete_floating_range_inner(
+                state,
+                file_state,
+                pivot_state,
+                user_files_state,
+                pane_control_state,
+                ribbon_filter_state,
+                slicer_state,
+                timeline_state,
+                id,
+            )
+        }) {
             // The host sheet is already gone; a refusal here would strand the
             // row. Drop it anyway and log — the backing sheet, if it survived,
             // is invisible and unreferenced by the object store.

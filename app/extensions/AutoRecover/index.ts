@@ -7,6 +7,8 @@
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { registerMenuItem, unregisterMenuItem, IconAutoRecover, IconClock } from "@api";
 import { createBackendChannel } from "@api/backendCommands";
+import { showToast, type ToastHandle } from "@api/notifications";
+import { createRefusalStreak, SKIPPED_SNAPSHOTS_NOTICE } from "./lib/refusalStreak";
 
 const autoRecoverBackend = createBackendChannel("AutoRecover");
 
@@ -54,29 +56,96 @@ let timerId: ReturnType<typeof setInterval> | null = null;
 let currentEnabled = true;
 let currentIntervalMs = 300_000; // 5 minutes
 
+/**
+ * WHICH TIMER IS RUNNING: bumped every time it is stopped or started (a switch
+ * off or on, an interval change, an activation, a deactivation). A tick reads
+ * it before it awaits its save and compares when the save comes back, so a
+ * save that was in flight when AutoRecover was switched off neither counts
+ * toward a streak nor puts the card up: it answers a timer the user stopped
+ * (review round 10, R10-3). A save in flight across an interval change is
+ * set aside the same way; the streak itself carries on, and the first tick at
+ * the new interval says whether copies are still being skipped.
+ */
+let timerGeneration = 0;
+
+/** The skipped-copies card on screen now, to take back when its streak ends; null = none. */
+let skippedCopiesCard: ToastHandle | null = null;
+
+/**
+ * Ticks the backend refused because the workbook kept changing (lib/refusalStreak.ts).
+ * The notice is a TOAST -- it never blocks the work it is about -- put up ONCE
+ * per streak, when the third refusal in a row comes in, and kept up (duration
+ * 0) for as long as the streak lasts: the next written copy, any other outcome
+ * (not_dirty included -- the user saved), File > AutoRecover switched off or
+ * on, a reset or a deactivation takes it down through its handle (review
+ * round 9, F4; the switch: round 10, R10-3). It was a 30-second card, so a
+ * long streak went on skipping copies with nothing on screen; before that a
+ * permanent one that nothing took back. One card per streak, never shown again
+ * inside it -- not even after the user clicked it away.
+ */
+const refusals = createRefusalStreak({
+  show() {
+    // Never two cards: a card from an earlier streak is already down (its end
+    // withdrew it), but take it back here too rather than trust that.
+    skippedCopiesCard?.dismiss();
+    skippedCopiesCard = showToast(SKIPPED_SNAPSHOTS_NOTICE, { type: "warning", duration: 0 });
+  },
+  withdraw() {
+    skippedCopiesCard?.dismiss();
+    skippedCopiesCard = null;
+  },
+});
+
 // ============================================================================
 // Timer Management
 // ============================================================================
 
+/** Stop the timer; a save still in flight from it no longer counts (`timerGeneration`). */
 function stopTimer(): void {
+  timerGeneration += 1;
   if (timerId !== null) {
     clearInterval(timerId);
     timerId = null;
   }
 }
 
+/** (Re)start the timer at the current interval -- a new generation (stopTimer bumps it). */
 function startTimer(): void {
   stopTimer();
   if (!currentEnabled || currentIntervalMs <= 0) return;
 
-  timerId = setInterval(async () => {
-    try {
-      await autoRecoverSave();
-    } catch {
-      // "not_dirty" is expected when no changes have been made -- ignore it.
-      // Other errors (disk full, etc.) are silently swallowed for background saves.
-    }
+  timerId = setInterval(() => {
+    void autoRecoverTick();
   }, currentIntervalMs);
+}
+
+/**
+ * One background save. Never rejects: a timer callback has nobody to report to.
+ */
+async function autoRecoverTick(): Promise<void> {
+  const generation = timerGeneration;
+  let failure: { err: unknown } | null = null;
+  try {
+    await autoRecoverSave();
+  } catch (err) {
+    failure = { err };
+  }
+  // NOT THIS TIMER'S ANSWER ANY MORE: the timer that asked was stopped or
+  // started again while the save ran, or AutoRecover has just been switched
+  // off (`currentEnabled` flips at the click; the timer stops once the setting
+  // is written). Either way nothing is skipping copies on its account -- a
+  // refusal counted now would put a card up after AutoRecover is off, or
+  // start the next streak one refusal early.
+  if (generation !== timerGeneration || !currentEnabled) return;
+  if (failure === null) {
+    refusals.succeeded();
+  } else {
+    // "not_dirty" is expected when no changes have been made, and other errors
+    // (disk full, etc.) stay silent for a background save -- both end a streak.
+    // The retryable refusal (the workbook changed while it was being read, so
+    // nothing was written) is COUNTED: three in a row is a toast.
+    refusals.failed(failure.err);
+  }
 }
 
 async function loadSettings(): Promise<void> {
@@ -141,6 +210,15 @@ function registerMenuItems(): () => void {
       } else {
         stopTimer();
       }
+      // A NEW STREAK EITHER WAY (review round 10, R10-3). Off: no timer, no
+      // streak -- the card says copies are being skipped by a timer that no
+      // longer runs, and it is a duration-0 card, so nothing else would ever
+      // take it down (deactivate follows the same rule). On: a fresh count, as
+      // an activation starts one. NOT on an interval change (below): the timer
+      // goes on and copies are still being skipped, so the card is still true
+      // -- and a reset there would announce again, inside one streak, a card
+      // the user already pressed OK on.
+      refusals.reset();
     },
   });
 
@@ -159,6 +237,8 @@ function registerMenuItems(): () => void {
       action: async () => {
         currentIntervalMs = opt.value;
         await setAutoRecoverSettingsBackend(currentEnabled, currentIntervalMs);
+        // The streak carries on, card and all: copies are still being
+        // skipped at the new interval (see the toggle's reset).
         if (currentEnabled) {
           startTimer();
         }
@@ -180,6 +260,7 @@ let unregisterMenuItems: (() => void) | null = null;
 
 async function activate(context: ExtensionContext): Promise<void> {
   autoRecoverBackend.set(context.invokeBackend);
+  refusals.reset();
   await loadSettings();
   unregisterMenuItems?.();
   unregisterMenuItems = registerMenuItems();
@@ -188,6 +269,9 @@ async function activate(context: ExtensionContext): Promise<void> {
 
 function deactivate(): void {
   stopTimer();
+  // No timer, no streak: a card saying copies are being skipped would now be
+  // describing something nothing is doing.
+  refusals.reset();
   unregisterMenuItems?.();
   unregisterMenuItems = null;
 }

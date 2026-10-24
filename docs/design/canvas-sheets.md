@@ -1246,6 +1246,13 @@ SHEET_CHANGED with its detail after the frontend switched, so no cache keyed on 
 loads the new sheet's objects while the grid still paints the old one (BUG-0462). The command line does
 not apply that switch (BUG-0464, open).
 
+**A drill-through's temporary canvas is not a page** (2026-10-23, `model-drillthrough.md` 2.6). `reportPagesFrom`
+skips a sheet whose `SheetInfo.ephemeral` is true, so while a chart drill's result page exists it is in no
+Page Navigator and no page button's target list. (Page SCOPES resolve through `sheetIdByIndex`, which keeps it:
+the ribbon filter's Selected pages list can still offer it -- open-items 2.aq.) Keeping it (a double-click on its tab,
+or Keep Sheet) clears the flag and announces `MUTATION_REFRESH { domains: ["sheets"] }`
+(`keepEphemeralSheet`, `app/src/core/lib/tauri-api.ts`), so the next read lists it as an ordinary page.
+
 ## 14. The object pane and the visual container (F1 + F5, WP-C, 2026-10-16)
 
 Owner findings F1 and F5: selecting any canvas object should show ONE side pane like the pivot's -- the

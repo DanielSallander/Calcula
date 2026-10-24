@@ -1084,7 +1084,7 @@
       ],
       "intent": "2025 revenue by category, but don't count Public Sector customers",
       "reference": "ROWS: Product.Category\nVALUES: [Revenue]\nFILTERS: Date.Year = (\"2025\"), Customer.Segment NOT IN (\"Public Sector\")",
-      "distractor": "ROWS: Product.Category\nVALUES: [Revenue]\nFILTERS: Date.Year = (\"2025\")\nFILTERS: Customer.Segment NOT IN (\"Public Sector\")",
+      "distractor": "ROWS: Product.Category\nVALUES: [Revenue]\nFILTERS: Date.Year = (\"2025\"), Customer.Segment = (\"Public Sector\")",
       "alternatives": [
         "ROWS: Product.Category\nVALUES: [Revenue]\nFILTERS: Customer.Segment NOT IN (\"Public Sector\"), Date.Year = (\"2025\")"
       ]

@@ -764,10 +764,11 @@ fn a_reversed_extent_never_reaches_the_host() {
 // 7. The two commands this file reproduces still do what it says they do
 // ---------------------------------------------------------------------------
 
-/// `build_workbook_for_save` cannot be called in-process (it takes
-/// `State<AppState>`), so this pins from SOURCE that it still stamps the
-/// extents, and stamps them AFTER `Sheet::from_grid` has produced the cells
-/// they attach to.
+/// Pins from SOURCE that `build_workbook_for_save` still stamps the extents,
+/// and stamps them AFTER `Sheet::from_grid` has produced the cells they attach
+/// to. (It takes plain references since F1 review round 7 and is driven
+/// in-process by the snapshot probes in `state_digest_lock_order_tests.rs`;
+/// this ordering is a property of the source, so it stays a source pin.)
 #[test]
 fn the_save_path_still_stamps_spill_extents() {
     let src = include_str!("../persistence.rs");

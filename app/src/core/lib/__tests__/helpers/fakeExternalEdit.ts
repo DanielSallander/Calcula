@@ -61,6 +61,8 @@ export const FAKE_CELL_OWNER = "fake";
 
 export function createFakeExternalEdit(opts: {
   hostSheetIndex: number;
+  /** The host's STABLE id, as a real owner (a floating range) names it; absent = an owner that names none. */
+  hostSheetId?: string;
   address?: string;
   text?: string;
   cursor?: number;
@@ -87,6 +89,7 @@ export function createFakeExternalEdit(opts: {
     parkedFlips: [],
     address: opts.address ?? "Float1!A1",
     hostSheetIndex: opts.hostSheetIndex,
+    ...(opts.hostSheetId !== undefined ? { hostSheetId: opts.hostSheetId } : {}),
     anchor: opts.anchor ?? { row: 0, col: 0 },
     getText() {
       return session.text;

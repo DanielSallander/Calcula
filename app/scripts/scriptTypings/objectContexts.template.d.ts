@@ -1402,8 +1402,12 @@ declare interface ScriptPublishSpec {
   version: string;
   /** "report" (default) | "template" | "dataset" | "library" | your own kind. */
   kind?: string;
-  /** Sheets to ship. Omit for the kind's default: every sheet for a report, and
-   *  NO sheets for a "library" (whose payload is its module scripts). */
+  /** Sheets to ship, as 0-BASED workbook positions in tab order: the first
+   *  sheet is 0, so a three-sheet workbook has 0, 1 and 2. A position past the
+   *  end is refused (CALP_PUSH_SHEET_INDEX_OUT_OF_RANGE) and resending it can
+   *  never succeed: read the sheets again and choose again. Omit for the
+   *  kind's default: every sheet for a report, and NO sheets for a "library"
+   *  (whose payload is its module scripts). */
   sheetIndices?: number[];
 }
 

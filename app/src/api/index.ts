@@ -376,7 +376,7 @@ export type {
 // ============================================================================
 
 export { showToast } from "./notifications";
-export type { ToastOptions } from "./notifications";
+export type { ToastOptions, ToastHandle } from "./notifications";
 export { registerSelectionOwner, isSelectionOwned, refuseIfSelectionOwned, type SelectionOwner } from "./selectionOwner";
 
 // ============================================================================
@@ -2181,6 +2181,11 @@ export {
   promotionImpact,
   setSubscriptionEnvironment,
   ENVIRONMENTS_CHANGED_EVENT,
+  // The one SYNC "is this sheet subscribed?" answer (a registry Collaboration
+  // publishes into): Charts, Pivot and CanvasSheet gate authoring on it.
+  registerSubscribedSheetsProvider,
+  isSheetSubscribed,
+  resetSubscribedSheetsProvider,
 } from "./collaboration";
 
 export type {
@@ -2278,6 +2283,7 @@ export type {
   PromoteResult,
   EnvironmentNotice,
   UnavailableSubscription,
+  SubscribedSheetsProvider,
 } from "./collaboration";
 
 // ============================================================================
@@ -3428,6 +3434,29 @@ export {
 } from "./chartContextMenu";
 
 export type { ChartContextMenuContribution } from "./chartContextMenu";
+
+// Drill-through on model visuals (design-query charts and BI pivots): the ONE
+// definition shape both families store, and the `drill_through` command's
+// mirrors. See docs/design/model-drillthrough.md.
+export {
+  drillKeepsFilters,
+  drillThroughDisplayName,
+  drillThroughSheetName,
+  DRILL_THROUGH_DEFAULT_SHEET_NAME,
+} from "./drillThrough";
+
+export type {
+  DrillPresentation,
+  DrillThroughDefinition,
+  DrillFilterSpec,
+  DrillSheetPresentation,
+  DrillThroughPivotContextRequest,
+  DrillThroughToSheetRequest,
+  DrillThroughRequest,
+  DrillThroughPivotContextResponse,
+  DrillThroughToSheetResponse,
+  DrillThroughResponse,
+} from "./drillThrough";
 
 // ============================================================================
 // Chart Mark Registry (IoC for built-in + extension chart types)

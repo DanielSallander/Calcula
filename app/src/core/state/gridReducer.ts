@@ -23,6 +23,7 @@ import {
   getColumnWidthFromDimensions,
   getRowHeightFromDimensions,
 } from "../lib/scrollUtils";
+import { rebaseEditOntoShownSheet } from "../lib/editSheetIdentity";
 
 // Debug logging for viewport tracking
 const DEBUG_VIEWPORT = false;
@@ -316,23 +317,43 @@ function applySurface(state: GridState, surface: SheetSurface): GridState {
 }
 
 /** The one place the sheet context moves: context, surface map and surface in
- *  ONE reducer step (see `SheetSurface`). */
+ *  ONE reducer step (see `SheetSurface`).
+ *
+ *  The context's STABLE id is the dispatch's own: stored when it carries one,
+ *  CLEARED when it carries none (undo's follow of the backend's switch has only
+ *  an index and a name) -- never kept from the sheet the context may have
+ *  left, so a stale id cannot mislead an identity decision.
+ *
+ *  An open edit whose sheet this IS (by id, else by name) follows it here, in
+ *  the same step: to its index -- a temporary sheet's discard, a delete, a move
+ *  or a copy that lands while the edit is open renumbers the sheet, and the
+ *  context arrives at the new index (review
+ *  TSHELL4-DISCARD-LANDS-UNDER-OPEN-EDIT) -- and, by id, to its NAME: a rename
+ *  of the edited sheet is followed, never refused (review
+ *  F1-rename-refuses-entry; core/lib/editSheetIdentity.ts). */
 function enterSheet(
   state: GridState,
   index: number,
   name: string,
   explicit: SheetSurface | undefined,
+  sheetId: string | undefined,
 ): GridState {
   const sheetSurfaces =
     explicit !== undefined && state.sheetSurfaces[index] !== explicit
       ? { ...state.sheetSurfaces, [index]: explicit }
       : state.sheetSurfaces;
   const surface = explicit ?? sheetSurfaces[index] ?? "grid";
+  const id = sheetId !== undefined && sheetId !== "" ? sheetId : undefined;
+  const editing = state.editing === null ? null : rebaseEditOntoShownSheet(state.editing, index, name, id);
   return applySurface(
     {
       ...state,
-      sheetContext: { activeSheetIndex: index, activeSheetName: name },
+      sheetContext:
+        id !== undefined
+          ? { activeSheetIndex: index, activeSheetName: name, activeSheetId: id }
+          : { activeSheetIndex: index, activeSheetName: name },
       sheetSurfaces,
+      editing,
     },
     surface,
   );
@@ -982,9 +1003,20 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
     }
 
     case GRID_ACTIONS.START_EDITING: {
+      // The open named its sheet from the context it READ before its awaits
+      // (merge info, the cell's content). A discard, delete, move or copy that
+      // landed meanwhile moved that sheet to another index -- or a rename gave
+      // it another name -- and the context here already says so: the edit
+      // follows its sheet by identity (id, else name). useEditing's
+      // EDIT_STARTED reports the index this stores (`editStartedIndex`).
       return {
         ...state,
-        editing: action.payload,
+        editing: rebaseEditOntoShownSheet(
+          action.payload,
+          state.sheetContext.activeSheetIndex,
+          state.sheetContext.activeSheetName,
+          state.sheetContext.activeSheetId,
+        ),
       };
     }
 
@@ -1161,13 +1193,13 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
     }
 
     case GRID_ACTIONS.SET_SHEET_CONTEXT: {
-      const { activeSheetIndex, activeSheetName, surface } = action.payload;
-      return enterSheet(state, activeSheetIndex, activeSheetName, surface);
+      const { activeSheetIndex, activeSheetName, surface, activeSheetId } = action.payload;
+      return enterSheet(state, activeSheetIndex, activeSheetName, surface, activeSheetId);
     }
 
     case GRID_ACTIONS.SET_ACTIVE_SHEET: {
-      const { index, name, surface } = action.payload;
-      return enterSheet(state, index, name, surface);
+      const { index, name, surface, sheetId } = action.payload;
+      return enterSheet(state, index, name, surface, sheetId);
     }
 
     case GRID_ACTIONS.SET_SHEET_SURFACES: {

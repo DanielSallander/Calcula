@@ -583,7 +583,7 @@ fn the_push_carrier_collects_bindings_before_the_rename_is_undone() {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/calp_commands.rs"),
     )
     .expect("calp_commands.rs");
-    let start = src.find("fn assemble_publish_workbook(").expect("the assembly");
+    let start = src.find("fn assemble_publish_snapshot(").expect("the assembly");
     let body = &src[start..];
     let body = &body[..body.find("\n}\n").expect("the end of the assembly")];
     let collect = body.find("collect_bindings_for_save(").expect("the assembly collects the bindings");

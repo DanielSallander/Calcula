@@ -92,6 +92,16 @@ export interface ResolvedFieldFilter {
   level: number;
   /** The source's name, for badges and console notes. */
   from: string;
+  /**
+   * True when the filter came from a WORKBOOK-WIDE publication: a published
+   * filter whose scope kind is "all" (a ribbon filter in workbook mode). Such
+   * a filter reaches every page, a page added later included, and re-applies
+   * there live -- which is why a drill-through's CHART leaves it out of its
+   * bake. False for a page / pages / visuals-scoped filter and for every
+   * cross-filter selection. Set in ONE place, the resolver (`fieldFilterOf`);
+   * never inferred from a source name, which two publishers can share.
+   */
+  workbookWide: boolean;
 }
 
 /** OR-of-AND over `fields` (a non-rectangular selection). Always level 1. */

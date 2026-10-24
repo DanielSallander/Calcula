@@ -114,6 +114,18 @@ FILTERS: dim_date.year, dim_product.category = ("Bikes", "Accessories")
 - `NOT IN (values)`: exclude these values (hide)
 - Multiple filters separated by commas
 - Value lists enclosed in parentheses
+- A second `FILTERS:` line ADDS to the first (it used to replace it). The
+  editor warns about a repeated clause so a stray duplicate is visible.
+- Two `= (...)` lists on the SAME field keep only the members both name (they
+  AND); two `NOT IN (...)` lists hide every member either names.
+- A field whose name has a space, a non-English letter or a dotted table name is
+  written in brackets: `FILTERS: [Geography.Område] = ("Norden")`.
+- A double quote inside a value is doubled: `= ("15"" screen")`. The blank
+  member is `= ("")`.
+- In a chart and in a drill-through the values are matched as member KEYS: the
+  spelling the model stores (`2024-01-15` for a date, `5.50` for a number with
+  two decimals), which is what the Design tab's field wells write. A grid report
+  also accepts the label.
 
 ### CALC (standalone)
 
@@ -554,3 +566,87 @@ allowed). Change the report through the report itself:
   selection leaves the report, like the pivot Analyze tab.
 - *Edit Design Query…* re-runs the query and saves the new DSL/name as **one
   undo step** together with the re-materialized cells.
+
+## Using a design query as a drill-through
+
+A chart that reads a model through a design query (including a Card, KPI or
+Gauge) and a data-model PivotTable can carry a **drill-through**: a second
+design query, plus how its result is shown. Right-clicking a bar runs it for
+that bar: the clicked members are added to the query, and the result opens on a
+new sheet.
+
+### Defining one
+
+- **On a chart**: right-click the chart → *Drill-through behavior...* →
+  *Design query*. Write the query in the editor (the same editor, completions
+  and AI assist as the chart's own Design tab), then choose how the result is
+  shown: a **Table** (cells on a worksheet) or a **Chart** of a mark you pick
+  (one chart on a new report page). Give it a name (the result sheet is named
+  after it) and choose whether to **Keep filters**.
+- **On a PivotTable**: right-click inside the pivot → *Drill-through
+  behavior...* → *Design query*, the fourth choice beside Built-in, Custom and
+  Script. A design query wins over the other choice.
+
+### Running it
+
+- **On a chart**: right-click a bar, slice, point or legend entry →
+  **Drill through: *member***. The row names the member it acts on.
+- **On a PivotTable**: right-click a value cell → **Drill through** (it replaces
+  *Show Details* when the pivot has a design-query drill), or double-click the
+  value cell.
+
+### What the click adds
+
+The clicked members are added to the query as ONE `FILTERS:` line on their
+member keys, written in brackets, for example:
+
+```
+ROWS: Geography.Region
+VALUES: [Revenue]
+FILTERS: [Product.Category] = ("Gadgets")
+```
+
+The added line ANDs with the definition's own `FILTERS:`. A Card, KPI or Gauge
+names no member, so its drill carries the page's filters only. A transformed or
+composed chart's points name no member: the *Drill through* row is shown
+disabled and says why, rather than drilling unfiltered.
+
+**Keep filters** (on by default, as Power BI's *Keep all filters*) adds the
+page's slicers and cross-filter selections that reach the visual. A
+PivotTable's OWN filters (its header filters, filter area and pinned filters)
+are always carried, whatever Keep filters says. For a **Chart** result, a
+filter that a workbook-wide ribbon filter supplies is left out of the added
+line: it already applies live to the new page, and a copy would intersect with
+it once you change the ribbon filter.
+
+### The result sheet is temporary
+
+The new sheet's tab name is shown in italics: it is **temporary** and closes
+when you leave it. To keep it, **double-click its tab** (or choose *Keep Sheet*
+from its tab menu); it then stays as an ordinary sheet.
+
+- A **Table** result is static cells: a bold title row with the drill's name, a
+  *Filtered to:* line naming the members (by label), then the result.
+- A **Chart** result is one chart on a new report page. Its Design tab shows the
+  query with the added `FILTERS:` line.
+
+### In a published application
+
+The definition travels with its chart or PivotTable. A subscriber can run it,
+and can read it through *View drill-through...* (on a chart) or *View
+drill-through behavior...* (on a PivotTable), but cannot change it.
+
+### Limits
+
+- A selection that spans several fields and is not a rectangle (Ctrl+click on
+  datums of two series) cannot be written as one `FILTERS:` line: it is not
+  carried, and you are told so.
+- A pinned filter (a ribbon filter or slicer pinned above level 1) runs at the
+  ordinary slicer level inside the drill.
+- Adding the result sheet and closing it each end the undo history, as adding
+  or deleting any sheet does, and mark the workbook as changed, so closing it
+  asks to save even after a look-only drill.
+- A temporary sheet that still exists when you SAVE is saved as an ordinary
+  sheet: it is temporary only for the rest of this session, and the reopened
+  workbook shows it as a normal sheet.
+- Protect Workbook Structure stops a drill-through, because it adds a sheet.

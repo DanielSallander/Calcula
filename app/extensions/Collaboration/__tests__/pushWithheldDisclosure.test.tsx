@@ -162,7 +162,8 @@ describe("the Publish dialog shows the withheld list before the push", () => {
     // The open-time preview is the one called with an EMPTY selection.
     const effect = DIALOG.indexOf("const result = await publishPreview(\n          [],");
     expect(effect, "the open-time preview moved").toBeGreaterThan(-1);
-    const end = DIALOG.indexOf("}, [mode, registryPath, packageName]);", effect);
+    // The loader re-runs on every show too (`openCount`, review round 9 F2).
+    const end = DIALOG.indexOf("}, [mode, registryPath, packageName, openCount]);", effect);
     expect(end, "the open-time preview effect's dependency list moved").toBeGreaterThan(effect);
     expect(DIALOG.slice(effect, end)).toContain("setWithheld(result.report.withheld ?? []);");
   });

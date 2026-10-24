@@ -1084,7 +1084,7 @@
       ],
       "intent": "2025 net value by family, but don't count Public Sector accounts",
       "reference": "ROWS: Item.Family\nVALUES: [NetValue]\nFILTERS: Date.Year = (\"2025\"), Account.Tier NOT IN (\"Public Sector\")",
-      "distractor": "ROWS: Item.Family\nVALUES: [NetValue]\nFILTERS: Date.Year = (\"2025\")\nFILTERS: Account.Tier NOT IN (\"Public Sector\")",
+      "distractor": "ROWS: Item.Family\nVALUES: [NetValue]\nFILTERS: Date.Year = (\"2025\"), Account.Tier = (\"Public Sector\")",
       "alternatives": [
         "ROWS: Item.Family\nVALUES: [NetValue]\nFILTERS: Account.Tier NOT IN (\"Public Sector\"), Date.Year = (\"2025\")"
       ]

@@ -11,7 +11,14 @@
 //          - a cell whose value field cannot be named greys every value item
 //            with a reason; Sort by value is greyed with its reason (BUG-0459);
 //          - each item calls the one action it names, with the cell's value
-//            field; a failure toasts "<Label> failed: <reason>".
+//            field; a failure toasts "<Label> failed: <reason>";
+//          - the drill-through doors (model-drillthrough.md 2.9): the run row
+//            reads "Drill through" when the pivot's cached REGION says its
+//            behaviour has a design query, else "Show Details" -- also when it
+//            is not known (the real region-first answer is pinned in
+//            hasDesignQueryDrill.test.ts); the authoring row reads "View
+//            drill-through behavior..." on a subscribed worksheet / a
+//            non-editable canvas page and opens the dialog read-only.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { GridMenuContext, GridContextMenuItem } from "@api";
@@ -21,6 +28,14 @@ const h = vi.hoisted(() => ({
   regions: [] as Array<Record<string, unknown>>,
   surface: "grid" as string,
   commands: new Set<string>(),
+  /** pivotId -> the region's "has a design-query drill" answer (undefined = not known). */
+  drill: new Map<string, boolean | undefined>(),
+  /** sheet index -> sheet id (the report-pages snapshot). */
+  sheetIds: {} as Record<number, string>,
+  /** The subscribed sheet ids (@api/collaboration). */
+  subscribed: new Set<string>(),
+  /** The canvas layout surface's `editable`; null = no surface. */
+  surfaceEditable: null as boolean | null,
 }));
 
 vi.mock("@api", () => ({
@@ -37,6 +52,12 @@ vi.mock("@api", () => ({
   markTaskPaneManuallyClosed: vi.fn(),
   clearTaskPaneManuallyClosed: vi.fn(),
   getTaskPaneManuallyClosed: () => [],
+  getReportPagesSnapshot: () => ({}),
+  sheetIdAt: (_snapshot: unknown, index: number) => h.sheetIds[index] ?? null,
+  isSheetSubscribed: (sheetId: string) => h.subscribed.has(sheetId),
+}));
+vi.mock("@api/layoutSurface", () => ({
+  getLayoutSurface: () => (h.surfaceEditable === null ? null : { editable: h.surfaceEditable }),
 }));
 vi.mock("@api/events", () => ({ emitAppEvent: vi.fn() }));
 vi.mock("@api/dialogs", () => ({ confirmAsync: vi.fn(), promptAsync: vi.fn() }));
@@ -67,13 +88,14 @@ vi.mock("../selectionHandler", () => {
     findPivotRegionAtCell: find,
     isModelPivot: (pivotId: string) =>
       h.regions.find((r) => r.pivotId === pivotId)?.isModel as boolean | undefined,
+    hasDesignQueryDrill: (pivotId: string) => h.drill.get(pivotId),
   };
 });
 vi.mock("../../lib/pivotCellDoubleClick", () => ({ runPivotDrillThrough: vi.fn() }));
 vi.mock("../../lib/valueFieldEdits", () => ({ editPivotValueField: vi.fn(() => Promise.resolve()) }));
 vi.mock("../../lib/valueFieldDialogRequest", () => ({ requestValueFieldDialog: vi.fn(() => Promise.resolve()) }));
 
-import { showToast } from "@api";
+import { showDialog, showToast } from "@api";
 import { CommandRegistry } from "@api/commands";
 import type { PivotCellData, PivotRowData, PivotViewResponse } from "../../lib/pivot-api";
 import { cachePivotView, deleteCachedPivotView } from "../../lib/pivotViewStore";
@@ -133,6 +155,7 @@ function install(isModel: boolean | undefined): void {
   h.regions = [
     {
       pivotId: "p1",
+      name: "PivotTable1",
       startRow: ANCHOR.row,
       startCol: ANCHOR.col,
       endRow: ANCHOR.row + 2,
@@ -190,6 +213,10 @@ beforeEach(() => {
   h.regions = [];
   h.surface = "grid";
   h.commands = new Set();
+  h.drill = new Map();
+  h.sheetIds = {};
+  h.subscribed = new Set();
+  h.surfaceEditable = null;
   registerPivotContextMenuItems();
 });
 
@@ -331,8 +358,11 @@ describe("actions", () => {
     install(false);
     await findItem("pivot:showDetails").onClick(ctxAt(1, 2));
     expect(runPivotDrillThrough).toHaveBeenCalledTimes(1);
-    const [pivotId, drilled, gridRow, gridCol] = vi.mocked(runPivotDrillThrough).mock.calls[0];
+    const [pivotId, drilled, gridRow, gridCol, options] = vi.mocked(runPivotDrillThrough).mock.calls[0];
     expect([pivotId, drilled.value, gridRow, gridCol]).toEqual(["p1", 7, ANCHOR.row + 1, ANCHOR.col + 2]);
+    // The pivot's sheet and name ride along: the drill's source for the page
+    // filters and the sheet-name fallback (model-drillthrough.md 2.4 / 2.5).
+    expect(options).toEqual({ sheetIndex: 0, name: "PivotTable1" });
   });
 
   it("Copy runs the canvas cell copy command; without it the row is greyed and a click says why", async () => {
@@ -369,5 +399,71 @@ describe("actions", () => {
     expect(editPivotValueField).not.toHaveBeenCalled();
     expect(showToast).toHaveBeenCalledWith(`Remove value field failed: ${VALUE_FIELD_UNKNOWN_REASON}`, { variant: "error" });
     error.mockRestore();
+  });
+});
+
+describe("drill-through doors (model-drillthrough.md 2.9)", () => {
+  it("the run row reads 'Drill through' when the pivot's region says it has a design query, else 'Show Details'", () => {
+    install(true);
+    const ctx = ctxAt(1, 1);
+    const item = findItem("pivot:showDetails");
+    h.drill.set("p1", true);
+    expect(label(item, ctx)).toBe("Drill through");
+    h.drill.set("p1", false);
+    expect(label(item, ctx)).toBe("Show Details");
+  });
+
+  it("an UNKNOWN answer reads 'Show Details' (stale mislabels, never misroutes); off every pivot it does too", () => {
+    // SABOTAGE: return "Drill through" for an unknown behaviour -- a range
+    // pivot's value cell would promise a drill it does not have.
+    install(true);
+    expect(label(findItem("pivot:showDetails"), ctxAt(1, 1))).toBe("Show Details");
+    expect(label(findItem("pivot:showDetails"), ctxAt(-5, -5))).toBe("Show Details");
+  });
+
+  it("whatever the label, the row runs the ONE drill with the clicked cell, the pivot's sheet and its name", async () => {
+    install(true);
+    h.drill.set("p1", true);
+    await findItem("pivot:showDetails").onClick(ctxAt(1, 1));
+    expect(runPivotDrillThrough).toHaveBeenCalledWith(
+      "p1",
+      expect.objectContaining({ value: 100 }),
+      ANCHOR.row + 1,
+      ANCHOR.col + 1,
+      { sheetIndex: 0, name: "PivotTable1" },
+    );
+  });
+
+  it("the authoring row reads 'Drill-through behavior...' on the user's own worksheet and opens the dialog editable", async () => {
+    install(true);
+    h.sheetIds[0] = "S-own";
+    const item = findItem("pivot:drillBehavior");
+    expect(label(item, ctxAt(1, 1))).toBe("Drill-through behavior...");
+    await item.onClick(ctxAt(1, 1));
+    expect(showDialog).toHaveBeenCalledWith("d", { pivotId: "p1", readOnly: false });
+  });
+
+  it("on a SUBSCRIBED worksheet it reads 'View drill-through behavior...' and opens the same dialog read-only", async () => {
+    // SABOTAGE: drop the isSheetSubscribed branch -- a subscriber gets an
+    // editable dialog on a publisher's definition.
+    install(true);
+    h.sheetIds[0] = "S-sub";
+    h.subscribed.add("S-sub");
+    const item = findItem("pivot:drillBehavior");
+    expect(label(item, ctxAt(1, 1))).toBe("View drill-through behavior...");
+    await item.onClick(ctxAt(1, 1));
+    expect(showDialog).toHaveBeenCalledWith("d", { pivotId: "p1", readOnly: true });
+  });
+
+  it("on a canvas the layout surface decides: a non-editable page is view-only, an editable page (or none known) is not", () => {
+    install(true);
+    h.surface = "canvas";
+    const item = findItem("pivot:drillBehavior");
+    h.surfaceEditable = false;
+    expect(label(item, ctxAt(1, 1))).toBe("View drill-through behavior...");
+    h.surfaceEditable = true;
+    expect(label(item, ctxAt(1, 1))).toBe("Drill-through behavior...");
+    h.surfaceEditable = null;
+    expect(label(item, ctxAt(1, 1))).toBe("Drill-through behavior...");
   });
 });

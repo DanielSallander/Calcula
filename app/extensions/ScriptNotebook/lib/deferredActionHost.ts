@@ -71,9 +71,13 @@ export const liveDeferredActionHost: DeferredActionHost = {
     // Mirrors the Shell's own sheet-switch sequence: swap in the backend, sync
     // Core state, then let SheetTabs/Spreadsheet re-read dimensions and cells.
     const result = await setActiveSheetBackend(sheetIndex);
-    const active = result.sheets[result.activeIndex];
+    // By the index FIELD, never list position (object-backed sheets are absent
+    // from the list while indices stay true): the name and the STABLE id the
+    // context carries must be the active sheet's own -- an open edit follows
+    // its sheet by that id.
+    const active = result.sheets.find((s) => s.index === result.activeIndex);
     const name = active?.name ?? "";
-    dispatchGridAction(setActiveSheetAction(result.activeIndex, name));
+    dispatchGridAction(setActiveSheetAction(result.activeIndex, name, undefined, active?.sheetId));
     window.dispatchEvent(
       new CustomEvent("sheet:normalSwitch", {
         detail: { newSheetIndex: result.activeIndex, newSheetName: name },

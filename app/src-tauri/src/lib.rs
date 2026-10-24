@@ -138,6 +138,7 @@ pub mod slicer;
 pub mod ribbon_filter;
 pub mod pane_control;
 pub mod report;
+pub mod drill_through;
 pub mod control_values;
 pub mod row_visibility;
 pub mod timeline_slicer;
@@ -747,6 +748,30 @@ pub struct AppState {
     /// The missing PERSISTENCE is a real, separate gap (Excel stores ScrollArea per
     /// sheet). Fix that first, then move this to `Persisted<T>` -- not the reverse.
     pub scroll_areas: Mutex<Vec<Option<String>>>,
+    /// The EPHEMERAL sheets: the result sheets of a model visual's drill-through
+    /// (`drill_through.rs`, docs/design/model-drillthrough.md 2.6), which the tab
+    /// strip discards when the user leaves one (`sheets::discard_ephemeral_sheet`)
+    /// and keeps on a double-click of its tab (`sheets::keep_ephemeral_sheet`) --
+    /// both BY ID, never by an index read earlier. An id enters only through
+    /// `sheets::append_user_sheet` handed an `EphemeralUserSheet`, inside the
+    /// add's own critical section. Keyed by the STABLE `SheetId`, so
+    /// move / copy / rename / the user-object partition rotation need no
+    /// maintenance (`sheet_ids` is kept at every structural op; a copy mints a
+    /// FRESH id, so Copy makes a permanent sheet and Move keeps the flag).
+    /// `delete_sheet_impl` removes the id (hygiene); `reset_document_scoped_stores`
+    /// clears the set (the ids are this document's).
+    ///
+    /// SESSION-ONLY, and deliberately a plain `Mutex` like `scroll_areas` above:
+    /// `assemble_workbook_for_save` never reads it and nothing serializes it, so a
+    /// sheet present at save is written as an ORDINARY sheet and reopens as one.
+    /// `keep_ephemeral_sheet` therefore takes no `FileState` and must NOT dirty --
+    /// a flag no save reads.
+    ///
+    /// LOCK ORDER: a LEAF. Take it alone or last, never while acquiring `grid`,
+    /// `grids`, `sheet_names` or `sheet_ids`, and never hold it across a call
+    /// (`build_sheet_list`'s callers read it through `sheets::ephemeral_sheet_ids`,
+    /// a snapshot taken and released in one statement).
+    pub ephemeral_sheets: Mutex<HashSet<identity::SheetId>>,
     /// Reference style: "A1" (default) or "R1C1"
     pub reference_style: Mutex<String>,
     /// Saved pivot layout configurations (persisted in .cala)
@@ -774,9 +799,51 @@ pub struct AppState {
     /// typed file-format field — see persistence::Workbook::extension_data.
     pub extension_data: document_effect::Persisted<std::collections::HashMap<String, serde_json::Value>>,
     /// Stable sheet identifiers, one per sheet (parallel to sheet_names / grids)
+    ///
+    /// LOCK ORDER: after `sheet_names`; never hold `sheet_ids` while acquiring
+    /// `sheet_names`. `delete_sheet_impl` holds `sheet_names` (pending, through
+    /// its formula pre-flight) and then takes `sheet_ids`, on the MCP server's
+    /// own thread when an agent deletes a sheet; the async drill-through's
+    /// `append_user_sheet` does the same off the main thread. Both stores are
+    /// `Persisted`, whose read takes an exclusive Mutex, so the opposite order
+    /// anywhere else is a deadlock with no panic and nothing in the log
+    /// (R4-LOCK-1). Enforced crate-wide by
+    /// `no_function_holds_sheet_ids_while_acquiring_sheet_names` in
+    /// `state_digest_lock_order_tests.rs`.
+    ///
+    /// AND AFTER EVERYTHING A CELL WRITER HOLDS. `calp_commands::record_subscription_override_edits`
+    /// takes `sheet_ids` while the writer (`update_cell_impl`,
+    /// `update_cells_batch_core`, `fill_range`) holds `grid`, `grids`,
+    /// `sheet_names`, `files` and the style, dependency, undo, merge, locale and
+    /// pivot stores -- off the main thread when the AI chat, the MCP server or
+    /// the notebook writes cells. So never hold `sheet_ids` while acquiring one
+    /// of those unless `grid` or `grids` is held too; copy it and release it
+    /// (R5-PREVIEW-SUBS-DEADLOCK). Enforced by
+    /// `no_function_holds_a_store_the_cell_writers_take_late_while_acquiring_one_they_hold`.
+    ///
+    /// A site that PAIRS `sheet_ids[i]` with `sheet_names[i]` reads both under
+    /// ONE hold, names first -- `calp_commands::sheet_ids_and_names`, a block
+    /// holding both guards, or one statement whose `sheet_names` temporary is
+    /// alive when `sheet_ids` is read. Two clone-and-release reads let a delete
+    /// or a move land between them and tear the pair, and since a delete takes
+    /// `sheet_names` first and removes the id late, an ids-then-names reader
+    /// overlapping it gets the old ids beside the new names every time
+    /// (R5-TORN-PAIR-SIBLINGS). Enforced by
+    /// `no_function_reads_sheet_ids_and_sheet_names_in_two_holds`, which still
+    /// tolerates nine named sites in files that round did not own.
     pub sheet_ids: document_effect::Persisted<Vec<identity::SheetId>>,
     /// Subscription metadata for .calp packages linked to this workbook
     /// PERSISTED (user_files/subscriptions.json) -> `Persisted<T>`.
+    ///
+    /// LOCK ORDER: after `grid`, `grids`, `sheet_names` and `sheet_ids`, before
+    /// the override layer -- the order `record_subscription_override_edits` takes
+    /// them in while a cell writer holds the grid locks, `sheet_names` and the
+    /// rest of its set, off the main thread for the AI chat, the MCP server and
+    /// the notebook. So NEVER hold this while acquiring a sheet lock or anything
+    /// else a cell writer holds at that call: copy what you need and release it
+    /// (R5-PREVIEW-SUBS-DEADLOCK -- the refresh preview held it while waiting for
+    /// `sheet_names` and hung the app against an agent's fill). Enforced by
+    /// `no_function_holds_subscriptions_or_the_override_layer_while_acquiring_a_sheet_lock`.
     pub subscriptions: crate::document_effect::Persisted<calp::manifest::SubscriptionManifest>,
     /// The package this workbook is a WORKING COPY of, if any (the author-side
     /// counterpart of `subscriptions`, which records the consumer side).
@@ -787,6 +854,13 @@ pub struct AppState {
     pub working_copy_link: crate::document_effect::Persisted<Option<calp::WorkingCopyLink>>,
     /// Override layer: consumer-side edits to subscribed (.calp) cells
     /// PERSISTED (user_files/overrides.json) -> `Persisted<T>`.
+    ///
+    /// LOCK ORDER: after `subscriptions` (and so after every sheet lock), before
+    /// `id_registry`. Same rule as `subscriptions`, for the same writers: never
+    /// hold it while acquiring a sheet lock, anything a cell writer holds when
+    /// it calls `record_subscription_override_edits`, or `subscriptions`
+    /// (R5-PREVIEW-SUBS-DEADLOCK). Enforced by
+    /// `no_function_holds_subscriptions_or_the_override_layer_while_acquiring_a_sheet_lock`.
     pub override_layer: crate::document_effect::Persisted<calp::OverrideLayer>,
     /// Audit log for subscription events (opt-in, stored in .cala as audit_log.json)
     /// PERSISTED (user_files/audit_log.json) -> `Persisted<T>`. The transparency trail:
@@ -863,6 +937,33 @@ pub struct AppState {
     /// that sets it cannot block on anything the recalc owns. It is an
     /// `Arc<AtomicBool>` internally.
     pub calc_cancel: engine::CancelToken,
+    /// THE SHEET-STRUCTURE GENERATION: bumped every time the sheets are
+    /// RENUMBERED -- a sheet added in front of the object tail, deleted, moved
+    /// or copied, the user/object partition restored, the document replaced --
+    /// so a reader that cannot hold the grid locks across all of its reads can
+    /// tell afterwards whether it read across a renumbering
+    /// (`persistence::SnapshotBasis`, F1 review round 7).
+    ///
+    /// WHO BUMPS IT: `sheets::remap_sheet_keyed_stores` (every in-place
+    /// renumbering re-keys the index-keyed stores through it, inside its own
+    /// `sheet_names` hold), `persistence::open_file` and
+    /// `persistence::reset_document_scoped_stores` (a whole new sheet list),
+    /// all through `persistence::note_sheet_structure_change`. It is never
+    /// reset to an earlier value: a snapshot compares two readings for
+    /// equality, and a counter that went back could make a reading taken
+    /// before a renumbering compare equal to one taken after it.
+    ///
+    /// WHO READS IT: the save, AutoRecover and publish snapshots. The shared
+    /// builder (`persistence::build_workbook_for_save`) reads it under its
+    /// grid hold; the snapshot's tail is not under that hold (the async slicer
+    /// item fetch holds `SlicerState::slicers` while it reads `grids`, so a
+    /// tail that took the slicers under the grid locks would close a cycle),
+    /// and it re-reads the counter at its end under `sheet_names` alone --
+    /// every renumbering holds `sheet_names` for its whole mutation -- and
+    /// takes the snapshot again when it moved.
+    ///
+    /// LOCK-FREE, deliberately: an atomic adds no edge to the lock order.
+    pub sheet_structure_generation: std::sync::atomic::AtomicU64,
     /// Cells a CANCELLED recalculation never reached. `None` = the workbook is
     /// fully calculated. See `eval_budget::PendingRecalc` for why the remainder
     /// is recorded rather than rolled back.
@@ -1012,6 +1113,7 @@ pub fn create_app_state() -> AppState {
         floating_ranges: document_effect::Persisted::new(Vec::new()),
         sparklines: document_effect::Persisted::new(Vec::new()),
         scroll_areas: Mutex::new(vec![None]),
+        ephemeral_sheets: Mutex::new(HashSet::new()),
         reference_style: Mutex::new("A1".to_string()),
         pivot_layouts: document_effect::Persisted::new(Vec::new()),
         object_scripts: document_effect::Persisted::new(Vec::new()),
@@ -1035,13 +1137,17 @@ pub fn create_app_state() -> AppState {
         model_writeback: document_effect::Persisted::new(crate::bi::writeback::ModelWritebackStore::default()),
         model_writeback_floor: Mutex::new(chrono::Utc::now().to_rfc3339()),
         calc_cancel: engine::CancelToken::new(),
+        sheet_structure_generation: std::sync::atomic::AtomicU64::new(0),
         pending_recalc: document_effect::Persisted::new(None),
     };
 
-    // Register the initial sheet in the IdRegistry
+    // Register the initial sheet in the IdRegistry. `sheet_names` before
+    // `sheet_ids`, the crate's one order for the pair (the `sheet_ids` field
+    // doc): nothing else can run yet, so this could not deadlock, but it is
+    // written the one way so the lock-order census needs no exemption.
     {
-        let sheet_ids = app_state.sheet_ids.read().unwrap();
         let sheet_names = app_state.sheet_names.read().unwrap();
+        let sheet_ids = app_state.sheet_ids.read().unwrap();
         let mut id_reg = app_state.id_registry.lock().unwrap();
         for (i, &sid) in sheet_ids.iter().enumerate() {
             if let Some(name) = sheet_names.get(i) {
@@ -5484,6 +5590,8 @@ pub fn run() {
             sheets::previous_sheet,
             sheets::set_scroll_area,
             sheets::get_scroll_area,
+            sheets::keep_ephemeral_sheet,
+            sheets::discard_ephemeral_sheet,
             // Find & Replace commands
             commands::find_all,
             commands::count_matches,
@@ -5539,6 +5647,7 @@ pub fn run() {
             pivot::create_manual_group,
             pivot::ungroup_pivot_field,
             pivot::drill_through_to_sheet,
+            drill_through::drill_through,
             pivot::set_pivot_drill_behavior,
             pivot::set_pivot_perspective,
             pivot::get_pivot_drill_behavior,

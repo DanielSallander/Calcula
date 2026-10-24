@@ -425,6 +425,7 @@ fn a_binding_on_a_deleted_page_is_dormant_and_comes_back_with_the_page() {
 
     crate::sheets::delete_sheet_impl(
         &wb.state, &wb.file, &wb.pivots, &wb.files, &wb.pane, &wb.ribbon, &wb.slicers, &wb.timelines, DETAIL, false,
+        None,
     )
     .expect("delete Detail");
 

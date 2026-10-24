@@ -1,10 +1,14 @@
 //! FILENAME: app/extensions/FloatingRange/__tests__/frSheetChange.test.ts
 // PURPOSE: The floating-range extension's EDIT / SELECTION / SHEET-CHANGE
 //          wiring (index.ts), activated for real against a stub context:
-//          - a GENUINE sheet switch commits an open edit at once (never a
-//            cancel: a plain value left by a tab click is Excel's commit),
-//            while a detail-less structural SHEET_CHANGED on the same sheet
-//            touches nothing;
+//          - a GENUINE sheet switch commits an open edit (never a cancel: a
+//            plain value left by a tab click is Excel's commit) -- at once
+//            through sheet:beforeSwitch, and, for a switch announced by
+//            SHEET_CHANGED alone, once the rows are re-read and the active
+//            sheet is found not to be the range's host BY IDENTITY (review
+//            FR-RESYNC-COMMITS-ON-RENUMBER; renumberings are
+//            frRenumberUnderEdit.test.ts) -- while a detail-less structural
+//            SHEET_CHANGED on the same sheet touches nothing;
 //          - PARKED (a formula picking a reference on another sheet): the
 //            backend's active sheet is the viewed one BY DESIGN, so neither a
 //            structural SHEET_CHANGED nor a backend reload may re-filter the
@@ -61,6 +65,24 @@ const h = vi.hoisted(() => ({
   gridState: null as null | { surface?: string },
   /** The listeners the extension gave Core's after-press announcement. */
   pressListeners: new Set<(press: GridCellPress) => void>(),
+  /**
+   * The backend's sheet list WITH stable ids (the host canvas carries the
+   * range's `hostSheetId`, "host"): what get_sheets / set_active_sheet answer
+   * and what the extension's re-sync decides by (review
+   * FR-RESYNC-COMMITS-ON-RENUMBER).
+   */
+  sheetList(): {
+    sheets: Array<{ index: number; name: string; kind: string; sheetId: string; visibility: "visible" }>;
+    activeIndex: number;
+  } {
+    return {
+      sheets: [
+        { index: 0, name: "Sheet1", kind: "worksheet", sheetId: "sheet-1", visibility: "visible" },
+        { index: 2, name: "Canvas1", kind: "canvas", sheetId: "host", visibility: "visible" },
+      ],
+      activeIndex: this.backendActive,
+    };
+  },
 }));
 
 // Core's AFTER-press announcement: its `notifyGridCellPressed` is Core-only (an
@@ -124,6 +146,7 @@ vi.mock("@api/lib", () => ({
     }
     return h.backendActive;
   }),
+  getSheets: vi.fn(async () => h.sheetList()),
   getUsedRange: vi.fn(async () => ({ startRow: 0, startCol: 0, endRow: 0, endCol: 0, empty: true })),
 }));
 
@@ -164,19 +187,11 @@ vi.mock("../lib/frCanvasGeometry", async (importOriginal) => {
   };
 });
 
-// The point-mode switch reaches the backend's `set_active_sheet`.
+// The point-mode switch reaches the backend's `set_active_sheet`, and the
+// return to the host its `get_sheets` (the host found by its stable id).
 const tauri = vi.hoisted(() => ({
-  invoke: vi.fn(async (cmd: string, args?: Record<string, unknown>): Promise<unknown> => {
-    if (cmd === "set_active_sheet") {
-      const index = args?.index as number;
-      return {
-        sheets: [
-          { index: 0, name: "Sheet1", kind: "worksheet" },
-          { index: 2, name: "Canvas1", kind: "canvas" },
-        ],
-        activeIndex: index,
-      };
-    }
+  invoke: vi.fn(async (cmd: string, _args?: Record<string, unknown>): Promise<unknown> => {
+    if (cmd === "set_active_sheet" || cmd === "get_sheets") return h.sheetList();
     return null;
   }),
 }));
@@ -318,15 +333,21 @@ describe("activation", () => {
   });
 });
 
-describe("SHEET_CHANGED keeps the 'did the sheet change' condition", () => {
-  it("(a) a GENUINE switch commits a plain value synchronously -- never a cancel", () => {
+describe("SHEET_CHANGED keeps the 'did the sheet change' condition -- by IDENTITY", () => {
+  // Review FR-RESYNC-COMMITS-ON-RENUMBER: a SHEET_CHANGED's index is no proof
+  // of a switch (a renumbering carries a new index for the SAME sheet), so the
+  // commit waits for the re-read rows and the active sheet's stable id. A UI
+  // switch commits at once through sheet:beforeSwitch, test (h).
+  it("(a) a GENUINE switch announced by SHEET_CHANGED alone (a script's activateSheet) COMMITS the plain value -- never a cancel", async () => {
     openFrEditor(FR_ID, 0, 0, null);
     typeInto("7");
     h.backendActive = 0;
     emitAppEvent(AppEvents.SHEET_CHANGED, { sheetIndex: 0, sheetName: "Sheet1" });
-    // Before any await: the commit is deterministic, not a race.
+    await flush();
+    expect(updateFloatingRangeCell).toHaveBeenCalledTimes(1);
     expect(updateFloatingRangeCell).toHaveBeenCalledWith(FR_ID, 0, 0, "7");
     expect(isFrEditorOpen()).toBe(false);
+    expect(getFrActiveSheetIndex()).toBe(0);
   });
 
   it("(b) a detail-less structural SHEET_CHANGED on the SAME sheet commits nothing", async () => {

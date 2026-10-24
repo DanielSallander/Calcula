@@ -32,6 +32,13 @@ export type {
   ExternalFormulaReference,
 } from "../core/lib/formulaEditTarget";
 
+// WHICH sheet an open cell edit belongs to, by IDENTITY -- its stable id, else
+// its name, else its index (core/lib/editSheetIdentity.ts). The tab strip marks
+// the edit's source tab with it: the index the edit stored is only the last one
+// known, and a renumbering while the grid shows another sheet (point mode)
+// leaves it naming whichever sheet slid into it.
+export { findEditSheet } from "../core/lib/editSheetIdentity";
+
 // THE one "is a formula picking a reference right now?" predicate (D-PICK):
 // the grid's own editor in formula mode, or an external editor expecting a
 // reference. Core's floating-object press reads the same binding; a family

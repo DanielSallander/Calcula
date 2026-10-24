@@ -19,6 +19,7 @@ import {
   refreshSubscribedSheets,
   resetSubscribedSheets,
   hasSubscribedSheets,
+  subscribedSheetsProvider,
 } from "../lib/subscribedSheets";
 
 const ROW = {
@@ -201,5 +202,19 @@ describe("working-copy sheets carry a DIFFERENT mark", () => {
     expect(await refreshSubscribedSheets()).toBe(true);
     getSheetProvenance.mockResolvedValue([{ ...WORKING_COPY_ROW, role: "subscribed" }]);
     expect(await refreshSubscribedSheets()).toBe(true);
+  });
+
+  it("publishes the SUBSCRIBED-only answer for @api/collaboration isSheetSubscribed over this cache", async () => {
+    // The drill-through authoring rows (Charts, Pivot) read this on a worksheet
+    // to go read-only. A working-copy sheet is the author's own: NOT subscribed.
+    // SABOTAGE: answer `provenanceForSheetId(id) !== null` -- a developer loses
+    // the authoring row on every sheet of their own application.
+    getSheetProvenance.mockResolvedValue([ROW, WORKING_COPY_ROW]);
+    await refreshSubscribedSheets();
+    expect(subscribedSheetsProvider.isSubscribed("LOCAL-1")).toBe(true);
+    expect(subscribedSheetsProvider.isSubscribed("APP-SHEET-1")).toBe(false);
+    expect(subscribedSheetsProvider.isSubscribed("NOT-A-SHEET")).toBe(false);
+    resetSubscribedSheets();
+    expect(subscribedSheetsProvider.isSubscribed("LOCAL-1")).toBe(false);
   });
 });

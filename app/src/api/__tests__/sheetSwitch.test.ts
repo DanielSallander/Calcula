@@ -19,6 +19,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const h = vi.hoisted(() => ({
   calls: [] as string[],
+  /** Every argument list the backend wrapper received. */
+  backendArgs: [] as unknown[][],
   releaseBackend: (() => {}) as () => void,
   backendResult: {
     activeIndex: 2,
@@ -31,7 +33,9 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock("../../core/lib/tauri-api", () => ({
-  setActiveSheet: (index: number) => {
+  setActiveSheet: (...args: unknown[]) => {
+    const index = args[0] as number;
+    h.backendArgs.push(args);
     h.calls.push(`backend:${index}`);
     return new Promise((resolve) => {
       h.releaseBackend = () => {
@@ -68,6 +72,7 @@ const onNormal = (e: Event) => h.calls.push(`normal:${JSON.stringify((e as Custo
 
 beforeEach(() => {
   h.calls.length = 0;
+  h.backendArgs.length = 0;
   h.backendResult.activeIndex = 2;
   window.addEventListener("sheet:beforeSwitch", onBefore);
   window.addEventListener("sheet:normalSwitch", onNormal);
@@ -114,6 +119,32 @@ describe("activateSheet", () => {
     expect(h.calls.find((c) => c.startsWith("emit:"))).toContain('"sheetIndex":2');
   });
 
+  it("the default call reaches the wrapper with ONE argument -- what it always sent", async () => {
+    const pending = activateSheet(2);
+    h.releaseBackend();
+    await pending;
+    expect(h.backendArgs).toEqual([[2]]);
+  });
+
+  // docs/design/model-drillthrough.md 2.7: the wrapper is where the macro
+  // recorder is told about an activateSheet step, and a drill's landing on
+  // its temporary sheet is not a step of the user's macro.
+  it("`{ record: false }` is threaded to the wrapper, and the switch itself is unchanged", async () => {
+    const pending = activateSheet(2, { record: false });
+    h.releaseBackend();
+    await pending;
+    expect(h.backendArgs).toEqual([[2, { record: false }]]);
+    expect(h.calls.map((c) => c.split(":")[0])).toEqual([
+      "before",
+      "backend",
+      "backend",
+      "prime",
+      "dispatch",
+      "normal",
+      "emit",
+    ]);
+  });
+
   it("follows the backend's answer, not the request, when they differ", async () => {
     h.backendResult.activeIndex = 1;
     const pending = activateSheet(2);
@@ -124,5 +155,21 @@ describe("activateSheet", () => {
     expect(dispatch).toContain('"name":"Sheet2"');
     expect(dispatch).toContain('"surface":"grid"');
     expect(h.calls).toContain("prime:1");
+  });
+
+  // Review F1-rename-refuses-entry (round 5): the switch hands Core the sheet's
+  // STABLE id -- an open edit follows its sheet by it, through a rename too.
+  it("gives Core the sheet's stable id when the backend reports one", async () => {
+    const original = h.backendResult.sheets;
+    h.backendResult.sheets = original.map((s) => ({ ...s, sheetId: `id-${s.name}` }));
+    try {
+      const pending = activateSheet(2);
+      h.releaseBackend();
+      await pending;
+      const dispatch = h.calls.find((c) => c.startsWith("dispatch:"))!;
+      expect(dispatch, "the switch dropped the sheet's id").toContain('"sheetId":"id-Canvas1"');
+    } finally {
+      h.backendResult.sheets = original;
+    }
   });
 });

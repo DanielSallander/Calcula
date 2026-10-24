@@ -1209,7 +1209,7 @@ pub(crate) fn format_sheet_inventory(result: &crate::sheets::SheetsResult) -> St
     let mut out = String::new();
     for s in &result.sheets {
         out.push_str(&format!(
-            "- index={} name=\"{}\" kind={} visibility={}{}{}\n",
+            "- index={} name=\"{}\" kind={} visibility={}{}{}{}\n",
             s.index,
             s.name,
             s.kind,
@@ -1220,10 +1220,20 @@ pub(crate) fn format_sheet_inventory(result: &crate::sheets::SheetsResult) -> St
             } else {
                 format!(" tabColor={}", s.tab_color)
             },
+            // An EPHEMERAL sheet is deleted without a prompt when the user
+            // leaves it: an agent that cannot see this writes lasting work
+            // onto a sheet that is about to disappear.
+            if s.ephemeral { TEMPORARY_SHEET_MARKER } else { "" },
         ));
     }
     out
 }
+
+/// What the sheet inventory appends to a row whose sheet is EPHEMERAL (a
+/// drill-through result the user has not kept; `SheetInfo::ephemeral`).
+/// The `list_sheets` tool description names it, so an agent knows it may
+/// appear and what it means.
+pub(crate) const TEMPORARY_SHEET_MARKER: &str = " (temporary: a drill-through result, deleted without a prompt when the user leaves it unless they keep it by double-clicking its tab)";
 
 /// List the workbook's sheets with their 0-based indices — the indices every
 /// other sheet tool takes. Read-only.
@@ -1340,29 +1350,74 @@ pub fn rename_sheet(handle: &AppHandle, index: usize, new_name: &str) -> Result<
     ))
 }
 
+/// What the agent is told when the sheets changed between this tool reading
+/// the sheet at `index` and the delete taking its locks
+/// (`sheets::SHEETS_CHANGED_UNDER_THE_DELETE`): nothing was deleted, and the
+/// indices it holds are stale.
+pub(crate) const DELETE_SHEET_RETRY_AFTER_LIST_SHEETS: &str = "The sheets changed while that sheet was \
+     being deleted, so nothing was deleted. Call list_sheets to see the current indices, then retry.";
+
+/// The `delete_sheet` tool's body over a plain reference, with the delete
+/// handed in: the tool passes the `delete_sheet` COMMAND, a test passes
+/// `delete_sheet_impl` (a `State<T>` has no constructor in a test).
+///
+/// The NAME and the STABLE ID of the sheet at `index` are read under ONE
+/// `sheet_names` guard -- `sheet_ids` taken inside it, the order
+/// `delete_sheet_impl` takes them in -- and `delete` gets the id, which the
+/// delete re-checks under its own locks (review RA-1). This tool runs on the
+/// MCP server's own thread, so the main thread can renumber the sheets after
+/// the name is read; a delete by index alone then removed ANOTHER sheet while
+/// the audit row and the reply named this one. Now it is refused, and the
+/// refusal reaches the agent as an instruction to list the sheets again.
+/// Returns the name of the sheet that was deleted, with the delete's answer.
+pub(crate) fn delete_sheet_at_with(
+    state: &AppState,
+    index: usize,
+    delete: impl FnOnce(usize, identity::SheetId) -> Result<crate::sheets::SheetsResult, String>,
+) -> Result<(String, crate::sheets::SheetsResult), String> {
+    let out_of_range = || format!("Sheet index {} out of range. Use list_sheets.", index);
+    let (name, sheet_id) = {
+        let names = state.sheet_names.read().map_err(|e| e.to_string())?;
+        let name = names.get(index).cloned().ok_or_else(out_of_range)?;
+        let sheet_id = state
+            .sheet_ids
+            .read()
+            .map_err(|e| e.to_string())?
+            .get(index)
+            .copied()
+            .ok_or_else(out_of_range)?;
+        (name, sheet_id)
+    };
+    let result = delete(index, sheet_id).map_err(|refusal| {
+        if refusal == crate::sheets::SHEETS_CHANGED_UNDER_THE_DELETE {
+            DELETE_SHEET_RETRY_AFTER_LIST_SHEETS.to_string()
+        } else {
+            refusal
+        }
+    })?;
+    Ok((name, result))
+}
+
 /// Delete a sheet by 0-based index.
 pub fn delete_sheet(handle: &AppHandle, index: usize) -> Result<String, String> {
     require_tier(handle, "delete_sheet")?;
-    let name = {
-        let state = handle.state::<AppState>();
-        let names = state.sheet_names.read().map_err(|e| e.to_string())?;
-        names
-            .get(index)
-            .cloned()
-            .ok_or_else(|| format!("Sheet index {} out of range. Use list_sheets.", index))?
-    };
-    let result = crate::sheets::delete_sheet(
-        handle.clone(),
-        handle.state::<AppState>(),
-        handle.state::<crate::persistence::FileState>(),
-        handle.state::<crate::pivot::PivotState>(),
-        handle.state::<crate::persistence::UserFilesState>(),
-        handle.state::<crate::pane_control::PaneControlState>(),
-        handle.state::<crate::ribbon_filter::RibbonFilterState>(),
-        handle.state::<crate::slicer::SlicerState>(),
-        handle.state::<crate::timeline_slicer::TimelineSlicerState>(),
-        index,
-    )?;
+    // A refusal returns HERE, before the audit row below: a delete that did
+    // not happen is never recorded as one.
+    let (name, result) = delete_sheet_at_with(&handle.state::<AppState>(), index, |index, sheet_id| {
+        crate::sheets::delete_sheet(
+            handle.clone(),
+            handle.state::<AppState>(),
+            handle.state::<crate::persistence::FileState>(),
+            handle.state::<crate::pivot::PivotState>(),
+            handle.state::<crate::persistence::UserFilesState>(),
+            handle.state::<crate::pane_control::PaneControlState>(),
+            handle.state::<crate::ribbon_filter::RibbonFilterState>(),
+            handle.state::<crate::slicer::SlicerState>(),
+            handle.state::<crate::timeline_slicer::TimelineSlicerState>(),
+            index,
+            Some(sheet_id.to_string()),
+        )
+    })?;
 
     // BACKEND-INITIATED, SO NOTHING ON THE FRONTEND RETURNS TO ANNOUNCE IT
     // (§3cd). The domain list is derived from DEPENDENCY_MATRIX, so the
@@ -1812,6 +1867,127 @@ mod tests {
         assert_eq!(entry.extra.get("sheet"), Some(&json!(1)));
     }
 
+    // ---- delete_sheet: the id read with the name (review RA-1) ----
+
+    /// The `delete_sheet` COMMAND's body over plain states, minus the slicer
+    /// work and the BI re-query (which need an AppHandle).
+    fn delete_through_the_impl(
+        state: &AppState,
+        file: &crate::persistence::FileState,
+        index: usize,
+        expected: Option<identity::SheetId>,
+    ) -> Result<crate::sheets::SheetsResult, String> {
+        crate::sheets::delete_sheet_impl(
+            state,
+            file,
+            &crate::pivot::types::PivotState::new(),
+            &crate::persistence::UserFilesState::default(),
+            &crate::pane_control::PaneControlState::new(),
+            &crate::ribbon_filter::RibbonFilterState::new(),
+            &crate::slicer::SlicerState::new(),
+            &crate::timeline_slicer::TimelineSlicerState::new(),
+            index,
+            false,
+            expected,
+        )
+    }
+
+    fn sheet_names(state: &AppState) -> Vec<String> {
+        state.sheet_names.read().unwrap().clone()
+    }
+
+    /// The agent asks to delete index 2, "Q3". On the main thread the user
+    /// leaves the drill sheet below it and the strip deletes that sheet, so Q3
+    /// moves to 1 and Q4 to 2 -- after this tool read the name. A delete by
+    /// index alone then removed Q4 while the audit row and the reply said Q3.
+    ///
+    /// SABOTAGE: make `delete_sheet_at_with` pass the delete's refusal through
+    /// unchanged -- the retry-instruction assertion fails (nothing is deleted
+    /// either way: that half is the delete's own id check).
+    #[test]
+    fn delete_sheet_turns_a_renumbering_after_its_name_read_into_a_retry_and_deletes_nothing() {
+        let state = crate::create_app_state();
+        let setup = crate::persistence::FileState::default();
+        for name in ["Drill", "Q3", "Q4"] {
+            crate::sheets::add_sheet_inner(&state, &setup, Some(name.to_string()), ::persistence::SheetKind::Worksheet)
+                .expect("add");
+        }
+        assert_eq!(sheet_names(&state), vec!["Sheet1", "Drill", "Q3", "Q4"]);
+        let clean = crate::persistence::FileState::default();
+
+        let err = delete_sheet_at_with(&state, 2, |index, id| {
+            delete_through_the_impl(&state, &setup, 1, None).expect("the main thread's delete of the drill sheet");
+            assert_eq!(sheet_names(&state)[index], "Q4", "fixture: the index the tool read now names Q4");
+            delete_through_the_impl(&state, &clean, index, Some(id))
+        })
+        .unwrap_err();
+        assert_eq!(sheet_names(&state), vec!["Sheet1", "Q3", "Q4"], "Q4 survives: nothing was deleted");
+        assert_eq!(err, DELETE_SHEET_RETRY_AFTER_LIST_SHEETS, "the agent is told to list the sheets again");
+        assert!(err.contains("list_sheets") && err.contains("nothing was deleted"), "{err}");
+        assert!(!clean.is_dirty(), "the refusal leaves the document clean");
+
+        // POSITIVE CONTROL: with nothing in the window, the sheet the tool
+        // named is the sheet deleted, and the name it answers is that sheet's.
+        let (name, result) = delete_sheet_at_with(&state, 1, |index, id| delete_through_the_impl(&state, &clean, index, Some(id)))
+            .expect("delete Q3");
+        assert_eq!(name, "Q3");
+        assert_eq!(sheet_names(&state), vec!["Sheet1", "Q4"]);
+        assert_eq!(result.sheets.len(), 2);
+
+        // Any other refusal reaches the agent as it is, and an index that names
+        // no sheet never reaches the delete.
+        let other = delete_sheet_at_with(&state, 1, |_, _| Err("Cannot delete the last visible sheet".to_string())).unwrap_err();
+        assert_eq!(other, "Cannot delete the last visible sheet");
+        let err = delete_sheet_at_with(&state, 9, |_, _| panic!("the delete ran for an index that names no sheet")).unwrap_err();
+        assert!(err.contains("out of range") && err.contains("list_sheets"), "{err}");
+    }
+
+    /// The comment-stripped code of the top-level `fn` in this file that starts
+    /// at `signature`, to its closing brace at column 0.
+    fn objects_fn_code(signature: &str) -> String {
+        let src = include_str!("objects.rs");
+        let at = src.find(signature).unwrap_or_else(|| panic!("{signature} not found in mcp/objects.rs"));
+        let rest = &src[at..];
+        let end = rest.find("\n}\n").map_or(rest.len(), |e| e + 3);
+        crate::object_deps_census_tests::strip_comments(&rest[..end])
+    }
+
+    /// The tool itself needs an AppHandle, so its WIRING is pinned from the
+    /// source: its name, id and answer come from `delete_sheet_at_with` (which
+    /// the test above drives), the COMMAND gets the id, the one audit row comes
+    /// after the helper's `?` -- a refused delete is never recorded as one --
+    /// and the helper reads the id inside the `sheet_names` guard, after it
+    /// (the order `delete_sheet_impl` takes the two in).
+    ///
+    /// SABOTAGE: (a) pass `None` to the command instead of the id -- the
+    /// id assertion fails; (b) read `sheet_ids` before `sheet_names` in the
+    /// helper -- the lock-order assertion fails.
+    #[test]
+    fn the_delete_sheet_tool_hands_the_command_the_id_and_audits_only_a_delete_that_happened() {
+        let tool = objects_fn_code("pub fn delete_sheet(handle: &AppHandle");
+        let helper = tool
+            .find("let (name, result) = delete_sheet_at_with(")
+            .expect("the tool no longer takes the name and the delete's answer from delete_sheet_at_with");
+        let command = tool.find("crate::sheets::delete_sheet(").expect("the tool no longer runs the delete_sheet COMMAND");
+        let unwrapped = tool[helper..].find("})?;").map(|at| helper + at).expect("the helper's answer is no longer unwrapped with `?`");
+        assert!(helper < command && command < unwrapped, "the command must run inside the helper's delete");
+        assert!(
+            tool[command..unwrapped].contains("Some(sheet_id.to_string())"),
+            "the tool no longer hands the delete_sheet command the sheet's id"
+        );
+        assert_eq!(tool.matches("audit(").count(), 1, "one audit row, for the delete that happened");
+        assert!(tool.find("audit(").unwrap() > unwrapped, "the audit row must come after the helper's `?`");
+
+        let read = objects_fn_code("pub(crate) fn delete_sheet_at_with(");
+        let names = read.find(".sheet_names").expect("the helper no longer reads the name");
+        let ids = read.find(".sheet_ids").expect("the helper no longer reads the id");
+        let guard_ends = read.find("(name, sheet_id)\n").expect("the helper's read block no longer ends in its (name, sheet_id) pair");
+        assert!(
+            names < ids && ids < guard_ends,
+            "the id must be read inside the sheet_names guard, after it (the order delete_sheet_impl takes them)"
+        );
+    }
+
     // ---- pure argument parsing ----
 
     #[test]
@@ -1865,6 +2041,7 @@ mod tests {
                     sheet_id: String::new(),
                     kind: "worksheet".to_string(),
                     canvas_layout: None,
+                    ephemeral: false,
                 },
                 crate::sheets::SheetInfo {
                     index: 1,
@@ -1876,6 +2053,7 @@ mod tests {
                     sheet_id: String::new(),
                     kind: "canvas".to_string(),
                     canvas_layout: Some(::persistence::CanvasLayout::default()),
+                    ephemeral: true,
                 },
             ],
             active_index: 1,
@@ -1891,5 +2069,21 @@ mod tests {
         assert!(lines[1].contains("visibility=hidden"));
         assert!(lines[1].contains("(active)"));
         assert!(lines[1].contains("tabColor=#ff0000"));
+        // A temporary (drill-through) sheet says so, and only that row does:
+        // an agent must not put lasting work on a sheet that disappears.
+        assert!(lines[1].contains("(temporary:"), "a temporary sheet must say so: {}", lines[1]);
+        assert!(lines[1].ends_with(TEMPORARY_SHEET_MARKER), "the marker closes the row: {}", lines[1]);
+        assert!(!lines[0].contains("temporary"), "an ordinary sheet carries no marker: {}", lines[0]);
+    }
+
+    #[test]
+    fn the_list_sheets_tool_description_names_the_temporary_marker() {
+        // The description lists every field a row carries; a marker an agent
+        // was never told about is one it cannot act on.
+        let server = include_str!("server.rs");
+        let at = server.find("async fn list_sheets(").expect("the list_sheets tool");
+        let attribute = &server[server[..at].rfind("#[tool(").expect("its #[tool] attribute")..at];
+        assert!(attribute.contains("(temporary: ...)"), "list_sheets does not name the marker: {attribute}");
+        assert!(attribute.contains("keep"), "nor how the user keeps such a sheet: {attribute}");
     }
 }

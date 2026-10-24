@@ -20,6 +20,7 @@ import type {
   PublishReport,
   PublishPreviewResponse,
 } from "@api";
+import { describeBackendRefusal } from "@api/backendRefusal";
 import { openApplicationInspectorWindow } from "../lib/openApplicationInspectorWindow";
 import { AddedToApplicationList, WithheldContentList } from "./WithheldContentList";
 
@@ -297,7 +298,9 @@ export function PublishPreviewSection(_props: PanelSectionProps): React.ReactEle
       // No sheet filter: preview publishing the whole workbook.
       setPreview(await publishPreview());
     } catch (err: unknown) {
-      setError(String(err));
+      // The retryable snapshot refusal as its plain sentence ("Preview
+      // publish" just above is the retry); every other error as before.
+      setError(describeBackendRefusal(err));
       setPreview(null);
     } finally {
       setBusy(false);

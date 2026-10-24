@@ -22,12 +22,47 @@ import {
 // Types
 // ============================================================================
 
+/**
+ * The sheets a publish door acts on, the way the Rust doors read them
+ * (`PublishParams`, `PublishPreviewParams`, `DiffWorkingCopyParams`).
+ *
+ * `sheetIds` -- the STABLE ids of the chosen sheets -- TAKES PRECEDENCE over
+ * `sheetIndices` whenever it is present (review round 9). Positions describe
+ * the sheet list as the caller last read it, and the backend resolves them
+ * against the list as it is NOW: the non-modal push dialog read its list in an
+ * earlier command, so an author who dragged a tab, copied or deleted a sheet
+ * while it was open handed every later tick to a neighbour -- the unticked
+ * private sheet shipped under the author's key, the ticked one stayed behind,
+ * and "Try again" after a refusal resent the same stale positions. An id that
+ * names no sheet any more is refused by name (`CALP_PUSH_SHEET_GONE`), never
+ * handed to another sheet. An empty `sheetIds` means what an empty
+ * `sheetIndices` means.
+ *
+ * `sheetIndices` stays for callers that choose positions in the same call
+ * (a script's `caps.publish.package`, and the e2e helpers), and for a chosen
+ * sheet the backend listed without an id -- which only positions can name.
+ * (There is no command-line publish: the CommandLine extension has no publish
+ * verb.)
+ *
+ * The push's hold-back (`holdBackCells`) takes the SAME selection, with the
+ * same names and meaning, beside the push's `kind`: Rust resolves it the way
+ * the publish does, so the cells it holds back are the ones on the sheets
+ * that push carries (review round 11, RV11-TS-1).
+ */
+export interface PublishSheetSelection {
+  sheetIndices: number[];
+  sheetIds?: string[];
+}
+
 export interface PublishParams {
   registryPath: string;
   packageName: string;
   version: string;
   kind: string;
   sheetIndices: number[];
+  /** The chosen sheets' STABLE ids; when present it takes precedence over
+   *  `sheetIndices` (see {@link PublishSheetSelection}). */
+  sheetIds?: string[];
   publishedBy: string;
   /** Custom objects contributed by distributable-object providers (brick 4).
    *  publishApplication fills this automatically from registered providers. */
@@ -314,14 +349,19 @@ export interface PublishPreviewResponse {
 
 /** One row of the publish dialog's sheet list. */
 export interface PublishPreviewSheet {
-  /** TRUE workbook index — the value to send back in `sheetIndices`. */
+  /**
+   * TRUE workbook index AS OF THE ANSWER that listed it. A renumbering since
+   * moves it, so the dialog sends {@link sheetId} back (`sheetIds`) and this
+   * only for a row with no id.
+   */
   index: number;
   /**
    * The workbook's stable sheet uuid, directly comparable with
    * `WorkingCopySheetInfo.sheetId` — a working copy's ids ARE the
-   * application's.
+   * application's. Empty when the sheet has none.
    *
-   * Use THIS to decide "was this sheet in the base version", never the name.
+   * Use THIS to decide "was this sheet in the base version", never the name,
+   * and send it back as `sheetIds` (see {@link PublishSheetSelection}).
    */
   sheetId: string;
   name: string;
@@ -568,6 +608,19 @@ export interface WorkingCopyDiff {
   diff: VersionDiff;
   /** The code this push changes, when asked (`codeSummary: true`); `null` otherwise. */
   code: WorkingCopyCode | null;
+  /**
+   * The stable ids of EVERY sheet the in-memory publish behind this answer
+   * wrote -- the sheets the described push CARRIES: the ticked ones, each
+   * floating grid's backing sheet with its host, and every sheet the selection
+   * added because something on a carried sheet reads it (a chart's source).
+   * The same spelling as the diff rows' `sheetId`. Never a sheet the push
+   * drops: an unticked base sheet the diff lists as "removed" is not carried.
+   *
+   * The push dialog sorts its hold-back by this, never by its ticked rows: a
+   * push carries more sheets than are ticked, and an untick sorted by the
+   * ticks was parked on a sheet that shipped (review round 11, RV11-TS-1).
+   */
+  carriedSheetIds: string[];
 }
 
 /**
@@ -1695,12 +1748,17 @@ export function publishLibrary(params: PublishLibraryParams): Promise<PublishRes
 /**
  * Dry-run of publishApplication: assemble the exact carrier a publish would use
  * and report what would ship vs stay behind — without writing anything.
- * Omit sheetIndices (or pass []) to preview publishing every sheet.
+ * Omit the sheets (or pass []) to preview the publish default.
  * Pass includeComments to mirror the real publish's comment opt-in, so the
  * preview report shows comments exactly where the publish would put them.
  */
 export function publishPreview(
-  sheetIndices?: number[],
+  /**
+   * The sheets to preview: bare positions, or a {@link PublishSheetSelection}
+   * whose `sheetIds` take precedence over its positions -- what the push
+   * dialog sends, so its preview describes the sheets its push will ship.
+   */
+  sheets?: number[] | PublishSheetSelection,
   includeComments?: boolean,
   /** Supply both to have the response carry {@link PushGateStatus}. */
   target?: { registryPath: string; packageName: string },
@@ -1718,9 +1776,14 @@ export function publishPreview(
    */
   includeInApplication?: IncludedItem[],
 ): Promise<PublishPreviewResponse> {
+  const selection: Partial<PublishSheetSelection> = Array.isArray(sheets)
+    ? { sheetIndices: sheets }
+    : (sheets ?? {});
   return invokeBackend("calp_publish_preview", {
     params: {
-      sheetIndices: sheetIndices ?? null,
+      sheetIndices: selection.sheetIndices ?? null,
+      // Only when the caller named ids: absent, the door reads the positions.
+      ...(selection.sheetIds !== undefined ? { sheetIds: selection.sheetIds } : {}),
       includeComments: includeComments ?? false,
       kind: kind ?? "",
       registryPath: target?.registryPath ?? null,
@@ -2184,6 +2247,12 @@ export async function diffWorkingCopy(params?: {
    */
   sheetIndices?: number[];
   /**
+   * The same sheets by this workbook's STABLE ids (the LOCAL ids, never the
+   * publisher's -- those are `scopeSheetIds`); when present it takes precedence
+   * over `sheetIndices` (see {@link PublishSheetSelection}).
+   */
+  sheetIds?: string[];
+  /**
    * Pass TRUE whenever the diff is shown as a preview of something that does not
    * touch comments. The publish assembly writes `comments.json` only when this
    * is set, so against a base version published WITH comments the working side
@@ -2525,6 +2594,13 @@ export interface HoldBackCellRef {
 export interface HoldBackCellsResponse {
   cellsHeldBack: number;
   /**
+   * Cells the request named on a sheet the push does NOT carry -- or one that
+   * is no longer in the workbook -- which were SKIPPED: never refused, never
+   * written. A caller sends every untick it has, and the push's own selection
+   * (`holdBackCells`'s `kind` and sheets) decides which of them act.
+   */
+  cellsSkipped: number;
+  /**
    * True when a write happened and an undo entry therefore exists.
    *
    * The caller MUST call `undo()` exactly once when this is true and MUST NOT
@@ -2551,10 +2627,22 @@ export interface HoldBackCellsResponse {
  * HALF OF A PAIR, and the caller owns the other half:
  *
  * ```ts
- * const { undoSeq } = await holdBackCells(...);
- * try { await publishApplication(...); }
+ * const selection = { sheetIndices, sheetIds }; // what the push sends
+ * const { undoSeq } = await holdBackCells({ ..., cells, kind, ...selection });
+ * try { await publishApplication({ ..., kind, ...selection }); }
  * finally { if (undoSeq != null) await undo(undoSeq); }
  * ```
+ *
+ * THE PUSH'S OWN SELECTION, NOT A GUESS AT IT. Which sheets a push carries is
+ * Rust's to say: the ticked ones, each floating grid's backing sheet with its
+ * host, and every sheet a chart on a carried sheet reads. So the hold-back
+ * takes the selection the push sends, resolves it the way the publish does,
+ * and holds back exactly the named cells on sheets that push carries --
+ * skipping the rest (`cellsSkipped`), never refusing them. A caller therefore
+ * sends EVERY cell the author unticked: over-sending is harmless, under-sending
+ * publishes the cell. A selection that names a sheet the workbook no longer
+ * has is refused the way the publish refuses it (`CALP_PUSH_SHEET_GONE`,
+ * `@api/backendRefusal`), before anything is written.
  *
  * `undo(undoSeq)`, never a bare `undo()`. The publish records nothing on the
  * undo stack itself, but it is long and IO-heavy, and an MCP tool or a
@@ -2581,7 +2669,20 @@ export function holdBackCells(params: {
   packageName: string;
   /** The version this push is based on — where the held-back values come from. */
   baseVersion: string;
+  /**
+   * Every cell the author unticked. Rust holds back exactly the ones on sheets
+   * the push below carries and skips the rest (`cellsSkipped`).
+   */
   cells: HoldBackCellRef[];
+  /** The kind the push sends (`PublishParams.kind`): it decides what an empty selection means. */
+  kind: string;
+  /**
+   * The push's sheets by position, exactly as the push sends them (see
+   * {@link PublishSheetSelection}); omitted means what an empty list means.
+   */
+  sheetIndices?: number[];
+  /** The push's sheets by STABLE id; when present they take precedence over `sheetIndices`. */
+  sheetIds?: string[];
 }): Promise<HoldBackCellsResponse> {
   return invokeBackend("calp_hold_back_cells", { params });
 }
@@ -4489,4 +4590,58 @@ export function inspectorVerifyArtifacts(
     packageName,
     versionPin,
   });
+}
+
+// ============================================================================
+// Subscribed sheets: the one SYNC "is this sheet a subscribed one?" answer
+// ============================================================================
+//
+// A right-click menu's `visible` / `label` predicates and a dialog's read-only
+// gate run while the surface is opening, where `getSheetProvenance()` (an IPC
+// round trip) is not an option. The Collaboration extension already keeps a
+// cache of every sheet's provenance for its tab badge; it publishes THAT cache
+// here on activation, SUBSCRIBED role only, so Charts, Pivot and CanvasSheet
+// ask one question instead of each keeping a cache of their own (three copies
+// of one answer, each with its own refresh wiring and failure policy). The
+// shape is floatingRangeService's register/get: last registration wins, and
+// an unregister clears the provider only while it is still the live one.
+// No provider = not subscribed (a workbook with no Collaboration loaded has
+// no subscriptions to speak of).
+
+/** What Collaboration publishes: a synchronous lookup over its provenance cache. */
+export interface SubscribedSheetsProvider {
+  /** True when `sheetId` came from an application this workbook SUBSCRIBES to
+   *  (a working-copy sheet answers false: it is the author's own to edit). */
+  isSubscribed(sheetId: string): boolean;
+}
+
+let subscribedSheetsProvider: SubscribedSheetsProvider | null = null;
+
+/**
+ * Register the provider. Called once by the Collaboration extension at
+ * activation; returns the unregister function for its cleanup list. Last
+ * registration wins; unregistering clears the provider only if it is still the
+ * one registered, so a re-activation followed by the OLD cleanup running
+ * cannot blank out the live provider.
+ */
+export function registerSubscribedSheetsProvider(p: SubscribedSheetsProvider): () => void {
+  subscribedSheetsProvider = p;
+  return () => {
+    if (subscribedSheetsProvider === p) subscribedSheetsProvider = null;
+  };
+}
+
+/**
+ * Whether `sheetId` is a SUBSCRIBED sheet (a worksheet or a canvas page that
+ * came from an application). Synchronous: safe inside a menu predicate. With
+ * no provider registered, or no id, the answer is false.
+ */
+export function isSheetSubscribed(sheetId: string): boolean {
+  if (!subscribedSheetsProvider || !sheetId) return false;
+  return subscribedSheetsProvider.isSubscribed(sheetId) === true;
+}
+
+/** Test/reset hook: forget the registered provider. */
+export function resetSubscribedSheetsProvider(): void {
+  subscribedSheetsProvider = null;
 }

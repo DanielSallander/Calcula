@@ -106,6 +106,7 @@ const boxPivot: PivotRegionData = {
   endCol: 1025,
   isEmpty: false,
   isModel: false,
+  hasDesignQueryDrill: false,
   canvasFrame: {
     x: 100,
     y: 80,

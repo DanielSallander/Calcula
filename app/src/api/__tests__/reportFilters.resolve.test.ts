@@ -107,7 +107,7 @@ describe("@api/reportFilters -- the publisher half (ported)", () => {
     ]);
 
     const base = resolvePageBase("p1", "conn-a");
-    expect(base.filters).toEqual([{ field: "Geo.Region", includedKeys: ["East"], level: 1, from: "Slicer_Region" }]);
+    expect(base.filters).toEqual([{ field: "Geo.Region", includedKeys: ["East"], level: 1, from: "Slicer_Region", workbookWide: false }]);
     expect(base.sources).toEqual([{ name: "Slicer_Region", ref: slicerRef("s-1"), mode: "filter" }]);
     expect(resolvePageBase("p1", "conn-b").filters).toHaveLength(1);
     expect(resolvePageBase("p2", "conn-a").filters).toHaveLength(1);
@@ -170,7 +170,7 @@ describe("@api/reportFilters -- the publisher half (ported)", () => {
     publishReportFilters("slicer", [filter({ includedKeys: [] })]);
 
     expect(resolvePageBase("p1", "conn-a").filters).toEqual([
-      { field: "Geo.Region", includedKeys: [], level: 1, from: "Slicer_Region" },
+      { field: "Geo.Region", includedKeys: [], level: 1, from: "Slicer_Region", workbookWide: false },
     ]);
     expect(seen).toHaveLength(1);
   });
@@ -280,6 +280,31 @@ describe("the scope matrix", () => {
     ]);
     expect(resolvePageBase("p1", "conn-a").filters.map((f) => f.field)).toEqual(["T.A", "T.P"]);
     expect(resolvePageBase("p2", "conn-a").filters.map((f) => f.field)).toEqual(["T.A"]);
+  });
+
+  it("workbookWide is true exactly for an \"all\" scope -- from the scope, never from a name", () => {
+    // SABOTAGE: set it from the source name (or leave it false) -- a page
+    // slicer named like a workbook ribbon filter, on the same field with the
+    // same keys, is then classed workbook-wide, and a drill-through's chart
+    // drops the page's own filter from its bake (review F8).
+    publishReportFilters("ribbon", [
+      ribbon({ kind: "all" }, { sourceId: "rf-all", sourceName: "Region", field: "Geo.Region", includedKeys: ["East"] }),
+      ribbon({ kind: "pages", sheetIds: ["p1"] }, { sourceId: "rf-pages", field: "T.P" }),
+      ribbon({ kind: "visuals", targets: [chart("a")] }, { sourceId: "rf-vis", field: "T.V" }),
+    ]);
+    publishReportFilters("slicer", [filter({ sourceName: "Region", field: "Geo.Region", includedKeys: ["East"] })]);
+    setCrossFilter(selection({ source: chart("bar"), fields: ["Time.Year"], tuples: [["2024"]] }));
+
+    const r = resolveFiltersFor("p1", target(chart("a"), false), "conn-a");
+    const wide = r.filters.map((f) => `${f.from}:${f.field}:${f.workbookWide}`);
+    expect(wide).toEqual([
+      "Region:Geo.Region:true",
+      "Year:T.P:false",
+      "Year:T.V:false",
+      "Region:Geo.Region:false",
+      "Revenue by region:Time.Year:false",
+    ]);
+    expect(resolvePageBase("p1", "conn-a").filters.map((f) => f.workbookWide)).toEqual([true, false, false]);
   });
 
   it("an all-pages change is announced as page \"*\"; a visuals change names its targets", () => {
@@ -394,7 +419,7 @@ describe("cross-filter selections", () => {
       sources: [],
     });
     expect(resolveFiltersFor("p1", target(chart("other")), "conn-a").highlights?.filters).toEqual([
-      { field: "Geo.Region", includedKeys: ["East"], level: 1, from: "Revenue by region" },
+      { field: "Geo.Region", includedKeys: ["East"], level: 1, from: "Revenue by region", workbookWide: false },
     ]);
   });
 

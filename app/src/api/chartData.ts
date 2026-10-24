@@ -20,6 +20,8 @@
 //          Mirrors `chartParams.ts`, which is the established precedent for
 //          reaching Charts without importing it.
 
+import type { MemberPath } from "./reportFilters";
+
 export interface ChartDataSummary {
   chartId: string;
   name: string;
@@ -238,7 +240,38 @@ export interface ChartRightClickTarget {
   value?: number;
   /** Which axis, for `xAxis` / `yAxis`. */
   axisType?: "x" | "y";
+  /**
+   * The datum's MODEL identity, for a DESIGN-QUERY chart's drill-through
+   * (docs/design/model-drillthrough.md 2.3): the member KEYS of the clicked
+   * category and series (`memberPathOfHit` over the render cache, taken from
+   * the HIT -- not from `pointIndex`, which the ladder withholds on a first
+   * right-click). `null` when the datum names no member; ABSENT when the chart
+   * is not a design-query chart or the element is not a datum / legend entry.
+   * Keys, never labels: a label is display text in the app locale.
+   */
+  memberPath?: MemberPath | null;
+  /**
+   * Display labels parallel to {@link memberPath}, for captions and the menu
+   * row ("Drill through: Mar, Cost"); `null` where no label is known for that
+   * coordinate (a category made of two fields has ONE drawn label). Shown,
+   * never used to identify a member.
+   */
+  memberLabels?: ReadonlyArray<string | null>;
+  /**
+   * Which of the three drill cases the datum is (2.3): a `path` to drill on;
+   * `measureOnly` -- a Card / KPI / Gauge, whose one category has the empty
+   * path, drilled with the page's filters only; `none` -- no identity (a
+   * transformed or composed chart, a missing key), offered DISABLED with
+   * {@link drillIdentityReason}, never run unfiltered. Absent with
+   * {@link memberPath}.
+   */
+  drillIdentity?: ChartDrillIdentityKind;
+  /** Why the datum has no identity, when {@link drillIdentity} is `none`. */
+  drillIdentityReason?: string;
 }
+
+/** The three drill-through cases of a right-clicked datum (see {@link ChartRightClickTarget.drillIdentity}). */
+export type ChartDrillIdentityKind = "path" | "measureOnly" | "none";
 
 let rightClickTarget: ChartRightClickTarget | null = null;
 

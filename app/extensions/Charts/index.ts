@@ -199,6 +199,7 @@ import { onOverlayStyleChanged } from "@api/insightStyle";
 import { hitTestCommentBoxes, hitTestCueStepper } from "./rendering/cueChrome";
 import { chartOverlayHost } from "./lib/chartOverlayHost";
 import { validateChartSpec, validateMergedSpec } from "./lib/chartSpecValidate";
+import { buildDesignQueryChartSpec, type DesignQueryChartRequest } from "./lib/chartSpecDefaults";
 import type { ChartSpec } from "./types";
 import { buildSeriesFormula } from "./lib/seriesFormula";
 import type { DataRangeRef } from "./types";
@@ -212,6 +213,7 @@ import {
   hideLegendEntryPatch,
 } from "./components/ChartContextMenu";
 import { FormatAxisDialog } from "./components/FormatAxisDialog";
+import { DrillThroughBehaviorDialog } from "./components/DrillThroughBehaviorDialog";
 import {
   renderChart,
   hitTestChart,
@@ -245,6 +247,7 @@ import {
   isDatumHit,
 } from "./rendering/chartHitTesting";
 import { toAuthoringIndices } from "./lib/dataPointOverrides";
+import { chartDrillIdentity, drillIdentityFields } from "./lib/chartDrillIdentity";
 import {
   CHART_FORMAT_ELEMENT_EVENT,
   handleChartDoubleClick,
@@ -318,6 +321,7 @@ import { onAppEvent } from "@api/events";
 import { ChartEvents } from "./lib/chartEvents";
 import {
   CHART_FORMAT_SELECTION_COMMAND,
+  CHART_DRILL_THROUGH_DIALOG_ID,
   isDataRangeRef,
   isPivotDataSource,
   isDesignQueryDataSource,
@@ -705,6 +709,21 @@ function activate(context: ExtensionContext): void {
       emitAppEvent(AppEvents.GRID_REFRESH);
       return chart.chartId;
     },
+    buildDesignQueryChartSpec(req: DesignQueryChartRequest) {
+      // A caller outside Charts (the drill-through runner) says WHAT it wants
+      // -- a design query, its connection, a mark, the mark's options and a
+      // title -- and Charts completes the spec from ITS OWN default skeleton,
+      // the one buildDefaultSpec builds from (lib/chartSpecDefaults.ts). No
+      // copy of the recipe lives outside Charts (the Seam Rule). PURE: nothing
+      // is validated or created here.
+      return buildDesignQueryChartSpec(req) as unknown as Record<string, unknown>;
+    },
+    validateChartSpec(fullSpec: Record<string, unknown>) {
+      // THE gate createChart runs, the same function, so a caller can refuse
+      // BEFORE it commits to anything a refused create would leave behind
+      // (the drill-through: before its temporary sheet is added). Pure.
+      return validateChartSpec(fullSpec);
+    },
     deleteChart(chartId: string) {
       // THE one delete (see performChartDelete). This method used to inline its
       // own copy of the recipe, which had drifted from the UI's in three ways:
@@ -837,6 +856,18 @@ function activate(context: ExtensionContext): void {
     priority: 50,
   });
   cleanupFunctions.push(() => context.ui.dialogs.unregister(FORMAT_AXIS_DIALOG_ID));
+
+  // Drill-through behavior (docs/design/model-drillthrough.md 2.9): a
+  // design-query chart's definition editor -- radios None | Design query
+  // hosting the shared `_shared/drillThrough` editor; opened read-only ("View
+  // drill-through...") on a subscribed page or sheet. The id lives in ./types
+  // beside CHART_FORMAT_SELECTION_COMMAND, because the context menu opens it.
+  context.ui.dialogs.register({
+    id: CHART_DRILL_THROUGH_DIALOG_ID,
+    component: DrillThroughBehaviorDialog,
+    priority: 50,
+  });
+  cleanupFunctions.push(() => context.ui.dialogs.unregister(CHART_DRILL_THROUGH_DIALOG_ID));
 
   // -----------------------------------------------------------------------
   // The object pane — Excel's "Format <element>" and Power BI's Format pane
@@ -2244,6 +2275,14 @@ function activate(context: ExtensionContext): void {
       categoryName: hit?.categoryName,
       value: hit?.value,
       axisType: hit?.axisType,
+      // The datum's MODEL identity for a design-query chart's drill-through
+      // (lib/chartDrillIdentity.ts; docs/design/model-drillthrough.md 2.3):
+      // member KEYS from the HIT over the render cache -- not from
+      // `painterPoint`, which the ladder withholds on a first right-click --
+      // so the "Drill through" row can name and act on the POINT under the
+      // pointer while the menu's rung is the series. Absent for every chart
+      // that is not a design-query chart.
+      ...drillIdentityFields(chartDrillIdentity(getChartById(targetId)?.spec, cached?.data, hit)),
     });
 
     showOverlay(CHART_CONTEXT_MENU_ID, {

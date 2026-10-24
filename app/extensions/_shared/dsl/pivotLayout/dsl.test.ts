@@ -137,6 +137,24 @@ describe('Parser', () => {
     expect(ast.filters[0].values).toEqual(['South']);
   });
 
+  it('a second FILTERS clause ADDS to the first (it used to replace it)', () => {
+    // SABOTAGE: assign `this.ast.filters` in the parser again -- only the last
+    // clause survives, and a drill-through's baked clause drops the author's.
+    const { tokens } = lex('FILTERS: Region = ("East")\nFILTERS: Product NOT IN ("X"), Quarter = ("Q1")');
+    const { ast, errors } = parse(tokens);
+    expect(errors).toHaveLength(0);
+    expect(ast.filters.map((f) => f.fieldName)).toEqual(['Region', 'Product', 'Quarter']);
+    expect(ast.filters[0].values).toEqual(['East']);
+    expect(ast.filters[1].exclude).toBe(true);
+    // Where each clause began, for the validator's repeated-clause warning.
+    expect(ast.filtersClauses?.map((l) => l.line)).toEqual([1, 2]);
+  });
+
+  it('one FILTERS clause records one clause start; none records none', () => {
+    expect(parse(lex('FILTERS: Region = ("East"), Product = ("P")').tokens).ast.filtersClauses?.length).toBe(1);
+    expect(parse(lex('ROWS: Region').tokens).ast.filtersClauses).toBeUndefined();
+  });
+
   it('parses LAYOUT directives', () => {
     const { tokens } = lex('LAYOUT: tabular, no-grand-totals, repeat-labels');
     const { ast, errors } = parse(tokens);
@@ -474,6 +492,29 @@ describe('Serializer', () => {
 // ============================================================================
 
 describe('Round-trip', () => {
+  it('round-trips a filter value with a quote in it (the serializer doubles it, the lexer reads it back)', () => {
+    // SABOTAGE: write `\"` in the serializer -- the lexer has no backslash
+    // escape, so the value comes back with a backslash in it (or not at all).
+    const filters: ZoneField[] = [
+      { sourceIndex: 1, name: 'Product', isNumeric: false, hiddenItems: ['He said "hello"', 'Plain'] },
+    ];
+    const text = serialize([], [], [], filters, {});
+    expect(text).toContain('""hello""');
+    const result = run(text);
+    expect(result.errors.filter(e => e.severity === 'error')).toHaveLength(0);
+    expect(result.filters).toHaveLength(1);
+    expect(result.filters[0].hiddenItems).toEqual(['He said "hello"', 'Plain']);
+  });
+
+  it('a repeated FILTERS clause is a WARNING, not an error, and both clauses compile', () => {
+    const result = run('ROWS: Region\nVALUES: Sum(Sales)\nFILTERS: Product NOT IN ("A")\nFILTERS: Quarter NOT IN ("Q4")');
+    expect(result.errors.filter(e => e.severity === 'error')).toHaveLength(0);
+    const warning = result.errors.find(e => e.message.includes('second FILTERS clause'));
+    expect(warning?.severity).toBe('warning');
+    expect(warning?.location.line).toBe(4);
+    expect(result.filters.map(f => f.name)).toEqual(['Product', 'Quarter']);
+  });
+
   it('round-trips ROWS and COLUMNS', () => {
     const rows: ZoneField[] = [
       { sourceIndex: 0, name: 'Region', isNumeric: false },

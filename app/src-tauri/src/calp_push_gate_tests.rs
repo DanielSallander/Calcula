@@ -17,6 +17,7 @@ fn params(mode: Option<&str>, base: Option<&str>, summary: &str) -> PublishParam
         version: "1.1.0".to_string(),
         kind: "report".to_string(),
         sheet_indices: vec![0],
+        sheet_ids: None,
         published_by: String::new(),
         custom_objects: None,
         include_comments: false,
@@ -350,7 +351,7 @@ fn the_push_assembly_and_the_merge_follow_a_working_copys_collision_renames() {
             .join("\n")
     };
     let cmds = read("src/calp_commands.rs");
-    let assembly = &cmds[cmds.find("fn assemble_publish_workbook(").unwrap()..];
+    let assembly = &cmds[cmds.find("fn assemble_publish_snapshot(").unwrap()..];
     let assembly = &assembly[..assembly.find("\n}\n").unwrap()];
     let restored_names = assembly.find("sheet.name = published.clone();").expect("the tab-name restore moved");
     let restored_refs = assembly

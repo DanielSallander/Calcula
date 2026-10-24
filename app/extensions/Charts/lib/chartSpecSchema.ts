@@ -13,6 +13,29 @@ export const CHART_CONTAINER_FORBIDDEN_TITLE_LEAVES = ["text", "color", "fontSiz
 export const CHART_FIELD_FORMAT_MAX_CHARS = 256;
 
 /**
+ * The longest design-query DSL a chart's drill-through definition may hold
+ * (docs/design/model-drillthrough.md 2.1). THIS SCHEMA IS THE GATE for the
+ * script door: `chart.updateSpec` is a restricted `object.setState` aspect
+ * that reaches `checkChartSpec` = this shape + the 2 MB cap, so the bound
+ * lives here and is pinned by chartSpecSchema.test.ts.
+ */
+export const CHART_DRILL_THROUGH_DSL_MAX_CHARS = 20000;
+
+/** The longest drill-through name (the result sheet's base name and the chart title's first half). */
+export const CHART_DRILL_THROUGH_NAME_MAX_CHARS = 80;
+
+/**
+ * THE shape of a chart mark id: a built-in (bar, line, card, ...) or a
+ * registered custom mark. ONE constant for every place a mark is named --
+ * `ChartSpec.mark`, a drill-through's `DrillPresentationChart.mark`, the
+ * Insert Chart dialog's `initialMark` -- so a mark one gate accepts is never
+ * one another refuses. (A drill definition whose mark the drill gate accepted
+ * but createChart refused used to fail only AFTER its temporary canvas was
+ * added, leaving an empty page.)
+ */
+export const CHART_MARK_ID_PATTERN = "^[A-Za-z_][A-Za-z0-9_]*$";
+
+/**
  * The chart's container definition: the shared visual-container schema
  * (@api/visualContainer, `additionalProperties: false` at every level) minus
  * the three title leaves the chart spells elsewhere -- so a spec that tries to
@@ -103,7 +126,7 @@ export const chartSpecJsonSchema: object = {
       // `examples` (not `enum`) so Monaco autocompletes the built-ins while a
       // registered custom mark id is still valid (not flagged as an error).
       examples: ["bar", "horizontalBar", "line", "area", "scatter", "pie", "donut", "waterfall", "combo", "radar", "bubble", "histogram", "funnel", "treemap", "stock", "boxPlot", "sunburst", "pareto", "card", "multiRowCard", "kpi", "gauge"],
-      pattern: "^[A-Za-z_][A-Za-z0-9_]*$",
+      pattern: CHART_MARK_ID_PATTERN,
       description: "Chart type. Built-in marks (bar, line, pie, ...) autocomplete; a registered custom mark id is also valid.",
     },
     data: {
@@ -242,6 +265,11 @@ export const chartSpecJsonSchema: object = {
       description: "Design-query charts: measure name (no brackets) -> Excel number format code, e.g. { \"Revenue\": \"#,##0.00\" }. Sent with the query, so the values come back formatted.",
       additionalProperties: { type: "string", maxLength: CHART_FIELD_FORMAT_MAX_CHARS },
     },
+    drillThrough: {
+      $ref: "#/definitions/DrillThroughDefinition",
+      description:
+        "Design-query charts: the drill-through a datum's right-click runs -- a design-query DSL text plus the presentation its result takes (a table of cells or a chart of some mark). The clicked members are added as one FILTERS clause on their member keys at run time; the result opens on a temporary sheet. Stores no connection id: the run uses data.connectionId.",
+    },
   },
   // Narrow markOptions to the matching definition based on the chart type.
   allOf: MARK_OPTION_NARROWING,
@@ -285,7 +313,75 @@ export const chartSpecJsonSchema: object = {
         type: { type: "string", const: "designQuery", description: "Discriminant tag. Must be \"designQuery\"." },
         dslText: { type: "string", description: "The pivot-layout DSL text (ROWS/COLUMNS/VALUES/FILTERS/CALC …)." },
         connectionId: { type: "string", description: "The BI connection ID (UUID string) whose model the query runs against." },
+        packageDataSourceId: {
+          type: "string",
+          description:
+            "The stable key of an APPLICATION connection (the connection's packageDataSourceId). A subscriber's connections get fresh uuids on every open; Calcula re-binds connectionId from this key on pull, refresh and open, and rewrites both fields when a key resolves. Calcula writes it itself when the workbook is saved, from the live connection (and removes it for a local connection), so you never need to write it.",
+        },
       },
+      additionalProperties: false,
+    },
+    DrillThroughDefinition: {
+      type: "object",
+      description:
+        "A design-query chart's drill-through: the DSL to run and how to show the result. Member filters are baked in at run time, so the definition itself carries only the author's query.",
+      required: ["dslText", "presentation"],
+      properties: {
+        dslText: {
+          type: "string",
+          maxLength: CHART_DRILL_THROUGH_DSL_MAX_CHARS,
+          description: "The design-query DSL (ROWS / COLUMNS / VALUES / FILTERS / CALC). FILTERS values are member keys.",
+        },
+        presentation: {
+          description: "How the result is shown: { kind: \"table\" } (a worksheet of static cells) or { kind: \"chart\", mark, markOptions? } (a canvas holding one design-query chart).",
+          oneOf: [
+            { $ref: "#/definitions/DrillPresentationTable" },
+            { $ref: "#/definitions/DrillPresentationChart" },
+          ],
+        },
+        name: {
+          type: "string",
+          maxLength: CHART_DRILL_THROUGH_NAME_MAX_CHARS,
+          description: "The drill's name: the result sheet's base name and the chart title's first half. Absent = \"Drillthrough\".",
+        },
+        keepFilters: {
+          type: "boolean",
+          description: "Power BI's \"Keep all filters\": carry the page's filters that reach this chart into the drill, beside the clicked members. Absent = true.",
+        },
+      },
+      additionalProperties: false,
+    },
+    DrillPresentationTable: {
+      type: "object",
+      description: "The result as a worksheet of static cells: caption rows, then the query's view.",
+      required: ["kind"],
+      properties: {
+        kind: { type: "string", const: "table", description: "Discriminant tag. Must be \"table\"." },
+      },
+      additionalProperties: false,
+    },
+    DrillPresentationChart: {
+      type: "object",
+      description: "The result as a canvas holding one design-query chart of `mark`.",
+      required: ["kind", "mark"],
+      properties: {
+        kind: { type: "string", const: "chart", description: "Discriminant tag. Must be \"chart\"." },
+        mark: {
+          type: "string",
+          // The SAME pattern as ChartSpec.mark: the result chart is made by
+          // createChart, which refuses any other id.
+          pattern: CHART_MARK_ID_PATTERN,
+          description: "The result chart's mark: a built-in (bar, line, pie, card, ...) or a registered custom mark -- the ids ChartSpec.mark accepts.",
+        },
+        markOptions: {
+          type: "object",
+          description: "The result chart's mark options, exactly as a ChartSpec carries them for that mark: narrowed per mark the same way, so an option the mark does not have is refused.",
+        },
+      },
+      // The same per-mark narrowing ChartSpec applies (its if/then reads the
+      // sibling `mark` and `markOptions`, which this definition has too), so
+      // this gate refuses what createChart would refuse at run time.
+      allOf: MARK_OPTION_NARROWING,
       additionalProperties: false,
     },
     ChartSeries: {
@@ -1477,6 +1573,7 @@ export function generateSpecReference(): string {
   lines.push("| trendlines | TrendlineSpec[] | Trendlines overlaid on series (linear, polynomial, movingAverage, ...) |");
   lines.push("| dataTable | DataTableOptions | Data table grid below the plot area |");
   lines.push("| filters | ChartFilters | Non-destructive hide of series/categories |");
+  lines.push("| drillThrough | DrillThroughDefinition | Design-query charts: the drill-through a datum's right-click runs (see Drill-through) |");
   lines.push("| dataPointOverrides | DataPointOverride[] | Per-point fill/border/gradient/pattern/marker/explode overrides, keyed by datum identity |");
   lines.push("| encoding | EncodingSpec | Channel description (x/y/color); compiled to the series model |");
   lines.push("");
@@ -2117,9 +2214,30 @@ export function generateSpecReference(): string {
   lines.push("lockAspect. =[Measure] reads the page's model.");
   lines.push("");
 
+  lines.push("## DrillThroughDefinition");
+  lines.push("");
+  lines.push("`drillThrough` (design-query charts only) is what \"Drill through\" on a bar, slice, point or legend entry runs:");
+  lines.push("the clicked members are added to the query as ONE `FILTERS:` clause on their member KEYS (never labels), the");
+  lines.push("query runs against the chart's own `data.connectionId`, and the result opens on a temporary sheet that closes");
+  lines.push("when you leave it (double-click its tab to keep it). The definition stores no connection id.");
+  lines.push("");
+  lines.push("| Property | Type | Description |");
+  lines.push("|----------|------|-------------|");
+  lines.push(`| dslText | string | The design-query DSL (ROWS / COLUMNS / VALUES / FILTERS / CALC), at most ${CHART_DRILL_THROUGH_DSL_MAX_CHARS} characters |`);
+  lines.push("| presentation | object | { \"kind\": \"table\" } for a worksheet of cells, or { \"kind\": \"chart\", \"mark\": \"bar\", \"markOptions\"?: {...} } for a canvas with one chart. `mark` takes the ids the chart's own `mark` takes, and `markOptions` only that mark's options (see Mark Options): anything else is refused |");
+  lines.push(`| name | string | The drill's name (the result sheet's base name, the chart title's first half), at most ${CHART_DRILL_THROUGH_NAME_MAX_CHARS} characters. Absent = \"Drillthrough\" |`);
+  lines.push("| keepFilters | boolean | Carry the page's filters that reach this chart into the drill (Power BI's Keep all filters). Absent = true |");
+  lines.push("");
+  lines.push("Example: a finer query shown as a table");
+  lines.push("```json");
+  lines.push("\"drillThrough\": { \"name\": \"Product detail\", \"presentation\": { \"kind\": \"table\" },");
+  lines.push("  \"dslText\": \"ROWS: Product.Name\\nVALUES: [Revenue], [Units]\" }");
+  lines.push("```");
+  lines.push("");
+
   lines.push("## Data Source Formats");
   lines.push("");
-  lines.push("The `data` field accepts four formats:");
+  lines.push("The `data` field accepts five formats:");
   lines.push("1. **DataRangeRef object**: { sheetIndex: 0, startRow: 0, startCol: 0, endRow: 9, endCol: 3 }");
   lines.push("   Optional `sheetId` (the sheet's stable id) wins over `sheetIndex`: the chart then keeps reading the same");
   lines.push("   sheet after sheets are inserted, moved or renamed, and reports an error if that sheet is deleted. Write");
@@ -2128,6 +2246,10 @@ export function generateSpecReference(): string {
   lines.push("2. **A1 reference**: \"Sheet1!A1:D10\" or \"A1:D10\"");
   lines.push("3. **Named range**: \"SalesData\"");
   lines.push("4. **PivotDataSource**: { type: \"pivot\", pivotId: \"<pivot uuid>\" } — reads from a pivot table's aggregated output");
+  lines.push("5. **DesignQueryDataSource**: { type: \"designQuery\", dslText: \"ROWS: ...\", connectionId: \"<connection uuid>\" } — runs the");
+  lines.push("   DSL against a BI model connection. Optional `packageDataSourceId` is the stable key of an APPLICATION connection:");
+  lines.push("   a subscriber's connections get fresh uuids on every open, and Calcula re-binds `connectionId` from it.");
+  lines.push("   Calcula writes it itself on save, from the live connection (removed for a local one), so you never need to write it.");
 
   return lines.join("\n");
 }

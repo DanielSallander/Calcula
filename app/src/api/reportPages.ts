@@ -94,11 +94,21 @@ export interface ReportPageFilter {
 // Pure helpers
 // ----------------------------------------------------------------------------
 
-/** Pure: the canvases of a get_sheets answer, in tab order. */
+/**
+ * Pure: the canvases of a get_sheets answer, in tab order.
+ *
+ * An EPHEMERAL canvas -- a drill-through's result, which closes when the
+ * reader leaves it (docs/design/model-drillthrough.md 2.6; canvas-sheets.md
+ * 13.7) -- is NOT a report page: a Page Navigator must not offer a button to a
+ * page that will be gone by the time the button is read. Its id is still
+ * carried in `sheetIdByIndex`, so a filter resolution on it (a drill from a
+ * drill) can still name it.
+ */
 export function reportPagesFrom(result: SheetsResult): ReportPage[] {
   const pages: ReportPage[] = [];
   for (const s of result.sheets ?? []) {
     if (s.kind !== "canvas") continue;
+    if (s.ephemeral === true) continue;
     const preset = s.canvasLayout?.pagePreset;
     pages.push({
       sheetId: s.sheetId ?? "",

@@ -275,6 +275,7 @@ fn deleting_the_host_sheet_cascades_its_floating_ranges() {
         &tl,
         1,
         false,
+        None,
     )
     .expect("delete the host sheet");
 
@@ -292,6 +293,180 @@ fn deleting_the_host_sheet_cascades_its_floating_ranges() {
         !vis.iter().any(|v| v == OBJECT_SHEET_VISIBILITY),
         "no orphaned object sheet survives the cascade"
     );
+}
+
+// ---------------------------------------------------------------------------
+// DELETE aimed by an index looked up from the stable id -- review RA-1, the
+// object door. `delete_floating_range` reads its backing sheet's index with
+// the lock released, and the MCP server (on its own thread) can add a sheet
+// before the delete takes its locks: the partition rotation moves every
+// object sheet up one, so the index then names ANOTHER range's backing sheet,
+// or the new user sheet.
+// ---------------------------------------------------------------------------
+
+/// `delete_sheet_impl` driven exactly as the floating-range door drives it,
+/// at the index it looked up before the other door's add.
+///
+/// SABOTAGE: (a) drop the `expected` check in `delete_sheet_impl` -- RangeA's
+/// backing sheet is deleted and the first block's name assertion fails;
+/// (b) drop the object-door check (`ensure_object_sheet`) -- the id-less call
+/// deletes the user's new sheet and the second block's name assertion fails.
+#[test]
+fn the_object_door_deletes_only_the_backing_sheet_it_was_given() {
+    let wb = Workbook::new(2);
+    let tl = timeline();
+    let a = create(&wb, Some("RangeA"));
+    let b = create(&wb, Some("RangeB"));
+    assert_eq!((a.backing_sheet_index, b.backing_sheet_index), (2, 3), "fixture: two object sheets at the tail");
+    let looked_up = b.backing_sheet_index;
+
+    crate::sheets::add_sheet_inner(&wb.state, &wb.file, Some("Added".to_string()), ::persistence::SheetKind::Worksheet)
+        .expect("the other door's add");
+    let names = || wb.state.sheet_names.read().unwrap().clone();
+    let all_five = vec!["Sheet1", "Sheet2", "Added", "RangeA", "RangeB"];
+    assert_eq!(names(), all_five, "fixture: the rotation moved both object sheets up one");
+    crate::document_effect::mark_saved(&wb.file);
+    let delete_at = |index: usize, expected: Option<identity::SheetId>| {
+        crate::sheets::delete_sheet_impl(
+            &wb.state, &wb.file, &wb.pivots, &wb.files, &wb.pane, &wb.filters, &wb.slicer, &tl, index, true, expected,
+        )
+    };
+
+    // 1. With RangeB's id, the stale index -- now RangeA's backing sheet -- is
+    //    refused, and nothing is deleted.
+    let refused = delete_at(looked_up, Some(b.range.backing_sheet_id)).err();
+    assert_eq!(names(), all_five, "nothing was deleted: RangeA's cells survive");
+    assert_eq!(refused.as_deref(), Some(crate::sheets::SHEETS_CHANGED_UNDER_THE_DELETE));
+    assert!(!wb.file.is_dirty(), "the refusal leaves the document clean");
+
+    // 2. Without an id, the object door -- which skips every user-sheet gate
+    //    -- still never deletes a USER sheet.
+    let refused = delete_at(2, None).err();
+    assert_eq!(names(), all_five, "the object door deleted the user's sheet");
+    let refused = refused.expect("refused");
+    assert!(refused.contains("not the backing store of a floating range"), "the refusal says why: {refused}");
+    assert!(!wb.file.is_dirty(), "the refusal leaves the document clean");
+
+    // POSITIVE CONTROL: the floating-range door re-resolves RangeB's backing
+    // sheet from its id and deletes exactly that sheet.
+    crate::floating_range::delete_floating_range_inner(
+        &wb.state, &wb.file, &wb.pivots, &wb.files, &wb.pane, &wb.filters, &wb.slicer, &tl, b.range.id,
+    )
+    .expect("delete RangeB");
+    assert_eq!(names(), vec!["Sheet1", "Sheet2", "Added", "RangeA"]);
+    let listed = crate::floating_range::list_floating_ranges_inner(&wb.state);
+    assert_eq!(listed.len(), 1, "RangeA's row survives");
+    assert_eq!(listed[0].range.id, a.range.id);
+    assert_eq!(listed[0].name, "RangeA", "and still resolves to its own backing sheet");
+}
+
+/// The code of a top-level `fn` in floating_range.rs, from `signature` to its
+/// closing brace at column 0, comments stripped (the comments around both
+/// fixes name what this file looks for).
+fn floating_range_fn_code(signature: &str) -> String {
+    let src = include_str!("../floating_range.rs");
+    let at = src
+        .find(signature)
+        .unwrap_or_else(|| panic!("{signature} not found in floating_range.rs -- renamed? re-derive this pin"));
+    let rest = &src[at..];
+    let end = rest.find("\n}\n").map_or(rest.len(), |e| e + 3);
+    crate::object_deps_census_tests::strip_comments(&rest[..end])
+}
+
+/// The text from `open` (which ends in `(`) to its matching `)`.
+fn call_from<'a>(code: &'a str, open: &str) -> &'a str {
+    let start = code.find(open).unwrap_or_else(|| panic!("`{open}` not found"));
+    let mut depth = 0usize;
+    for (i, ch) in code[start..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &code[start..=start + i];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("`{open}` is never closed");
+}
+
+/// Review RA-1, the wiring the runtime test above cannot reach: no test can
+/// land another door's sheet add between the floating-range door's lookup and
+/// its delete, so both halves of the fix are pinned from the source -- the
+/// door hands the delete its backing sheet's id, and the Sheet -> FloatingRange
+/// cascade runs each pass inside the retry.
+///
+/// SABOTAGE: (a) pass `None` as the id in `delete_floating_range_inner` -- the
+/// first assertion fails; (b) call `delete_floating_range_inner` directly in
+/// `delete_floating_ranges_for_host` -- the second fails.
+#[test]
+fn the_floating_range_delete_passes_its_backing_sheets_id_and_the_cascade_retries_a_renumbered_pass() {
+    let inner = floating_range_fn_code("pub(crate) fn delete_floating_range_inner(");
+    let delete = call_from(&inner, "delete_sheet_impl(");
+    assert!(
+        delete.contains("Some(row.backing_sheet_id)"),
+        "delete_floating_range_inner no longer tells the delete which sheet it means: {delete}"
+    );
+
+    let cascade = floating_range_fn_code("pub(crate) fn delete_floating_ranges_for_host(");
+    let retried = if cascade.contains("retry_once_if_renumbered(") {
+        call_from(&cascade, "retry_once_if_renumbered(")
+    } else {
+        ""
+    };
+    assert!(
+        retried.contains("delete_floating_range_inner("),
+        "the cascade no longer runs its delete inside the retry: {cascade}"
+    );
+    assert_eq!(
+        cascade.matches("delete_floating_range_inner(").count(),
+        1,
+        "the cascade runs a delete outside the retry: {cascade}"
+    );
+}
+
+/// The retry the cascade wraps each pass in: once more after a renumbering
+/// refusal, and only once; any other outcome as it is.
+///
+/// SABOTAGE: make `retry_once_if_renumbered` run `attempt` once and return its
+/// outcome -- the first assertion fails.
+#[test]
+fn a_pass_refused_for_a_renumbering_is_tried_once_more_and_only_once() {
+    use std::cell::Cell;
+    use crate::floating_range::retry_once_if_renumbered;
+    let renumbered = || Err::<u8, String>(crate::sheets::SHEETS_CHANGED_UNDER_THE_DELETE.to_string());
+
+    // Refused once, then it lands.
+    let calls = Cell::new(0);
+    let out = retry_once_if_renumbered(|| {
+        calls.set(calls.get() + 1);
+        if calls.get() == 1 { renumbered() } else { Ok(7) }
+    });
+    assert_eq!((out, calls.get()), (Ok(7), 2), "a renumbered pass is looked up again and tried once more");
+
+    // Refused twice: the second refusal is the answer -- no third try.
+    let calls = Cell::new(0);
+    let out = retry_once_if_renumbered(|| {
+        calls.set(calls.get() + 1);
+        renumbered()
+    });
+    assert_eq!((out, calls.get()), (renumbered(), 2), "only once more");
+
+    // Any other refusal is not retried, and a success is not repeated.
+    let calls = Cell::new(0);
+    let out = retry_once_if_renumbered(|| {
+        calls.set(calls.get() + 1);
+        Err::<u8, String>("Cannot delete the last sheet".to_string())
+    });
+    assert_eq!((out, calls.get()), (Err("Cannot delete the last sheet".to_string()), 1));
+    let calls = Cell::new(0);
+    let out = retry_once_if_renumbered(|| {
+        calls.set(calls.get() + 1);
+        Ok::<u8, String>(7)
+    });
+    assert_eq!((out, calls.get()), (Ok(7), 1));
 }
 
 // ---------------------------------------------------------------------------
@@ -918,6 +1093,7 @@ fn deleting_a_protected_host_sheet_still_cascades_its_floating_ranges() {
         &tl,
         1,
         false,
+        None,
     )
     .expect("delete the protected host sheet");
     assert!(

@@ -129,6 +129,17 @@ export function validate(ast: PivotLayoutAST, ctx: ValidateContext): DslError[] 
       errors.push(dslWarning('Filter has no values specified', node.location));
     }
   }
+  // A repeated FILTERS clause ADDS to the first (parser.ts accumulates). Legal
+  // -- a drill-through bakes its terms as one more clause -- but in typed text
+  // it is usually a slip, since the one-clause comma-separated form is what the
+  // serializer writes and every example shows. Each clause after the first is
+  // pointed at; a warning, never an error, so the query still runs.
+  for (const loc of (ast.filtersClauses ?? []).slice(1)) {
+    errors.push(dslWarning(
+      'A second FILTERS clause adds to the first. One FILTERS clause with comma-separated terms is the usual form.',
+      loc,
+    ));
+  }
 
   // --- Validate SORT ---
   // Sorting by a calculated field is not supported: the backend sort

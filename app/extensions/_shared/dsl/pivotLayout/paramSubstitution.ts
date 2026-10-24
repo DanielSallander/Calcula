@@ -8,7 +8,8 @@
 //   control-change refresh side is _shared/lib/queryObjectRefresh.ts.
 //
 // Grammar — @params are recognized ONLY on FILTERS lines; an `@` anywhere else
-// (comments, ROWS/CALC lines) or inside a quoted string value is left untouched:
+// (comments, ROWS/CALC lines), inside a quoted string value, or inside a
+// bracketed `[...]` / single-quoted `'...'` name is left untouched:
 //   @Name         bare name: letters (unicode), digits, `_`; must start with a
 //                 letter or `_` (e.g. @Region, @Område)
 //   @"Any name"   quoted name: anything except `"` — needed for names with spaces
@@ -74,10 +75,19 @@ interface ParamToken {
 }
 
 /**
- * Scan one FILTERS line for @param tokens, ignoring `@` inside quoted string
- * values (data like "bob@example.com") and after an unquoted `#` (trailing
- * comment) — mirroring the DSL lexer's string/comment rules, including the
- * doubled-quote ("") escape.
+ * Scan one FILTERS line for @param tokens, mirroring the DSL lexer's rules for
+ * what is OPAQUE text (lexer.ts):
+ *   - a quoted string value, with the doubled-quote ("") escape: data such as
+ *     "bob@example.com";
+ *   - a BRACKETED name, `[...]`, to the next `]` -- or to the end of the line
+ *     when there is none, exactly as the lexer reads an unclosed one;
+ *   - a SINGLE-QUOTED name, `'...'`, to the next `'` or the end of the line;
+ *   - everything after an unquoted `#` (a trailing comment).
+ * Nothing inside an opaque span is a param, opens a string or starts a
+ * comment. That is what makes re-substituting a drill-through's baked line a
+ * no-op: the bake brackets every field name, so a model column such as
+ * `[Contacts.e@mail]` or `[P.15" screens]` is never read as a param (which
+ * would DROP the whole baked line as unset) or as the start of a string.
  */
 function scanParamTokens(line: string): ParamToken[] {
   const tokens: ParamToken[] = [];
@@ -94,6 +104,14 @@ function scanParamTokens(line: string): ParamToken[] {
     }
     if (inString) continue;
     if (ch === "#") break; // trailing comment
+    if (ch === "[" || ch === "'") {
+      // A bracketed or single-quoted name: skip to its closing character. An
+      // unclosed one runs to the end of the line, so nothing after it counts.
+      const close = line.indexOf(ch === "[" ? "]" : "'", i + 1);
+      if (close === -1) break;
+      i = close;
+      continue;
+    }
     if (ch !== "@") continue;
 
     if (line[i + 1] === '"') {

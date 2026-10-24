@@ -293,10 +293,31 @@ export interface EditingCell {
   col: number;
   /** Current value in the editor */
   value: string;
-  /** Source sheet index where editing started (for cross-sheet references) */
+  /**
+   * The edit's sheet's TRUE index as last known: read from the sheet context
+   * when the edit opens, and moved by the reducer whenever the context arrives
+   * at the same sheet (by identity) at another index. Never decide "is this the
+   * edit's sheet" by it: a temporary sheet's discard, a delete, a move or a
+   * copy renumbers the sheets while the edit is open (core/lib/editSheetIdentity.ts).
+   */
   sourceSheetIndex?: number;
-  /** Source sheet name where editing started (for cross-sheet references) */
+  /**
+   * The edit's sheet's NAME as last known (sheet names are unique, ASCII
+   * case-insensitively). The identity when the sheet has no stable id; and
+   * followed -- like the index -- whenever the context arrives at the edit's
+   * sheet BY ID under a new name, so a rename while the edit is open is
+   * followed, never refused.
+   */
   sourceSheetName?: string;
+  /**
+   * The edit's sheet's STABLE id (`SheetInfo.sheetId`), read from the sheet
+   * context when the edit opens. THE identity when present: no renumbering
+   * moves it and no rename changes it, so every "is this the edit's sheet"
+   * decision -- and the return to it from cross-sheet point mode -- compares it
+   * first, then the name, then the index (core/lib/editSheetIdentity.ts;
+   * review F1-rename-refuses-entry). Absent when the context carried none.
+   */
+  sourceSheetId?: string;
   /** Number of rows this cell spans (for merged cells, default 1) */
   rowSpan?: number;
   /** Number of columns this cell spans (for merged cells, default 1) */
@@ -309,6 +330,15 @@ export interface EditingCell {
 export interface SheetContext {
   activeSheetIndex: number;
   activeSheetName: string;
+  /**
+   * The active sheet's STABLE id (`SheetInfo.sheetId`), when the dispatch that
+   * moved the context carried one -- every dispatcher that holds the sheet list
+   * does. ABSENT when the last dispatch carried none (undo's follow of the
+   * backend's switch has only an index and a name): the reducer clears it
+   * rather than keep an id that may belong to the sheet the context LEFT, so a
+   * stale id never misleads an identity decision (core/lib/editSheetIdentity.ts).
+   */
+  activeSheetId?: string;
 }
 
 /**

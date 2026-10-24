@@ -48,7 +48,18 @@ import {
   onSheetTabDecorationsChanged,
   MAX_SHEET_TAB_DECORATION_GLYPHS,
 } from "../../api";
-import { isGlobalFormulaMode, getGlobalCursorPosition, getExternalFormulaTarget } from "../../api/editing";
+import {
+  isGlobalFormulaMode,
+  getGlobalCursorPosition,
+  getExternalFormulaTarget,
+  getGlobalIsEditing,
+  findEditSheet,
+} from "../../api/editing";
+// The typed-open latch: an edit that is OPENING (its first keystroke landed,
+// its editing state not dispatched yet). A dependency-free Core primitive the
+// facade does not carry; the Shell may read Core (insertFunctionHost.tsx reads
+// cellEditFlag the same way).
+import { isEditorOpening } from "../../core/lib/editOpenBuffer";
 // The SUBPATH (NameBox.tsx precedent): a dependency-free store plus Core's one
 // point-mode switch, kept out of any test's `@api/editing` double.
 import {
@@ -57,16 +68,39 @@ import {
   isCrossSheetPointMode,
   getExternalEditSession,
   isExternalSessionParked,
+  isExternalSessionHostSheet,
   switchSheetForPointMode,
   focusExternalSessionView,
 } from "../../api/externalEdit";
+// The sheet PRIMITIVES a temporary sheet is kept and discarded with, by the
+// facade's own names and by STABLE id (the Shell must not spell a feature's
+// command; model-drillthrough.md 2.5).
+import { keepEphemeralSheet, discardEphemeralSheet, type DiscardedSheet } from "../../api/lib";
+import { showToast } from "@api/notifications";
 import { resolveTabClick } from "./resolveTabClick";
+import {
+  EPHEMERAL_TAB_TOOLTIP,
+  createEphemeralLeaveObserver,
+  keepNotice,
+  leaveObserverPaused,
+  refusedDiscardOutcome,
+  resolveTabDoubleClick,
+  temporarySheetStateIn,
+  type EphemeralLeaveObserver,
+  type SyncEditFlags,
+  type TemporarySheetState,
+} from "./ephemeralSheets";
 import { sheetRangePrefix } from "./sheetRangePrefix";
-import { registerSheetTabsController } from "./sheetCommands";
+import { registerSheetTabsController, STRUCTURE_LOCKED } from "./sheetCommands";
 import { promptForSheetName } from "./renameSheetPrompt";
 import { sheetDeleteNeedsConfirmation } from "./sheetDeletePolicy";
 import { insertSheetBefore, moveOrCopySheet } from "./sheetTabFlows";
-import { insertionReorderDetail, removalReorderDetail } from "./sheetPlacement";
+import {
+  findSameSheet,
+  insertionReorderDetail,
+  removalReorderDetail,
+  type PlacedSheet,
+} from "./sheetPlacement";
 import type {
   SheetInfo,
   SheetsResult,
@@ -84,6 +118,87 @@ export interface SheetTabsProps {
 
 // Register core context menu items once
 let coreMenuRegistered = false;
+
+/**
+ * Temporary sheets whose discard is in flight, by stable id, each with the
+ * discard's own answer (model-drillthrough.md 2.7, rule 2; C7). MODULE-level on
+ * purpose: a second request for the same sheet -- the delete's own
+ * `sheets:refresh` re-read, a remount, the drill runner's
+ * core.sheet.discardEphemeral racing the observer -- must find it here and
+ * AWAIT that answer, never send a second discard nor answer before the first
+ * one landed.
+ */
+const discardInFlight = new Map<string, Promise<boolean>>();
+
+/**
+ * Discards whose backend call has been SENT -- past the hold in
+ * `discardSheetById` -- and not yet answered. Every door of the strip that
+ * acts on a sheet its gesture named (Duplicate, Move Left / Right, a drag,
+ * Delete, Hide, Rename, Tab Color, Unhide, Insert Sheet, Move or Copy) awaits
+ * these before it reads the list again (`resolveDoorTargets`): a discard
+ * landing after the gesture renumbers every sheet after it, and the door then
+ * acted on whichever sheet slid into the index it held (review TSHELL-3's
+ * converse; TSHELL3-CONVERSE-OTHER-DOORS). Only SENT ones: a discard still
+ * waiting on the hold waits for the door, so awaiting it there would deadlock.
+ */
+const discardsSent = new Set<Promise<unknown>>();
+
+/** Wait for every discard already sent; true when there was one (the list moved). */
+async function settleSentDiscards(): Promise<boolean> {
+  if (discardsSent.size === 0) return false;
+  await Promise.allSettled([...discardsSent]);
+  return true;
+}
+
+/** A rejection as the sentence the backend refused with. */
+const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+/**
+ * The backend's refusal of a delete that named its sheet by stable id when the
+ * sheet at that index no longer carries it (Rust
+ * `SHEETS_CHANGED_UNDER_THE_DELETE`, sheets.rs): nothing was deleted. The
+ * strip says it in a toast -- the sheets moved under the delete, as a
+ * temporary sheet's discard moves them -- never as a modal "Failed to delete".
+ */
+const SHEETS_CHANGED_UNDER_THE_DELETE =
+  "The sheets changed while that sheet was being deleted, so nothing was deleted.";
+
+/**
+ * Core's synchronous edit flags, read NOW (ephemeralSheets.ts `SyncEditFlags`):
+ * the edit flag and the typed-open latch. An edit that is still OPENING has no
+ * React `editing` state yet, so the strip's render cannot see it -- only these.
+ */
+const syncEditFlags = (): SyncEditFlags => ({
+  coreEditOpen: getGlobalIsEditing(),
+  editorOpening: isEditorOpening(),
+});
+
+/** Who asked for a temporary sheet's discard: the leave observer, or a caller through core.sheet.discardEphemeral. */
+type DiscardCaller = "leave" | "command";
+
+/**
+ * The discard door's refusal while a plain cell edit is open or opening (a
+ * formula being written gets the structural lock's own sentence): a discard
+ * landing under the edit renumbers the sheet being edited, and a drill-from-
+ * drill's discard would delete the very sheet being typed on.
+ */
+const DISCARD_UNDER_EDIT =
+  "Finish editing the cell first: the temporary sheet cannot be closed while a cell is being edited.";
+
+/**
+ * Where the temporary sheet with this id stands in a FRESH read of the list:
+ * asked when a keep was refused, so the strip says "still temporary" or
+ * "gone" from the backend's word rather than guessing ("unknown" when even the
+ * read fails).
+ */
+async function temporarySheetStateNow(sheetId: string): Promise<TemporarySheetState | "unknown"> {
+  try {
+    return temporarySheetStateIn(await getSheets(), sheetId);
+  } catch (err) {
+    console.error("[SheetTabs] getSheets after a refused keep failed:", err);
+    return "unknown";
+  }
+}
 
 /**
  * The sheet a TRUE workbook index names — by the `index` FIELD, never by list
@@ -132,6 +247,135 @@ const announceReorder = (detail: { fromIndex: number; toIndex: number }): void =
   window.dispatchEvent(new CustomEvent("sheet:reorder", { detail }));
 };
 
+// ============================================================================
+// The strip's doors: identity captured at the gesture, resolved at ONE place
+// ============================================================================
+//
+// A temporary sheet's discard runs in the background once the user leaves it
+// (model-drillthrough.md 2.7) and renumbers every sheet after it. A door that
+// captured an INDEX at its gesture -- a right-click, a drag, a confirmation, a
+// dialog, a prompt -- and acted on it later acted on whichever sheet slid into
+// that index: Duplicate copied the neighbour, Move Left moved it, and Delete
+// DELETED it, with no undo (review TSHELL3-CONVERSE-OTHER-DOORS,
+// TSHELL3-CONVERSE-DIALOG-WINDOW, DISCARD-RENUMBERS-UNDER-DELETE-CONFIRM). So
+// every such door captures the sheet's STABLE id at its gesture and finds it
+// again in `resolveDoorTargets`, inside `runSheetDoor`.
+
+/**
+ * A sheet as a door's GESTURE named it, by its stable id, with the name and
+ * temporary flag it had then -- what a refusal says if it is gone by the time
+ * the door acts. The index it had then is only `findSameSheet`'s fallback for a
+ * list without ids, which matches by name.
+ */
+interface DoorTarget extends PlacedSheet {
+  ephemeral?: boolean;
+  /** How a refusal names it: the sheet acted on (default), the sheet to place it before, or the tab it was dropped on. */
+  role?: "anchor" | "drop";
+}
+
+/** What a door's caller hands the strip: the TRUE index it saw, and the stable id when it carried one. */
+interface SheetRequest {
+  index: number;
+  sheetId?: string;
+}
+
+/**
+ * The names of the temporary sheets this strip discarded, by stable id (the
+ * last few): a door that names one of them AFTER its discard landed -- a
+ * dialog left open, a request carrying the id -- still says WHICH sheet is
+ * gone, and why, rather than "That sheet".
+ */
+const discardedNames = new Map<string, string>();
+const DISCARDED_NAMES_KEPT = 32;
+
+function rememberDiscarded(sheetId: string, name: string): void {
+  discardedNames.delete(sheetId);
+  discardedNames.set(sheetId, name);
+  while (discardedNames.size > DISCARDED_NAMES_KEPT) {
+    const oldest = discardedNames.keys().next();
+    if (oldest.done) break;
+    discardedNames.delete(oldest.value);
+  }
+}
+
+/** A listed sheet as a door target. */
+const doorTargetOf = (sheet: SheetInfo): DoorTarget => ({
+  index: sheet.index,
+  name: sheet.name,
+  sheetId: sheet.sheetId,
+  ephemeral: sheet.ephemeral === true,
+});
+
+/**
+ * The door target a request names, read from `list` -- the strip's list AT
+ * THE GESTURE: by the stable id the request carries (named from the list, or
+ * from a discard this strip made), else the sheet at its TRUE index. An index
+ * the list does not carry gives a target no list matches.
+ */
+function doorTargetFor(list: SheetInfo[], request: SheetRequest): DoorTarget {
+  if (request.sheetId) {
+    const listed = list.find((s) => s.sheetId === request.sheetId);
+    if (listed) return doorTargetOf(listed);
+    const discarded = discardedNames.get(request.sheetId);
+    return { index: request.index, sheetId: request.sheetId, name: discarded ?? "", ephemeral: discarded !== undefined };
+  }
+  const at = sheetAt(list, request.index);
+  return at ? doorTargetOf(at) : { index: request.index, name: "" };
+}
+
+/** True when a target names no sheet at all (neither an id nor a name to match). */
+const namesNoSheet = (target: DoorTarget): boolean => !target.sheetId && !target.name;
+
+/**
+ * THE one refusal of a door whose sheet is gone by the time it acts: which
+ * sheet, and -- for a temporary sheet, the usual case -- why. `done` is what
+ * was not done ("copied", "deleted", ...).
+ */
+function goneNotice(target: DoorTarget, done: string): string {
+  const role =
+    target.role === "anchor" ? "the sheet to place it before" : target.role === "drop" ? "the sheet it was dropped on" : null;
+  const who = target.name
+    ? `"${target.name}"${role ? `, ${role},` : ""}`
+    : role
+      ? role.charAt(0).toUpperCase() + role.slice(1)
+      : "That sheet";
+  const why = target.ephemeral ? ": it was a temporary sheet and closed when you left it" : "";
+  return `${who} is no longer in the workbook${why}. Nothing was ${done}.`;
+}
+
+/**
+ * THE one place a door of the strip finds the sheet(s) its gesture named
+ * again: every discard already SENT answers first, then a FRESH read, and each
+ * target is found in it by its stable id (`findSameSheet`). The door's step
+ * then acts on the TRUE indices of that read -- never on an index the gesture
+ * captured. A target that is gone refuses the whole door with ONE toast (the
+ * strip's temporary-sheet events are toasts, never a modal) and answers null;
+ * a failed read rejects, for the door's own "Failed to ..." alert.
+ *
+ * Always settles and always re-reads, whatever the settle found: a discard
+ * that already LANDED leaves nothing in `discardsSent`, and the strip's own
+ * list can still be the one the gesture was made on. Called only inside
+ * `runSheetDoor`, whose hold keeps a NEW discard from being sent between this
+ * read and the step.
+ */
+async function resolveDoorTargets(
+  targets: readonly DoorTarget[],
+  done: string,
+): Promise<{ found: SheetInfo[]; fresh: SheetsResult } | null> {
+  await settleSentDiscards();
+  const fresh = await getSheets();
+  const found: SheetInfo[] = [];
+  for (const target of targets) {
+    const sheet = namesNoSheet(target) ? undefined : findSameSheet(fresh.sheets, target);
+    if (!sheet) {
+      showToast(goneNotice(target, done), { variant: "warning" });
+      return null;
+    }
+    found.push(sheet);
+  }
+  return { found, fresh };
+}
+
 export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement {
   const { state, dispatch } = useGridContext();
   const { editing, sheetContext } = state;
@@ -171,11 +415,13 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     }
   }, [sheetContext.activeSheetIndex, activeIndex, isLoading]);
 
-  // Context menu state
+  // Context menu state: the right-clicked sheet as the list showed it, kept BY
+  // IDENTITY -- the render and the item click find it again by its stable id
+  // (`findSameSheet`), never by the index it had at the right-click.
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
-    sheetIndex: number;
+    sheet: SheetInfo;
   } | null>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
 
@@ -185,24 +431,53 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     selectedIndex: number | null;
   } | null>(null);
 
-  // Delete confirmation dialog state
-  const [deleteConfirm, setDeleteConfirm] = useState<{
-    index: number;
-    name: string;
-  } | null>(null);
+  // Delete confirmation dialog state: the sheet the prompt NAMES, by its
+  // stable id. Its Delete deletes THAT sheet (`confirmDeleteSheet`), whatever
+  // a discard landing while the prompt was open did to the indices.
+  const [deleteConfirm, setDeleteConfirm] = useState<DoorTarget | null>(null);
 
   // The "+" caret's kind menu (Worksheet / Canvas), anchored above the caret.
   const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(null);
   const addMenuRef = useRef<HTMLDivElement>(null);
 
-  // Drag-to-reorder state
+  // Drag-to-reorder state. The indices drive the drag's own pixels; the drop
+  // moves the sheets the STABLE ids name (a discard can land mid-drag).
   const [dragState, setDragState] = useState<{
     dragging: boolean;
     sourceIndex: number;
+    /** The dragged sheet's stable id, taken at the press. */
+    sourceSheetId?: string;
     currentIndex: number;
+    /** The stable id of the tab under the pointer: the one the drop takes the place of. */
+    currentSheetId?: string;
     startX: number;
   } | null>(null);
   const tabsAreaRef = useRef<HTMLDivElement>(null);
+
+  // A FINISHED drag is not a click (the FIRST early return of
+  // `handleSheetClick`, below -- the strip's to decide, never resolveTabClick's:
+  // it must run before the group-clearing step; review
+  // DRAG-DISARM-MAKES-THE-DROP-A-CLICK, RESOLVETABCLICK-DRAGGING-DEAD; tested
+  // in sheetTabsTemporarySheets.test.tsx). The drag disarms AT its mouseup,
+  // before the drop's door is awaited (TSHELL4-DRAG-STATE-ARMED-DURING-DOOR),
+  // and React commits that before the browser dispatches the click that
+  // follows the release -- so `dragState` can no longer tell that click from a
+  // genuine one, and a drop released over the dragged tab switched to it (or,
+  // with Ctrl, grouped it) by its PRE-move index while the move was in
+  // flight. This ref remembers the release instead: set by the mouseup for
+  // ANY finished drag, honoured -- and cleared -- FIRST by the click; cleared
+  // by a timer (Chromium dispatches the click in the mouseup's own task, so
+  // the timer always runs after it, and also covers a release with no tab
+  // click) and by the next press.
+  const dropJustEndedRef = useRef(false);
+  const dropEndedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const forgetDropEnded = useCallback(() => {
+    dropJustEndedRef.current = false;
+    if (dropEndedTimerRef.current !== null) {
+      clearTimeout(dropEndedTimerRef.current);
+      dropEndedTimerRef.current = null;
+    }
+  }, []);
 
   // Tab scroll state: how many tabs are hidden on each side
   const [hiddenLeft, setHiddenLeft] = useState(0);
@@ -227,6 +502,82 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
   // external session is live, expecting or not: the session holds its host's
   // TRUE index, and a structural change would move that sheet underneath it.
   const structuralLocked = isInFormulaMode || externalLive;
+
+  // The structural lock as it stands NOW, for a check made AFTER an await (a
+  // door's settle and fresh read, review TSHELL4-DOOR-WAIT-SKIPS-STRUCTURAL-LOCK)
+  // or from a callback created once: the render's verdict through a ref the
+  // render keeps current, OR the same synchronous globals the render reads,
+  // which a keystroke since the last render has already moved. A callback that
+  // closed over `structuralLocked` would ask the lock as it was when the door
+  // STARTED -- before a formula edit opened during its wait.
+  const structuralLockedRef = useRef(structuralLocked);
+  structuralLockedRef.current = structuralLocked;
+  const structureLockedNow = useCallback(
+    (): boolean =>
+      structuralLockedRef.current ||
+      isGlobalFormulaMode() ||
+      isCrossSheetPointMode() ||
+      getExternalEditSession() !== null,
+    [],
+  );
+
+  // The leave observer's OWN pause (model-drillthrough.md 2.7, rule 3): ANY
+  // cell edit open -- the grid's editor or an external session -- whatever the
+  // formula looks like. NOT `structuralLocked`: that lock asks "does the
+  // formula expect a reference right now?", which turns false the moment a
+  // point-mode click inserts `Sales!B2` while the backend is still on Sales,
+  // and a read judged then deleted the temporary sheet being edited
+  // (ephemeralSheets.ts `leaveObserverPaused`). `editingRef` is what the
+  // observer asks at EVENT time; the render keeps it current. Core's
+  // SYNCHRONOUS edit flags join it, so an edit that is still OPENING -- its
+  // first keystroke landed, no editing state yet -- pauses the observer too.
+  const editingRef = useRef(editing);
+  editingRef.current = editing;
+  // `pointKey` is null exactly when no external session is live.
+  const observerPaused = leaveObserverPaused(editing, pointKey, syncEditFlags());
+  // The same pause asked NOW (event time): the observer's, and the discard's
+  // own check before it sends (`discardSheetById`).
+  const editPausedNow = useCallback(
+    (): boolean => leaveObserverPaused(editingRef.current, getExternalEditSession(), syncEditFlags()),
+    [],
+  );
+
+  // The temporary sheet's discard, by stable id, read through a ref so the
+  // observer (created once) always reaches the current body.
+  const discardByIdRef = useRef<(sheetId: string, caller?: DiscardCaller) => Promise<boolean>>(
+    () => Promise.resolve(false),
+  );
+
+  // THE leave observer (ephemeralSheets.ts `createEphemeralLeaveObserver`):
+  // its memory -- the ACTIVE sheet as the last JUDGED read reported it, by
+  // stable id, with its flag -- is overwritten synchronously before any
+  // discard; it records nothing while a cell edit is open or while the
+  // strip's own two-step flow is in flight; it discards by stable id.
+  const leaveObserverRef = useRef<EphemeralLeaveObserver | null>(null);
+  if (leaveObserverRef.current === null) {
+    leaveObserverRef.current = createEphemeralLeaveObserver({
+      paused: () => leaveObserverPaused(editingRef.current, getExternalEditSession(), syncEditFlags()),
+      discardInFlight: (sheetId) => discardInFlight.has(sheetId),
+      discard: (sheetId) => {
+        void discardByIdRef.current(sheetId, "leave");
+      },
+    });
+  }
+  const leaveObserver = leaveObserverRef.current;
+
+  // Rule 3's other half: nothing is queued while the observer is paused. When
+  // the pause ENDS -- the edit closed, which a Core trip does only after it
+  // switched back to the source sheet -- the list is re-read ONCE, and only if
+  // a read was skipped meanwhile, so the verdict comes from a fresh
+  // `get_sheets()`. Only the true -> false edge reads; the mount read is the
+  // effect below.
+  const wasPausedRef = useRef(observerPaused);
+  useEffect(() => {
+    const wasPaused = wasPausedRef.current;
+    wasPausedRef.current = observerPaused;
+    if (wasPaused && !observerPaused && leaveObserver.pauseEnded()) loadSheets();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [observerPaused]);
 
   // Register core menu items on first render
   useEffect(() => {
@@ -285,7 +636,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         setActiveIndex(result.activeIndex);
         const newActive = sheetAt(result.sheets, result.activeIndex);
         if (newActive) {
-          dispatch(setActiveSheet(result.activeIndex, newActive.name, surfaceOf(newActive)));
+          dispatch(setActiveSheet(result.activeIndex, newActive.name, surfaceOf(newActive), newActive.sheetId));
         }
         onSheetChange?.(result.activeIndex, newActive?.name || "");
         window.dispatchEvent(new CustomEvent("sheet:normalSwitch", {
@@ -305,7 +656,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         setActiveIndex(switchResult.activeIndex);
         const newActive = sheetAt(switchResult.sheets, switchResult.activeIndex);
         if (newActive) {
-          dispatch(setActiveSheet(switchResult.activeIndex, newActive.name, surfaceOf(newActive)));
+          dispatch(setActiveSheet(switchResult.activeIndex, newActive.name, surfaceOf(newActive), newActive.sheetId));
         }
         onSheetChange?.(switchResult.activeIndex, newActive?.name || "");
         window.dispatchEvent(new CustomEvent("sheet:normalSwitch", {
@@ -326,41 +677,94 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
   // dispatch, and the controller the core.sheet.* commands call
   // (sheetCommands.ts). ONE body per operation, so the two doors cannot
   // drift. Every handler is read through a ref, so this effect registers once.
+  //
+  // Each door takes its sheet BY IDENTITY at the event -- the stable id the
+  // tab menu sends, else the sheet at the index in the list the caller just
+  // chose from -- and acts through `runSheetDoor`, which finds it again after
+  // every discard already sent has answered (review
+  // TSHELL3-CONVERSE-OTHER-DOORS).
   useEffect(() => {
-    const moveSheetTo = async (fromIndex: number, toIndex: number) => {
+    // The strip's list as of the last render: the list a menu item, or a
+    // command that has just read the snapshot, chose its sheet from.
+    const listNow = (): SheetInfo[] => controllerStateRef.current.sheets;
+    const targetOf = (request: SheetRequest): DoorTarget => doorTargetFor(listNow(), request);
+    /** A window event's sheet: the TRUE index it names and, from the tab menu, the stable id. */
+    const requestFrom = (index: unknown, sheetId: unknown): SheetRequest => ({
+      index: typeof index === "number" ? index : -1,
+      sheetId: typeof sheetId === "string" && sheetId !== "" ? sheetId : undefined,
+    });
+
+    /** One `move_sheet`, told to Core's view cache once it LANDED, then applied. */
+    const rotateSheet = async (fromIndex: number, toIndex: number) => {
+      const result = await moveSheet(fromIndex, toIndex);
+      announceReorder({ fromIndex, toIndex });
+      await applySheetsResultRef.current(result, { backendHandledSwitch: true });
+    };
+
+    /**
+     * Move Left / Move Right: one place along the tabs the user SEES. The
+     * neighbour is taken from where the sheet stands in the door's FRESH read,
+     * never from an index the menu captured (a discard landing since moved the
+     * sheet onto itself, or past another one).
+     */
+    const moveSheetBeside = async (request: SheetRequest, direction: "left" | "right") => {
       try {
-        window.dispatchEvent(new CustomEvent("sheet:reorder", {
-          detail: { fromIndex, toIndex },
-        }));
-        const result = await moveSheet(fromIndex, toIndex);
-        await applySheetsResultRef.current(result, { backendHandledSwitch: true });
+        await runSheetDoorRef.current([targetOf(request)], "moved", async ([sheet], fresh) => {
+          const visible = fresh.sheets.filter((s) => s.visibility === "visible");
+          const at = visible.findIndex((s) => s.index === sheet.index);
+          const to = direction === "left" ? at - 1 : at + 1;
+          // Already at that end of the visible tabs: nothing to move.
+          if (at < 0 || to < 0 || to >= visible.length) return;
+          await rotateSheet(sheet.index, visible[to].index);
+        });
       } catch (err) {
         console.error("[SheetTabs] moveSheet error:", err);
         void alertAsync("Failed to move sheet: " + String(err));
       }
     };
 
-    const copySheetAt = async (index: number) => {
+    /**
+     * `sheet:requestMove { fromIndex, toIndex }` (the journeys' door): the
+     * sheet at `fromIndex` to where the sheet at `toIndex` stands, both taken
+     * by identity at the event and found again in the door's fresh read.
+     */
+    const moveSheetTo = async (from: SheetRequest, to: SheetRequest) => {
       try {
-        window.dispatchEvent(new CustomEvent("sheet:beforeSwitch", {
-          detail: { oldSheetIndex: -1, newSheetIndex: -1 },
-        }));
-        const result = await copySheet(index);
-        // The copy lands right after its source, renumbering every sheet past
-        // it: untold, each of them restored its NEIGHBOUR's selection and
-        // scroll on its next visit.
-        announceReorder(insertionReorderDetail(result.activeIndex));
-        await applySheetsResultRef.current(result, { backendHandledSwitch: true, forceSwitch: true });
+        const place: DoorTarget = { ...targetOf(to), role: "drop" };
+        await runSheetDoorRef.current([targetOf(from), place], "moved", async ([sheet, destination]) => {
+          if (sheet.index !== destination.index) await rotateSheet(sheet.index, destination.index);
+        });
+      } catch (err) {
+        console.error("[SheetTabs] moveSheet error:", err);
+        void alertAsync("Failed to move sheet: " + String(err));
+      }
+    };
+
+    const copySheetAt = async (request: SheetRequest) => {
+      try {
+        await runSheetDoorRef.current([targetOf(request)], "copied", async ([source]) => {
+          window.dispatchEvent(new CustomEvent("sheet:beforeSwitch", {
+            detail: { oldSheetIndex: -1, newSheetIndex: -1 },
+          }));
+          const result = await copySheet(source.index);
+          // The copy lands right after its source, renumbering every sheet past
+          // it: untold, each of them restored its NEIGHBOUR's selection and
+          // scroll on its next visit.
+          announceReorder(insertionReorderDetail(result.activeIndex));
+          await applySheetsResultRef.current(result, { backendHandledSwitch: true, forceSwitch: true });
+        });
       } catch (err) {
         console.error("[SheetTabs] copySheet error:", err);
         void alertAsync("Failed to copy sheet: " + String(err));
       }
     };
 
-    const hideSheetAt = async (index: number) => {
+    const hideSheetAt = async (request: SheetRequest) => {
       try {
-        const result = await hideSheet(index);
-        await applySheetsResultRef.current(result, { backendHandledSwitch: true });
+        await runSheetDoorRef.current([targetOf(request)], "hidden", async ([sheet]) => {
+          const result = await hideSheet(sheet.index);
+          await applySheetsResultRef.current(result, { backendHandledSwitch: true });
+        });
       } catch (err) {
         console.error("[SheetTabs] hideSheet error:", err);
         void alertAsync("Failed to hide sheet: " + String(err));
@@ -383,10 +787,12 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       }
     };
 
-    const setTabColorAt = async (index: number, color: string) => {
+    const setTabColorAt = async (request: SheetRequest, color: string) => {
       try {
-        const result = await setTabColor(index, color);
-        setSheets(result.sheets);
+        await runSheetDoorRef.current([targetOf(request)], "recolored", async ([sheet]) => {
+          const result = await setTabColor(sheet.index, color);
+          setSheets(result.sheets);
+        });
       } catch (err) {
         console.error("[SheetTabs] setTabColor error:", err);
         void alertAsync("Failed to set tab color: " + String(err));
@@ -394,13 +800,13 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     };
 
     const handleRename = async (e: Event) => {
-      const { index, newName } = (e as CustomEvent).detail;
-      await handleRenameSheetRef.current(index, newName);
+      const { index, newName, sheetId } = (e as CustomEvent).detail;
+      await handleRenameSheetRef.current(requestFrom(index, sheetId), newName);
     };
 
     const handleDelete = async (e: Event) => {
-      const { index } = (e as CustomEvent).detail;
-      await handleDeleteSheetRef.current(index);
+      const { index, sheetId } = (e as CustomEvent).detail;
+      await handleDeleteSheetRef.current(requestFrom(index, sheetId));
     };
 
     const handleAdd = async (e: Event) => {
@@ -409,18 +815,22 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     };
 
     const handleMove = async (e: Event) => {
-      const { fromIndex, toIndex } = (e as CustomEvent).detail;
-      await moveSheetTo(fromIndex, toIndex);
+      const { fromIndex, toIndex, sheetId, direction } = (e as CustomEvent).detail;
+      if (direction === "left" || direction === "right") {
+        await moveSheetBeside(requestFrom(fromIndex, sheetId), direction);
+      } else {
+        await moveSheetTo(requestFrom(fromIndex, sheetId), requestFrom(toIndex, undefined));
+      }
     };
 
     const handleCopy = async (e: Event) => {
-      const { index } = (e as CustomEvent).detail;
-      await copySheetAt(index);
+      const { index, sheetId } = (e as CustomEvent).detail;
+      await copySheetAt(requestFrom(index, sheetId));
     };
 
     const handleHide = async (e: Event) => {
-      const { index } = (e as CustomEvent).detail;
-      await hideSheetAt(index);
+      const { index, sheetId } = (e as CustomEvent).detail;
+      await hideSheetAt(requestFrom(index, sheetId));
     };
 
     const handleUnhide = async () => {
@@ -428,26 +838,37 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     };
 
     const handleTabColor = async (e: Event) => {
-      const { index, color } = (e as CustomEvent).detail;
-      await setTabColorAt(index, color);
+      const { index, color, sheetId } = (e as CustomEvent).detail;
+      await setTabColorAt(requestFrom(index, sheetId), color);
     };
 
     // The core.sheet.* commands' door (sheetCommands.ts). Seated for as long
     // as the strip is mounted; every method is a handler of the strip's own,
-    // so a command runs the same switch steps a click does.
+    // so a command runs the same switch steps a click does. An index from a
+    // command names the sheet at that index in the list it just read (the
+    // controller's contract); Rename passes the id it read before its prompt,
+    // and Move or Copy passes ids only.
     const releaseController = registerSheetTabsController({
-      snapshot: () => controllerStateRef.current,
+      // The lock as it stands NOW (`structureLockedNow`), so the commands'
+      // refusals and the door's own re-check ask the same question.
+      snapshot: () => ({ ...controllerStateRef.current, locked: structureLockedNow() }),
       insertSheetBefore: (beforeIndex, kind) => handleInsertSheetBeforeRef.current(beforeIndex, kind),
       // The strip's own "+" (append), for the command's `{ atEnd: true }`.
       appendSheet: (kind) => handleAddSheetRef.current(kind),
       // Excel's rule for the command door: a blank sheet goes without asking.
-      deleteSheet: (index) => handleDeleteSheetRef.current(index, { confirm: "whenNotBlank" }),
-      renameSheet: (index, newName) => handleRenameSheetRef.current(index, newName),
-      hideSheet: hideSheetAt,
+      deleteSheet: (index) => handleDeleteSheetRef.current({ index }, { confirm: "whenNotBlank" }),
+      // A TEMPORARY sheet's two doors (model-drillthrough.md 2.7): the drill
+      // runner's discard-before-the-next (core.sheet.discardEphemeral) and the
+      // tab menu's Keep Sheet. Neither asks: the sheet is a drill's result.
+      // Both by the STABLE id, passed straight through -- never an index.
+      discardSheet: (sheetId) => discardByIdRef.current(sheetId),
+      keepSheet: (sheetId) => keepSheetRef.current(sheetId),
+      renameSheet: (index, newName, sheetId) => handleRenameSheetRef.current({ index, sheetId }, newName),
+      hideSheet: (index) => hideSheetAt({ index }),
       openUnhideDialog,
-      setTabColor: setTabColorAt,
-      moveOrCopySheet: (sourceIndex, beforeIndex, copy) =>
-        handleMoveOrCopySheetRef.current(sourceIndex, beforeIndex, copy),
+      setTabColor: (index, color) => setTabColorAt({ index }, color),
+      moveOrCopySheet: (sourceSheetId, beforeSheetId, copy) =>
+        handleMoveOrCopySheetRef.current(sourceSheetId, beforeSheetId, copy),
     });
 
     window.addEventListener("sheet:requestRename", handleRename);
@@ -470,7 +891,8 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       window.removeEventListener("sheet:requestTabColor", handleTabColor);
       releaseController();
     };
-  }, []);
+    // `structureLockedNow` is created once (no deps), so this still registers once.
+  }, [structureLockedNow]);
 
   // Close context menu on outside click
   useEffect(() => {
@@ -511,26 +933,270 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     };
   }, [addMenu]);
 
+  /**
+   * Discard a TEMPORARY (drill-through) sheet the user has LEFT -- or, through
+   * the controller (core.sheet.discardEphemeral), the one a drill runner must
+   * clear before it adds the next (model-drillthrough.md 2.7) -- by its STABLE
+   * id. Resolves true once the sheet is gone, false on a refusal it has
+   * already told the user about (C7).
+   *
+   * By id END TO END: the backend resolves the id to the sheet's CURRENT index
+   * in the same command that deletes it (`discard_ephemeral_sheet`), and the
+   * index everything here announces is the one it REPORTS. An index taken from
+   * an earlier read named whichever sheet slid into it: Insert Sheet (an add
+   * then a move) and Move or Copy's copy (a copy then a move) renumber the
+   * sheets between the read and the delete, and the strip deleted the user's
+   * own sheet while the temporary one survived (review finding
+   * discard-stale-index-after-insert-or-copy-move).
+   *
+   * Its OWN body, NOT `executeDeleteSheet`: that one is a SWITCH body
+   * (beforeSwitch, prime, `dispatch(setActiveSheet)`, normalSwitch,
+   * SHEET_CHANGED), and replayed onto a sheet the user already reached it
+   * restores that sheet's OLD selection and scroll ~100 ms after a hyperlink or
+   * the Watch Window landed. The user sits on the sheet they chose; this only
+   * removes the one they left: the wrapper's discard (its SHEET_DELETED and
+   * MUTATION_REFRESH over seven domains -- exactly what `deleteSheet`
+   * announces -- make every cache, and this strip through the translator's
+   * `sheets:refresh`, re-read), the view-cache renumbering at the REPORTED
+   * index, the list, and Core's sheet context from the backend's answer. No
+   * switch fan-out and no SHEET_CHANGED of its own; nothing recorded for a
+   * macro.
+   *
+   * A second request for the same id while one is in flight gets the SAME
+   * promise: it awaits the first discard's answer instead of sending another.
+   *
+   * NEVER INSIDE ONE OF THE STRIP'S OWN DOORS (review TSHELL-3; `runSheetDoor`):
+   * between a door's fresh read and its step -- and between the two steps of
+   * Insert Sheet or Move or Copy with a copy -- a discard landing renumbers the
+   * sheets under the indices the step uses. The leave observer holds its own
+   * verdicts for a door; a discard through core.sheet.discardEphemeral (the
+   * drill runner's) waits here, INSIDE the promise, so the in-flight entry is
+   * still recorded synchronously and the observer's re-read after the door
+   * joins this discard instead of sending a second one. Once sent it is in
+   * `discardsSent`, which a door that starts later awaits first.
+   *
+   * A REFUSED discard (Protect Workbook Structure turned on while on the
+   * sheet; a repairability pre-flight) KEEPS the sheet instead, by the same id,
+   * and says so ONCE in a toast -- never a modal, never the same refusal at
+   * every later leave -- and "kept" ONLY when the keep landed
+   * (ephemeralSheets.ts `refusedDiscardOutcome`).
+   *
+   * NEVER SENT UNDER A CELL EDIT (review TSHELL4-DISCARD-LANDS-UNDER-OPEN-EDIT,
+   * TSHELL4-DOOR-WAIT-SKIPS-STRUCTURAL-LOCK): when a Core edit or an external
+   * session is open -- or still OPENING -- at the moment the discard would go
+   * (after the hold, which an edit can open during), it is not sent: a discard
+   * landing under the edit renumbers the sheet being edited, and the edit then
+   * commits into whichever sheet slid into its index. The leave is handed back
+   * to the observer as OWED (`leaveDeferred`), whose pause re-reads once when
+   * the edit closes and discards the sheet then -- if the user has left it. A
+   * caller through core.sheet.discardEphemeral (`caller` "command", the drill
+   * runner) is told once in a toast -- the structural lock's sentence while a
+   * formula is being written -- and answered false, so it adds nothing.
+   */
+  const discardSheetById = useCallback(
+    (sheetId: string, caller: DiscardCaller = "command"): Promise<boolean> => {
+      const pending = discardInFlight.get(sheetId);
+      if (pending) return pending;
+      const run = (async (): Promise<boolean> => {
+        while (leaveObserver.flowsInFlight() > 0) await leaveObserver.whenFlowsIdle();
+        if (editPausedNow()) {
+          leaveObserver.leaveDeferred(sheetId);
+          if (caller === "command") {
+            showToast(structureLockedNow() ? STRUCTURE_LOCKED : DISCARD_UNDER_EDIT, { variant: "info" });
+          }
+          return false;
+        }
+        let discarded: DiscardedSheet;
+        // SENT from here, in the same turn the hold let go: no flow can start in between.
+        const sent = discardEphemeralSheet(sheetId);
+        discardsSent.add(sent);
+        const forget = () => {
+          discardsSent.delete(sent);
+        };
+        sent.then(forget, forget);
+        try {
+          discarded = await sent;
+        } catch (err) {
+          // Only the BACKEND's refusal lands here (nothing was deleted).
+          const reason = errorText(err);
+          console.warn("[SheetTabs] discard of a temporary sheet refused; keeping it:", reason);
+          let state: TemporarySheetState | "unknown";
+          let keepRefusal: string | undefined;
+          try {
+            const kept = await keepEphemeralSheet(sheetId);
+            setSheets(kept.sheets);
+            state = temporarySheetStateIn(kept, sheetId);
+          } catch (keepErr) {
+            keepRefusal = errorText(keepErr);
+            console.error("[SheetTabs] keepEphemeralSheet after a refused discard failed:", keepRefusal);
+            state = await temporarySheetStateNow(sheetId);
+          }
+          if (state === "kept") leaveObserver.kept(sheetId);
+          const outcome = refusedDiscardOutcome(reason, state, keepRefusal);
+          if (outcome.notice) showToast(outcome.notice.message, { variant: outcome.notice.variant });
+          return outcome.gone;
+        }
+        const { deletedIndex, result } = discarded;
+        // A door that still names this sheet can say which sheet is gone.
+        rememberDiscarded(sheetId, discarded.deletedName);
+        // Every sheet past the discarded one moved down an index -- the same
+        // telling executeDeleteSheet makes to Core's per-sheet view cache, at
+        // the index the backend actually removed.
+        announceReorder(removalReorderDetail(deletedIndex));
+        setSheets(result.sheets);
+        setActiveIndex(result.activeIndex);
+        const active = sheetAt(result.sheets, result.activeIndex);
+        if (active) {
+          dispatch(setSheetContext(result.activeIndex, active.name, surfaceOf(active), active.sheetId));
+        }
+        return true;
+      })();
+      discardInFlight.set(sheetId, run);
+      const release = () => {
+        if (discardInFlight.get(sheetId) === run) discardInFlight.delete(sheetId);
+      };
+      run.then(release, release);
+      return run;
+    },
+    // `leaveObserver` is created once per mount (a ref), never replaced; the
+    // two predicates are created once (no deps).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [dispatch, editPausedNow, structureLockedNow],
+  );
+  discardByIdRef.current = discardSheetById;
+
+  /**
+   * Keep a TEMPORARY sheet (the tab's double-click; the tab menu's Keep
+   * Sheet), by the STABLE id the caller saw: the backend drops its flag and the
+   * strip adopts the list -- the italic goes with the flag. "Sheet kept" ONLY
+   * when the answered list holds THAT sheet unflagged; otherwise it says the
+   * sheet is still temporary, or gone (a refused keep asks a fresh read which).
+   * The observer's memory follows, so a later leave of this sheet finds
+   * nothing to discard even before the next read (the fresh read's own flag
+   * decides anyway; ephemeralSheets.ts rule 5).
+   */
+  const keepSheet = useCallback(async (sheetId: string | undefined) => {
+    if (sheetId === undefined || sheetId === "") {
+      const notice = keepNotice("unknown", "the workbook did not report which sheet this is");
+      showToast(notice.message, { variant: notice.variant });
+      return;
+    }
+    let state: TemporarySheetState | "unknown";
+    let refusal: string | undefined;
+    try {
+      const result = await keepEphemeralSheet(sheetId);
+      setSheets(result.sheets);
+      state = temporarySheetStateIn(result, sheetId);
+    } catch (err) {
+      refusal = errorText(err);
+      console.error("[SheetTabs] keepEphemeralSheet error:", refusal);
+      state = await temporarySheetStateNow(sheetId);
+    }
+    if (state === "kept") leaveObserver.kept(sheetId);
+    const notice = keepNotice(state, refusal);
+    showToast(notice.message, { variant: notice.variant });
+    // `leaveObserver` is created once per mount (a ref), never replaced.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /**
+   * The backend-derived read, and THE one site of the temporary-sheet leave
+   * observer (model-drillthrough.md 2.7, rule 1) -- never the strip's own adopt
+   * sites: a tab click adopts its result and THEN emits SHEET_CHANGED, so a
+   * second site would judge the same pair twice. The observer
+   * (ephemeralSheets.ts) records nothing while a cell edit is open or while the
+   * strip's own two-step flow is in flight -- which is why the ticket is taken
+   * as the read is SENT, not when it answers -- overwrites its memory before
+   * any discard, and discards by stable id. Doors that switch with a raw
+   * `setActiveSheet` and no event (the Insights pane, the command line's
+   * `ensureSheetActive`) produce a LATE leave on the next sheets event;
+   * accepted and named in the design (rule 6).
+   */
   const loadSheets = useCallback(async () => {
+    const ticket = leaveObserver.readSent();
     try {
       const result = await getSheets();
       setSheets(result.sheets);
       setActiveIndex(result.activeIndex);
-      // Sync sheet context with state
+      // Sync sheet context with state -- with the sheet's STABLE id, which is
+      // how an open edit follows a rename of its own sheet (review
+      // F1-rename-refuses-entry): a rename re-reads here, and the context
+      // arrives at the same id under the new name.
       const activeSheet = sheetAt(result.sheets, result.activeIndex);
       if (activeSheet) {
-        dispatch(setSheetContext(result.activeIndex, activeSheet.name, surfaceOf(activeSheet)));
+        dispatch(setSheetContext(result.activeIndex, activeSheet.name, surfaceOf(activeSheet), activeSheet.sheetId));
       }
       setError(null);
+      // The ONE site of the temporary-sheet leave observer (rule 1).
+      leaveObserver.observe(result, ticket);
     } catch (err) {
       console.error("[SheetTabs] getSheets error:", err);
       setError(String(err));
+      // The fallback list has no ids and is NEVER handed to the observer
+      // (rule 4): its memory keeps what the last judged read said.
       setSheets([{ index: 0, name: "Sheet1", visibility: "visible" as const }]);
       setActiveIndex(0);
     } finally {
       setIsLoading(false);
     }
+    // `leaveObserver` is created once per mount (a ref), never replaced.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dispatch]);
+
+  /**
+   * Run one of the strip's doors on the sheet(s) its gesture named -- every
+   * `targets` entry captured BEFORE anything was awaited -- through the ONE
+   * shared resolver (`resolveDoorTargets`), and then `step` with those sheets
+   * as the door's fresh read lists them.
+   *
+   * Held from the leave observer like a two-step flow (`flowStarted` /
+   * `flowSettled`), from before the settle to after the step: no discard can
+   * be SENT between the fresh read and the step (it waits for the door), and
+   * a leave read that answers meanwhile -- the user left a temporary sheet a
+   * moment before the gesture -- is not judged until the door is done, when
+   * the list is re-read ONCE. Without the hold that read's discard was sent
+   * after the door's read and before its step, and the step acted on the
+   * renumbered list.
+   *
+   * The STRUCTURAL LOCK is asked again between the resolve and the step, as it
+   * stands NOW (`structureLockedNow`): a door whose entry check passed can
+   * spend a sent discard's whole round trip and a fresh read waiting, and a
+   * formula edit opened meanwhile holds its source sheet by INDEX -- the
+   * door's add, copy, move or delete renumbered it under the edit, and Enter
+   * wrote the formula into another sheet (review
+   * TSHELL4-DOOR-WAIT-SKIPS-STRUCTURAL-LOCK). One place for every door,
+   * including those with no entry check of their own (Duplicate, Move Left /
+   * Right, a drag, Hide, Tab Color, Unhide). It refuses with the lock's own
+   * sentence in one toast, and the step does not run; the settle's re-read
+   * still does.
+   *
+   * Rejects with whatever the read or the step threw, for the door's own
+   * alert; a gone target was already refused with a toast.
+   */
+  const runSheetDoor = useCallback(
+    async (
+      targets: readonly DoorTarget[],
+      done: string,
+      step: (found: SheetInfo[], fresh: SheetsResult) => Promise<void>,
+    ): Promise<void> => {
+      leaveObserver.flowStarted();
+      try {
+        const resolved = await resolveDoorTargets(targets, done);
+        if (!resolved) return;
+        if (structureLockedNow()) {
+          showToast(STRUCTURE_LOCKED, { variant: "info" });
+          return;
+        }
+        await step(resolved.found, resolved.fresh);
+      } finally {
+        if (leaveObserver.flowSettled()) void loadSheets();
+      }
+    },
+    // `leaveObserver` is created once per mount (a ref), never replaced;
+    // `structureLockedNow` is created once (no deps).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [loadSheets, structureLockedNow],
+  );
 
   /**
    * Handle mousedown on sheet tabs.
@@ -561,7 +1227,19 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
 
   const handleSheetClick = useCallback(
     async (index: number, event?: React.MouseEvent) => {
-      // Skip click if we just finished a drag
+      // A finished drag is not a click -- asked FIRST, before anything below
+      // can act, the group-clearing block included: this is the click the
+      // browser dispatches after a drag's release (`dropJustEndedRef`), which
+      // the drag's own state, disarmed at the mouseup, can no longer tell.
+      // These two early returns are the ONLY place a drag's click is refused:
+      // `resolveTabClick` takes no drag input, because its "ignore" is honoured
+      // only after the group-clearing block (review RESOLVETABCLICK-DRAGGING-DEAD).
+      if (dropJustEndedRef.current) {
+        forgetDropEnded();
+        return;
+      }
+      // A drag still ARMED (the button held, no release seen yet) is not a
+      // click either: a keyboard-driven click on a tab mid-drag.
       if (dragState?.dragging) return;
 
       // FIX: Check BOTH the closure value AND the synchronous global state at event time.
@@ -571,9 +1249,14 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       // The external session is read at EVENT time as well, never from the
       // render: a keystroke can have made it expect a reference since.
       const session = getExternalEditSession();
+      const target = sheetAt(sheets, index);
       const sessionInput = session
         ? {
-            hostSheetIndex: session.hostSheetIndex,
+            // The CLICKED tab is the session's host by IDENTITY, asked now
+            // (review F3-strip-uses-owner-host-index) -- never the owner's
+            // opening `hostSheetIndex`, which a renumbering under a parked
+            // edit leaves naming another sheet.
+            targetIsSessionHost: target !== undefined && isExternalSessionHostSheet(target),
             parked: isExternalSessionParked(),
             expecting: getExternalFormulaTarget()?.isExpectingReference() === true,
           }
@@ -589,11 +1272,10 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       const action = resolveTabClick({
         index,
         activeIndex,
-        targetIsCanvas: sheetAt(sheets, index)?.kind === "canvas",
+        targetIsCanvas: target?.kind === "canvas",
         activeIsCanvas: sheetAt(sheets, activeIndex)?.kind === "canvas",
         ctrlKey: event?.ctrlKey === true,
         shiftKey: event?.shiftKey === true,
-        dragging: dragState?.dragging === true,
         coreFormulaMode,
         session: sessionInput,
       });
@@ -718,7 +1400,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         const newActiveSheet = sheetAt(result.sheets, result.activeIndex);
 
         if (newActiveSheet) {
-          dispatch(setActiveSheet(result.activeIndex, newActiveSheet.name, surfaceOf(newActiveSheet)));
+          dispatch(setActiveSheet(result.activeIndex, newActiveSheet.name, surfaceOf(newActiveSheet), newActiveSheet.sheetId));
         }
 
         onSheetChange?.(result.activeIndex, newActiveSheet?.name || "");
@@ -743,7 +1425,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         void alertAsync("Failed to switch sheet: " + String(err));
       }
     },
-    [activeIndex, sheets, onSheetChange, editing, dispatch, dragState, groupedSheets]
+    [activeIndex, sheets, onSheetChange, editing, dispatch, dragState, groupedSheets, forgetDropEnded]
   );
 
   const handleAddSheet = useCallback(async (kind?: SheetKindName) => {
@@ -772,7 +1454,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
 
       const newActiveSheet = sheetAt(result.sheets, result.activeIndex);
       if (newActiveSheet) {
-        dispatch(setActiveSheet(result.activeIndex, newActiveSheet.name, surfaceOf(newActiveSheet)));
+        dispatch(setActiveSheet(result.activeIndex, newActiveSheet.name, surfaceOf(newActiveSheet), newActiveSheet.sheetId));
       }
       onSheetChange?.(result.activeIndex, newActiveSheet?.name || "");
 
@@ -803,71 +1485,109 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
    * the same commit-before-switch steps. FORCED: the new sheet takes the
    * anchor's index, so the active INDEX can come back unchanged while the
    * active SHEET is a different one.
+   *
+   * The anchor is taken BY IDENTITY from the list the caller chose it from
+   * and found again by `runSheetDoor`, whose hold covers both backend steps:
+   * the temporary-sheet leave observer judges nothing until both landed and
+   * the result was applied -- a list read between the add and the move is not
+   * the list the user ends up with, and a discard landing between them would
+   * renumber the sheets under the move's indices -- and the list is re-read
+   * ONCE when the door settles. An anchor that is gone by then (it was the
+   * temporary sheet, closing) refuses the insert with a toast.
    */
   const handleInsertSheetBefore = useCallback(async (beforeIndex: number, kind?: SheetKindName) => {
     if (structuralLocked) return;
-    const anchor = sheetAt(sheets, beforeIndex);
+    const anchor: DoorTarget = { ...doorTargetFor(sheets, { index: beforeIndex }), role: "anchor" };
     try {
-      window.dispatchEvent(new CustomEvent("sheet:beforeSwitch", {
-        detail: { oldSheetIndex: activeIndex, newSheetIndex: -1 },
-      }));
-      const { result, error } = await insertSheetBefore(
-        { addSheet: () => addSheet(undefined, kind), copySheet, moveSheet },
-        announceReorder,
-        anchor,
-      );
-      await applySheetsResultRef.current(result, { backendHandledSwitch: true, forceSwitch: true });
-      if (error !== undefined) {
-        // The sheet exists (and is shown); only its position failed.
-        console.error("[SheetTabs] insert-before move error:", error);
-        void alertAsync(`The new sheet was added at the end: it could not be moved before "${anchor?.name ?? ""}". ` + String(error));
-      }
+      await runSheetDoor([anchor], "inserted", async ([before]) => {
+        window.dispatchEvent(new CustomEvent("sheet:beforeSwitch", {
+          detail: { oldSheetIndex: activeIndex, newSheetIndex: -1 },
+        }));
+        // The flow follows the anchor by identity again in the add's answer (`moveTargetFor`).
+        const { result, error } = await insertSheetBefore(
+          { addSheet: () => addSheet(undefined, kind), copySheet, moveSheet },
+          announceReorder,
+          before,
+        );
+        await applySheetsResultRef.current(result, { backendHandledSwitch: true, forceSwitch: true });
+        if (error !== undefined) {
+          // The sheet exists (and is shown); only its position failed.
+          console.error("[SheetTabs] insert-before move error:", error);
+          void alertAsync(`The new sheet was added at the end: it could not be moved before "${before.name}". ` + String(error));
+        }
+      });
     } catch (err) {
       console.error("[SheetTabs] insertSheetBefore error:", err);
       void alertAsync("Failed to insert sheet: " + String(err));
     }
-  }, [sheets, activeIndex, structuralLocked]);
+  }, [sheets, activeIndex, structuralLocked, runSheetDoor]);
 
   /**
-   * Excel's Move or Copy: the sheet at `sourceIndex` -- or a copy of it --
-   * immediately before `beforeIndex`, or at the end (null). A copy is made
-   * active (Excel), so its switch is forced (see handleInsertSheetBefore); a
-   * move keeps the active sheet, and the backend's index follows it.
+   * Excel's Move or Copy: the sheet with stable id `sourceSheetId` -- or a
+   * copy of it -- immediately before the sheet with id `beforeSheetId`, or at
+   * the end (null). A copy is made active (Excel), so its switch is forced
+   * (see handleInsertSheetBefore); a move keeps the active sheet, and the
+   * backend's index follows it.
+   *
+   * BY ID END TO END (review TSHELL3-CONVERSE-DIALOG-WINDOW): the dialog and
+   * the command line hand over the ids they read, and the door ALWAYS settles
+   * every discard already sent and finds both sheets again in a FRESH read
+   * (`runSheetDoor`) -- the dialog can have stayed open while a discard
+   * renumbered every sheet after the temporary one -- and the flow runs on
+   * that read's indices. A source or a target that is gone REFUSES with a
+   * toast; a gone target is never read as "(move to end)" (review
+   * MOC-RERESOLVE-GONE-TARGET-READS-AS-END). The door's hold covers both of a
+   * copy's steps, with the one re-read when it settles.
    */
   const handleMoveOrCopySheet = useCallback(
-    async (sourceIndex: number, beforeIndex: number | null, copy: boolean) => {
+    async (sourceSheetId: string, beforeSheetId: string | null, copy: boolean) => {
       if (structuralLocked) return;
+      const source = doorTargetFor(sheets, { index: -1, sheetId: sourceSheetId });
+      const targets: DoorTarget[] =
+        beforeSheetId === null
+          ? [source]
+          : [source, { ...doorTargetFor(sheets, { index: -1, sheetId: beforeSheetId }), role: "anchor" }];
       try {
-        if (copy) {
-          window.dispatchEvent(new CustomEvent("sheet:beforeSwitch", {
-            detail: { oldSheetIndex: activeIndex, newSheetIndex: -1 },
-          }));
-        }
-        const { result, error } = await moveOrCopySheet(
-          { addSheet: () => addSheet(), copySheet, moveSheet },
-          announceReorder,
-          sheets,
-          sourceIndex,
-          beforeIndex,
-          copy,
-        );
-        if (result) {
-          await applySheetsResultRef.current(result, { backendHandledSwitch: true, forceSwitch: copy });
-        }
-        if (error !== undefined) {
-          console.error("[SheetTabs] move-or-copy move error:", error);
-          void alertAsync("The copy was made, but it could not be moved: " + String(error));
-        }
+        await runSheetDoor(targets, copy ? "copied" : "moved", async ([from, before], fresh) => {
+          if (copy) {
+            window.dispatchEvent(new CustomEvent("sheet:beforeSwitch", {
+              detail: { oldSheetIndex: activeIndex, newSheetIndex: -1 },
+            }));
+          }
+          const { result, error } = await moveOrCopySheet(
+            { addSheet: () => addSheet(), copySheet, moveSheet },
+            announceReorder,
+            fresh.sheets,
+            from.index,
+            beforeSheetId === null ? null : before.index,
+            copy,
+          );
+          if (result) {
+            await applySheetsResultRef.current(result, { backendHandledSwitch: true, forceSwitch: copy });
+          }
+          if (error !== undefined) {
+            console.error("[SheetTabs] move-or-copy move error:", error);
+            void alertAsync("The copy was made, but it could not be moved: " + String(error));
+          }
+        });
       } catch (err) {
         console.error("[SheetTabs] moveOrCopySheet error:", err);
         void alertAsync((copy ? "Failed to copy sheet: " : "Failed to move sheet: ") + String(err));
       }
     },
-    [sheets, activeIndex, structuralLocked]
+    [sheets, activeIndex, structuralLocked, runSheetDoor]
   );
 
+  /**
+   * The delete itself and its switch steps, for the sheet at `index` in the
+   * door's fresh read. With `expectedSheetId` the backend deletes only THAT
+   * sheet and refuses -- deleting nothing -- when the index names another by
+   * the time the delete holds its locks (another door renumbered them); that
+   * refusal is a toast, and every announcement below is made only for a delete
+   * that landed, at the index it landed at.
+   */
   const executeDeleteSheet = useCallback(
-    async (index: number) => {
+    async (index: number, expectedSheetId?: string) => {
       try {
         // Dispatch event BEFORE deleting sheet to save current sheet's state
         window.dispatchEvent(new CustomEvent("sheet:beforeSwitch", {
@@ -877,7 +1597,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
           }
         }));
 
-        const result = await deleteSheet(index);
+        const result = await deleteSheet(index, expectedSheetId === undefined ? undefined : { expectedSheetId });
         // Every sheet past the deleted one moved down an index. Untold, Core's
         // per-sheet view cache restored the DELETED sheet's selection and
         // scroll onto the neighbour that inherited its index, and each later
@@ -891,7 +1611,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
 
         const newActiveSheet = sheetAt(result.sheets, result.activeIndex);
         if (newActiveSheet) {
-          dispatch(setActiveSheet(result.activeIndex, newActiveSheet.name, surfaceOf(newActiveSheet)));
+          dispatch(setActiveSheet(result.activeIndex, newActiveSheet.name, surfaceOf(newActiveSheet), newActiveSheet.sheetId));
         }
         onSheetChange?.(result.activeIndex, newActiveSheet?.name || "");
 
@@ -907,6 +1627,14 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
           sheetName: newActiveSheet?.name || "",
         });
       } catch (err) {
+        const reason = errorText(err);
+        if (expectedSheetId !== undefined && reason.trim() === SHEETS_CHANGED_UNDER_THE_DELETE) {
+          // Nothing was deleted: the backend's own sentence, once, in a toast.
+          // The door's settle re-reads the list.
+          console.warn("[SheetTabs] delete refused, the sheets changed under it:", reason);
+          showToast(reason, { variant: "warning" });
+          return;
+        }
         console.error("[SheetTabs] deleteSheet error:", err);
         void alertAsync("Failed to delete sheet: " + String(err));
       }
@@ -925,46 +1653,91 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
    * (`"always"`, the default): three journeys drive its confirmation on sheets
    * that may be blank (fixall-lifecycle X19, orphaned-sheet-state,
    * report-store), so moving that door is an owner's call, not this change's.
+   *
+   * The sheet is taken BY IDENTITY before anything is awaited -- the stable id
+   * the tab menu sent, else the sheet at `index` in the list the command just
+   * read. The confirmation remembers it by id (`confirmDeleteSheet` finds it
+   * again); the Excel-rule door finds it again in a fresh read before it asks
+   * the policy about THAT sheet and deletes it by id (review
+   * DISCARD-RENUMBERS-UNDER-DELETE-CONFIRM: the index read before the await
+   * named the next sheet once a discard landed, and a delete ends the undo
+   * history).
    */
   const handleDeleteSheet = useCallback(
-    async (index: number, options: { confirm?: "always" | "whenNotBlank" } = {}) => {
+    async (request: SheetRequest, options: { confirm?: "always" | "whenNotBlank" } = {}) => {
       if (sheets.length <= 1) return;
       if (structuralLocked) return;
 
-      const sheet = sheetAt(sheets, index);
-      const sheetName = sheet?.name || `Sheet ${index}`;
-      const ask =
-        options.confirm !== "whenNotBlank" ||
-        (await sheetDeleteNeedsConfirmation(
-          { index, kind: sheet?.kind === "canvas" ? "canvas" : "worksheet" },
-          index === activeIndex,
-        ));
-      if (ask) {
+      const target = doorTargetFor(sheets, request);
+      if (namesNoSheet(target)) {
+        showToast(goneNotice(target, "deleted"), { variant: "warning" });
+        return;
+      }
+      if (options.confirm !== "whenNotBlank") {
         // Show confirmation dialog instead of using confirm()
-        setDeleteConfirm({ index, name: sheetName });
-      } else {
-        await executeDeleteSheet(index);
+        setDeleteConfirm(target);
+        return;
+      }
+      try {
+        await runSheetDoor([target], "deleted", async ([sheet], fresh) => {
+          const ask = await sheetDeleteNeedsConfirmation(
+            { index: sheet.index, kind: sheet.kind === "canvas" ? "canvas" : "worksheet" },
+            sheet.index === fresh.activeIndex,
+          );
+          if (ask) setDeleteConfirm(doorTargetOf(sheet));
+          else await executeDeleteSheet(sheet.index, sheet.sheetId);
+        });
+      } catch (err) {
+        console.error("[SheetTabs] deleteSheet error:", err);
+        void alertAsync("Failed to delete sheet: " + String(err));
       }
     },
-    [sheets, structuralLocked, activeIndex, executeDeleteSheet]
+    [sheets, structuralLocked, runSheetDoor, executeDeleteSheet]
+  );
+
+  /**
+   * The confirmation's Delete: the sheet the prompt NAMED, found again by its
+   * stable id once every discard already sent has answered -- never the index
+   * it had when the prompt opened, which a discard landing while the prompt
+   * was open hands to the next sheet (review
+   * DISCARD-RENUMBERS-UNDER-DELETE-CONFIRM). The delete carries the id too, so
+   * the backend refuses rather than delete another sheet should anything
+   * renumber the sheets after this read.
+   */
+  const confirmDeleteSheet = useCallback(
+    async (target: DoorTarget) => {
+      try {
+        await runSheetDoor([target], "deleted", async ([sheet]) => {
+          await executeDeleteSheet(sheet.index, sheet.sheetId);
+        });
+      } catch (err) {
+        console.error("[SheetTabs] deleteSheet error:", err);
+        void alertAsync("Failed to delete sheet: " + String(err));
+      }
+    },
+    [runSheetDoor, executeDeleteSheet]
   );
 
   const handleRenameSheet = useCallback(
-    async (index: number, newName: string) => {
+    async (request: SheetRequest, newName: string) => {
       // Don't allow renaming sheets while in formula mode
       if (structuralLocked) {
         return;
       }
 
       try {
-        const result = await renameSheet(index, newName);
-        setSheets(result.sheets);
+        // The sheet BY IDENTITY: a prompt was open between the gesture and
+        // this call, and a discard landing meanwhile renumbered the sheets.
+        await runSheetDoor([doorTargetFor(sheets, request)], "renamed", async ([sheet]) => {
+          const result = await renameSheet(sheet.index, newName);
+          setSheets(result.sheets);
+        });
       } catch (err) {
         console.error("[SheetTabs] renameSheet error:", err);
         void alertAsync("Failed to rename sheet: " + String(err));
       }
     },
-    [structuralLocked]
+    [structuralLocked, sheets, runSheetDoor]
   );
 
   // Refs to always access the latest handler versions from stable event listeners.
@@ -981,6 +1754,10 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
   handleMoveOrCopySheetRef.current = handleMoveOrCopySheet;
   const applySheetsResultRef = useRef(applySheetsResult);
   applySheetsResultRef.current = applySheetsResult;
+  const keepSheetRef = useRef(keepSheet);
+  keepSheetRef.current = keepSheet;
+  const runSheetDoorRef = useRef(runSheetDoor);
+  runSheetDoorRef.current = runSheetDoor;
   // What the core.sheet.* commands' refusals read SYNCHRONOUSLY (the command-
   // refusal registry cannot await): the list, the active sheet and the
   // structural lock as of this render.
@@ -999,13 +1776,17 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       if (structuralLocked) {
         return;
       }
+      // The tab's sheet, kept BY IDENTITY from here on: a discard can land
+      // while the menu is open and hand this index to the next sheet.
+      const sheet = sheetByIndex(index);
+      if (!sheet) return;
       setContextMenu({
         x: e.clientX,
         y: e.clientY,
-        sheetIndex: index,
+        sheet,
       });
     },
-    [structuralLocked]
+    [structuralLocked, sheetByIndex]
   );
 
   const handleDoubleClick = useCallback(
@@ -1014,40 +1795,50 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       if (structuralLocked) {
         return;
       }
-      const currentName = sheetByIndex(index)?.name || "";
+      const sheet = sheetByIndex(index);
+      // A TEMPORARY sheet's double-click KEEPS it (model-drillthrough.md 2.7);
+      // its rename stays in the tab menu. Decided by the pure helper. Kept by
+      // the STABLE id of the tab that was double-clicked (this render's list,
+      // the one the tab was drawn from), never by its index.
+      if (resolveTabDoubleClick(sheet) === "keep") {
+        await keepSheet(sheet?.sheetId);
+        return;
+      }
+      const currentName = sheet?.name || "";
       // THE rename prompt (renameSheetPrompt.ts), shared with the tab menu's
       // Rename and core.sheet.rename; it explains why it is promptAsync and
       // never window.prompt.
       const newName = await promptForSheetName(currentName);
       if (newName !== null) {
-        await handleRenameSheet(index, newName);
+        // The double-clicked sheet BY IDENTITY: a discard can have landed
+        // while the prompt was open.
+        await handleRenameSheet({ index, sheetId: sheet?.sheetId }, newName);
       }
     },
-    [sheetByIndex, handleRenameSheet, structuralLocked]
+    [sheetByIndex, handleRenameSheet, structuralLocked, keepSheet]
   );
 
   const contextFor = useCallback(
-    (sheetIndex: number): SheetContext | null => {
-      const sheet = sheetByIndex(sheetIndex);
+    (sheet: SheetInfo | undefined): SheetContext | null => {
       if (!sheet) return null;
       return {
         sheet,
-        index: sheetIndex,
+        index: sheet.index,
         // The STABLE key. An extension that answers "did this sheet come from
         // an application?" from a cache must key it on identity: the index
         // shifts under an insert, a delete or a move, and nothing tells the
         // extension it did.
         sheetId: sheet.sheetId,
-        isActive: sheetIndex === activeIndex,
+        isActive: sheet.index === activeIndex,
         totalSheets: sheets.length,
       };
     },
-    [sheetByIndex, sheets.length, activeIndex]
+    [sheets.length, activeIndex]
   );
 
   const getContextMenuItems = useCallback(
-    (sheetIndex: number): ResolvedSheetContextMenuItem[] => {
-      const context = contextFor(sheetIndex);
+    (sheet: SheetInfo): ResolvedSheetContextMenuItem[] => {
+      const context = contextFor(sheet);
       if (!context) return [];
       return sheetExtensions.getContextMenuItemsForContext(context);
     },
@@ -1058,36 +1849,50 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     async (item: ResolvedSheetContextMenuItem) => {
       if (!contextMenu) return;
 
-      const context = contextFor(contextMenu.sheetIndex);
-      if (!context) return;
-
+      // The sheet the menu was opened for, found again BY ITS STABLE ID in the
+      // list as it is NOW -- never by the index it had at the right-click: a
+      // temporary sheet's discard landing while the menu was open shifts every
+      // sheet after it, and each item then acted on the neighbour (review
+      // TSHELL3-CONVERSE-OTHER-DOORS). Each item's door finds it once more after
+      // any discard still in flight (`runSheetDoor`).
+      const sheet = findSameSheet(sheets, contextMenu.sheet);
       setContextMenu(null);
+      if (!sheet) {
+        showToast(goneNotice(doorTargetOf(contextMenu.sheet), "done"), { variant: "warning" });
+        return;
+      }
+      const context = contextFor(sheet);
+      if (!context) return;
 
       if (!item.disabled) {
         await item.onClick(context);
       }
     },
-    [contextMenu, contextFor]
+    [contextMenu, contextFor, sheets]
   );
 
   // Unhide dialog confirm. `index` is the row a DOUBLE-CLICK chose: the
   // double-click handler used to set the selection and call this in the same
   // tick, and this read `unhideDialog.selectedIndex` from its render closure --
   // the PREVIOUS selection -- so double-clicking the second hidden sheet
-  // unhid the first. OK passes nothing and reads the selection.
+  // unhid the first. OK passes nothing and reads the selection. The row is
+  // the sheet the dialog LISTED, by identity: the indices it was opened with
+  // shift under a discard that lands while it is open.
   const handleUnhideConfirm = useCallback(async (index?: number) => {
     const target = typeof index === "number" ? index : unhideDialog?.selectedIndex ?? null;
     if (!unhideDialog || target === null) return;
     try {
-      const result = await unhideSheet(target);
-      setSheets(result.sheets);
-      setActiveIndex(result.activeIndex);
+      await runSheetDoor([doorTargetFor(unhideDialog.hiddenSheets, { index: target })], "unhidden", async ([sheet]) => {
+        const result = await unhideSheet(sheet.index);
+        setSheets(result.sheets);
+        setActiveIndex(result.activeIndex);
+      });
     } catch (err) {
       console.error("[SheetTabs] unhideSheet error:", err);
       void alertAsync("Failed to unhide sheet: " + String(err));
     }
     setUnhideDialog(null);
-  }, [unhideDialog]);
+  }, [unhideDialog, runSheetDoor]);
 
   // ---------------------------------------------------------------------------
   // Drag-to-reorder handlers
@@ -1113,23 +1918,33 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
 
   const handleDragStart = useCallback(
     (e: React.MouseEvent, sheetIndex: number) => {
+      // Every new press starts clean: a release whose click never reached a
+      // tab must not swallow THIS gesture's click (`dropJustEndedRef`).
+      forgetDropEnded();
       if (structuralLocked || e.button !== 0) return;
       // Only start drag on left-click, not on context-menu
+      const sheetId = sheetByIndex(sheetIndex)?.sheetId;
       setDragState({
         dragging: false,
         sourceIndex: sheetIndex,
+        sourceSheetId: sheetId,
         currentIndex: sheetIndex,
+        currentSheetId: sheetId,
         startX: e.clientX,
       });
     },
-    [structuralLocked]
+    [structuralLocked, sheetByIndex, forgetDropEnded]
   );
 
   // Global mousemove / mouseup for drag
   useEffect(() => {
     if (!dragState) return;
+    // Set by the release: from then on THIS drag's listeners act on nothing,
+    // even before the render that removes them.
+    let released = false;
 
     const handleMouseMove = (e: MouseEvent) => {
+      if (released) return;
       setDragState(prev => {
         if (!prev) return null;
         const dragging = prev.dragging || Math.abs(e.clientX - prev.startX) > 5;
@@ -1138,23 +1953,60 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         const visibleSheets = sheets.filter(s => s.visibility === "visible");
         const targetSheet = visibleSheets[dropIdx];
         const targetRealIndex = targetSheet ? targetSheet.index : prev.currentIndex;
-        return { ...prev, dragging, currentIndex: targetRealIndex };
+        const targetSheetId = targetSheet ? targetSheet.sheetId : prev.currentSheetId;
+        return { ...prev, dragging, currentIndex: targetRealIndex, currentSheetId: targetSheetId };
       });
     };
 
     const handleMouseUp = async () => {
-      if (dragState.dragging && dragState.sourceIndex !== dragState.currentIndex) {
-        try {
-          window.dispatchEvent(new CustomEvent("sheet:reorder", {
-            detail: { fromIndex: dragState.sourceIndex, toIndex: dragState.currentIndex },
-          }));
-          const result = await moveSheet(dragState.sourceIndex, dragState.currentIndex);
-          await applySheetsResult(result, { backendHandledSwitch: true });
-        } catch (err) {
-          console.error("[SheetTabs] drag moveSheet error:", err);
-        }
+      if (released) return;
+      // DISARMED FIRST, synchronously, before anything is awaited (review
+      // TSHELL4-DRAG-STATE-ARMED-DURING-DOOR): the door below can wait out a
+      // sent discard, a fresh read and the move itself, and a drag still armed
+      // all that time let the indicator follow the released pointer and let
+      // the NEXT mouseup anywhere -- a click on a cell -- start a second move
+      // from a read taken before the first landed. This closure keeps what the
+      // drag named; the render this causes removes the listeners.
+      released = true;
+      // A FINISHED drag -- moved or released back on its own tab -- is not a
+      // click (review DRAG-DISARM-MAKES-THE-DROP-A-CLICK): the click the
+      // browser dispatches after this release must be ignored, and with the
+      // drag disarmed below only this ref can still tell (`dropJustEndedRef`).
+      if (dragState.dragging) {
+        forgetDropEnded();
+        dropJustEndedRef.current = true;
+        dropEndedTimerRef.current = setTimeout(() => {
+          dropEndedTimerRef.current = null;
+          dropJustEndedRef.current = false;
+        }, 0);
       }
       setDragState(null);
+      if (!dragState.dragging || dragState.sourceIndex === dragState.currentIndex) return;
+      // Both ends BY IDENTITY, as the drag named them: a discard landing
+      // during the drag renumbers the sheets, and a move by the captured
+      // indices moved another sheet (review TSHELL3-CONVERSE-OTHER-DOORS).
+      const source = doorTargetFor(sheets, { index: dragState.sourceIndex, sheetId: dragState.sourceSheetId });
+      const drop: DoorTarget = {
+        ...doorTargetFor(sheets, { index: dragState.currentIndex, sheetId: dragState.currentSheetId }),
+        role: "drop",
+      };
+      try {
+        await runSheetDoor([source, drop], "moved", async ([sheet, place]) => {
+          if (sheet.index === place.index) return;
+          const result = await moveSheet(sheet.index, place.index);
+          // Told to Core's view cache once the move LANDED.
+          announceReorder({ fromIndex: sheet.index, toIndex: place.index });
+          // The CURRENT applySheetsResult, as every other door applies (review
+          // TSHELL4-DRAG-STALE-APPLYSHEETSRESULT): the one this listener closed
+          // over compares against the active index from BEFORE the door's
+          // settle, and a discard landing in that settle renumbers the active
+          // sheet -- the stale comparison then replayed a full switch onto the
+          // sheet the user was already on, restoring its old selection and scroll.
+          await applySheetsResultRef.current(result, { backendHandledSwitch: true });
+        });
+      } catch (err) {
+        console.error("[SheetTabs] drag moveSheet error:", err);
+      }
     };
 
     document.addEventListener("mousemove", handleMouseMove);
@@ -1163,7 +2015,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       document.removeEventListener("mousemove", handleMouseMove);
       document.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [dragState, sheets, resolveDropIndex, applySheetsResult]);
+  }, [dragState, sheets, resolveDropIndex, runSheetDoor, forgetDropEnded]);
 
   // ---------------------------------------------------------------------------
   // Tab scroll navigation
@@ -1275,11 +2127,23 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     container.scrollLeft = container.scrollWidth;
   }, []);
 
-  // The sheet the formula being written BELONGS to: the grid editor's source
-  // sheet, or a live external session's host (a floating grid's sheet). Read at
-  // render; `pointKey` re-renders the strip when the session's host changes.
-  const sourceIndex: number | undefined =
-    editing?.sourceSheetIndex ?? getExternalEditSession()?.hostSheetIndex;
+  // The sheet the formula being written BELONGS to, found in the strip's OWN
+  // list by IDENTITY (review F3-strip-uses-owner-host-index): the grid
+  // editor's source sheet (`findEditSheet`: its stable id, else its name), or a
+  // live external session's host (`isExternalSessionHostSheet`, a floating
+  // grid's sheet). Never an index taken when the edit opened: a renumbering
+  // while the grid shows another sheet (point mode, a parked session) leaves
+  // that index naming whichever sheet slid into it, and the marker sat on the
+  // wrong tab. Undefined when the list has no such sheet (it is gone). Read at
+  // render: a renumbering re-reads the list, and `pointKey` re-renders the
+  // strip when the session's host changes.
+  const sourceSheet: SheetInfo | undefined =
+    editing !== null
+      ? findEditSheet(editing, sheets) ?? undefined
+      : externalLive
+        ? sheets.find((s) => isExternalSessionHostSheet(s))
+        : undefined;
+  const sourceIndex: number | undefined = sourceSheet?.index;
 
   // Determine if we're viewing a different sheet than the formula source
   const isViewingDifferentSheet = isInFormulaMode &&
@@ -1372,6 +2236,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
                 $isFormulaTarget={isTargetSheet}
                 $tabColor={sheet.tabColor || ""}
                 $withSeparator={withSeparator}
+                $isEphemeral={sheet.ephemeral === true}
                 onMouseDown={(e) => {
                   handleTabMouseDown(e, sheet.index);
                   handleDragStart(e, sheet.index);
@@ -1390,6 +2255,8 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
                         ? `Formula source: ${sheet.name}`
                         : `Click to select cells from ${sheet.name}`
                       : `${sheet.name} (right-click for options)`,
+                    // A temporary sheet says what it is and how to keep it.
+                    ...(sheet.ephemeral === true ? [EPHEMERAL_TAB_TOOLTIP] : []),
                     // EVERY mark's reason, including any past the glyph cap —
                     // the cap limits pixels, never disclosure.
                     ...decorations.map((d) => d.tooltip).filter(Boolean),
@@ -1491,7 +2358,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         <S.FormulaModeIndicator>
           Selecting from: {sheetAt(sheets, activeIndex)?.name} 
           {" --> "}
-          {editing?.sourceSheetName || sheetAt(sheets, sourceIndex ?? 0)?.name}
+          {sourceSheet?.name ?? editing?.sourceSheetName}
         </S.FormulaModeIndicator>
       )}
 
@@ -1527,7 +2394,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
           $x={contextMenu.x}
           $y={contextMenu.y}
         >
-          {getContextMenuItems(contextMenu.sheetIndex).map((item, _idx) => (
+          {getContextMenuItems(findSameSheet(sheets, contextMenu.sheet) ?? contextMenu.sheet).map((item, _idx) => (
             <React.Fragment key={item.id}>
               <S.ContextMenuItem
                 type="button"
@@ -1557,9 +2424,9 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
                 Cancel
               </S.DialogButton>
               <S.DialogButtonPrimary onClick={() => {
-                const idx = deleteConfirm.index;
+                const target = deleteConfirm;
                 setDeleteConfirm(null);
-                executeDeleteSheet(idx);
+                void confirmDeleteSheet(target);
               }}>
                 Delete
               </S.DialogButtonPrimary>

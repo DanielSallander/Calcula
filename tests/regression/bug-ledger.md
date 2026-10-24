@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 587 | Open: 66 | Triaged: 0 | Fixed: 521 | Other: 0
+Total: 593 | Open: 69 | Triaged: 0 | Fixed: 524 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -6077,3 +6077,60 @@ The @api/layout Dropdown trigger sets line-height: 1 (a 12px line box for 12px t
 
 **Repro:** Render a Dropdown (or the Collected Responses pane's Collect from field) whose value is 'prod' and zoom the screenshot 8x: the p has no tail and a comma is cut short; the native Region select above it keeps its descenders.
 **Fix:** fixed
+
+## BUG-0588 `[fixed]`
+
+**Found:** 2026-10-23 (manual)
+**Oracle:** subscribed-design-query-chart-keeps-publisher-connection-uuid
+
+A design-query chart (the Charts extension's DesignQueryDataSource, including the Card / KPI / Gauge marks) binds its BI model by `connectionId`, a per-SESSION uuid. A .calp pull materialises every embedded data source as a FRESH connection (`load_embedded_data_sources`, generate_uuid_v7) and every open re-mints it (`restore_application_bi_connections`); BI pivots re-bind through `data_source_id`, ribbon filters and slicers through their data-source id or the publisher's uuid string -- but nothing ever rewrote a chart's `connectionId` (`core/calp/src/chart_refs.rs` remapped only DataRangeRef sheet ids). So every subscribed design-query chart kept the publisher's uuid, `get_connection_bi_model` answered None and the chart said its BI model was not loaded, while `@api/reportFilters` -- which matches page filters to visuals by connectionId string equality -- stopped delivering page filters to it as well. A kept drill-through chart (docs/design/model-drillthrough.md 2.8) would have died the same way on the subscriber's first reopen.
+
+**Repro:** Publish a workbook whose canvas holds a design-query chart on a local BI connection together with that connection's model (Collaboration > Publish with the model included); subscribe from another workbook, or save the subscriber's workbook and reopen it: the chart shows 'BI model not loaded' while the application's BI pivot on the same page works, and `spec.data.connectionId` in the chart's stored spec still equals the publisher's connection uuid, which names no connection here. Unit reproduction: `a_subscribed_design_query_chart_is_bound_to_the_connection_the_pull_minted` (app/src-tauri/src/calp_materialize_tests.rs) with the `remap_chart_bi_connections` call after `load_embedded_data_sources` removed.
+**Fix:** fixed
+
+## BUG-0589 `[open]`
+
+**Found:** 2026-10-23 (manual)
+**Oracle:** working-copy-push-keeps-data-source-identity
+
+A working-copy push files every BI data source under the pushing session's connection uuid (`published_data_source_id`, app/src-tauri/src/calp_commands.rs, used by `capture_bi_data_sources` for the data source and its writeback declarations), and a checkout mints a fresh uuid for each data source, so EVERY push re-keys every data source -- although a working copy cannot even edit the model. Every other object family keeps the STABLE key (the connection's `package_data_source_id`): pivots (`collect_pivot_definitions` prefers the carried key), model slicers, ribbon filters, grid reports (`connection_data_source_id`) and object-binding measure keys (`model_key_of`). Consequences at subscribers after ANY working-copy push: (1) EVERY subscriber, fresh or existing, loses the application's ribbon filters -- `materialize_pulled_ribbon_filters` skips a filter whose stamped id is not an embedded data source (a refresh first removes the application's filters, then re-materialises through the same skip); (2) at an EXISTING subscriber the refresh finds no connection for the new id and mints a SECOND connection, keeping the old one on the previous version's model: pivots and model slicers resolve the old key and stay there, while design-query charts follow the new id (BUG-0588's carrier key), so one canvas page reads two model versions and page slicers stop filtering the charts; (3) after the subscriber reopens, only the new id is re-minted, so those pivots keep `ConnectionId::ZERO` and show no model (their drill-through then says to open the model's connection); (4) `restore_pulled_pivots` / `apply_refreshed_pivots` fall back to `ds_to_conn.values().next()`, an arbitrary connection when two or more exist; (5) the push review lists every model object as removed and added, and a push merge collides on every model piece.
+
+**Repro:** Publish v1 from a local connection with a canvas page holding a BI pivot, a model slicer, a ribbon filter and a design-query chart; subscribe from workbook S; check out v1 (Collaboration > Open Application for Editing) and push v2 without changes; in S, refresh: the ribbon filter is gone, and the pivot and slicer read v1's model while the chart reads v2's; save and reopen S: the pivot has no model. Unit evidence: calp_materialize_tests `the_carrier_keys_a_checked_out_design_query_chart_by_the_id_its_data_source_is_filed_under` (the push files the data source under the working connection's uuid while the checked-out connection's package key is the publisher's id). Investigated 2026-10-23 with a full change list (open-items 2.aq): a stable published id -- the connection's package key when it has one, else its own id -- used by the capture, the writeback declarations, the carrier's chart keys and `calp_publish_model`; `create_pivot_from_bi_model` stamping that key; one live connection per key at pull (checkout refused on a collision); a capture refusal for two connections with one key; the ribbon-filter and single-source pivot fallbacks. It needs three owner decisions (is a data source's identity global across applications; which version serves a shared connection; does a NEW application published from a subscribed workbook keep the source's data-source id).
+
+## BUG-0590 `[fixed]`
+
+**Found:** 2026-10-23 (manual)
+**Oracle:** sheet-names-before-sheet-ids
+
+`sheet_names` and `sheet_ids` were acquired in OPPOSITE orders on different threads. `delete_sheet_impl` (app/src-tauri/src/sheets.rs) holds `sheet_names` and then takes `sheet_ids` -- and the MCP server runs it on its OWN thread (the `delete_sheet` tool) -- while four main-thread commands in app/src-tauri/src/calp_commands.rs held `sheet_ids` and then took `sheet_names`: `calp_refresh_preview`, `apply_refresh_payloads` (Refresh), `detach_sheet_inner` (Detach) and `materialize_dev_controls`. `Persisted::read` is an exclusive Mutex, so two 'reads' block each other: an AI agent's delete overlapping a user's Detach or Refresh left each thread holding what the other waited for, and the main thread never returned -- the window goes Not Responding, nothing panics, nothing is logged, unsaved work is lost.
+
+**Repro:** Runtime probes in app/src-tauri/src/state_digest_lock_order_tests.rs: one thread holds `sheet_names` pending, as the delete does, while `detach_sheet_inner` or `materialize_dev_controls` runs on another -- before the fix both probes reported DEADLOCK (the site held `sheet_ids` while waiting for `sheet_names`).
+**Fix:** fixed
+
+## BUG-0591 `[fixed]`
+
+**Found:** 2026-10-23 (manual)
+**Oracle:** calp-stores-after-sheet-locks
+
+Cell writers hold `grid` / `grids` / `sheet_names` and THEN take `subscriptions` and the override layer (`record_subscription_override_edits`), and three of them run off the main thread; `calp_refresh_preview` (app/src-tauri/src/calp_commands.rs) held `subscriptions` and the override layer while it waited for `sheet_names` / `sheet_ids` -- a live deadlock (the window freezes with nothing logged). The same census found `calp_get_application_objects` (subscription and table stores before the sheet pair / pivot store), `calp_export_overrides` (override layer before subscriptions) and the save / AutoRecover / publish builders (`assemble_workbook_for_save`, `build_workbook_for_save`, `build_workbook_for_save_with_slicers` in persistence.rs, which held `sheet_ids` -- and tables -- across `collect_pivot_definitions` (takes `sheet_names`), the pivot and style stores, subscriptions and the override layer).
+
+**Repro:** Census self-tests in app/src-tauri/src/state_digest_lock_order_tests.rs fire on each pre-fix shape (`the_cell_writer_censuses_fire_on_every_shape_round_six_found_and_stay_quiet_on_the_fixes`). A runtime probe of the preview is impossible (it takes a Tauri State and Window).
+**Fix:** fixed
+
+## BUG-0592 `[open]`
+
+**Found:** 2026-10-23 (manual)
+**Oracle:** name-stores-before-grid-locks
+
+Two pre-existing lock cycles with the off-main-thread cell writers, found through calls by the round-6 call-graph census and NOT fixed there (outside its files): (1) `remove_duplicates` (app/src-tauri/src/commands/data.rs) holds `tables` / `table_names` / `named_ranges` without a grid lock and calls `rebuild_all_dependencies_from_grid`, which takes the dependency maps the writers hold first; (2) `rename_named_range_impl` (app/src-tauri/src/named_ranges.rs) holds `named_ranges` and calls `rename_name_in_grids` (grid, grids) and `record_rename_undo` (undo_stack). Either can deadlock against an MCP or script cell write landing at the same moment. Also nine sheet_ids / sheet_names reads remain TORN (two clone-and-release reads) outside calp_commands.rs, allowed by name in the torn-read census: calp_collection.rs (ready_author_collections, list_collection_regions), commands/sheet_blank.rs (sheet_contents), object_bindings/formula.rs (FormulaWorld::read), object_bindings/object_json.rs (SheetTable::read), object_bindings/page_overrides.rs (ReportPages::read), scripting/application_code_gate.rs (workbook_sheet_facts), scripting/notebook_commands.rs (run_cell_internal), sheets.rs (with_pane_controls_following_rename).
+
+**Repro:** Read the two call chains named above against the canonical order (grid, grids, then everything else); the census self-test shape for a held name store plus a grid-taking callee reproduces them in app/src-tauri/src/state_digest_lock_order_tests.rs.
+
+## BUG-0593 `[open]`
+
+**Found:** 2026-10-23 (manual)
+**Oracle:** slicer-items-after-grids
+
+ABBA deadlock between a TABLE slicer's item fetch and a cell edit or a sheet op. The async `get_slicer_items_core` (app/src-tauri/src/slicer/commands.rs) holds `slicer_state.slicers` while `get_table_column_values` / `get_table_available_values` read `state.grids`; meanwhile `update_cell_impl` holds grid and grids and calls `re_evaluate_slicer_computed_properties`, which writes `slicer_state.slicers`; delete, move and copy reach the slicers through `cascade_sheet_removed` under the grid locks; `add_slicer_computed_property` / `update_slicer_computed_property` take grids then slicers. A slicer item fetch for a table slicer racing a cell edit (or a sheet op) can leave each thread holding what the other waits for: the window freezes, nothing is logged.
+
+**Repro:** Read the two acquisition orders named above (slicers -> grids in the async item fetch; grid/grids -> slicers in the cell writer and the sheet cascades). Fix in slicer/commands.rs: copy what the item fetch needs from the slicer store, release it, then read the grids (or take the grids first), and add the slicer store to the pair censuses.

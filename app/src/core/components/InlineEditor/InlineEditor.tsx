@@ -22,6 +22,7 @@ import { isFormulaAutocompleteVisible, AutocompleteEvents } from "../../../api/f
 import { isColumnAutocompleteVisible, ColumnAutocompleteEvents } from "../../../api/columnAutocomplete";
 import { rowHeaderGutter, colHeaderGutter } from "../../lib/gridRenderer/layout/headerVisibility";
 import { endEditorOpen, type OpenTerminalKey, type PendingTerminal } from "../../lib/editOpenBuffer";
+import { isEditOnShownSheet } from "../../lib/editSheetIdentity";
 
 /**
  * Global flag to prevent blur from committing during sheet tab navigation.
@@ -259,9 +260,14 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
   // FIX: Track when ESC is pressed to prevent blur from committing
   const isCancelingRef = useRef(false);
    
-  // Get current sheet context to determine if we should render
+  // Get current sheet context to determine if we should render. The edit's
+  // sheet is decided by IDENTITY (its name), never by index: a temporary
+  // sheet's discard, a delete, a move or a copy that lands while the edit is
+  // open renumbers that sheet, and an index comparison then unmounted the
+  // editor out from under the typing on the very sheet it belongs to (review
+  // TSHELL4-DISCARD-LANDS-UNDER-OPEN-EDIT; core/lib/editSheetIdentity.ts).
   const { state: gridState } = useGridContext();
-  const currentSheetIndex = gridState.sheetContext.activeSheetIndex;
+  const onEditSheet = isEditOnShownSheet(editing, gridState.sheetContext);
   // Counter to force refocus after sheet switches or formula reference insertions
   const [refocusTrigger, setRefocusTrigger] = useState(0);
 
@@ -403,7 +409,7 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
     // NOTHING -- scrolled out of view, and parked on another sheet during
     // cross-sheet point mode. There is no element to find an offsetParent from
     // in either state, so the observer has to be re-attached on the way back.
-  }, [logicalPos.visible, currentSheetIndex]);
+  }, [logicalPos.visible, onEditSheet]);
 
   /**
    * Everything that can legitimately change what a measurement RETURNS, other
@@ -1048,9 +1054,8 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
   // This happens during cross-sheet formula reference selection (point mode).
   // The formula bar still shows the formula, but we don't overlay the editor on the target sheet.
   // This matches Excel behavior where you see the target sheet clearly while selecting references.
-  const isOnDifferentSheet = 
-    editing.sourceSheetIndex !== undefined && 
-    editing.sourceSheetIndex !== currentSheetIndex;
+  // "Different" is by the sheet's identity (`onEditSheet`, above), not its index.
+  const isOnDifferentSheet = !onEditSheet;
 
   // Don't render if not visible OR if viewing a different sheet during formula mode
   // NOTE: This check must be AFTER all hooks to avoid React hooks rule violation

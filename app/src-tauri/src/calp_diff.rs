@@ -9,7 +9,10 @@
 //!   authored from. Main window only, because it reads the live document.
 //!   Asked by the push dialog (`codeSummary`), it also carries the CODE this
 //!   push changes -- the Promote dialog's code summary, base -> push
-//!   (`push_code_summary`, owner question 14).
+//!   (`push_code_summary`, owner question 14). Every answer also names the
+//!   sheets that push would CARRY (`carried_sheet_ids`, review round 11), which
+//!   the rows cannot: they list a sheet the push drops, and omit an unchanged
+//!   one it ships.
 //!
 //! **Verification posture: the inspector's, unchanged.** Both published sides
 //! go through `open_verified_content` with the full per-artifact SHA-256 walk
@@ -163,18 +166,26 @@ pub struct DiffWorkingCopyParams {
     /// The version to compare against. Defaults to the link's base version.
     #[serde(default)]
     pub base_version: Option<String>,
-    /// Sheets the comparison should cover. Empty = the same default a publish
-    /// would take.
+    /// Sheets the comparison should cover, BY POSITION. Empty = the same default
+    /// a publish would take. Ignored when `sheet_ids` is present, exactly as on
+    /// `PublishParams::sheet_indices`.
     ///
-    /// FOR A SUBSCRIBER DIFF THIS MUST BE EXPLICIT, and the command refuses
-    /// otherwise. "The publish default" for a workbook that subscribes is *every
-    /// user sheet MINUS the subscribed ones* — the exact inverse of what a
-    /// "compare my subscribed sheets against the published version" request
-    /// means. The refusal is deliberate rather than a silent substitution: the
-    /// scope of a diff shown before a destructive act must be visible at the
-    /// call site.
+    /// FOR A SUBSCRIBER DIFF THE SHEETS MUST BE NAMED -- here or in `sheet_ids`
+    /// -- and the command refuses otherwise. "The publish default" for a workbook
+    /// that subscribes is *every user sheet MINUS the subscribed ones* — the
+    /// exact inverse of what a "compare my subscribed sheets against the
+    /// published version" request means. The refusal is deliberate rather than a
+    /// silent substitution: the scope of a diff shown before a destructive act
+    /// must be visible at the call site.
     #[serde(default)]
     pub sheet_indices: Option<Vec<usize>>,
+    /// Sheets the comparison should cover, BY STABLE ID -- the push dialog's
+    /// ticked rows (`PublishPreviewSheet::sheet_id`), so the diff describes the
+    /// sheets the push would ship even after a tab moved while the dialog was
+    /// open. Takes precedence over `sheet_indices`; empty = the default; an id no
+    /// sheet carries refuses (`CALP_PUSH_SHEET_GONE`), as the push would.
+    #[serde(default)]
+    pub sheet_ids: Option<Vec<String>>,
     #[serde(default)]
     pub include_comments: bool,
     /// Keep only these APPLICATION sheet ids in the result, and recompute the
@@ -219,9 +230,54 @@ pub struct WorkingCopyDiff {
     pub package_name: String,
     pub base_version: String,
     pub diff: VersionDiff,
+    /// EVERY SHEET THE PUSH THIS DIFF DESCRIBES WOULD CARRY (review round 11,
+    /// RV11-TS-1), in publish order, by stable id in the spelling the rows'
+    /// `sheetId` uses (`SheetId` as text): the sheets the in-memory publish
+    /// behind this answer WROTE, read off its own manifest -- the ticked ones,
+    /// the backing sheets of the floating ranges on them, and the sources the
+    /// selection added (a chart's, a slicer's, a timeline's, a pivot's) --
+    /// each as the attempt that wrote it found it in its own snapshot.
+    ///
+    /// The rows cannot answer this, in either direction: a base sheet the push
+    /// DROPS is listed there as `removed` (every cell a removed row with a
+    /// checkbox) and is never here, and a carried sheet nobody changed has no
+    /// row at all. So the push dialog sorts its hold-backs by this list, never
+    /// by the rows; the hold-back itself resolves the same selection again
+    /// (`calp_hold_back_cells`), so this list only decides what is SHOWN.
+    ///
+    /// A SUBSCRIBER's diff (this workbook subscribes to the application)
+    /// returns its own carried sheets the same way, mapped through the same
+    /// local -> application id map its rows are: a pulled sheet reads as its
+    /// application id, and a sheet with no application id -- the backing sheet
+    /// of a floating range the subscriber added -- keeps its local one, as its
+    /// `added` row would. `scope_sheet_ids` does not narrow it: the scope
+    /// chooses the rows the caller is shown, and this describes the publish.
+    pub carried_sheet_ids: Vec<String>,
     /// The code this push changes, when the caller asked for it
     /// (`code_summary`); `null` otherwise.
     pub code: Option<WorkingCopyCode>,
+}
+
+/// The sheets a working side's in-memory publish WROTE -- `working_manifest`'s
+/// own sheets, in publish order -- by stable id in the spelling a diff's rows
+/// use: through `sheet_id_map`, the local -> application map that diff applies
+/// (empty for a checked-out working copy, whose ids ARE the application's).
+/// The ticked sheets, the backing sheets that travel with their hosts and the
+/// sources the selection added are all here because the publish wrote them; a
+/// base sheet the selection leaves out is not, because it did not -- although
+/// the diff lists it, `removed` ([`WorkingCopyDiff::carried_sheet_ids`]). Pure.
+pub(crate) fn carried_sheet_ids(
+    working_manifest: &calp::VersionManifest,
+    sheet_id_map: &HashMap<String, String>,
+) -> Vec<String> {
+    working_manifest
+        .sheets
+        .iter()
+        .map(|sheet| {
+            let id = sheet.sheet_id.to_string();
+            sheet_id_map.get(&id).cloned().unwrap_or(id)
+        })
+        .collect()
 }
 
 /// The CODE this push changes against its signed base (owner question 14): the
@@ -348,7 +404,16 @@ pub fn calp_diff_working_copy(
         true,
     )?;
 
-    // A SUBSCRIBER DIFF MUST NAME ITS SHEETS. An empty `sheet_indices` means
+    // The sheets the caller named: by id when it sent ids (they take
+    // precedence), else by position -- the rule every publish door applies
+    // (`RequestedSheets::from_wire`), so this diff covers the sheets the push it
+    // previews would ship.
+    let requested = crate::calp_commands::RequestedSheets::from_wire(
+        params.sheet_ids.clone(),
+        params.sheet_indices.clone().unwrap_or_default(),
+    );
+
+    // A SUBSCRIBER DIFF MUST NAME ITS SHEETS. A request that names none means
     // "the publish default", and for a workbook that subscribes to this
     // application that default is *every user sheet MINUS the subscribed ones* —
     // the exact inverse of "compare my subscribed sheets against the published
@@ -366,9 +431,7 @@ pub fn calp_diff_working_copy(
     // A refusal, never a silent substitution: filling in the tracked indices
     // here would hide a caller bug and make the scope of a diff shown before a
     // destructive act invisible at the call site.
-    if params.sheet_indices.as_ref().is_none_or(|v| v.is_empty())
-        && !subscription_sheet_map(&state, &package_name)?.is_empty()
-    {
+    if requested.names_no_sheet() && !subscription_sheet_map(&state, &package_name)?.is_empty() {
         return Err(format!(
             "CALP_DIFF_NEEDS_SHEETS: This workbook SUBSCRIBES to '{}', so a comparison \
              must name the sheets it covers. Without them the diff would describe \
@@ -405,10 +468,12 @@ pub fn calp_diff_working_copy(
         // From the link, so a LIBRARY working copy diffs the same zero sheets a
         // real library push would ship rather than its author's whole workbook.
         link.as_ref().map(|l| l.kind.as_str()).unwrap_or(""),
-        params.sheet_indices.clone().unwrap_or_default(),
+        requested,
         params.include_comments,
         params.custom_objects,
         &published_names,
+        // A refusal names THIS act: the diff compares, it publishes nothing.
+        "compared",
         &params.include_in_application,
     )?;
     let working_version_str = working_version.to_string();
@@ -444,6 +509,13 @@ pub fn calp_diff_working_copy(
     // checked-out working copy needs no map — its ids ARE the package's.
     let sheet_id_map = subscription_sheet_map(&state, &package_name)?;
 
+    // WHAT THE PUSH WOULD CARRY (review round 11): what the in-memory publish
+    // above WROTE, read off its own manifest -- the ids each attempt found in
+    // its own snapshot -- in the spelling of the rows (the same id map the diff
+    // applies, taken before it moves into the options). Never rebuilt from the
+    // rows: they list a dropped base sheet and omit an unchanged carried one.
+    let carried_sheet_ids = carried_sheet_ids(&working_manifest, &sheet_id_map);
+
     let mut diff = calp::diff::diff_sides(
         &DiffSide::Published {
             transport: &base_registry,
@@ -471,6 +543,7 @@ pub fn calp_diff_working_copy(
         package_name,
         base_version,
         diff: scope_diff(diff, params.scope_sheet_ids.as_deref()),
+        carried_sheet_ids,
         code,
     })
 }

@@ -9,7 +9,9 @@
 //             options do not exclude them. A filter with a sourceRef (a model
 //             slicer) then goes through interactionFor: "none" drops it,
 //             anything else keeps it as a FILTER -- slicers never highlight.
-//             A filter never reaches its own source object.
+//             A filter never reaches its own source object. Each one says
+//             whether it is WORKBOOK-WIDE (its scope is "all"), from the scope
+//             itself, so no consumer has to guess that from a name.
 //          2. Cross-filter selections on the page, same connection: the
 //             target's OWN selection is dropped; interactionFor decides the
 //             mode ("none" drops, a highlight the target cannot paint is a
@@ -63,8 +65,20 @@ function reachesPage(f: ReportFilter, pageSheetId: string): boolean {
   }
 }
 
+/**
+ * A published filter as a target applies it. `workbookWide` is read from the
+ * publication's SCOPE here, once: a consumer that must tell a workbook-wide
+ * filter from a page's (the drill-through's chart bake) asks the flag, never
+ * the name -- a page slicer and a ribbon filter may share name, field and keys.
+ */
 function fieldFilterOf(f: ReportFilter): ResolvedFieldFilter {
-  return { field: f.field, includedKeys: [...f.includedKeys], level: f.filterLevel, from: f.sourceName };
+  return {
+    field: f.field,
+    includedKeys: [...f.includedKeys],
+    level: f.filterLevel,
+    from: f.sourceName,
+    workbookWide: f.scope.kind === "all",
+  };
 }
 
 function emptyResolved(): ResolvedFilters {
@@ -99,6 +113,8 @@ function selectionFilters(sel: CrossFilterSelection): { filters: ResolvedFieldFi
       includedKeys: [...new Set(sel.tuples.map((t) => t[i]))],
       level: 1,
       from: sel.sourceName,
+      // A selection lives on ONE page: never workbook-wide.
+      workbookWide: false,
     }));
     return { filters, tupleFilters: [] };
   }

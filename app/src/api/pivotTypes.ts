@@ -11,6 +11,7 @@ import type { BiHierarchyMeta } from "./backend";
 import type { MemberRef } from "./types";
 import type { DesignStrategySummary } from "./designQueryAssist/types";
 import type { VisualContainerFormat } from "./visualContainer";
+import type { DrillThroughDefinition } from "./drillThrough";
 
 /** Inline calculated field definition. */
 export interface CalculatedFieldDef {
@@ -769,6 +770,13 @@ export interface PivotRegionData {
   /** True for a data-model (BI) pivot. Known synchronously from the cached
    *  region, so a menu never has to guess which items apply. */
   isModel: boolean;
+  /** True when the pivot's drill-through behaviour carries a DESIGN-QUERY
+   *  definition (Rust fills it from `BiPivotMetadata.drill_through
+   *  .design_query.is_some()` where the regions are built; false for a range
+   *  pivot). It rides the region beside `isModel` so the value-cell menu
+   *  labels its run row "Drill through" on the very FIRST right-click of a
+   *  pivot that was never selected (docs/design/model-drillthrough.md 2.9). */
+  hasDesignQueryDrill: boolean;
   /** Present only for a canvas pivot: the box its view is shown in. */
   canvasFrame?: CanvasFrameConfig;
   /** The pivot's persisted style; absent = the default style. */
@@ -1355,6 +1363,17 @@ export interface DrillQueryOverride {
 export interface DrillThroughBehavior {
   kind: DrillThroughKind;
   query?: DrillQueryOverride;
+  /**
+   * A DESIGN-QUERY drill (docs/design/model-drillthrough.md 2.1): the clicked
+   * cell's members become `FILTERS:` on this DSL and the result lands on an
+   * ephemeral sheet. A PRESENT `designQuery` WINS over `kind`, which keeps
+   * whatever it was -- not a fourth `DrillThroughKind` variant, because that
+   * enum is closed and an older reader meeting an unknown variant would drop
+   * the pivot's WHOLE BI metadata; an unknown FIELD is merely ignored (the
+   * previous drill runs: loss, not a lie). Mirrors Rust
+   * `DrillThroughBehavior.design_query`.
+   */
+  designQuery?: DrillThroughDefinition;
 }
 
 // ============================================================================

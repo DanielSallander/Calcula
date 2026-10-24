@@ -61,11 +61,25 @@ import {
 } from "@api/chartContextMenu";
 import {
   getChartRightClickTarget,
+  type ChartDrillIdentityKind,
   type ChartRightClickTarget,
   type ChartTargetElement,
 } from "@api/chartData";
+// The drill-through seams (docs/design/model-drillthrough.md 2.9): the ONE
+// definition shape, the read-only answers for a subscribed sheet or page, and
+// the page list that turns the chart's sheet index into a sheet id. Subpath
+// imports, so the menu's own test harness (which doubles the `@api` barrel)
+// keeps seeing the real functions.
+import { drillThroughDisplayName } from "@api/drillThrough";
+import { isSheetSubscribed } from "@api/collaboration";
+import { getLayoutSurface } from "@api/layoutSurface";
+import { getReportPagesSnapshot, sheetIdAt } from "@api/reportPages";
+import type { MemberPath } from "@api/reportFilters";
 
 import { getChartById, updateChartSpec, syncChartRegions } from "../lib/chartStore";
+import { chartsBackend } from "../lib/chartsBackend";
+import { DRILL_NO_MEMBER_REASON, drillSpecsOf, drillSubjectText } from "../lib/chartDrillIdentity";
+import { runDrillThrough } from "../../_shared/drillThrough/runDrillThrough";
 import { chartObjectClipboardRows } from "../lib/chartMenuSelection";
 import { noteChartMenuMounted } from "../lib/chartMenuState";
 import { chartIdOfRegion } from "../lib/chartObjectSelection";
@@ -88,11 +102,14 @@ import { dataPointKey, markOffersPerPointFormatting } from "../lib/dataPointOver
 import { ChartEvents } from "../lib/chartEvents";
 import { CHART_DIALOG_ID } from "../manifest";
 import {
+  CHART_DRILL_THROUGH_DIALOG_ID,
   CHART_FORMAT_SELECTION_COMMAND,
   DATA_POINT_KEY_SEPARATOR,
+  isDesignQueryDataSource,
   isPivotDataSource,
 } from "../types";
 import type {
+  ChartDefinition,
   ChartSpec,
   ChartSubSelection,
   DataPointOverride,
@@ -191,6 +208,16 @@ export interface MenuSubject {
   seriesName?: string;
   categoryName?: string;
   axisType?: "x" | "y";
+  /**
+   * The datum's MODEL identity for a drill-through, copied from the record
+   * (docs/design/model-drillthrough.md 2.3): member KEYS taken from the HIT at
+   * the record site, with display labels beside them. Present only on a
+   * design-query chart's datum or legend entry.
+   */
+  memberPath?: MemberPath | null;
+  memberLabels?: ReadonlyArray<string | null>;
+  drillIdentity?: ChartDrillIdentityKind;
+  drillIdentityReason?: string;
 }
 
 /**
@@ -421,7 +448,47 @@ export function subjectFor(target: ChartRightClickTarget | null): MenuSubject {
     ...(target.seriesName !== undefined ? { seriesName: target.seriesName } : {}),
     ...(target.categoryName !== undefined ? { categoryName: target.categoryName } : {}),
     ...(target.axisType !== undefined ? { axisType: target.axisType } : {}),
+    ...(target.memberPath !== undefined ? { memberPath: target.memberPath } : {}),
+    ...(target.memberLabels !== undefined ? { memberLabels: target.memberLabels } : {}),
+    ...(target.drillIdentity !== undefined ? { drillIdentity: target.drillIdentity } : {}),
+    ...(target.drillIdentityReason !== undefined ? { drillIdentityReason: target.drillIdentityReason } : {}),
   };
+}
+
+// ============================================================================
+// Drill through (docs/design/model-drillthrough.md 2.9)
+// ============================================================================
+
+/**
+ * The run row's label. It NAMES ITS OWN SUBJECT -- "Drill through: Mar, Cost"
+ * -- because the recorded subject is the SERIES rung on a first right-click
+ * (the ladder withholds `pointIndex`) while the drill acts on the POINT under
+ * the pointer, whose identity the record site took from the hit. The labels
+ * ride beside the keys; when a coordinate has no label of its own (a category
+ * made of two fields) the drawn point labels stand in. A measure-only datum (a
+ * Card) and a datum with no identity read plain "Drill through".
+ */
+export function drillThroughRowLabel(subject: MenuSubject): string {
+  if (subject.drillIdentity !== "path") return "Drill through";
+  const text =
+    drillSubjectText(subject) ??
+    (subject.element === "legendEntry"
+      ? subject.seriesName ?? ""
+      : [subject.categoryName, subject.seriesName].filter((s): s is string => !!s).join(", "));
+  return text ? `Drill through: ${text}` : "Drill through";
+}
+
+/**
+ * Whether the chart's drill-through definition is READ-ONLY here: a canvas
+ * page in consume mode (`LayoutSurface.editable === false`, a subscribed page)
+ * or a subscribed worksheet (`@api/collaboration isSheetSubscribed`, the one
+ * sync answer Collaboration publishes). A subscriber can RUN and VIEW a
+ * publisher's definition, never edit it.
+ */
+export function chartDrillReadOnly(chart: Pick<ChartDefinition, "sheetIndex">): boolean {
+  if (getLayoutSurface(chart.sheetIndex)?.editable === false) return true;
+  const sheetId = sheetIdAt(getReportPagesSnapshot(), chart.sheetIndex);
+  return sheetId !== null && isSheetSubscribed(sheetId);
 }
 
 // ============================================================================
@@ -628,6 +695,18 @@ const styles = {
       background: #e8f0fe;
     }
   `,
+  // A row that is offered but cannot run here (a datum with no model identity):
+  // Excel's greyed item, with the reason in its tooltip. The menu otherwise
+  // offers no greyed rows; this one is the deliberate exception, because a
+  // missing row would leave the reader guessing why the chart has no drill.
+  itemDisabled: css`
+    cursor: default;
+    color: #9a9a9a;
+
+    &:hover {
+      background: transparent;
+    }
+  `,
   divider: css`
     border-top: 1px solid #e8e8e8;
     margin: 4px 0;
@@ -663,6 +742,10 @@ interface MenuRow {
   id: string;
   label: string;
   run: () => void;
+  /** Offered but not runnable here; `hint` says why. The click does nothing. */
+  disabled?: boolean;
+  /** The row's tooltip: the reason when disabled, else what it will act with. */
+  hint?: string;
 }
 
 export function ChartContextMenu({ onClose, data }: OverlayProps): React.ReactElement | null {
@@ -811,6 +894,39 @@ export function ChartContextMenu({ onClose, data }: OverlayProps): React.ReactEl
   // --------------------------------------------------------------------------
   // Element verbs
   // --------------------------------------------------------------------------
+
+  // DRILL THROUGH (docs/design/model-drillthrough.md 2.9), design-query charts
+  // with a definition only -- FIRST among the element verbs, by this menu's own
+  // finer-act-first rule: a reader who right-clicked a bar means that bar.
+  // The row runs the SHARED runner with the chart's connection (the definition
+  // stores none, 2.2) and the clicked members as KEY filters (2.3). A datum
+  // with no identity -- a transformed or composed chart, a missing key -- is
+  // offered DISABLED with the reason, never run unfiltered; a measure-only
+  // datum (a Card / KPI / Gauge) runs with the page's filters only.
+  const drillDefinition = isDesignQueryDataSource(spec.data) ? spec.drillThrough : undefined;
+  if (drillDefinition && (subject.element === "datum" || subject.element === "legendEntry")) {
+    const connectionId = isDesignQueryDataSource(spec.data) ? String(spec.data.connectionId ?? "") : "";
+    const identity: ChartDrillIdentityKind = subject.drillIdentity ?? "none";
+    rows.push({
+      id: "drillThrough",
+      label: drillThroughRowLabel(subject),
+      ...(identity === "none"
+        ? { disabled: true, hint: subject.drillIdentityReason ?? DRILL_NO_MEMBER_REASON }
+        : { hint: drillThroughDisplayName(drillDefinition) }),
+      run: () => {
+        // The datum is the clicked PATH only (`filters`). A chart has no
+        // standing filters of its own (`standing` is a BI pivot's: its pinned
+        // and hidden members) and nothing to tell (`notices`); the page's
+        // filters that reach it are resolved by the runner itself.
+        void runDrillThrough(
+          { kind: "chart", id: chartId, name: chartLabel, connectionId, sheetIndex: chart.sheetIndex },
+          drillDefinition,
+          { filters: drillSpecsOf(subject) },
+          { invoke: chartsBackend.invoke },
+        );
+      },
+    });
+  }
 
   if (subject.element === "title" && spec.title != null) {
     rows.push({
@@ -963,6 +1079,30 @@ export function ChartContextMenu({ onClose, data }: OverlayProps): React.ReactEl
     if (!dataEntry.disabled) rows.push({ id: "editData", label: "Edit data...", run: dataEntry.run });
   }
 
+  // DRILL-THROUGH BEHAVIOR (2.9): the authoring row, between "Edit data..." and
+  // "Edit Script...", design-query charts only -- the pivot's existing label,
+  // opening the chart's radio dialog (None | Design query). On a subscribed
+  // page or sheet it reads "View drill-through..." and opens the same dialog
+  // READ-ONLY: a subscriber must be able to read what a publisher's drill will
+  // query (wave3 12.1, a not-code artifact is transparent because it is
+  // listed). Absent there when the chart has no definition to view.
+  if (isDesignQueryDataSource(spec.data)) {
+    const readOnly = chartDrillReadOnly(chart);
+    if (!readOnly) {
+      rows.push({
+        id: "drillThroughBehavior",
+        label: "Drill-through behavior...",
+        run: () => showDialog(CHART_DRILL_THROUGH_DIALOG_ID, { chartId, readOnly: false }),
+      });
+    } else if (spec.drillThrough) {
+      rows.push({
+        id: "drillThroughBehavior",
+        label: "View drill-through...",
+        run: () => showDialog(CHART_DRILL_THROUGH_DIALOG_ID, { chartId, readOnly: true }),
+      });
+    }
+  }
+
   rows.push({
     id: "editScript",
     label: "Edit Script...",
@@ -1061,9 +1201,14 @@ export function ChartContextMenu({ onClose, data }: OverlayProps): React.ReactEl
       {rows.map((row) => (
         <div
           key={row.id}
-          className={styles.item}
+          className={row.disabled ? `${styles.item} ${styles.itemDisabled}` : styles.item}
           data-chart-menu-item={row.id}
+          {...(row.disabled ? { "aria-disabled": true, "data-chart-menu-disabled": "true" } : {})}
+          title={row.hint}
           onClick={() => {
+            // A DISABLED row does nothing -- not even close -- so its reason
+            // stays readable in the tooltip (Excel's greyed items behave so).
+            if (row.disabled) return;
             // Close FIRST, for the same reason a contribution does: an item
             // that opens a dialog must not fight this menu for the dropdown
             // layer, and a throw must not leave the menu stuck on screen.

@@ -15,9 +15,15 @@ import { installSheetTabColorPicker, openSheetTabColorPicker } from "./sheetTabC
 
 /** Context passed to sheet-related extension callbacks */
 export interface SheetContext {
-  /** The sheet being acted upon. `kind` is absent for a worksheet. */
-  sheet: { name: string; index: number; kind?: "worksheet" | "canvas" };
-  /** TRUE workbook index — what the backend commands take, and a bad cache key */
+  /** The sheet being acted upon. `kind` is absent for a worksheet; `ephemeral`
+   *  is true for a drill-through's TEMPORARY sheet (model-drillthrough.md 2.7). */
+  sheet: { name: string; index: number; kind?: "worksheet" | "canvas"; ephemeral?: boolean };
+  /**
+   * TRUE workbook index — what the backend commands take, a bad cache key, and
+   * true only NOW: a temporary sheet's discard can renumber the sheets at any
+   * moment, so anything that acts later (after a prompt, in a dialog) names
+   * the sheet by `sheetId`.
+   */
   index: number;
   /** Stable identity, for anything an extension remembers about this sheet */
   sheetId?: string;
@@ -233,10 +239,27 @@ function isLastVisibleSheet(context: SheetContext): boolean {
   return !snapshot.sheets.some((s) => s.index !== context.index && s.visibility === "visible");
 }
 
-/** The right-clicked sheet's current tab colour, from the strip's snapshot. */
+/** The right-clicked sheet's current tab colour, from the strip's snapshot (by its stable id when it has one). */
 function currentTabColor(context: SheetContext): string | null {
-  const sheet = getSheetTabsController()?.snapshot().sheets.find((s) => s.index === context.index);
+  const sheet = getSheetTabsController()
+    ?.snapshot()
+    .sheets.find((s) => (context.sheetId ? s.sheetId === context.sheetId : s.index === context.index));
   return sheet?.tabColor ? sheet.tabColor : null;
+}
+
+/**
+ * Whether the right-clicked sheet has a VISIBLE tab on that side -- what Move
+ * Left / Move Right move it past. From the strip's snapshot (the strip itself
+ * takes the neighbour again from a fresh read when it moves); with no strip
+ * seated, the TRUE index against the workbook's count.
+ */
+function hasVisibleNeighbour(context: SheetContext, direction: "left" | "right"): boolean {
+  const snapshot = getSheetTabsController()?.snapshot();
+  if (!snapshot) return direction === "left" ? context.index > 0 : context.index < context.totalSheets - 1;
+  const visible = snapshot.sheets.filter((s) => s.visibility === "visible");
+  const at = visible.findIndex((s) => (context.sheetId ? s.sheetId === context.sheetId : s.index === context.index));
+  if (at < 0) return false;
+  return direction === "left" ? at > 0 : at < visible.length - 1;
 }
 
 /** Register the default/core context menu items */
@@ -249,6 +272,31 @@ export function registerCoreSheetContextMenu(): void {
   // mounts, opened by the menu row below.
   installSheetTabColorPicker();
 
+  // Keep Sheet -- FIRST, and only on a TEMPORARY (drill-through) sheet: the
+  // one thing such a sheet needs that an ordinary one does not. The same keep
+  // the tab's double-click makes, through the strip's controller (the strip
+  // adopts the result and says "Sheet kept" only when the answered list holds
+  // that sheet unflagged); the registry keeps insertion order, so a core item
+  // registered here is the only way to lead the list. By the STABLE id the
+  // menu was opened for, never its index: a lower sheet's discard can land
+  // between the right-click and the click and shift every index above it.
+  sheetExtensions.registerContextMenuItem({
+    id: "core:keepSheet",
+    label: "Keep Sheet",
+    visible: (context) => context.sheet.ephemeral === true,
+    separatorAfter: true,
+    onClick: async (context) => {
+      await getSheetTabsController()?.keepSheet(context.sheetId);
+    },
+  });
+
+  // Every item below that acts on the right-clicked sheet through the strip's
+  // `sheet:request*` events sends its STABLE id with the index: the strip acts
+  // on the sheet with that id, found again after any temporary sheet's discard
+  // still in flight (SheetTabs.tsx `runSheetDoor`). The index alone named the
+  // NEIGHBOUR once such a discard landed -- after Rename's prompt, say, or
+  // under Delete's confirmation (review TSHELL3-CONVERSE-OTHER-DOORS).
+
   // Rename -- the ONE rename prompt (SheetTabs/renameSheetPrompt.ts), shared
   // with the tab double-click and core.sheet.rename.
   sheetExtensions.registerContextMenuItem({
@@ -258,7 +306,7 @@ export function registerCoreSheetContextMenu(): void {
       const newName = await promptForSheetName(context.sheet.name);
       if (newName !== null) {
         window.dispatchEvent(new CustomEvent("sheet:requestRename", {
-          detail: { index: context.index, newName },
+          detail: { index: context.index, newName, sheetId: context.sheetId },
         }));
       }
     },
@@ -273,7 +321,7 @@ export function registerCoreSheetContextMenu(): void {
     onClick: async (context) => {
       if (context.totalSheets <= 1) return;
       window.dispatchEvent(new CustomEvent("sheet:requestDelete", {
-        detail: { index: context.index },
+        detail: { index: context.index, sheetId: context.sheetId },
       }));
     },
   });
@@ -324,20 +372,23 @@ export function registerCoreSheetContextMenu(): void {
     separatorAfter: true,
     onClick: async (context) => {
       window.dispatchEvent(new CustomEvent("sheet:requestCopy", {
-        detail: { index: context.index },
+        detail: { index: context.index, sheetId: context.sheetId },
       }));
     },
   });
 
-  // Move Left
+  // Move Left / Move Right -- one place along the VISIBLE tabs. Each sends a
+  // DIRECTION, never a target index: the strip takes the neighbour from where
+  // the sheet stands when the move runs (an index captured here was the
+  // sheet's own place once a discard had landed in between).
   sheetExtensions.registerContextMenuItem({
     id: "core:moveLeft",
     label: "Move Left",
-    disabled: (context) => context.index === 0,
+    disabled: (context) => !hasVisibleNeighbour(context, "left"),
     onClick: async (context) => {
-      if (context.index > 0) {
+      if (hasVisibleNeighbour(context, "left")) {
         window.dispatchEvent(new CustomEvent("sheet:requestMove", {
-          detail: { fromIndex: context.index, toIndex: context.index - 1 },
+          detail: { fromIndex: context.index, sheetId: context.sheetId, direction: "left" },
         }));
       }
     },
@@ -347,12 +398,12 @@ export function registerCoreSheetContextMenu(): void {
   sheetExtensions.registerContextMenuItem({
     id: "core:moveRight",
     label: "Move Right",
-    disabled: (context) => context.index === context.totalSheets - 1,
+    disabled: (context) => !hasVisibleNeighbour(context, "right"),
     separatorAfter: true,
     onClick: async (context) => {
-      if (context.index < context.totalSheets - 1) {
+      if (hasVisibleNeighbour(context, "right")) {
         window.dispatchEvent(new CustomEvent("sheet:requestMove", {
-          detail: { fromIndex: context.index, toIndex: context.index + 1 },
+          detail: { fromIndex: context.index, sheetId: context.sheetId, direction: "right" },
         }));
       }
     },
@@ -365,7 +416,7 @@ export function registerCoreSheetContextMenu(): void {
     disabled: (context) => isLastVisibleSheet(context),
     onClick: async (context) => {
       window.dispatchEvent(new CustomEvent("sheet:requestHide", {
-        detail: { index: context.index },
+        detail: { index: context.index, sheetId: context.sheetId },
       }));
     },
   });
@@ -384,6 +435,12 @@ export function registerCoreSheetContextMenu(): void {
   // Colors, No Color, More Colors...), running core.sheet.setTabColor for THIS
   // sheet: the same command the Home tab's Format > Tab Color runs. It was a
   // numbered text prompt with eight colours of its own and a raw window event.
+  //
+  // The context is the right-clicked sheet as the list shows it at the CLICK
+  // (the strip found it again by its id), so the palette opens on its current
+  // index. The palette then holds that index until a colour is picked
+  // (sheetTabColorPicker.tsx), and the strip acts on the sheet at that index
+  // when the command reaches it.
   sheetExtensions.registerContextMenuItem({
     id: "core:tabColor",
     label: "Tab Color",

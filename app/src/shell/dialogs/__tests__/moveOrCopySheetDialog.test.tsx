@@ -2,8 +2,11 @@
 // PURPOSE: Excel's Move or Copy dialog (Home > Format > Move or Copy Sheet...,
 //          and the tab menu's "Move or Copy..."): a "Before sheet" list ending
 //          in "(move to end)", a "Create a copy" box, OK / Cancel. The dialog
-//          only ANSWERS -- { beforeIndex, copy } -- and the sheet tab strip
-//          does the moving (sheetPlacement.ts has the arithmetic).
+//          only ANSWERS -- { beforeSheetId, copy }, by STABLE id -- and the
+//          sheet tab strip does the moving (sheetPlacement.ts has the
+//          arithmetic). By id because the dialog can outlive the indices it
+//          opened with: a temporary sheet's discard renumbers the sheets while
+//          it is open (review TSHELL3-CONVERSE-DIALOG-WINDOW).
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import React, { act } from "react";
@@ -22,12 +25,12 @@ const onClose = vi.fn();
 
 function render(overrides: Partial<MoveOrCopySheetData> = {}): void {
   const data: MoveOrCopySheetData = {
-    sourceIndex: 1,
+    sourceSheetId: "id-Data",
     sourceName: "Data",
     sheets: [
-      { index: 0, name: "Sheet1" },
-      { index: 1, name: "Data" },
-      { index: 3, name: "Totals" },
+      { sheetId: "id-Sheet1", name: "Sheet1" },
+      { sheetId: "id-Data", name: "Data" },
+      { sheetId: "id-Totals", name: "Totals" },
     ],
     canCopy: true,
     onResult,
@@ -91,20 +94,28 @@ describe("Move or Copy", () => {
     expect(byTestId("move-or-copy-sheet-dialog").getAttribute("role")).toBe("dialog");
   });
 
-  it("OK answers the chosen sheet's TRUE index and the copy box", () => {
+  it("OK answers the chosen sheet's STABLE id and the copy box", () => {
     render();
-    click(byTestId("move-or-copy-before-3"));
+    click(byTestId("move-or-copy-before-id-Totals"));
     click(byTestId("move-or-copy-create-copy"));
     click(byTestId("move-or-copy-ok"));
-    expect(onResult).toHaveBeenCalledWith({ beforeIndex: 3, copy: true });
+    expect(onResult).toHaveBeenCalledWith({ beforeSheetId: "id-Totals", copy: true });
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("(move to end) answers beforeIndex null", () => {
+  it("(move to end) answers beforeSheetId null", () => {
     render();
     click(byTestId("move-or-copy-before-end"));
     click(byTestId("move-or-copy-ok"));
-    expect(onResult).toHaveBeenCalledWith({ beforeIndex: null, copy: false });
+    expect(onResult).toHaveBeenCalledWith({ beforeSheetId: null, copy: false });
+  });
+
+  it("answers no index at all: nothing in the answer can name a sheet by position", () => {
+    render();
+    click(byTestId("move-or-copy-before-id-Sheet1"));
+    click(byTestId("move-or-copy-ok"));
+    const [choice] = onResult.mock.calls[0] as [Record<string, unknown>];
+    expect(Object.keys(choice).sort()).toEqual(["beforeSheetId", "copy"]);
   });
 
   it("Cancel and Escape answer nothing", () => {
@@ -131,15 +142,15 @@ describe("Move or Copy", () => {
     key(list, "Home");
     expect(selected()).toEqual(["Sheet1"]);
     key(list, "Enter");
-    expect(onResult).toHaveBeenCalledWith({ beforeIndex: 0, copy: false });
+    expect(onResult).toHaveBeenCalledWith({ beforeSheetId: "id-Sheet1", copy: false });
   });
 
   it("a double-click chooses and confirms", () => {
     render();
     act(() => {
-      byTestId("move-or-copy-before-0").dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+      byTestId("move-or-copy-before-id-Sheet1").dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
     });
-    expect(onResult).toHaveBeenCalledWith({ beforeIndex: 0, copy: false });
+    expect(onResult).toHaveBeenCalledWith({ beforeSheetId: "id-Sheet1", copy: false });
   });
 
   it("a sheet that cannot be copied (a canvas) offers move only", () => {
@@ -148,7 +159,7 @@ describe("Move or Copy", () => {
     expect(box.disabled).toBe(true);
     click(box);
     click(byTestId("move-or-copy-ok"));
-    expect(onResult).toHaveBeenCalledWith({ beforeIndex: 1, copy: false });
+    expect(onResult).toHaveBeenCalledWith({ beforeSheetId: "id-Data", copy: false });
   });
 
   it("names the sheet it moves (Excel says 'Move selected sheets')", () => {

@@ -92,9 +92,15 @@ class Parser {
         this.ast.values = this.parseValueFieldList();
         break;
       case TokenType.Filters:
+        // ACCUMULATE, never assign. A second `FILTERS:` clause ADDS to the
+        // first: it used to REPLACE it, so a drill-through's baked clause
+        // silently dropped the author's own filters (and only the LAST of
+        // several baked clauses filtered anything). Where each clause began is
+        // kept on the AST so the validator can point at a repeated one.
+        this.ast.filtersClauses = [...(this.ast.filtersClauses ?? []), tok.location];
         this.advance();
         this.expect(TokenType.Colon, 'Expected ":" after FILTERS');
-        this.ast.filters = this.parseFilterList();
+        this.ast.filters.push(...this.parseFilterList());
         break;
       case TokenType.Sort:
         this.advance();

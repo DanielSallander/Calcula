@@ -6,7 +6,12 @@
 //          valid (partial-merged or complete) spec.
 
 import { describe, it, expect } from "vitest";
-import { validateChartSpec, validateMergedSpec, RESERVED_SPEC_PREFIX } from "../chartSpecValidate";
+import {
+  validateChartSpec,
+  validateDrillThroughDefinition,
+  validateMergedSpec,
+  RESERVED_SPEC_PREFIX,
+} from "../chartSpecValidate";
 import type { ChartSpec } from "../../types";
 
 const valid: ChartSpec = {
@@ -82,5 +87,57 @@ describe("validateChartSpec (B8 chart-write gate)", () => {
     // A merged result that gained a garbage key is rejected.
     const withGarbage = { ...valid, _injected: { evil: true } } as unknown as ChartSpec;
     expect(validateMergedSpec(withGarbage).join(" ")).toContain("_injected");
+  });
+});
+
+// The chart's drill dialog validates the DEFINITION it writes, on its own,
+// against the schema's DrillThroughDefinition sub-schema -- never a deep-merge
+// preview of the whole spec (review: dialog-bypasses-dsl-bound).
+describe("validateDrillThroughDefinition (the definition alone, against the schema's own sub-schema)", () => {
+  const table = { kind: "table" };
+
+  it("accepts a valid table and a valid chart definition", () => {
+    expect(validateDrillThroughDefinition({ dslText: "ROWS: A.B", presentation: table })).toEqual([]);
+    expect(
+      validateDrillThroughDefinition({
+        dslText: "ROWS: A.B",
+        presentation: { kind: "chart", mark: "bar", markOptions: { stackMode: "stacked" } },
+        name: "Detail",
+        keepFilters: false,
+      }),
+    ).toEqual([]);
+  });
+
+  it("applies the schema's bounds, with paths that name the definition", () => {
+    const tooLong = validateDrillThroughDefinition({ dslText: "x".repeat(20001), presentation: table });
+    expect(tooLong.join("\n")).toContain("drillThrough.dslText: longer than 20000 characters");
+    expect(validateDrillThroughDefinition({ dslText: "x".repeat(20000), presentation: table })).toEqual([]);
+    expect(
+      validateDrillThroughDefinition({ dslText: "ROWS: A.B", presentation: table, name: "n".repeat(81) }).join("\n"),
+    ).toContain("drillThrough.name");
+  });
+
+  it("resolves the presentation's $refs and per-mark narrowing (the sub-schema carries the root's definitions)", () => {
+    expect(
+      validateDrillThroughDefinition({
+        dslText: "ROWS: A.B",
+        presentation: { kind: "chart", mark: "bar", markOptions: { innerRadius: 0.4 } },
+      }).join("\n"),
+    ).toContain("drillThrough.presentation.markOptions: unknown property 'innerRadius'");
+    expect(
+      validateDrillThroughDefinition({ dslText: "ROWS: A.B", presentation: { kind: "chart", mark: "bar-3d" } }).join(
+        "\n",
+      ),
+    ).toContain("drillThrough.presentation.mark");
+    expect(validateDrillThroughDefinition({ dslText: "ROWS: A.B", presentation: { kind: "page" } }).length).toBeGreaterThan(
+      0,
+    );
+  });
+
+  it("refuses an unknown key and a missing query", () => {
+    expect(
+      validateDrillThroughDefinition({ dslText: "ROWS: A.B", presentation: table, connectionId: "c1" }).join("\n"),
+    ).toContain("unknown property 'connectionId'");
+    expect(validateDrillThroughDefinition({ presentation: table }).join("\n")).toContain("missing required 'dslText'");
   });
 });

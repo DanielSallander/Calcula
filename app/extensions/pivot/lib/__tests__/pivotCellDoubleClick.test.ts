@@ -13,6 +13,16 @@
 //            the new sheet activated and announced; a script-mode pivot whose
 //            mounted script handles the drill gets the hook instead; a failure
 //            is a toast.
+//          - DESIGN-QUERY DRILL (model-drillthrough.md 2.9). A behaviour with
+//            a `designQuery` WINS over its kind: the cell's group path goes to
+//            the backend's `pivotContext` op for member KEYS, and the shared
+//            runner gets the pivot as the source over this extension's bound
+//            channel -- never drill_through_to_sheet, never the script hook.
+//            The answer's clicked PATH and the pivot's STANDING filters go to
+//            the runner apart, exactly as answered (never re-split by the
+//            groupPath's length), and its notices go only into the datum: the
+//            runner tells them once, after the sheet landed, so nothing here
+//            toasts them before the run. A failed op is a toast and nothing else.
 //          - Anything else means nothing (false, no request).
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -28,6 +38,13 @@ const api = vi.hoisted(() => ({
   getScript: vi.fn(),
   isScriptMounted: vi.fn(),
   mountedScriptHasHook: vi.fn(),
+  // The design-query drill's doors: the Pivot channel, the shared runner,
+  // the notice surfacing, the active sheet and the cached regions.
+  invoke: vi.fn(),
+  runDrillThrough: vi.fn(),
+  surfacePivotNotices: vi.fn(),
+  regions: [] as Array<{ pivotId: string; name: string }>,
+  activeSheetIndex: 2,
 }));
 
 vi.mock("@api", () => ({
@@ -39,6 +56,13 @@ vi.mock("@api", () => ({
 
 vi.mock("@api/events", () => ({ emitAppEvent: api.emitAppEvent }));
 vi.mock("@api/lib", () => ({ setActiveSheet: api.setActiveSheet }));
+vi.mock("@api/grid", () => ({
+  getGridStateSnapshot: () => ({ sheetContext: { activeSheetIndex: api.activeSheetIndex } }),
+}));
+vi.mock("@api/pivotNotices", () => ({ surfacePivotNotices: api.surfacePivotNotices }));
+vi.mock("../pivotBackend", () => ({ pivotBackend: { invoke: api.invoke } }));
+vi.mock("../../handlers/selectionHandler", () => ({ getCachedRegions: () => api.regions }));
+vi.mock("../../../_shared/drillThrough/runDrillThrough", () => ({ runDrillThrough: api.runDrillThrough }));
 
 vi.mock("../pivot-api", () => ({
   togglePivotGroup: api.togglePivotGroup,
@@ -256,5 +280,183 @@ describe("cells that mean nothing", () => {
     expect(api.togglePivotGroup).not.toHaveBeenCalled();
     expect(api.drillThroughToSheet).not.toHaveBeenCalled();
     expect(api.getPivotDrillBehavior).not.toHaveBeenCalled();
+  });
+});
+
+describe("design-query drill (model-drillthrough.md 2.9): a behaviour with a designQuery WINS", () => {
+  const def = {
+    dslText: "ROWS: Geo.Region\nVALUES: [Revenue]",
+    presentation: { kind: "table" as const },
+    name: "Region detail",
+  };
+  // The C3 answer: the CLICKED PATH (`filters`) and the pivot's own STANDING
+  // filters (`standing`) apart.
+  const context = {
+    op: "pivotContext",
+    connectionId: "c1",
+    filters: [{ field: "Product.Category", includedKeys: ["Bikes"], labels: ["Bikes"] }],
+    standing: [{ field: "Date.Year", hiddenKeys: ["2021", "2022"] }],
+    notices: [
+      { kind: "degraded", message: "the filter on Geo.City was carried only in part: 1 of its 3 items name no member" },
+    ],
+  };
+
+  beforeEach(() => {
+    api.getPivotDrillBehavior.mockResolvedValue({ kind: "builtin", designQuery: def });
+    api.invoke.mockResolvedValue(context);
+    api.runDrillThrough.mockResolvedValue({ ok: true, sheetIndex: 5, sheetId: "S5", sheetName: "Region detail" });
+    api.regions = [{ pivotId: "p1", name: "Sales by Region" }];
+    api.activeSheetIndex = 2;
+  });
+
+  it("asks the backend for the cell's member KEYS (pivotContext) and hands the runner the pivot source, the definition, the path, the standing filters, the notices and the Pivot channel -- never drill_through_to_sheet", async () => {
+    // SABOTAGE: drop the `behavior?.designQuery` branch -- drillThroughToSheet runs and the runner never does.
+    runPivotDrillThrough("p1", cell({ cellType: "Data", value: 125, groupPath: [[0, 2], [1, 5]] }), 6, 1025);
+    await settle();
+
+    expect(api.invoke).toHaveBeenCalledTimes(1);
+    expect(api.invoke).toHaveBeenCalledWith("drill_through", {
+      request: { op: "pivotContext", pivotId: "p1", groupPath: [[0, 2], [1, 5]] },
+    });
+    expect(api.runDrillThrough).toHaveBeenCalledTimes(1);
+    const [source, definition, datum, io] = api.runDrillThrough.mock.calls[0];
+    expect(source).toEqual({ kind: "pivot", id: "p1", sheetIndex: 2, connectionId: "c1", name: "Sales by Region" });
+    expect(definition).toBe(def);
+    expect(datum).toEqual({
+      filters: context.filters,
+      standing: context.standing,
+      notices: [context.notices[0].message],
+    });
+    expect(io.invoke).toBe(api.invoke);
+    expect(api.drillThroughToSheet).not.toHaveBeenCalled();
+    expect(api.setActiveSheet).not.toHaveBeenCalled();
+    expect(api.emitAppEvent).not.toHaveBeenCalled();
+    expect(api.showToast).not.toHaveBeenCalled();
+  });
+
+  it("the path and the standing filters go to the runner APART, so the runner can keep a workbook-wide standing copy out of a chart -- never the clicked path", async () => {
+    // SABOTAGE: pass `{ filters: [...context.filters, ...context.standing] }`
+    // (the pre-split datum) -- the runner cannot tell a standing copy of a
+    // live ribbon filter from the clicked member, and bakes it into a chart.
+    runPivotDrillThrough("p1", cell({ cellType: "Data", value: 125, groupPath: [[0, 2]] }), 6, 1025);
+    await settle();
+    const datum = api.runDrillThrough.mock.calls[0][2] as { filters: unknown[]; standing?: unknown[] };
+    expect(datum.filters).toEqual(context.filters);
+    expect(datum.standing).toEqual(context.standing);
+  });
+
+  it("a measure-only pivot's synthetic 'Total' coordinate gives NO path spec: the answer is passed as answered, never re-split by the groupPath's length", async () => {
+    // SABOTAGE: split one combined list at groupPath.length
+    // (`filters.slice(0, groupPath.length)`) -- the first standing filter is
+    // taken for the clicked member and baked as if the user had clicked it.
+    const measureOnly = {
+      ...context,
+      filters: [],
+      standing: [
+        { field: "Date.Year", includedKeys: ["2024"], labels: ["2024"] },
+        { field: "Geo.Region", hiddenKeys: ["West"] },
+      ],
+    };
+    api.invoke.mockResolvedValue(measureOnly);
+    runPivotDrillThrough("p1", cell({ cellType: "Data", value: 900, groupPath: [[0, 0]] }), 6, 1025);
+    await settle();
+    const datum = api.runDrillThrough.mock.calls[0][2] as { filters: unknown[]; standing?: unknown[] };
+    expect(datum.filters).toEqual([]);
+    expect(datum.standing).toEqual(measureOnly.standing);
+  });
+
+  it("the notices are NOT told before the run: a drill that then fails shows the runner's refusal alone (the runner tells notices only after the sheet landed)", async () => {
+    // SABOTAGE: put back the pre-run `surfacePivotNotices(context)` -- a
+    // refused drill shows "the filter on Geo.City was carried only in part"
+    // for a drill that never ran, then the refusal: two toasts for one click.
+    api.runDrillThrough.mockResolvedValue({ ok: false, reason: "The drill-through query has errors." });
+    runPivotDrillThrough("p1", cell({ cellType: "Data", value: 1, groupPath: [[0, 0]] }), 1, 1);
+    await settle();
+    expect(api.runDrillThrough).toHaveBeenCalledTimes(1);
+    expect(api.surfacePivotNotices).not.toHaveBeenCalled();
+    expect(api.showToast).not.toHaveBeenCalled();
+    // The notices still reach the runner, which writes them into the
+    // caption and tells them once a sheet has landed.
+    expect((api.runDrillThrough.mock.calls[0][2] as { notices: string[] }).notices).toEqual([
+      context.notices[0].message,
+    ]);
+  });
+
+  it("wins over kind 'script': the hook is never dispatched, getPivotDataFormula never asked", async () => {
+    api.getPivotDrillBehavior.mockResolvedValue({ kind: "script", designQuery: def });
+    api.getScript.mockReturnValue({ id: "s1", name: "Drill script" });
+    api.isScriptMounted.mockReturnValue(true);
+    api.mountedScriptHasHook.mockReturnValue(true);
+
+    runPivotDrillThrough("p1", cell({ cellType: "Data", value: 1, groupPath: [[0, 0]] }), 7, 1026);
+    await settle();
+
+    expect(api.runDrillThrough).toHaveBeenCalledTimes(1);
+    expect(api.getPivotDataFormula).not.toHaveBeenCalled();
+    expect(api.emitAppEvent).not.toHaveBeenCalled();
+    expect(api.drillThroughToSheet).not.toHaveBeenCalled();
+  });
+
+  it("a caller's sheet index and name are used as given (the value-cell menu's door); the defaults are the active sheet and the cached region", async () => {
+    runPivotDrillThrough("p1", cell({ cellType: "Data", value: 1, groupPath: [[0, 0]] }), 1, 1, {
+      sheetIndex: 7,
+      name: "Boxed pivot",
+    });
+    await settle();
+    expect(api.runDrillThrough.mock.calls[0][0]).toEqual(
+      expect.objectContaining({ sheetIndex: 7, name: "Boxed pivot" }),
+    );
+
+    api.regions = [];
+    runPivotDrillThrough("p9", cell({ cellType: "Data", value: 1, groupPath: [[0, 0]] }), 1, 1);
+    await settle();
+    expect(api.runDrillThrough.mock.calls[1][0]).toEqual(
+      expect.objectContaining({ id: "p9", sheetIndex: 2, name: "PivotTable" }),
+    );
+  });
+
+  it("a grand total drills the whole source: an empty path to pivotContext", async () => {
+    runPivotCellDoubleClick("p1", cell({ cellType: "GrandTotal", value: 900 }), 9, 3, 3);
+    await settle();
+    expect(api.invoke).toHaveBeenCalledWith("drill_through", {
+      request: { op: "pivotContext", pivotId: "p1", groupPath: [] },
+    });
+  });
+
+  it("a failed pivotContext op (a non-model pivot, an unresolvable coordinate) is a TOAST and nothing else runs -- never the built-in drill on another datum", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    api.invoke.mockRejectedValueOnce(
+      "Pivot p1 is not a data-model pivot: only a data-model pivot has a design-query drill-through",
+    );
+
+    runPivotDrillThrough("p1", cell({ cellType: "Data", value: 1, groupPath: [[0, 0]] }), 1, 1);
+    await settle();
+
+    expect(api.showToast).toHaveBeenCalledTimes(1);
+    expect(api.showToast).toHaveBeenCalledWith(
+      "Pivot p1 is not a data-model pivot: only a data-model pivot has a design-query drill-through",
+      { type: "error" },
+    );
+    expect(api.runDrillThrough).not.toHaveBeenCalled();
+    expect(api.drillThroughToSheet).not.toHaveBeenCalled();
+    expect(api.emitAppEvent).not.toHaveBeenCalled();
+  });
+
+  it("the runner toasts its own failures: a { ok: false } answer is not toasted a second time", async () => {
+    api.runDrillThrough.mockResolvedValue({ ok: false, reason: "Open the model's connection first." });
+    runPivotDrillThrough("p1", cell({ cellType: "Data", value: 1, groupPath: [[0, 0]] }), 1, 1);
+    await settle();
+    expect(api.runDrillThrough).toHaveBeenCalledTimes(1);
+    expect(api.showToast).not.toHaveBeenCalled();
+    expect(api.drillThroughToSheet).not.toHaveBeenCalled();
+  });
+
+  it("without a designQuery the behaviour runs as before: the built-in drill, no pivotContext", async () => {
+    api.getPivotDrillBehavior.mockResolvedValue({ kind: "builtin" });
+    runPivotDrillThrough("p1", cell({ cellType: "Data", value: 1, groupPath: [[0, 0]] }), 1, 1);
+    await settle();
+    expect(api.invoke).not.toHaveBeenCalled();
+    expect(api.runDrillThrough).not.toHaveBeenCalled();
+    expect(api.drillThroughToSheet).toHaveBeenCalledWith({ pivotId: "p1", groupPath: [[0, 0]] });
   });
 });

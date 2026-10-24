@@ -51,3 +51,24 @@ export function validateChartSpec(spec: unknown): string[] {
 export function validateMergedSpec(merged: ChartSpec): string[] {
   return validateChartSpec(merged);
 }
+
+/**
+ * Validate a drill-through DEFINITION on its own, against the schema's own
+ * `DrillThroughDefinition` sub-schema (with the root's definitions, so its
+ * `$ref`s and the per-mark option narrowing resolve): the very bounds the
+ * whole-spec gate applies to `spec.drillThrough` at the script door. Paths
+ * read `drillThrough.<field>`. Empty = valid. Pure.
+ *
+ * WHY NOT THE WHOLE SPEC. The chart's drill dialog writes clear-then-set, so a
+ * deep-merge preview of `{ drillThrough: next }` validates a definition it never
+ * stores (a table presentation saved over a stored chart presentation previews
+ * as a table WITH a mark, which the closed schema refuses), and any unrelated
+ * violation elsewhere in an older chart would block a drill-through edit.
+ */
+export function validateDrillThroughDefinition(def: unknown): string[] {
+  const schema = {
+    $ref: "#/definitions/DrillThroughDefinition",
+    definitions: (chartSpecJsonSchema as { definitions: Record<string, unknown> }).definitions,
+  };
+  return schemaViolations(def, schema).map((v) => v.replace(/^spec/, "drillThrough"));
+}

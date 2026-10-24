@@ -1,5 +1,6 @@
 //! FILENAME: core/calp/src/chart_refs.rs
-//! PURPOSE: Find, stamp and remap the sheets a chart's data sources name.
+//! PURPOSE: Find, stamp and remap the sheets a chart's data sources name, and
+//! re-bind and key the BI connections its design-query sources name (BUG-0588).
 //! CONTEXT: A chart's `spec` is the whole ChartDefinition envelope as JSON
 //! (`SavedChart.spec`, an embedded object since `.cala` v10) (`{chartId, name, sheetIndex, x, y, ..., spec: ChartSpec}`) or, for
 //! a chart written by a script or an older build, a bare ChartSpec. Inside it a
@@ -212,6 +213,176 @@ pub fn remap_chart_spec_sheet_ids(
             touched = true;
         }
         touched
+    })
+}
+
+/// The two keys a design-query source binds its model by. `connectionId` is
+/// the LIVE connection's uuid, a per-session value; `packageDataSourceId` is
+/// the application data-source id, the stable one. Spelled once here because
+/// the TS type (`DesignQueryDataSource` in `Charts/types.ts`) and its closed
+/// schema carry the same two names.
+const DESIGN_QUERY_CONNECTION_KEY: &str = "connectionId";
+const DESIGN_QUERY_PACKAGE_KEY: &str = "packageDataSourceId";
+
+/// Re-point every DESIGN-QUERY source (`{type: "designQuery", dslText,
+/// connectionId, packageDataSourceId?}`) of `spec` at the live BI connection
+/// `resolve` names for it, in the four places the module header lists
+/// (BUG-0588).
+///
+/// A design-query chart binds its model by `connectionId`, a per-SESSION uuid:
+/// an application's embedded data source is minted a fresh connection on every
+/// pull and on every open (the host's `load_embedded_data_sources`), so a
+/// pulled chart that kept the publisher's uuid found no model at all -- while
+/// BI pivots re-bound through their data-source id and slicers healed
+/// themselves. The STABLE key is `packageDataSourceId`, the application's
+/// data-source id, which at publish time IS the publisher's connection uuid.
+///
+/// `resolve(key)` answers a candidate key with the live connection id as its
+/// uuid string, or `None`. A source is tried on its `packageDataSourceId`
+/// FIRST (on a reload the uuid in `connectionId` is the previous session's and
+/// matches nothing), then on its `connectionId` string -- the slicer remap's
+/// rule. On a hit BOTH fields are written: `connectionId` becomes the live
+/// uuid and `packageDataSourceId` the key that WORKED, so the next reload
+/// re-binds by it too (self-heal; a stale package key that no longer resolves
+/// is replaced by the connection key that did). A source neither key resolves
+/// is left exactly as it is: an unknown id stays the honest "connection not
+/// loaded" rather than some other model's numbers. Range, string and pivot
+/// sources are never touched, whatever `resolve` would answer for them.
+///
+/// Edits `spec` in place; returns `false` when nothing changed -- a spec that
+/// is not an object, no design-query source, or every source already bound to
+/// the live connection with its key recorded -- so a second run is a no-op and
+/// an untouched chart serialises to the same bytes.
+pub fn remap_chart_spec_connection_ids(
+    spec: &mut Value,
+    resolve: &dyn Fn(&str) -> Option<String>,
+) -> bool {
+    for_each_source_mut(spec_root_mut(spec), 0, &mut |source| {
+        let Some(m) = source.as_object_mut() else {
+            return false;
+        };
+        if m.get("type").and_then(Value::as_str) != Some("designQuery") {
+            return false;
+        }
+        let key_of = |name: &str| -> Option<String> {
+            m.get(name)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        let package_key = key_of(DESIGN_QUERY_PACKAGE_KEY);
+        let connection_key = key_of(DESIGN_QUERY_CONNECTION_KEY);
+        // The key that works and the live connection it names: the stable
+        // package key first, the old uuid string second.
+        let hit = [package_key.as_deref(), connection_key.as_deref()]
+            .into_iter()
+            .flatten()
+            .find_map(|key| resolve(key).map(|live| (key.to_string(), live)));
+        let Some((worked, live)) = hit else {
+            return false;
+        };
+        let mut touched = false;
+        if connection_key.as_deref() != Some(live.as_str()) {
+            m.insert(DESIGN_QUERY_CONNECTION_KEY.to_string(), Value::String(live));
+            touched = true;
+        }
+        if package_key.as_deref() != Some(worked.as_str()) {
+            m.insert(DESIGN_QUERY_PACKAGE_KEY.to_string(), Value::String(worked));
+            touched = true;
+        }
+        touched
+    })
+}
+
+/// What a SAVE knows about the live BI connection a design-query source's
+/// `connectionId` names -- the answer [`stamp_chart_spec_package_keys`] asks
+/// its lookup for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveConnectionKey {
+    /// An APPLICATION connection (one a pull or an open minted for an
+    /// application's embedded data source): the data-source id it represents.
+    /// An empty id is no id, and is treated as [`LiveConnectionKey::Local`].
+    Application(String),
+    /// A connection authored in this workbook: it has no package key.
+    Local,
+}
+
+/// Stamp every DESIGN-QUERY source of `spec` (in the four places the module
+/// header lists) with the stable key of the live connection its
+/// `connectionId` names -- the save-time half of BUG-0588's re-bind.
+///
+/// [`remap_chart_spec_connection_ids`] re-binds a chart on a pull, a refresh
+/// and an open by its `packageDataSourceId` FIRST, because every open re-mints
+/// an application's connections and the uuid in `connectionId` is then the
+/// previous session's. Two kinds of chart defeated it, and both because some
+/// writer had to remember the key:
+/// - a chart that never carried one -- a drill-through's result chart, one
+///   made in the Insert Chart dialog, by a script or by the AI, or one whose
+///   spec a full replace rebuilt -- kept only the per-session uuid, matched
+///   nothing on the next open and lost its model for good;
+/// - a chart RE-POINTED from an application connection to a local one kept the
+///   OLD key beside the new uuid (the chart store deep-merges `data`), and the
+///   remap, preferring the key, silently undid the user's choice on the next
+///   open.
+///
+/// Stamping at the one boundary every writer crosses -- the save, AutoRecover
+/// and the `.calp` publish/push all serialise charts through the host's
+/// `collect_charts_for_save` -- covers every writer, present and future. The
+/// HOST decides what `Application(key)` holds for each: the data-source id a
+/// connection was minted from for the `.cala` save, and the id its data source
+/// is filed under in the package for the `.calp` carrier (they differ after a
+/// checkout, which mints its connections from the previous version).
+///
+/// `lookup(connectionId)` answers:
+/// - `Some(Application(key))`: `packageDataSourceId` becomes `key`;
+/// - `Some(Local)`: `packageDataSourceId` is REMOVED -- a local connection has
+///   no package key, and a stale one would re-bind the chart elsewhere;
+/// - `None` (the uuid names no live connection: a chart whose model is not
+///   loaded this session): the source is left exactly as it is, so a key that
+///   would still heal it on the next open is kept.
+///
+/// A source with no usable `connectionId` (absent, not a string, empty) is
+/// never looked up. `connectionId` itself is never rewritten -- binding is the
+/// remap's job, and the live uuid is the right one for this session. Range,
+/// string and pivot sources are never touched.
+///
+/// Edits `spec` in place; returns `false` when nothing changed, so a second
+/// stamp is a no-op and an already-stamped chart serialises to the same bytes.
+/// The host applies it to the SAVED copy of a chart only, never to its live
+/// chart store, whose spec the Charts extension owns.
+pub fn stamp_chart_spec_package_keys(
+    spec: &mut Value,
+    lookup: &dyn Fn(&str) -> Option<LiveConnectionKey>,
+) -> bool {
+    for_each_source_mut(spec_root_mut(spec), 0, &mut |source| {
+        let Some(m) = source.as_object_mut() else {
+            return false;
+        };
+        if m.get("type").and_then(Value::as_str) != Some("designQuery") {
+            return false;
+        }
+        let Some(connection) = m
+            .get(DESIGN_QUERY_CONNECTION_KEY)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+        else {
+            return false;
+        };
+        match lookup(&connection) {
+            // Not a live connection: keep whatever key may still heal it.
+            None => false,
+            Some(LiveConnectionKey::Application(key)) if !key.is_empty() => {
+                if m.get(DESIGN_QUERY_PACKAGE_KEY).and_then(Value::as_str) == Some(key.as_str()) {
+                    false
+                } else {
+                    m.insert(DESIGN_QUERY_PACKAGE_KEY.to_string(), Value::String(key));
+                    true
+                }
+            }
+            // A local connection (or an application one with no id): no key.
+            Some(_) => m.remove(DESIGN_QUERY_PACKAGE_KEY).is_some(),
+        }
     })
 }
 
@@ -997,5 +1168,409 @@ mod tests {
         let mut c = b.clone();
         c["spec"]["yAxis"]["showGrid"] = Value::Bool(false);
         assert_ne!(comparable_chart_spec(&a), comparable_chart_spec(&c));
+    }
+
+    // -----------------------------------------------------------------------
+    // BUG-0588 -- design-query sources follow their connection
+    // -----------------------------------------------------------------------
+
+    fn uuid() -> String {
+        EntityId::from_bytes(identity::generate_uuid_v7()).to_string()
+    }
+
+    /// A design-query source as the Charts extension writes it, with an
+    /// optional stable package key beside the live uuid.
+    fn design_query(connection: &str, package: Option<&str>) -> Value {
+        let mut v = json!({
+            "type": "designQuery",
+            "dslText": "ROWS: [Product.Category]\nVALUES: [Revenue]",
+            "connectionId": connection
+        });
+        if let Some(p) = package {
+            v["packageDataSourceId"] = Value::String(p.to_string());
+        }
+        v
+    }
+
+    /// A resolver over a (key -> live uuid) table.
+    fn resolver(table: &HashMap<String, String>) -> impl Fn(&str) -> Option<String> + '_ {
+        move |key: &str| table.get(key).cloned()
+    }
+
+    /// Every design-query source in the four places moves to its live
+    /// connection and records the package key; the range ref, the string
+    /// source, the pivot source and the NON-lookup transform's `from` are
+    /// untouched, and so is the envelope.
+    ///
+    /// SABOTAGE: walk only `data` (drop the layers / transform / concat arms
+    /// from `for_each_source_mut`) -- the layer and concat assertions fail.
+    #[test]
+    fn a_connection_remap_reaches_every_design_query_source_and_only_those() {
+        let (p1, p2) = (uuid(), uuid());
+        let (l1, l2) = (uuid(), uuid());
+        let table: HashMap<String, String> =
+            [(p1.clone(), l1.clone()), (p2.clone(), l2.clone())].into_iter().collect();
+        let sheet = sid();
+        let mut v = envelope(json!({
+            "mark": "bar",
+            "data": design_query(&p1, None),
+            "layers": [
+                { "mark": "line", "data": design_query(&p2, None) },
+                { "mark": "point", "data": range_ref(3, Some(sheet)) },
+                { "mark": "area", "data": "Sheet1!A1:B5" },
+                { "mark": "pie", "data": { "type": "pivot", "pivotId": "p1" } },
+                "not-an-object"
+            ],
+            "transform": [
+                { "type": "lookup", "from": design_query(&p1, None) },
+                { "type": "filter", "from": design_query(&p1, None) }
+            ],
+            "concat": {
+                "charts": [
+                    { "data": design_query(&p2, None) },
+                    { "data": range_ref(1, Some(sheet)),
+                      "concat": { "charts": [ { "data": design_query(&p1, None) } ] } }
+                ]
+            }
+        }));
+        let before = v.clone();
+        assert!(remap_chart_spec_connection_ids(&mut v, &resolver(&table)), "five sources moved");
+        let spec = &v["spec"];
+        for (source, live, package) in [
+            (&spec["data"], &l1, &p1),
+            (&spec["layers"][0]["data"], &l2, &p2),
+            (&spec["transform"][0]["from"], &l1, &p1),
+            (&spec["concat"]["charts"][0]["data"], &l2, &p2),
+            (&spec["concat"]["charts"][1]["concat"]["charts"][0]["data"], &l1, &p1),
+        ] {
+            assert_eq!(source["connectionId"], *live, "{source}");
+            assert_eq!(source["packageDataSourceId"], *package, "{source}");
+            assert_eq!(source["dslText"], before["spec"]["data"]["dslText"], "the query is not touched");
+        }
+        // The filter transform's `from` is not a data source.
+        assert_eq!(spec["transform"][1]["from"], before["spec"]["transform"][1]["from"]);
+        // Range, string and pivot sources are exactly as they were.
+        assert_eq!(spec["layers"][1]["data"], before["spec"]["layers"][1]["data"]);
+        assert_eq!(spec["layers"][2]["data"], before["spec"]["layers"][2]["data"]);
+        assert_eq!(spec["layers"][3]["data"], before["spec"]["layers"][3]["data"]);
+        assert_eq!(spec["concat"]["charts"][1]["data"], before["spec"]["concat"]["charts"][1]["data"]);
+        // The envelope's own fields are not sources.
+        assert_eq!(v["chartId"], 7);
+        assert_eq!(v["name"], "Sales");
+        assert_eq!(v["sheetIndex"], 5);
+        // And a bare spec walks the same as the envelope.
+        let mut bare = before["spec"].clone();
+        assert!(remap_chart_spec_connection_ids(&mut bare, &resolver(&table)));
+        assert_eq!(bare, v["spec"]);
+    }
+
+    /// A miss -- an empty table, a table that knows none of the spec's keys, a
+    /// spec with no design-query source at all -- leaves the spec BYTE-identical
+    /// and reports no change; a resolver that would answer anything never
+    /// touches a range, string or pivot source; a non-object spec never panics.
+    ///
+    /// SABOTAGE: insert `packageDataSourceId` on a miss too -- the byte
+    /// comparison fails.
+    #[test]
+    fn a_connection_remap_miss_leaves_the_spec_byte_identical() {
+        let p = uuid();
+        let spec = envelope(json!({
+            "mark": "bar",
+            "data": design_query(&p, None),
+            "layers": [ { "data": range_ref(0, Some(sid())) }, { "data": "Data!A1:B2" } ]
+        }));
+        let text = spec.to_string();
+        let nothing: HashMap<String, String> = HashMap::new();
+        let mut v = spec.clone();
+        assert!(!remap_chart_spec_connection_ids(&mut v, &resolver(&nothing)));
+        assert_eq!(v.to_string(), text, "an empty table changes nothing");
+        let strangers: HashMap<String, String> = [(uuid(), uuid())].into_iter().collect();
+        assert!(!remap_chart_spec_connection_ids(&mut v, &resolver(&strangers)));
+        assert_eq!(v.to_string(), text, "a table that knows none of the keys changes nothing");
+        // A greedy resolver still never touches a source that is not a design query.
+        let greedy = |_: &str| Some("live".to_string());
+        let mut ranges = envelope(json!({
+            "data": range_ref(0, Some(sid())),
+            "layers": [ { "data": "Data!A1:B2" }, { "data": { "type": "pivot", "pivotId": "p1" } } ]
+        }));
+        let range_text = ranges.to_string();
+        assert!(!remap_chart_spec_connection_ids(&mut ranges, &greedy));
+        assert_eq!(ranges.to_string(), range_text);
+        // Wrong shapes are skipped, not fatal.
+        for bad in [
+            Value::String("not json".to_string()),
+            json!(42),
+            Value::Null,
+            json!([1, 2]),
+            json!({ "spec": 7 }),
+            json!({ "data": 17, "layers": { "not": "an array" }, "concat": { "charts": "nope" } }),
+            json!({ "data": { "type": "designQuery", "connectionId": 5 } }),
+            json!({ "data": { "type": "designQuery", "connectionId": "" } }),
+        ] {
+            let mut v = bad.clone();
+            assert!(!remap_chart_spec_connection_ids(&mut v, &greedy), "{bad}");
+            assert_eq!(v, bad, "{bad}");
+        }
+    }
+
+    /// The package key WINS and is kept; a source with only a uuid heals by
+    /// recording the key that worked; a stale package key is REPLACED by the
+    /// connection key that did resolve; and a second run is a no-op.
+    ///
+    /// SABOTAGE: try the connection key first -- case (d) binds to `l2`.
+    #[test]
+    fn a_connection_remap_binds_by_the_package_key_first_and_heals_the_key_that_worked() {
+        let (p, q, stale_session, stale_package) = (uuid(), uuid(), uuid(), uuid());
+        let (l1, l2) = (uuid(), uuid());
+        let table: HashMap<String, String> =
+            [(p.clone(), l1.clone()), (q.clone(), l2.clone())].into_iter().collect();
+        let resolve = resolver(&table);
+
+        // (a) The reload: the uuid is last session's, the package key is known.
+        let mut a = json!({ "data": design_query(&stale_session, Some(&p)) });
+        assert!(remap_chart_spec_connection_ids(&mut a, &resolve));
+        assert_eq!(a["data"]["connectionId"], l1);
+        assert_eq!(a["data"]["packageDataSourceId"], p);
+
+        // (b) The first pull: the publisher's uuid IS the package key -- heal.
+        let mut b = json!({ "data": design_query(&p, None) });
+        assert!(remap_chart_spec_connection_ids(&mut b, &resolve));
+        assert_eq!(b["data"]["connectionId"], l1);
+        assert_eq!(b["data"]["packageDataSourceId"], p, "the key that worked is recorded");
+
+        // (c) A working-copy push re-keyed the data source by its own uuid: the
+        //     carried package key is stale, the uuid string resolves.
+        let mut c = json!({ "data": design_query(&q, Some(&stale_package)) });
+        assert!(remap_chart_spec_connection_ids(&mut c, &resolve));
+        assert_eq!(c["data"]["connectionId"], l2);
+        assert_eq!(c["data"]["packageDataSourceId"], q, "the stale key is replaced by the one that worked");
+
+        // (d) Both keys resolve, to DIFFERENT connections: the package key wins.
+        let mut d = json!({ "data": design_query(&q, Some(&p)) });
+        assert!(remap_chart_spec_connection_ids(&mut d, &resolve));
+        assert_eq!(d["data"]["connectionId"], l1);
+        assert_eq!(d["data"]["packageDataSourceId"], p);
+
+        // (e) Already bound, key recorded: nothing to do, same bytes.
+        for bound in [&mut a, &mut b, &mut c, &mut d] {
+            let text = bound.to_string();
+            assert!(!remap_chart_spec_connection_ids(bound, &resolve), "{text}");
+            assert_eq!(bound.to_string(), text);
+        }
+        // A source bound to the live connection but MISSING its key is healed
+        // (the key recorded) without the uuid changing.
+        let mut e = json!({ "data": design_query(&l1, None) });
+        let heal: HashMap<String, String> = [(l1.clone(), l1.clone())].into_iter().collect();
+        assert!(remap_chart_spec_connection_ids(&mut e, &resolver(&heal)));
+        assert_eq!(e["data"]["connectionId"], l1);
+        assert_eq!(e["data"]["packageDataSourceId"], l1);
+    }
+
+    // -----------------------------------------------------------------------
+    // The save-time package-key stamp (drill-through fix round, 2026-10-23)
+    // -----------------------------------------------------------------------
+
+    /// A lookup over a (live connection uuid -> what the save knows) table.
+    fn live(table: &HashMap<String, LiveConnectionKey>) -> impl Fn(&str) -> Option<LiveConnectionKey> + '_ {
+        move |connection: &str| table.get(connection).cloned()
+    }
+
+    /// Every design-query source in the four places gets the application key
+    /// of the live connection it names; the uuid is never rewritten; the range
+    /// ref, the string source, the pivot source and the NON-lookup transform's
+    /// `from` are untouched, and so is the envelope.
+    ///
+    /// SABOTAGE: walk only `data` (drop the layers / transform / concat arms of
+    /// `for_each_source_mut`) -- the layer, lookup and concat assertions fail.
+    #[test]
+    fn a_package_stamp_reaches_every_design_query_source_and_only_those() {
+        let (a1, a2) = (uuid(), uuid());
+        let table: HashMap<String, LiveConnectionKey> = [
+            (a1.clone(), LiveConnectionKey::Application("ds-A".to_string())),
+            (a2.clone(), LiveConnectionKey::Application("ds-B".to_string())),
+        ]
+        .into_iter()
+        .collect();
+        let sheet = sid();
+        let mut v = envelope(json!({
+            "mark": "bar",
+            "data": design_query(&a1, None),
+            "layers": [
+                { "mark": "line", "data": design_query(&a2, None) },
+                { "mark": "point", "data": range_ref(3, Some(sheet)) },
+                { "mark": "area", "data": "Sheet1!A1:B5" },
+                { "mark": "pie", "data": { "type": "pivot", "pivotId": "p1" } },
+                "not-an-object"
+            ],
+            "transform": [
+                { "type": "lookup", "from": design_query(&a1, None) },
+                { "type": "filter", "from": design_query(&a1, None) }
+            ],
+            "concat": {
+                "charts": [
+                    { "data": design_query(&a2, None) },
+                    { "data": range_ref(1, Some(sheet)),
+                      "concat": { "charts": [ { "data": design_query(&a1, None) } ] } }
+                ]
+            }
+        }));
+        let before = v.clone();
+        assert!(stamp_chart_spec_package_keys(&mut v, &live(&table)), "five sources stamped");
+        let spec = &v["spec"];
+        for (source, connection, key) in [
+            (&spec["data"], &a1, "ds-A"),
+            (&spec["layers"][0]["data"], &a2, "ds-B"),
+            (&spec["transform"][0]["from"], &a1, "ds-A"),
+            (&spec["concat"]["charts"][0]["data"], &a2, "ds-B"),
+            (&spec["concat"]["charts"][1]["concat"]["charts"][0]["data"], &a1, "ds-A"),
+        ] {
+            assert_eq!(source["packageDataSourceId"], key, "{source}");
+            assert_eq!(source["connectionId"], *connection, "the uuid is never rewritten: {source}");
+            assert_eq!(source["dslText"], before["spec"]["data"]["dslText"], "the query is not touched");
+        }
+        // The filter transform's `from` is not a data source.
+        assert_eq!(spec["transform"][1]["from"], before["spec"]["transform"][1]["from"]);
+        // Range, string and pivot sources are exactly as they were.
+        for i in 1..=3 {
+            assert_eq!(spec["layers"][i]["data"], before["spec"]["layers"][i]["data"], "layer {i}");
+        }
+        assert_eq!(spec["concat"]["charts"][1]["data"], before["spec"]["concat"]["charts"][1]["data"]);
+        // The envelope's own fields are not sources.
+        assert_eq!(v["chartId"], 7);
+        assert_eq!(v["name"], "Sales");
+        assert_eq!(v["sheetIndex"], 5);
+        // A bare spec stamps the same as the envelope.
+        let mut bare = before["spec"].clone();
+        assert!(stamp_chart_spec_package_keys(&mut bare, &live(&table)));
+        assert_eq!(bare, v["spec"]);
+    }
+
+    /// The three answers: an application connection SETS its key (replacing a
+    /// stale one), a local connection REMOVES the key (and an empty application
+    /// id counts as none), and a uuid that names no live connection leaves the
+    /// source BYTE-identical -- its key may still heal it on the next open.
+    ///
+    /// SABOTAGE: treat "not live" (`None`) like a local connection -- case (c)
+    /// loses its key and the byte comparison fails.
+    #[test]
+    fn a_package_stamp_sets_removes_or_leaves_the_key_by_what_the_connection_is() {
+        let (app, local, dead, blank) = (uuid(), uuid(), uuid(), uuid());
+        let table: HashMap<String, LiveConnectionKey> = [
+            (app.clone(), LiveConnectionKey::Application("ds-A".to_string())),
+            (local.clone(), LiveConnectionKey::Local),
+            (blank.clone(), LiveConnectionKey::Application(String::new())),
+        ]
+        .into_iter()
+        .collect();
+        let lookup = live(&table);
+
+        // (a) An application connection: the key is written, a stale one replaced.
+        let mut a = json!({ "data": design_query(&app, None) });
+        assert!(stamp_chart_spec_package_keys(&mut a, &lookup));
+        assert_eq!(a["data"]["packageDataSourceId"], "ds-A");
+        let mut stale = json!({ "data": design_query(&app, Some("ds-OLD")) });
+        assert!(stamp_chart_spec_package_keys(&mut stale, &lookup));
+        assert_eq!(stale["data"]["packageDataSourceId"], "ds-A", "the live connection's key wins");
+
+        // (b) A local connection: a key carried over from an application
+        //     connection is removed -- absent, not null or "".
+        let mut b = json!({ "data": design_query(&local, Some("ds-A")) });
+        assert!(stamp_chart_spec_package_keys(&mut b, &lookup));
+        assert!(b["data"].get("packageDataSourceId").is_none(), "{b}");
+        assert_eq!(b["data"]["connectionId"], local);
+        let mut keyless = json!({ "data": design_query(&local, None) });
+        let text = keyless.to_string();
+        assert!(!stamp_chart_spec_package_keys(&mut keyless, &lookup), "nothing to remove");
+        assert_eq!(keyless.to_string(), text);
+        // An application connection with an EMPTY id has no key either.
+        let mut e = json!({ "data": design_query(&blank, Some("ds-A")) });
+        assert!(stamp_chart_spec_package_keys(&mut e, &lookup));
+        assert!(e["data"].get("packageDataSourceId").is_none(), "{e}");
+
+        // (c) A uuid no live connection answers to: left exactly as it is.
+        let mut c = json!({ "data": design_query(&dead, Some("ds-A")) });
+        let text = c.to_string();
+        assert!(!stamp_chart_spec_package_keys(&mut c, &lookup));
+        assert_eq!(c.to_string(), text, "the key that would heal it on the next open is kept");
+    }
+
+    /// A source with no usable `connectionId` is never looked up; a spec with
+    /// no design-query source, or of the wrong shape, changes nothing and
+    /// never panics; and a second stamp is a no-op.
+    ///
+    /// SABOTAGE: drop the `.filter(|s| !s.is_empty())` on the connection id --
+    /// the lookup is asked for "" and the recording assertion fails.
+    #[test]
+    fn a_package_stamp_never_looks_up_a_missing_id_and_is_idempotent() {
+        let asked = std::cell::RefCell::new(Vec::<String>::new());
+        let greedy = |connection: &str| {
+            asked.borrow_mut().push(connection.to_string());
+            Some(LiveConnectionKey::Application("ds-A".to_string()))
+        };
+        for bad in [
+            Value::String("not json".to_string()),
+            json!(42),
+            Value::Null,
+            json!([1, 2]),
+            json!({ "spec": 7 }),
+            json!({ "data": 17, "layers": { "not": "an array" }, "concat": { "charts": "nope" } }),
+            json!({ "data": { "type": "designQuery", "dslText": "VALUES: [Revenue]" } }),
+            json!({ "data": { "type": "designQuery", "connectionId": 5 } }),
+            json!({ "data": { "type": "designQuery", "connectionId": "" } }),
+            json!({ "data": range_ref(0, Some(sid())), "layers": [ { "data": "Data!A1:B2" } ] }),
+            json!({ "data": { "type": "pivot", "pivotId": "p1", "connectionId": "x" } }),
+        ] {
+            let mut v = bad.clone();
+            assert!(!stamp_chart_spec_package_keys(&mut v, &greedy), "{bad}");
+            assert_eq!(v, bad, "{bad}");
+        }
+        assert!(asked.borrow().is_empty(), "looked up: {:?}", asked.borrow());
+
+        let mut once = envelope(json!({ "data": design_query(&uuid(), None) }));
+        assert!(stamp_chart_spec_package_keys(&mut once, &greedy));
+        let text = once.to_string();
+        assert!(!stamp_chart_spec_package_keys(&mut once, &greedy), "a second stamp changes nothing");
+        assert_eq!(once.to_string(), text);
+    }
+
+    /// THE POINT OF THE STAMP: a chart saved with its live connection's key
+    /// re-binds on the next open, when every application connection has been
+    /// re-minted and the saved uuid names nothing -- while the SAME chart saved
+    /// without the stamp stays bound to the dead uuid. And a chart re-pointed
+    /// to a local connection keeps the user's choice: with the stale key
+    /// removed, the open's remap has nothing to pull it back by.
+    ///
+    /// SABOTAGE: return `false` from `stamp_chart_spec_package_keys` without
+    /// editing -- the re-bind assertion fails.
+    #[test]
+    fn a_stamped_chart_re_binds_on_the_next_open_and_a_re_pointed_one_stays_local() {
+        let (session_one, reopened, local) = (uuid(), uuid(), uuid());
+        let saving: HashMap<String, LiveConnectionKey> = [
+            (session_one.clone(), LiveConnectionKey::Application("ds-A".to_string())),
+            (local.clone(), LiveConnectionKey::Local),
+        ]
+        .into_iter()
+        .collect();
+        // The next open: the application's data source ds-A got a FRESH uuid.
+        let open: HashMap<String, String> = [("ds-A".to_string(), reopened.clone())].into_iter().collect();
+
+        // A drill chart written with only the session's uuid.
+        let unstamped = json!({ "data": design_query(&session_one, None) });
+        let mut saved = unstamped.clone();
+        assert!(stamp_chart_spec_package_keys(&mut saved, &live(&saving)));
+        assert!(remap_chart_spec_connection_ids(&mut saved, &resolver(&open)), "the saved chart re-binds");
+        assert_eq!(saved["data"]["connectionId"], reopened);
+        let mut not_saved_that_way = unstamped;
+        assert!(
+            !remap_chart_spec_connection_ids(&mut not_saved_that_way, &resolver(&open)),
+            "the premise: without the key the next open cannot re-bind it"
+        );
+
+        // A chart re-pointed from ds-A's connection to a local one, the stale
+        // key kept by the store's deep merge.
+        let mut re_pointed = json!({ "data": design_query(&local, Some("ds-A")) });
+        assert!(stamp_chart_spec_package_keys(&mut re_pointed, &live(&saving)));
+        assert!(!remap_chart_spec_connection_ids(&mut re_pointed, &resolver(&open)), "nothing pulls it back");
+        assert_eq!(re_pointed["data"]["connectionId"], local, "the user's choice survives the reopen");
     }
 }

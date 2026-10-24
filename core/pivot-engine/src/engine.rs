@@ -3732,6 +3732,24 @@ pub fn calculate_pivot(
     calculator.calculate()
 }
 
+/// The value ids a field's `hidden_items` list names, resolved EXACTLY as the
+/// engine resolves them when it applies the filter (`resolve_hidden_ids`): an
+/// item matches a member by its DISPLAY spelling ("5.5") OR by its member KEY
+/// ("5.50", `FieldCache::member_key`), and the blank member -- its key "" or
+/// the header text "(blank)" in any case -- resolves to `VALUE_ID_EMPTY` plus
+/// every empty-text item (one member, ruling Q8). An item that names nothing
+/// contributes nothing, so a caller resolving items ONE AT A TIME can tell a
+/// carried filter from one it must report as lost.
+///
+/// The host's drill-through (`drill_through.rs`, `pivotContext`) needs this to
+/// turn a pivot's standing filters into member KEYS: `hidden_items` is
+/// "the string representation of hidden values" (`PivotField`), which is the
+/// display spelling for a filter the user ticked and the key for one a slicer
+/// wrote, and an engine IN-list matches keys only.
+pub fn hidden_member_ids(field_cache: &crate::cache::FieldCache, hidden_items: &[String]) -> Vec<ValueId> {
+    PivotCalculator::resolve_hidden_ids(field_cache, hidden_items)
+}
+
 /// Performs a drill-down operation to get source records for a cell.
 ///
 /// `group_path` holds MEMBER ids, as the view's cells carry them: a blank
@@ -3976,12 +3994,49 @@ mod tests {
     fn test_basic_pivot_calculation() {
         let mut cache = create_test_cache();
         let definition = create_test_definition();
-        
+
         let view = calculate_pivot(&definition, &mut cache);
-        
+
         // Should have header rows + 2 regions + grand total
         assert!(view.row_count > 0);
         assert!(view.col_count > 0);
+    }
+
+    /// `hidden_member_ids` is the engine's OWN resolution, exposed: display
+    /// spelling and member key both name a member, the blank's two spellings
+    /// name `VALUE_ID_EMPTY` and the empty-text item, and an item that names
+    /// nothing contributes nothing (so a per-item caller can report it lost).
+    #[test]
+    fn hidden_member_ids_resolve_as_the_engine_filter_does() {
+        let mut cache = PivotCache::new(test_pivot_id(), 2);
+        cache.set_field_name(0, "Price".to_string());
+        cache.set_field_name(1, "Region".to_string());
+        cache.add_record(0, &[CellValue::Number(5.5), CellValue::Text("East".to_string())]);
+        cache.add_record(1, &[CellValue::Number(10.0), CellValue::Text(String::new())]);
+        cache.add_record(2, &[CellValue::Empty, CellValue::Text("West".to_string())]);
+        // A Decimal column: the KEY keeps the scale ("5.50"), the DISPLAY does
+        // not ("5.5") -- the exact divergence a ticked filter and a slicer-
+        // written one differ by.
+        cache.fields[0].member_kind = crate::cache::MemberKind::Decimal { scale: 2 };
+        let price = &cache.fields[0];
+        let region = &cache.fields[1];
+        let five_five = price.find_id(&CacheValue::Number(OrderedFloat(5.5))).expect("5.5 interned");
+        let ten = price.find_id(&CacheValue::Number(OrderedFloat(10.0))).expect("10 interned");
+        let empty_text = region.find_id(&CacheValue::Text(String::new())).expect("'' interned");
+
+        assert_eq!(price.member_key(five_five), "5.50");
+        // By display spelling, and by key: the same member.
+        assert_eq!(hidden_member_ids(price, &["5.5".to_string()]), vec![five_five]);
+        assert_eq!(hidden_member_ids(price, &["5.50".to_string()]), vec![five_five]);
+        assert_eq!(hidden_member_ids(price, &["10".to_string()]), vec![ten]);
+        // The blank member under either spelling: the record blank AND the
+        // empty-text item (ruling Q8).
+        let blank = hidden_member_ids(region, &["".to_string()]);
+        assert_eq!(blank, vec![VALUE_ID_EMPTY, empty_text]);
+        let blank_label = hidden_member_ids(region, &["(Blank)".to_string()]);
+        assert_eq!(blank_label, vec![VALUE_ID_EMPTY, empty_text]);
+        // An item that names nothing resolves to nothing.
+        assert!(hidden_member_ids(region, &["Nowhere".to_string()]).is_empty());
     }
     
     #[test]

@@ -1,19 +1,44 @@
 //! FILENAME: app/extensions/Pivot/lib/pivotCellDoubleClick.ts
 // PURPOSE: What a DOUBLE-CLICK on a pivot cell does: an expandable row header
-//          toggles; a data or total cell drills through (to the pivot's script
-//          when a mounted script handles it, otherwise into a new sheet).
+//          toggles; a data or total cell drills through (to the pivot's
+//          DESIGN-QUERY drill when its behaviour carries one, to the pivot's
+//          script when a mounted script handles it, otherwise into a new sheet).
 // CONTEXT: A worksheet pivot hears the double-click through the cell
 //          double-click interceptor; a canvas pivot box through its overlay's
 //          `onDoubleClick` (Core offers a double-click over a floating object to
 //          nothing else). Both resolve the view cell and the hidden-grid cell
 //          and then call this, so the drill behaviour has one implementation.
 //          The drill half is its own export, `runPivotDrillThrough`, so the
-//          value-cell menu's "Show Details" runs the very same drill.
+//          value-cell menu's "Show Details" / "Drill through" runs the very
+//          same drill.
+//
+//          THE DESIGN-QUERY DRILL (docs/design/model-drillthrough.md 2.3, 2.9).
+//          A present `behavior.designQuery` WINS over `kind` and is tested
+//          BEFORE the script branch. The clicked cell's identity is its
+//          `groupPath` of (field index, value id) pairs, which only the backend
+//          can turn into member KEYS: the `drill_through { op: "pivotContext" }`
+//          op resolves it (blank member -> key "", a coordinate that cannot be
+//          resolved FAILS the op) and answers the pivot's connection, the
+//          CLICKED PATH (`filters`) and the pivot's own STANDING filters
+//          (`standing`) apart, as keys, with notices for what it could not
+//          carry. They are passed apart because the runner treats them apart:
+//          a chart presentation leaves out a standing copy of a workbook-wide
+//          filter that re-applies live, never the clicked path (spec 2.4).
+//          `pivotCellItemKey` (the measure VALUE on a data cell) and
+//          `getPivotDataFormula` (spells the blank "(blank)") are NOT used.
+//          The shared runner then bakes the keys into the definition's DSL,
+//          lands the result on an ephemeral sheet and tells the notices ONCE,
+//          after the sheet landed; it toasts its own failures.
 
-import { AppEvents, showToast } from "@api";
+import { AppEvents, showToast, type DrillThroughPivotContextResponse } from "@api";
 import { pivotCellItemKey } from "@api/pivotMembers";
 import { emitAppEvent } from "@api/events";
 import { setActiveSheet } from "@api/lib";
+import { getGridStateSnapshot } from "@api/grid";
+import type { DrillThroughDefinition } from "@api";
+import { runDrillThrough } from "../../_shared/drillThrough/runDrillThrough";
+import { getCachedRegions } from "../handlers/selectionHandler";
+import { pivotBackend } from "./pivotBackend";
 import type { PivotCellData } from "./pivot-api";
 import {
   togglePivotGroup,
@@ -23,6 +48,19 @@ import {
   getPivotDrillBehavior,
 } from "./pivot-api";
 import { decideDrillDispatch, diagnoseScriptDrill } from "./drillDispatch";
+
+/**
+ * What a caller knows about the pivot's place that the drill cannot read
+ * back later: both doors act on the ACTIVE sheet, so each defaults from the
+ * grid snapshot (the sheet) and the cached regions (the name) at CALL time --
+ * before any await, because the design-query runner switches sheets.
+ */
+export interface PivotDrillOptions {
+  /** The pivot's TRUE sheet index (the page its filters are resolved on). */
+  sheetIndex?: number;
+  /** The pivot's name as a person knows it (the sheet-name and title fallbacks). */
+  name?: string;
+}
 
 /**
  * Act on a double-click on `cell`, the view cell at hidden-grid cell
@@ -79,7 +117,9 @@ function togglePivotRowHeader(pivotId: string, cell: PivotCellData, viewCol: num
 
 /**
  * Drill through the data / total `cell` of `pivotId`, the view cell written
- * to hidden-grid cell (gridRow, gridCol). A "script"-mode pivot dispatches the
+ * to hidden-grid cell (gridRow, gridCol). A behaviour with a `designQuery`
+ * runs the design-query drill (the clicked members as KEY filters on the
+ * stored DSL, onto an ephemeral sheet); a "script"-mode pivot dispatches the
  * onDrillThrough hook to its sandboxed script (which produces the drill via
  * its consented capabilities); otherwise the host runs the built-in / query
  * secured drill into a new sheet, which becomes the active sheet. Runs in the
@@ -90,11 +130,21 @@ export function runPivotDrillThrough(
   cell: PivotCellData,
   gridRow: number,
   gridCol: number,
+  options: PivotDrillOptions = {},
 ): void {
   const groupPath = (cell.groupPath ?? []) as Array<[number, number]>;
+  // Read NOW, synchronously: the design-query runner moves the active sheet.
+  const sheetIndex = options.sheetIndex ?? getGridStateSnapshot()?.sheetContext?.activeSheetIndex ?? 0;
+  const name = options.name ?? getCachedRegions().find((r) => r.pivotId === pivotId)?.name ?? "PivotTable";
   void (async () => {
     try {
       const behavior = await getPivotDrillBehavior(pivotId);
+      // A design-query definition WINS over `kind` (model-drillthrough.md
+      // 2.1): it is tested first, before the script branch.
+      if (behavior?.designQuery) {
+        await runDesignQueryDrill(pivotId, groupPath, behavior.designQuery, { sheetIndex, name });
+        return;
+      }
       // Dispatch to the pivot's script only when a MOUNTED script has
       // actually REGISTERED a drill handler. "Does this pivot have a
       // script" answers the wrong question: the handler side is opt-in
@@ -157,11 +207,54 @@ export function runPivotDrillThrough(
       // reason only in devtools. That is verbatim the BUG-0096
       // failure mode ("no drill, no fallback and no message") the
       // comment above this handler exists to prevent. The same line
-      // also covers a failed getPivotDrillBehavior.
+      // also covers a failed getPivotDrillBehavior and a failed
+      // pivotContext op (a non-model pivot, an unresolvable coordinate):
+      // such a drill is told and runs nothing else -- never the
+      // built-in drill on another datum's member.
       console.error("[Pivot Extension] Drill-through failed:", error);
       showToast(String(error), { type: "error" });
     }
   })();
+}
+
+/**
+ * The design-query drill: the backend resolves the cell's path to member
+ * KEYS (`pivotContext`), and the shared runner takes the pivot as the source
+ * (its connection comes from the answer, never from the definition, spec 2.2)
+ * over this extension's own bound channel. The answer's clicked path and the
+ * pivot's standing filters go to the runner APART, exactly as answered --
+ * never re-split by `groupPath.length`, because a measure-only pivot's
+ * synthetic "Total" row contributes no path spec. The notices are NOT told
+ * here: the runner tells them once, only after the sheet has landed, so a
+ * drill that fails shows its failure alone. The runner toasts every failure
+ * of its own and resolves to an outcome, so a `{ ok: false }` answer is not
+ * toasted a second time here.
+ */
+async function runDesignQueryDrill(
+  pivotId: string,
+  groupPath: Array<[number, number]>,
+  definition: DrillThroughDefinition,
+  source: { sheetIndex: number; name: string },
+): Promise<void> {
+  const context = await pivotBackend.invoke<DrillThroughPivotContextResponse>("drill_through", {
+    request: { op: "pivotContext", pivotId, groupPath },
+  });
+  await runDrillThrough(
+    {
+      kind: "pivot",
+      id: pivotId,
+      sheetIndex: source.sheetIndex,
+      connectionId: String(context.connectionId ?? ""),
+      name: source.name,
+    },
+    definition,
+    {
+      filters: context.filters,
+      standing: context.standing,
+      notices: context.notices.map((n) => n.message),
+    },
+    { invoke: pivotBackend.invoke },
+  );
 }
 
 function errorText(error: unknown): string {

@@ -127,6 +127,32 @@ describe('Validator', () => {
     expect(errors.some(e => e.severity === 'warning' && e.message.includes('no values'))).toBe(true);
   });
 
+  it('warns on a REPEATED FILTERS clause, once per clause after the first, at that clause', () => {
+    // The parser accumulates filter terms across clauses and records where each
+    // clause began; a second clause is legal (a drill-through bakes one) but in
+    // typed text usually a slip. A warning, never an error.
+    const ast = emptyAST();
+    ast.filters = [filterNode('Region', ['East']), filterNode('Product', ['P'])];
+    ast.filtersClauses = [
+      { line: 1, column: 0, endColumn: 7 },
+      { line: 2, column: 0, endColumn: 7 },
+      { line: 3, column: 0, endColumn: 7 },
+    ];
+    const warnings = validate(ast, ctx()).filter(e => e.message.includes('second FILTERS clause'));
+    expect(warnings.map(w => w.severity)).toEqual(['warning', 'warning']);
+    expect(warnings.map(w => w.location.line)).toEqual([2, 3]);
+  });
+
+  it('a single FILTERS clause (or none recorded) raises no repeated-clause warning', () => {
+    const one = emptyAST();
+    one.filters = [filterNode('Region', ['East']), filterNode('Product', ['P'])];
+    one.filtersClauses = [{ line: 1, column: 0, endColumn: 7 }];
+    expect(validate(one, ctx()).some(e => e.message.includes('second FILTERS clause'))).toBe(false);
+    const none = emptyAST();
+    none.filters = [filterNode('Region', ['East'])];
+    expect(validate(none, ctx()).some(e => e.message.includes('second FILTERS clause'))).toBe(false);
+  });
+
   // --- Layout directive validation ---
 
   it('warns for unknown layout directive', () => {

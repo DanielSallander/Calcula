@@ -438,11 +438,15 @@ fn diff_working_copy_against_base(
         &ctx.package_name,
         working_version.clone(),
         &ctx.kind,
-        Vec::new(),
+        // No sheet named: the default selection -- for a working copy, the
+        // application's own sheets.
+        crate::calp_commands::RequestedSheets::default(),
         false,
         frontend_custom_objects,
         // A working copy's collision renames are undone by the assembly itself.
         &HashMap::new(),
+        // A refusal names THIS act: the merge publishes nothing.
+        "merged",
         // A merge compares what the author CHANGED; adding items to the
         // application is the push dialog's act, never the merge's.
         &[],

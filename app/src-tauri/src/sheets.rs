@@ -64,6 +64,17 @@ pub struct SheetInfo {
     /// The canvas's page / snap-grid / stacking layout; absent for a worksheet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canvas_layout: Option<::persistence::CanvasLayout>,
+    /// Whether the sheet is EPHEMERAL: a drill-through's result sheet
+    /// (`AppState::ephemeral_sheets`, docs/design/model-drillthrough.md 2.6),
+    /// which the tab strip discards when the user leaves it and keeps on a
+    /// double-click of its tab. Session-only -- never written to the .cala, so
+    /// a saved one reopens as an ordinary sheet. It rides in the same payload
+    /// as `sheet_id` for the same reason: the strip decides "leave = discard"
+    /// from the list it already has, and a separate round trip could tear
+    /// against the discard itself. `#[serde(default)]`: absent reads as not
+    /// ephemeral.
+    #[serde(default)]
+    pub ephemeral: bool,
 }
 
 fn default_visibility() -> String {
@@ -86,6 +97,18 @@ pub struct SheetsResult {
 // Helper: build SheetInfo list from state vectors
 // ============================================================================
 
+/// A SNAPSHOT of `AppState::ephemeral_sheets`: the leaf lock taken, cloned
+/// and released in ONE statement, so no caller ever holds it across a call or
+/// while acquiring another lock. The set is a handful of ids at most. This is
+/// what every `build_sheet_list(..)` call site passes as its 7th argument.
+pub(crate) fn ephemeral_sheet_ids(state: &AppState) -> HashSet<identity::SheetId> {
+    state
+        .ephemeral_sheets
+        .lock()
+        .map(|set| set.clone())
+        .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+}
+
 pub(crate) fn build_sheet_list(
     sheet_names: &[String],
     freeze_configs: &[FreezeConfig],
@@ -93,6 +116,7 @@ pub(crate) fn build_sheet_list(
     sheet_visibility: &[String],
     sheet_ids: &[identity::SheetId],
     sheet_kinds: &[::persistence::SheetKind],
+    ephemeral: &HashSet<identity::SheetId>,
 ) -> Vec<SheetInfo> {
     sheet_names
         .iter()
@@ -135,6 +159,12 @@ pub(crate) fn build_sheet_list(
                     .get(index)
                     .and_then(|k| k.canvas_layout())
                     .cloned(),
+                // By the sheet's STABLE id, `.get(index)` for the same reason as
+                // `sheet_id`; a sheet with no id (a short vector) is not
+                // ephemeral, the padding default.
+                ephemeral: sheet_ids
+                    .get(index)
+                    .is_some_and(|id| ephemeral.contains(id)),
             }
         })
         .collect()
@@ -214,6 +244,25 @@ pub(crate) fn ensure_user_sheet(
     }
 }
 
+/// The OBJECT door's refusal, the inverse of [`ensure_user_sheet`]: the
+/// floating-range commands reach a sheet command with `allow_object`, which
+/// skips every user-sheet gate, so through that door only an OBJECT-backed
+/// sheet may be touched. A caller that knows its backing sheet's stable id is
+/// also checked by id; this keeps one that passes none -- or a visibility
+/// vector that disagrees with the row store -- from ever reaching a user's
+/// sheet (review RA-1).
+fn ensure_object_sheet(sheet_visibility: &[String], index: usize, action: &str) -> Result<(), String> {
+    if sheet_visibility.get(index).is_some_and(|v| v == OBJECT_SHEET_VISIBILITY) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Cannot {} sheet {} through the floating range commands: it is not the \
+             backing store of a floating range.",
+            action, index
+        ))
+    }
+}
+
 // ============================================================================
 // Sheet provenance — which sheets came from a subscribed application
 // ============================================================================
@@ -253,17 +302,32 @@ pub(crate) struct SheetOrigin {
 /// is exactly how the publish path came to know nothing about subscriptions at
 /// all, and shipped other publishers' sheets under the author's key.
 ///
-/// LOCK ORDER: takes `sheet_ids` then `subscriptions`, both READ, both released
-/// before it returns. Call it holding neither.
+/// LOCK ORDER: takes `sheet_names` then `sheet_ids` under ONE hold (both held
+/// while they are cloned, so each index's id and name come from the same moment
+/// -- R5-TORN-PAIR-SIBLINGS) and releases both; only then does it read
+/// `subscriptions`. Everything is released before it returns. Call it holding
+/// none of them.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct SheetProvenance {
     by_index: HashMap<usize, SheetOrigin>,
+    /// The sheet ids in the order this snapshot indexed them, so a caller that
+    /// names its sheet by STABLE id finds where that sheet sat in the SAME
+    /// snapshot ([`SheetProvenance::index_of_sheet`]) -- never through a second
+    /// read of `sheet_ids` that could disagree with the first.
+    sheet_ids: Vec<identity::SheetId>,
 }
 
 impl SheetProvenance {
     pub(crate) fn snapshot(state: &AppState) -> Result<Self, String> {
-        let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
-        let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+        // The pair under ONE hold, `sheet_names` first: each origin below takes
+        // its sheet's name from the index its id sits at, and two separate
+        // clone-and-release reads let a delete land between them and badge a
+        // sheet with its neighbour's name. Released before `subscriptions`.
+        let (sheet_ids, sheet_names) = {
+            let names = state.sheet_names.read().map_err(|e| e.to_string())?;
+            let ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
+            (ids.clone(), names.clone())
+        };
         let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
 
         let mut by_index = HashMap::new();
@@ -313,11 +377,17 @@ impl SheetProvenance {
                 );
             }
         }
-        Ok(Self { by_index })
+        Ok(Self { by_index, sheet_ids })
     }
 
     pub(crate) fn origin(&self, index: usize) -> Option<&SheetOrigin> {
         self.by_index.get(&index)
+    }
+
+    /// Where the sheet whose STABLE id is `sheet_id` sat when this snapshot was
+    /// taken, or `None` when it was not in the workbook.
+    pub(crate) fn index_of_sheet(&self, sheet_id: identity::SheetId) -> Option<usize> {
+        self.sheet_ids.iter().position(|id| *id == sheet_id)
     }
 
     pub(crate) fn is_subscribed(&self, index: usize) -> bool {
@@ -621,11 +691,20 @@ fn remap_list_validation_sources(
 /// `sheet_index` field carried INSIDE Comment and Scenario payloads (the same
 /// re-stamp load_file performs when it materializes them). Takes each store's
 /// lock briefly, one at a time; callers must not hold any of these locks.
+///
+/// THE SHEETS ARE BEING RENUMBERED, so this also moves the sheet-structure
+/// generation (`AppState::sheet_structure_generation`). Every in-place
+/// renumbering comes through here -- the add's partition rotation, delete,
+/// move, copy, `restore_partition_invariant` -- and every caller is inside its
+/// own `sheet_names` hold, which is what lets a save, AutoRecover or publish
+/// snapshot that re-checks the generation under `sheet_names` see this
+/// renumbering whether it read before or after it (F1, review round 7).
 fn remap_sheet_keyed_stores(
     state: &AppState,
     effect: &crate::document_effect::DocumentEffect,
     remap: impl Fn(usize) -> Option<usize>,
 ) {
+    crate::persistence::note_sheet_structure_change(state);
     // QUEUED UNDO ENTRIES ARE NOT REMAPPED HERE ANY MORE — THEY NO LONGER EXIST.
     //
     // This block used to rewrite the sheet index inside every queued
@@ -1490,7 +1569,7 @@ pub fn get_sheets(state: State<AppState>) -> SheetsResult {
     let sheet_visibility = state.sheet_visibility.read().unwrap();
 
     SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap()),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap(), &ephemeral_sheet_ids(&state)),
         active_index,
     }
 }
@@ -2296,7 +2375,7 @@ pub(crate) fn activate_sheet(state: &AppState, index: usize) -> Result<SheetsRes
 
     (
         SheetsResult {
-            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap()),
+            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap(), &ephemeral_sheet_ids(&state)),
             active_index: index,
         },
         switched,
@@ -2613,13 +2692,37 @@ pub(crate) enum NewSheetName {
     /// `base`, else `base2`, `base3`, ... -- the first one no sheet has,
     /// ignoring case. For a sheet a command names itself (a drill-through's
     /// detail rows), where there is nobody to refuse. `base` must itself be a
-    /// legal sheet name.
+    /// legal sheet name, and then EVERY candidate is one too: from `base2` on,
+    /// the stem is shortened BY CHARACTERS to leave room for the counter
+    /// ([`numbered_sheet_name`]), so a 31-character base never yields a
+    /// 32-character name that `validate_sheet_name` refuses and an .xlsx save
+    /// then refuses too.
     FirstFree(String),
     /// `Sheet{n}`: `add_sheet`'s default.
     Default,
 }
 
-/// One user sheet for [`append_user_sheet`] to add.
+/// `base` followed by the counter `n`, the stem shortened BY CHARACTERS (never
+/// by byte slicing, which panics inside a multi-byte character) so the whole
+/// stays within Excel's `MAX_SHEET_NAME_CHARS`: `NewSheetName::FirstFree`'s
+/// spelling from its second candidate on. Bare digits, not `unique_sheet_name`'s
+/// " (2)": the drill-through precedent names its sheets `Drillthrough2`.
+///
+/// Always a legal sheet name when `base` is one: at most 31 characters, the
+/// start (and so the no-apostrophe-first rule) unchanged, nothing illegal
+/// added, and the last character a digit -- so it can neither end in an
+/// apostrophe nor be "History". A shortened candidate that collides with an
+/// existing sheet (`base[..30] + "2"` can equal the kept `base` itself) is
+/// simply not free, and the counter moves on.
+fn numbered_sheet_name(base: &str, n: usize) -> String {
+    let digits = n.to_string();
+    let room = crate::sheet_names::MAX_SHEET_NAME_CHARS.saturating_sub(digits.chars().count());
+    let stem: String = base.chars().take(room).collect();
+    format!("{}{}", stem, digits)
+}
+
+/// One user sheet for [`append_user_sheet`] to add: an ORDINARY sheet. Wrap
+/// it in an [`EphemeralUserSheet`] for a drill-through's temporary result.
 pub(crate) struct NewUserSheet {
     pub name: NewSheetName,
     pub kind: ::persistence::SheetKind,
@@ -2631,12 +2734,59 @@ pub(crate) struct NewUserSheet {
     pub activate: bool,
 }
 
+/// A user sheet [`append_user_sheet`] adds as EPHEMERAL: a model visual's
+/// drill-through result (`drill_through.rs`, model-drillthrough.md 2.6), which
+/// the tab strip discards when the user leaves it unless they keep it.
+///
+/// The flag is decided INSIDE the add's critical section, under the held
+/// `grid` -> `grids` -> `sheet_names` locks, and never after them: the add
+/// REFUSES with `refusal` -- before its `DocumentEffect`, so the document stays
+/// clean -- when the ACTIVE sheet is itself ephemeral at that moment, and
+/// otherwise puts the new sheet's id into `AppState::ephemeral_sheets` before
+/// those locks are released. A check made outside that section (the drill's
+/// own guards run before its query is awaited) leaves a window in which a
+/// second drill lands and activates its own temporary sheet; one temporary
+/// sheet then opens on top of another, and the strip's leave-discard of the
+/// first races the chart save of the second.
+pub(crate) struct EphemeralUserSheet {
+    pub sheet: NewUserSheet,
+    /// What the add answers when the active sheet is ephemeral at the add --
+    /// a sentence that says what happened, for the caller to show as is.
+    pub refusal: &'static str,
+}
+
+/// What [`append_user_sheet`] is handed: an ordinary [`NewUserSheet`] or an
+/// [`EphemeralUserSheet`], each through its `From`. One add path takes both,
+/// so the ephemeral flag is set by the code that adds the sheet and cannot be
+/// left to a second step after the locks are gone.
+pub(crate) struct UserSheetToAdd {
+    sheet: NewUserSheet,
+    /// `Some(refusal)` for an ephemeral sheet (see [`EphemeralUserSheet`]).
+    ephemeral_refusal: Option<&'static str>,
+}
+
+impl From<NewUserSheet> for UserSheetToAdd {
+    fn from(sheet: NewUserSheet) -> Self {
+        UserSheetToAdd { sheet, ephemeral_refusal: None }
+    }
+}
+
+impl From<EphemeralUserSheet> for UserSheetToAdd {
+    fn from(sheet: EphemeralUserSheet) -> Self {
+        UserSheetToAdd { sheet: sheet.sheet, ephemeral_refusal: Some(sheet.refusal) }
+    }
+}
+
 /// What [`append_user_sheet`] added.
 pub(crate) struct AppendedUserSheet {
     /// Where it landed: the end of the USER prefix, which is not the end of
     /// the sheet list once a floating range's object sheet exists.
     pub index: usize,
     pub name: String,
+    /// The new sheet's STABLE id, minted by the add. A caller that needs it
+    /// takes it from here, never by reading `sheet_ids` at `index` after the
+    /// add's locks are released (another structural command can run between).
+    pub sheet_id: identity::SheetId,
     pub result: SheetsResult,
 }
 
@@ -2654,12 +2804,16 @@ pub(crate) struct AppendedUserSheet {
 /// rely on; and a protected workbook structure stopped neither.
 ///
 /// In order: the workbook-structure gate, Excel's rule for a caller's name,
-/// the name's uniqueness under the held sheet locks -- every refusal BEFORE
-/// the `DocumentEffect`, so a refused add leaves the document clean -- then
-/// every per-sheet store through `append_sheet_stores`, the partition
-/// rotation, the cells, and (when `activate`) the stash of the sheet being
-/// left and the switch. Lock order is the crate's canonical one: `grid`,
-/// `grids`, `sheet_names`, then everything else.
+/// the name's uniqueness under the held sheet locks and, for an
+/// [`EphemeralUserSheet`], the refusal when the active sheet is itself
+/// ephemeral -- every refusal BEFORE the `DocumentEffect`, so a refused add
+/// leaves the document clean -- then every per-sheet store through
+/// `append_sheet_stores`, the partition rotation, the cells, (when `activate`)
+/// the stash of the sheet being left and the switch, and (when ephemeral) the
+/// new sheet's id into `AppState::ephemeral_sheets` -- still under the held
+/// locks, so the list this returns already flags it. Lock order is the
+/// crate's canonical one: `grid`, `grids`, `sheet_names`, then everything
+/// else; `ephemeral_sheets` is a LEAF, taken last and alone in its own block.
 ///
 /// Returns with every lock released, and ends NOTHING: the caller ends the
 /// undo history (`invalidate_undo_history_for_sheet_structure`, Excel parity,
@@ -2668,10 +2822,11 @@ pub(crate) struct AppendedUserSheet {
 pub(crate) fn append_user_sheet(
     state: &AppState,
     file_state: &FileState,
-    sheet: NewUserSheet,
+    sheet: impl Into<UserSheetToAdd>,
     action: &str,
 ) -> Result<AppendedUserSheet, String> {
     crate::protection::check_workbook_structure(state, action)?;
+    let UserSheetToAdd { sheet, ephemeral_refusal } = sheet.into();
     let NewUserSheet { name, kind, cells, activate } = sheet;
     // Excel's rule, checked BEFORE the document is marked modified: a refused
     // name must not dirty the workbook. The uniqueness half needs the sheet
@@ -2708,10 +2863,12 @@ pub(crate) fn append_user_sheet(
         NewSheetName::FirstFree(base) => {
             let mut counter = 1usize;
             loop {
+                // From the second candidate on, the stem makes room for the
+                // counter: `base` may already be 31 characters.
                 let candidate = if counter == 1 {
                     base.clone()
                 } else {
-                    format!("{}{}", base, counter)
+                    numbered_sheet_name(&base, counter)
                 };
                 if is_free(&candidate) {
                     break candidate;
@@ -2730,6 +2887,32 @@ pub(crate) fn append_user_sheet(
             }
         }
     };
+
+    // AN EPHEMERAL SHEET NEVER OPENS ON TOP OF ANOTHER. Decided here, under the
+    // held grid/grids/sheet_names locks -- every other add, every sheet switch
+    // and every delete waits on them -- and still before the effect, so the
+    // refusal leaves the document clean. `active_sheet` and `sheet_ids` are
+    // read and released inside the block; the leaf set is taken last, alone.
+    if let Some(refusal) = ephemeral_refusal {
+        let active_id = {
+            let active = *state
+                .active_sheet
+                .read()
+                .map_err(|e| format!("active_sheet lock poisoned: {}", e))?;
+            let ids = state.sheet_ids.read().map_err(|e| format!("sheet_ids lock poisoned: {}", e))?;
+            ids.get(active).copied()
+        };
+        if let Some(active_id) = active_id {
+            let active_is_ephemeral = state
+                .ephemeral_sheets
+                .lock()
+                .map_err(|e| format!("ephemeral_sheets lock poisoned: {}", e))?
+                .contains(&active_id);
+            if active_is_ephemeral {
+                return Err(refusal.to_string());
+            }
+        }
+    }
 
     // Past every gate. Adding a sheet appends to every per-sheet persisted vector.
     let effect = crate::document_effect::DocumentEffect::mutates(file_state);
@@ -2778,7 +2961,7 @@ pub(crate) fn append_user_sheet(
         }
     }
 
-    let (appended_at, _sheet_id) = append_sheet_stores(
+    let (appended_at, new_sheet_id) = append_sheet_stores(
         &state,
         &effect,
         new_name.clone(),
@@ -2899,11 +3082,27 @@ pub(crate) fn append_user_sheet(
         grids[new_index] = cells;
     }
 
+    // An EPHEMERAL sheet's id goes into the set BEFORE the locks above are
+    // released, so no other add, switch or delete can observe the new sheet
+    // unflagged (the list built below already flags it). The leaf set is
+    // taken last and alone -- `delete_sheet_impl` takes it the same way under
+    // the same guards -- and a poisoned set is recovered rather than refused:
+    // the sheet is added by now, and an `Err` here would report an add that
+    // happened as one that did not.
+    if ephemeral_refusal.is_some() {
+        state
+            .ephemeral_sheets
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(new_sheet_id);
+    }
+
     AppendedUserSheet {
         index: new_index,
         name: new_name,
+        sheet_id: new_sheet_id,
         result: SheetsResult {
-            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap()),
+            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap(), &ephemeral_sheet_ids(&state)),
             active_index: *active_sheet,
         },
     }
@@ -2926,7 +3125,19 @@ pub fn delete_sheet(
     slicer_state: State<'_, crate::slicer::SlicerState>,
     timeline_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     index: usize,
+    // When given, the delete refuses unless the sheet at `index` still carries
+    // this stable id when it takes its locks (`delete_sheet_impl`). The discard
+    // of a temporary sheet, the tab strip's Delete (its confirmation and
+    // core.sheet.delete, which find the sheet again by id first) and the MCP
+    // `delete_sheet` tool all pass it.
+    expected_sheet_id: Option<String>,
 ) -> Result<SheetsResult, String> {
+    let expected = match expected_sheet_id.as_deref() {
+        Some(text) => Some(
+            identity::SheetId::parse(text.trim()).ok_or_else(|| NO_SHEET_WITH_THAT_ID.to_string())?,
+        ),
+        None => None,
+    };
     // OWNER DECISION 3 for the slicers that go WITH the sheet: deleting ANY
     // slicer removes its filter, and a sheet delete deletes every slicer on
     // it. Before this only `delete_slicer` cleared -- a pivot slicer on a
@@ -2954,7 +3165,16 @@ pub fn delete_sheet(
         &timeline_state,
         index,
         false,
+        expected,
     )?;
+    // ...BUT ONLY THE SLICERS THE DELETE REALLY REMOVED (review RA-1, the
+    // pre-work). The targets above were resolved by INDEX before the delete
+    // took its locks, and the MCP server, on its own thread, can renumber the
+    // sheets in that window -- away and back, which the delete's id check
+    // cannot see. They may then name the slicers of a sheet that SURVIVED, and
+    // clearing those would take a live slicer's selection off its pivots with
+    // no undo (the history has ended).
+    let doomed = crate::slicer::commands::doomed_slicers_the_delete_removed(&slicer_state, doomed);
     let requery = crate::slicer::commands::clear_filters_of_deleted_slicers(
         &state,
         &file_state,
@@ -2979,7 +3199,17 @@ pub fn delete_sheet(
 /// machinery — the repairable pre-flight, the store removals, the `#REF!`
 /// repair, the cross-map re-keying, the workbook recalculation — because a
 /// backing sheet IS a sheet and a second copy of this walk would drift. Every
-/// other caller passes `allow_object = false` and object sheets are refused.
+/// other caller passes `allow_object = false` and object sheets are refused;
+/// with `allow_object` it is the other way round: only an object sheet is
+/// deleted. Both refusals come before the document is marked dirty, and so do
+/// "Cannot delete the last sheet", "Sheet index N out of range" and "Cannot
+/// delete the last visible sheet".
+///
+/// `expected`: the stable id the caller knows the sheet at `index` by, or
+/// `None`. When given, a delete whose index names ANOTHER sheet by the time
+/// the delete holds its locks is refused with
+/// [`SHEETS_CHANGED_UNDER_THE_DELETE`] -- before the document is marked dirty
+/// -- and the subscribed-sheet refusal answers about the sheet with that id.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn delete_sheet_impl(
     state: &AppState,
@@ -2992,6 +3222,7 @@ pub(crate) fn delete_sheet_impl(
     timeline_state: &crate::timeline_slicer::TimelineSlicerState,
     index: usize,
     allow_object: bool,
+    expected: Option<identity::SheetId>,
 ) -> Result<SheetsResult, String> {
     crate::protection::check_workbook_structure(state, "delete a sheet")?;
 
@@ -3002,25 +3233,138 @@ pub(crate) fn delete_sheet_impl(
     // sheet that no longer exists. `detach` is the deliberate way to make it
     // yours, and the message says so.
     //
-    // POSITION IS LOAD-BEARING, and it is why this does not sit beside
-    // `ensure_user_sheet` further down even though the two read alike:
-    // `DocumentEffect::mutates` dirties the document AT CONSTRUCTION, and that
-    // construction is below. `ensure_user_sheet` therefore already dirties the
-    // file on a refusal — a pre-existing wart this guard must not copy, because
-    // unlike an object sheet (unreachable from any UI, so hitting it is a
-    // programming error) a subscribed sheet is a real tab a user right-clicked,
-    // and a refusal they can act on must not leave the file modified.
+    // POSITION IS LOAD-BEARING: `DocumentEffect::mutates` dirties the document
+    // AT CONSTRUCTION, and that construction is below. A subscribed sheet is a
+    // real tab a user right-clicked, so the refusal sits above it and a refusal
+    // they can act on leaves the file unmodified (the door check under the
+    // locks below sits above it for the same reason).
     //
     // It also runs before the repairability walk, which parses every formula on
     // every sheet: refusing for a formula reason a sheet that may not be deleted
     // at all is both wasteful and confusing.
+    //
+    // A caller that names its sheet by STABLE id (`expected`) is answered about
+    // THAT sheet, found by id in this same snapshot -- never about whichever
+    // sheet another door slid into `index` after the caller looked it up.
+    // Answering by index refused a temporary sheet's discard with advice about
+    // a subscribed sheet the user never touched (review RA-1). Whether the
+    // meant sheet is still at `index` is the question the check under the
+    // locks answers below, and that check stays the authority.
     {
         let provenance = SheetProvenance::snapshot(state)?;
-        ensure_unsubscribed_sheet(&provenance, index, "delete")?;
+        let meant = match expected {
+            Some(sheet_id) => provenance.index_of_sheet(sheet_id),
+            None => Some(index),
+        };
+        if let Some(meant) = meant {
+            ensure_unsubscribed_sheet(&provenance, meant, "delete")?;
+        }
     }
 
-    // PRE-FLIGHT, under READ locks, before the document is marked dirty and
-    // before a single store is touched.
+    // Deleting a sheet rewrites persisted per-sheet stores. Assigned inside the
+    // guarded block below, after every refusal in it a caller can provoke --
+    // the id check, the door check, the last-sheet, out-of-range and
+    // last-visible checks and the repairability pre-flight -- so each of those
+    // leaves the document clean. Only a race backstop for the last-visible
+    // check (see there) and the unreachable repair failure sit after it
+    // (deferred init: every path that reaches a use passed the assignment).
+    let effect: crate::document_effect::DocumentEffect;
+    // Tables and pivots removed BECAUSE their sheet went, collected inside the
+    // guarded block and cascaded after every lock is released (§3bn): objects on
+    // OTHER sheets can be bound to them.
+    let mut removed_sources: Vec<crate::object_deps::DeletedSource> = Vec::new();
+    // The deleted sheet's stable id, captured inside the guarded block (the
+    // vector entry is removed further down) and consumed after every lock is
+    // released: floating ranges HOSTED on this sheet die with it. Deferred
+    // init — every path that reaches the consumer passed the assignment.
+    let deleted_sheet_stable_id: Option<identity::SheetId>;
+    // The deleted sheet's NAME and the tab order without it, for the rule
+    // stores and the override layer repaired after the guarded block
+    // (W10/W11). Deferred init, like the id.
+    let deleted_sheet_name: String;
+    let deleted_sheet_names_after: Vec<String>;
+    let result = {
+    // PENDING, NOT READ, AND HELD THROUGH THE WRITE (review RA-1, 2026-10-23).
+    // The three guards are taken here and AUTHORIZED below once the effect
+    // exists, so from the checks to the delete nothing can renumber the
+    // sheets: the MCP server runs on its own thread, and its move / insert /
+    // delete could otherwise land between this pre-flight and the write and
+    // hand `index` to another sheet. `Persisted::read` takes the same
+    // exclusive mutex, so holding them across the formula walk blocks nothing
+    // that was not blocked before. They live in THIS block, so they go with
+    // the write guards they become, at its end.
+    // CANONICAL LOCK ORDER: both grid locks first, then `sheet_names`.
+    let pending_grid = state.grid.lock_pending().map_err(|e| e.to_string())?;
+    let pending_grids = state.grids.lock_pending().map_err(|e| e.to_string())?;
+    let pending_names = state.sheet_names.lock_pending().map_err(|e| e.to_string())?;
+
+    // THE SHEET MUST STILL BE THE ONE THE CALLER MEANT. A caller that knows it
+    // by its stable id (the discard of a temporary sheet) says so, and a delete
+    // whose index now names another sheet is refused HERE, before the effect,
+    // so the refusal deletes nothing and leaves the document clean.
+    if let Some(expected) = expected {
+        let at_index = state.sheet_ids.read().map_err(|e| e.to_string())?.get(index).copied();
+        if at_index != Some(expected) {
+            return Err(SHEETS_CHANGED_UNDER_THE_DELETE.to_string());
+        }
+    }
+
+    // WHICH DOOR MAY DELETE WHICH KIND OF SHEET -- asked here, under the three
+    // pending guards above (no other door can renumber the sheets before this
+    // delete is done) and BEFORE the effect, so a refusal leaves the document
+    // clean. `sheet_visibility` can be read here in lock order: it comes after
+    // `grid`, `grids` and `sheet_names`, where the authorized writes below take
+    // it too, and this guard is released at the end of the block, long before
+    // that write takes the same lock again.
+    //
+    // A floating range's backing sheet is deleted by `delete_floating_range`,
+    // which also removes the object row and knows what the delete owes the
+    // workbook; reaching it through the sheet command would leave the object
+    // row behind, pointing at nothing. And the OBJECT door, which skips every
+    // user-sheet gate, deletes ONLY an object sheet (review RA-1): it passes
+    // its backing sheet's id, checked above, and this keeps a caller that
+    // passes none from ever deleting a user's sheet.
+    {
+        let sheet_visibility = state.sheet_visibility.read().map_err(|e| e.to_string())?;
+        if allow_object {
+            ensure_object_sheet(&sheet_visibility, index, "delete")?;
+        } else {
+            ensure_user_sheet(&sheet_visibility, index, "delete")?;
+        }
+
+        // CAN THE WORKBOOK SURVIVE IT -- asked here too, under the same guards
+        // and before the effect, so these refusals also leave the document
+        // clean (review F2, round 3: they sat below `DocumentEffect::mutates`,
+        // so a refused delete of the last visible sheet put the asterisk in the
+        // title, made Close ask to save a workbook nothing had changed, and gave
+        // AutoRecover a change to keep). `pending_names` is held until it
+        // becomes the write guard, so neither the count nor the index can move
+        // before the write. Asked before the pre-flight too: a refused delete
+        // never parses every formula in the workbook.
+        let sheet_count = pending_names.len();
+        if sheet_count <= 1 {
+            return Err("Cannot delete the last sheet".to_string());
+        }
+        if index >= sheet_count {
+            return Err(format!("Sheet index {} out of range", index));
+        }
+        // EXCEL PARITY: a workbook must keep at least one VISIBLE worksheet,
+        // and "at least one sheet" is not the same test (BUG-0046's family).
+        // Hide Sheet1, delete Sheet2, and the count above is satisfied while
+        // the workbook is left with a single HIDDEN sheet -- no tab to click,
+        // and an active index naming a sheet the user cannot be looking at.
+        // `hide_sheet` has always refused the mirror image of this ("Cannot
+        // hide the last visible sheet"); the delete side never asked.
+        //
+        // A short `sheet_visibility` counts as visible, exactly as
+        // `build_sheet_list` reads it.
+        if visible_sheets_after_removing(&sheet_visibility, sheet_count, index) == 0 {
+            return Err("Cannot delete the last visible sheet".to_string());
+        }
+    }
+
+    // PRE-FLIGHT, under the pending locks above, before the document is
+    // marked dirty and before a single store is touched.
     //
     // The repair itself runs far below, after this command has already removed
     // the sheet from a dozen index-aligned stores; by then there is nothing to
@@ -3031,10 +3375,7 @@ pub(crate) fn delete_sheet_impl(
     // rather than corrupting the file). The cost is parsing the repaired text
     // twice on a command that already walks every formula on every sheet.
     {
-        // CANONICAL LOCK ORDER: both grid locks first, then `sheet_names`.
-        let current_grid = state.grid.read().map_err(|e| e.to_string())?;
-        let grids = state.grids.read().map_err(|e| e.to_string())?;
-        let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
+        let (current_grid, grids, sheet_names) = (&*pending_grid, &*pending_grids, &*pending_names);
         let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
         if index < sheet_names.len() && sheet_names.len() > 1 {
             let deleted_name = sheet_names[index].clone();
@@ -3059,30 +3400,15 @@ pub(crate) fn delete_sheet_impl(
         }
     }
 
-    // Deleting a sheet rewrites persisted per-sheet stores.
-    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
-    // Tables and pivots removed BECAUSE their sheet went, collected inside the
-    // guarded block and cascaded after every lock is released (§3bn): objects on
-    // OTHER sheets can be bound to them.
-    let mut removed_sources: Vec<crate::object_deps::DeletedSource> = Vec::new();
-    // The deleted sheet's stable id, captured inside the guarded block (the
-    // vector entry is removed further down) and consumed after every lock is
-    // released: floating ranges HOSTED on this sheet die with it. Deferred
-    // init — every path that reaches the consumer passed the assignment.
-    let deleted_sheet_stable_id: Option<identity::SheetId>;
-    // The deleted sheet's NAME and the tab order without it, for the rule
-    // stores and the override layer repaired after the guarded block
-    // (W10/W11). Deferred init, like the id.
-    let deleted_sheet_name: String;
-    let deleted_sheet_names_after: Vec<String>;
-    let result = {
+    effect = crate::document_effect::DocumentEffect::mutates(file_state);
     // CANONICAL LOCK ORDER: `grid`, then `grids`, then everything else --
     // including `sheet_names`. The recalculation pass takes `sheet_names` only
     // AFTER both grid locks and runs on a background thread, so holding it here
     // and then waiting for a grid lock closes a cycle that hangs the app.
-    let mut current_grid = state.grid.write(&effect).unwrap();
-    let mut grids = state.grids.write(&effect).unwrap();
-    let mut sheet_names = state.sheet_names.write(&effect).unwrap();
+    // The pre-flight's three guards, never released: authorized now.
+    let mut current_grid = pending_grid.authorize(&effect);
+    let mut grids = pending_grids.authorize(&effect);
+    let mut sheet_names = pending_names.authorize(&effect);
     let mut active_sheet = state.active_sheet.write(&effect).unwrap();
     let mut freeze_configs = state.freeze_configs.write(&effect).unwrap();
     let mut tab_colors = state.tab_colors.write(&effect).unwrap();
@@ -3094,32 +3420,14 @@ pub(crate) fn delete_sheet_impl(
     let mut all_column_widths = state.all_column_widths.write(&effect).unwrap();
     let mut all_row_heights = state.all_row_heights.write(&effect).unwrap();
 
-    if sheet_names.len() <= 1 {
-        return Err("Cannot delete the last sheet".to_string());
-    }
-
-    if index >= sheet_names.len() {
-        return Err(format!("Sheet index {} out of range", index));
-    }
-
-    // A floating range's backing sheet is deleted by `delete_floating_range`,
-    // which also removes the object row and knows what the delete owes the
-    // workbook. Reaching it through the sheet command would leave the object
-    // row behind, pointing at nothing.
-    if !allow_object {
-        ensure_user_sheet(&sheet_visibility, index, "delete")?;
-    }
-
-    // EXCEL PARITY: a workbook must keep at least one VISIBLE worksheet, and
-    // "at least one sheet" is not the same test (BUG-0046's family). Hide
-    // Sheet1, delete Sheet2, and the guard above is satisfied while the
-    // workbook is left with a single HIDDEN sheet — no tab to click, and an
-    // active index naming a sheet the user cannot be looking at. `hide_sheet`
-    // has always refused the mirror image of this ("Cannot hide the last
-    // visible sheet"); the delete side never asked.
-    //
-    // A short `sheet_visibility` counts as visible, exactly as
-    // `build_sheet_list` reads it.
+    // A BACKSTOP, NOT THE REFUSAL: the last-visible question was answered above,
+    // before the effect. But `sheet_visibility` is not one of the guards held
+    // across from there -- it was read and released -- and one writer does not
+    // take `sheet_names` around its write (`apply_sheet_tab_state_restore`, the
+    // undo/redo of a hide), so a hide can land between that read and this write
+    // guard. Refusing here costs a needless dirty flag (the cheap direction);
+    // deleting would leave the workbook with no visible sheet. The count and
+    // the index need no backstop: `sheet_names` was held pending throughout.
     if visible_sheets_after_removing(&sheet_visibility, sheet_names.len(), index) == 0 {
         return Err("Cannot delete the last visible sheet".to_string());
     }
@@ -3175,6 +3483,16 @@ pub(crate) fn delete_sheet_impl(
                     );
                 }
             }
+        }
+    }
+    // The EPHEMERAL flag goes with the sheet (hygiene for the session-only
+    // `ephemeral_sheets` set; a stale id would be harmless, uuid v7 is never
+    // reused, but a set that only grows is a leak). A LEAF lock, taken alone
+    // in its own block: the `sheet_ids` guard above was released with its
+    // statement, and nothing is acquired while this one is held.
+    if let Some(sid) = deleted_sheet_stable_id {
+        if let Ok(mut ephemeral) = state.ephemeral_sheets.lock() {
+            ephemeral.remove(&sid);
         }
     }
 
@@ -3503,7 +3821,7 @@ pub(crate) fn delete_sheet_impl(
     }
 
     SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap()),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap(), &ephemeral_sheet_ids(&state)),
         active_index: *active_sheet,
     }
     }; // drop all locks before rebuilding dependency maps
@@ -3805,7 +4123,7 @@ pub(crate) fn rename_sheet_inner(
     }
 
     let result = SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap()),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap(), &ephemeral_sheet_ids(&state)),
         active_index: active_sheet,
     };
 
@@ -3937,7 +4255,7 @@ pub(crate) fn set_freeze_panes_impl(
     };
 
     let result = SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap()),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap(), &ephemeral_sheet_ids(&state)),
         active_index: active_sheet,
     };
     drop(freeze_configs);
@@ -4154,7 +4472,7 @@ pub(crate) fn move_sheet_impl(
     ensure_user_sheet(&sheet_visibility, to_index, "move onto")?;
     if from_index == to_index {
         return Ok(SheetsResult {
-            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap()),
+            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap(), &ephemeral_sheet_ids(&state)),
             active_index: *active_sheet,
         });
     }
@@ -4329,7 +4647,7 @@ pub(crate) fn move_sheet_impl(
     }
 
     let result = SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap()),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap(), &ephemeral_sheet_ids(&state)),
         active_index: new_active,
     };
 
@@ -4626,7 +4944,7 @@ pub(crate) fn copy_sheet_impl(
     }
 
     let result = SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap()),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap(), &ephemeral_sheet_ids(&state)),
         active_index: new_index,
     };
 
@@ -4771,7 +5089,7 @@ pub(crate) fn hide_sheet_inner(
         };
 
         let result = SheetsResult {
-            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap()),
+            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap(), &ephemeral_sheet_ids(&state)),
             active_index: switch_to.unwrap_or(active_sheet),
         };
         (result, switch_to, previous_visibility, active_sheet)
@@ -4856,7 +5174,7 @@ pub(crate) fn unhide_sheet_inner(
         sheet_visibility[index] = "visible".to_string();
 
         let result = SheetsResult {
-            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap()),
+            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap(), &ephemeral_sheet_ids(&state)),
             active_index: active_sheet,
         };
         (result, previous_visibility)
@@ -4923,7 +5241,7 @@ pub(crate) fn set_tab_color_inner(
         tab_colors[index] = color;
 
         let result = SheetsResult {
-            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap()),
+            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap(), &ephemeral_sheet_ids(&state)),
             active_index: active_sheet,
         };
         (result, previous_tab_colors)
@@ -5008,6 +5326,210 @@ pub(crate) fn set_scroll_area_impl(
     scroll_areas[active_sheet] = scroll_area;
 
     Ok(())
+}
+
+// ============================================================================
+// Ephemeral Sheet Commands (a drill-through's result sheet)
+// ============================================================================
+
+/// The refusal when a sheet id names no sheet of this workbook -- already
+/// deleted (a discard that landed first), or never one of this document's.
+pub(crate) const NO_SHEET_WITH_THAT_ID: &str = "There is no sheet with that id.";
+
+/// The refusal when a discard names a sheet that is no longer temporary: the
+/// user kept it (a double-click on its tab) while the discard was on its way.
+pub(crate) const SHEET_NOT_TEMPORARY_ANY_MORE: &str = "That sheet is not temporary any more.";
+
+/// The refusal when the sheet a delete was aimed at -- by index, with its
+/// stable id as `expected` -- is no longer at that index when the delete holds
+/// its locks: another door (the MCP server, on its own thread) moved, inserted
+/// or deleted a sheet in between. Nothing is deleted.
+pub(crate) const SHEETS_CHANGED_UNDER_THE_DELETE: &str =
+    "The sheets changed while that sheet was being deleted, so nothing was deleted.";
+
+/// The CURRENT index of the sheet whose STABLE id is `sheet_id`, with the
+/// parsed id. Every ephemeral-sheet door names its sheet by id, never by an
+/// index the frontend read earlier: indices shift under insert / move / copy /
+/// delete, and a door acting on a stale index acts on whichever sheet slid
+/// into it. `sheet_ids` is read and released inside this call. An id that does
+/// not parse names no sheet either: [`NO_SHEET_WITH_THAT_ID`] for both.
+fn sheet_index_of_id(state: &AppState, sheet_id: &str) -> Result<(usize, identity::SheetId), String> {
+    let id = identity::SheetId::parse(sheet_id.trim()).ok_or_else(|| NO_SHEET_WITH_THAT_ID.to_string())?;
+    let ids = state.sheet_ids.read().map_err(|e| format!("sheet_ids lock poisoned: {}", e))?;
+    let index = ids
+        .iter()
+        .position(|candidate| *candidate == id)
+        .ok_or_else(|| NO_SHEET_WITH_THAT_ID.to_string())?;
+    Ok((index, id))
+}
+
+/// What [`discard_ephemeral_sheet`] answers: WHICH sheet went -- its index at
+/// the moment of the delete, resolved from its stable id inside the command,
+/// and its name -- and the sheet list after it. The strip announces the
+/// delete (`SHEET_DELETED`, the reorder detail) at `deleted_index`, never at an
+/// index it read before the command ran. Mirrored in
+/// `app/src/core/lib/tauri-api.ts`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscardedSheet {
+    pub deleted_index: usize,
+    pub deleted_name: String,
+    pub result: SheetsResult,
+}
+
+/// DISCARD an ephemeral sheet -- a drill-through's result sheet the user left
+/// without keeping it (docs/design/model-drillthrough.md 2.7), or the one a
+/// drill-from-drill replaces -- BY ITS STABLE ID.
+///
+/// The id is resolved to its CURRENT index, and the delete re-checks UNDER
+/// ITS OWN LOCKS that the sheet at that index still carries the id
+/// (`delete_sheet`'s `expected_sheet_id`): the MCP server runs on its own
+/// thread, so another door can renumber the sheets between the lookup and the
+/// delete, and such a delete is refused ([`SHEETS_CHANGED_UNDER_THE_DELETE`])
+/// and deletes nothing. An unknown id
+/// ([`NO_SHEET_WITH_THAT_ID`]) and an id no longer flagged
+/// ([`SHEET_NOT_TEMPORARY_ANY_MORE`]) are REFUSED before anything else runs --
+/// before the slicer pre-work and before any `DocumentEffect`, so a refused
+/// discard deletes nothing and leaves the document clean; and then the
+/// [`delete_sheet`] COMMAND itself runs for that index -- not a copy of its
+/// body, so the two cannot drift: the slicer filter clearing, the
+/// `delete_sheet_impl` walk (the `#REF!` repair, the cascades, the undo reset)
+/// and the quiet BI re-query are exactly the user's own Delete Sheet's.
+///
+/// The index-based delete the strip used before raced its own two-step flows:
+/// Insert Sheet is add + move, so a list read between the two named the
+/// temporary sheet at an index the move then gave to a user sheet, and that
+/// user sheet was deleted with no prompt.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn discard_ephemeral_sheet(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    file_state: State<FileState>,
+    pivot_state: State<'_, PivotState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
+    timeline_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
+    sheet_id: String,
+) -> Result<DiscardedSheet, String> {
+    let app_state: &AppState = state.inner();
+    discard_ephemeral_sheet_with(app_state, &sheet_id, move |index, id| {
+        delete_sheet(
+            app,
+            state,
+            file_state,
+            pivot_state,
+            user_files_state,
+            pane_control_state,
+            ribbon_filter_state,
+            slicer_state,
+            timeline_state,
+            index,
+            Some(id.to_string()),
+        )
+    })
+}
+
+/// The body of [`discard_ephemeral_sheet`] over a plain reference, with the
+/// delete handed in -- the command passes the `delete_sheet` command, a test
+/// passes `delete_sheet_impl` (a `State<T>` has no constructor in a test).
+///
+/// The two refusals run FIRST and `delete` is called only past both, with the
+/// index resolved from the id in this call AND the id itself, which the delete
+/// re-checks under its own locks. `sheet_ids` is read and released,
+/// then the leaf set alone, then `sheet_names` for the name -- each in its
+/// own statement, none held across `delete`.
+pub(crate) fn discard_ephemeral_sheet_with(
+    state: &AppState,
+    sheet_id: &str,
+    delete: impl FnOnce(usize, identity::SheetId) -> Result<SheetsResult, String>,
+) -> Result<DiscardedSheet, String> {
+    let (index, id) = sheet_index_of_id(state, sheet_id)?;
+    let flagged = state
+        .ephemeral_sheets
+        .lock()
+        .map_err(|e| format!("ephemeral_sheets lock poisoned: {}", e))?
+        .contains(&id);
+    if !flagged {
+        return Err(SHEET_NOT_TEMPORARY_ANY_MORE.to_string());
+    }
+    let deleted_name = state
+        .sheet_names
+        .read()
+        .map_err(|e| format!("sheet_names lock poisoned: {}", e))?
+        .get(index)
+        .cloned()
+        .ok_or_else(|| NO_SHEET_WITH_THAT_ID.to_string())?;
+    let result = delete(index, id)?;
+    Ok(DiscardedSheet { deleted_index: index, deleted_name, result })
+}
+
+/// KEEP an ephemeral sheet -- a drill-through's result sheet, which the tab
+/// strip would otherwise discard when the user leaves it -- as an ordinary
+/// sheet (the double-click on its tab, Keep Sheet in its menu, or the
+/// fallback after a refused discard; docs/design/model-drillthrough.md 2.7).
+/// A sheet PRIMITIVE the Shell calls by its own name; the sheet's content and
+/// position do not change, only the session-only flag. Returns the sheet
+/// list, as every tab-strip command does, so the strip adopts it.
+///
+/// BY ITS STABLE ID, never an index: a keep aimed by a stale index (a tab menu
+/// opened before a lower sheet was discarded) landed on another sheet,
+/// answered Ok, and the strip told the user "Sheet kept" while the temporary
+/// sheet they meant stayed temporary and was deleted when they left it.
+#[tauri::command]
+pub fn keep_ephemeral_sheet(state: State<AppState>, sheet_id: String) -> Result<SheetsResult, String> {
+    keep_ephemeral_sheet_impl(&state, &sheet_id)
+}
+
+/// Command body over a plain reference.
+///
+/// - An id that names no sheet is REFUSED ([`NO_SHEET_WITH_THAT_ID`]): the
+///   sheet is gone (a discard landed first), so nothing was kept and the
+///   caller must not say it was.
+/// - A floating range's object-backed sheet is refused (`ensure_user_sheet`):
+///   it is never ephemeral and never a tab.
+/// - Otherwise the id leaves the set and the answer is Ok -- ALSO when it was
+///   already ordinary: it is the same sheet the user meant, already kept, so a
+///   second keep (a repeated double-click, Keep Sheet racing a refused
+///   discard's keep) is harmless and its "kept" is true.
+///
+/// Takes NO `FileState` on purpose, the `set_scroll_area` rule: `ephemeral_sheets`
+/// is never read by `assemble_workbook_for_save`, so the flag cannot reach the
+/// .cala and clearing it must not dirty -- a dirty flag on state that is not
+/// saved makes the close prompt lie ("save to keep this", and nothing would be
+/// saved). The sheet itself was already written when it was created.
+///
+/// Lock order: `sheet_ids` read and RELEASED, then `sheet_visibility` read and
+/// released, then the leaf set alone, then the list built as `get_sheets`
+/// builds it.
+pub(crate) fn keep_ephemeral_sheet_impl(state: &AppState, sheet_id: &str) -> Result<SheetsResult, String> {
+    let (index, id) = sheet_index_of_id(state, sheet_id)?;
+    {
+        let sheet_visibility = state
+            .sheet_visibility
+            .read()
+            .map_err(|e| format!("sheet_visibility lock poisoned: {}", e))?;
+        ensure_user_sheet(&sheet_visibility, index, "keep")?;
+    }
+    {
+        let mut ephemeral = state
+            .ephemeral_sheets
+            .lock()
+            .map_err(|e| format!("ephemeral_sheets lock poisoned: {}", e))?;
+        ephemeral.remove(&id);
+    }
+
+    let sheet_names = state.sheet_names.read().unwrap();
+    let active_index = *state.active_sheet.read().unwrap();
+    let freeze_configs = state.freeze_configs.read().unwrap();
+    let tab_colors = state.tab_colors.read().unwrap();
+    let sheet_visibility = state.sheet_visibility.read().unwrap();
+    Ok(SheetsResult {
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap(), &state.sheet_kinds.read().unwrap(), &ephemeral_sheet_ids(state)),
+        active_index,
+    })
 }
 
 /// Get the scrollable area restriction for the active sheet.

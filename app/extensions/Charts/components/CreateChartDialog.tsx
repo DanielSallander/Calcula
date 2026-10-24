@@ -55,7 +55,9 @@ import {
   RANGE_FORMAT_MESSAGE,
 } from "../lib/chartRangeBinding";
 import { validateChartSpec } from "../lib/chartSpecValidate";
+import { CHART_MARK_ID_PATTERN } from "../lib/chartSpecSchema";
 import { markOptionsForMark } from "../lib/markOptionsForMark";
+import { designQuerySourceFor } from "../lib/designQuerySource";
 
 import { DataTab } from "./tabs/DataTab";
 import { useRangeSource } from "./data/useRangeSource";
@@ -133,15 +135,18 @@ export function readDialogPlacement(raw: unknown): DialogPlacement | null {
   };
 }
 
+/** THE mark-id pattern (chartSpecSchema's `CHART_MARK_ID_PATTERN`), never a retyped copy. */
+const MARK_ID_RE = new RegExp(CHART_MARK_ID_PATTERN, "u");
+
 /**
  * Read `dialogData.initialMark`: the chart type an opener asks the dialog to
  * START with (contract §4.1 — the Canvas tab's Visuals gallery opens "Card",
  * "Stacked bar", "Line and stacked column" ...). Only a mark-id-shaped string
- * (the spec schema's own pattern) is accepted; anything else is ignored and the
- * dialog starts on a column chart, as before.
+ * (the spec schema's own pattern, CHART_MARK_ID_PATTERN) is accepted; anything
+ * else is ignored and the dialog starts on a column chart, as before.
  */
 export function readInitialMark(raw: unknown): ChartMark | null {
-  return typeof raw === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(raw) ? (raw as ChartMark) : null;
+  return typeof raw === "string" && MARK_ID_RE.test(raw) ? (raw as ChartMark) : null;
 }
 
 /**
@@ -282,6 +287,13 @@ export function CreateChartDialog({
   const [dslText, setDslText] = useState("");
   const [connectionId, setConnectionId] = useState("");
   const [connections, setConnections] = useState<ConnectionInfo[]>([]);
+  // Edit mode: the edited chart's data source as it was when the dialog
+  // opened. The dialog REPLACES the whole spec, so a design-query source is
+  // rebuilt from it (designQuerySourceFor): the application connection's
+  // stable key Rust stamped is KEPT while the connection is unchanged -- the
+  // key is what re-binds the chart once its connection uuid is re-minted on
+  // the next open -- and dropped when the reader picks another connection.
+  const [editedDataSource, setEditedDataSource] = useState<ChartSpec["data"] | null>(null);
   const [hasHeaders, setHasHeaders] = useState(true);
   const [orientation, setOrientation] = useState<SeriesOrientation>("columns");
   const [categoryIndex, setCategoryIndex] = useState(0);
@@ -417,7 +429,7 @@ export function CreateChartDialog({
       dataSource = { type: "pivot" as const, pivotId: pivotId! };
     } else if (sourceMode === "designQuery") {
       if (!connectionId || !dslText.trim()) return null;
-      dataSource = { type: "designQuery" as const, dslText, connectionId };
+      dataSource = designQuerySourceFor(dslText, connectionId, editedDataSource);
     } else if (rangeBinding.ok) {
       dataSource = { ...rangeBinding.ref };
     } else if (nameCandidate !== null && nameRef !== null) {
@@ -446,7 +458,7 @@ export function CreateChartDialog({
       spec.markOptions = markOptions;
     }
     return spec;
-  }, [rangeBinding, nameCandidate, nameRef, sourceMode, dslText, connectionId, hasHeaders, orientation, categoryIndex, series, title, xAxis, yAxis, legend, palette, mark, markOptions, specOverlay, isPivotMode, pivotId]);
+  }, [rangeBinding, nameCandidate, nameRef, sourceMode, dslText, connectionId, editedDataSource, hasHeaders, orientation, categoryIndex, series, title, xAxis, yAxis, legend, palette, mark, markOptions, specOverlay, isPivotMode, pivotId]);
 
   // Switch source mode; seed a starter design query the first time (Monaco has
   // no placeholder text).
@@ -513,6 +525,7 @@ export function CreateChartDialog({
       setSpecFullView(false);
       setSpecOverlay({});
       setSourceMode("range");
+      setEditedDataSource(null);
       setShowDataInspector(false);
       win.reset(); // Reset to centered, natural size
       split.reset(); // Reset the settings/preview divider
@@ -552,6 +565,7 @@ export function CreateChartDialog({
         const existingChart = getChartById(editChartId);
         if (existingChart) {
           const spec = existingChart.spec;
+          setEditedDataSource(spec.data);
           // Set data source
           if (typeof spec.data === "string") {
             setSourceRange(spec.data);

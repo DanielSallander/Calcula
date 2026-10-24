@@ -27,7 +27,7 @@
 //          the two are read together on every lookup, and a detach offered on a
 //          working-copy sheet would be a command with nothing to detach from.
 
-import { getSheetProvenance, type SheetProvenanceRole } from "@api";
+import { getSheetProvenance, type SheetProvenanceRole, type SubscribedSheetsProvider } from "@api";
 
 /**
  * Where one sheet came from, and what that means for it.
@@ -149,6 +149,19 @@ export function subscribedSheetCountForApplication(
 export function hasSubscribedSheets(): boolean {
   return [...byId.values()].some((e) => e.role === "subscribed");
 }
+
+/**
+ * The `@api/collaboration` `isSheetSubscribed` answer, published at activation
+ * over THIS cache: SUBSCRIBED role only, like `subscriptionForSheetId`. A
+ * working-copy sheet answers false -- it is the author's own to edit -- and a
+ * sheet the cache cannot identify answers false (no name fallback, for the
+ * reason `provenanceForSheetId` gives). The gate the chart and pivot
+ * drill-through authoring rows read on a worksheet; a canvas reads
+ * `getLayoutSurface(idx)?.editable` instead.
+ */
+export const subscribedSheetsProvider: SubscribedSheetsProvider = {
+  isSubscribed: (sheetId: string): boolean => subscriptionForSheetId(sheetId) !== null,
+};
 
 /**
  * Re-read the provenance snapshot.

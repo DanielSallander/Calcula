@@ -54,8 +54,8 @@ const entry = (v: string) => CHANGELOG?.find((e) => e.version === v);
 const names = (v: string): Set<string> => new Set(entry(v)?.added.map((e) => e.name) ?? []);
 
 describe("API_VERSION", () => {
-  it("is 1.5.0 (canvas round 2 added to @api)", () => {
-    expect(version.API_VERSION).toBe("1.5.0");
+  it("is 1.6.0 (the model-visual drill-through added to @api)", () => {
+    expect(version.API_VERSION).toBe("1.6.0");
   });
 
   it("carries a changelog whose newest entry IS the current version", () => {
@@ -363,6 +363,73 @@ describe("the 1.5.0 changelog names what round 2's P4 (report filters) added", (
     for (const n of ["@api/pageFilters", "publishPageFilters", "getPageFilters", "listPageFilterPages", "onPageFiltersChange"]) {
       expect(changed.has(n), `1.5.0's changelog does not say ${n} changed`).toBe(true);
     }
+  });
+});
+
+describe("the 1.6.0 changelog names what the model-visual drill-through added", () => {
+  // One or more names from every part of the programme's @api additions, so a
+  // part dropped from the entry fails here by name.
+  const REQUIRED = [
+    "drillKeepsFilters",
+    "drillThroughSheetName",
+    "DrillThroughDefinition",
+    "DrillThroughBehavior.designQuery",
+    "isSheetSubscribed",
+    "registerSubscribedSheetsProvider",
+    "ChartRightClickTarget.memberPath",
+    "IChartStoreService.buildDesignQueryChartSpec",
+    "IChartStoreService.validateChartSpec",
+    "ResolvedFieldFilter.workbookWide",
+    "SheetInfo.ephemeral",
+    "PivotRegionData.hasDesignQueryDrill",
+    "keepEphemeralSheet",
+    "discardEphemeralSheet",
+  ];
+
+  it("lists every drill-through addition", () => {
+    const listed = names("1.6.0");
+    expect(entry("1.6.0"), "API_CHANGELOG has no 1.6.0 entry").toBeDefined();
+    for (const n of REQUIRED) expect(listed.has(n), `1.6.0's changelog does not list ${n}`).toBe(true);
+  });
+
+  it("says the sheet doors CHANGED: they take an optional { record }", () => {
+    const changed = entry("1.6.0")!.changed.join("\n");
+    for (const n of ["activateSheet", "deleteSheet", "setActiveSheet"]) {
+      expect(changed, `1.6.0's changelog does not say ${n} changed`).toContain(n);
+    }
+  });
+});
+
+describe("the 1.6.0 changelog names round 10's additions", () => {
+  // The past-the-end refusal (WIRE-RUST F1's TypeScript half) and the toast's
+  // dismiss handle (DIALOG-TS F4). SABOTAGE: drop one of them from the entry.
+  const REQUIRED = ["CALP_PUSH_SHEET_INDEX_OUT_OF_RANGE", "isSheetIndexOutOfRangeRefusal", "ToastHandle"];
+
+  it("lists each of them", () => {
+    const listed = names("1.6.0");
+    for (const n of REQUIRED) expect(listed.has(n), `1.6.0's changelog does not list ${n}`).toBe(true);
+  });
+
+  it("says showToast and registerToastSink CHANGED: a handle back, an id from the sink", () => {
+    const changed = entry("1.6.0")!.changed.join("\n");
+    for (const n of ["showToast", "registerToastSink"]) {
+      expect(changed, `1.6.0's changelog does not say ${n} changed`).toContain(n);
+    }
+  });
+});
+
+describe("the 1.6.0 changelog names what a push CARRIES (round 11, RV11-TS-1)", () => {
+  // The diff answer's carried sheets, and the hold-back that is told the push's
+  // own selection. SABOTAGE: drop either from the entry.
+  it("lists WorkingCopyDiff.carriedSheetIds", () => {
+    expect(names("1.6.0").has("WorkingCopyDiff.carriedSheetIds"), "1.6.0's changelog does not list it").toBe(true);
+  });
+
+  it("says holdBackCells CHANGED: it takes the push's selection and reports cellsSkipped", () => {
+    const line = entry("1.6.0")!.changed.find((c) => c.startsWith("holdBackCells:"));
+    expect(line, "1.6.0's changelog does not say holdBackCells changed").toBeDefined();
+    expect(line).toContain("cellsSkipped");
+    expect(line).toMatch(/sheetIds/);
   });
 });
 

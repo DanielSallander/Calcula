@@ -522,12 +522,28 @@ function SpreadsheetContent({
   // AFTER the render that made the grid-state snapshot current -- the snapshot
   // lags a dispatch until render, which is why this is an effect and not a call
   // at the dispatch site. (A parked external session is decided by the store.)
+  // The STABLE ids and the NAMES as well as the indices: whether the grid
+  // shows the edit's sheet is decided by the sheet's identity -- its id, else
+  // its name (core/lib/editSheetIdentity.ts) -- and a sheet can take the shown
+  // index while keeping none of the names, or keep the index under a new name.
   const editingSourceSheet = gridState.editing?.sourceSheetIndex;
+  const editingSourceSheetName = gridState.editing?.sourceSheetName;
+  const editingSourceSheetId = gridState.editing?.sourceSheetId;
   const isCoreEditing = gridState.editing !== null;
   const activeSheetForPointMode = gridState.sheetContext.activeSheetIndex;
+  const activeSheetNameForPointMode = gridState.sheetContext.activeSheetName;
+  const activeSheetIdForPointMode = gridState.sheetContext.activeSheetId;
   useEffect(() => {
     notifyPointModeViewChanged();
-  }, [editingSourceSheet, isCoreEditing, activeSheetForPointMode]);
+  }, [
+    editingSourceSheet,
+    editingSourceSheetName,
+    editingSourceSheetId,
+    isCoreEditing,
+    activeSheetForPointMode,
+    activeSheetNameForPointMode,
+    activeSheetIdForPointMode,
+  ]);
 
   // NOTE: the "grid:set-manually-hidden-rows"/"-cols" window events are GONE.
   // They wrote a hand-computed set straight into the reducer and nowhere else,

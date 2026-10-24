@@ -858,6 +858,7 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
         ("undo_commands.rs", "apply_sheet_structural_restore", "reports its sheet; apply_changes recalculates"),
         // -- Writes a sheet nothing can yet reference -----------------------
         ("pivot/commands.rs", "drill_through_to_sheet_core", "writes a freshly created sheet: no formula can reference a sheet that did not exist a moment ago, so there is nothing to cascade to. The `drill_through_to_sheet` command is now a one-line delegation here (testability split, so its lock order is tested behaviourally)"),
+        ("drill_through.rs", "drill_through_to_ephemeral_sheet_core", "writes literals into a DETACHED grid for a sheet that did not exist yet (the model-visual drill-through's caption rows; the view itself goes through `write_pivot_to_grid`): no formula can reference a sheet that did not exist a moment ago, so there is nothing to cascade to. The `drill_through` command's `toSheet` op is a delegation here"),
         // -- Rewrites formula REFERENCES, not values ------------------------
         ("tables.rs", "rename_table_refs_in_formulas", "re-points structured refs at the same cells; no value moves"),
         ("tables.rs", "rename_table_column_in_formulas", "re-points a COLUMN specifier at the same cells; no value moves, and both callers recalculate anyway"),

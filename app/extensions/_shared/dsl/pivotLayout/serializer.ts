@@ -274,9 +274,17 @@ function quoteIfNeeded(name: string): string {
   return name;
 }
 
-/** Escape double quotes within a string. */
+/**
+ * Escape double quotes within a string literal: a `"` is DOUBLED (`""`), the
+ * lexer's one escape (lexer.ts, the string-literal rule). This used to write a
+ * backslash (`\"`), which the lexer does not read: a filter value with a quote
+ * in it serialized to text that would not round-trip, and the drill-through
+ * bake -- which writes member keys as string literals -- had to avoid this
+ * function for that reason. `quoteCalcName` and `paramSubstitution.ts` always
+ * wrote the doubled form.
+ */
 function escapeString(s: string): string {
-  return s.replace(/"/g, '\\"');
+  return s.replace(/"/g, '""');
 }
 
 /** A plain identifier needs no quoting as a CALC field name. */

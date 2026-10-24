@@ -31,8 +31,25 @@ import {
   setSelection,
   setRowHeight,
   setColumnWidth,
+  type GridAction,
 } from "../../core/state/gridActions";
-import { updateCell, getCell, setActiveSheet as setActiveSheetApi, getMergeInfo, updateCellOnSheets } from "../lib/tauri-api";
+import {
+  updateCell,
+  getCell,
+  getSheets,
+  setActiveSheet as setActiveSheetApi,
+  getMergeInfo,
+  updateCellOnSheets,
+  type SheetInfo,
+  type SheetsResult,
+} from "../lib/tauri-api";
+import {
+  isEditOnShownSheet,
+  isEditSheet,
+  findEditSheet,
+  rebaseEditOntoShownSheet,
+  type EditSheetRef,
+} from "../lib/editSheetIdentity";
 import { formulaA1ToR1C1, formulaR1C1ToA1 } from "../lib/r1c1";
 import { isSheetGroupingActive, getGroupedSheetIndices } from "../state/sheetGrouping";
 import { cellEvents, cellToChange } from "../lib/cellEvents";
@@ -45,7 +62,7 @@ import {
   rowRangeToReference,
   cellToReference,
 } from "../lib/gridRenderer";
-import type { EditingCell, CellUpdateResult, FormulaReference } from "../types";
+import type { EditingCell, CellUpdateResult, FormulaReference, SheetContext } from "../types";
 import { isFormulaExpectingReference, FORMULA_REFERENCE_COLORS } from "../types";
 import { checkEditGuards, checkRangeGuards } from "../lib/editGuards";
 import { checkCommitGuards } from "../lib/commitGuards";
@@ -58,6 +75,10 @@ import {
   type FormulaReferenceWithPosition,
 } from "../lib/formulaRefParser";
 import { alertAsync } from "../lib/dialogs";
+// Only the shown-sheet follower of an EXTERNAL session (a floating grid's cell
+// edit); this hook's own return to its edit's sheet stays its own (see
+// returnBackendToEditSheet).
+import { followShownSheetForExternalSession } from "../lib/pointModeSheetSwitch";
 import { openEntryValue, abortEditorOpen, isEditorOpening } from "../lib/editOpenBuffer";
 import { setCoreCellEditFlag, isCoreCellEditOpen, coreCellEditSession } from "../lib/cellEditFlag";
 
@@ -631,6 +652,246 @@ function setPreventBlurCommit(value: boolean): void {
   window.dispatchEvent(new CustomEvent("editor:preventBlurCommit", { detail: value }));
 }
 
+// =============================================================================
+// THE RETURN TO THE EDIT'S OWN SHEET -- BY IDENTITY
+// =============================================================================
+
+/**
+ * Why an open edit's return to its own sheet was refused (`EditSheetReturn`):
+ *  - "gone": the edit's sheet is in no sheet list any more (deleted while the
+ *    edit was open -- or, for an edit that carries no stable id, deleted or
+ *    renamed);
+ *  - "moving": each switch landed on another sheet, because the sheets kept
+ *    moving;
+ *  - "hidden": the edit's sheet was HIDDEN while the edit was open (a script's
+ *    `setSheetVisibility`, an MCP tool). REFUSED, never followed: the backend
+ *    writes a cell only to its ACTIVE sheet and refuses to activate a hidden
+ *    one, so following it would mean unhiding a sheet someone else just hid --
+ *    and writing anywhere else is the wrong-sheet write this return exists to
+ *    prevent. The user is told, with the entry, so it can be entered again
+ *    once the sheet is unhidden (review COMMIT-RETURN-THROW-DROPS-ENTRY);
+ *  - "backend": the backend refused the switch for its own reason (Protect
+ *    Workbook, say), `detail` its sentence.
+ */
+type EditSheetRefusal = "gone" | "moving" | "hidden" | "backend";
+
+/**
+ * Where an open edit's return to its OWN sheet ended up
+ * (`returnBackendToEditSheet`):
+ *  - "returned": the backend is on the edit's sheet -- `sheet`, as the backend
+ *    reported it;
+ *  - "refused": it is not, for `reason` (`EditSheetRefusal`). `landed` is the
+ *    sheet a switch that went wrong left the backend on (null when no switch
+ *    moved it), so the grid can follow it instead of showing one sheet while
+ *    the backend writes to another.
+ */
+type EditSheetReturn =
+  | { kind: "returned"; sheet: SheetInfo }
+  | { kind: "refused"; reason: EditSheetRefusal; landed: SheetInfo | null; detail?: string };
+
+/** Whether a listed sheet is hidden (an absent visibility is a visible sheet). */
+function isHiddenSheet(sheet: SheetInfo): boolean {
+  return sheet.visibility === "hidden" || sheet.visibility === "veryHidden";
+}
+
+/** The sentence an error carries (a backend refusal is a string). */
+function errorText(error: unknown): string {
+  return typeof error === "string" ? error : error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Put the BACKEND back on an open edit's own sheet, found by IDENTITY (its
+ * stable id, else its name) in a FRESH sheet list -- never at the index the
+ * edit stored (review TSHELL4-DISCARD-LANDS-UNDER-OPEN-EDIT). That index was
+ * right when the edit opened; a temporary sheet's discard, a delete, a move or
+ * a copy -- the tab strip's, an MCP tool's or a script's -- renumbers the
+ * sheets while the edit is open, and the old return then wrote the entry into
+ * whichever sheet slid into the index, or failed "out of range" and lost it.
+ * By id a sheet RENAMED while the edit was open is found too, so its entry is
+ * written there; only a DELETED sheet is refused (review F1-rename-refuses-entry).
+ *
+ * `set_active_sheet` takes an index, so a renumbering can still land between
+ * the read and the switch: the switch's own answer (the list as of the switch)
+ * is checked, and the edit's sheet looked up once more in it.
+ *
+ * A switch that THROWS never loses the entry (review
+ * COMMIT-RETURN-THROW-DROPS-ENTRY): it used to propagate, and commitEdit's
+ * catch alerted the backend's bare sentence ("Sheet index 4 out of range")
+ * with the typed text gone. Now:
+ *  - a HIDDEN edit's sheet is refused BEFORE any switch ("hidden": the backend
+ *    refuses to activate a hidden sheet, and the edit is not followed there --
+ *    see `EditSheetRefusal`);
+ *  - a throw before anything moved is followed by ONE fresh read, which says
+ *    why: the sheet is gone or hidden now (refused, so), it moved to another
+ *    index (a renumbering landed in the read -> switch gap, e.g. an MCP delete
+ *    of an earlier sheet while the edit's sheet is the last one: the switch is
+ *    retried there), or it is where it was -- a genuine refusal (Protect
+ *    Workbook), refused "backend" with the backend's sentence;
+ *  - a throw once a switch has already moved the backend to another sheet
+ *    keeps where it was left as the answer, so the grid can follow it.
+ * Every refusal is reported by the caller WITH the entry (refusedEntryMessage).
+ * Only a failed READ still propagates (commitEdit's catch shows the entry too).
+ *
+ * `onTarget` hears the edit's sheet as each fresh list names it, just before
+ * the switch to it (or the refusal of a hidden one): what a cancel whose
+ * return was refused before anything moved reports as the edit's sheet (never
+ * the index the edit stored).
+ */
+async function returnBackendToEditSheet(
+  editing: EditingCell,
+  onTarget?: (target: SheetInfo) => void,
+): Promise<EditSheetReturn> {
+  let sheets: SheetInfo[] = (await getSheets()).sheets;
+  let landed: SheetInfo | null = null;
+  // Three: a renumbering in the first read -> switch gap costs one re-read and
+  // a retry, and the retry may still land on a sheet that moved once more.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const target = findEditSheet(editing, sheets);
+    if (target === null) return { kind: "refused", reason: "gone", landed };
+    onTarget?.(target);
+    if (isHiddenSheet(target)) return { kind: "refused", reason: "hidden", landed };
+    let switched: SheetsResult | undefined;
+    try {
+      switched = await setActiveSheetApi(target.index);
+    } catch (error) {
+      if (landed !== null) {
+        console.error("[useEditing] The return to the edit's sheet was refused after a switch landed elsewhere:", error);
+        return { kind: "refused", reason: "moving", landed };
+      }
+      // Nothing moved. Why was it refused? One FRESH read decides.
+      const fresh: SheetInfo[] = (await getSheets()).sheets;
+      const now = findEditSheet(editing, fresh);
+      if (now === null) return { kind: "refused", reason: "gone", landed: null };
+      if (isHiddenSheet(now)) {
+        onTarget?.(now);
+        return { kind: "refused", reason: "hidden", landed: null };
+      }
+      if (now.index !== target.index) {
+        // A renumbering landed between the read and the switch: try again
+        // where the edit's sheet stands NOW.
+        sheets = fresh;
+        continue;
+      }
+      console.warn("[useEditing] The backend refused the return to the edit's sheet:", error);
+      return { kind: "refused", reason: "backend", landed: null, detail: errorText(error) };
+    }
+    if (!switched || !Array.isArray(switched.sheets)) {
+      // An answer without a list cannot be checked; the index was resolved by
+      // identity a moment ago, which is the best there is.
+      return { kind: "returned", sheet: target };
+    }
+    landed = switched.sheets.find((s) => s.index === switched.activeIndex) ?? null;
+    if (landed !== null && isEditSheet(editing, landed)) return { kind: "returned", sheet: landed };
+    sheets = switched.sheets;
+  }
+  return { kind: "refused", reason: "moving", landed };
+}
+
+/**
+ * Make the grid show the sheet the backend is on, after a return to an edit's
+ * sheet: the sheet context in ONE dispatch (its surface from the sheet's kind,
+ * and its STABLE id) and the refetch GridCanvas runs on `sheet:formulaModeSwitch`.
+ */
+function followBackendTo(dispatch: (action: GridAction) => void, sheet: SheetInfo): void {
+  dispatch(setActiveSheet(sheet.index, sheet.name, sheet.kind === "canvas" ? "canvas" : "grid", sheet.sheetId));
+  window.dispatchEvent(new CustomEvent("sheet:formulaModeSwitch", {
+    detail: {
+      newSheetIndex: sheet.index,
+      newSheetName: sheet.name,
+    }
+  }));
+}
+
+// =============================================================================
+// AN EDIT'S SHEET AT ITS OPEN -- AND THE ONE EDIT_STARTED
+// =============================================================================
+
+/**
+ * The sheet an edit opened on, as the context names it NOW: its index, its
+ * name, and -- when the context carries one -- its STABLE id, the identity
+ * every later decision compares first (core/lib/editSheetIdentity.ts). The
+ * ONE spelling all three opens (startEdit, startEditing's replace mode,
+ * replaceCurrentCell) build their edit's sheet from.
+ */
+function editSheetRefOf(context: SheetContext): EditSheetRef {
+  return context.activeSheetId
+    ? {
+        sourceSheetIndex: context.activeSheetIndex,
+        sourceSheetName: context.activeSheetName,
+        sourceSheetId: context.activeSheetId,
+      }
+    : { sourceSheetIndex: context.activeSheetIndex, sourceSheetName: context.activeSheetName };
+}
+
+/**
+ * The sheet index EDIT_STARTED reports for an edit just dispatched with `ref`:
+ * the index the reducer STORES for it -- `ref` rebased onto the sheet the grid
+ * shows NOW by the very rule START_EDITING applies (`rebaseEditOntoShownSheet`)
+ * -- never the index the open READ before its awaits (review
+ * F4-edit-started-stale-index). A temporary sheet's discard landing during the
+ * open's merge-info or cell read renumbers the edit's sheet; the old event then
+ * named whichever sheet slid into the old index, and a script heard
+ * onEditStart and onEditEnd for ONE edit on two different sheets. "Now" is the
+ * rendered grid state (`getGridStateSnapshot`), else the open's own context.
+ */
+function editStartedIndex(ref: EditSheetRef, fallback: SheetContext): number {
+  const shown = getGridStateSnapshot()?.sheetContext ?? fallback;
+  const stored = rebaseEditOntoShownSheet(ref, shown.activeSheetIndex, shown.activeSheetName, shown.activeSheetId);
+  return stored.sourceSheetIndex ?? shown.activeSheetIndex;
+}
+
+/** Notify extensions/scripts that editing has begun (cell.onEditStart): the ONE emit site of all three opens. */
+function announceEditStarted(row: number, col: number, ref: EditSheetRef, fallback: SheetContext): void {
+  emitAppEvent(AppEvents.EDIT_STARTED, { row, col, sheetIndex: editStartedIndex(ref, fallback) });
+}
+
+/**
+ * The sheet index a CANCEL that could not return to its edit's sheet reports
+ * (EDIT_ENDED): where the grid is when the cancel is done -- never the index
+ * the edit stored, which names whichever sheet slid into it once the edit's
+ * own sheet is gone (review F4-edit-started-stale-index). "Where the grid is"
+ * is the rendered grid state, else the cancel's own context.
+ */
+function shownSheetIndexNow(fallback: SheetContext): number {
+  return getGridStateSnapshot()?.sheetContext.activeSheetIndex ?? fallback.activeSheetIndex;
+}
+
+/**
+ * The ONE "here is what you typed" suffix every commit failure ends with, so
+ * no failure path drops typed text without showing it (review
+ * COMMIT-RETURN-THROW-DROPS-ENTRY): the entry, cut at 120 characters; "" for an
+ * empty entry.
+ */
+function entryShownSuffix(editing: EditingCell): string {
+  const entry = editing.value.length > 120 ? `${editing.value.slice(0, 117)}...` : editing.value;
+  return entry !== "" ? `\n\nThe entry was: ${entry}` : "";
+}
+
+/** The sentence a refused entry is reported with (commitEdit): what happened, and the text, so it can be typed again. */
+function refusedEntryMessage(editing: EditingCell, reason: EditSheetRefusal, detail?: string): string {
+  const sheet = editing.sourceSheetName ? `the sheet "${editing.sourceSheetName}"` : "the sheet it was typed on";
+  // By its stable id a RENAMED sheet is found again, so "gone" then means deleted.
+  const gone = editing.sourceSheetId ? "was deleted" : "was deleted or renamed";
+  const why =
+    reason === "gone"
+      ? `${sheet} ${gone} while you were typing`
+      : reason === "hidden"
+        ? `${sheet} was hidden while you were typing -- unhide it and enter it again`
+        : reason === "backend"
+          ? `Calcula could not go back to ${sheet}${detail ? `: ${detail}` : ""}`
+          : `the sheets kept changing while Calcula went back to ${sheet}`;
+  return `Your entry was not saved, because ${why}. Nothing was written to any other sheet.` + entryShownSuffix(editing);
+}
+
+/**
+ * The ONE sentence a grouped edit that did not reach every grouped sheet is
+ * reported with (commitEdit): the backend refused the whole replication, or
+ * answered that it wrote fewer sheets than were asked for. `detail` says why.
+ */
+function groupReplicationFailedMessage(detail: string | undefined): string {
+  return `The edit was applied to this sheet but NOT to the other grouped sheets.` + (detail ? `\n\n${detail}` : "");
+}
+
 /**
  * Return type for the useEditing hook.
  */
@@ -769,6 +1030,21 @@ export function useEditing(): UseEditingReturn {
     }
   }, [editing]);
 
+  // An EXTERNAL session (a floating grid's cell edit) follows the sheet the
+  // grid shows BY IDENTITY when a door it never heard of moved the grid -- a
+  // temporary sheet's discard, a script's or an MCP tool's delete, move or
+  // rename, a script's activateSheet (review FR-RESYNC-COMMITS-ON-RENUMBER):
+  // its parked view is re-found at its index NOW (or the edit un-parks, back on
+  // its host), and an un-parked session's host follows the shown sheet. Every
+  // such door moves the grid through ONE thing, the sheet context dispatched
+  // with the sheet's stable id, so this follows them all; it runs after the
+  // render, when the context names the sheet actually on screen. Idempotent
+  // (pointModeSheetSwitch.ts), so every instance of this hook may run it.
+  const { activeSheetIndex, activeSheetName, activeSheetId } = sheetContext;
+  useEffect(() => {
+    followShownSheetForExternalSession({ activeSheetIndex, activeSheetName, activeSheetId });
+  }, [activeSheetIndex, activeSheetName, activeSheetId]);
+
   /**
    * Check if currently in formula mode (expecting a reference).
    */
@@ -782,21 +1058,22 @@ export function useEditing(): UseEditingReturn {
   }, [editing]);
 
   /**
-   * Check if we're on a different sheet than the formula source.
+   * Check if we're on a different sheet than the formula source -- by the
+   * sheet's IDENTITY (core/lib/editSheetIdentity.ts), never its index.
    */
   const isOnDifferentSheet = useCallback((): boolean => {
-    if (!editing?.sourceSheetName) return false;
-    return editing.sourceSheetName !== sheetContext.activeSheetName;
-  }, [editing, sheetContext.activeSheetName]);
+    if (!editing) return false;
+    return !isEditOnShownSheet(editing, sheetContext);
+  }, [editing, sheetContext]);
 
   /**
    * Get the target sheet name for references (current active sheet if different from source).
    */
   const getTargetSheetName = useCallback((): string | null => {
-    if (!editing?.sourceSheetName) return null;
-    if (editing.sourceSheetName === sheetContext.activeSheetName) return null;
+    if (!editing) return null;
+    if (isEditOnShownSheet(editing, sheetContext)) return null;
     return sheetContext.activeSheetName;
-  }, [editing, sheetContext.activeSheetName]);
+  }, [editing, sheetContext]);
 
   /**
    * Get the next color for a formula reference.
@@ -1010,24 +1287,20 @@ export function useEditing(): UseEditingReturn {
         }
       }
       
+      const sheetRef = editSheetRefOf(sheetContext);
       dispatch(
         startEditingAction({
           row: editRow,
           col: editCol,
           value,
-          sourceSheetIndex: sheetContext.activeSheetIndex,
-          sourceSheetName: sheetContext.activeSheetName,
+          ...sheetRef,
           rowSpan,
           colSpan,
         })
       );
 
-      // Notify extensions/scripts that editing has begun (cell.onEditStart)
-      emitAppEvent(AppEvents.EDIT_STARTED, {
-        row: editRow,
-        col: editCol,
-        sheetIndex: sheetContext.activeSheetIndex,
-      });
+      // cell.onEditStart, on the sheet's index as the reducer stores it.
+      announceEditStarted(editRow, editCol, sheetRef, sheetContext);
     },
     [dispatch, sheetContext, state.referenceStyle]
   );
@@ -1113,24 +1386,20 @@ export function useEditing(): UseEditingReturn {
         setGlobalEditingValue(seededValue);
         globalCursorPosition = seededValue.length;
 
+        const sheetRef = editSheetRefOf(sheetContext);
         dispatch(
           startEditingAction({
             row: editRow,
             col: editCol,
             value: seededValue,
-            sourceSheetIndex: sheetContext.activeSheetIndex,
-            sourceSheetName: sheetContext.activeSheetName,
+            ...sheetRef,
             rowSpan,
             colSpan,
           })
         );
 
-        // Notify extensions/scripts that editing has begun (cell.onEditStart)
-        emitAppEvent(AppEvents.EDIT_STARTED, {
-          row: editRow,
-          col: editCol,
-          sheetIndex: sheetContext.activeSheetIndex,
-        });
+        // cell.onEditStart, on the sheet's index as the reducer stores it.
+        announceEditStarted(editRow, editCol, sheetRef, sheetContext);
       } else {
         // EDIT mode - fetch existing content (handled by startEdit)
         await startEdit(row, col);
@@ -1579,29 +1848,51 @@ export function useEditing(): UseEditingReturn {
     try {
       const perfT0 = performance.now();
 
-      // FIX: Check if we need to switch back to the source sheet before committing
-      const needsSheetSwitch =
-        editing.sourceSheetIndex !== undefined &&
-        editing.sourceSheetIndex !== sheetContext.activeSheetIndex;
-
-      if (needsSheetSwitch) {
+      // The edit's OWN sheet, by IDENTITY -- its stable id, else its name
+      // (review TSHELL4-DISCARD-LANDS-UNDER-OPEN-EDIT, F1-rename-refuses-entry;
+      // core/lib/editSheetIdentity.ts). Where the grid shows it, nothing
+      // switches, whatever index or name it holds now: a temporary sheet's
+      // discard (or a delete, a move, a copy) that landed while the edit was
+      // open renumbered it, and the stored index then named ANOTHER sheet, or
+      // none -- the old "switch back" wrote the entry there or failed "out of
+      // range"; a rename of it is followed the same way. Where the grid shows
+      // another sheet (point mode: the user went there to pick a reference),
+      // the backend goes back to the edit's sheet found by identity in a fresh
+      // list; and when that sheet is gone (deleted) or HIDDEN, or the backend
+      // refuses the switch, the entry is REFUSED -- nothing is written
+      // anywhere, and the user is told, with the entry (EditSheetRefusal).
+      let editSheetIndex = sheetContext.activeSheetIndex;
+      if (!isEditOnShownSheet(editing, sheetContext)) {
         console.log("[useEditing] Switching back to source sheet before commit:", editing.sourceSheetName);
 
-        // Switch the backend to the source sheet
-        await setActiveSheetApi(editing.sourceSheetIndex!);
+        const back = await returnBackendToEditSheet(editing);
+        if (back.kind === "refused") {
+          // A switch that went wrong moved the backend: the grid follows it, so
+          // it never shows one sheet while the backend is on another.
+          if (back.landed) followBackendTo(dispatch, back.landed);
+          const message = refusedEntryMessage(editing, back.reason, back.detail);
+          console.warn("[useEditing] Commit refused:", message);
+          setLastError(message);
+          void alertAsync(message, { kind: "warning" });
+          setGlobalIsEditing(false);
+          setGlobalEditingValue("");
+          resetArrowRefState();
+          dispatch(stopEditing());
+          dispatch(clearFormulaReferences());
+          return {
+            success: false,
+            row: editing.row,
+            col: editing.col,
+            display: "#ERROR",
+            formula: editing.value.startsWith("=") ? editing.value : null,
+            error: message,
+          };
+        }
 
-        // Update the frontend state to match
-        // A formula's source sheet is always a worksheet (a canvas refuses
-        // every cell edit), so the surface is known without the list.
-        dispatch(setActiveSheet(editing.sourceSheetIndex!, editing.sourceSheetName!, "grid"));
-
-        // Dispatch event to refresh grid cells for the source sheet
-        window.dispatchEvent(new CustomEvent("sheet:formulaModeSwitch", {
-          detail: {
-            newSheetIndex: editing.sourceSheetIndex,
-            newSheetName: editing.sourceSheetName,
-          }
-        }));
+        // The grid follows the backend to the edit's sheet (as the backend
+        // named it: its index NOW), and refetches its cells.
+        editSheetIndex = back.sheet.index;
+        followBackendTo(dispatch, back.sheet);
       }
       const perfT1SheetSwitch = performance.now();
 
@@ -1680,13 +1971,38 @@ export function useEditing(): UseEditingReturn {
         emitAppEvent(AppEvents.MUTATION_REFRESH, { domains, source: "commit" });
       }
 
-      // Sheet grouping: replicate the cell update to all grouped (non-active) sheets
+      // Sheet grouping: replicate the cell update to every grouped sheet other
+      // than the EDIT'S OWN -- `editSheetIndex`, the sheet just written at its
+      // index NOW (after a point-mode return, the backend's active sheet too).
+      // NOT the closure's `sheetContext.activeSheetIndex`: after a point-mode
+      // trip that is the sheet the user POINTED at, so a pointed-at sheet that
+      // was itself grouped was left out, and the edit's own sheet was asked for
+      // instead -- which the backend skips as its active sheet. The grouped
+      // sheet silently never got the entry (review
+      // F2-group-replication-excludes-pointed-sheet).
       if (isSheetGroupingActive()) {
-        const otherSheets = getGroupedSheetIndices(sheetContext.activeSheetIndex);
+        const otherSheets = getGroupedSheetIndices(editSheetIndex);
         if (otherSheets.length > 0) {
           try {
-            await updateCellOnSheets(otherSheets, editing.row, editing.col, valueToCommit);
-            console.log("[commitEdit] Replicated to grouped sheets:", otherSheets);
+            const wrote = await updateCellOnSheets(otherSheets, editing.row, editing.col, valueToCommit);
+            // The backend answers the sheets it ACTUALLY wrote (it skips its
+            // own active sheet). A requested sheet missing from that answer did
+            // not get the entry: said out loud, never left silent.
+            if (Array.isArray(wrote)) {
+              const missed = otherSheets.filter((index) => !wrote.includes(index));
+              if (missed.length > 0) {
+                console.error("[commitEdit] Grouped sheets the backend did not write:", missed);
+                void alertAsync(
+                  groupReplicationFailedMessage(
+                    `${missed.length} of the ${otherSheets.length} other grouped sheet${otherSheets.length === 1 ? "" : "s"} did not receive it.`,
+                  ),
+                );
+              } else {
+                console.log("[commitEdit] Replicated to grouped sheets:", otherSheets);
+              }
+            } else {
+              console.warn("[commitEdit] The backend did not say which grouped sheets it wrote:", wrote);
+            }
           } catch (err) {
             // update_cell_on_sheets refuses the WHOLE call if any grouped sheet
             // protects this cell — deliberately, so a group edit never applies
@@ -1695,10 +2011,7 @@ export function useEditing(): UseEditingReturn {
             // divergent, which is the one outcome grouping exists to prevent.
             console.error("[commitEdit] Failed to replicate to grouped sheets:", err);
             const msg = typeof err === "string" ? err : (err as Error)?.message;
-            void alertAsync(
-              `The edit was applied to this sheet but NOT to the other grouped sheets.` +
-                (msg ? `\n\n${msg}` : "")
-            );
+            void alertAsync(groupReplicationFailedMessage(msg));
           }
         }
       }
@@ -1732,11 +2045,12 @@ export function useEditing(): UseEditingReturn {
         const perfT4Events = performance.now();
 
         // Emit EDIT_ENDED so extensions (e.g. Table auto-expand) can react
-        // to the committed edit with full cell context.
+        // to the committed edit with full cell context -- on the edit's sheet
+        // at its index NOW, which a renumbering may have moved.
         emitAppEvent(AppEvents.EDIT_ENDED, {
           row: primaryCell.row,
           col: primaryCell.col,
-          sheetIndex: editing.sourceSheetIndex ?? sheetContext.activeSheetIndex,
+          sheetIndex: editSheetIndex,
           value: editing.value,
           committed: true,
         });
@@ -1785,8 +2099,11 @@ export function useEditing(): UseEditingReturn {
       console.error("Failed to update cell:", error);
       setLastError(errorMessage);
 
-      // Show spill protection (or other backend) errors to the user
-      void alertAsync(errorMessage);
+      // Show spill protection (or other backend) errors to the user -- WITH the
+      // entry: the edit ends here, and a failure that drops typed text must
+      // show it (review COMMIT-RETURN-THROW-DROPS-ENTRY; the same suffix as a
+      // refused return's).
+      void alertAsync(errorMessage + entryShownSuffix(editing));
 
       // FIX: Clear global flag and arrow reference state on error too
       setGlobalIsEditing(false);
@@ -1812,7 +2129,8 @@ export function useEditing(): UseEditingReturn {
 
   /**
    * Cancel the current edit without saving.
-   * FIX: If editing started on a different sheet, switch back to that sheet.
+   * FIX: If editing started on a different sheet, switch back to that sheet --
+   * found by IDENTITY, the same rule commitEdit returns by.
    */
   const cancelEdit = useCallback(async () => {
     // FIX: Clear global flag and arrow reference state immediately
@@ -1827,27 +2145,58 @@ export function useEditing(): UseEditingReturn {
       return;
     }
 
-    // Check if we need to switch back to the source sheet
-    const needsSheetSwitch = 
-      editing.sourceSheetIndex !== undefined && 
-      editing.sourceSheetIndex !== sheetContext.activeSheetIndex;
-
-    if (needsSheetSwitch) {
+    // Back to the edit's OWN sheet when the grid shows another one (point
+    // mode), found by IDENTITY in a fresh list (review
+    // TSHELL4-DISCARD-LANDS-UNDER-OPEN-EDIT). A cancel writes nothing, so a
+    // sheet that is gone -- or a return the backend refused -- only means the
+    // grid stays where it is. And whatever happens on the way, the edit ENDS:
+    // the switch used to reject out of here and leave `editing` set, because
+    // stopEditing came after the await.
+    //
+    // The index EDIT_ENDED reports is NEVER the one the edit stored when the
+    // return did not land (review F4-edit-started-stale-index): once the
+    // edit's sheet is gone -- or renumbered while the grid showed another
+    // sheet -- that index names whichever sheet slid into it. It is the edit's
+    // sheet where the fresh read found it, else where the grid is.
+    let endedOnIndex: number;
+    if (isEditOnShownSheet(editing, sheetContext)) {
+      endedOnIndex = sheetContext.activeSheetIndex;
+    } else {
       console.log("[useEditing] Canceling - switching back to source sheet:", editing.sourceSheetName);
-      
-      // Switch the backend to the source sheet
-      await setActiveSheetApi(editing.sourceSheetIndex!);
-      
-      // Update the frontend state to match
-      dispatch(setActiveSheet(editing.sourceSheetIndex!, editing.sourceSheetName!, "grid"));
-      
-      // Dispatch event to refresh grid cells for the source sheet
-      window.dispatchEvent(new CustomEvent("sheet:formulaModeSwitch", {
-        detail: {
-          newSheetIndex: editing.sourceSheetIndex,
-          newSheetName: editing.sourceSheetName,
+      // The edit's sheet as the return's fresh read last found it (before its switch).
+      const seen: { target: SheetInfo | null } = { target: null };
+      // Where the cancel left the edit, when that is known.
+      let endedOn: SheetInfo | null = null;
+      try {
+        const back = await returnBackendToEditSheet(editing, (target) => {
+          seen.target = target;
+        });
+        if (back.kind === "returned") {
+          followBackendTo(dispatch, back.sheet);
+          endedOn = back.sheet;
+        } else {
+          console.warn("[useEditing] Cancel: the edit's sheet could not be returned to; staying here.", back.reason);
+          if (back.landed) {
+            // The grid follows where a wrong switch left the backend: the edit ended THERE.
+            followBackendTo(dispatch, back.landed);
+            endedOn = back.landed;
+          } else if (back.reason === "hidden" || back.reason === "backend") {
+            // Refused before anything moved -- the edit's sheet is HIDDEN, or
+            // the backend refused the switch: the grid stays where it is, and
+            // the edit's sheet is where the fresh read found it.
+            endedOn = seen.target;
+          }
+          // Otherwise ("gone": in no list; "moving": no switch landed anywhere
+          // known) the edit ended where the grid is.
         }
-      }));
+      } catch (error) {
+        // A sheet READ failed (a refused switch is a "refused" answer above):
+        // the grid stays where it is, and the edit's sheet is where the last
+        // fresh read found it, if any did.
+        console.error("[useEditing] Cancel: the return to the edit's sheet failed; staying here.", error);
+        endedOn = seen.target;
+      }
+      endedOnIndex = endedOn?.index ?? shownSheetIndexNow(sheetContext);
     }
 
     setLastError(null);
@@ -1859,7 +2208,7 @@ export function useEditing(): UseEditingReturn {
     emitAppEvent(AppEvents.EDIT_ENDED, {
       row: editing.row,
       col: editing.col,
-      sheetIndex: editing.sourceSheetIndex ?? sheetContext.activeSheetIndex,
+      sheetIndex: endedOnIndex,
       value: editing.value,
       committed: false,
     });
@@ -1947,24 +2296,20 @@ export function useEditing(): UseEditingReturn {
       // FIX: Update global editing value synchronously
       setGlobalEditingValue(initialChar || "");
       
+      const sheetRef = editSheetRefOf(sheetContext);
       dispatch(
         startEditingAction({
           row: editRow,
           col: editCol,
           value: initialChar || "",
-          sourceSheetIndex: sheetContext.activeSheetIndex,
-          sourceSheetName: sheetContext.activeSheetName,
+          ...sheetRef,
           rowSpan,
           colSpan,
         })
       );
 
-      // Notify extensions/scripts that editing has begun (cell.onEditStart)
-      emitAppEvent(AppEvents.EDIT_STARTED, {
-        row: editRow,
-        col: editCol,
-        sheetIndex: sheetContext.activeSheetIndex,
-      });
+      // cell.onEditStart, on the sheet's index as the reducer stores it.
+      announceEditStarted(editRow, editCol, sheetRef, sheetContext);
     },
     [state, dispatch, sheetContext]
   );

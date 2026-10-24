@@ -45,12 +45,15 @@ interface MockCalls {
 
 const SHEETS_RESULT = {
   sheets: [
-    { index: 0, name: "Sheet1", visibility: "visible" as const },
-    { index: 1, name: "Sheet2", visibility: "visible" as const },
-    { index: 2, name: "My Sheet", visibility: "visible" as const },
+    { index: 0, name: "Sheet1", visibility: "visible" as const, sheetId: "id-Sheet1" },
+    { index: 1, name: "Sheet2", visibility: "visible" as const, sheetId: "id-Sheet2" },
+    { index: 2, name: "My Sheet", visibility: "visible" as const, sheetId: "id-My Sheet" },
   ],
   activeIndex: 0,
 };
+
+/** The backend's refusal of a delete whose index no longer names the expected sheet (sheets.rs). */
+const SHEETS_CHANGED = "The sheets changed while that sheet was being deleted, so nothing was deleted.";
 
 const NAMED_RANGE_OK = { success: true, namedRange: null, error: null };
 const UNDO_RESULT = {
@@ -304,9 +307,49 @@ describe("sheet operations", () => {
     }
   });
 
-  it("deletes a quoted, spaced sheet name", async () => {
+  // Review CLI-DELETE-BY-STALE-INDEX: the delete carries the stable id read WITH
+  // the index, so a renumbering between the read and the delete is refused by
+  // the backend instead of deleting the neighbour that slid into the index.
+  it("deletes a quoted, spaced sheet name -- by its index AND the id read with it", async () => {
     const { calls } = await runApp('delete sheet "My Sheet"');
-    expect(calls.deleteSheet).toEqual([[2]]);
+    expect(calls.deleteSheet).toEqual([[2, "id-My Sheet"]]);
+  });
+
+  it("a delete the backend refuses because the sheets changed fails THE LINE, naming the sheet, and claims nothing", async () => {
+    const { ok, lines, calls } = await runApp("delete sheet Sheet2", {
+      deleteSheet: () => Promise.reject(SHEETS_CHANGED),
+    });
+    expect(ok).toBe(false);
+    expect(calls.deleteSheet).toEqual([[1, "id-Sheet2"]]);
+    const errors = lines.filter((l) => l.cls === "err").map((l) => l.text);
+    expect(errors).toEqual([`Error — line 1: Sheet 'Sheet2' was not deleted: ${SHEETS_CHANGED}`]);
+    expect(allText(lines)).not.toMatch(/Deleted sheet/);
+  });
+
+  it("a refused delete inside a multi-line run stops the run there; the completed edits stay one undo step", async () => {
+    const { ok, lines, calls } = await runApp("set cell A1 = 1\ndelete sheet Sheet2\nset cell A2 = 2", {
+      deleteSheet: () => Promise.reject(SHEETS_CHANGED),
+    });
+    expect(ok).toBe(false);
+    expect(calls.updateCell).toEqual([[0, 0, "1"]]);
+    expect(lines.some((l) => l.cls === "err" && l.text.includes("line 2: Sheet 'Sheet2' was not deleted"))).toBe(true);
+    expect(allText(lines)).not.toMatch(/Deleted sheet/);
+    expect(calls.commitUndoTransaction).toHaveLength(1);
+    expect(calls.cancelUndoTransaction).toBeUndefined();
+    expect(allText(lines)).toContain("kept as ONE undo step");
+  });
+
+  it("a sheet the workbook reports no id for is refused rather than deleted unguarded", async () => {
+    const { ok, lines, calls } = await runApp("delete sheet Sheet2", {
+      getSheets: () =>
+        Promise.resolve({
+          sheets: SHEETS_RESULT.sheets.map(({ sheetId: _id, ...row }) => row),
+          activeIndex: 0,
+        }),
+    });
+    expect(ok).toBe(false);
+    expect(calls.deleteSheet).toBeUndefined();
+    expect(lines.some((l) => l.cls === "err" && l.text.includes("did not report which sheet it is"))).toBe(true);
   });
 
   it("errors on an unknown sheet at run time", async () => {
