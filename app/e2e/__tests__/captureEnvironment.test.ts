@@ -32,7 +32,8 @@ describe("capture environment guard", () => {
     // written in — which silently became a MATCHING reading, so the guard
     // correctly returned null and the test failed for the wrong reason. Whichever
     // side the corpus is on, the wrong reading is the other one.
-    const wrong = CAPTURE_ENVIRONMENT.devicePixelRatio === 1 ? 2 : 1;
+    const corpusDpr: number = CAPTURE_ENVIRONMENT.devicePixelRatio;
+    const wrong = corpusDpr === 1 ? 2 : 1;
     const msg = describeCaptureEnvironmentMismatch({ ...matching, devicePixelRatio: wrong });
     expect(msg).not.toBeNull();
     // The number that is wrong, and the number it should be.
@@ -69,7 +70,8 @@ describe("capture environment guard", () => {
   it("reports BOTH when both are wrong, rather than stopping at the first", () => {
     // Same reasoning as above: the WRONG dpr is whichever side the corpus is not
     // on, derived rather than written in.
-    const wrong = CAPTURE_ENVIRONMENT.devicePixelRatio === 1 ? 2 : 1;
+    const corpusDpr: number = CAPTURE_ENVIRONMENT.devicePixelRatio;
+    const wrong = corpusDpr === 1 ? 2 : 1;
     const msg = describeCaptureEnvironmentMismatch({
       devicePixelRatio: wrong,
       gridCanvasLayer: { width: 2498, height: 1342 },

@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 593 | Open: 69 | Triaged: 0 | Fixed: 524 | Other: 0
+Total: 594 | Open: 70 | Triaged: 0 | Fixed: 524 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -6134,3 +6134,12 @@ Two pre-existing lock cycles with the off-main-thread cell writers, found throug
 ABBA deadlock between a TABLE slicer's item fetch and a cell edit or a sheet op. The async `get_slicer_items_core` (app/src-tauri/src/slicer/commands.rs) holds `slicer_state.slicers` while `get_table_column_values` / `get_table_available_values` read `state.grids`; meanwhile `update_cell_impl` holds grid and grids and calls `re_evaluate_slicer_computed_properties`, which writes `slicer_state.slicers`; delete, move and copy reach the slicers through `cascade_sheet_removed` under the grid locks; `add_slicer_computed_property` / `update_slicer_computed_property` take grids then slicers. A slicer item fetch for a table slicer racing a cell edit (or a sheet op) can leave each thread holding what the other waits for: the window freezes, nothing is logged.
 
 **Repro:** Read the two acquisition orders named above (slicers -> grids in the async item fetch; grid/grids -> slicers in the cell writer and the sheet cascades). Fix in slicer/commands.rs: copy what the item fetch needs from the slicer store, release it, then read the grids (or take the grids first), and add the slicer store to the pair censuses.
+
+## BUG-0594 `[open]`
+
+**Found:** 2026-10-29 (manual)
+**Oracle:** pivot-shrink-leaves-ghost-cells
+
+A PIVOT THAT SHRINKS UNDER A FILTER KEEPS PAINTING ITS OLD CELLS. After `pivot.applyFilter` (app/src/api/pivot.ts) cut a BI pivot from 26 view rows to 8, the backend was right -- `get_cell` returns the 8-row output in rows 2-9 and EMPTY cells in rows 10-26 -- but the frontend was not: `getGridRegions()` (app/src/api/gridOverlays.ts) still reported the pivot region as rows 1-26 (0-based startRow 1, endRow 26, the pre-filter extent), and the canvas kept painting the UNFILTERED pivot's lower rows (2024-08 .. 2025-12) into the vacated cells. The user sees numbers that exist nowhere in the document, directly under a Grand Total that does not include them.
+
+**Repro:** app/e2e/journeys/insight-overlays-pivot.spec.ts up to `let where = await locate();` (after filterField("Date.Month", SHOWN_MONTHS)): read get_cell for rows 0..28 x cols 0..8 and getGridRegions(). Measured 2026-10-29: region {startRow:1,startCol:1,endRow:26,endCol:7}, viewRows=8, rows 10-26 empty in the backend, the same rows painted with the old values in e2e/journeys/__screenshots__/insight-overlays-pivot.spec.ts/region-insight-overlay-pivot-model.png.

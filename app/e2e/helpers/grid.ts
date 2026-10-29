@@ -753,8 +753,9 @@ export class GridHelper {
 
   /**
    * Set a cell value directly via the Tauri API, bypassing keyboard input.
-   * This avoids locale-related input transformations (e.g., comma → dot in
-   * Swedish locale). The value string is sent as-is to the backend.
+   * The backend parses it in the APP locale, exactly as typed input: in sv-SE
+   * "1234.5678" is stored as TEXT and a formula needs ";" between arguments.
+   * For a seed spelled invariantly, use `setCellValueInvariant`.
    */
   async setCellValueDirect(ref: string, value: string) {
     const { row, col } = parseCellRef(ref);
@@ -769,6 +770,32 @@ export class GridHelper {
               detail: { row: cell.row, col: cell.col },
             }));
           }
+        }
+        window.dispatchEvent(new Event("grid:refresh"));
+      },
+      { r: row, c: col, v: value }
+    );
+    await this.page.waitForTimeout(200);
+  }
+
+  /**
+   * Set a cell value from an INVARIANT spelling ("1234.5678", "=ROUND(A1,2)"),
+   * whatever the app locale. Since the app locale reached cell input
+   * (2026-10-16), `update_cell` read "1234.5678" as the text "1234.5678" in
+   * sv-SE; `update_cells_batch` with `invariant: true` skips delocalization.
+   */
+  async setCellValueInvariant(ref: string, value: string) {
+    const { row, col } = parseCellRef(ref);
+    await this.page.evaluate(
+      async ({ r, c, v }) => {
+        const tauri = (window as any).__TAURI__;
+        const cells = await tauri.core.invoke("update_cells_batch", {
+          updates: [{ row: r, col: c, value: v, invariant: true }],
+        });
+        for (const cell of cells ?? []) {
+          window.dispatchEvent(new CustomEvent("cell:updated", {
+            detail: { row: cell.row, col: cell.col },
+          }));
         }
         window.dispatchEvent(new Event("grid:refresh"));
       },

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 594,
+  "nextId": 595,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -16300,6 +16300,33 @@
       "repro": {
         "description": "Read the two acquisition orders named above (slicers -> grids in the async item fetch; grid/grids -> slicers in the cell writer and the sheet cascades). Fix in slicer/commands.rs: copy what the item fetch needs from the slicer store, release it, then read the grids (or take the grids first), and add the slicer store to the pair censuses."
       }
+    },
+    {
+      "id": "BUG-0594",
+      "status": "open",
+      "discovered": "2026-10-29",
+      "source": {
+        "kind": "manual",
+        "seed": null,
+        "runId": "E2E golden re-record after the owner's icon/UI redesign (insight-overlays-pivot journey)"
+      },
+      "violation": {
+        "oracleId": "pivot-shrink-leaves-ghost-cells",
+        "severity": "medium",
+        "message": "A PIVOT THAT SHRINKS UNDER A FILTER KEEPS PAINTING ITS OLD CELLS. After `pivot.applyFilter` (app/src/api/pivot.ts) cut a BI pivot from 26 view rows to 8, the backend was right -- `get_cell` returns the 8-row output in rows 2-9 and EMPTY cells in rows 10-26 -- but the frontend was not: `getGridRegions()` (app/src/api/gridOverlays.ts) still reported the pivot region as rows 1-26 (0-based startRow 1, endRow 26, the pre-filter extent), and the canvas kept painting the UNFILTERED pivot's lower rows (2024-08 .. 2025-12) into the vacated cells. The user sees numbers that exist nowhere in the document, directly under a Grand Total that does not include them.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "The journey that shows it asserts the view, the cue cells and the backend, never the vacated cells; its clip is taken from the stale region, so the golden photographed the ghost rows as part of the pivot.",
+      "repro": {
+        "description": "app/e2e/journeys/insight-overlays-pivot.spec.ts up to `let where = await locate();` (after filterField(\"Date.Month\", SHOWN_MONTHS)): read get_cell for rows 0..28 x cols 0..8 and getGridRegions(). Measured 2026-10-29: region {startRow:1,startCol:1,endRow:26,endCol:7}, viewRows=8, rows 10-26 empty in the backend, the same rows painted with the old values in e2e/journeys/__screenshots__/insight-overlays-pivot.spec.ts/region-insight-overlay-pivot-model.png."
+      },
+      "triage": {
+        "notes": "Not yet established whether the Pivot UI's own filter route refreshes the region (only the @api applyFilter route was measured), nor whether the committed pre-2026-10-29 golden already held the ghost rows. The re-recorded golden DOES hold them, so fixing this defect will (correctly) fail that golden."
+      },
+      "fix": {
+        "status": "open"
+      },
+      "notes": []
     }
   ]
 }

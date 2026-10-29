@@ -60,9 +60,16 @@ export const CAPTURE_ENVIRONMENT = {
   /**
    * `window.devicePixelRatio` at capture time.
    *
-   * **1 as of 2026-08-18**, when the whole corpus was re-recorded at 100%.
+   * **2 as of 2026-10-29**, when the whole corpus was re-recorded at 200% after
+   * the owner's icon and UI redesign. MEASURED live before recording: dpr 2,
+   * screen 1472x920 (logical), viewport 1280x800, grid 1218x542 -- the display
+   * this suite is normally run on hosts the corpus's window at 200%, so the two
+   * demands described at the top of this file hold together again. On a
+   * 2560x1440 panel they still do not; the history below explains why.
    *
-   * WHY IT MOVED, because "we changed machines" is not the reason and the real
+   * It was 1 from 2026-08-18, when the whole corpus was re-recorded at 100%.
+   *
+   * WHY IT MOVED THEN, because "we changed machines" is not the reason and the real
    * one constrains any future change. The previous value, 2, came from a display
    * whose 200% logical desktop was 1472x920 (GDI DESKTOPHORZRES 2944 / HORZRES
    * 1472) — tall enough to host the 1280x800 window the corpus also assumes. On a
@@ -71,14 +78,12 @@ export const CAPTURE_ENVIRONMENT = {
    * before a pixel was compared. See the block at the top of this file for the
    * measurement.
    *
-   * So the corpus now holds the dpr-1 hairline (226,226,226) rather than the
-   * dpr-2 one (241,241,241), across all three trees. The GEOMETRY is unchanged —
-   * 1280x800 / 1218x542 are identical at either scaling, because Tauri sizes its
-   * window in logical units — which is what made this a safe move to make: the
-   * only thing that legitimately differs between the old corpus and the new is
-   * the hairline.
+   * So from 2026-08-18 the corpus held the dpr-1 hairline (226,226,226); since
+   * 2026-10-29 it holds the dpr-2 one (241,241,241) again, across all four
+   * trees. The GEOMETRY is unchanged — 1280x800 / 1218x542 are identical at
+   * either scaling, because Tauri sizes its window in logical units.
    */
-  devicePixelRatio: 1,
+  devicePixelRatio: 2,
   /**
    * The CSS size of `[data-grid-canvas-layer]`, i.e. the frame of every
    * `takeGridScreenshot` golden. Scale-independent (Tauri sizes logically), so a

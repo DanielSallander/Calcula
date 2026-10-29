@@ -252,7 +252,9 @@ test.describe("Formatting Visual Regression", () => {
     await grid.setCellValue("B1", "Value");
     for (const [label, ref, raw] of FORMAT_BLOCK) {
       await grid.setCellValue(`A${ref.slice(1)}`, label);
-      await grid.setCellValueDirect(ref, raw);
+      // Raw values are spelled invariantly; the app locale (sv-SE here)
+      // would otherwise store "1234.5678" as text.
+      await grid.setCellValueInvariant(ref, raw);
     }
     for (const [, ref, , format] of FORMAT_BLOCK) {
       await grid.setNumberFormatDirect(ref, format);

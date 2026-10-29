@@ -676,6 +676,14 @@ async function settleCanvasMotion(page: Page): Promise<void> {
  * change the row-header width and the geometry with it) while putting the
  * selection chrome far outside a clip that extends only `padding` px past the
  * range.
+ *
+ * The park is VERIFIED, not assumed (2026-10-29). Callers typically run
+ * `navigateTo(topLeftCell)` just before capturing, and that navigation can land
+ * AFTER the park event: `tables-after-create` was recorded with the selection
+ * parked and then failed a cold re-run by 363 px of selection tint on R1. So the
+ * Name Box must read the park cell, and still read it after the repaint wait,
+ * or the park is repeated; a park that never holds fails rather than
+ * photographing the selection.
  */
 async function parkSelectionAwayFrom(
   page: Page,
@@ -686,17 +694,46 @@ async function parkSelectionAwayFrom(
   const b = parseCellRef(to);
   const parkRow = Math.max(a.row, b.row) + 6;
   const parkCol = Math.min(a.col, b.col);
-  await page.evaluate(
-    ({ row, col }) => {
-      window.dispatchEvent(
-        new CustomEvent("app:navigate-to-cell", {
-          detail: { row, col, select: true },
-        })
-      );
-    },
-    { row: parkRow, col: parkCol }
+  const parkRef = `${columnLetters(parkCol)}${parkRow + 1}`;
+  const nameBox = page.locator('input[aria-label="Name Box"]');
+  const readNameBox = async (): Promise<string> =>
+    ((await nameBox.inputValue().catch(() => "")) || "").trim().toUpperCase();
+
+  let seen = "";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await page.evaluate(
+      ({ row, col }) => {
+        window.dispatchEvent(
+          new CustomEvent("app:navigate-to-cell", {
+            detail: { row, col, select: true },
+          })
+        );
+      },
+      { row: parkRow, col: parkCol }
+    );
+    await expect
+      .poll(readNameBox, { timeout: 5_000, message: `the selection never reached the park cell ${parkRef}` })
+      .toBe(parkRef);
+    await page.waitForTimeout(300);
+    seen = await readNameBox();
+    if (seen === parkRef) return;
+  }
+  throw new Error(
+    `[screenshot] the selection would not stay parked at ${parkRef} (last read ${seen}); ` +
+      `a late navigation keeps moving it back into the captured range`
   );
-  await page.waitForTimeout(300);
+}
+
+/** 0-based column index -> letters (0 -> A, 25 -> Z, 26 -> AA). */
+function columnLetters(col: number): string {
+  let n = col + 1;
+  let out = "";
+  while (n > 0) {
+    const r = (n - 1) % 26;
+    out = String.fromCharCode(65 + r) + out;
+    n = Math.floor((n - 1) / 26);
+  }
+  return out;
 }
 
 async function ensureRangeVisible(

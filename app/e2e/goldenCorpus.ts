@@ -927,35 +927,43 @@ export const PRESSED_ACCENT_MEDIAN_BAND = 12;
  * than the old dropdowns reached), and the open Data menu no longer COVERS it,
  * so menu-data-open is now a lit golden like the rest. The "covered" example
  * the reader test needs moved to ribbon-minimized (the band collapsed: 0 px).
+ *
+ * RE-MEASURED 2026-10-29 after the owner's icon and UI redesign, with the
+ * corpus re-recorded at dpr 2. All six files read 509 px centred at x=633:
+ * still exactly one box, still Bottom Align. The live app put the button
+ * there too (`getBoundingClientRect`: Top / Middle / Bottom Align centred at
+ * 577.6 / 605.6 / 633.6, each 28 wide, Bottom the only one pressed), so the
+ * median moved because the Alignment cluster moved, not because another
+ * toggle lit.
  */
 export const EMPTY_DOCUMENT_GOLDENS: EmptyDocumentGolden[] = [
   {
     file: "visual/__screenshots__/core-visual.spec.ts/core-empty-grid.png",
     spec: "visual/core-visual.spec.ts",
     capture: "core-empty-grid",
-    expectedPressedAccent: 494,
-    expectedPressedAccentMedianX: 579,
+    expectedPressedAccent: 509,
+    expectedPressedAccentMedianX: 633,
   },
   {
     file: "visual/__screenshots__/core-visual.spec.ts/ribbon-core-default-ribbon.png",
     spec: "visual/core-visual.spec.ts",
     capture: "core-default-ribbon",
-    expectedPressedAccent: 494,
-    expectedPressedAccentMedianX: 579,
+    expectedPressedAccent: 509,
+    expectedPressedAccentMedianX: 633,
   },
   {
     file: "visual/__screenshots__/core-visual.spec.ts/menu-file-open.png",
     spec: "visual/core-visual.spec.ts",
     capture: "menu-file-open",
-    expectedPressedAccent: 494,
-    expectedPressedAccentMedianX: 579,
+    expectedPressedAccent: 509,
+    expectedPressedAccentMedianX: 633,
   },
   {
     file: "visual/__screenshots__/core-visual.spec.ts/menu-edit-open.png",
     spec: "visual/core-visual.spec.ts",
     capture: "menu-edit-open",
-    expectedPressedAccent: 494,
-    expectedPressedAccentMedianX: 579,
+    expectedPressedAccent: 509,
+    expectedPressedAccentMedianX: 633,
   },
   {
     // Before the Clusters ribbon the open Data menu covered the alignment
@@ -964,15 +972,15 @@ export const EMPTY_DOCUMENT_GOLDENS: EmptyDocumentGolden[] = [
     file: "visual/__screenshots__/core-visual.spec.ts/menu-data-open.png",
     spec: "visual/core-visual.spec.ts",
     capture: "menu-data-open",
-    expectedPressedAccent: 494,
-    expectedPressedAccentMedianX: 579,
+    expectedPressedAccent: 509,
+    expectedPressedAccentMedianX: 633,
   },
   {
     file: "tests/__screenshots__/grid-rendering.spec.ts/empty-grid-full-window.png",
     spec: "tests/grid-rendering.spec.ts",
     capture: "empty-grid-full-window",
-    expectedPressedAccent: 494,
-    expectedPressedAccentMedianX: 579,
+    expectedPressedAccent: 509,
+    expectedPressedAccentMedianX: 633,
   },
 ];
 
@@ -1085,8 +1093,8 @@ export function describeStaleRibbonState(
     `-- BOTTOM ALIGN, because the document default style is ` +
     `VerticalAlign::${DOCUMENT_DEFAULT_VERTICAL_ALIGN.toUpperCase()} (Excel ` +
     `parity: a fresh cell is Horizontal General, Vertical Bottom) and the ` +
-    `ribbon reports the DEFAULT style for an empty cell since BUG-0062 (~494 px ` +
-    `when fully visible, centred at x=579 in a 1280-wide capture of the Calcula ` +
+    `ribbon reports the DEFAULT style for an empty cell since BUG-0062 (~509 px ` +
+    `when fully visible, centred at x=633 in a 1280-wide capture of the Calcula ` +
     `Clusters Home band). No ` +
     `horizontal-alignment toggle lights at all: a default cell is General and ` +
     `the ribbon has no General button.\n` +
@@ -1103,7 +1111,7 @@ export function describeStaleRibbonState(
     `perfectly consistent about the display and still contain a screenshot of a ` +
     `bug that has been fixed.\n` +
     `  The toggle fill is ${PRESSED_ACCENT_FILL.join(",")} over a 28x28 box in a ` +
-    `segmented pill -- one box is ~494 pixels against a 200-pixel comparator budget, so a golden ` +
+    `segmented pill -- one box is ~509 pixels against a 200-pixel comparator budget, so a golden ` +
     `on the wrong side cannot pass its spec either. Re-record with ` +
     `--update-snapshots=changed, never "all", and attribute the diff first.`
   );
