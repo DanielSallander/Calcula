@@ -1505,7 +1505,7 @@ mod tests {
                     .unwrap()
                     .with_storage_mode(StorageMode::InMemory),
                 )
-                .add_measure(sum_measure("Revenue", "Sales", "amount"))
+                .add_measure(sum_measure("Revenue", "Sales", "amount").with_format_string("#,##0"))
                 .build()
                 .unwrap()
         }
@@ -1657,6 +1657,40 @@ mod tests {
             let undo = state.undo_stack.lock().unwrap();
             assert_eq!(undo.clears_total(), clears_before + 1, "the drill ended the undo history");
             assert_eq!(undo.undo_depth(), 0, "the step recorded before the drill is gone");
+        }
+
+        /// The model formats Revenue "#,##0": the table's value cells carry
+        /// that format, as the pivot's do, never the raw float (owner,
+        /// 2026-10-29: the pivot read "12 000", the drill "12000,090").
+        /// SABOTAGE: drop the `adopt_model_number_formats` call from
+        /// `pivot::headless::compute_once` -- no cell carries the format.
+        #[tokio::test]
+        async fn to_sheet_table_value_cells_take_the_measures_model_format() {
+            let state = crate::create_app_state();
+            let file = FileState::default();
+            let (bi, conn) = bi_state().await;
+            drill_through_to_ephemeral_sheet_core(
+                &state,
+                &file,
+                &bi,
+                "Region detail",
+                None,
+                DrillSheetPresentation::Table,
+                Some(region_query(conn, &["East", "West"])),
+                &[],
+            )
+            .await
+            .expect("the table drill lands");
+            let expected = crate::commands::styles::parse_number_format("#,##0");
+            let grids = state.grids.read().unwrap();
+            let styles = state.style_registry.read().unwrap();
+            let formatted = grids[1]
+                .cells
+                .values()
+                .filter(|c| matches!(c.value, engine::CellValue::Number(_)))
+                .filter(|c| styles.get(c.style_index).number_format == expected)
+                .count();
+            assert!(formatted > 0, "no value cell carries the model's #,##0");
         }
 
         #[test]

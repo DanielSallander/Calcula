@@ -745,6 +745,34 @@ async fn compute_once(
     let value_col_idx = crate::pivot::totals::measure_value_col_idx(&result_columns, 0);
     def.value_fields =
         expand_bi_value_fields(&request.value_fields, &[], measure_start, &value_col_idx);
+    // THE MODEL'S NUMBER FORMATS, as a BI pivot adopts them on every query
+    // (`adopt_model_number_formats`, BUG-0478): a measure formatted "#,##0" in
+    // the model reads "12 000" in the pivot, and its drill-through table and
+    // chart labels showed the raw float ("12000,090"). A format the request
+    // already carries is the user's and is kept. Dimension columns take their
+    // model format the same way the pivot's row / column fields do.
+    crate::pivot::commands::adopt_model_number_formats(&mut def, &result_columns, &[]);
+    {
+        let dim_format: HashMap<(String, String), String> = result_columns
+            .iter()
+            .filter(|rc| matches!(rc.kind, bi_engine::ResultColumnKind::Dimension))
+            .filter_map(|rc| {
+                Some((
+                    (rc.source_table.clone()?.to_lowercase(), rc.source_column.clone()?.to_lowercase()),
+                    rc.format_string.clone()?,
+                ))
+            })
+            .collect();
+        for field in def.row_fields.iter_mut().chain(def.column_fields.iter_mut()) {
+            if field.number_format.is_some() {
+                continue;
+            }
+            if let Some(f) = group_fields.get(field.source_index as usize) {
+                field.number_format =
+                    dim_format.get(&(f.table.to_lowercase(), f.column.to_lowercase())).cloned();
+            }
+        }
+    }
 
     if let Some(ref layout_config) = request.layout {
         apply_layout_config(&mut def.layout, layout_config);

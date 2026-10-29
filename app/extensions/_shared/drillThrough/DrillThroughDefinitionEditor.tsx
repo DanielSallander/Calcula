@@ -38,6 +38,9 @@ import { TOKENS } from "../lib/themeTokens";
 import type { BiPivotModelInfo } from "../components/types";
 import type { DrillInvoke } from "./runDrillThrough";
 
+/** The open chart-type list's layer: above the host dialogs (z-index 10000). */
+export const DRILL_EDITOR_POPUP_Z = 10001;
+
 export interface DrillThroughDefinitionEditorProps {
   value: DrillThroughDefinition;
   onChange: (next: DrillThroughDefinition) => void;
@@ -275,6 +278,11 @@ export function DrillThroughDefinitionEditor({
               disabled={readOnly}
               ariaLabel="Chart type"
               width={180}
+              // ABOVE THE DIALOG: both hosts (the chart's and the pivot's
+              // Drill-through behavior dialogs) sit at z-index 10000, and the
+              // list's default layer (1100) opened BEHIND them (owner,
+              // 2026-10-29).
+              zIndex={DRILL_EDITOR_POPUP_Z}
               testId="drill-through-mark"
               optionTestIdPrefix="drill-through-mark-"
             />

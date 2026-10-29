@@ -33,7 +33,7 @@
 import { AppEvents, showToast, type DrillThroughPivotContextResponse } from "@api";
 import { pivotCellItemKey } from "@api/pivotMembers";
 import { emitAppEvent } from "@api/events";
-import { setActiveSheet } from "@api/lib";
+import { activateSheet } from "@api/sheetSwitch";
 import { getGridStateSnapshot } from "@api/grid";
 import type { DrillThroughDefinition } from "@api";
 import { runDrillThrough } from "../../_shared/drillThrough/runDrillThrough";
@@ -193,12 +193,16 @@ export function runPivotDrillThrough(
         if (diagnosis) showToast(diagnosis.message, { type: diagnosis.variant });
       }
       const resp = await drillThroughToSheet({ pivotId, groupPath });
+      // THE WHOLE SWITCH, through the one door a tab click uses: a
+      // backend-only switch left the grid painting the PIVOT's cells on
+      // the new sheet until the user left it and came back (owner,
+      // 2026-10-29, the Custom behavior). `record: false`: the landing is a
+      // consequence of the drill, not a macro step.
       try {
-        await setActiveSheet(resp.sheetIndex);
+        await activateSheet(resp.sheetIndex, { record: false });
       } catch {
-        /* the SHEET_CHANGED emit below still re-syncs the tab bar */
+        emitAppEvent(AppEvents.SHEET_CHANGED, { sheetIndex: resp.sheetIndex });
       }
-      emitAppEvent(AppEvents.SHEET_CHANGED, { sheetIndex: resp.sheetIndex });
     } catch (error) {
       // MUST be visible. The backend now REFUSES a drill whose
       // dimension column the active "view as" role denies, instead

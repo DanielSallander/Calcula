@@ -30,7 +30,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const api = vi.hoisted(() => ({
   showToast: vi.fn(),
   emitAppEvent: vi.fn(),
-  setActiveSheet: vi.fn(async () => undefined),
+  activateSheet: vi.fn(async () => undefined),
   togglePivotGroup: vi.fn(async () => ({})),
   getPivotDataFormula: vi.fn(),
   drillThroughToSheet: vi.fn(),
@@ -55,7 +55,9 @@ vi.mock("@api", () => ({
 }));
 
 vi.mock("@api/events", () => ({ emitAppEvent: api.emitAppEvent }));
-vi.mock("@api/lib", () => ({ setActiveSheet: api.setActiveSheet }));
+// THROUGH THE SEAM: a backend-only switch left the pivot's cells painted
+// on the new sheet (owner, 2026-10-29).
+vi.mock("@api/sheetSwitch", () => ({ activateSheet: api.activateSheet }));
 vi.mock("@api/grid", () => ({
   getGridStateSnapshot: () => ({ sheetContext: { activeSheetIndex: api.activeSheetIndex } }),
 }));
@@ -96,7 +98,7 @@ const onRefresh = (): void => {
 beforeEach(() => {
   vi.clearAllMocks();
   api.togglePivotGroup.mockImplementation(async () => ({}));
-  api.setActiveSheet.mockImplementation(async () => undefined);
+  api.activateSheet.mockImplementation(async () => undefined);
   api.getPivotDrillBehavior.mockResolvedValue({ kind: "builtin" });
   api.drillThroughToSheet.mockResolvedValue({ sheetName: "Details1", sheetIndex: 4, rowCount: 3 });
   refreshes = 0;
@@ -215,8 +217,9 @@ describe("double-click drill on a data / total cell (runPivotDrillThrough)", () 
 
     expect(api.getPivotDrillBehavior).toHaveBeenCalledWith("p1");
     expect(api.drillThroughToSheet).toHaveBeenCalledWith({ pivotId: "p1", groupPath: [[0, 2], [1, 5]] });
-    expect(api.setActiveSheet).toHaveBeenCalledWith(4);
-    expect(api.emitAppEvent).toHaveBeenCalledWith("app:sheet-changed", { sheetIndex: 4 });
+    // The seam announces the switch itself (SHEET_CHANGED after the grid moved).
+    expect(api.activateSheet).toHaveBeenCalledWith(4, { record: false });
+    expect(api.emitAppEvent).not.toHaveBeenCalledWith("app:sheet-changed", { sheetIndex: 4 });
     expect(api.togglePivotGroup).not.toHaveBeenCalled();
     expect(api.showToast).not.toHaveBeenCalled();
   });
@@ -231,7 +234,7 @@ describe("double-click drill on a data / total cell (runPivotDrillThrough)", () 
     runPivotDrillThrough("p2", cell({ cellType: "RowSubtotal", value: 40, groupPath: [[0, 1]] }), 3, 2);
     await settle();
     expect(api.drillThroughToSheet).toHaveBeenCalledWith({ pivotId: "p2", groupPath: [[0, 1]] });
-    expect(api.emitAppEvent).toHaveBeenCalledWith("app:sheet-changed", { sheetIndex: 4 });
+    expect(api.activateSheet).toHaveBeenCalledWith(4, { record: false });
   });
 
   it("a refused drill is a TOAST (BUG-0096), and no sheet is announced", async () => {
@@ -329,7 +332,7 @@ describe("design-query drill (model-drillthrough.md 2.9): a behaviour with a des
     });
     expect(io.invoke).toBe(api.invoke);
     expect(api.drillThroughToSheet).not.toHaveBeenCalled();
-    expect(api.setActiveSheet).not.toHaveBeenCalled();
+    expect(api.activateSheet).not.toHaveBeenCalled();
     expect(api.emitAppEvent).not.toHaveBeenCalled();
     expect(api.showToast).not.toHaveBeenCalled();
   });
